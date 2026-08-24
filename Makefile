@@ -7,12 +7,12 @@ build:
 	$(CARGO) build --release
 
 rom: build
-	agb-gbafix target/thumbv4t-none-eabi/release/gba-audio -o gba-audio.gba
-	@echo "ROM built: gba-audio.gba"
+	agb-gbafix target/thumbv4t-none-eabi/release/gba-sound-player -o gba-sound-player.gba
+	@echo "ROM built: gba-sound-player.gba"
 
 clean:
 	$(CARGO) clean
-	rm -f gba-audio.gba
+	rm -f gba-sound-player.gba
 
 # Dockerized build
 docker-rom:

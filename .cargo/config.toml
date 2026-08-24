@@ -12,4 +12,4 @@ rustflags = [
     "-Cforce-frame-pointers=yes",
 ]
 
-runner = ["echo", "no emulator available; ROM produced at target/thumbv4t-none-eabi/release/gba-audio.elf"]
+runner = ["echo", "no emulator available; ROM produced at target/thumbv4t-none-eabi/release/gba-sound-player.elf"]

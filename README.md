@@ -1,4 +1,4 @@
-# gba-audio
+# gba-sound-player
 
 A Rust-based Game Boy Advance audio project. The goal is to push the limits of
 the GBA's audio hardware — both the hardware PSG (programmable sound generation)
@@ -57,7 +57,7 @@ repository:
 ```
 
 For now the audio and input logic live inline in this crate. As they grow they
-will be split out into dedicated crates (`gba-audio-lib`, `gba-input-lib`) that
+will be split out into dedicated crates (`gba-sound-player-lib`, `gba-input-lib`) that
 the top-level ROM depends on.
 
 ### Current state
@@ -81,7 +81,7 @@ You have two main ways to build and develop:
    make docker-rom
    ```
    This builds the Docker image, mounts your local directory into the container,
-   compiles the ROM, and outputs `gba-audio.gba` directly to your host directory.
+   compiles the ROM, and outputs `gba-sound-player.gba` directly to your host directory.
 
 2. **Using VS Code Dev Containers (IDE)**  
    The repository includes a `.devcontainer` configuration. Open this folder in 
@@ -90,7 +90,7 @@ You have two main ways to build and develop:
 
 *(If you prefer to build natively on your host and have the nightly toolchain configured, `make rom` will still work).* 
 
-Run `gba-audio.gba` in any GBA emulator (mGBA recommended) to see the title
+Run `gba-sound-player.gba` in any GBA emulator (mGBA recommended) to see the title
 screen and hear the tone.
 
 ## References

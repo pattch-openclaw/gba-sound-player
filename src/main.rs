@@ -29,7 +29,7 @@ fn entry(mut gba: agb::Gba) -> ! {
     );
 
     let layout = Layout::new(
-        "gba-audio\nPSG tone: ON\n(~731 Hz square,\n2 s loop)",
+        "gba-sound-player\nPSG tone: ON\n(~731 Hz square,\n2 s loop)",
         &FONT,
         &LayoutSettings::new().with_max_line_length(200),
     );
