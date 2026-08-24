@@ -14,12 +14,15 @@
 #
 FROM rust:slim-bookworm
 
-# C toolchain + git (build deps), plus a GNU ARM cross toolchain as a linker
-# safety net (the gba.ld script + rust-lld are the primary linker path)
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    git \
-    arm-none-eabi-gcc \
+# This project uses `agb`, which links with Rust's BUILT-IN linker (rust-lld)
+# via the `-Clink-arg=-Tgba.ld` script — it does NOT use an ARM cross-compiler
+# (no `arm-none-eabi-ld`, no `arm-none-eabi-gcc`). So no system packages are
+# required beyond what the base image provides. (Do NOT add an ARM cross-compiler
+# here; it is unused by this build path and `arm-none-eabi-gcc` does not exist
+# on Debian bookworm — the real package is `gcc-arm-none-eabi`, which we don't need.)
+# git is a build dep (cargo/git fetch). Install only that, quietly.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 
 # Nightly toolchain + rust-src (needed for -Zbuild-std)
