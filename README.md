@@ -62,16 +62,24 @@ the top-level ROM depends on.
 
 ### Current state
 
-- `src/main.rs` — minimal ROM: renders a title screen with text and plays a
-  440 Hz (A4) square wave on PSG channel 1 on boot, looping indefinitely.
-- `assets/fonts/` — a small pixel font used for the title screen.
+- `src/main.rs` — minimal "hello world" ROM. It deliberately avoids complex subsystems (no tiles, no audio) to establish a baseline. It simply sets the hardware backdrop colour to orange and emits milestone logs via `agb::eprintln!`.
+- `src/main.rs` also includes a basic `#[test_case]` suite runnable via `mgba-test-runner`.
 - `Makefile` — `make build`, `make rom`, `make clean`, `make podman-rom`.
 - `Dockerfile` — the containerized build (Debian 12 / `rust:slim-bookworm`,
   nightly + `rust-src`, `agb-gbafix`).
 
-### Build status (as of 2026-08-24)
+### Build and Test status (as of 2026-08-24)
 
-**The build is verified working two ways:**
+**We are currently debugging a "black screen + silent" runtime issue.** To diagnose this, the ROM has been stripped down to a minimal baseline and instrumented with observability.
+
+**Debugging Workflow:**
+1. **Milestone Logging:** The ROM uses `agb::eprintln!` to log its progress. This macro communicates with the mGBA emulator via a cheat-code handshake and prints to the terminal running mGBA.
+   - Run the ROM in mGBA from a terminal. If the screen is black, the console logs will tell us exactly which step the ROM reached before halting.
+2. **Automated Testing:** We use agb's `#[test_case]` harness.
+   - Run tests using the `mgba-test-runner` on a host that supports it:
+     ```sh
+     CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER=mgba-test-runner cargo test --target thumbv4t-none-eabi
+     ```
 
 1. **Native macOS build** — `cargo +nightly build --release --target
    thumbv4t-none-eabi` compiles cleanly on this host (see "Native build" below).
@@ -89,26 +97,15 @@ the top-level ROM depends on.
 The containerized path is the one that produces the runnable `.gba`. The native
 path stops at the linked binary (it has no `agb-gbafix` / no emulator here).
 
-### Architecture: agb framework + raw PSG MMIO
+### Architecture: agb framework baseline
 
 We commit to **agb as the framework** (`#[agb::entry]`, agb display, agb
-DMA/timing). agb 0.25 has **no PSG (channel 1–4) API** — its `mixer` only
-drives the PCM channels (5–6) via DMA. So the 440 Hz square wave is produced by
-driving the GBA's `SOUND1` registers **directly via raw MMIO** in the `psg`
-module of `src/main.rs`.
-
-This is safe and is *not* the "mixed-frameworks" trap: agb never touches PSG
-channels 1–4, so raw writes to `SOUND1` do not fight any agb subsystem. agb owns
-display/DMA/timing; we own the PSG registers. Do **not** start writing raw MMIO
-for display or PCM channels — that would be the conflict.
+DMA/timing). To verify the runtime pipeline, the current ROM simply acquires the graphics controller and changes the backdrop colour (palette 0, colour 0). Once this baseline is proven to output a solid orange screen, we will rebuild the audio and tile features on top of it.
 
 ### ⚠️ Runtime status: unverified on hardware/emulator
 
-**The ROM compiles cleanly, but has not yet been run in an emulator on this
-host** (no mGBA here). The previous "black screen + silent" report is expected
-to be resolved by the fix above — the tone and title screen now go through the
-correct paths. **Verify in mGBA on a host that has it** before treating the
-runtime as confirmed.
+**The ROM compiles cleanly, but has not yet been run in an emulator.**
+The previous "black screen + silent" report prompted a fallback to this minimal hello-world logging baseline. **Verify in mGBA on a host that has it**, and check the terminal logs for the milestone output.
 
 ## Building and Development
 
