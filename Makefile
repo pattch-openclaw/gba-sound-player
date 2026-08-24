@@ -1,7 +1,9 @@
-.PHONY: build rom clean docker-rom
+.PHONY: build rom clean podman-rom
 
 # Local build settings (can be overridden)
-CARGO ?= cargo +nightly
+CARGO ?= cargo
+# Container runtime: podman by default, override with `make podman-rom CONTAINER=docker` if you prefer.
+CONTAINER ?= podman
 
 build:
 	$(CARGO) build --release
@@ -14,7 +16,9 @@ clean:
 	$(CARGO) clean
 	rm -f gba-sound-player.gba
 
-# Dockerized build
-docker-rom:
-	docker build -t gba-builder .
-	docker run --rm -v "$(PWD):/app" gba-builder make rom
+# Containerized build (podman by default)
+# Builds the image, then mounts the project dir into a fresh container
+# and runs `make rom` there. The .gba lands back in your host dir.
+podman-rom:
+	$(CONTAINER) build -t gba-builder .
+	$(CONTAINER) run --rm -v "$(PWD):/app:Z" -w /app gba-builder make rom

@@ -69,26 +69,32 @@ the top-level ROM depends on.
 
 ## Building and Development
 
-To ensure a consistent toolchain across Linux and macOS hosts (and to avoid 
-issues with missing `thumbv4t` std targets), this project uses a containerized 
-development environment based on Debian 12.
+To ensure a consistent toolchain across Linux and macOS hosts (and to avoid
+issues with missing `thumbv4t` std targets), this project uses a containerized
+development environment based on Debian 12. The image pins the **stable**
+toolchain — `agb` 0.25 builds fine under stable once `rust-src` and the
+`thumbv4t-none-eabi` target are present (std is compiled from source for the
+bare-metal target). No nightly required.
 
 You have two main ways to build and develop:
 
-1. **Using Docker (CLI)**  
-   Simply run:
+1. **Using a container runtime (CLI)**
+   The default runtime is **podman** (daemonless, rootless — ideal on a minimal
+   Linux host), but any OCI-compatible runtime works. Run:
    ```sh
-   make docker-rom
+   make podman-rom
    ```
-   This builds the Docker image, mounts your local directory into the container,
-   compiles the ROM, and outputs `gba-sound-player.gba` directly to your host directory.
+   This builds the image, mounts your local directory into the container,
+   compiles the ROM, and outputs `gba-sound-player.gba` directly to your host
+   directory. Prefer docker? `make podman-rom CONTAINER=docker`.
 
-2. **Using VS Code Dev Containers (IDE)**  
-   The repository includes a `.devcontainer` configuration. Open this folder in 
-   VS Code and click "Reopen in Container" to run your IDE and `rust-analyzer` 
+2. **Using VS Code Dev Containers (IDE)**
+   The repository includes a `.devcontainer` configuration. Open this folder in
+   VS Code and click "Reopen in Container" to run your IDE and `rust-analyzer`
    inside the Debian environment with full GBA target autocomplete.
 
-*(If you prefer to build natively on your host and have the nightly toolchain configured, `make rom` will still work).* 
+*(If you prefer to build natively on your host and have the stable toolchain +
+`thumbv4t-none-eabi` target + `agb-gbafix` installed, `make rom` will still work).*
 
 Run `gba-sound-player.gba` in any GBA emulator (mGBA recommended) to see the title
 screen and hear the tone.
