@@ -74,23 +74,35 @@ a containerized development environment based on Debian 12. The default runtime
 is **podman** (daemonless, rootless — ideal on a minimal Linux host), but any
 OCI-compatible runtime (e.g. docker) works.
 
-### Requirement: `#![no_std]`, and *no* std target for `thumbv4t-none-eabi`
+### Requirement: nightly + `rust-src` + `-Zbuild-std` (no prebuilt `core` for this target)
 
 The GBA target `thumbv4t-none-eabi` is a **Tier-3, `#![no_std]`** bare-metal
 target. Per the [Rust platform-support docs](https://doc.rust-lang.org/nightly/rustc/platform-support/armv4t-none-eabi.html),
-its library support is **`core` and `alloc` only** — it ships **no `std`**, and
-rustup has **no prebuilt std artifacts** for it on *any* toolchain (stable or
-nightly). Consequently:
+its library support is **`core` and `alloc` only** — no `std`, and rustup ships
+**no prebuilt `core`/`alloc` artifacts** for it on *any* toolchain (stable *or*
+nightly). So `rustup target add thumbv4t-none-eabi` fails by design and is the
+wrong approach.
 
-- The crate is written `#![no_std]` (see `src/main.rs`) and relies on `core`/
-  `alloc` via `agb`. This is the supported model, not a workaround.
-- **Do not** run `rustup target add thumbv4t-none-eabi` or try to install a std
-  target for it — that step fails by design. We build `no_std` directly for the
-target instead (the target spec itself is built into rustc; no target install
-is needed).
-- This is a toolchain/platform reality, independent of host OS. If it looks like
-a "missing dependency" or "add nightly" issue, it isn't — the target simply has
-no std.
+A `#![no_std]` build still needs **`core`** (it is mandatory — `#![no_std]` only
+means *no `std`*). Since there are no prebuilt `core` artifacts for this target,
+we compile `core`/`alloc` **from source for `thumbv4t`** using `-Zbuild-std`
+(the compiler's own suggestion for `E0463: can't find crate for core`). That
+requires all three:
+
+- **a nightly toolchain** — `-Zbuild-std` is a nightly-only flag;
+- **the `rust-src` component** — provides the `core`/`alloc` source to compile;
+- **`build-std` enabled** — already set in `.cargo/config.toml`
+  (`[unstable] build-std = ["core", "alloc"]`), so a plain `cargo build
+  --target thumbv4t-none-eabi` picks it up automatically.
+
+This is a toolchain/platform reality, independent of host OS. It is **not** a
+"missing dependency" and it is **not** fixable by dropping nightly — nightly is
+required *because* of `-Zbuild-std`. Do not try to install a std target for this
+target; compile `core`/`alloc` from source instead.
+
+> The earlier "drop nightly / build no_std directly" attempt failed with
+> `error[E0463]: can't find crate for core` — this target needs `core` built
+> for it, which is exactly what `-Zbuild-std` (on nightly) provides.
 
 You have two main ways to build and develop:
 
@@ -101,9 +113,9 @@ You have two main ways to build and develop:
    make podman-rom
    ```
    This builds the image, mounts your local directory into the container,
-   compiles the ROM (`no_std`, target `thumbv4t-none-eabi`), and outputs
-   `gba-sound-player.gba` directly to your host directory. Prefer docker?
-   `make podman-rom CONTAINER=docker`.
+   compiles the ROM (`#![no_std]` + `-Zbuild-std`, target `thumbv4t-none-eabi`),
+   and outputs `gba-sound-player.gba` directly to your host directory. Prefer
+   docker? `make podman-rom CONTAINER=docker`.
 
 2. **Using VS Code Dev Containers (IDE)**
    The repository includes a `.devcontainer` configuration. Open this folder in
@@ -111,9 +123,10 @@ You have two main ways to build and develop:
    inside the Debian environment with full GBA target autocomplete.
 
 *(If you prefer to build natively on your host — a side quest for us — install
-the nightly Rust toolchain and `agb-gbafix`. You do **not** need to add a std
-target for `thumbv4t-none-eabi`; the `no_std` build works directly. `make rom`
-will still work then.)*
+the nightly Rust toolchain, the `rust-src` component, and `agb-gbafix`. You do
+**not** need to add a std target for `thumbv4t-none-eabi`; `.cargo/config.toml`
+enables `-Zbuild-std`, so `cargo build` compiles `core`/`alloc` for the target
+automatically. `make rom` will still work then.)*
 
 Run `gba-sound-player.gba` in any GBA emulator (mGBA recommended) to see the title
 screen and hear the tone.

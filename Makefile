@@ -1,9 +1,11 @@
 .PHONY: build rom clean podman-rom
 
 # Local build settings (can be overridden)
-# Target thumbv4t-none-eabi is #![no_std] (core + alloc only) — see Dockerfile /
-# README. Do NOT add a std target for it; build no_std directly.
-CARGO ?= cargo
+# nightly is REQUIRED: -Zbuild-std (in .cargo/config.toml) is a nightly-only flag,
+# used to compile core/alloc from source for this Tier-3 target. See Dockerfile/
+# README. Do NOT try to `rustup target add thumbv4t-none-eabi` — it has no
+# prebuilt artifacts on any toolchain.
+CARGO ?= cargo +nightly
 # Container runtime: podman by default, override with `make podman-rom CONTAINER=docker` if you prefer.
 CONTAINER ?= podman
 
