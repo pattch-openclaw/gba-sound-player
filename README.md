@@ -63,9 +63,48 @@ the top-level ROM depends on.
 ### Current state
 
 - `src/main.rs` — minimal ROM: renders a title screen with text and plays a
-  ~731 Hz square wave on PSG channel 1 for ~2 seconds on boot.
+  ~731 Hz square wave on PSG channel 1 on boot.
 - `assets/fonts/` — a small pixel font used for the title screen.
-- `Makefile` — `make build`, `make rom`, `make clean`.
+- `Makefile` — `make build`, `make rom`, `make clean`, `make podman-rom`.
+- `Dockerfile` — the containerized build (Debian 12 / `rust:slim-bookworm`,
+  nightly + `rust-src`, `agb-gbafix`).
+
+### Build status (as of 2026-08-24)
+
+**The build is verified working** on Linux using containerization with `podman`
+(the default runtime; docker also works). `make podman-rom` successfully:
+
+1. builds the `gba-builder` image (`rust:slim-bookworm` + nightly + `rust-src`
+   + `git` + `make` + `agb-gbafix`),
+2. compiles the ROM (`#![no_std]` + `-Zbuild-std` for `thumbv4t-none-eabi`),
+3. links it with `rust-lld` (via the `agb`-supplied `gba.ld` linker script),
+4. fixes it into a loadable ROM, and
+5. outputs `gba-sound-player.gba` to the host directory.
+
+This is the current known-good build path.
+
+### ⚠️ Runtime status: ROM loads, but no video or audio
+
+**The ROM builds and loads in an emulator without crashing, but it currently
+produces no visible output (black screen) and no audible output (silent).**
+This is a *runtime* issue, not a build issue — the compiler, linker, and ROM
+fixing steps all succeed.
+
+**Suspected root cause (needs investigation):** `src/main.rs` mixes two
+incompatible GBA frameworks. It uses `agb`'s `#[agb::entry]` (which means agb
+owns the hardware — its own sound system, its own display/DMA, its own timing),
+*but* it also writes to the GBA's sound and display registers **directly via
+raw MMIO pointers** (the `psg` module, and `gfx`/`bg`/`frame` calls), bypassing
+agb's abstraction. agb's sound/display subsystems are not the ones driving the
+hardware when raw registers are written underneath them, so the tone and the
+title screen never actually reach the GBA. This is an architecture mismatch
+(HAL + raw MMIO) and is the most likely explanation for the silent/black
+ROM.
+
+Next steps (not yet done): pick one framework and commit to it — either
+(a) use agb's `sound::` and `display::` APIs exclusively (drop the raw `psg`
+module), or (b) drop agb and drive the hardware purely via raw MMIO (a
+gba-rs-style `no_std` crate). Do not mix the two.
 
 ## Building and Development
 
