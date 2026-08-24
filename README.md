@@ -63,7 +63,7 @@ the top-level ROM depends on.
 ### Current state
 
 - `src/main.rs` — minimal ROM: renders a title screen with text and plays a
-  ~731 Hz square wave on PSG channel 1 on boot.
+  440 Hz (A4) square wave on PSG channel 1 on boot, looping indefinitely.
 - `assets/fonts/` — a small pixel font used for the title screen.
 - `Makefile` — `make build`, `make rom`, `make clean`, `make podman-rom`.
 - `Dockerfile` — the containerized build (Debian 12 / `rust:slim-bookworm`,
@@ -71,40 +71,44 @@ the top-level ROM depends on.
 
 ### Build status (as of 2026-08-24)
 
-**The build is verified working** on Linux using containerization with `podman`
-(the default runtime; docker also works). `make podman-rom` successfully:
+**The build is verified working two ways:**
 
-1. builds the `gba-builder` image (`rust:slim-bookworm` + nightly + `rust-src`
-   + `git` + `make` + `agb-gbafix`),
-2. compiles the ROM (`#![no_std]` + `-Zbuild-std` for `thumbv4t-none-eabi`),
-3. links it with `rust-lld` (via the `agb`-supplied `gba.ld` linker script),
-4. fixes it into a loadable ROM, and
-5. outputs `gba-sound-player.gba` to the host directory.
+1. **Native macOS build** — `cargo +nightly build --release --target
+   thumbv4t-none-eabi` compiles cleanly on this host (see "Native build" below).
+   This is the path to use for local development; it only *compiles*, it does
+   not fix or run the ROM.
+2. **Containerized Linux build** — `make podman-rom` (podman by default, docker
+   also works) successfully:
+   1. builds the `gba-builder` image (`rust:slim-bookworm` + nightly + `rust-src`
+      + `git` + `make` + `agb-gbafix`),
+   2. compiles the ROM (`#![no_std]` + `-Zbuild-std` for `thumbv4t-none-eabi`),
+   3. links it with `rust-lld` (via the `agb`-supplied `gba.ld` linker script),
+   4. fixes it into a loadable ROM, and
+   5. outputs `gba-sound-player.gba` to the host directory.
 
-This is the current known-good build path.
+The containerized path is the one that produces the runnable `.gba`. The native
+path stops at the linked binary (it has no `agb-gbafix` / no emulator here).
 
-### ⚠️ Runtime status: ROM loads, but no video or audio
+### Architecture: agb framework + raw PSG MMIO
 
-**The ROM builds and loads in an emulator without crashing, but it currently
-produces no visible output (black screen) and no audible output (silent).**
-This is a *runtime* issue, not a build issue — the compiler, linker, and ROM
-fixing steps all succeed.
+We commit to **agb as the framework** (`#[agb::entry]`, agb display, agb
+DMA/timing). agb 0.25 has **no PSG (channel 1–4) API** — its `mixer` only
+drives the PCM channels (5–6) via DMA. So the 440 Hz square wave is produced by
+driving the GBA's `SOUND1` registers **directly via raw MMIO** in the `psg`
+module of `src/main.rs`.
 
-**Suspected root cause (needs investigation):** `src/main.rs` mixes two
-incompatible GBA frameworks. It uses `agb`'s `#[agb::entry]` (which means agb
-owns the hardware — its own sound system, its own display/DMA, its own timing),
-*but* it also writes to the GBA's sound and display registers **directly via
-raw MMIO pointers** (the `psg` module, and `gfx`/`bg`/`frame` calls), bypassing
-agb's abstraction. agb's sound/display subsystems are not the ones driving the
-hardware when raw registers are written underneath them, so the tone and the
-title screen never actually reach the GBA. This is an architecture mismatch
-(HAL + raw MMIO) and is the most likely explanation for the silent/black
-ROM.
+This is safe and is *not* the "mixed-frameworks" trap: agb never touches PSG
+channels 1–4, so raw writes to `SOUND1` do not fight any agb subsystem. agb owns
+display/DMA/timing; we own the PSG registers. Do **not** start writing raw MMIO
+for display or PCM channels — that would be the conflict.
 
-Next steps (not yet done): pick one framework and commit to it — either
-(a) use agb's `sound::` and `display::` APIs exclusively (drop the raw `psg`
-module), or (b) drop agb and drive the hardware purely via raw MMIO (a
-gba-rs-style `no_std` crate). Do not mix the two.
+### ⚠️ Runtime status: unverified on hardware/emulator
+
+**The ROM compiles cleanly, but has not yet been run in an emulator on this
+host** (no mGBA here). The previous "black screen + silent" report is expected
+to be resolved by the fix above — the tone and title screen now go through the
+correct paths. **Verify in mGBA on a host that has it** before treating the
+runtime as confirmed.
 
 ## Building and Development
 
@@ -145,7 +149,22 @@ target; compile `core`/`alloc` from source instead.
 
 You have two main ways to build and develop:
 
-1. **Using a container runtime (CLI)**
+1. **Native build (local development — the default for this host)**
+   ```sh
+   cargo +nightly build --release --target thumbv4t-none-eabi
+   ```
+   This compiles and links the ROM for `thumbv4t` (via `-Zbuild-std`). It is
+   the fast iteration loop. **It only compiles — there is no emulator and no
+   `agb-gbafix` on this host, so do not try to run the ROM here.** To produce
+   the runnable `.gba`, use the containerized path (below) on a host that has it.
+
+   On macOS you may need the toolchain's `lib` on the dynamic loader path so
+   `rust-lld` finds `libLLVM.dylib`:
+   ```sh
+   export DYLD_FALLBACK_LIBRARY_PATH="$HOME/.rustup/toolchains/nightly-<arch>/lib"
+   ```
+
+2. **Container runtime (CLI) — produces the runnable `.gba`**
    The default runtime is **podman**; override with docker if you prefer.
    Run:
    ```sh
@@ -153,22 +172,16 @@ You have two main ways to build and develop:
    ```
    This builds the image, mounts your local directory into the container,
    compiles the ROM (`#![no_std]` + `-Zbuild-std`, target `thumbv4t-none-eabi`),
-   and outputs `gba-sound-player.gba` directly to your host directory. Prefer
-   docker? `make podman-rom CONTAINER=docker`.
+   fixes it, and outputs `gba-sound-player.gba` directly to your host directory.
+   Prefer docker? `make podman-rom CONTAINER=docker`.
 
-2. **Using VS Code Dev Containers (IDE)**
+3. **Using VS Code Dev Containers (IDE)**
    The repository includes a `.devcontainer` configuration. Open this folder in
    VS Code and click "Reopen in Container" to run your IDE and `rust-analyzer`
    inside the Debian environment with full GBA target autocomplete.
 
-*(If you prefer to build natively on your host — a side quest for us — install
-the nightly Rust toolchain, the `rust-src` component, and `agb-gbafix`. You do
-**not** need to add a std target for `thumbv4t-none-eabi`; `.cargo/config.toml`
-enables `-Zbuild-std`, so `cargo build` compiles `core`/`alloc` for the target
-automatically. `make rom` will still work then.)*
-
-Run `gba-sound-player.gba` in any GBA emulator (mGBA recommended) to see the title
-screen and hear the tone.
+Run `gba-sound-player.gba` in any GBA emulator (mGBA recommended) on a host that
+has an emulator, to see the title screen and hear the 440 Hz tone.
 
 ## References
 
