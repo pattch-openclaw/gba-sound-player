@@ -71,16 +71,26 @@ the top-level ROM depends on.
 
 To ensure a consistent toolchain across Linux and macOS hosts (and to avoid
 issues with missing `thumbv4t` std targets), this project uses a containerized
-development environment based on Debian 12. The image pins the **stable**
-toolchain — `agb` 0.25 builds fine under stable once `rust-src` and the
-`thumbv4t-none-eabi` target are present (std is compiled from source for the
-bare-metal target). No nightly required.
+development environment based on Debian 12. The default runtime is **podman**
+(daemonless, rootless — ideal on a minimal Linux host), but any
+OCI-compatible runtime (e.g. docker) works.
+
+### Requirement: Rust nightly
+
+**Nightly is a hard requirement, not a platform-specific workaround.** The GBA
+target `thumbv4t-none-eabi` is a *low-tier* target: stable rustup ships no
+prebuilt std artifacts for it, so `rustup target add thumbv4t-none-eabi` fails
+on stable (`has no prebuilt artifacts available for target`). The supported
+way to get std for this bare-metal target is a **nightly toolchain + the
+`rust-src` component** — std is compiled from source for the target. This is
+a Rust toolchain limitation, independent of host OS; don't "simplify" it to
+stable, the build breaks at the `rustup target add` step.
 
 You have two main ways to build and develop:
 
 1. **Using a container runtime (CLI)**
-   The default runtime is **podman** (daemonless, rootless — ideal on a minimal
-   Linux host), but any OCI-compatible runtime works. Run:
+   The default runtime is **podman**; override with docker if you prefer.
+   Run:
    ```sh
    make podman-rom
    ```
@@ -93,8 +103,9 @@ You have two main ways to build and develop:
    VS Code and click "Reopen in Container" to run your IDE and `rust-analyzer`
    inside the Debian environment with full GBA target autocomplete.
 
-*(If you prefer to build natively on your host and have the stable toolchain +
-`thumbv4t-none-eabi` target + `agb-gbafix` installed, `make rom` will still work).*
+*(If you prefer to build natively on your host — a side quest for us — you need
+the nightly toolchain, the `thumbv4t-none-eabi` target, the `rust-src`
+component, and `agb-gbafix` installed. `make rom` will still work then.)*
 
 Run `gba-sound-player.gba` in any GBA emulator (mGBA recommended) to see the title
 screen and hear the tone.

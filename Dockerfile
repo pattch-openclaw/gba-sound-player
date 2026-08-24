@@ -1,8 +1,12 @@
 # Use the official Rust image based on Debian 12.
-# We pin STABLE (not nightly): agb 0.25 + thumbv4t-none-eabi builds fine under
-# stable as long as `rust-src` is present (std is built from source for the
-# bare-metal target). If a future dependency truly requires nightly, bump the
-# toolchain line below and the corresponding rust-toolchain.toml together.
+#
+# WHY NIGHTLY: `thumbv4t-none-eabi` (ARMv4T) is a low-tier target. Stable rustup
+# has NO prebuilt std artifacts for it, so `rustup target add thumbv4t-none-eabi`
+# fails on stable ("has no prebuilt artifacts available for target"). The
+# practical way to build std for this bare-metal target is a nightly toolchain
+# + the `rust-src` component (std is compiled from source for the target).
+# This is a hard Rust limitation, not a project preference — do not "simplify"
+# this to stable; the build will break at the `rustup target add` step.
 FROM rust:slim-bookworm
 
 # Install required C toolchain and git
@@ -11,8 +15,10 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install stable + the thumbv4t target + std sources
-RUN rustup component add rust-src \
+# Install nightly + the thumbv4t target + std sources
+RUN rustup toolchain install nightly \
+    && rustup default nightly \
+    && rustup component add rust-src \
     && rustup target add thumbv4t-none-eabi
 
 # Install the GBA ROM fixing tool
