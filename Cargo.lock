@@ -299,7 +299,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gba-audio"
+name = "gba-sound-player"
 version = "0.1.0"
 dependencies = [
  "agb",
