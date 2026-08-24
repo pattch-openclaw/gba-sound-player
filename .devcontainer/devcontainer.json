@@ -1,0 +1,20 @@
+{
+    "name": "GBA Audio Dev",
+    "build": {
+        "dockerfile": "../Dockerfile"
+    },
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "rust-analyzer.cargo.target": "thumbv4t-none-eabi",
+                "rust-analyzer.checkOnSave.target": "thumbv4t-none-eabi",
+                "rust-analyzer.check.allTargets": false
+            },
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "tamasfe.even-better-toml"
+            ]
+        }
+    },
+    "postCreateCommand": "cargo --version"
+}
