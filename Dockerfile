@@ -1,25 +1,19 @@
-# Use the official Rust image based on Debian 12.
+# GBA ROM build image (Debian 12, Rust).
 #
-# WHY NIGHTLY: `thumbv4t-none-eabi` (ARMv4T) is a low-tier target. Stable rustup
-# has NO prebuilt std artifacts for it, so `rustup target add thumbv4t-none-eabi`
-# fails on stable ("has no prebuilt artifacts available for target"). The
-# practical way to build std for this bare-metal target is a nightly toolchain
-# + the `rust-src` component (std is compiled from source for the target).
-# This is a hard Rust limitation, not a project preference — do not "simplify"
-# this to stable; the build will break at the `rustup target add` step.
+# Target: thumbv4t-none-eabi — a Tier-3, #![no_std] bare-metal target
+# (supports core + alloc only). It ships NO prebuilt std artifacts on any
+# rustup toolchain (stable OR nightly), so do NOT run `rustup target add` for
+# it — that step will fail. We build no_std directly for the target instead.
+#
+#   Ref: https://doc.rust-lang.org/nightly/rustc/platform-support/armv4t-none-eabi.html
+#
 FROM rust:slim-bookworm
 
-# Install required C toolchain and git
+# C toolchain + git (linker / build deps)
 RUN apt-get update && apt-get install -y \
     build-essential \
     git \
     && rm -rf /var/lib/apt/lists/*
-
-# Install nightly + the thumbv4t target + std sources
-RUN rustup toolchain install nightly \
-    && rustup default nightly \
-    && rustup component add rust-src \
-    && rustup target add thumbv4t-none-eabi
 
 # Install the GBA ROM fixing tool
 RUN cargo install agb-gbafix

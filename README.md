@@ -69,22 +69,28 @@ the top-level ROM depends on.
 
 ## Building and Development
 
-To ensure a consistent toolchain across Linux and macOS hosts (and to avoid
-issues with missing `thumbv4t` std targets), this project uses a containerized
-development environment based on Debian 12. The default runtime is **podman**
-(daemonless, rootless — ideal on a minimal Linux host), but any
+To ensure a consistent toolchain across Linux and macOS hosts, this project uses
+a containerized development environment based on Debian 12. The default runtime
+is **podman** (daemonless, rootless — ideal on a minimal Linux host), but any
 OCI-compatible runtime (e.g. docker) works.
 
-### Requirement: Rust nightly
+### Requirement: `#![no_std]`, and *no* std target for `thumbv4t-none-eabi`
 
-**Nightly is a hard requirement, not a platform-specific workaround.** The GBA
-target `thumbv4t-none-eabi` is a *low-tier* target: stable rustup ships no
-prebuilt std artifacts for it, so `rustup target add thumbv4t-none-eabi` fails
-on stable (`has no prebuilt artifacts available for target`). The supported
-way to get std for this bare-metal target is a **nightly toolchain + the
-`rust-src` component** — std is compiled from source for the target. This is
-a Rust toolchain limitation, independent of host OS; don't "simplify" it to
-stable, the build breaks at the `rustup target add` step.
+The GBA target `thumbv4t-none-eabi` is a **Tier-3, `#![no_std]`** bare-metal
+target. Per the [Rust platform-support docs](https://doc.rust-lang.org/nightly/rustc/platform-support/armv4t-none-eabi.html),
+its library support is **`core` and `alloc` only** — it ships **no `std`**, and
+rustup has **no prebuilt std artifacts** for it on *any* toolchain (stable or
+nightly). Consequently:
+
+- The crate is written `#![no_std]` (see `src/main.rs`) and relies on `core`/
+  `alloc` via `agb`. This is the supported model, not a workaround.
+- **Do not** run `rustup target add thumbv4t-none-eabi` or try to install a std
+  target for it — that step fails by design. We build `no_std` directly for the
+target instead (the target spec itself is built into rustc; no target install
+is needed).
+- This is a toolchain/platform reality, independent of host OS. If it looks like
+a "missing dependency" or "add nightly" issue, it isn't — the target simply has
+no std.
 
 You have two main ways to build and develop:
 
@@ -95,23 +101,26 @@ You have two main ways to build and develop:
    make podman-rom
    ```
    This builds the image, mounts your local directory into the container,
-   compiles the ROM, and outputs `gba-sound-player.gba` directly to your host
-   directory. Prefer docker? `make podman-rom CONTAINER=docker`.
+   compiles the ROM (`no_std`, target `thumbv4t-none-eabi`), and outputs
+   `gba-sound-player.gba` directly to your host directory. Prefer docker?
+   `make podman-rom CONTAINER=docker`.
 
 2. **Using VS Code Dev Containers (IDE)**
    The repository includes a `.devcontainer` configuration. Open this folder in
    VS Code and click "Reopen in Container" to run your IDE and `rust-analyzer`
    inside the Debian environment with full GBA target autocomplete.
 
-*(If you prefer to build natively on your host — a side quest for us — you need
-the nightly toolchain, the `thumbv4t-none-eabi` target, the `rust-src`
-component, and `agb-gbafix` installed. `make rom` will still work then.)*
+*(If you prefer to build natively on your host — a side quest for us — install
+the nightly Rust toolchain and `agb-gbafix`. You do **not** need to add a std
+target for `thumbv4t-none-eabi`; the `no_std` build works directly. `make rom`
+will still work then.)*
 
 Run `gba-sound-player.gba` in any GBA emulator (mGBA recommended) to see the title
 screen and hear the tone.
 
 ## References
 
+- <https://doc.rust-lang.org/nightly/rustc/platform-support/armv4t-none-eabi.html> — `thumbv4t-none-eabi` is Tier 3, `#![no_std]` (`core` + `alloc` only, no prebuilt std)
 - <https://gbadev.net/> — GBA hardware reference
 - <https://github.com/agbrs/agb> — the `agb` Rust library this project builds on
 - <https://jsgroth.dev/blog/posts/gba-audio/> — detailed GBA audio hardware
