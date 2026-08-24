@@ -20,9 +20,11 @@ FROM rust:slim-bookworm
 # required beyond what the base image provides. (Do NOT add an ARM cross-compiler
 # here; it is unused by this build path and `arm-none-eabi-gcc` does not exist
 # on Debian bookworm — the real package is `gcc-arm-none-eabi`, which we don't need.)
-# git is a build dep (cargo/git fetch). Install only that, quietly.
+# git (cargo/git fetch) + make (the Makefile drives the build; rust:slim-bookworm
+# ships neither). We do NOT need build-essential — this is a pure-Rust build
+# (rust-lld links; no C is compiled).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends git make \
     && rm -rf /var/lib/apt/lists/*
 
 # Nightly toolchain + rust-src (needed for -Zbuild-std)
