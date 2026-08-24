@@ -67,16 +67,28 @@ the top-level ROM depends on.
 - `assets/fonts/` — a small pixel font used for the title screen.
 - `Makefile` — `make build`, `make rom`, `make clean`.
 
-## Building
+## Building and Development
 
-The GBA target `thumbv4t-none-eabi` is not distributed as a prebuilt std on
-this host, so the build uses nightly's `-Z build-std=core,alloc` (see
-`.cargo/config.toml`).
+To ensure a consistent toolchain across Linux and macOS hosts (and to avoid 
+issues with missing `thumbv4t` std targets), this project uses a containerized 
+development environment based on Debian 12.
 
-```sh
-make build   # produces target/thumbv4t-none-eabi/release/gba-audio
-make rom     # produces gba-audio.gba (a valid GBA ROM)
-```
+You have two main ways to build and develop:
+
+1. **Using Docker (CLI)**  
+   Simply run:
+   ```sh
+   make docker-rom
+   ```
+   This builds the Docker image, mounts your local directory into the container,
+   compiles the ROM, and outputs `gba-audio.gba` directly to your host directory.
+
+2. **Using VS Code Dev Containers (IDE)**  
+   The repository includes a `.devcontainer` configuration. Open this folder in 
+   VS Code and click "Reopen in Container" to run your IDE and `rust-analyzer` 
+   inside the Debian environment with full GBA target autocomplete.
+
+*(If you prefer to build natively on your host and have the nightly toolchain configured, `make rom` will still work).* 
 
 Run `gba-audio.gba` in any GBA emulator (mGBA recommended) to see the title
 screen and hear the tone.
