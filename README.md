@@ -62,8 +62,9 @@ the top-level ROM depends on.
 
 ### Current state
 
-- `src/main.rs` — minimal ROM that sets the hardware backdrop colour to orange, emits milestone logs via `agb::eprintln!`, and successfully plays a 440 Hz square wave tone using PSG Channel 1.
-- `src/main.rs` also includes a basic `#[test_case]` suite runnable via `mgba-test-runner`.
+- `examples/tone_playback.rs` — minimal ROM that sets the hardware backdrop colour to orange, emits milestone logs via `agb::eprintln!`, and successfully plays a 440 Hz square wave tone using PSG Channel 1.
+- `src/main.rs` is now a clean slate for the next phase: implementing sample-based (PCM) audio playback.
+- The project also includes a basic `#[test_case]` suite runnable via `mgba-test-runner`.
 - `Makefile` — `make build`, `make rom`, `make clean`, `make podman-rom`.
 - `Dockerfile` — the containerized build (Debian 12 / `rust:slim-bookworm`,
   nightly + `rust-src`, `agb-gbafix`).
@@ -131,7 +132,7 @@ The critical initialization order for GBA audio is:
 While mGBA is highly accurate, we discovered two specific audio behaviors that only manifest on real GBA hardware:
 
 1. **Envelope Step Time of `0` Mutes Audio:** If you configure a *decreasing* envelope with a step time of `0` (e.g., `0xF080`), mGBA treats this as "constant volume" and plays the tone. Real hardware treats this as an instant drop to `0` volume, resulting in complete silence. Always use a non-zero envelope step (e.g., `4`) if you want the note to fade out, or configure an *increasing* envelope for sustained notes.
-2. **Startup Initialization Delay:** On real hardware, the very first sound triggered immediately after enabling the audio registers is often skipped or muted. Subsequent triggers of the same registers work perfectly. This implies that real hardware requires a brief timing delay (warm-up period) between turning on the master audio circuit (`SOUNDCNT_X`) and successfully triggering the first note.
+2. **Sweep Unit "First Trigger" Bug:** On real hardware, the very first time you trigger Channel 1 (the only channel with a sweep unit), the sound may not play. The uninitialized sweep hardware consumes the first trigger pulse just to reset its internal state machine, failing to restart the oscillator. **Workaround:** "Double-trigger" the channel on its very first play by writing the frequency and trigger bit (`0x8000`) to `SOUND1CNT_X` twice in rapid succession.
 
 *Note: Many channel frequency/trigger registers are write-only. Reading from them will usually return `0` or normal hardware fallback values.*
 
