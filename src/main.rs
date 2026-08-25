@@ -52,30 +52,61 @@ mod psg {
     const SOUND1CNT_H: *mut u16 = 0x0400_0062 as *mut u16;
     const SOUND1CNT_X: *mut u16 = 0x0400_0064 as *mut u16;
     const SOUNDCNT_L:  *mut u16 = 0x0400_0080 as *mut u16;
+    const SOUNDCNT_H:  *mut u16 = 0x0400_0082 as *mut u16;
+    const SOUNDCNT_X_MASTER: *mut u16 = 0x0400_0084 as *mut u16;
+    const SOUNDBIAS:   *mut u16 = 0x0400_0088 as *mut u16;
 
     pub fn play_tone_a4() {
         unsafe {
-            // SOUNDCNT_L (0x0400_0080): Master Volume & LR enable
-            // Bits 0-2: Right volume (7 = max)
-            // Bits 4-6: Left volume (7 = max)
-            // Bit 8: Ch 1 Right enable
-            // Bit 12: Ch 1 Left enable
+            agb::eprintln!("[audio] --- BEFORE INIT ---");
+            agb::eprintln!("[audio] SOUNDCNT_L (0x80): {:#06x}", SOUNDCNT_L.read_volatile());
+            agb::eprintln!("[audio] SOUNDCNT_H (0x82): {:#06x}", SOUNDCNT_H.read_volatile());
+            agb::eprintln!("[audio] SOUNDCNT_X (0x84): {:#06x}", SOUNDCNT_X_MASTER.read_volatile());
+            agb::eprintln!("[audio] SOUNDBIAS  (0x88): {:#06x}", SOUNDBIAS.read_volatile());
+
+            // 1. SOUNDCNT_X (0x0400_0084): Master Sound Enable
+            // Bit 7 turns on the entire sound circuit.
+            // While `agb` might do this during init, setting it explicitly ensures it's on.
+            SOUNDCNT_X_MASTER.write_volatile(0x0080);
+
+            // 2. SOUNDCNT_L (0x0400_0080): DMG Master Volume & LR enable
+            // Bits 0-2: Left volume (7 = max)
+            // Bits 4-6: Right volume (7 = max)
+            // Bit 8: Ch 1 Left enable
+            // Bit 12 (0xC): Ch 1 Right enable
+            // 0x1177 sets max volume and enables Ch 1 on both left and right outputs.
             SOUNDCNT_L.write_volatile(0x1177);
 
-            // SOUND1CNT_L (0x0400_0060): Sweep register
+            // 3. SOUNDCNT_H (0x0400_0082): PSG Volume Ratio
+            // Bits 0-1: Output sound ratio for chan. 1-4 (0=25%, 1=50%, 2=100%)
+            // We do a read-modify-write to preserve Direct Sound settings (if any), setting PSG volume to 100%.
+            let mut snd_cnt_h = SOUNDCNT_H.read_volatile();
+            snd_cnt_h = (snd_cnt_h & !0x0003) | 0x0002;
+            SOUNDCNT_H.write_volatile(snd_cnt_h);
+
+            // 4. SOUND1CNT_L (0x0400_0060): Sweep register
             // 0 = disable sweep
             SOUND1CNT_L.write_volatile(0);
 
-            // SOUND1CNT_H (0x0400_0062): Duty / Length / Envelope
-            // Bits 6-7: Duty cycle (2 = 50%) -> 0x0080
+            // 5. SOUND1CNT_H (0x0400_0062): Duty / Length / Envelope
+            // Bits 6-7: Wave duty cycle (2 = 50%) -> 0x0080
             // Bits 12-15: Initial volume (15 = max) -> 0xF000
-            // We leave length at 0 (continuous) and envelope step at 0.
+            // Envelope step time (bits 8-10) is 0 (disabled).
             SOUND1CNT_H.write_volatile(0xF080);
 
-            // SOUND1CNT_X (0x0400_0064): Frequency / Control
+            // 6. SOUND1CNT_X (0x0400_0064): Frequency / Control
             // Bits 0-10: Frequency. For 440 Hz, x = 1758.
             // Bit 15: Initial (trigger the note) -> 0x8000
             SOUND1CNT_X.write_volatile(1758 | 0x8000);
+
+            agb::eprintln!("[audio] --- AFTER INIT ---");
+            agb::eprintln!("[audio] SOUNDCNT_L (0x80): {:#06x}", SOUNDCNT_L.read_volatile());
+            agb::eprintln!("[audio] SOUNDCNT_H (0x82): {:#06x}", SOUNDCNT_H.read_volatile());
+            agb::eprintln!("[audio] SOUNDCNT_X (0x84): {:#06x}", SOUNDCNT_X_MASTER.read_volatile());
+            agb::eprintln!("[audio] SOUND1CNT_L (0x60): {:#06x}", SOUND1CNT_L.read_volatile());
+            agb::eprintln!("[audio] SOUND1CNT_H (0x62): {:#06x}", SOUND1CNT_H.read_volatile());
+            agb::eprintln!("[audio] SOUND1CNT_X (0x64): {:#06x}", SOUND1CNT_X.read_volatile());
+            agb::eprintln!("[audio] SOUNDBIAS  (0x88): {:#06x}", SOUNDBIAS.read_volatile());
         }
     }
 }
