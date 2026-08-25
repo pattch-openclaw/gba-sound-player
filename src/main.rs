@@ -22,6 +22,10 @@ fn entry(mut gba: agb::Gba) -> ! {
     agb::eprintln!("[hello] screen should now be orange");
 
     psg::init_audio_master();
+    
+    // Hardware quirk: Real silicon requires a brief warm-up period after 
+    // enabling the master audio circuit before it will successfully play a note.
+    delay(16); // ~250ms delay
 
     loop {
         agb::eprintln!("[audio] playing Channel 1 (Sweep/Square)...");
@@ -79,7 +83,10 @@ mod psg {
 
     pub fn init_audio_master() {
         unsafe {
-            // 1. Turn on Master Sound Enable FIRST
+            // 1. Hard Reset: Turn off, then turn on Master Sound Enable.
+            // If the BIOS left it on, writing 0x0080 doesn't reset the APU.
+            // Toggling it guarantees a clean slate.
+            SOUNDCNT_X_MASTER.write_volatile(0x0000);
             SOUNDCNT_X_MASTER.write_volatile(0x0080);
             
             // 2. Enable Channels 1, 2, and 4 on Left and Right. Max volume.
@@ -97,10 +104,16 @@ mod psg {
 
     pub fn play_ch1() {
         unsafe {
-            SOUND1CNT_L.write_volatile(0); // Sweep off
+            // 0x0008 = Sweep Time 0, Decrease 1, Shift 0.
+            // This is the safest way to turn off sweep without triggering hardware bugs.
+            SOUND1CNT_L.write_volatile(0x0008); 
+            
             // Vol=15, Env=Decrease, Step=4, Duty=50%
             SOUND1CNT_H.write_volatile(0xF480);
+            
             // Frequency 1758 (440Hz), Trigger note
+            SOUND1CNT_X.write_volatile(1758 | 0x8000); 
+            // Hardware quirk: Double-trigger to force the sweep unit to initialize on boot
             SOUND1CNT_X.write_volatile(1758 | 0x8000); 
         }
     }
