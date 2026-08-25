@@ -62,7 +62,7 @@ the top-level ROM depends on.
 
 ### Current state
 
-- `src/main.rs` — minimal "hello world" ROM. It deliberately avoids complex subsystems (no tiles, no audio) to establish a baseline. It simply sets the hardware backdrop colour to orange and emits milestone logs via `agb::eprintln!`.
+- `src/main.rs` — minimal ROM that sets the hardware backdrop colour to orange, emits milestone logs via `agb::eprintln!`, and attempts basic audio playback (which is currently failing to output sound).
 - `src/main.rs` also includes a basic `#[test_case]` suite runnable via `mgba-test-runner`.
 - `Makefile` — `make build`, `make rom`, `make clean`, `make podman-rom`.
 - `Dockerfile` — the containerized build (Debian 12 / `rust:slim-bookworm`,
@@ -70,11 +70,16 @@ the top-level ROM depends on.
 
 ### Build and Test status (as of 2026-08-24)
 
-**We are currently debugging a "black screen + silent" runtime issue.** To diagnose this, the ROM has been stripped down to a minimal baseline and instrumented with observability.
+**We are currently debugging an audio output issue.**
+
+Through a series of recent refactors, we:
+1. Rewrote the app as a simple "hello world" baseline that sets an orange screen.
+2. Added debug logging statements (`agb::eprintln!`).
+3. Validated that the ROM builds correctly, prints debug statements to the mGBA terminal, and successfully displays the orange screen in an emulator.
+4. Attempted to add back basic audio functionality on top of this verified baseline, but we are still not correctly outputting any audio.
 
 **Debugging Workflow:**
-1. **Milestone Logging:** The ROM uses `agb::eprintln!` to log its progress. This macro communicates with the mGBA emulator via a cheat-code handshake and prints to the terminal running mGBA.
-   - Run the ROM in mGBA from a terminal. If the screen is black, the console logs will tell us exactly which step the ROM reached before halting.
+1. **Milestone Logging:** The ROM uses `agb::eprintln!` to log its progress to the terminal running mGBA.
 2. **Automated Testing:** We use agb's `#[test_case]` harness.
    - Run tests using the `mgba-test-runner` on a host that supports it:
      ```sh
@@ -100,12 +105,7 @@ path stops at the linked binary (it has no `agb-gbafix` / no emulator here).
 ### Architecture: agb framework baseline
 
 We commit to **agb as the framework** (`#[agb::entry]`, agb display, agb
-DMA/timing). To verify the runtime pipeline, the current ROM simply acquires the graphics controller and changes the backdrop colour (palette 0, colour 0). Once this baseline is proven to output a solid orange screen, we will rebuild the audio and tile features on top of it.
-
-### ⚠️ Runtime status: unverified on hardware/emulator
-
-**The ROM compiles cleanly, but has not yet been run in an emulator.**
-The previous "black screen + silent" report prompted a fallback to this minimal hello-world logging baseline. **Verify in mGBA on a host that has it**, and check the terminal logs for the milestone output.
+DMA/timing). We have successfully verified the runtime pipeline: the baseline ROM acquires the graphics controller and changes the backdrop colour to orange. We are now working on getting the audio features functioning on top of this proven baseline.
 
 ## Building and Development
 
@@ -184,6 +184,8 @@ has an emulator, to see the title screen and hear the 440 Hz tone.
 
 - <https://doc.rust-lang.org/nightly/rustc/platform-support/armv4t-none-eabi.html> — `thumbv4t-none-eabi` is Tier 3, `#![no_std]` (`core` + `alloc` only, no prebuilt std)
 - <https://gbadev.net/> — GBA hardware reference
+- <https://gbadev.net/gbadoc/audio/registers.html> — GBA audio hardware registers reference
+- <https://gbadev.net/gbadoc/audio/sound1.html> — GBA audio Sound Channel 1 reference
 - <https://github.com/agbrs/agb> — the `agb` Rust library this project builds on
 - <https://jsgroth.dev/blog/posts/gba-audio/> — detailed GBA audio hardware
   analysis (mixing, DMA, timers)
