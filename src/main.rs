@@ -7,6 +7,9 @@
 use agb::display::Rgb;
 
 const HELLO: agb::display::Rgb15 = Rgb::new(255, 128, 0).to_rgb15();
+const COLOR_CH1: agb::display::Rgb15 = Rgb::new(255, 0, 0).to_rgb15();
+const COLOR_CH2: agb::display::Rgb15 = Rgb::new(0, 255, 0).to_rgb15();
+const COLOR_CH4: agb::display::Rgb15 = Rgb::new(0, 128, 255).to_rgb15();
 
 #[agb::entry]
 fn entry(mut gba: agb::Gba) -> ! {
@@ -14,8 +17,7 @@ fn entry(mut gba: agb::Gba) -> ! {
 
     let mut gfx = gba.graphics.get();
     gfx.set_background_palette_colour(0, 0, HELLO);
-    let frame = gfx.frame();
-    frame.commit();
+    gfx.frame().commit();
     
     agb::eprintln!("[hello] screen should now be orange");
 
@@ -23,16 +25,22 @@ fn entry(mut gba: agb::Gba) -> ! {
 
     loop {
         agb::eprintln!("[audio] playing Channel 1 (Sweep/Square)...");
+        gfx.set_background_palette_colour(0, 0, COLOR_CH1);
+        gfx.frame().commit();
         psg::play_ch1();
-        delay(90); // 1.5 seconds
+        delay(180); // 3 seconds
 
         agb::eprintln!("[audio] playing Channel 2 (Square)...");
+        gfx.set_background_palette_colour(0, 0, COLOR_CH2);
+        gfx.frame().commit();
         psg::play_ch2();
-        delay(90);
+        delay(180); // 3 seconds
 
         agb::eprintln!("[audio] playing Channel 4 (Noise)...");
+        gfx.set_background_palette_colour(0, 0, COLOR_CH4);
+        gfx.frame().commit();
         psg::play_ch4();
-        delay(90);
+        delay(180); // 3 seconds
     }
 }
 
