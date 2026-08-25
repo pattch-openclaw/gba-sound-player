@@ -62,7 +62,7 @@ the top-level ROM depends on.
 
 ### Current state
 
-- `src/main.rs` — minimal ROM that sets the hardware backdrop colour to orange, emits milestone logs via `agb::eprintln!`, and attempts basic audio playback (which is currently failing to output sound).
+- `src/main.rs` — minimal ROM that sets the hardware backdrop colour to orange, emits milestone logs via `agb::eprintln!`, and successfully plays a 440 Hz square wave tone using PSG Channel 1.
 - `src/main.rs` also includes a basic `#[test_case]` suite runnable via `mgba-test-runner`.
 - `Makefile` — `make build`, `make rom`, `make clean`, `make podman-rom`.
 - `Dockerfile` — the containerized build (Debian 12 / `rust:slim-bookworm`,
@@ -70,13 +70,13 @@ the top-level ROM depends on.
 
 ### Build and Test status (as of 2026-08-24)
 
-**We are currently debugging an audio output issue.**
+**Baseline audio and video verified.**
 
-Through a series of recent refactors, we:
+Through a series of recent refactors and debugging sessions, we:
 1. Rewrote the app as a simple "hello world" baseline that sets an orange screen.
 2. Added debug logging statements (`agb::eprintln!`).
 3. Validated that the ROM builds correctly, prints debug statements to the mGBA terminal, and successfully displays the orange screen in an emulator.
-4. Attempted to add back basic audio functionality on top of this verified baseline, but we are still not correctly outputting any audio.
+4. Identified and fixed a missing "Master Sound Enable" initialization step, successfully activating PSG Channel 1 to play a continuous 440 Hz square wave tone.
 
 **Debugging Workflow:**
 1. **Milestone Logging:** The ROM uses `agb::eprintln!` to log its progress to the terminal running mGBA.
@@ -105,7 +105,27 @@ path stops at the linked binary (it has no `agb-gbafix` / no emulator here).
 ### Architecture: agb framework baseline
 
 We commit to **agb as the framework** (`#[agb::entry]`, agb display, agb
-DMA/timing). We have successfully verified the runtime pipeline: the baseline ROM acquires the graphics controller and changes the backdrop colour to orange. We are now working on getting the audio features functioning on top of this proven baseline.
+DMA/timing). We have successfully verified the runtime pipeline: the baseline ROM acquires the graphics controller, changes the backdrop colour to orange, and plays a test tone.
+
+## Audio Initialization (Lessons Learned)
+
+During the process of bringing up the audio hardware, we identified a critical sequence of operations necessary for the GBA to emit sound. The hardware will completely ignore writes to audio registers if the sound circuit isn't explicitly enabled.
+
+The critical initialization order for GBA audio is:
+
+1. **Master Sound Enable (`SOUNDCNT_X` at `0x04000084`)**
+   - **Crucial:** Bit 7 MUST be set to `1` (`0x0080`) before writing to *any* other audio registers. If this bit is `0`, all writes to PSG channels are ignored and forced to `0`.
+2. **Master Volume & Panning (`SOUNDCNT_L` at `0x04000080`)**
+   - Set left/right master volume (bits 0-2 and 4-6) to maximum (`7`).
+   - Enable the specific channels (e.g., Channel 1) on both the left (bit 8) and right (bit 12) outputs. (e.g., `0x1177`).
+3. **Sound Output Ratio (`SOUNDCNT_H` at `0x04000082`)**
+   - Set the PSG volume ratio to 100% (bits 0-1 set to `2`).
+4. **Channel-Specific Configuration (e.g., Channel 1)**
+   - **Sweep (`SOUND1CNT_L` - `0x04000060`):** Set to `0` to disable frequency sweep.
+   - **Duty/Envelope (`SOUND1CNT_H` - `0x04000062`):** Set duty cycle (e.g., 50% = bit 6-7) and initial volume (bits 12-15).
+   - **Frequency/Trigger (`SOUND1CNT_X` - `0x04000064`):** Write the 11-bit frequency value and set the highest bit (bit 15, `0x8000`) to trigger the note.
+
+*Note: Many channel frequency/trigger registers are write-only. Reading from them will usually return `0` or normal hardware fallback values.*
 
 ## Building and Development
 
