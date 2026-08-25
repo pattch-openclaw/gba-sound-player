@@ -77,6 +77,7 @@ Through a series of recent refactors and debugging sessions, we:
 2. Added debug logging statements (`agb::eprintln!`).
 3. Validated that the ROM builds correctly, prints debug statements to the mGBA terminal, and successfully displays the orange screen in an emulator.
 4. Identified and fixed a missing "Master Sound Enable" initialization step, successfully activating PSG Channel 1 to play a continuous 440 Hz square wave tone.
+5. Implemented a 3-channel diagnostic loop (Sweep/Square, Square, Noise) synchronized with screen colors (Red, Green, Blue) to isolate emulator-vs-hardware audio quirks.
 
 **Debugging Workflow:**
 1. **Milestone Logging:** The ROM uses `agb::eprintln!` to log its progress to the terminal running mGBA.
@@ -124,6 +125,13 @@ The critical initialization order for GBA audio is:
    - **Sweep (`SOUND1CNT_L` - `0x04000060`):** Set to `0` to disable frequency sweep.
    - **Duty/Envelope (`SOUND1CNT_H` - `0x04000062`):** Set duty cycle (e.g., 50% = bit 6-7) and initial volume (bits 12-15).
    - **Frequency/Trigger (`SOUND1CNT_X` - `0x04000064`):** Write the 11-bit frequency value and set the highest bit (bit 15, `0x8000`) to trigger the note.
+
+### Hardware-Specific Quirks (Emulator vs. Real Silicon)
+
+While mGBA is highly accurate, we discovered two specific audio behaviors that only manifest on real GBA hardware:
+
+1. **Envelope Step Time of `0` Mutes Audio:** If you configure a *decreasing* envelope with a step time of `0` (e.g., `0xF080`), mGBA treats this as "constant volume" and plays the tone. Real hardware treats this as an instant drop to `0` volume, resulting in complete silence. Always use a non-zero envelope step (e.g., `4`) if you want the note to fade out, or configure an *increasing* envelope for sustained notes.
+2. **Startup Initialization Delay:** On real hardware, the very first sound triggered immediately after enabling the audio registers is often skipped or muted. Subsequent triggers of the same registers work perfectly. This implies that real hardware requires a brief timing delay (warm-up period) between turning on the master audio circuit (`SOUNDCNT_X`) and successfully triggering the first note.
 
 *Note: Many channel frequency/trigger registers are write-only. Reading from them will usually return `0` or normal hardware fallback values.*
 
