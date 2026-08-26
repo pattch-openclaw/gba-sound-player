@@ -6,12 +6,36 @@
 
 pub mod pcm;
 
+use agb::display::Rgb;
+use agb::sound::mixer::{Frequency, SoundData};
+
+const HELLO: agb::display::Rgb15 = Rgb::new(255, 128, 0).to_rgb15();
+
+// This should be the target .wav file you want to play.
+// Place it in the root directory or adjust the path accordingly.
+// Note: agb's include_wav! macro requires the file to be present at compile time.
+static TEST_SOUND: SoundData = agb::include_wav!("test.wav");
+
 #[agb::entry]
-fn main(mut _gba: agb::Gba) -> ! {
+fn main(mut gba: agb::Gba) -> ! {
     #[cfg(test)]
     test_main();
 
+    agb::eprintln!("[main] entry started, setting up gfx and audio");
+
+    let mut gfx = gba.graphics.get();
+    gfx.set_background_palette_colour(0, 0, HELLO);
+    
+    agb::eprintln!("[main] screen should now be orange");
+
+    pcm::play_stereo_track_blocking(&mut gba, &TEST_SOUND, Frequency::Hz65536);
+
     loop {
-        agb::display::busy_wait_for_vblank();
+        let mut frame = gfx.frame();
+        
+        // agb's software mixer requires frame() to be called in the main loop to process audio
+        gba.mixer.frame();
+        
+        frame.commit();
     }
 }
