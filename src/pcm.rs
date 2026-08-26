@@ -1,47 +1,38 @@
 //! Simple PCM audio playback for the Game Boy Advance using agb's MixerController.
 //!
-//! This provides a thin wrapper around agb's audio APIs for playing stereo PCM tracks.
+//! Uses agb's built-in audio APIs for playing stereo PCM tracks.
 
-use core::convert::Infallible;
+use agb::sound::mixer::{Frequency, SoundChannel, SoundData};
 
-/// Play a stereo track using agb's MixerController with blocking execution.
-/// 
+/// Play a stereo track using agb's MixerController.
+///
 /// # Arguments
 /// * `gba` - Reference to GBA hardware
-/// * `left_data` - Left channel PCM samples (8-bit unsigned)
-/// * `right_data` - Right channel PCM samples (8-bit unsigned)
-/// * `sample_rate_hz` - Sample rate in Hertz (GBA supports 32768, 65536, 131072, 262144)
-/// 
+/// * `sound_data` - The `SoundData` containing the audio to play
+/// * `sample_rate` - The `Frequency` to play back at
+///
 /// # Example
 /// ```ignore
 /// use gba_sound_player::pcm::play_stereo_track_blocking;
-/// 
-/// let left_data: &'static [u8] = &[128u8; 1024]; // Silence
-/// let right_data: &'static [u8] = &[128u8; 1024];
-/// 
-/// loop {
-///     play_stereo_track_blocking(gba, left_data, right_data, 65536);
-///     agb::display::busy_wait_for_vblank();
+/// use agb::sound::mixer::{Frequency, SoundData};
+///
+/// static MY_SOUND: SoundData = include_wav!("my_sound.wav");
+///
+/// pub fn main(mut gba: agb::Gba) -> ! {
+///     play_stereo_track_blocking(&mut gba, &MY_SOUND, Frequency::Hz65536);
+///     
+///     loop {
+///         // Need to call mixer.frame() in your game loop!
+///     }
 /// }
 /// ```
 pub fn play_stereo_track_blocking(
-    gba: &agb::Gba,
-    left_data: &'static [u8],
-    right_data: &'static [u8],
-    sample_rate_hz: u32,
+    gba: &mut agb::Gba,
+    sound_data: &'static SoundData,
+    sample_rate: Frequency,
 ) {
-    use agb::sound::mixer::{Mixer, Frequency};
-    
-    // Use agb's Mixer API - it handles all the GBA audio register setup
-    let mixer = gba.sound().mixer();
-    
-    // Add both channels with the specified sample rate
-    // agb's Mixer automatically handles the GBA audio hardware setup
-    mixer.add(left_data, true);
-    mixer.add(right_data, true);
-}
-
-/// Quick-play function with default sample rate (65536 Hz).
-pub fn play_stereo_track_default(gba: &agb::Gba, left_data: &'static [u8], right_data: &'static [u8]) {
-    play_stereo_track_blocking(gba, left_data, right_data, 65536);
+    let mut mixer = gba.mixer.mixer(sample_rate);
+    let mut channel = SoundChannel::new(*sound_data);
+    channel.stereo();
+    let _ = mixer.play_sound(channel);
 }
