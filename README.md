@@ -83,9 +83,18 @@ Through a series of recent refactors and debugging sessions, we:
 **Debugging Workflow:**
 1. **Milestone Logging:** The ROM uses `agb::eprintln!` to log its progress to the terminal running mGBA.
 2. **Automated Testing:** We use agb's `#[test_case]` harness.
-   - Run tests using the `mgba-test-runner` on a host that supports it:
+   - The test runner boots the ROM headlessly in mGBA and captures assertion output.
+   - **macOS Native Test Setup:** To run tests locally, you need the nightly toolchain, a C++ compiler for the emulator bindings, and the emulator itself:
      ```sh
-     CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER=mgba-test-runner cargo test --target thumbv4t-none-eabi
+     rustup toolchain install nightly
+     rustup component add rust-src --toolchain nightly
+     brew install cmake mgba
+     cargo install agb-gbafix
+     cargo install mgba-test-runner --git https://github.com/agbrs/agb.git
+     ```
+   - **Running Tests:**
+     ```sh
+     CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER=mgba-test-runner cargo +nightly test --target thumbv4t-none-eabi
      ```
 
 1. **Native macOS build** — `cargo +nightly build --release --target
