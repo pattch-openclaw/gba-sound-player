@@ -28,13 +28,14 @@ fn main(mut gba: agb::Gba) -> ! {
     
     agb::eprintln!("[main] screen should now be orange");
 
-    pcm::play_stereo_track_blocking(&mut gba, &TEST_SOUND, Frequency::Hz65536);
+    let mut mixer = gba.mixer.mixer(Frequency::Hz32768);
+    pcm::play_stereo_track_blocking(&mut mixer, &TEST_SOUND);
 
     loop {
         let mut frame = gfx.frame();
         
         // agb's software mixer requires frame() to be called in the main loop to process audio
-        gba.mixer.frame();
+        mixer.frame();
         
         frame.commit();
     }

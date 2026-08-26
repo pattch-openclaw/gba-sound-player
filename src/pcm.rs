@@ -2,14 +2,13 @@
 //!
 //! Uses agb's built-in audio APIs for playing stereo PCM tracks.
 
-use agb::sound::mixer::{Frequency, SoundChannel, SoundData};
+use agb::sound::mixer::{Frequency, Mixer, SoundChannel, SoundData};
 
 /// Play a stereo track using agb's MixerController.
 ///
 /// # Arguments
-/// * `gba` - Reference to GBA hardware
+/// * `mixer` - The active `Mixer` instance
 /// * `sound_data` - The `SoundData` containing the audio to play
-/// * `sample_rate` - The `Frequency` to play back at
 ///
 /// # Example
 /// ```ignore
@@ -19,19 +18,18 @@ use agb::sound::mixer::{Frequency, SoundChannel, SoundData};
 /// static MY_SOUND: SoundData = include_wav!("my_sound.wav");
 ///
 /// pub fn main(mut gba: agb::Gba) -> ! {
-///     play_stereo_track_blocking(&mut gba, &MY_SOUND, Frequency::Hz65536);
+///     let mut mixer = gba.mixer.mixer(Frequency::Hz32768);
+///     play_stereo_track_blocking(&mut mixer, &MY_SOUND);
 ///     
 ///     loop {
-///         // Need to call mixer.frame() in your game loop!
+///         mixer.frame();
 ///     }
 /// }
 /// ```
-pub fn play_stereo_track_blocking(
-    gba: &mut agb::Gba,
+pub fn play_stereo_track_blocking<'a>(
+    mixer: &mut Mixer<'a>,
     sound_data: &'static SoundData,
-    sample_rate: Frequency,
 ) {
-    let mut mixer = gba.mixer.mixer(sample_rate);
     let mut channel = SoundChannel::new(*sound_data);
     channel.stereo();
     let _ = mixer.play_sound(channel);
