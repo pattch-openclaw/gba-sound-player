@@ -32,7 +32,7 @@ fn main(mut gba: agb::Gba) -> ! {
     pcm::play_stereo_track_blocking(&mut mixer, &TEST_SOUND);
 
     loop {
-        let mut frame = gfx.frame();
+        let frame = gfx.frame();
         
         // agb's software mixer requires frame() to be called in the main loop to process audio
         mixer.frame();

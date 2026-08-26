@@ -2,7 +2,7 @@
 //!
 //! Uses agb's built-in audio APIs for playing stereo PCM tracks.
 
-use agb::sound::mixer::{Frequency, Mixer, SoundChannel, SoundData};
+use agb::sound::mixer::{Mixer, SoundChannel, SoundData};
 
 /// Play a stereo track using agb's MixerController.
 ///
