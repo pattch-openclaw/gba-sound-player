@@ -118,6 +118,12 @@ path stops at the linked binary (it has no `agb-gbafix` / no emulator here).
 We commit to **agb as the framework** (`#[agb::entry]`, agb display, agb
 DMA/timing). We have successfully verified the runtime pipeline: the baseline ROM acquires the graphics controller, changes the backdrop colour to orange, and plays a test tone.
 
+### PCM Audio and Sample Rates
+
+Currently, this project uses the native `agb` software mixer for PCM playback. The `agb` framework enforces a maximum hardware timer frequency of **32,768 Hz** (`Frequency::Hz32768`). It does this because arbitrary sample rates might fail to divide cleanly into the GBA's ~16.78 MHz master clock, resulting in severe CPU and timing overhead.
+
+**Future Goal:** We aim to eventually address this limitation and increase the target audio frequency to a **~65kHz sample rate** (specifically 65,536 Hz, which is a clean divisor of the master clock and was common in high-fidelity commercial GBA titles). This will likely require bypassing `agb`'s built-in `MixerController` and writing a custom DMA/Timer-driven audio mixer in the future.
+
 ## Audio Initialization (Lessons Learned)
 
 During the process of bringing up the audio hardware, we identified a critical sequence of operations necessary for the GBA to emit sound. The hardware will completely ignore writes to audio registers if the sound circuit isn't explicitly enabled.

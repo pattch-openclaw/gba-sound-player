@@ -1,49 +1,41 @@
 #!/bin/bash
 
 # convert_stereo.sh
-# Converts a stereo audio file into two raw signed 8-bit PCM binary files
-# formatted for GBA Direct Sound (DMA playback).
+# Converts a source audio file into a stereo WAV file formatted
+# for the GBA agb software mixer.
 
 if [ -z "$1" ]; then
-  echo "Usage: $0 <input_audio_file> [sample_rate] [output_prefix]"
-  echo "  sample_rate:   Target sample rate in Hz (default: 65536)"
-  echo "  output_prefix: Prefix for output files (default: left.bin / right.bin)"
+  echo "Usage: $0 <input_audio_file> [sample_rate] [output_file]"
+  echo "  sample_rate:   Target sample rate in Hz (default: 32768)"
+  echo "  output_file:   Target output .wav file (default: test.wav)"
   echo ""
   echo "Example:"
-  echo "  $0 my_song.wav 44100 bgm"
-  echo "  -> Generates bgm_left.bin and bgm_right.bin at 44100 Hz"
+  echo "  $0 my_song.mp3 32768 my_song.wav"
+  echo "  -> Generates my_song.wav at 32768 Hz (stereo, 8-bit PCM)"
   exit 1
 fi
 
 INPUT_FILE="$1"
-# Default to 65536 Hz if arg 2 is empty
-SAMPLE_RATE="${2:-65536}"
-OUTPUT_PREFIX="$3"
-
-# Determine output filenames based on whether a prefix was provided
-if [ -z "$OUTPUT_PREFIX" ]; then
-  OUT_LEFT="left.bin"
-  OUT_RIGHT="right.bin"
-else
-  OUT_LEFT="${OUTPUT_PREFIX}_left.bin"
-  OUT_RIGHT="${OUTPUT_PREFIX}_right.bin"
-fi
+# Default to 32768 Hz if arg 2 is empty
+SAMPLE_RATE="${2:-32768}"
+OUTPUT_FILE="${3:-test.wav}"
 
 echo "Converting '$INPUT_FILE' for GBA..."
 echo "Sample Rate: $SAMPLE_RATE Hz"
-echo "Outputs:     $OUT_LEFT, $OUT_RIGHT"
+echo "Output:      $OUTPUT_FILE"
 echo "----------------------------------------"
 
 # Run FFmpeg:
 # -y overrides output files without prompting
 # -hide_banner makes output slightly cleaner
+# -ac 2 forces stereo
+# -ar sets the sample rate
+# -c:a pcm_u8 sets the audio codec to 8-bit unsigned PCM (standard for 8-bit WAV)
 ffmpeg -i "$INPUT_FILE" -y -hide_banner \
-  -filter_complex "[0:a]loudnorm,channelsplit[left][right]" \
-  -map "[left]"  -ar "$SAMPLE_RATE" -c:a pcm_s8 -f s8 "$OUT_LEFT" \
-  -map "[right]" -ar "$SAMPLE_RATE" -c:a pcm_s8 -f s8 "$OUT_RIGHT"
+  -ac 2 -ar "$SAMPLE_RATE" -c:a pcm_u8 "$OUTPUT_FILE"
 
 if [ $? -eq 0 ]; then
-  echo "Conversion complete!"
+  echo "Conversion complete! Output saved to $OUTPUT_FILE"
 else
   echo "FFmpeg encountered an error."
   exit 1
