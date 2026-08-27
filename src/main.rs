@@ -14,7 +14,7 @@ const HELLO: agb::display::Rgb15 = Rgb::new(255, 128, 0).to_rgb15();
 // This should be the target .wav file you want to play.
 // Place it in the root directory or adjust the path accordingly.
 // Note: agb's include_wav! macro requires the file to be present at compile time.
-static TEST_SOUND: SoundData = agb::include_wav!("assets/test.wav");
+static TEST_SOUND: SoundData = agb::include_wav!("assets/sound/test.wav");
 
 #[agb::entry]
 fn main(mut gba: agb::Gba) -> ! {

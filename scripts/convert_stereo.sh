@@ -18,7 +18,7 @@ fi
 INPUT_FILE="$1"
 # Default to 32768 Hz if arg 2 is empty
 SAMPLE_RATE="${2:-32768}"
-OUTPUT_FILE="${3:-assets/test.wav}"
+OUTPUT_FILE="${3:-assets/sound/test.wav}"
 
 echo "Converting '$INPUT_FILE' for GBA..."
 echo "Sample Rate: $SAMPLE_RATE Hz"
