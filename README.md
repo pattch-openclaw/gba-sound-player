@@ -20,6 +20,10 @@ libraries that other GBA ROMs can build on top of.
    so a ROM can be used as a playable instrument, not just a fixed playback
    device.
 
+4. **Compressed audio (FLAC).** Support FLAC decoding in order to make use of compressed audio files, allowing us to fit more songs (or a full album) onto the cartridge.
+
+5. **Upstream higher sample rates.** Add support for higher sample rates (like 65kHz) to the upstream `agb` library to push past the current 32kHz software mixer limit.
+
 ## Project ideas (top-level ROMs)
 
 The top-level behaviour of this ROM is intentionally minimal for now. Future
