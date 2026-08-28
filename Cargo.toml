@@ -6,14 +6,15 @@ edition = "2024"
 [dependencies]
 agb = "0.25.0"
 
-[profile.dev]
-opt-level = 3
-debug = true
+# FLAC crates for inspection — not integrated, just included
+symphonia-flac = { git = "https://github.com/pdeljanov/Symphonia", branch = "no-std-fix" }
+ferrosintesis-flac = "0.1.0"
+flac-rs = { version = "0.3", default-features = false, features = [] }
+flac-decoder = { version = "0.2", default-features = false, features = [] }
 
-[profile.dev.build-override]
+[profile.dev]
 opt-level = 3
 
 [profile.release]
 opt-level = 3
-lto = "fat"
-debug = true
+lto = true
