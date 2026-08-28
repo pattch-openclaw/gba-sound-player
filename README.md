@@ -67,7 +67,8 @@ the top-level ROM depends on.
 ### Current state
 
 - `examples/tone_playback.rs` — minimal ROM that sets the hardware backdrop colour to orange, emits milestone logs via `agb::eprintln!`, and successfully plays a 440 Hz square wave tone using PSG Channel 1.
-- `src/main.rs` is now a clean slate for the next phase: implementing sample-based (PCM) audio playback.
+- `examples/pcm_playback.rs` — demonstrates sample-based (PCM) audio playback using `agb`'s native software mixer and a pre-converted 32kHz `.wav` file.
+- `src/main.rs` is now a clean slate for the next phase: exploring FLAC decoding (evaluating `#![no_std]` libraries like `symphonia`) to stream compressed audio.
 - The project also includes a basic `#[test_case]` suite runnable via `mgba-test-runner`.
 - `Makefile` — `make build`, `make rom`, `make clean`, `make podman-rom`.
 - `Dockerfile` — the containerized build (Debian 12 / `rust:slim-bookworm`,
