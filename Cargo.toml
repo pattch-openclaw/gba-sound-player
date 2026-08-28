@@ -7,14 +7,16 @@ edition = "2024"
 agb = "0.25.0"
 
 # FLAC crates for inspection — not integrated, just included
-symphonia-flac = { git = "https://github.com/pdeljanov/Symphonia", branch = "no-std-fix" }
+# symphonia-flac = { git = "https://github.com/pdeljanov/Symphonia", branch = "no-std-fix" }
+symphonia-bundle-flac = { git = "https://github.com/keks/Symphonia", branch = "chore/core-step-towards-nostd-0.6" }
 ferrosintesis-flac = "0.1.0"
-flac-rs = { version = "0.3", default-features = false, features = [] }
+flac-rs = { version = "0.0.7", default-features = false, features = [] }
 flac-decoder = { version = "0.2", default-features = false, features = [] }
 
-[profile.dev]
+[profile.dev.build-override]
 opt-level = 3
 
 [profile.release]
 opt-level = 3
-lto = true
+lto = "fat"
+debug = true
