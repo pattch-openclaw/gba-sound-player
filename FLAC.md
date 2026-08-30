@@ -143,4 +143,157 @@ Options, honest version:
 - Probe exists at `examples/symphonia_flac_probe/`; it **fails to compile by design**
   (error above). Root crate no longer carries any FLAC dependency; baseline builds
   clean.
-- No FLAC integration exists yet in the shipping ROM. Decision on (a)/(b)/(c) pending.
+- No FLAC integration exists yet in the shipping ROM.
+
+---
+
+## Decision (2026-08-30): option (c) — write `flac-lite`
+
+**We are going with (c): a minimal, `no_std`, zero-dependency, zero-allocation FLAC
+frame decoder of our own.** Rationale:
+
+- We control **both ends** of the pipeline. Encoding is offline and ours; the
+  "filesystem" is memory-mapped, fixed-layout ROM. That deletes the entire stack that
+  makes symphonia unportable — `std::io::{Read, Seek, BufRead}`, the container probe,
+  the runtime codec registry, `HashMap`, `Error::IoError`. A decoder over a
+  `&'static [u8]` with a cursor needs **none** of it.
+- (a) means permanently tracking a WIP fork of a moving upstream for a port upstream
+  has abandoned; (b) is the same porting cost as (c) but against someone else's
+  architecture, which assumes `std::io` too.
+- The decode math is ~500 lines of integer work (subframes + LPC + Rice + stereo
+  decorrelation). All shifts/adds/multiply-accumulate — **no division**, which matters
+  because ARM7TDMI has no hardware divide.
+
+### Architecture
+
+```
+offline (host)                       ROM (no_std, core-only)
+────────────────                     ────────────────────────
+source.wav ──flac -l 4──▶ constrained .flac
+                         │  pack script (manifest + raw frames)
+                         ▼
+                    .gfp blob ──▶ include_bytes!/static ROM
+                                      │
+                                      ├─ format::Manifest   (stream info + frame index)
+                                      ├─ decoder::FrameStream (cursor over frames)
+                                      └─ frame → subframe → residual → stereo
+                                              │
+                                              ▼
+                                        double buffer → DMA/mixer
+```
+
+**Container: raw frames + an offline manifest (`GAFP` blob).** The pack script strips
+STREAMINFO/seektable/Vorbis metadata and emits a manifest holding stream info
+(sample rate, channels, bps, blocksize) plus a **frame-offset index**. Consequences:
+
+- Seek is an O(1) table lookup — no `Seek`/`SeekFrom` trait anywhere.
+- Decode walks a `&[u8]` cursor; the manifest is borrowed (`&'a`), so the whole decode
+  path is **zero-allocation** (`alloc` is not required by the decoder at all).
+- Non-conforming files are rejected at *pack* time, not at decode time.
+
+### Constrained encode profile (our FLAC subset)
+
+Because we own the encoder, we pin the features the decoder must support:
+
+- 16-bit, 32kHz to start (65,536Hz later), mono or stereo
+- blocksize fixed per track (1024 or 2048)
+- `-l 4` → predictors capped at FIXED order 0–4 (full LPC order ≤32 still *parsed*,
+  but banned by profile → see perf gate)
+- Rice / Rice2 residuals; mid/side + left/right-side decorrelation
+- no metadata blocks other than STREAMINFO (stripped by the packer)
+
+### Crate layout (`crates/flac-lite/`)
+
+| Module | Responsibility |
+|---|---|
+| `bits` | MSB-first bit reader over `&[u8]` (u32 accumulator + `clz`, available on ARMv4T); UTF-8-style coded numbers; byte alignment for verbatim/raw-signature subframes |
+| `format` | `GAFP` manifest parse (borrowed, zero-alloc), sample-rate/blocksize tables, encode-profile validation |
+| `frame` | frame header (sync `0xFFxF`, blocksize/sample-rate tables, coded frame number, CRC-8 — checked in debug, skippable in release), `decode_frame` |
+| `subframe` | CONSTANT, VERBATIM, FIXED (orders 0–4), LPC (order ≤32, precisions 0/15/16); warm-up/predictor state |
+| `residual` | partitioned Rice, Rice2, and escape-record residual |
+| `stereo` | mid/side, left/side, right/side decorrelation |
+| `decoder` | top-level cursor API: `FrameStream` + per-frame warm-up state, decode into caller-provided channel buffers |
+
+Memory: two channel buffers of `blocksize` × `i32` (2048 × 2 × 4B = 16KB scratch,
+plus ≤32-sample warm-up per subframe) — fits IWRAM/EWRAM with room for the DMA
+double-buffer. Release build can downcast accumulation to `i32` throughout.
+
+### Playback path
+
+One frame → fill a half of a double-buffer; DMA/timer IRQ consumes the other half.
+2048 samples @ 32kHz ≈ **64ms of audio per frame**, a generous real-time budget per
+IRQ boundary.
+
+### Risk & gate (be honest about this)
+
+The open question is not "can we write it" but **whether a 16.78MHz ARM7TDMI sustains
+decode + playback in real time**. Gate before building the full decoder:
+
+1. Spike: FIXED-only + Rice (no full LPC) and benchmark a ~10s clip on mGBA with an
+   explicit frame-decode **cycle counter** (timer capture around `decode_frame`).
+2. If FIXED-only fits but LPC does not, `flac -l 4` graduates from preference to
+   **hard project constraint** — and the parser can then reject LPC frames outright.
+3. If even FIXED-only misses the budget, fall back to frame-level offline
+   pre-processing (e.g. store FIXED order 0–1 only) or reduce scope to short loops.
+
+### Testing
+
+- **Host:** `crates/flac-lite/tests/` (std integration harness — the lib itself is
+  `#![no_std]`, tests are separate crates) decoding fixture files and asserting
+  bit-exact equality with reference `flac --decode` PCM.
+- **Target:** `cargo +nightly check --release --target thumbv4t-none-eabi
+  -Zbuild-std=core,alloc` must stay clean — that is the compile gate that symphonia
+  could never pass.
+
+#### Cargo config leak (found 2026-08-30, verified by A/B builds)
+
+Cargo reads `.cargo/config.toml` by **walking up parent directories** and merging
+every layer; a `[workspace]` boundary does not stop it. So `crates/flac-lite` inherits
+the root's GBA config, and **both** inherited values break a naive host test:
+
+| Command (in `crates/flac-lite/`) | Result |
+|---|---|
+| `cargo +nightly test` | ❌ `E0463: can't find crate for 'test'` — inherited `[build] target` |
+| `cargo +nightly test --target <host>` | ❌ `E0152: duplicate lang item core::sized` — inherited `build-std` recompiles `core` under host `std` |
+| local `[unstable] build-std = []` | ❌ still `E0152` — cargo **merges arrays across config layers**, an empty local override does not clear the parent's |
+| `cargo +nightly test -Zbuild-std= --target <host>` | ✅ both overrides required |
+
+Canonical host gate: `cargo +nightly test -Zbuild-std= --target "$(rustc -vV | sed
+-n 's|host: ||p')"`. Alternatively run from outside the repo subtree with
+`--manifest-path`, where no parent config exists — which is what splitting
+`flac-lite` into its own repo would give us permanently.
+
+> `-Zbuild-std=core,alloc` on the target gate is **not** "using std": rustup ships
+> no prebuilt `core` for this Tier-3 target, so `core` must be compiled from source
+> (root README: `E0463: can't find crate for core`). The flag is only named after
+> `std`. **`std` must never appear in a build-std list in this project** — an early
+> draft here suggested `-Zbuild-std=core,alloc,std` for host tests, which was wrong:
+> it masked the leak instead of fixing it. The host gate *disables* build-std.
+- **ROM:** `examples/flac_spike/` (placeholder) → later a packed clip playing A/B
+  against the same WAV.
+
+### Scaffold status (2026-08-30)
+
+Scaffolding only — **no decoding logic implemented yet**:
+
+- `crates/flac-lite/` — `#![no_std]`, zero-dep crate; module skeleton with real type
+  and function signatures and `todo!()` bodies (crate-level `allow(dead_code,
+  unused_variables)` is tagged for removal as implementations land). Compiles clean
+  for `thumbv4t-none-eabi` and for the host test target.
+- `crates/flac-lite/README.md` — `GAFP` manifest byte layout + encode profile contract
+  (the spec the packer and decoder must agree on).
+- `scripts/pack_flac.sh` — documented stub; prints the intended pipeline, exits 2
+  (not implemented).
+- `examples/flac_spike/README.md` — perf-gate placeholder (no Cargo.toml, so nothing
+  can accidentally build it).
+- Root crate still carries **no** FLAC dependency; baseline ROM unaffected. `agb`
+  integration (path dependency + mixer example) is deliberately deferred until the
+  perf gate is settled.
+
+Next steps, in order:
+
+1. [ ] Implement `bits::BitReader` + host unit tests (smallest testable unit).
+2. [ ] `format::Manifest` parser + `scripts/pack_flac.sh` real implementation.
+3. [ ] `subframe` FIXED + `residual` Rice → **perf gate spike** in mGBA.
+4. [ ] LPC + stereo decorrelation + CRC; fixture tests vs reference `flac`.
+5. [ ] `examples/flac_spike` ROM: cycle counter, then mixer/DMA double-buffer playback.
