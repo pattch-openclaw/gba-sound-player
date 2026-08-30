@@ -1,3 +1,7 @@
 /target
 /gba-sound-player.gba
 *.d
+
+# Standalone build dir for the symphonia FLAC compile probe example
+# (examples/symphonia_flac_probe/ has its own Cargo.toml/workspace)
+/examples/symphonia_flac_probe/target/

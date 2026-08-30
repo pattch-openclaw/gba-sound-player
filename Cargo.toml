@@ -2,16 +2,31 @@
 name = "gba-sound-player"
 version = "0.1.0"
 edition = "2024"
+# Examples are declared explicitly below. autoexamples = false keeps the standalone
+# FLAC compile probe (examples/symphonia_flac_probe/ — its own Cargo.toml,
+# intentionally broken; see FLAC.md) from being auto-discovered and built by
+# `cargo test` in this crate.
+autoexamples = false
 
 [dependencies]
 agb = "0.25.0"
 
-# FLAC crates for inspection — not integrated, just included
+# FLAC crates — NOT integrated (see FLAC.md for the full evaluation).
+# All commented out in the root crate so the baseline ROM stays buildable;
+# the symphonia compile probe lives standalone in examples/symphonia_flac_probe/.
 # symphonia-flac = { git = "https://github.com/pdeljanov/Symphonia", branch = "no-std-fix" }
-symphonia-bundle-flac = { git = "https://github.com/keks/Symphonia", branch = "chore/core-step-towards-nostd-0.6" }
-ferrosintesis-flac = "0.1.0"
-flac-rs = { version = "0.0.7", default-features = false, features = [] }
-flac-decoder = { version = "0.2", default-features = false, features = [] }
+# symphonia-bundle-flac = { git = "https://github.com/keks/Symphonia", branch = "chore/core-step-towards-nostd-0.6" }
+# ferrosintesis-flac = "0.1.0"
+# flac-rs = { version = "0.0.7", default-features = false, features = [] }
+# flac-decoder = { version = "0.2", default-features = false, features = [] }
+
+[[example]]
+name = "tone_playback"
+path = "examples/tone_playback.rs"
+
+[[example]]
+name = "pcm_playback"
+path = "examples/pcm_playback.rs"
 
 [profile.dev.build-override]
 opt-level = 3

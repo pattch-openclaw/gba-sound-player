@@ -20,7 +20,7 @@ libraries that other GBA ROMs can build on top of.
    so a ROM can be used as a playable instrument, not just a fixed playback
    device.
 
-4. **Compressed audio (FLAC).** Support FLAC decoding in order to make use of compressed audio files, allowing us to fit more songs (or a full album) onto the cartridge.
+4. **Compressed audio (FLAC).** Support FLAC decoding in order to make use of compressed audio files, allowing us to fit more songs (or a full album) onto the cartridge. Status and library evaluation live in **[FLAC.md](FLAC.md)**.
 
 5. **Upstream higher sample rates.** Add support for higher sample rates (like 65kHz) to the upstream `agb` library to push past the current 32kHz software mixer limit.
 
@@ -68,7 +68,8 @@ the top-level ROM depends on.
 
 - `examples/tone_playback.rs` — minimal ROM that sets the hardware backdrop colour to orange, emits milestone logs via `agb::eprintln!`, and successfully plays a 440 Hz square wave tone using PSG Channel 1.
 - `examples/pcm_playback.rs` — demonstrates sample-based (PCM) audio playback using `agb`'s native software mixer and a pre-converted 32kHz `.wav` file.
-- `src/main.rs` is now a clean slate for the next phase: exploring FLAC decoding (evaluating `#![no_std]` libraries like `symphonia`) to stream compressed audio.
+- `src/main.rs` is a clean slate baseline (no FLAC dependency, builds clean).
+- `examples/symphonia_flac_probe/` — standalone FLAC compile probe (`symphonia-bundle-flac` from the keks no-std fork, with its own `Cargo.toml`). **Expected to fail compilation**; the failure analysis is documented in **[FLAC.md](FLAC.md)**.
 - The project also includes a basic `#[test_case]` suite runnable via `mgba-test-runner`.
 - `Makefile` — `make build`, `make rom`, `make clean`, `make podman-rom`.
 - `Dockerfile` — the containerized build (Debian 12 / `rust:slim-bookworm`,
