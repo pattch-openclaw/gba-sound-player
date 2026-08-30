@@ -1,0 +1,44 @@
+[package]
+name = "flac-lite"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal no_std, zero-dependency, zero-allocation FLAC frame decoder for GBA (thumbv4t-none-eabi). SCAFFOLD ONLY — see ../../FLAC.md"
+license = "MIT"
+keywords = ["flac", "audio", "no_std", "gba", "decoder"]
+categories = ["multimedia::audio", "no-std"]
+
+# SCAFFOLD STATE (2026-08-30): type/signature skeleton with todo!() bodies.
+# No decoding logic implemented yet. See ../../FLAC.md "Scaffold status".
+
+[dependencies]
+# Intentionally EMPTY. Zero dependencies is the entire point: the GBA target
+# (thumbv4t-none-eabi) is core+alloc only, so any dep that references `std`
+# breaks the build — this is exactly what killed symphonia (see FLAC.md).
+# Do not add dependencies without re-verifying the thumbv4t build.
+
+[dev-dependencies]
+# Host-test-only deps (integration tests are separate crates, so `std` is fine
+# there). Reserved for fixtures/reference comparison; keep empty until needed.
+
+[features]
+default = []
+# Decode-profile escape hatch: when enabled, frames that violate the constrained
+# encode profile (full-LPC predictors, unsupported block sizes) are rejected with
+# `Error::ProfileViolation` instead of being decoded. See README.md.
+strict-profile = []
+# Verify frame CRC-8 / stream CRC-16. Off in release for CPU reasons; the
+# perf spike will tell us whether it can stay on.
+crc-check = []
+
+[lib]
+name = "flac_lite"
+path = "src/lib.rs"
+
+# No workspace membership: this crate is standalone (like examples/symphonia_flac_probe/)
+# so the root ROM crate's `[build] target = thumbv4t-none-eabi` config never leaks
+# into host-side unit tests, and vice versa.
+[workspace]
+
+[profile.release]
+opt-level = "z"
+lto = "fat"

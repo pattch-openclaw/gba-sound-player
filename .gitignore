@@ -5,3 +5,9 @@
 # Standalone build dir for the symphonia FLAC compile probe example
 # (examples/symphonia_flac_probe/ has its own Cargo.toml/workspace)
 /examples/symphonia_flac_probe/target/
+
+# flac-lite is its own workspace (crates/flac-lite/Cargo.toml has [workspace]),
+# so it keeps its own target/ — and it builds for BOTH thumbv4t-none-eabi and the
+# host triple, so the paths vary; ignore the whole dir. The root `/target` rule
+# above is anchored and does not cover it.
+/crates/*/target/
