@@ -210,6 +210,40 @@ broken experiment can never take the baseline down with it.
 > `todo!()` panic on hardware. Replace the anchor with a real decode loop once
 > decoding lands (see [FLAC.md](FLAC.md) → next steps).
 
+### Toolchain resolution (conda / non-rustup `cargo` on PATH)
+
+The Makefile does **not** use `cargo +nightly`. That syntax only works when the
+`cargo` found on `PATH` is the **rustup shim**; under conda (the `(base)` prompt)
+or some Homebrew/distro setups a *plain* cargo comes first, and it reads
+`+nightly` as a subcommand:
+
+```
+error: no such command: `+nightly`
+help: invoke `cargo` through `rustup` to handle `+toolchain` directives
+```
+
+Instead the Makefile detects rustup and pins the toolchain through it, so the
+same targets work in a conda shell, a bare shell, and inside the container:
+
+```make
+HAS_RUSTUP := $(shell command -v $(RUSTUP) >/dev/null 2>&1 && echo 1)
+# rustup present   -> `rustup run nightly cargo …` (immune to a shadowed shim)
+# no rustup at all -> plain `cargo`/`rustc`, which must already be nightly
+```
+
+Overrides: `TOOLCHAIN=`, `RUSTUP=`, `CARGO=`, `RUSTC=`. `make help` prints the
+resolved toolchain and host triple; `toolchain-check` (a prerequisite of the
+test gates) fails fast with install instructions rather than half-running a
+gate. Prerequisites for a native setup:
+
+```sh
+rustup toolchain install nightly
+rustup component add rust-src --toolchain nightly    # -Zbuild-std
+rustup component add rustfmt  --toolchain nightly    # make check
+cargo install agb-gbafix                             # ROM fixing
+cargo install mgba-test-runner --git https://github.com/agbrs/agb.git  # make test-rom
+```
+
 ### Requirement: nightly + `rust-src` + `-Zbuild-std` (no prebuilt `core` for this target)
 
 The GBA target `thumbv4t-none-eabi` is a **Tier-3, `#![no_std]`** bare-metal
