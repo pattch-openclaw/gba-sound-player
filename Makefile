@@ -1,5 +1,5 @@
 .PHONY: build rom native-rom podman-rom flac-rom native-flac-rom podman-flac-rom \
-        test flac-test test-rom clean check help
+        test flac-test test-rom clean check help toolchain-check
 
 # ---------------------------------------------------------------------------
 # Build settings (all overridable, e.g. `make podman-rom CONTAINER=docker`)
@@ -9,15 +9,44 @@
 # Dockerfile/README. Do NOT try to `rustup target add thumbv4t-none-eabi` — it
 # has no prebuilt artifacts on any toolchain.
 # ---------------------------------------------------------------------------
-CARGO ?= cargo +nightly
+# Toolchain resolution — deliberately NOT `cargo +nightly`.
+#
+# `cargo +nightly` only works when the `cargo` on PATH is the **rustup shim**.
+# Conda (the `(base)` prompt) and some distro/Homebrew setups put a *plain*
+# cargo first on PATH; that binary treats `+nightly` as a subcommand and dies:
+#   error: no such command: `+nightly`
+#   help: invoke `cargo` through `rustup` to handle `+toolchain` directives
+#
+# `rustup run <toolchain> cargo` pins the toolchain through rustup no matter
+# which cargo (or none) is on PATH — so the same Makefile works in a conda
+# shell, a bare shell, and inside the container. Override if you truly have no
+# rustup: `make check CARGO=cargo RUSTC=rustc` (needs nightly as the default).
+RUSTUP ?= rustup
+TOOLCHAIN ?= nightly
+
+# Detect rustup instead of assuming the `cargo` on PATH is the rustup shim:
+#   - rustup present  -> pin through rustup (correct even when a non-shim cargo
+#                        from conda/Homebrew shadows it on PATH)
+#   - no rustup at all -> plain cargo/rustc, which must already BE nightly
+#                        (override with CARGO=/ RUSTC=/ TOOLCHAIN= as needed)
+HAS_RUSTUP := $(shell command -v $(RUSTUP) >/dev/null 2>&1 && echo 1)
+ifeq ($(HAS_RUSTUP),1)
+CARGO ?= $(RUSTUP) run $(TOOLCHAIN) cargo
+RUSTC ?= $(RUSTUP) run $(TOOLCHAIN) rustc
+else
+CARGO ?= cargo
+RUSTC ?= rustc
+endif
 # Container runtime: podman by default, override with `make podman-rom CONTAINER=docker`.
 CONTAINER ?= podman
 # GBA test harness (ROM tests boot headlessly in mGBA). Override to point
 # elsewhere, or set empty to see the raw cargo command.
 GBA_TEST_RUNNER ?= mgba-test-runner
 # Host triple, used to defeat the inherited `target = thumbv4t-none-eabi` when
-# running flac-lite's host tests. See "The cargo config leak" in FLAC.md.
-HOST_TRIPLE := $(shell rustc -vV | sed -n 's|host: ||p')
+# running flac-lite's host tests. Queried through the SAME toolchain the tests
+# build with, so a stray rustc elsewhere on PATH can't hand us the wrong triple.
+# See "Cargo config leak" in FLAC.md.
+HOST_TRIPLE := $(shell $(RUSTC) -vV 2>/dev/null | sed -n 's|host: ||p')
 
 TARGET := thumbv4t-none-eabi
 ROM := gba-sound-player.gba
@@ -99,7 +128,7 @@ podman-flac-rom:
 #     recompile and `--target $(HOST_TRIPLE)` defeats the inherited GBA target.
 #     Cargo MERGES config arrays up the directory tree, so an empty local
 #     override alone does not clear the parent's build-std. Both flags needed.
-flac-test:
+flac-test: toolchain-check
 	cd crates/flac-lite && \
 	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc
 	cd crates/flac-lite && \
@@ -112,7 +141,7 @@ TARGET_ENV := $(shell echo $(TARGET) | tr 'a-z-' 'A-Z_')
 
 # ROM test suite on target (needs mgba-test-runner:
 # `cargo install mgba-test-runner --git https://github.com/agbrs/agb.git`).
-test-rom:
+test-rom: toolchain-check
 	CARGO_TARGET_$(TARGET_ENV)_RUNNER=$(GBA_TEST_RUNNER) \
 	  $(CARGO) test --target $(TARGET)
 
@@ -133,6 +162,18 @@ check:
 	cd crates/flac-lite && $(CARGO) fmt --check
 	cd $(FLAC_CRATE_DIR) && $(CARGO) fmt --check
 
+# Fail early and legibly when the pinned toolchain isn't reachable, instead of
+# half-running a gate (e.g. `--target ''` when the host triple can't be probed).
+toolchain-check:
+	@$(RUSTC) -V >/dev/null 2>&1 || { \
+	  echo "error: cannot run '$(RUSTC)'. This build needs rustup + the '$(TOOLCHAIN)' toolchain:"; \
+	  echo "  rustup toolchain install $(TOOLCHAIN)"; \
+	  echo "  rustup component add rust-src rustfmt --toolchain $(TOOLCHAIN)"; \
+	  echo "(no rustup at all? override: make $(MAKECMDGOALS) CARGO=cargo RUSTC=rustc)"; \
+	  exit 1; }
+	@test -n "$(HOST_TRIPLE)" || { \
+	  echo "error: could not read the host triple from '$(RUSTC) -vV'"; exit 1; }
+
 help:
 	@echo "gba-sound-player build targets"
 	@echo ""
@@ -150,3 +191,6 @@ help:
 	@echo "    test              test-rom + flac-test"
 	@echo ""
 	@echo "  Other: build, rom, flac-rom, clean, check, help"
+	@echo ""
+	@echo "  Toolchain: $(RUSTC)  (override: RUSTUP= / TOOLCHAIN= / CARGO=)"
+	@echo "  Host triple: $(HOST_TRIPLE)"
