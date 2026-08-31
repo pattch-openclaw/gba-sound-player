@@ -27,10 +27,17 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git make \
     && rm -rf /var/lib/apt/lists/*
 
-# Nightly toolchain + rust-src (needed for -Zbuild-std)
+# Nightly toolchain + rust-src (needed for -Zbuild-std) + rustfmt.
+#
+# rustfmt is here because every build target runs the `format` pre-step, and
+# the container's CMD/entrypoint path is `make rom` -> `make build` -> `make
+# format`. Without it the container silently skips formatting (the Makefile
+# degrades to a notice rather than failing the build), which would let the
+# standardized path produce unformatted code. It also lets CI run `make check`
+# (the non-writing `cargo fmt --check` gate) inside this image.
 RUN rustup toolchain install nightly \
     && rustup default nightly \
-    && rustup component add rust-src
+    && rustup component add rust-src rustfmt
 
 # Install the GBA ROM fixing tool
 RUN cargo install agb-gbafix
