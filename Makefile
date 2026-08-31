@@ -1,4 +1,4 @@
-.PHONY: build rom native-rom podman-rom flac-rom native-flac-rom podman-flac-rom \
+.PHONY: format build rom native-rom podman-rom flac-rom native-flac-rom podman-flac-rom \
         test flac-test test-rom clean check help toolchain-check
 
 # ---------------------------------------------------------------------------
@@ -48,6 +48,14 @@ GBA_TEST_RUNNER ?= mgba-test-runner
 # See "Cargo config leak" in FLAC.md.
 HOST_TRIPLE := $(shell $(RUSTC) -vV 2>/dev/null | sed -n 's|host: ||p')
 
+# Is rustfmt installed for the pinned toolchain? Asked the same way the
+# toolchain is resolved (through $(CARGO)), so a shadowed cargo can't confuse
+# it. `format` degrades to a notice instead of failing a build when it is
+# absent — formatting is a convenience pre-step, never a build gate. The
+# Dockerfile installs rustfmt so the standardized container path always
+# formats.
+HAS_RUSTFMT := $(shell $(CARGO) fmt --version >/dev/null 2>&1 && echo 1)
+
 TARGET := thumbv4t-none-eabi
 ROM := gba-sound-player.gba
 FLAC_ROM := flac-integration.gba
@@ -59,7 +67,32 @@ FLAC_CRATE_BIN := target/$(TARGET)/release/flac-integration
 # *-rom targets above it are the host-facing entrypoints. Keep `rom` = the
 # native ROM build so containerized and native builds produce the same artifact.
 
-build:
+# ---------------------------------------------------------------------------
+# format — the build pre-step (writes files; all three workspaces).
+#
+# Builds auto-format, so experimental code lands formatted without a separate
+# `make check` round trip. `check` stays the strict NON-writing gate
+# (`cargo fmt --check`) that humans/CI run to verify; `format` is the writer.
+#
+# `podman-rom` gets this too for free (the container runs `make rom` ->
+# `make build`), and the container mounts the project dir, so containerized
+# formats write back to your working tree.
+# ---------------------------------------------------------------------------
+ifeq ($(HAS_RUSTFMT),1)
+format:
+	$(CARGO) fmt
+	cd crates/flac-lite && $(CARGO) fmt
+	cd $(FLAC_CRATE_DIR) && $(CARGO) fmt
+else
+format:
+	@echo "format: skipping — no rustfmt for '$(TOOLCHAIN)' (build continues)."
+	@echo "  enable with: rustup component add rustfmt --toolchain $(TOOLCHAIN)"
+endif
+
+# NOTE: `build` deliberately does NOT depend on `test`. Builds never gate on
+# tests — experimental/untested code must stay buildable. Gates are what
+# `make check` and `make test` are for, run explicitly (or in CI).
+build: format
 	$(CARGO) build --release --target $(TARGET)
 
 # Link + fix the baseline ROM. Needs agb-gbafix on PATH (the container image
@@ -98,7 +131,7 @@ podman-rom:
 # scaffold). The root ROM crate stays FLAC-free either way.
 # ---------------------------------------------------------------------------
 
-flac-rom:
+flac-rom: format
 	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
 	agb-gbafix $(FLAC_CRATE_DIR)/$(FLAC_CRATE_BIN) -o $(FLAC_ROM)
 	@echo "FLAC ROM built: $(FLAC_ROM)"
@@ -146,6 +179,10 @@ test-rom: toolchain-check
 	  $(CARGO) test --target $(TARGET)
 
 # Top-level test: everything except the intentionally-broken symphonia probe.
+# Deliberately does NOT depend on `format`: a test run must never rewrite your
+# working tree as a side effect (that would also let CI's `make test` silently
+# fix drift that `make check` is supposed to fail on). Builds format; tests
+# verify. `check` is the formatting gate.
 test: test-rom flac-test
 	@echo "test passed: ROM suite + flac-lite isolation gates"
 
@@ -188,9 +225,16 @@ help:
 	@echo "  Tests:"
 	@echo "    flac-test         flac-lite alone (target compile gate + host tests)"
 	@echo "    test-rom          ROM #[test_case] suite in mGBA"
-	@echo "    test              test-rom + flac-test"
+	@echo "    test              test-rom + flac-test (verify-only: no reformat)"
 	@echo ""
-	@echo "  Other: build, rom, flac-rom, clean, check, help"
+	@echo "  Formatting:"
+	@echo "    format            cargo fmt all workspaces (writes; runs before builds)"
+	@echo "    check             cargo fmt --check (verify-only gate; never writes)"
+	@echo ""
+	@echo "  Other: build, rom, flac-rom, clean, help"
+	@echo ""
+	@echo "  Builds never gate on tests; they DO auto-run 'format' first."
+	@echo "  (no rustfmt for $(TOOLCHAIN)? format prints a notice and skips.)"
 	@echo ""
 	@echo "  Toolchain: $(RUSTC)  (override: RUSTUP= / TOOLCHAIN= / CARGO=)"
 	@echo "  Host triple: $(HOST_TRIPLE)"

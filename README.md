@@ -75,7 +75,9 @@ the top-level ROM depends on.
 - The project also includes a basic `#[test_case]` suite runnable via `mgba-test-runner`.
 - `Makefile` — standardized build/test entrypoints, see **[Build Process](#build-process-standardized)**.
 - `Dockerfile` — the containerized build (Debian 12 / `rust:slim-bookworm`,
-  nightly + `rust-src`, `agb-gbafix`).
+  nightly + `rust-src` + `rustfmt`, `agb-gbafix`). `rustfmt` is in the image so
+  the `format` build pre-step runs (and CI can gate with `make check`) inside
+  the container too.
 
 ### Build and Test status (as of 2026-08-24)
 
@@ -111,7 +113,7 @@ Through a series of recent refactors and debugging sessions, we:
 2. **Containerized build** — `make podman-rom` (podman by default, docker
    also works) successfully:
    1. builds the `gba-builder` image (`rust:slim-bookworm` + nightly + `rust-src`
-      + `git` + `make` + `agb-gbafix`),
+      + `rustfmt` + `git` + `make` + `agb-gbafix`),
    2. compiles the ROM (`#![no_std]` + `-Zbuild-std` for `thumbv4t-none-eabi`),
    3. links it with `rust-lld` (via the `agb`-supplied `gba.ld` linker script),
    4. fixes it into a loadable ROM, and
@@ -180,9 +182,39 @@ requirements (nightly + `rust-src`, plus `agb-gbafix` for ROM fixing).
 | `make podman-flac-rom` | Same FLAC integration ROM, built in the container | needs podman/docker |
 | `make flac-test` | `flac-lite` **in isolation**: GBA target compile gate + host unit tests. No agb, no ROM, no emulator | either |
 | `make test-rom` | ROM `#[test_case]` suite, headless in mGBA via `mgba-test-runner` | needs mGBA |
-| `make test` | Top-level: `test-rom` + `flac-test` | either |
-| `make build` / `rom` / `flac-rom` | Lower-level primitives (no fixing / container); `rom` is what the container runs | — |
-| `make clean` / `check` / `help` | Clean all workspaces incl. sub-crates; `cargo fmt --check`; target list | either |
+| `make test` | Top-level: `test-rom` + `flac-test`. Verify-only — never reformats your tree | either |
+| `make build` / `rom` / `flac-rom` | Lower-level primitives (no fixing / container); `rom` is what the container runs. All run `format` first; **none gate on tests** | — |
+| `make format` | `cargo fmt` (writes) across all three workspaces — the automatic build pre-step | either |
+| `make clean` / `check` / `help` | Clean all workspaces incl. sub-crates; `cargo fmt --check` (**verify-only**, never writes); target list | either |
+
+#### Formatting: builds auto-format; nothing but `check` gates
+
+Every **build** runs **`make format`** (`cargo fmt`, writing, all three
+workspaces) as a pre-step — including inside the container, whose bind mount
+means `make podman-rom` formats your working tree. So the routine loop is just:
+
+```sh
+make native-rom        # formats, then builds — code lands rustfmt-clean
+```
+
+Two deliberate separations:
+
+- **Builds never depend on `test`** — experimental, not-yet-passing code must
+  stay buildable. Run gates explicitly (`make test`) or in CI.
+- **Tests never reformat** — `make test` must not rewrite your working tree as
+  a side effect, and a CI `make test` passing must never mask drift that
+  `make check` exists to fail on.
+
+| | Writes files? | Fails on unformatted? | Fails on test failures? |
+|---|---|---|---|
+| `make build` / `*-rom` | ✅ (`format` first) | no — fixes them | no |
+| `make test` / `test-rom` / `flac-test` | never | no | ✅ |
+| `make check` | never | ✅ | no |
+
+If a build reformats your tree, run `make check` before committing to confirm
+the result is gate-green. If `rustfmt` is missing for the pinned toolchain,
+`format` prints a notice and the build continues — formatting is a convenience,
+never a hard dependency of building.
 
 ### The FLAC sanity-check triangle
 
@@ -239,7 +271,7 @@ gate. Prerequisites for a native setup:
 ```sh
 rustup toolchain install nightly
 rustup component add rust-src --toolchain nightly    # -Zbuild-std
-rustup component add rustfmt  --toolchain nightly    # make check
+rustup component add rustfmt  --toolchain nightly    # make check + build's format pre-step
 cargo install agb-gbafix                             # ROM fixing
 cargo install mgba-test-runner --git https://github.com/agbrs/agb.git  # make test-rom
 ```
