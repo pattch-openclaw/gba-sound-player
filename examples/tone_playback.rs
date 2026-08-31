@@ -18,12 +18,12 @@ fn entry(mut gba: agb::Gba) -> ! {
     let mut gfx = gba.graphics.get();
     gfx.set_background_palette_colour(0, 0, HELLO);
     gfx.frame().commit();
-    
+
     agb::eprintln!("[hello] screen should now be orange");
 
     psg::init_audio_master();
-    
-    // Hardware quirk: Real silicon requires a brief warm-up period after 
+
+    // Hardware quirk: Real silicon requires a brief warm-up period after
     // enabling the master audio circuit before it will successfully play a note.
     delay(16); // ~250ms delay
 
@@ -64,10 +64,10 @@ fn delay(frames: u32) {
 
 mod psg {
     // Master
-    const SOUNDCNT_L:  *mut u16 = 0x0400_0080 as *mut u16;
-    const SOUNDCNT_H:  *mut u16 = 0x0400_0082 as *mut u16;
+    const SOUNDCNT_L: *mut u16 = 0x0400_0080 as *mut u16;
+    const SOUNDCNT_H: *mut u16 = 0x0400_0082 as *mut u16;
     const SOUNDCNT_X_MASTER: *mut u16 = 0x0400_0084 as *mut u16;
-    
+
     // Ch 1
     const SOUND1CNT_L: *mut u16 = 0x0400_0060 as *mut u16;
     const SOUND1CNT_H: *mut u16 = 0x0400_0062 as *mut u16;
@@ -88,14 +88,14 @@ mod psg {
             // Toggling it guarantees a clean slate.
             SOUNDCNT_X_MASTER.write_volatile(0x0000);
             SOUNDCNT_X_MASTER.write_volatile(0x0080);
-            
+
             // 2. Enable Channels 1, 2, and 4 on Left and Right. Max volume.
             // Bit 8=Ch1 L, 9=Ch2 L, 11=Ch4 L. (0x0B00)
             // Bit 12=Ch1 R, 13=Ch2 R, 15=Ch4 R. (0xB000)
             // Bits 0-2 = 7 (Left Vol), Bits 4-6 = 7 (Right Vol)
             // 0xBB00 | 0x0077 = 0xBB77
-            SOUNDCNT_L.write_volatile(0xBB77); 
-            
+            SOUNDCNT_L.write_volatile(0xBB77);
+
             // 3. Set PSG volume ratio to 100%
             let snd_cnt_h = SOUNDCNT_H.read_volatile();
             SOUNDCNT_H.write_volatile((snd_cnt_h & !0x0003) | 0x0002);
@@ -106,22 +106,22 @@ mod psg {
         unsafe {
             // 0x0008 = Sweep Time 0, Decrease 1, Shift 0.
             // This is the safest way to turn off sweep without triggering hardware bugs.
-            SOUND1CNT_L.write_volatile(0x0008); 
-            
+            SOUND1CNT_L.write_volatile(0x0008);
+
             // Vol=15, Env=Decrease, Step=4, Duty=50%
             SOUND1CNT_H.write_volatile(0xF480);
-            
+
             // Frequency 1758 (440Hz), Trigger note
-            SOUND1CNT_X.write_volatile(1758 | 0x8000); 
+            SOUND1CNT_X.write_volatile(1758 | 0x8000);
             // Hardware quirk: Double-trigger to force the sweep unit to initialize on boot
-            SOUND1CNT_X.write_volatile(1758 | 0x8000); 
+            SOUND1CNT_X.write_volatile(1758 | 0x8000);
         }
     }
 
     pub fn play_ch2() {
         unsafe {
             // Vol=15, Env=Decrease, Step=4, Duty=50%
-            SOUND2CNT_L.write_volatile(0xF480); 
+            SOUND2CNT_L.write_volatile(0xF480);
             // Frequency 1758 (440Hz), Trigger note
             SOUND2CNT_H.write_volatile(1758 | 0x8000);
         }
@@ -130,9 +130,9 @@ mod psg {
     pub fn play_ch4() {
         unsafe {
             // Vol=15, Env=Decrease, Step=4
-            SOUND4CNT_L.write_volatile(0xF400); 
+            SOUND4CNT_L.write_volatile(0xF400);
             // Trigger, 7-stage step, counter/clock params
-            SOUND4CNT_H.write_volatile(0x8000 | 0x0008); 
+            SOUND4CNT_H.write_volatile(0x8000 | 0x0008);
         }
     }
 }

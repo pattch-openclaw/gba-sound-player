@@ -269,8 +269,58 @@ Canonical host gate: `cargo +nightly test -Zbuild-std= --target "$(rustc -vV | s
 > `std`. **`std` must never appear in a build-std list in this project** — an early
 > draft here suggested `-Zbuild-std=core,alloc,std` for host tests, which was wrong:
 > it masked the leak instead of fixing it. The host gate *disables* build-std.
+
+##### Second leak variant: duplicated `-Tgba.ld` (found 2026-08-30, by building)
+
+The same parent-directory walk bites `rustflags`, and the failure mode is
+*linking*, not type-checking. `cargo` **concatenates** `target.<triple>.rustflags`
+across config layers, so a standalone sub-crate that re-declares the root's config
+locally gets the linker script **twice**:
+
+```
+error: linking with `rust-lld` failed
+  = note: rust-lld: error: gba.ld:15: region 'ewram' already defined
+          >>>     ewram (w!x) : ORIGIN = 0x02000000, LENGTH = 256K
+  note: "-Tgba.ld" "-Tgba.ld"
+```
+
+(The `agb` build script only adds `cargo:rustc-link-search`, not the `-T` arg —
+the `-Tgba.ld` in `.cargo/config.toml` is the sole source, so declaring it twice
+is purely a config-layer merge artefact.)
+
+**Rule: standalone sub-crates must NOT re-declare the root `.cargo/config.toml` —
+they inherit it.** `crates/flac-lite/` follows this (no local config); so does
+`examples/flac_integration/`. `examples/symphonia_flac_probe/` predates the finding
+and carries a redundant local copy — harmless there only because the probe dies
+long before linking. If a future sub-crate needs to *run* cargo for the GBA target,
+keep config inherited and pass extra flags on the command line.
 - **ROM:** `examples/flac_spike/` (placeholder) → later a packed clip playing A/B
   against the same WAV.
+
+### Build gates are now Makefile targets (2026-08-30)
+
+The gates above stopped being ad hoc commands and are now standardized entrypoints
+in the root `Makefile` (full table in README → "Build Process (Standardized)"):
+
+| Make target | Gate |
+|---|---|
+| `make flac-test` | **both flac-lite gates above** (thumbv4t check + host tests), library in isolation |
+| `make native-flac-rom` / `make podman-flac-rom` | new: `flac-lite` bundled into a bootable ROM via `examples/flac_integration/` — the *integration* sanity check |
+| `make test` | `test-rom` (agb `#[test_case]` suite in mGBA) + `flac-test` |
+| `make native-rom` / `make podman-rom` | baseline ROM, one per compute environment |
+
+`examples/flac_integration/` is a standalone workspace ROM crate (`agb` +
+path-dependency on `crates/flac-lite`) that **compiles, links, fixes, and boots**
+with the decoder in the image. It does not decode yet: `flac-lite` is scaffold, so
+the ROM holds a `#[used]` fn-pointer **link anchor** that references the decode
+path without ever calling it — the build path is fully exercised while no `todo!()`
+can panic on hardware. This is the intended shape of the ongoing check: correctness
+lives in `flac-test`, bundling/memory/scheduling lives in `*-flac-rom`, and the two
+failing independently is the diagnostic.
+
+The root ROM crate still carries **no** FLAC dependency; the baseline is unaffected
+if the experiment breaks. `agb` mixer/DMA integration stays deferred until the perf
+gate is settled.
 
 ### Scaffold status (2026-08-30)
 

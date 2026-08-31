@@ -20,7 +20,7 @@ fn main(mut gba: agb::Gba) -> ! {
 
     let mut gfx = gba.graphics.get();
     gfx.set_background_palette_colour(0, 0, BACKGROUND_COLOR);
-    
+
     agb::eprintln!("[main] ready for FLAC decoding exploration");
 
     loop {

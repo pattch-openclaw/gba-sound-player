@@ -1,0 +1,36 @@
+[package]
+name = "flac-integration"
+version = "0.1.0"
+edition = "2024"
+
+# EXPERIMENTAL integration sanity build for `flac-lite` (see ../../FLAC.md).
+#
+# Unlike examples/symphonia_flac_probe/ — which is an intentionally-broken probe
+# that documents why third-party FLAC crates cannot target this platform — this
+# crate is EXPECTED TO BUILD AND LINK CLEANLY. It is the ongoing sanity check
+# that our own minimal decoder actually bundles into a GBA ROM:
+#
+#   make native-flac-rom      # this host (no virtualization needed)
+#   make podman-flac-rom      # containerized, reproducible
+#
+# It produces a bootable ROM. It does NOT decode audio yet — flac-lite is still
+# scaffold (`todo!()` bodies), and the link anchor in src/main.rs deliberately
+# never runs the decoder, so the ROM boots normally instead of panicking.
+#
+# Standalone (own Cargo.toml + [workspace] + .cargo/config.toml) for the same
+# reason as flac-lite: the root crate must stay free of any FLAC dependency so
+# the baseline ROM is unaffected if this experiment breaks.
+
+[dependencies]
+agb = "0.25.0"
+flac-lite = { path = "../../crates/flac-lite" }
+
+[workspace]
+
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true
