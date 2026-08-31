@@ -1,5 +1,6 @@
 /target
 /gba-sound-player.gba
+/flac-integration.gba
 *.d
 
 # Standalone build dir for the symphonia FLAC compile probe example
@@ -11,3 +12,7 @@
 # host triple, so the paths vary; ignore the whole dir. The root `/target` rule
 # above is anchored and does not cover it.
 /crates/*/target/
+
+# Same story for the experimental FLAC integration ROM crate (examples/flac_integration/
+# is its own workspace, builds only for thumbv4t-none-eabi via `make native-flac-rom`).
+/examples/flac_integration/target/

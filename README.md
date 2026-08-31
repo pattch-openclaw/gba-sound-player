@@ -70,8 +70,10 @@ the top-level ROM depends on.
 - `examples/pcm_playback.rs` — demonstrates sample-based (PCM) audio playback using `agb`'s native software mixer and a pre-converted 32kHz `.wav` file.
 - `src/main.rs` is a clean slate baseline (no FLAC dependency, builds clean).
 - `examples/symphonia_flac_probe/` — standalone FLAC compile probe (`symphonia-bundle-flac` from the keks no-std fork, with its own `Cargo.toml`). **Expected to fail compilation**; the failure analysis is documented in **[FLAC.md](FLAC.md)**.
+- `crates/flac-lite/` — our own `no_std`, zero-dependency, zero-allocation FLAC frame decoder (**scaffold only**: real signatures, `todo!()` bodies). Decision + design in **[FLAC.md](FLAC.md)**; byte-level `GAFP` contract in [`crates/flac-lite/README.md`](crates/flac-lite/README.md).
+- `examples/flac_integration/` — **EXPERIMENTAL** standalone ROM crate that links `flac-lite` into a bootable GBA ROM. This is the ongoing build sanity check that the decoder keeps fitting the target end to end (see `make native-flac-rom` below). It builds, links, and boots; it does not play audio yet.
 - The project also includes a basic `#[test_case]` suite runnable via `mgba-test-runner`.
-- `Makefile` — `make build`, `make rom`, `make clean`, `make podman-rom`.
+- `Makefile` — standardized build/test entrypoints, see **[Build Process](#build-process-standardized)**.
 - `Dockerfile` — the containerized build (Debian 12 / `rust:slim-bookworm`,
   nightly + `rust-src`, `agb-gbafix`).
 
@@ -103,11 +105,10 @@ Through a series of recent refactors and debugging sessions, we:
      CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER=mgba-test-runner cargo +nightly test --target thumbv4t-none-eabi
      ```
 
-1. **Native macOS build** — `cargo +nightly build --release --target
-   thumbv4t-none-eabi` compiles cleanly on this host (see "Native build" below).
-   This is the path to use for local development; it only *compiles*, it does
-   not fix or run the ROM.
-2. **Containerized Linux build** — `make podman-rom` (podman by default, docker
+1. **Native build** — `make native-rom` compiles, links, and fixes the ROM using
+   the host toolchain (nightly + `rust-src` + `agb-gbafix` installed locally).
+   Produces the same runnable `gba-sound-player.gba` as the containerized path.
+2. **Containerized build** — `make podman-rom` (podman by default, docker
    also works) successfully:
    1. builds the `gba-builder` image (`rust:slim-bookworm` + nightly + `rust-src`
       + `git` + `make` + `agb-gbafix`),
@@ -116,8 +117,11 @@ Through a series of recent refactors and debugging sessions, we:
    4. fixes it into a loadable ROM, and
    5. outputs `gba-sound-player.gba` to the host directory.
 
-The containerized path is the one that produces the runnable `.gba`. The native
-path stops at the linked binary (it has no `agb-gbafix` / no emulator here).
+Both paths produce the same runnable `.gba`. The container is the **standardized**,
+reproducible path (identical toolchain everywhere, no host setup needed) and the
+only one that works on a host without virtualization-independent tooling; the
+native path is the fast local iteration loop. Emulation/testing still happens on
+hosts that have mGBA.
 
 ### Architecture: agb framework baseline
 
@@ -157,12 +161,54 @@ While mGBA is highly accurate, we discovered two specific audio behaviors that o
 
 *Note: Many channel frequency/trigger registers are write-only. Reading from them will usually return `0` or normal hardware fallback values.*
 
-## Building and Development
+## Build Process (Standardized)
 
-To ensure a consistent toolchain across Linux and macOS hosts, this project uses
-a containerized development environment based on Debian 12. The default runtime
-is **podman** (daemonless, rootless — ideal on a minimal Linux host), but any
-OCI-compatible runtime (e.g. docker) works.
+All building and testing goes through the **`Makefile`** — one set of entrypoints,
+two compute environments. `make help` lists everything.
+
+The split exists because the two environments differ only in *virtualization*:
+containerized hosts can run podman; some hosts (e.g. this agent's VM) cannot nest
+virtualization, so podman/docker is unavailable there. Every target therefore has
+a native twin that produces the **same artifact** from the same toolchain
+requirements (nightly + `rust-src`, plus `agb-gbafix` for ROM fixing).
+
+| Target | What it does | Environment |
+|---|---|---|
+| `make native-rom` | Build + link + fix `gba-sound-player.gba` with the host toolchain | no virtualization needed |
+| `make podman-rom` | Build the `gba-builder` image and run the same ROM build inside it; `CONTAINER=docker` works | needs podman/docker |
+| `make native-flac-rom` | **EXPERIMENTAL** — build `flac-integration.gba`: a bootable ROM that links `crates/flac-lite` in | no virtualization needed |
+| `make podman-flac-rom` | Same FLAC integration ROM, built in the container | needs podman/docker |
+| `make flac-test` | `flac-lite` **in isolation**: GBA target compile gate + host unit tests. No agb, no ROM, no emulator | either |
+| `make test-rom` | ROM `#[test_case]` suite, headless in mGBA via `mgba-test-runner` | needs mGBA |
+| `make test` | Top-level: `test-rom` + `flac-test` | either |
+| `make build` / `rom` / `flac-rom` | Lower-level primitives (no fixing / container); `rom` is what the container runs | — |
+| `make clean` / `check` / `help` | Clean all workspaces incl. sub-crates; `cargo fmt --check`; target list | either |
+
+### The FLAC sanity-check triangle
+
+Goal #4 development keeps three independent signals separate, so a failure is
+always diagnosable without guesswork:
+
+1. **`make flac-test`** — is the decoder *correct and `no_std`-clean* on its own?
+   Runs both load-bearing gates for `crates/flac-lite` (see below).
+2. **`make native-flac-rom`** / **`make podman-flac-rom`** — does the decoder
+   still *bundle into a ROM*: compile, link (`rust-lld` + `gba.ld`), get fixed,
+   and boot?
+3. **`make test`** — does the whole ROM (baseline + audio stack + tests) still
+   pass?
+
+If (1) passes but (2) fails, the problem is **integration** — linking, memory
+budget, scheduling — not the decoder. That isolation is the whole point of (1);
+the FLAC library is deliberately *not* a dependency of the root ROM crate, so a
+broken experiment can never take the baseline down with it.
+
+> **Current state of the FLAC ROM build:** `flac-integration.gba` compiles,
+> links, fixes, and boots (purple backdrop, logs the linked anchor address).
+> It does **not** decode audio yet — `flac-lite` is scaffold (`todo!()` bodies),
+> and the ROM references the decoder via a `#[used]` link anchor that is never
+> called, so the image exercises the full build path without ever hitting a
+> `todo!()` panic on hardware. Replace the anchor with a real decode loop once
+> decoding lands (see [FLAC.md](FLAC.md) → next steps).
 
 ### Requirement: nightly + `rust-src` + `-Zbuild-std` (no prebuilt `core` for this target)
 
@@ -196,14 +242,16 @@ target; compile `core`/`alloc` from source instead.
 
 You have two main ways to build and develop:
 
-1. **Native build (local development — the default for this host)**
+1. **Native build (local development)**
+   ```sh
+   make native-rom
+   ```
+   Compiles, links, and fixes the ROM for `thumbv4t` (via `-Zbuild-std`) using the
+   host toolchain — the fast iteration loop. Requires `nightly` + `rust-src` +
+   `agb-gbafix` on PATH. Raw cargo equivalent:
    ```sh
    cargo +nightly build --release --target thumbv4t-none-eabi
    ```
-   This compiles and links the ROM for `thumbv4t` (via `-Zbuild-std`). It is
-   the fast iteration loop. **It only compiles — there is no emulator and no
-   `agb-gbafix` on this host, so do not try to run the ROM here.** To produce
-   the runnable `.gba`, use the containerized path (below) on a host that has it.
 
    On macOS you may need the toolchain's `lib` on the dynamic loader path so
    `rust-lld` finds `libLLVM.dylib`:
@@ -211,7 +259,7 @@ You have two main ways to build and develop:
    export DYLD_FALLBACK_LIBRARY_PATH="$HOME/.rustup/toolchains/nightly-<arch>/lib"
    ```
 
-2. **Container runtime (CLI) — produces the runnable `.gba`**
+2. **Container runtime (CLI) — the standardized, reproducible build**
    The default runtime is **podman**; override with docker if you prefer.
    Run:
    ```sh
@@ -229,6 +277,24 @@ You have two main ways to build and develop:
 
 Run `gba-sound-player.gba` in any GBA emulator (mGBA recommended) on a host that
 has an emulator, to see the title screen and hear the 440 Hz tone.
+
+### Note: cargo config inheritance (why the flac gates carry extra flags)
+
+Cargo reads `.cargo/config.toml` by walking **up** parent directories and merging
+every layer — a `[workspace]` boundary does not stop it. `crates/flac-lite`
+therefore inherits the root's GBA settings, and both inherited values break a
+naive host test: the `target` default gives `E0463: can't find crate for 'test'`,
+and the inherited `build-std` gives `E0152: duplicate lang item`. Because cargo
+**merges arrays** across config layers, an empty local `build-std = []` does not
+clear the parent's. The `flac-test` target encodes the fix:
+
+```sh
+cargo +nightly test -Zbuild-std= --target "$(rustc -vV | sed -n 's|host: ||p')"
+```
+
+Both overrides are load-bearing. Full write-up (including the `-Tgba.ld`
+double-pass variant that breaks linking in standalone sub-crates) lives in
+**[FLAC.md](FLAC.md)** → "Cargo config leak".
 
 ## References
 

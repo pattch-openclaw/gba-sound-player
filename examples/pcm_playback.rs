@@ -11,10 +11,7 @@ const HELLO: agb::display::Rgb15 = Rgb::new(255, 128, 0).to_rgb15();
 static TEST_SOUND: SoundData = agb::include_wav!("assets/sound/test.wav");
 
 /// Play a stereo track using agb's MixerController.
-pub fn play_stereo_track_blocking<'a>(
-    mixer: &mut Mixer<'a>,
-    sound_data: &'static SoundData,
-) {
+pub fn play_stereo_track_blocking<'a>(mixer: &mut Mixer<'a>, sound_data: &'static SoundData) {
     let mut channel = SoundChannel::new(*sound_data);
     channel.stereo();
     let _ = mixer.play_sound(channel);
@@ -26,7 +23,7 @@ fn main(mut gba: agb::Gba) -> ! {
 
     let mut gfx = gba.graphics.get();
     gfx.set_background_palette_colour(0, 0, HELLO);
-    
+
     agb::eprintln!("[pcm_playback] screen should now be orange");
 
     let mut mixer = gba.mixer.mixer(Frequency::Hz32768);
@@ -34,10 +31,10 @@ fn main(mut gba: agb::Gba) -> ! {
 
     loop {
         let frame = gfx.frame();
-        
+
         // agb's software mixer requires frame() to be called in the main loop to process audio
         mixer.frame();
-        
+
         frame.commit();
     }
 }
