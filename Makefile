@@ -1,5 +1,6 @@
 .PHONY: format build rom native-rom podman-rom flac-rom native-flac-rom podman-flac-rom \
-        test flac-test test-rom clean check help toolchain-check
+        test test-rom flac-test podman-test podman-test-rom podman-flac-test \
+        clean clean-cache check podman-check help toolchain-check
 
 # ---------------------------------------------------------------------------
 # Build settings (all overridable, e.g. `make podman-rom CONTAINER=docker`)
@@ -39,6 +40,21 @@ RUSTC ?= rustc
 endif
 # Container runtime: podman by default, override with `make podman-rom CONTAINER=docker`.
 CONTAINER ?= podman
+# Container image. ONE image serves builds AND tests: it carries nightly +
+# rust-src + rustfmt + agb-gbafix + mgba-test-runner, so the containerized
+# path needs no host tooling whatsoever (see Dockerfile).
+IMAGE ?= gba-builder
+# Persistent volumes for the three cargo build dirs. The project bind mount
+# shadows the image's /app/target, so without these every container run would
+# recompile core/alloc + every dependency from scratch. Named volumes are
+# auto-created by podman/docker on first run. `:Z` matches the project mount
+# (private SELinux label); it is inert on macOS, where podman runs no SELinux.
+CARGO_CACHE   ?= gba-cargo-target
+FLAC_CACHE    ?= gba-flac-lite-target
+FLACROM_CACHE ?= gba-flac-integration-target
+CACHE_MOUNTS := -v $(CARGO_CACHE):/app/target:Z \
+                -v $(FLAC_CACHE):/app/crates/flac-lite/target:Z \
+                -v $(FLACROM_CACHE):/app/examples/flac_integration/target:Z
 # GBA test harness (ROM tests boot headlessly in mGBA). Override to point
 # elsewhere, or set empty to see the raw cargo command.
 GBA_TEST_RUNNER ?= mgba-test-runner
@@ -117,8 +133,8 @@ native-rom: rom
 # Containerized: build the image, then run `make rom` inside it with the project
 # dir mounted. The .gba lands back in your host dir.
 podman-rom:
-	$(CONTAINER) build -t gba-builder .
-	$(CONTAINER) run --rm -v "$(PWD):/app:Z" -w /app gba-builder make rom
+	$(CONTAINER) build -t $(IMAGE) .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE) make rom
 
 # ---------------------------------------------------------------------------
 # EXPERIMENTAL: flac-lite bundled into a ROM (sanity check for FLAC.md option
@@ -140,8 +156,22 @@ native-flac-rom: flac-rom
 	@echo "native-flac-rom done: $(FLAC_ROM)"
 
 podman-flac-rom:
-	$(CONTAINER) build -t gba-builder .
-	$(CONTAINER) run --rm -v "$(PWD):/app:Z" -w /app gba-builder make flac-rom
+	$(CONTAINER) build -t $(IMAGE) .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE) make flac-rom
+
+# ---------------------------------------------------------------------------
+# Containerized testing.
+#
+# Same convention as the ROM builds: the BARE names (`rom`, `flac-rom`, `test`,
+# `test-rom`, `flac-test`) run wherever they are invoked — natively on a host,
+# or inside the container when the `podman-*` wrapper re-invokes them there.
+# The `podman-*` names are the host-facing containerized entrypoints. Nothing
+# branches on "am I in a container?", so no recursion and no surprise: a host
+# with the toolchain installed uses the bare names; a host without them (no
+# agb-gbafix, no mgba-test-runner, an unexpected nightly) uses `podman-*`.
+#   make podman-test        ROM suite + flac-lite gates, in the image
+#   make podman-flac-test   flac-lite alone, in the image
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Tests. Deliberately separated so a decoder bug is never confused with a ROM
@@ -172,8 +202,11 @@ flac-test: toolchain-check
 # by underscores: CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER.
 TARGET_ENV := $(shell echo $(TARGET) | tr 'a-z-' 'A-Z_')
 
-# ROM test suite on target (needs mgba-test-runner:
-# `cargo install mgba-test-runner --git https://github.com/agbrs/agb.git`).
+# ROM test suite on target. Needs mgba-test-runner on PATH:
+#   natively    -> `cargo install mgba-test-runner --git https://github.com/agbrs/agb.git`
+#                  (also needs cmake + clang/libclang + libelf to build libmgba)
+#   in the image -> preinstalled by the Dockerfile; use `make podman-test-rom`
+#                  and none of that host setup applies.
 test-rom: toolchain-check
 	CARGO_TARGET_$(TARGET_ENV)_RUNNER=$(GBA_TEST_RUNNER) \
 	  $(CARGO) test --target $(TARGET)
@@ -187,12 +220,54 @@ test: test-rom flac-test
 	@echo "test passed: ROM suite + flac-lite isolation gates"
 
 # ---------------------------------------------------------------------------
+# Containerized test entrypoints (the portable path — the image ships
+# mgba-test-runner + agb-gbafix + nightly + rust-src, so NO host tooling is
+# needed). These build the image, then run the same bare gate targets inside,
+# with the project dir mounted so artifacts and reports land back on the host.
+#
+# Use these when the native path can't run (missing toolchain pieces, an
+# unexpected nightly, conda, etc.) — same commands, same gates, same result.
+# ---------------------------------------------------------------------------
+
+# Full suite: ROM #[test_case] suite in headless mGBA + flac-lite gates.
+podman-test:
+	$(CONTAINER) build -t $(IMAGE) .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE) make test
+	@echo "podman-test done: ROM suite + flac-lite gates ran in $(CONTAINER)."
+
+# ROM #[test_case] suite only.
+podman-test-rom:
+	$(CONTAINER) build -t $(IMAGE) .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE) make test-rom
+	@echo "podman-test-rom done: ROM suite ran in $(CONTAINER)."
+
+# flac-lite alone (target compile gate + host tests) — the fastest container
+# loop; no agb, no ROM, no emulator.
+podman-flac-test:
+	$(CONTAINER) build -t $(IMAGE) .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE) make flac-test
+	@echo "podman-flac-test done: flac-lite gates ran in $(CONTAINER)."
+
+# Formatting gate in the container too (CI-friendly; identical rustfmt).
+podman-check:
+	$(CONTAINER) build -t $(IMAGE) .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE) make check
+	@echo "podman-check done: formatting verified in $(CONTAINER)."
+
+# ---------------------------------------------------------------------------
 
 clean:
 	$(CARGO) clean
 	cd crates/flac-lite && $(CARGO) clean
 	cd $(FLAC_CRATE_DIR) && $(CARGO) clean
 	rm -f $(ROM) $(FLAC_ROM)
+
+# Drop the container build caches (the named volumes behind $(CACHE_MOUNTS)).
+# Safe: they are pure build caches — the next container run rebuilds from
+# scratch, slowly once, then repopulates them. Does NOT touch ./target.
+clean-cache:
+	-$(CONTAINER) volume rm $(CARGO_CACHE) $(FLAC_CACHE) $(FLACROM_CACHE) 2>/dev/null || true
+	@echo "container build-cache volumes removed ($(CARGO_CACHE), $(FLAC_CACHE), $(FLACROM_CACHE))."
 
 check:
 	$(CARGO) fmt --check
@@ -222,19 +297,26 @@ help:
 	@echo "    native-flac-rom   build $(FLAC_ROM) natively"
 	@echo "    podman-flac-rom   build $(FLAC_ROM) in the container"
 	@echo ""
-	@echo "  Tests:"
-	@echo "    flac-test         flac-lite alone (target compile gate + host tests)"
-	@echo "    test-rom          ROM #[test_case] suite in mGBA"
+	@echo "  Tests — native gates (need nightly + agb-gbafix + mgba-test-runner locally):"
 	@echo "    test              test-rom + flac-test (verify-only: no reformat)"
+	@echo "    test-rom          ROM #[test_case] suite in mGBA"
+	@echo "    flac-test         flac-lite alone (target compile gate + host tests)"
+	@echo ""
+	@echo "  Tests — containerized (same gates, no host tooling needed):"
+	@echo "    podman-test       test-rom + flac-test in the $(CONTAINER) image"
+	@echo "    podman-test-rom   ROM #[test_case] suite in the container"
+	@echo "    podman-flac-test  flac-lite alone in the container"
+	@echo "    podman-check      cargo fmt --check in the container"
 	@echo ""
 	@echo "  Formatting:"
 	@echo "    format            cargo fmt all workspaces (writes; runs before builds)"
 	@echo "    check             cargo fmt --check (verify-only gate; never writes)"
 	@echo ""
-	@echo "  Other: build, rom, flac-rom, clean, help"
+	@echo "  Other: build, rom, flac-rom, clean, clean-cache, help"
 	@echo ""
 	@echo "  Builds never gate on tests; they DO auto-run 'format' first."
 	@echo "  (no rustfmt for $(TOOLCHAIN)? format prints a notice and skips.)"
 	@echo ""
 	@echo "  Toolchain: $(RUSTC)  (override: RUSTUP= / TOOLCHAIN= / CARGO=)"
+	@echo "  Container: $(CONTAINER)  image: $(IMAGE)  (override: CONTAINER=docker IMAGE=)"
 	@echo "  Host triple: $(HOST_TRIPLE)"

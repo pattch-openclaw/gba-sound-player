@@ -94,15 +94,26 @@ Through a series of recent refactors and debugging sessions, we:
 1. **Milestone Logging:** The ROM uses `agb::eprintln!` to log its progress to the terminal running mGBA.
 2. **Automated Testing:** We use agb's `#[test_case]` harness.
    - The test runner boots the ROM headlessly in mGBA and captures assertion output.
-   - **macOS Native Test Setup:** To run tests locally, you need the nightly toolchain, a C++ compiler for the emulator bindings, and the emulator itself:
+   - **Recommended: run tests in the container** — no host setup at all, since
+     the `gba-builder` image ships nightly + `rust-src` + `agb-gbafix` +
+     `mgba-test-runner`:
+     ```sh
+     make podman-test         # ROM suite + flac-lite isolation gates
+     make podman-test-rom     # ROM #[test_case] suite only
+     make podman-flac-test    # flac-lite alone (fastest loop)
+     ```
+   - **Native test setup (optional, faster inner loop):** running `make test-rom`
+     on the host needs the nightly toolchain, plus the toolchain that builds
+     libmgba (a C library) for `mgba-test-runner`:
      ```sh
      rustup toolchain install nightly
      rustup component add rust-src --toolchain nightly
-     brew install cmake mgba
+     brew install cmake pkg-config libelf        # to build libmgba
      cargo install agb-gbafix
-     cargo install mgba-test-runner --git https://github.com/agbrs/agb.git
+     cargo install mgba-test-runner --git https://github.com/agbrs/agb.git --tag v0.25.0 --path emulator/test-runner
      ```
-   - **Running Tests:**
+   - **Running Tests natively** (the Makefile sets this runner itself; shown for
+     a raw `cargo` invocation):
      ```sh
      CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER=mgba-test-runner cargo +nightly test --target thumbv4t-none-eabi
      ```
@@ -113,7 +124,9 @@ Through a series of recent refactors and debugging sessions, we:
 2. **Containerized build** — `make podman-rom` (podman by default, docker
    also works) successfully:
    1. builds the `gba-builder` image (`rust:slim-bookworm` + nightly + `rust-src`
-      + `rustfmt` + `git` + `make` + `agb-gbafix`),
+      + `rustfmt` + `git` + `make` + `agb-gbafix` + `mgba-test-runner`, plus the
+      C toolchain deps `mgba-test-runner`'s libmgba build needs: `cmake`,
+      `clang`/`libclang`, `pkg-config`, `libelf`, `zlib`, `libpng`, `libasound`),
    2. compiles the ROM (`#![no_std]` + `-Zbuild-std` for `thumbv4t-none-eabi`),
    3. links it with `rust-lld` (via the `agb`-supplied `gba.ld` linker script),
    4. fixes it into a loadable ROM, and
@@ -121,9 +134,13 @@ Through a series of recent refactors and debugging sessions, we:
 
 Both paths produce the same runnable `.gba`. The container is the **standardized**,
 reproducible path (identical toolchain everywhere, no host setup needed) and the
-only one that works on a host without virtualization-independent tooling; the
-native path is the fast local iteration loop. Emulation/testing still happens on
-hosts that have mGBA.
+only one that works on a host without the native tooling installed; the native
+path is the fast local iteration loop.
+
+**Tests follow the same native/container convention** (`make podman-test` ⇄
+`make test`), so a machine that can run `make podman-rom` can also run the whole
+test suite — including the mGBA `#[test_case]` suite — without installing
+anything. See [Build Process → Containerized testing](#containerized-testing).
 
 ### Architecture: agb framework baseline
 
@@ -180,12 +197,17 @@ requirements (nightly + `rust-src`, plus `agb-gbafix` for ROM fixing).
 | `make podman-rom` | Build the `gba-builder` image and run the same ROM build inside it; `CONTAINER=docker` works | needs podman/docker |
 | `make native-flac-rom` | **EXPERIMENTAL** — build `flac-integration.gba`: a bootable ROM that links `crates/flac-lite` in | no virtualization needed |
 | `make podman-flac-rom` | Same FLAC integration ROM, built in the container | needs podman/docker |
-| `make flac-test` | `flac-lite` **in isolation**: GBA target compile gate + host unit tests. No agb, no ROM, no emulator | either |
-| `make test-rom` | ROM `#[test_case]` suite, headless in mGBA via `mgba-test-runner` | needs mGBA |
-| `make test` | Top-level: `test-rom` + `flac-test`. Verify-only — never reformats your tree | either |
+| `make flac-test` | `flac-lite` **in isolation**: GBA target compile gate + host unit tests. No agb, no ROM, no emulator | native |
+| `make test-rom` | ROM `#[test_case]` suite, headless in mGBA via `mgba-test-runner` | native (needs `mgba-test-runner`) |
+| `make test` | Top-level: `test-rom` + `flac-test`. Verify-only — never reformats your tree | native |
+| `make podman-test` | **The same suite**, running inside the image (`make test` in there) — no host tooling | needs podman/docker |
+| `make podman-test-rom` | ROM suite only, in the container | needs podman/docker |
+| `make podman-flac-test` | `flac-lite` gates only, in the container (fastest container loop) | needs podman/docker |
 | `make build` / `rom` / `flac-rom` | Lower-level primitives (no fixing / container); `rom` is what the container runs. All run `format` first; **none gate on tests** | — |
 | `make format` | `cargo fmt` (writes) across all three workspaces — the automatic build pre-step | either |
+| `make podman-check` | `cargo fmt --check` in the container (the CI formatting gate) | needs podman/docker |
 | `make clean` / `check` / `help` | Clean all workspaces incl. sub-crates; `cargo fmt --check` (**verify-only**, never writes); target list | either |
+| `make clean-cache` | Remove the container build-cache volumes (see [Containerized testing](#containerized-testing)) | needs podman/docker |
 
 #### Formatting: builds auto-format; nothing but `check` gates
 
@@ -215,6 +237,40 @@ If a build reformats your tree, run `make check` before committing to confirm
 the result is gate-green. If `rustfmt` is missing for the pinned toolchain,
 `format` prints a notice and the build continues — formatting is a convenience,
 never a hard dependency of building.
+
+### Containerized testing
+
+Tests follow the same convention as ROM builds, and for the same reason: the
+container is the environment-independent path. **`make podman-rom` working on a
+host now means `make podman-test` works on that host too** — the `gba-builder`
+image ships `agb-gbafix` *and* `mgba-test-runner` (a headless mGBA built from
+source at image-build time), so nothing about mGBA, `cmake`, `libelf`, or the
+exact nightly has to be true on the host.
+
+```sh
+make podman-test         # ROM #[test_case] suite + flac-lite isolation gates
+make podman-flac-test    # flac-lite alone — fastest loop, no agb/emulator
+make podman-check        # formatting gate, same rustfmt as CI
+```
+
+How it works: each `podman-*` target builds the image, then runs the **bare**
+gate target (`make test`, `make flac-test`, `make test-rom`, `make check`) *inside*
+the container with the project dir bind-mounted. The bare targets are unaware of
+containers, exactly like `rom` — so the commands, flags, and gate semantics are
+identical on both paths, and the artifacts/reports land back in your working tree.
+
+**Build caches.** The bind mount shadows the image's `/app/target`, so the
+targets mount three named volumes (`gba-cargo-target`, `gba-flac-lite-target`,
+`gba-flac-integration-target`) over the crates' build dirs. Without them every
+container run would rebuild `core`/`alloc` and every dependency from scratch
+(`-Zbuild-std` is not cheap). They are pure caches: `make clean-cache` drops them
+safely, and the next run just rebuilds slowly once. Override the names with
+`CARGO_CACHE=` / `FLAC_CACHE=` / `FLACROM_CACHE=`, or the runtime with
+`CONTAINER=docker`.
+
+**Native still wins for iteration speed** when the host has the tooling — no
+image build, no container startup, warm incremental `target/`. Use it as the
+inner loop, keep `podman-test` as the truth.
 
 ### The FLAC sanity-check triangle
 
