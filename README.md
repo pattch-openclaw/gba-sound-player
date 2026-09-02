@@ -110,7 +110,7 @@ Through a series of recent refactors and debugging sessions, we:
      rustup component add rust-src --toolchain nightly
      brew install cmake pkg-config libelf        # to build libmgba
      cargo install agb-gbafix
-     cargo install mgba-test-runner --git https://github.com/agbrs/agb.git --tag v0.25.0 --path emulator/test-runner
+     cargo install --git https://github.com/agbrs/agb.git --tag v0.25.0 --locked mgba-test-runner
      ```
    - **Running Tests natively** (the Makefile sets this runner itself; shown for
      a raw `cargo` invocation):
@@ -329,7 +329,7 @@ rustup toolchain install nightly
 rustup component add rust-src --toolchain nightly    # -Zbuild-std
 rustup component add rustfmt  --toolchain nightly    # make check + build's format pre-step
 cargo install agb-gbafix                             # ROM fixing
-cargo install mgba-test-runner --git https://github.com/agbrs/agb.git  # make test-rom
+cargo install --git https://github.com/agbrs/agb.git --tag v0.25.0 --locked mgba-test-runner  # make test-rom
 ```
 
 ### Requirement: nightly + `rust-src` + `-Zbuild-std` (no prebuilt `core` for this target)

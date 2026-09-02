@@ -80,14 +80,22 @@ RUN cargo install agb-gbafix
 # image-build time (compiling libmgba from source takes a few minutes ONCE) so
 # `make test-rom` never pays for it, and no host needs mGBA/cmake at all.
 #
-# `--locked` respects agb's own Cargo.lock, so bindgen et al. stay on versions
-# agb CI actually tests. The smoke test only asserts the binary exists and is
-# dynamic-link-clean (a broken libmgba link shows up as "not found"/missing
-# symbols at exec time); running an actual ROM test needs a ROM, which the
-# `make podman-test-rom` target supplies.
+# `--locked` asks cargo to keep dependency versions as recorded in the source's
+# lockfile. agb does NOT commit a workspace Cargo.lock, so cargo prints
+# "warning: no Cargo.lock file published in mgba-test-runner" and resolves
+# fresh — the warning is expected, not a failure. Kept because it becomes a
+# hard pin the day agb does publish a lock, and it fails loudly if a recorded
+# lock could not be honored.
+#
+# NOTE: `cargo install --git` does NOT accept `--path` (cargo errors: "the
+# argument '--git <URL>' cannot be used with '--path <PATH>'"). With --git you
+# select the crate by NAME as the positional argument; cargo resolves it inside
+# the cloned repo's workspace — no --path needed (or allowed). (--path is for
+# installing from a LOCAL directory; combining it with --git is what broke
+# every `make podman-*` target.)
 ARG AGB_REF=v0.25.0
 RUN cargo install --git https://github.com/agbrs/agb.git --tag "${AGB_REF}" \
-      --locked --path emulator/test-runner mgba-test-runner
+      --locked mgba-test-runner
 RUN command -v mgba-test-runner \
     && mgba-test-runner --help >/dev/null \
     && echo "mgba-test-runner OK: $(command -v mgba-test-runner)"
