@@ -203,7 +203,7 @@ flac-test: toolchain-check
 TARGET_ENV := $(shell echo $(TARGET) | tr 'a-z-' 'A-Z_')
 
 # ROM test suite on target. Needs mgba-test-runner on PATH:
-#   natively    -> `cargo install mgba-test-runner --git https://github.com/agbrs/agb.git`
+#   natively    -> `cargo install --git https://github.com/agbrs/agb.git --tag v0.25.0 --locked mgba-test-runner`
 #                  (also needs cmake + clang/libclang + libelf to build libmgba)
 #   in the image -> preinstalled by the Dockerfile; use `make podman-test-rom`
 #                  and none of that host setup applies.
