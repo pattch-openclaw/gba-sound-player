@@ -94,13 +94,18 @@ Through a series of recent refactors and debugging sessions, we:
 1. **Milestone Logging:** The ROM uses `agb::eprintln!` to log its progress to the terminal running mGBA.
 2. **Automated Testing:** We use agb's `#[test_case]` harness.
    - The test runner boots the ROM headlessly in mGBA and captures assertion output.
-   - **Recommended: run tests in the container** — no host setup at all, since
-     the `gba-builder` image ships nightly + `rust-src` + `agb-gbafix` +
-     `mgba-test-runner`:
+   - **Recommended: run tests in the container** — no host setup at all. The
+     containerized path uses a **multi-stage Dockerfile** to keep the environments
+     specialized:
+     - The `tester` stage ships nightly + `rust-src` + `agb-gbafix` **plus** the C
+       toolchain and `mgba-test-runner` required to boot mGBA.
+     - The `builder` stage is pure Rust (used for standard ROM builds and isolation
+       gates), keeping test-emulator dependencies out of the everyday build path.
+     
      ```sh
-     make podman-test         # ROM suite + flac-lite isolation gates
-     make podman-test-rom     # ROM #[test_case] suite only
-     make podman-flac-test    # flac-lite alone (fastest loop)
+     make podman-test         # ROM suite + flac-lite isolation gates (tester + builder stages)
+     make podman-test-rom     # ROM #[test_case] suite only (tester stage)
+     make podman-flac-test    # flac-lite alone (builder stage, fastest loop)
      ```
    - **Native test setup (optional, faster inner loop):** running `make test-rom`
      on the host needs the nightly toolchain, plus the toolchain that builds
@@ -123,10 +128,9 @@ Through a series of recent refactors and debugging sessions, we:
    Produces the same runnable `gba-sound-player.gba` as the containerized path.
 2. **Containerized build** — `make podman-rom` (podman by default, docker
    also works) successfully:
-   1. builds the `gba-builder` image (`rust:slim-bookworm` + nightly + `rust-src`
-      + `rustfmt` + `git` + `make` + `agb-gbafix` + `mgba-test-runner`, plus the
-      C toolchain deps `mgba-test-runner`'s libmgba build needs: `cmake`,
-      `clang`/`libclang`, `pkg-config`, `libelf`, `zlib`, `libpng`, `libasound`),
+   1. builds the `builder` stage of the image (`rust:slim-bookworm` + nightly +
+      `rust-src` + `rustfmt` + `git` + `make` + `agb-gbafix`). It avoids the C
+      toolchain and emulator dependencies which are isolated to the `tester` stage.
    2. compiles the ROM (`#![no_std]` + `-Zbuild-std` for `thumbv4t-none-eabi`),
    3. links it with `rust-lld` (via the `agb`-supplied `gba.ld` linker script),
    4. fixes it into a loadable ROM, and
