@@ -1,9 +1,10 @@
 //! MSB-first bit reader over an immutable byte slice.
 //!
-//! STATUS (2026-09-04): **core read path implemented** — `new`, `read_bits`,
-//! `bit_position`, `bits_remaining` (roadmap Step 1, FLAC.md "Next steps").
-//! The remaining methods (`peek_bits`, `read_signed`, `read_utf8_coded`,
-//! `byte_align`, `read_u8`, CRCs) are still scaffold (`todo!()`).
+//! STATUS (2026-09-05): **core read path implemented** — `new`, `read_bits`,
+//! `peek_bits`, `bit_position`, `bits_remaining` (roadmap Step 1 + `peek_bits`,
+//! FLAC.md "Next steps"). The remaining methods (`read_signed`,
+//! `read_utf8_coded`, `byte_align`, `read_u8`, CRCs) are still scaffold
+//! (`todo!()`).
 //!
 //! FLAC packs its fields MSB-first across byte boundaries, so the whole decoder
 //! is built on this one primitive. Design notes for the implementation:
@@ -58,8 +59,14 @@ impl<'a> BitReader<'a> {
     }
 
     /// Peek at the next `n` bits (1..=32) without advancing the cursor.
-    pub fn peek_bits(&mut self, n: u32) -> Result<u32> {
-        todo!("flac-lite scaffold: BitReader::peek_bits (Step 2 — trivially wraps peek_at)")
+    ///
+    /// Same width and end-of-stream semantics as [`Self::read_bits`] — same
+    /// error variants, cursor untouched on success *and* failure. This is
+    /// exactly what `peek_at` already guarantees, so peek is a direct wrap;
+    /// the caller-visible difference vs `read_bits` is purely the missing
+    /// `bit_pos += n`.
+    pub fn peek_bits(&self, n: u32) -> Result<u32> {
+        self.peek_at(self.bit_pos, n)
     }
 
     /// Read `n` bits (1..=32) as a two's-complement signed value.
@@ -267,6 +274,109 @@ mod tests {
         let mut r = BitReader::new(&[0xAB, 0xCD, 0xEF, 0x01, 0x23]);
         assert_eq!(r.read_bits(3).unwrap(), 0b101);
         assert_eq!(r.read_bits(32).unwrap(), 0x5E6F_7809);
+    }
+
+    // ---- peek_bits ----------------------------------------------------------
+
+    #[test]
+    fn peek_matches_read_and_never_moves_cursor() {
+        // 0xA55A = 1010_0101_0101_1010. Peek a field, confirm read returns the
+        // identical value and only read advances the cursor.
+        let mut r = BitReader::new(&[0xA5, 0x5A]);
+        for _ in 0..3 {
+            // Idempotent: repeated peeks are identical...
+            assert_eq!(r.peek_bits(7).unwrap(), 0b101_0010); // top 7 bits of 0xA5
+            assert_eq!(r.bit_position(), 0); // ...and never move the cursor
+        }
+        assert_eq!(r.read_bits(7).unwrap(), 0b101_0010);
+        assert_eq!(r.bit_position(), 7);
+        for _ in 0..2 {
+            assert_eq!(r.peek_bits(5).unwrap(), 0b10101); // bits [7..12)
+            assert_eq!(r.bit_position(), 7);
+        }
+        assert_eq!(r.read_bits(5).unwrap(), 0b10101);
+        assert_eq!(r.bit_position(), 12);
+    }
+
+    #[test]
+    fn peek_validates_widths_like_read() {
+        // `&self` receiver: this whole test needs no mutable cursor at all.
+        let r = BitReader::new(&[0xFF; 4]);
+        assert_eq!(r.peek_bits(0), Err(Error::InvalidField));
+        assert_eq!(r.peek_bits(33), Err(Error::InvalidField));
+        assert_eq!(r.peek_bits(u32::MAX), Err(Error::InvalidField));
+        assert_eq!(r.bit_position(), 0);
+        // Legal widths still work after the rejections.
+        assert_eq!(r.peek_bits(32).unwrap(), 0xFFFF_FFFF);
+        assert_eq!(r.bit_position(), 0);
+    }
+
+    #[test]
+    fn peek_eof_leaves_cursor_untouched() {
+        let mut r = BitReader::new(&[0b1010_1010]);
+        assert_eq!(r.read_bits(3).unwrap(), 0b101);
+        assert_eq!(r.peek_bits(6), Err(Error::EndOfStream)); // only 5 left
+        assert_eq!(r.bit_position(), 3);
+        assert_eq!(r.peek_bits(5).unwrap(), 0b0_1010); // exactly what remains
+        assert_eq!(r.bit_position(), 3);
+        // Drain to the end: peek fails at EOF but never before the last read.
+        assert_eq!(r.read_bits(5).unwrap(), 0b0_1010);
+        assert_eq!(r.peek_bits(1), Err(Error::EndOfStream));
+        assert_eq!(r.bit_position(), 8);
+    }
+
+    #[test]
+    fn peek_32_bits_unaligned_covers_worst_case_span() {
+        // Same five-byte worst case as the wide-read test (off = 3, n = 32),
+        // but via peek: value must match and cursor must not move.
+        let mut r = BitReader::new(&[0xAB, 0xCD, 0xEF, 0x01, 0x23]);
+        assert_eq!(r.read_bits(3).unwrap(), 0b101);
+        for _ in 0..2 {
+            assert_eq!(r.peek_bits(32).unwrap(), 0x5E6F_7809);
+            assert_eq!(r.bit_position(), 3);
+        }
+        assert_eq!(r.read_bits(32).unwrap(), 0x5E6F_7809);
+    }
+
+    #[test]
+    fn peek_agrees_with_oracle_at_every_position() {
+        // Differential sweep over every absolute bit position (alignment is
+        // where peek bugs live): peek must equal the oracle bits assembled
+        // MSB-first, at every alignment, for every legal width.
+        let mut rng = Lcg(0xCAFE_F00D);
+        let mut data = [0u8; 16];
+        for d in &mut data {
+            *d = rng.next_u8();
+        }
+        let total = data.len() * 8;
+
+        for start in 0..total {
+            let byte_start = start >> 3;
+            let pad = start & 7;
+            for width in 1..=32usize {
+                let mut r = BitReader::new(&data[byte_start..]);
+                if pad > 0 {
+                    let _ = r.read_bits(pad as u32).unwrap();
+                }
+                let pos = start - (byte_start * 8); // cursor within subslice
+                match r.peek_bits(width as u32) {
+                    Ok(val) => {
+                        assert_eq!(
+                            r.bit_position(),
+                            pos,
+                            "peek must not move cursor: start {start}, width {width}"
+                        );
+                        let mut expect = 0u32;
+                        for j in 0..width {
+                            expect = (expect << 1) | ref_bit(&data, start + j);
+                        }
+                        assert_eq!(val, expect, "start {start}, width {width}");
+                    }
+                    Err(Error::EndOfStream) => assert!(start + width > total),
+                    Err(e) => panic!("unexpected at start {start}, width {width}: {e:?}"),
+                }
+            }
+        }
     }
 
     // ---- position bookkeeping ----------------------------------------------
