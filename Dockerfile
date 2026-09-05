@@ -87,15 +87,18 @@ RUN cargo install agb-gbafix
 # hard pin the day agb does publish a lock, and it fails loudly if a recorded
 # lock could not be honored.
 #
-# NOTE: `cargo install --git` does NOT accept `--path` (cargo errors: "the
-# argument '--git <URL>' cannot be used with '--path <PATH>'"). With --git you
-# select the crate by NAME as the positional argument; cargo resolves it inside
-# the cloned repo's workspace — no --path needed (or allowed). (--path is for
-# installing from a LOCAL directory; combining it with --git is what broke
-# every `make podman-*` target.)
+# We clone and patch manually instead of using `cargo install --git` because
+# agb v0.25.0 has an AArch64 Linux compilation bug in `emulator/mgba`: it
+# assumes `c_char` is `i8` (it is `u8` on ARM Linux) and uses an x86-specific
+# `__va_list_tag`. The sed commands patch this for Apple Silicon host compat.
 ARG AGB_REF=v0.25.0
-RUN cargo install --git https://github.com/agbrs/agb.git --tag "${AGB_REF}" \
-      --locked mgba-test-runner
+RUN git clone --depth 1 --branch "${AGB_REF}" https://github.com/agbrs/agb.git /tmp/agb \
+    && cd /tmp/agb \
+    && sed -i 's/not(target_os = "macos")/not(any(target_os = "macos", target_arch = "aarch64"))/' emulator/mgba/src/log.rs \
+    && sed -i 's/any(windows, target_os = "macos")/any(windows, target_os = "macos", target_arch = "aarch64")/' emulator/mgba/src/log.rs \
+    && sed -i 's/\*const i8/*const libc::c_char/g' emulator/mgba/src/log.rs \
+    && cargo install --path emulator/test-runner --locked \
+    && rm -rf /tmp/agb
 RUN command -v mgba-test-runner \
     && mgba-test-runner --help >/dev/null \
     && echo "mgba-test-runner OK: $(command -v mgba-test-runner)"
