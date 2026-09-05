@@ -387,6 +387,13 @@ Scaffolding only — **no decoding logic implemented yet**:
 Next steps, in order:
 
 1. [ ] Implement `bits::BitReader` + host unit tests (smallest testable unit).
+       - [x] **Step 1 done 2026-09-04**: core read path (`new`, `read_bits`,
+         `bit_position`, `bits_remaining`) on the **position-only** design —
+         cursor is a plain bit offset, no refill accumulator. 12 `core`-only
+         unit tests (hand-computed patterns, exhaustive alignment×width sweep,
+         differential bit-by-bit vs wide-read vs independent oracle, EOF/cursor
+         invariants). Both gates green. Remaining: `peek_bits`, `read_signed`,
+         `read_utf8_coded`, `byte_align`, `read_u8`, `crc8`/`crc16`.
 2. [ ] `format::Manifest` parser + `scripts/pack_flac.sh` real implementation.
 3. [ ] `subframe` FIXED + `residual` Rice → **perf gate spike** in mGBA.
 4. [ ] LPC + stereo decorrelation + CRC; fixture tests vs reference `flac`.
