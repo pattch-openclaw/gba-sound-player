@@ -387,7 +387,7 @@ Scaffolding only — **no decoding logic implemented yet**:
 Next steps, in order:
 
 1. [ ] Implement `bits::BitReader` + host unit tests (smallest testable unit).
-   **Not done**: the read path is implemented and hardware-validated, but 5
+   **Not done**: the read path is implemented and hardware-validated, but 4
    reader methods and both CRC helpers are still `todo!()` scaffold (listed
    below).
    - [x] **Core read path — done 2026-09-04** (PR #25): `new`, `read_bits`,
@@ -406,7 +406,15 @@ Next steps, in order:
      completed). Expectations are hand-computed from the bit layout, not from
      the library — so the ROM is an independent oracle, and the colour report
      works on cart with no cable.
-   - [ ] `peek_bits` — trivially wraps the existing `peek_at` helper.
+   - [x] **`peek_bits` — done 2026-09-05**: direct wrap of the existing
+     `peek_at(pos, n)` helper (takes `&self` — peeking needs no cursor
+     mutation), so width validation (`InvalidField` for 0/>32) and EOF
+     semantics are identical to `read_bits` by construction, cursor never
+     moves. 5 new `core`-only tests: peek==read agreement + idempotence,
+     width validation, EOF cursor invariants, the off=3/n=32 five-byte
+     worst case via peek, and an exhaustive alignment×width sweep against
+     the independent oracle. `make flac-test` green (17 tests + thumbv4t
+     compile gate).
    - [ ] `read_signed` — two's-complement sign extension after `read_bits`.
    - [ ] `read_utf8_coded` — FLAC's zero-padded prefix numbers (RFC 9629
      §5.1.4.1 / §7.2), used for frame/sample numbers and channel assignments.
