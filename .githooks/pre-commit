@@ -1,0 +1,15 @@
+#!/bin/bash
+# Pre-commit hook to prevent regressions
+
+echo "Running tests before commit..."
+make test
+
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "❌ Tests failed! Commit aborted."
+    echo "   Use 'git commit --no-verify' if you absolutely must bypass this."
+    exit 1
+fi
+
+echo "✅ Tests passed."
+exit 0
