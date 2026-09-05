@@ -77,6 +77,9 @@ ROM := gba-sound-player.gba
 FLAC_ROM := flac-integration.gba
 # Standalone crate that bundles flac-lite into a ROM (the FLAC sanity build).
 FLAC_CRATE_DIR := examples/flac_integration
+# Absolute manifest path for the flac-lite host gate (see `flac-test`: the gate
+# runs from outside the repo so the root's cargo config is not inherited).
+FLAC_CRATE_DIR_MANIFEST := $(abspath crates/flac-lite/Cargo.toml)
 FLAC_CRATE_BIN := target/$(TARGET)/release/flac-integration
 
 # `rom` is the command run INSIDE the container (where agb-gbafix lives); the
@@ -185,17 +188,34 @@ podman-flac-rom:
 # integration (linking, memory, mixer/scheduling), not the decoder.
 # ---------------------------------------------------------------------------
 
+# Where the host gate runs: a directory OUTSIDE the repo, so cargo's upward
+# `.cargo/config.toml` walk finds nothing to inherit. Must live outside the
+# tree — any in-repo directory still walks up into the root's GBA config.
+GATE_NEUTRAL_CWD ?= /tmp/gba-sound-player-host-gate
+
 # flac-lite in isolation. Both gates are load-bearing:
-#  1. target check  — the gate symphonia could never pass; keeps std out
-#  2. host tests    — `-Zbuild-std=` (empty) defeats the inherited core
-#     recompile and `--target $(HOST_TRIPLE)` defeats the inherited GBA target.
-#     Cargo MERGES config arrays up the directory tree, so an empty local
-#     override alone does not clear the parent's build-std. Both flags needed.
+#  1. target check  — the gate symphonia could never pass; keeps std out.
+#     Run in-tree, where inheriting the root config is exactly what we want.
+#  2. host tests    — run from $(GATE_NEUTRAL_CWD) with --manifest-path, so the
+#     root's GBA `target` AND `build-std` are never inherited at all. `--target
+#     $(HOST_TRIPLE)` stays explicit so the gate documents its own intent.
+#
+# Why not the old `-Zbuild-std=` (empty) + `cd` form: it held until nightly
+# ~2026-06-01, then rotted. On nightly 2026-09-03 the inherited build-std wins
+# over EVERY in-tree override — CLI `-Zbuild-std=`, the empty
+# `CARGO_UNSTABLE_BUILD_STD=` env var, and `--config unstable.build-std=[]` all
+# still recompile `core` from source under the prebuilt host `core`, giving
+# `E0152: duplicate lang item core::sized` (verified 2026-09-04; full A/B table
+# in FLAC.md → "Cargo config leak"). Config non-inheritance is positional, so it
+# cannot drift with nightly the way flag-precedence does. The build dir stays
+# `crates/flac-lite/target` (derived from the manifest, not the cwd), so the
+# container cache volumes still apply.
 flac-test: toolchain-check
 	cd crates/flac-lite && \
 	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc
-	cd crates/flac-lite && \
-	  $(CARGO) test -Zbuild-std= --target $(HOST_TRIPLE)
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE)
 	@echo "flac-test passed: flac-lite compiles for $(TARGET) and passes host tests"
 
 # Cargo's runner env var is the upper-cased target triple with dashes replaced

@@ -408,14 +408,22 @@ therefore inherits the root's GBA settings, and both inherited values break a
 naive host test: the `target` default gives `E0463: can't find crate for 'test'`,
 and the inherited `build-std` gives `E0152: duplicate lang item`. Because cargo
 **merges arrays** across config layers, an empty local `build-std = []` does not
-clear the parent's. The `flac-test` target encodes the fix:
+clear the parent's — and as of nightly 2026-09-03 the inherited value also beats
+every *in-tree* override (`-Zbuild-std=`, the empty `CARGO_UNSTABLE_BUILD_STD=`,
+`--config unstable.build-std=[]`), so the flag-based workaround we used through
+2026-06 no longer holds. The durable fix is positional: run cargo from outside the
+repo so the config walk finds nothing, and point it at the crate explicitly. The
+`flac-test` target encodes it:
 
 ```sh
-cargo +nightly test -Zbuild-std= --target "$(rustc -vV | sed -n 's|host: ||p')"
+mkdir -p /tmp/gba-sound-player-host-gate && cd /tmp/gba-sound-player-host-gate && \
+  cargo +nightly test --manifest-path <repo>/crates/flac-lite/Cargo.toml \
+    --target "$(rustc -vV | sed -n 's|host: ||p')"
 ```
 
-Both overrides are load-bearing. Full write-up (including the `-Tgba.ld`
-double-pass variant that breaks linking in standalone sub-crates) lives in
+Artifacts still land in `crates/flac-lite/target/` (derived from the manifest, not
+the cwd). Full write-up, including the dated A/B matrix and the `-Tgba.ld`
+double-pass variant that breaks linking in standalone sub-crates, lives in
 **[FLAC.md](FLAC.md)** → "Cargo config leak".
 
 ## References

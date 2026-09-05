@@ -240,7 +240,9 @@ decode + playback in real time**. Gate before building the full decoder:
 
 - **Host:** `crates/flac-lite/tests/` (std integration harness — the lib itself is
   `#![no_std]`, tests are separate crates) decoding fixture files and asserting
-  bit-exact equality with reference `flac --decode` PCM.
+  bit-exact equality with reference `flac --decode` PCM. Run via `make flac-test`,
+  which invokes cargo from **outside the repo** (see "Cargo config leak" — the
+  in-tree flag override went stale on nightly drift).
 - **Target:** `cargo +nightly check --release --target thumbv4t-none-eabi
   -Zbuild-std=core,alloc` must stay clean — that is the compile gate that symphonia
   could never pass.
@@ -256,12 +258,54 @@ the root's GBA config, and **both** inherited values break a naive host test:
 | `cargo +nightly test` | ❌ `E0463: can't find crate for 'test'` — inherited `[build] target` |
 | `cargo +nightly test --target <host>` | ❌ `E0152: duplicate lang item core::sized` — inherited `build-std` recompiles `core` under host `std` |
 | local `[unstable] build-std = []` | ❌ still `E0152` — cargo **merges arrays across config layers**, an empty local override does not clear the parent's |
-| `cargo +nightly test -Zbuild-std= --target <host>` | ✅ both overrides required |
+| `cargo +nightly test -Zbuild-std= --target <host>` | ⚠️ worked up to nightly ~2026-06-01, **rots** (below) |
+| `CARGO_UNSTABLE_BUILD_STD= cargo +nightly test --target <host>` | ❌ still `E0152` (nightly 2026-09-03) |
+| `cargo +nightly test --config 'unstable.build-std=[]' --target <host>` | ❌ still `E0152` (nightly 2026-09-03) |
+| **cwd outside the repo** + `cargo +nightly test --manifest-path <crate>/Cargo.toml --target <host>` | ✅ non-inheritance is positional, not flag precedence |
 
-Canonical host gate: `cargo +nightly test -Zbuild-std= --target "$(rustc -vV | sed
--n 's|host: ||p')"`. Alternatively run from outside the repo subtree with
-`--manifest-path`, where no parent config exists — which is what splitting
-`flac-lite` into its own repo would give us permanently.
+##### The flag override rotted; only leaving the tree is durable (found 2026-09-04)
+
+The 2026-08-30 conclusion — `-Zbuild-std=` (empty) + `--target <host>`, "both
+overrides required" — held against nightly of that era and is now **false**. On
+nightly 2026-09-03 (`rustc 1.100.0-nightly a69a63265`) the inherited
+`[unstable] build-std` wins over *every* in-tree override we tried:
+
+| Variant, run in `crates/flac-lite/` (nightly 2026-09-03) | Result |
+|---|---|
+| `cargo test -Zbuild-std= --target <host>` (the old canonical gate) | ❌ `E0152` while compiling `std` from source |
+| `CARGO_UNSTABLE_BUILD_STD= cargo test --target <host>` | ❌ `E0152` compiling `flac-lite` |
+| `cargo test --config 'unstable.build-std=[]' --target <host>` | ❌ `E0152` |
+| `cargo test --config 'build.target="<host>"' -Zbuild-std=` | ❌ `E0152` |
+| same crate, toolchain pinned to `nightly-2026-06-01` | ✅ passes |
+| cwd `=/tmp/...` (outside repo) + `--manifest-path`, no flags | ✅ passes |
+
+Reproduce with `drafts/flac-host-gate-matrix.sh` (workspace, not committed). The
+`E0152` message names *which* `core` lost: the first definition comes from
+`target/<host>/debug/build/core/*/out/libcore-*.rmeta` — a build-std `core` baked
+*inside the crate's own target dir* — colliding with the toolchain's prebuilt host
+`core`. So stale artifacts poison subsequent runs too; every row above was measured
+after `rm -rf target/<host>`.
+
+**Canonical host gate (Makefile `flac-test`, 2026-09-04):** run cargo from a cwd
+outside the repo so the config walk terminates immediately, and name the crate with
+`--manifest-path`:
+
+```sh
+REPO=$(git rev-parse --show-toplevel)   # resolve BEFORE leaving the tree
+mkdir -p /tmp/gba-sound-player-host-gate && cd /tmp/gba-sound-player-host-gate && \
+  cargo +nightly test \
+    --manifest-path "$REPO/crates/flac-lite/Cargo.toml" \
+    --target "$(rustc -vV | sed -n 's|host: ||p')"
+```
+
+(The manifest path must be absolute and resolved *before* the `cd` — the Makefile
+uses `$(abspath crates/flac-lite/Cargo.toml)` for exactly this reason.)
+
+Nothing is inherited, so there is nothing to override — no `-Zbuild-std=` dance, and
+no exposure to whatever nightly decides about flag-vs-config precedence. The build
+dir is derived from the *manifest*, not the cwd, so artifacts still land in
+`crates/flac-lite/target/` (the container cache volumes keep working). This is the
+same effect splitting `flac-lite` into its own repo would give us, without the split.
 
 > `-Zbuild-std=core,alloc` on the target gate is **not** "using std": rustup ships
 > no prebuilt `core` for this Tier-3 target, so `core` must be compiled from source
