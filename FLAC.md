@@ -387,6 +387,22 @@ Scaffolding only — **no decoding logic implemented yet**:
 Next steps, in order:
 
 1. [ ] Implement `bits::BitReader` + host unit tests (smallest testable unit).
+       - [x] **Step 1 done 2026-09-04**: core read path (`new`, `read_bits`,
+         `bit_position`, `bits_remaining`) on the **position-only** design —
+         cursor is a plain bit offset, no refill accumulator. 12 `core`-only
+         unit tests (hand-computed patterns, exhaustive alignment×width sweep,
+         differential bit-by-bit vs wide-read vs independent oracle, EOF/cursor
+         invariants). Both gates green. Remaining: `peek_bits`, `read_signed`,
+         `read_utf8_coded`, `byte_align`, `read_u8`, `crc8`/`crc16`.
+       - [x] **On-hardware PoC added 2026-09-05** (`make native-flac-rom` /
+         `podman-flac-rom`): the FLAC ROM embeds a hard-coded 10-byte test
+         vector, reads it back through `BitReader` in the decoder's
+         representative field pattern (unaligned widths, byte-crossing reads,
+         cursor + EOF checks), logs expected-vs-actual per field over mGBA
+         serial, and shows the verdict on screen: **blue = all matched,
+         red = mismatch** (purple = proof never completed). Expectations are
+         hand-computed from the bit layout, not from the library — so the ROM
+         is an independent oracle that also validates on real hardware.
 2. [ ] `format::Manifest` parser + `scripts/pack_flac.sh` real implementation.
 3. [ ] `subframe` FIXED + `residual` Rice → **perf gate spike** in mGBA.
 4. [ ] LPC + stereo decorrelation + CRC; fixture tests vs reference `flac`.
