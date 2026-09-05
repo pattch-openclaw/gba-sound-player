@@ -133,11 +133,10 @@ rom: build
 native-rom: rom
 	@echo "native-rom done: $(ROM)"
 
-# Containerized: build the image, then run `make rom` inside it with the project
-# dir mounted. The .gba lands back in your host dir.
+# Containerized: build the image (builder stage only), then run `make rom`.
 podman-rom:
-	$(CONTAINER) build -t $(IMAGE) .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE) make rom
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make rom
 
 # ---------------------------------------------------------------------------
 # EXPERIMENTAL: flac-lite bundled into a ROM (sanity check for FLAC.md option
@@ -159,8 +158,8 @@ native-flac-rom: flac-rom
 	@echo "native-flac-rom done: $(FLAC_ROM)"
 
 podman-flac-rom:
-	$(CONTAINER) build -t $(IMAGE) .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE) make flac-rom
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make flac-rom
 
 # ---------------------------------------------------------------------------
 # Containerized testing.
@@ -251,27 +250,27 @@ test: test-rom flac-test
 
 # Full suite: ROM #[test_case] suite in headless mGBA + flac-lite gates.
 podman-test:
-	$(CONTAINER) build -t $(IMAGE) .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE) make test
+	$(CONTAINER) build --target tester -t $(IMAGE)-tester .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-tester make test
 	@echo "podman-test done: ROM suite + flac-lite gates ran in $(CONTAINER)."
 
 # ROM #[test_case] suite only.
 podman-test-rom:
-	$(CONTAINER) build -t $(IMAGE) .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE) make test-rom
+	$(CONTAINER) build --target tester -t $(IMAGE)-tester .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-tester make test-rom
 	@echo "podman-test-rom done: ROM suite ran in $(CONTAINER)."
 
 # flac-lite alone (target compile gate + host tests) — the fastest container
-# loop; no agb, no ROM, no emulator.
+# loop; no agb, no ROM, no emulator. Runs in the lighter builder stage.
 podman-flac-test:
-	$(CONTAINER) build -t $(IMAGE) .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE) make flac-test
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make flac-test
 	@echo "podman-flac-test done: flac-lite gates ran in $(CONTAINER)."
 
 # Formatting gate in the container too (CI-friendly; identical rustfmt).
 podman-check:
-	$(CONTAINER) build -t $(IMAGE) .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE) make check
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make check
 	@echo "podman-check done: formatting verified in $(CONTAINER)."
 
 # ---------------------------------------------------------------------------
