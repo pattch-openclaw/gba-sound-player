@@ -1,10 +1,10 @@
 //! MSB-first bit reader over an immutable byte slice.
 //!
 //! STATUS (2026-09-05): **core read path implemented** — `new`, `read_bits`,
-//! `peek_bits`, `read_signed`, `bit_position`, `bits_remaining` (roadmap Step 1
-//! + `peek_bits` + `read_signed`, FLAC.md "Next steps"). The remaining
-//! methods (`read_utf8_coded`, `byte_align`, `read_u8`, CRCs) are still
-//! scaffold (`todo!()`).
+//! `peek_bits`, `read_signed`, `read_utf8_coded`, `bit_position`,
+//! `bits_remaining` (roadmap Step 1 + `peek_bits` + `read_signed` +
+//! `read_utf8_coded`, FLAC.md "Next steps"). The remaining methods
+//! (`byte_align`, `read_u8`, CRCs) are still scaffold (`todo!()`).
 //!
 //! FLAC packs its fields MSB-first across byte boundaries, so the whole decoder
 //! is built on this one primitive. Design notes for the implementation:
@@ -90,13 +90,54 @@ impl<'a> BitReader<'a> {
         Ok(((raw << shift) as i32) >> shift)
     }
 
-    /// Read the UTF-8-style "zero-padded" number used for frame/sample numbers
-    /// and channel assignments (RFC 9629 §5.1.4.1 / §7.2).
+    /// Read FLAC's UTF-8-style **coded number** (RFC 9639 §9.1.5): the
+    /// variable-length prefix code used for frame/sample numbers. FLAC reuses
+    /// the UTF-8 shape but extends it to 36-bit values / 7-byte forms —
+    /// general-purpose UTF-8 decoders cannot parse these, so this is
+    /// deliberately its own reader.
     ///
-    /// Leading zero bits encode the width of the following value. A value with
-    /// all-ones prefix (`1111111`) is an invalid/reserved doubled prefix.
+    /// Leading one-bits of the first byte set the total length; the first
+    /// byte's remaining payload bits are the value's top bits, and each
+    /// following byte contributes 6 (`10xxxxxx` continuation) bits, MSB-first:
+    ///
+    /// ```text
+    /// 0xxxxxxx                                    → 1 byte,  7 payload bits
+    /// 110xxxxx 10xxxxxx                           → 2 bytes, 11 bits
+    /// 1110xxxx 10xxxxxx 10xxxxxx                  → 3 bytes, 16 bits
+    /// 11110xxx  …                                 → 4 bytes, 21 bits
+    /// 111110xx  …                                 → 5 bytes, 26 bits
+    /// 1111110x  …                                 → 6 bytes, 31 bits
+    /// 11111110 10xxxxxx ×6                        → 7 bytes, 36 bits
+    /// ```
+    ///
+    /// Errors ([`Error::InvalidField`]): a stray continuation lead
+    /// (`0b10xxxxxx`, prefix == 1) and an all-ones first byte (`0xFF`,
+    /// prefix == 8) are not legal leads; any non-`0b10xxxxxx` continuation
+    /// byte is likewise rejected. (The pre-RFC spec's "doubled prefix"
+    /// warning applied to `0xFE`, which RFC 9639 legalizes as the 7-byte
+    /// lead — only `0xFF` remains invalid.)
+    ///
+    /// This is a *bit-level* decoder: it does not enforce canonical (shortest)
+    /// form — non-canonical leads like `0xC0 0x80` decode to small values by
+    /// design, exactly as libFLAC's decoder accepts them. Stream semantics
+    /// (numbers must match the frame count / be strictly increasing) belong
+    /// to the frame layer, where those invariants are actually checkable.
+    ///
+    /// Cursor is **atomic**: a multi-byte read that fails partway (bad lead,
+    /// bad continuation, EOF) restores the cursor exactly as it was — the
+    /// composite of several `read_bits` calls, rolled back on error.
     pub fn read_utf8_coded(&mut self) -> Result<u64> {
-        todo!("flac-lite scaffold: BitReader::read_utf8_coded")
+        let start = self.bit_pos;
+        match self.coded_number_inner() {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                // Atomicity across the whole composite read; `bit_pos` only
+                // ever moves forward, and a failed number read never moves it
+                // at all.
+                self.bit_pos = start;
+                Err(e)
+            }
+        }
     }
 
     /// Consume bits up to the next byte boundary. Returns the number of bits
@@ -160,6 +201,44 @@ impl<'a> BitReader<'a> {
         let shift = bytes_needed as u32 * 8 - off - n;
         let mask = (1u64 << n) - 1; // n in 1..=32, so this cannot overflow u64
         Ok(((acc >> shift) & mask) as u32)
+    }
+
+    /// Decode one UTF-8-style coded number (RFC 9639 §9.1.5), advancing the
+    /// cursor as it goes. [`Self::read_utf8_coded`] wraps this to make the
+    /// composite read atomic — every failure path here returns through the
+    /// wrapper, which restores the cursor.
+    fn coded_number_inner(&mut self) -> Result<u64> {
+        let lead = self.read_bits(8)? as u8;
+        // Count leading ones of the lead byte: shift/mask only, at most 8
+        // iterations (`mask` reaching 0 ends the loop for every input, per
+        // the module's no-divide ARMv4T rule).
+        let mut prefix: u32 = 0;
+        let mut mask = 0x80u8;
+        while lead & mask != 0 {
+            prefix += 1;
+            mask >>= 1;
+        }
+        // prefix == 1: stray continuation byte (10xxxxxx cannot lead).
+        // prefix == 8: 0xFF, the one all-ones lead RFC 9639 leaves invalid
+        // (0xFE is the legal 7-byte lead; the pre-RFC "doubled prefix"
+        // warning concerned it, not 0xFF).
+        if prefix == 1 || prefix == 8 {
+            return Err(Error::InvalidField);
+        }
+        // prefix == 0 → single byte; otherwise the prefix counts ALL octets.
+        let total = if prefix == 0 { 1 } else { prefix };
+        // Lead-byte payload width is 7 - prefix (zero for the 7-byte lead).
+        // `0xFFu32 >> (prefix + 1)` is that width's mask with no subtraction
+        // edge case: prefix == 7 shifts a u32 by 8 → 0, which is defined.
+        let mut value = u64::from(u32::from(lead) & (0xFFu32 >> (prefix + 1)));
+        for _ in 1..total {
+            let cont = self.read_bits(8)? as u8;
+            if cont & 0xC0 != 0x80 {
+                return Err(Error::InvalidField);
+            }
+            value = (value << 6) | u64::from(cont & 0x3F);
+        }
+        Ok(value)
     }
 }
 
@@ -543,6 +622,248 @@ mod tests {
                     Err(Error::EndOfStream) => assert!(start + width > total),
                     Err(e) => panic!("unexpected at start {start}, width {width}: {e:?}"),
                 }
+            }
+        }
+    }
+
+    // ---- read_utf8_coded -----------------------------------------------------
+
+    /// Independent encoder for roundtrip tests: builds the canonical
+    /// (shortest-form) octet sequence for a value by Table 18 magnitude
+    /// boundaries — construction-by-shifting-from-the-top, a deliberately
+    /// different mechanism from the decode-under-test (which walks
+    /// prefix → continuations), so a shared bug is unlikely.
+    ///
+    /// Table 18 boundaries (RFC 9639 §9.1.5): total octets and lead base per
+    /// magnitude class.
+    fn encode_coded(v: u64) -> ([u8; 7], usize) {
+        const FORMS: [(u64, u8, u32); 7] = [
+            (0x7F, 0x00, 1),           // 0xxxxxxx
+            (0x7FF, 0xC0, 2),          // 110xxxxx
+            (0xFFFF, 0xE0, 3),         // 1110xxxx
+            (0x1F_FFFF, 0xF0, 4),      // 11110xxx
+            (0x3FF_FFFF, 0xF8, 5),     // 111110xx: 2+24 = 26 payload bits
+            (0x7F_FF_FF_FF, 0xFC, 6),  // 1111110x
+            (0xF_FFFF_FFFF, 0xFE, 7),  // 11111110 + 6 continuations
+        ];
+        let mut out = [0u8; 7];
+        for &(max, base, t) in FORMS.iter() {
+            if v <= max {
+                // Payload below the lead byte; t == 1 shifts by 0 (identity,
+                // and v ≤ 0x7F fits the lead payload exactly).
+                out[0] = base | (v >> (6 * (t - 1))) as u8;
+                for i in 1..t {
+                    out[i as usize] = 0x80 | ((v >> (6 * (t - 1 - i))) & 0x3F) as u8;
+                }
+                return (out, t as usize);
+            }
+        }
+        panic!("{v:#x} exceeds the 36-bit coded-number range");
+    }
+
+    #[test]
+    fn read_utf8_coded_single_byte_identity() {
+        // 0xxxxxxx is the identity form: every one-byte lead decodes to
+        // itself, cursor lands on the next byte.
+        for lead in 0x00u8..=0x7F {
+            let data = [lead];
+            let mut r = BitReader::new(&data);
+            assert_eq!(r.read_utf8_coded().unwrap(), u64::from(lead), "{lead:#04X}");
+            assert_eq!(r.bit_position(), 8);
+        }
+    }
+
+    #[test]
+    fn read_utf8_coded_rfc_table_vectors() {
+        // Every form class from the RFC 9639 Table 18 shape, at minimum,
+        // mid, and maximum where distinct — expectations derived by hand
+        // from the bit layout (payload bits concatenated MSB-first) and
+        // cross-checked against an independent spec-derived oracle script.
+        // Includes the RFC §9.1.5 worked example (51 billion).
+        let cases: &[(&[u8], u64)] = &[
+            (&[0x00], 0),
+            (&[0x7F], 127),
+            (&[0xC2, 0x80], 0x80),
+            (&[0xDF, 0xBF], 0x7FF),
+            (&[0xE0, 0xA0, 0x80], 0x800),
+            (&[0xEF, 0xBF, 0xBF], 0xFFFF),
+            (&[0xF0, 0x90, 0x80, 0x80], 0x1_0000),
+            (&[0xF1, 0x80, 0x80, 0x80], 0x4_0000), // lead payload 0b0001 << 18
+            (&[0xF7, 0xBF, 0xBF, 0xBF], 0x1F_FFFF),
+            (&[0xF8, 0x88, 0x80, 0x80, 0x80], 0x20_0000),
+            (&[0xFB, 0xBF, 0xBF, 0xBF, 0xBF], 0x3_FFFF_FF), // 26-bit max of the 5-byte form
+            (&[0xFC, 0x84, 0x80, 0x80, 0x80, 0x80], 0x400_0000),
+            (&[0xFD, 0xBF, 0xBF, 0xBF, 0xBF, 0xBF], 0x7F_FF_FF_FF),
+            // 7-byte lead carries ZERO payload bits:
+            (&[0xFE, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80], 0), // non-canonical zero
+            (&[0xFE, 0x82, 0x80, 0x80, 0x80, 0x80, 0x80], 0x8000_0000), // 2^31, table minimum
+            (&[0xFE, 0xBF, 0xBF, 0xBF, 0xBF, 0xBF, 0xBF], 0xF_FFFF_FFFF), // 36-bit max
+            (&[0xFE, 0xAF, 0x9F, 0xB5, 0xA3, 0xB8, 0x80], 51_000_000_000), // RFC worked example
+        ];
+        for &(bytes, want) in cases {
+            let mut r = BitReader::new(bytes);
+            assert_eq!(r.read_utf8_coded().unwrap(), want, "{bytes:02X?}");
+            // Whole number consumed exactly one byte per octet.
+            assert_eq!(r.bit_position(), bytes.len() * 8, "{bytes:02X?}");
+        }
+    }
+
+    #[test]
+    fn read_utf8_coded_rejects_invalid_forms_cursor_untouched() {
+        // Stray continuation leads (10xxxxxx), the all-ones lead (0xFF), and
+        // broken continuation bytes are all InvalidField — and because the
+        // read is composite, the cursor must be fully restored in every case
+        // (nothing before the failure point stays consumed).
+        let cases: &[&[u8]] = &[
+            &[0x80],             // stray continuation lead
+            &[0xBF],             // stray continuation lead (upper)
+            &[0xFF],             // prefix == 8: the invalid all-ones lead
+            &[0xC2, 0x00],       // second octet is not 10xxxxxx
+            &[0xC2, 0xC0],       // continuation bit pattern broken (11…)
+            &[0xDF, 0x3F],       // continuation bit pattern broken (00…)
+            &[0xE0, 0xA0, 0x00], // third octet not a continuation
+        ];
+        for &bytes in cases {
+            let mut r = BitReader::new(bytes);
+            assert_eq!(r.read_utf8_coded(), Err(Error::InvalidField), "{bytes:02X?}");
+            assert_eq!(r.bit_position(), 0, "atomic: {bytes:02X?}");
+        }
+        // Every stray-continuation lead byte at all rejects before consuming
+        // any continuation.
+        for lead in 0x80u8..0xC0 {
+            let data = [lead, 0x80];
+            let mut r = BitReader::new(&data);
+            assert_eq!(r.read_utf8_coded(), Err(Error::InvalidField), "{lead:#04X}");
+            assert_eq!(r.bit_position(), 0);
+        }
+    }
+
+    #[test]
+    fn read_utf8_coded_truncation_restores_cursor() {
+        // Mid-number EOF is the case atomicity exists for: a 6-byte form cut
+        // to 5 octets must leave the cursor exactly where it started.
+        let truncated = [0xFC, 0xBF, 0xBF, 0xBF, 0xBF]; // needs 6 octets, has 5
+        let mut r = BitReader::new(&truncated);
+        assert_eq!(r.read_utf8_coded(), Err(Error::EndOfStream));
+        assert_eq!(r.bit_position(), 0);
+        // Same bytes + the missing octet → succeeds; the failed attempt
+        // consumed nothing.
+        // 0xFC lead carries ONE payload bit (0 here), five continuations
+        // carry 30 → 0x3F_FF_FF_FF, not the 0x7F… of the 0xFD lead.
+        let full = [0xFC, 0xBF, 0xBF, 0xBF, 0xBF, 0xBF];
+        let mut r = BitReader::new(&full);
+        assert_eq!(r.read_utf8_coded().unwrap(), 0x3F_FF_FF_FF);
+        assert_eq!(r.bit_position(), 48);
+        // 7-byte lead at EOF after one byte: rejection of an incomplete
+        // number never strands the cursor mid-number.
+        let mut r = BitReader::new(&[0xFE]);
+        assert_eq!(r.read_utf8_coded(), Err(Error::EndOfStream));
+        assert_eq!(r.bit_position(), 0);
+    }
+
+    #[test]
+    fn read_utf8_coded_two_byte_form_exhaustive() {
+        // All 32×64 legal two-byte pairs against the by-definition value
+        // ((lead & 0x1F) << 6) | (cont & 0x3F) — no table lookup involved.
+        for lead in 0xC0u8..0xE0 {
+            for cont in 0x80u8..0xC0 {
+                let data = [lead, cont];
+                let mut r = BitReader::new(&data);
+                let want =
+                    (u64::from(lead & 0x1F) << 6) | u64::from(cont & 0x3F);
+                assert_eq!(r.read_utf8_coded().unwrap(), want, "{lead:02X} {cont:02X}");
+                assert_eq!(r.bit_position(), 16);
+            }
+        }
+    }
+
+    #[test]
+    fn read_utf8_coded_sequential_numbers_pack_back_to_back() {
+        // Mixed widths concatenated: 1 + 2 + 7 + 1 octets. The frame header
+        // read path (coded number after fixed-width fields) lives or dies
+        // with sequential cursor bookkeeping.
+        let data = [
+            0x00,                                                             // 0
+            0xC2, 0x80,                                                       // 0x80
+            0xFE, 0xAF, 0x9F, 0xB5, 0xA3, 0xB8, 0x80,                         // 51e9
+            0x7F,                                                             // 127
+        ];
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.read_utf8_coded().unwrap(), 0);
+        assert_eq!(r.read_utf8_coded().unwrap(), 0x80);
+        assert_eq!(r.read_utf8_coded().unwrap(), 51_000_000_000);
+        assert_eq!(r.read_utf8_coded().unwrap(), 127);
+        assert_eq!(r.bit_position(), data.len() as usize * 8);
+        assert_eq!(r.read_utf8_coded(), Err(Error::EndOfStream));
+        assert_eq!(r.bit_position(), data.len() as usize * 8);
+    }
+
+    #[test]
+    fn read_utf8_coded_roundtrips_at_every_bit_alignment() {
+        // Differential sweep: canonical encodings (independent encoder
+        // above) placed at every bit alignment 0..7, decoded back. Covers
+        // the unaligned 8-bit reads inside the composite decode — where a
+        // refill/cursor bug would live — for every form width.
+        let boundaries: &[u64] = &[
+            0, 1, 0x7E, 0x7F, 0x80, 0x7FE, 0x7FF,
+            0x800, 0xFFFE, 0xFFFF,
+            0x1_0000, 0x1F_FFFE, 0x1F_FFFF,
+            0x20_0000, 0x3_FFFF_FE, 0x3_FFFF_FF,
+            0x400_0000, 0x7F_FF_FF_FE, 0x7F_FF_FF_FF,
+            0x8000_0000, 0xF_FFFF_FFFE, 0xF_FFFF_FFFF,
+        ];
+        let mut rng = Lcg(0xFEED_C0DE);
+        let mut samples: [u64; 64 + 22] = [0; 64 + 22];
+        let mut n = 0usize;
+        for &b in boundaries {
+            samples[n] = b;
+            n += 1;
+        }
+        while n < samples.len() {
+            let mut v = 0u64;
+            for _ in 0..5 {
+                v = (v << 8) | u64::from(rng.next_u8());
+            }
+            samples[n] = v & 0xF_FFFF_FFFF; // clamp into the 36-bit range
+            n += 1;
+        }
+
+        for &val in &samples[..n] {
+            let (enc, len) = encode_coded(val);
+            for pad in 0..8usize {
+                // Place the number at ABSOLUTE bit `pad`: pack `pad` filler
+                // bits then the enc octets bit-by-bit MSB-first. (A byte-copy
+                // would put the field at bit 8, not bit `pad` — an early version of
+                // this harness read filler at pad == 0 and failed.)
+                let total_bits = pad + len * 8;
+                let mut data = [0u8; 16];
+                for i in 0..total_bits {
+                    // Both branches yield an unshifted 0/1 bit; the shift into
+                    // the byte happens once here. (An early version pre-shifted
+                    // only the filler branch — number bits then landed at the
+                    // wrong bit position for any pad > 0.)
+                    let bit = if i < pad {
+                        // Arbitrary but non-constant filler: a run of zeros
+                        // here could mask an off-by-one into the padding.
+                        (i as u8 * 37 + 11) & 1
+                    } else {
+                        let j = i - pad;
+                        (enc[j >> 3] >> (7 - (j & 7))) & 1
+                    };
+                    data[i >> 3] |= bit << (7 - (i & 7));
+                }
+                let mut r = BitReader::new(&data);
+                if pad > 0 {
+                    let _ = r.read_bits(pad as u32).unwrap(); // reach the alignment
+                }
+                let before = r.bit_position();
+                assert_eq!(
+                    r.read_utf8_coded().unwrap(),
+                    val,
+                    "val {val:#x}, pad {pad}, enc {:?}",
+                    &enc[..len]
+                );
+                assert_eq!(r.bit_position(), before + len * 8);
             }
         }
     }
