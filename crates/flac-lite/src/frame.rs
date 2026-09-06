@@ -2,7 +2,7 @@
 //!
 //! SCAFFOLD STATE: types and signatures only, bodies are `todo!()`.
 //!
-//! Frame layout (RFC 9629 §7):
+//! Frame layout (RFC 9639 §9):
 //!
 //! ```text
 //! [sync 0b1111111x][reserved 0][blocking strategy][blocksize code][sample rate code]

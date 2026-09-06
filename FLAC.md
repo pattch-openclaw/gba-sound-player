@@ -387,7 +387,7 @@ Scaffolding only — **no decoding logic implemented yet**:
 Next steps, in order:
 
 1. [ ] Implement `bits::BitReader` + host unit tests (smallest testable unit).
-   **Not done**: the read path is implemented and hardware-validated, but 3
+   **Not done**: the read path is implemented and hardware-validated, but 2
    reader methods and both CRC helpers are still `todo!()` scaffold (listed
    below).
    - [x] **Core read path — done 2026-09-04** (PR #25): `new`, `read_bits`,
@@ -431,8 +431,28 @@ Next steps, in order:
      hand-computed bit fields were mis-derived and the oracle itself had
      dropped its arithmetic shift; the impl never changed. `make flac-test`
      green (31 tests + thumbv4t compile gate).
-   - [ ] `read_utf8_coded` — FLAC's zero-padded prefix numbers (RFC 9629
-     §5.1.4.1 / §7.2), used for frame/sample numbers and channel assignments.
+   - [x] **`read_utf8_coded` — done 2026-09-05**: FLAC's UTF-8-style coded
+     number (RFC 9639 **§9.1.5** — the §5.1.4.1/§7.2 cites here were stale
+     section numbers from the pre-RFC doc layout, and the RFC number itself
+     was a 9629 typo; both fixed repo-wide in this PR). Lead-byte leading-ones
+     prefix → total octets (1–7), lead payload + six bits per continuation,
+     MSB-first, into `u64` (the format extends UTF-8 to 36-bit values, so
+     stock UTF-8 decoders can't be reused). `InvalidField` for stray-
+     continuation leads (prefix 1), `0xFF` (prefix 8 — the only invalid
+     all-ones lead; `0xFE` is the legal 7-byte lead), and broken
+     continuations; deliberately **bit-level**: no canonical-form check
+     (libFLAC-identical — stream semantics belong to the frame layer).
+     Composite read is **atomic**: partial failures restore the cursor.
+     7 new `core`-only tests (~400 assertions): all seven form classes with
+     hand-derived vectors incl. the RFC §9.1.5 worked example (51 billion),
+     exhaustive 1-byte identity + 2-byte sweeps, invalid-form and truncated-
+     number cursor atomicity, and an alignment×sample differential roundtrip
+     vs an independent encoder. `make flac-test` green (31 tests + thumbv4t
+     compile gate). Lesson baked in again: every failure during this step was
+     a *test/vector* bug (mis-derived expectations, a hex-digit-group typo,
+     a bit-packing harness bug) — the impl never changed; an independent
+     Python oracle script caught three bad vectors before any Rust was
+     written.
    - [ ] `byte_align` — discard to the next byte boundary, returning bits
      dropped (0..7); division-free (`& 7`).
    - [ ] `read_u8` — byte-aligned single byte (CRC-8 / padding).

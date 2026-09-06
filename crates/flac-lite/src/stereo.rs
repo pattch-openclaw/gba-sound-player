@@ -1,4 +1,4 @@
-//! Stereo decorrelation (RFC 9629 §7.4.3).
+//! Stereo decorrelation (RFC 9639 §4.2 / §9.2.1 channel bits).
 //!
 //! SCAFFOLD STATE: signatures only, bodies are `todo!()`.
 //!

@@ -115,7 +115,7 @@ pub enum Error {
 /// Crate-local result alias; avoids importing `std::result` anywhere.
 pub type Result<T> = core::result::Result<T, Error>;
 
-/// Highest LPC predictor order FLAC defines (RFC 9629 §7.2).
+/// Highest LPC predictor order FLAC defines (RFC 9639 §9.2.6).
 pub const MAX_LPC_ORDER: usize = 32;
 
 /// Highest FIXED predictor order FLAC defines.
