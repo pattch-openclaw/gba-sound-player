@@ -454,11 +454,65 @@ Next steps, in order:
      Python oracle script caught three bad vectors before any Rust was
      written.
    - [ ] `byte_align` — discard to the next byte boundary, returning bits
-     dropped (0..7); division-free (`& 7`).
-   - [ ] `read_u8` — byte-aligned single byte (CRC-8 / padding).
+     dropped (0..7); division-free (`& 7`). **Phase-1 blocker**: FLAC frame
+     headers are not inherently byte-aligned and end in an 8-bit CRC; nothing
+     downstream of `decode_frame`'s header parse can consume a real frame
+     without this.
+   - [ ] `read_u8` — byte-aligned single byte (CRC-8 / padding). **Phase-1
+     blocker**, same reason: the header CRC byte must at least be *consumed*,
+     even when its value is not verified.
    - [ ] `crc8` + `crc16` — FLAC polynomials, table-free for now; revisit a
-     256×u16 table only if the perf spike shows it pays for itself.
-2. [ ] `format::Manifest` parser + `scripts/pack_flac.sh` real implementation.
-3. [ ] `subframe` FIXED + `residual` Rice → **perf gate spike** in mGBA.
-4. [ ] LPC + stereo decorrelation + CRC; fixture tests vs reference `flac`.
-5. [ ] `examples/flac_spike` ROM: cycle counter, then mixer/DMA double-buffer playback.
+     256×u16 table only if the perf spike shows it pays for itself. **Not a
+     spike prerequisite** — the perf gate runs with CRC verify skipped (design
+     already allows: checked in debug, skippable in release). Deferred to
+     Phase 2.
+
+#### Phased plan: PoC/perf-gate first, production pipeline after (2026-09-06)
+
+Re-sequenced deliberately. The perf gate ("can a 16.78MHz ARM7TDMI decode
+FIXED+Rice in real time?") is the project's critical unknown, and its answer
+could invalidate downstream design choices (e.g. `flac -l 4` hardening,
+buffer layout, even the encode profile). So the gate gets the *shortest
+honest path*, and the production-only machinery (manifest, packer, CRC
+verify, fixtures) waits until the gate resolves. The old list's "manifest
+parser before spike" was the *production* build order, not the *gate* order —
+the spike does not need it: it can `include_bytes!` a plain `flac -l 4`
+encode and locate frames by sync-code scan (`0xFF 0xF8`) or a hand-computed
+static offset table. That harness is throwaway on purpose; the GAFP packer
+gets built later for the shipping path regardless.
+
+**Phase 1 — path to the perf gate (the only active work):**
+
+1. [ ] Finish `bits` for frame-header consumption: `byte_align`, `read_u8`
+   (+ host unit tests). Small, division-free, and the genuine last blockers
+   in `bits`.
+2. [ ] Minimal `frame` header parse: sync/code checks, blocksize & sample-rate
+   tables, UTF-8 coded frame number, **consume** (do not verify) the header
+   CRC-8. Enough to position the reader at the subframe data of a real
+   `flac -l 4` frame.
+3. [ ] `subframe` FIXED (orders 0–4) + `residual` partitioned Rice/Rice2 —
+   the decode math the gate measures.
+4. [ ] **Perf gate spike** in `examples/flac_spike/`: ROM embeds a ~10s
+   `flac -l 4` clip via `include_bytes!`; frames located by sync scan or a
+   hand-computed offset array (no GAFP, no manifest — deliberately
+   throwaway); timer-capture cycle counter around `decode_frame`; decode-loop
+   cadence vs the 64ms/frame @ 2048×32kHz real-time budget, measured on mGBA.
+   - Decision rule (from the risk gate above): FIXED-only fits but LPC does
+     not → `flac -l 4` becomes a hard constraint and the parser rejects LPC
+     frames. FIXED-only misses the budget → offline pre-processing
+     (FIXED order 0–1) or scope reduction.
+
+**Phase 2 — production pipeline (starts only after the gate resolves):**
+
+5. [ ] `crc8` + `crc16` implementations; wire debug-only frame CRC-8 /
+     footer CRC-16 verification into `frame`.
+6. [ ] `format::Manifest` (GAFP) parser + `scripts/pack_flac.sh` real
+     implementation — the shippable container: O(1) seek table, profile
+     validation at pack time, replaces the spike's scan-based harness.
+7. [ ] LPC (order ≤32, parse at minimum; enforce the profile per the gate's
+     decision) + stereo decorrelation (mid/side, left/side, right/side).
+8. [ ] Fixture tests: bit-exact vs reference `flac --decode` PCM across the
+     constrained profile.
+9. [ ] `agb` integration: replace the integration ROM's `#[used]` link anchor
+     with a real decode loop; mixer/DMA double-buffer playback; A/B against
+     the same WAV.
