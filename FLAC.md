@@ -453,14 +453,36 @@ Next steps, in order:
      a bit-packing harness bug) — the impl never changed; an independent
      Python oracle script caught three bad vectors before any Rust was
      written.
-   - [ ] `byte_align` — discard to the next byte boundary, returning bits
-     dropped (0..7); division-free (`& 7`). **Phase-1 blocker**: FLAC frame
-     headers are not inherently byte-aligned and end in an 8-bit CRC; nothing
-     downstream of `decode_frame`'s header parse can consume a real frame
-     without this.
-   - [ ] `read_u8` — byte-aligned single byte (CRC-8 / padding). **Phase-1
-     blocker**, same reason: the header CRC byte must at least be *consumed*,
-     even when its value is not verified.
+   - [x] **`byte_align` + `read_u8` — done 2026-09-06**: the last two
+     frame-header blockers, together in one `bits`-closing PR
+     (`feat/bitreader-byte-align-read-u8`; together because each alone is a
+     ~5-line diff and the composite frame-header composition is the shared
+     test surface). `byte_align` is the division-free `(8 - (pos & 7)) & 7`:
+     infallible, idempotent at aligned, and it cannot overrun — a slice's bit
+     count is a multiple of 8, so aligning any in-bounds cursor lands in
+     bounds. `read_u8` delegates to `read_bits(8)` (EOF/cursor rules identical
+     by construction, same delegation as `read_signed`). Design decision found
+     *during* implementation, not before: `read_u8` is **bit-level, not
+     alignment-enforcing**, because the frame header's fixed fields are
+     **31 bits** (sync 14 + reserved + blocking + blocksize 4 + rate 4 +
+     channels 3 + size 3 + reserved) and the coded number after them is whole
+     octets — so the header CRC-8 always sits at bit `31 + 8k`, **never**
+     byte-aligned. An earlier draft of these notes claimed the fixed fields
+     were 24 bits and the CRC "aligned by construction": both wrong, and
+     `byte_align`-before-CRC would drop the CRC's top bit and break
+     `decode_frame`. 10 new `core`-only tests: drop-width sweep at every
+     alignment, exhaustive length×position no-overrun sweep, idempotence,
+     `read_u8` differential vs `read_bits(8)` + naive oracle at every
+     alignment, all-256-byte stream order, EOF cursor invariants, and two
+     composite frame-layer patterns — a faithful 55-bit header tail (31 fixed
+     bits + 2-octet coded 300 + CRC-8 straddling a byte boundary) and
+     padding→footer with a counterfactual assertion (the unaligned read is a
+     *different* byte, so skipping `byte_align` cannot pass).
+     `make flac-test` green (41 tests + thumbv4t compile gate). Lesson baked
+     in again: an independent Python bit packer caught two hand-packed vector
+     bugs before any Rust ran — sync `0x3FF8` is not a valid sync code (the
+     14-bit fixed-blocksize code is `0x3FFE`), and blocksize code 9 is 512,
+     not 2048 (codes 8..13 = 256/512/1024/2048/4096/8192; 2048 = code 11).
    - [ ] `crc8` + `crc16` — FLAC polynomials, table-free for now; revisit a
      256×u16 table only if the perf spike shows it pays for itself. **Not a
      spike prerequisite** — the perf gate runs with CRC verify skipped (design
@@ -483,9 +505,10 @@ gets built later for the shipping path regardless.
 
 **Phase 1 — path to the perf gate (the only active work):**
 
-1. [ ] Finish `bits` for frame-header consumption: `byte_align`, `read_u8`
+1. [x] Finish `bits` for frame-header consumption: `byte_align`, `read_u8`
    (+ host unit tests). Small, division-free, and the genuine last blockers
-   in `bits`.
+   in `bits`. **Done 2026-09-06** — `bits` is complete for the decode path
+   (CRCs remain, Phase 2); the frame header parse below is unblocked.
 2. [ ] Minimal `frame` header parse: sync/code checks, blocksize & sample-rate
    tables, UTF-8 coded frame number, **consume** (do not verify) the header
    CRC-8. Enough to position the reader at the subframe data of a real
