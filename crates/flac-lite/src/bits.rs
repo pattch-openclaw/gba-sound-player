@@ -1,10 +1,12 @@
 //! MSB-first bit reader over an immutable byte slice.
 //!
-//! STATUS (2026-09-05): **core read path implemented** — `new`, `read_bits`,
-//! `peek_bits`, `read_signed`, `read_utf8_coded`, `bit_position`,
-//! `bits_remaining` (roadmap Step 1 + `peek_bits` + `read_signed` +
-//! `read_utf8_coded`, FLAC.md "Next steps"). The remaining methods
-//! (`byte_align`, `read_u8`, CRCs) are still scaffold (`todo!()`).
+//! STATUS (2026-09-06): **the read path is complete** — `new`, `read_bits`,
+//! `peek_bits`, `read_signed`, `read_utf8_coded`, `byte_align`, `read_u8`,
+//! `bit_position`, `bits_remaining` (roadmap Step 1 + `peek_bits` +
+//! `read_signed` + `read_utf8_coded` + the last two frame-header blockers,
+//! FLAC.md "Next steps"). Only the CRC helpers (`crc8`, `crc16`) remain
+//! `todo!()` scaffold: deferred to Phase 2, because the perf gate runs with CRC
+//! verification skipped.
 //!
 //! FLAC packs its fields MSB-first across byte boundaries, so the whole decoder
 //! is built on this one primitive. Design notes for the implementation:
@@ -142,13 +144,52 @@ impl<'a> BitReader<'a> {
 
     /// Consume bits up to the next byte boundary. Returns the number of bits
     /// discarded (0..7).
+    ///
+    /// FLAC pads the end of a frame's subframe data to a byte boundary before
+    /// the CRC-16 footer, and verbatim / raw-signature subframe samples start on
+    /// one — both consumers call this first.
+    ///
+    /// Notably **not** a caller: the frame header's CRC-8. The header's fixed
+    /// fields total 31 bits (sync 14 + reserved + blocking + blocksize 4 +
+    /// sample rate 4 + channels 3 + sample size 3 + reserved), and the UTF-8
+    /// coded number after them is whole octets, so the CRC-8 always lands at
+    /// bit `31 + 8k` — never byte-aligned. Aligning there would skip the top
+    /// bit of the CRC. That is why [`Self::read_u8`] is bit-level.
+    ///
+    /// **Infallible, and it cannot overrun the slice**: a slice's bit count is
+    /// always a multiple of 8, so aligning any in-bounds cursor lands on a
+    /// boundary that also fits. An already-aligned cursor discards 0 and stays
+    /// put, which makes the call idempotent.
+    ///
+    /// Division-free per the module's ARMv4T rule: `(8 - (pos & 7)) & 7` is the
+    /// distance to the next boundary with no modulo — an aligned position puts
+    /// 8 in the subtraction and the mask folds it back to 0.
     pub fn byte_align(&mut self) -> u32 {
-        todo!("flac-lite scaffold: BitReader::byte_align")
+        let drop = (8 - (self.bit_pos & 7)) & 7;
+        self.bit_pos += drop;
+        drop as u32
     }
 
-    /// Read a `u8` (assumes byte-aligned cursor; used for CRC-8 / padding).
+    /// Read a `u8` (8 bits) — the frame header's CRC-8 byte, the two bytes of a
+    /// CRC-16 footer, and byte-aligned metadata.
+    ///
+    /// Delegates to [`Self::read_bits`], so EOF behaviour and cursor rules are
+    /// identical **by construction** (the same delegation as
+    /// [`Self::read_signed`]): a short read yields [`Error::EndOfStream`] and
+    /// leaves the cursor untouched; `read_bits(8)` cannot return anything but
+    /// the low 8 bits, so the `as u8` truncation is lossless.
+    ///
+    /// Like the rest of the module this is **bit-level**: it neither requires
+    /// nor assumes a byte-aligned cursor. That is load-bearing, not laxness —
+    /// the frame header's CRC-8 sits at bit `31 + 8k` (see
+    /// [`Self::byte_align`]), so an alignment *requirement* would make the real
+    /// header unreadable. Where a field genuinely is byte-aligned (padding
+    /// before the CRC-16 footer) the caller contracts to call
+    /// [`Self::byte_align`] first; the reader keeps no alignment invariant, so
+    /// asserting one here could only ever be a tripwire, and the layer that can
+    /// actually check alignment is the frame parser.
     pub fn read_u8(&mut self) -> Result<u8> {
-        todo!("flac-lite scaffold: BitReader::read_u8")
+        self.read_bits(8).map(|v| v as u8)
     }
 
     /// Bits remaining in the backing slice from the current cursor.
@@ -638,13 +679,13 @@ mod tests {
     /// magnitude class.
     fn encode_coded(v: u64) -> ([u8; 7], usize) {
         const FORMS: [(u64, u8, u32); 7] = [
-            (0x7F, 0x00, 1),           // 0xxxxxxx
-            (0x7FF, 0xC0, 2),          // 110xxxxx
-            (0xFFFF, 0xE0, 3),         // 1110xxxx
-            (0x1F_FFFF, 0xF0, 4),      // 11110xxx
-            (0x3FF_FFFF, 0xF8, 5),     // 111110xx: 2+24 = 26 payload bits
-            (0x7F_FF_FF_FF, 0xFC, 6),  // 1111110x
-            (0xF_FFFF_FFFF, 0xFE, 7),  // 11111110 + 6 continuations
+            (0x7F, 0x00, 1),          // 0xxxxxxx
+            (0x7FF, 0xC0, 2),         // 110xxxxx
+            (0xFFFF, 0xE0, 3),        // 1110xxxx
+            (0x1F_FFFF, 0xF0, 4),     // 11110xxx
+            (0x3FF_FFFF, 0xF8, 5),    // 111110xx: 2+24 = 26 payload bits
+            (0x7F_FF_FF_FF, 0xFC, 6), // 1111110x
+            (0xF_FFFF_FFFF, 0xFE, 7), // 11111110 + 6 continuations
         ];
         let mut out = [0u8; 7];
         for &(max, base, t) in FORMS.iter() {
@@ -725,7 +766,11 @@ mod tests {
         ];
         for &bytes in cases {
             let mut r = BitReader::new(bytes);
-            assert_eq!(r.read_utf8_coded(), Err(Error::InvalidField), "{bytes:02X?}");
+            assert_eq!(
+                r.read_utf8_coded(),
+                Err(Error::InvalidField),
+                "{bytes:02X?}"
+            );
             assert_eq!(r.bit_position(), 0, "atomic: {bytes:02X?}");
         }
         // Every stray-continuation lead byte at all rejects before consuming
@@ -769,8 +814,7 @@ mod tests {
             for cont in 0x80u8..0xC0 {
                 let data = [lead, cont];
                 let mut r = BitReader::new(&data);
-                let want =
-                    (u64::from(lead & 0x1F) << 6) | u64::from(cont & 0x3F);
+                let want = (u64::from(lead & 0x1F) << 6) | u64::from(cont & 0x3F);
                 assert_eq!(r.read_utf8_coded().unwrap(), want, "{lead:02X} {cont:02X}");
                 assert_eq!(r.bit_position(), 16);
             }
@@ -783,10 +827,10 @@ mod tests {
         // read path (coded number after fixed-width fields) lives or dies
         // with sequential cursor bookkeeping.
         let data = [
-            0x00,                                                             // 0
-            0xC2, 0x80,                                                       // 0x80
-            0xFE, 0xAF, 0x9F, 0xB5, 0xA3, 0xB8, 0x80,                         // 51e9
-            0x7F,                                                             // 127
+            0x00, // 0
+            0xC2, 0x80, // 0x80
+            0xFE, 0xAF, 0x9F, 0xB5, 0xA3, 0xB8, 0x80, // 51e9
+            0x7F, // 127
         ];
         let mut r = BitReader::new(&data);
         assert_eq!(r.read_utf8_coded().unwrap(), 0);
@@ -805,12 +849,28 @@ mod tests {
         // the unaligned 8-bit reads inside the composite decode — where a
         // refill/cursor bug would live — for every form width.
         let boundaries: &[u64] = &[
-            0, 1, 0x7E, 0x7F, 0x80, 0x7FE, 0x7FF,
-            0x800, 0xFFFE, 0xFFFF,
-            0x1_0000, 0x1F_FFFE, 0x1F_FFFF,
-            0x20_0000, 0x3_FFFF_FE, 0x3_FFFF_FF,
-            0x400_0000, 0x7F_FF_FF_FE, 0x7F_FF_FF_FF,
-            0x8000_0000, 0xF_FFFF_FFFE, 0xF_FFFF_FFFF,
+            0,
+            1,
+            0x7E,
+            0x7F,
+            0x80,
+            0x7FE,
+            0x7FF,
+            0x800,
+            0xFFFE,
+            0xFFFF,
+            0x1_0000,
+            0x1F_FFFE,
+            0x1F_FFFF,
+            0x20_0000,
+            0x3_FFFF_FE,
+            0x3_FFFF_FF,
+            0x400_0000,
+            0x7F_FF_FF_FE,
+            0x7F_FF_FF_FF,
+            0x8000_0000,
+            0xF_FFFF_FFFE,
+            0xF_FFFF_FFFF,
         ];
         let mut rng = Lcg(0xFEED_C0DE);
         let mut samples: [u64; 64 + 22] = [0; 64 + 22];
@@ -865,6 +925,239 @@ mod tests {
                 );
                 assert_eq!(r.bit_position(), before + len * 8);
             }
+        }
+    }
+
+    // ---- byte_align ----------------------------------------------------------
+
+    #[test]
+    fn byte_align_drops_the_expected_bits_at_every_alignment() {
+        // Walk pad = 0..7, then align. Expected drop written independently of
+        // the impl's mask: `if pad == 0 { 0 } else { 8 - pad }`.
+        let data = [0b1111_0001, 0b0000_1110, 0b1010_1010, 0xFF];
+        for pad in 0..8usize {
+            let mut r = BitReader::new(&data);
+            if pad > 0 {
+                let _ = r.read_bits(pad as u32).unwrap();
+            }
+            let want_drop = if pad == 0 { 0 } else { 8 - pad };
+            assert_eq!(r.byte_align() as usize, want_drop, "pad {pad}");
+            assert_eq!(r.bit_position(), pad + want_drop, "pad {pad}");
+            assert_eq!(r.bit_position() % 8, 0, "pad {pad}: must land aligned");
+            assert_eq!(r.bits_remaining(), data.len() * 8 - (pad + want_drop));
+        }
+    }
+
+    #[test]
+    fn byte_align_is_idempotent_on_an_aligned_cursor() {
+        let mut r = BitReader::new(&[0xA5, 0x5A]);
+        // Bit 0 is a byte boundary: no discard, no movement.
+        assert_eq!(r.byte_align(), 0);
+        assert_eq!(r.bit_position(), 0);
+        assert_eq!(r.read_bits(3).unwrap(), 0b101);
+        assert_eq!(r.byte_align(), 5);
+        assert_eq!(r.bit_position(), 8);
+        // Repeated calls on an aligned cursor are exact no-ops.
+        assert_eq!(r.byte_align(), 0);
+        assert_eq!(r.byte_align(), 0);
+        assert_eq!(r.bit_position(), 8);
+    }
+
+    #[test]
+    fn byte_align_returns_bits_dropped_not_the_new_position() {
+        // Mid-slice at bit 11: the next boundary is bit 16, so the return is 5.
+        // An implementation returning the absolute position would say 16.
+        let mut r = BitReader::new(&[0u8; 4]);
+        assert_eq!(r.read_bits(11).unwrap(), 0);
+        assert_eq!(r.byte_align(), 5);
+        assert_eq!(r.bit_position(), 16);
+    }
+
+    #[test]
+    fn byte_align_never_moves_past_the_end_of_the_slice() {
+        // Exhaustive over slice length × every reachable bit position. Reaching
+        // an arbitrary position uses forward reads only (there is no Seek); 13
+        // is an odd chunk width, so positions are hit at every alignment. The
+        // invariant under test: aligning an in-bounds cursor stays in bounds —
+        // and at EOF (already aligned) it is an exact no-op.
+        // Zero-filled: `byte_align` is data-independent, and asserting the
+        // skipped reads return 0 keeps them honest without an expectation that
+        // depends on the bit pattern's alignment.
+        for len in 0..=8usize {
+            let all = [0u8; 8];
+            let data = &all[..len];
+            let total = len * 8;
+            for pos in 0..=total {
+                let mut r = BitReader::new(data);
+                let mut left = pos;
+                while left > 0 {
+                    let chunk = left.min(13);
+                    assert_eq!(r.read_bits(chunk as u32).unwrap(), 0);
+                    left -= chunk;
+                }
+                let before = r.bit_position();
+                let want_drop = if before % 8 == 0 { 0 } else { 8 - before % 8 };
+                let drop = r.byte_align();
+                assert!(drop <= 7, "len {len}, pos {pos}: drop {drop}");
+                assert_eq!(drop as usize, want_drop, "len {len}, pos {pos}");
+                assert_eq!(r.bit_position(), before + drop as usize);
+                assert!(r.bit_position() <= total, "len {len}, pos {pos}: overrun");
+                assert_eq!(r.bit_position() % 8, 0);
+            }
+        }
+    }
+
+    // ---- read_u8 -------------------------------------------------------------
+
+    #[test]
+    fn read_u8_matches_read_bits_at_every_alignment() {
+        // Differential sweep over every absolute bit position, including
+        // deliberately unaligned ones: read_u8 must equal read_bits(8) cast
+        // down, and match the naive bit-by-bit oracle. This is the test that
+        // pins down "read_u8 is a plain 8-bit read, not an aligned-only path".
+        let mut rng = Lcg(0xB01F_00D1);
+        let mut data = [0u8; 16];
+        for d in &mut data {
+            *d = rng.next_u8();
+        }
+        let total = data.len() * 8;
+
+        for start in 0..=(total - 8) {
+            let byte_start = start >> 3;
+            let pad = start & 7;
+            let mut a = BitReader::new(&data[byte_start..]);
+            let mut b = BitReader::new(&data[byte_start..]);
+            if pad > 0 {
+                let _ = a.read_bits(pad as u32).unwrap();
+                let _ = b.read_bits(pad as u32).unwrap();
+            }
+            let want = b.read_bits(8).unwrap() as u8;
+            let got = a.read_u8().unwrap();
+            assert_eq!(got, want, "start {start}");
+            assert_eq!(a.bit_position(), pad + 8, "start {start}");
+            let mut oracle = 0u32;
+            for j in 0..8 {
+                oracle = (oracle << 1) | ref_bit(&data, start + j);
+            }
+            assert_eq!(u32::from(got), oracle, "start {start}");
+        }
+    }
+
+    #[test]
+    fn read_u8_returns_every_byte_value_in_stream_order() {
+        // All 256 byte values, read back in sequence: catches a truncation or
+        // bit-order slip that a single aligned read could miss, and pins the
+        // cursor advancing exactly 8 bits per call.
+        let data: [u8; 256] = core::array::from_fn(|i| i as u8);
+        let mut r = BitReader::new(&data);
+        for (i, &want) in data.iter().enumerate() {
+            assert_eq!(r.read_u8().unwrap(), want, "byte {i}");
+            assert_eq!(r.bit_position(), (i + 1) * 8);
+        }
+        assert_eq!(r.bits_remaining(), 0);
+        assert_eq!(r.read_u8(), Err(Error::EndOfStream));
+    }
+
+    #[test]
+    fn read_u8_eof_leaves_cursor_untouched() {
+        let mut r = BitReader::new(&[0b1010_1010]);
+        assert_eq!(r.read_bits(3).unwrap(), 0b101);
+        assert_eq!(r.read_u8(), Err(Error::EndOfStream)); // only 5 bits left
+        assert_eq!(r.bit_position(), 3);
+        assert_eq!(r.read_bits(5).unwrap(), 0b0_1010); // exact fit to the end
+        assert_eq!(r.read_u8(), Err(Error::EndOfStream));
+        assert_eq!(r.bit_position(), 8);
+    }
+
+    #[test]
+    fn read_u8_agrees_with_peek_bits_unaligned() {
+        // Mid-byte on purpose: peek(8) and read_u8 must agree on the same
+        // unaligned field, and only read moves the cursor.
+        // 0x36 0xC3 = 0011_0110 1100_0011; bits [5..13) = 1101_1000 = 0xD8.
+        let mut r = BitReader::new(&[0x36, 0xC3]);
+        assert_eq!(r.read_bits(5).unwrap(), 0b0011_0);
+        for _ in 0..2 {
+            assert_eq!(r.peek_bits(8).unwrap(), 0xD8);
+            assert_eq!(r.bit_position(), 5);
+        }
+        assert_eq!(r.read_u8().unwrap(), 0xD8);
+        assert_eq!(r.bit_position(), 13);
+    }
+
+    // ---- composition: the patterns the frame layer will actually use ---------
+
+    #[test]
+    fn header_tail_pattern_reads_the_crc_byte_straddling_a_boundary() {
+        // A faithful FLAC frame header, hand-packed bit by bit: 31 bits of
+        // fixed fields, a 2-octet UTF-8 coded frame number, then the CRC-8.
+        // The header is 31 + 16 + 8 = 55 bits — it does not even end on a byte
+        // boundary, which is the proof that `read_u8` must be bit-level and
+        // that `byte_align` before the CRC would be *wrong* (it would drop the
+        // CRC's top bit).
+        //
+        // Fields: sync 0x3FFE (14 ones ending in 0 = fixed blocksize) |
+        // reserved 0 | fixed blocking 0 | blocksize code 11 (2048) |
+        // sample-rate code 0 (from stream, what real encoders emit) | channels
+        // code 1 (left/side) | sample size code 4 (16-bit) | reserved 0, frame
+        // number 300 (2-octet: 0xC4 0xAC), CRC-8 0x7A (consumed, not verified
+        // — verification is Phase 2). Bytes re-derived with an independent
+        // Python bit packer, which caught two hand-packing bugs: a sync of
+        // 0x3FF8 is not a valid sync code, and blocksize code 9 is 512, not
+        // 2048 (codes 8..13 = 256/512/1024/2048/4096/8192).
+        let data = [0xFF, 0xF8, 0xB0, 0x31, 0x89, 0x58, 0xF4];
+        let mut r = BitReader::new(&data);
+        assert_eq!(r.read_bits(14).unwrap(), 0x3FFE, "sync");
+        assert_eq!(r.read_bits(1).unwrap(), 0, "reserved");
+        assert_eq!(r.read_bits(1).unwrap(), 0, "fixed blocking strategy");
+        assert_eq!(r.read_bits(4).unwrap(), 11, "blocksize code 11 = 2048");
+        assert_eq!(r.read_bits(4).unwrap(), 0, "sample rate from stream");
+        assert_eq!(r.read_bits(3).unwrap(), 1, "left/side decorrelation");
+        assert_eq!(r.read_bits(3).unwrap(), 4, "16-bit");
+        assert_eq!(r.read_bits(1).unwrap(), 0, "reserved");
+        assert_eq!(r.bit_position(), 31, "fixed fields are 31 bits");
+
+        assert_eq!(r.read_utf8_coded().unwrap(), 300, "coded frame number");
+        assert_eq!(r.bit_position(), 47);
+        assert_ne!(
+            r.bit_position() % 8,
+            0,
+            "CRC position is inherently unaligned"
+        );
+
+        assert_eq!(r.read_u8().unwrap(), 0x7A, "CRC-8: consumed, not verified");
+        assert_eq!(r.bit_position(), 55);
+        assert_eq!(
+            r.bits_remaining(),
+            1,
+            "one subframe bit follows in a real frame"
+        );
+    }
+
+    #[test]
+    fn footer_padding_pattern_aligns_then_reads_the_next_byte() {
+        // The other real pattern: subframe data ends mid-byte, padding bits pad
+        // to the boundary, then the CRC-16 (two whole bytes) follows. Across
+        // every padding width, `byte_align` + `read_u8` must reach the *whole*
+        // next byte — never the field the padding bits came from.
+        //
+        // 0xAA 0x5C 0xA5: target byte is 0x5C. Hand-checked guard below — the
+        // seven unaligned 8-bit reads are 0x54, 0xA9, 0x52, 0xA5, 0x4B, 0x97,
+        // 0x2E, none of which is 0x5C, so a reader that skipped byte_align
+        // could not pass this test.
+        let data = [0xAA, 0x5C, 0xA5];
+        for pad in 1..8usize {
+            let mut r = BitReader::new(&data);
+            let _ = r.read_bits(pad as u32).unwrap(); // mid-field padding bits
+            assert_eq!(r.byte_align() as usize, 8 - pad, "pad {pad}");
+            assert_eq!(r.bit_position(), 8, "pad {pad}");
+            assert_eq!(r.read_u8().unwrap(), 0x5C, "pad {pad}");
+            assert_eq!(r.read_u8().unwrap(), 0xA5, "pad {pad}: second CRC byte");
+            assert_eq!(r.bit_position(), 24, "pad {pad}");
+
+            // The counterfactual: no alignment step reads a different byte.
+            let mut naive = BitReader::new(&data);
+            let _ = naive.read_bits(pad as u32).unwrap();
+            assert_ne!(naive.read_u8().unwrap(), 0x5C, "pad {pad}");
         }
     }
 
