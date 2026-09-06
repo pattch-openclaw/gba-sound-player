@@ -3,6 +3,14 @@
 /flac-integration.gba
 *.d
 
+# mGBA writes a save file beside the ROM on every local run
+# (e.g. `gba-sound-player.sav` next to `gba-sound-player.gba`).
+# Emulator state, never build output we want tracked.
+*.sav
+
+# macOS Finder metadata
+.DS_Store
+
 # Standalone build dir for the symphonia FLAC compile probe example
 # (examples/symphonia_flac_probe/ has its own Cargo.toml/workspace)
 /examples/symphonia_flac_probe/target/
