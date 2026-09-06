@@ -1,10 +1,10 @@
 //! MSB-first bit reader over an immutable byte slice.
 //!
 //! STATUS (2026-09-05): **core read path implemented** — `new`, `read_bits`,
-//! `peek_bits`, `bit_position`, `bits_remaining` (roadmap Step 1 + `peek_bits`,
-//! FLAC.md "Next steps"). The remaining methods (`read_signed`,
-//! `read_utf8_coded`, `byte_align`, `read_u8`, CRCs) are still scaffold
-//! (`todo!()`).
+//! `peek_bits`, `read_signed`, `bit_position`, `bits_remaining` (roadmap Step 1
+//! + `peek_bits` + `read_signed`, FLAC.md "Next steps"). The remaining
+//! methods (`read_utf8_coded`, `byte_align`, `read_u8`, CRCs) are still
+//! scaffold (`todo!()`).
 //!
 //! FLAC packs its fields MSB-first across byte boundaries, so the whole decoder
 //! is built on this one primitive. Design notes for the implementation:
@@ -70,8 +70,24 @@ impl<'a> BitReader<'a> {
     }
 
     /// Read `n` bits (1..=32) as a two's-complement signed value.
+    ///
+    /// Same width/EOF semantics as [`Self::read_bits`] (delegates to it, so
+    /// validation and cursor rules are identical by construction). FLAC
+    /// encodes LP coefficients, Rice-partition samples, verbatim samples, and
+    /// unaligned warm-up values as raw two's-complement in the field's stated
+    /// width — sign extension is pure post-processing.
+    ///
+    /// Sign extension is the classic **shl-then-arithmetic-shr** idiom: move
+    /// the field's sign bit up into bit 31, then let `>>` on `i32` (an
+    /// arithmetic shift on ARM, `asr`) drag the sign down through the high
+    /// half. No divide, no subtract, and it needs **no special case for
+    /// `n == 32`** — there the shifts are both by 0, which Rust defines, and
+    /// the result is just the `as i32` reinterpretation.
     pub fn read_signed(&mut self, n: u32) -> Result<i32> {
-        todo!("flac-lite scaffold: BitReader::read_signed")
+        let raw = self.read_bits(n)?;
+        // n in 1..=32, so both shift amounts are in 0..=31 (never >= 32).
+        let shift = 32 - n;
+        Ok(((raw << shift) as i32) >> shift)
     }
 
     /// Read the UTF-8-style "zero-padded" number used for frame/sample numbers
@@ -371,6 +387,158 @@ mod tests {
                             expect = (expect << 1) | ref_bit(&data, start + j);
                         }
                         assert_eq!(val, expect, "start {start}, width {width}");
+                    }
+                    Err(Error::EndOfStream) => assert!(start + width > total),
+                    Err(e) => panic!("unexpected at start {start}, width {width}: {e:?}"),
+                }
+            }
+        }
+    }
+
+    // ---- read_signed --------------------------------------------------------
+
+    /// Independent oracle: assemble `w` bits MSB-first from the naive bit
+    /// source, then sign-extend by **definition** — if the sign bit is set,
+    /// subtract 2^w (in `i64`, so `w == 32` cannot overflow). A genuinely
+    /// *different mechanism* than the shl+arith-shr implementation in
+    /// `read_signed`, so a shared bug is unlikely.
+    fn ref_signed(data: &[u8], start: usize, w: usize) -> i32 {
+        let mut raw = 0u32;
+        for j in 0..w {
+            raw = (raw << 1) | ref_bit(data, start + j);
+        }
+        if raw & (1 << (w - 1)) == 0 {
+            raw as i32 // sign bit clear: the raw bits *are* the value
+        } else {
+            (raw as i64 - (1i64 << w)) as i32 // raw - 2^w, the two's-complement definition
+        }
+    }
+
+    #[test]
+    fn read_signed_hand_computed_fields() {
+        // 0xF1 0x23 = 1111_0001_0010_0011, read whole (16 bits, exact fit).
+        let mut r = BitReader::new(&[0xF1, 0x23]);
+        assert_eq!(r.read_signed(4).unwrap(), -1); // 1111 → -1
+        assert_eq!(r.read_signed(4).unwrap(), 1); // 0001 → +1
+        assert_eq!(r.read_signed(5).unwrap(), 4); // 00100 → +4 (sign bit 0)
+        assert_eq!(r.read_signed(3).unwrap(), 3); // 011 → +3 (sign bit 0)
+        assert_eq!(r.bits_remaining(), 0);
+    }
+
+    #[test]
+    fn read_signed_unaligned_crosses_byte_boundary() {
+        // Chosen so bits [3..15) are exactly 1111_1111_1001 (= -7 in 12-bit
+        // two's complement): byte0 = 101_11111, byte1 = 1111_001_0.
+        // 0xBF 0xF2 = 1011_1111_1111_0010.
+        let mut r = BitReader::new(&[0xBF, 0xF2]);
+        assert_eq!(r.read_bits(3).unwrap(), 0b101); // re-align to bit 3
+        assert_eq!(r.read_signed(12).unwrap(), -7); // bits [3..15) = 1111_1111_1001
+    }
+
+    #[test]
+    fn read_signed_extremes_per_width() {
+        // All-ones reads as -1 at every width (shl puts a one in bit 31, the
+        // arithmetic shr fills the whole high half with ones → all-ones i32).
+        // Consecutive widths 1..=32 consume 528 bits → 66 bytes exactly.
+        let mut r = BitReader::new(&[0xFF; 66]);
+        for n in 1..=32u32 {
+            assert_eq!(r.read_signed(n).unwrap(), -1, "width {n}");
+        }
+        assert_eq!(r.bit_position(), (1..=32u32).sum::<u32>() as usize); // 528 bits
+
+        // ...and the minimum negative (1000…₂) at every width is i32::MIN >> (32-n).
+        for n in 1..=32usize {
+            let bytes = [0x80, 0, 0, 0, 0]; // bit 0 = 1, rest 0
+            let mut r = BitReader::new(&bytes);
+            let want = (i32::MIN >> (32 - n)) as i64;
+            assert_eq!(r.read_signed(n as u32).unwrap() as i64, want, "width {n}");
+        }
+    }
+
+    #[test]
+    fn read_signed_32_bit_boundary() {
+        // n == 32 takes the plain `as i32` branch — the one width the shift
+        // trick cannot handle (n - 1 == 31 would misplace the flip).
+        let mut r = BitReader::new(&[0xFF, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(r.read_signed(32).unwrap(), -1);
+        let mut r = BitReader::new(&[0x80, 0, 0, 0]);
+        assert_eq!(r.read_signed(32).unwrap(), i32::MIN);
+        let mut r = BitReader::new(&[0x7F, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(r.read_signed(32).unwrap(), i32::MAX);
+    }
+
+    #[test]
+    fn read_signed_validates_widths_like_read() {
+        let mut r = BitReader::new(&[0xFF; 4]);
+        assert_eq!(r.read_signed(0), Err(Error::InvalidField));
+        assert_eq!(r.read_signed(33), Err(Error::InvalidField));
+        assert_eq!(r.read_signed(u32::MAX), Err(Error::InvalidField));
+        assert_eq!(r.bit_position(), 0); // rejected reads must not move the cursor
+    }
+
+    #[test]
+    fn read_signed_eof_leaves_cursor_untouched() {
+        let mut r = BitReader::new(&[0b1111_1111]);
+        assert_eq!(r.read_signed(3).unwrap(), -1);
+        assert_eq!(r.read_signed(6), Err(Error::EndOfStream)); // only 5 left
+        assert_eq!(r.bit_position(), 3);
+        assert_eq!(r.read_signed(5).unwrap(), -1); // exact fit on the last bits
+        assert_eq!(r.bit_position(), 8);
+        assert_eq!(r.read_signed(1), Err(Error::EndOfStream));
+        assert_eq!(r.bit_position(), 8);
+    }
+
+    #[test]
+    fn read_signed_agrees_with_unsigned_plus_oracle() {
+        // Differential sweep over every absolute bit position × width:
+        //  1. read_signed must equal read_bits on the same bits, sign-extended
+        //     with the shl+shr idiom (a different mechanism from the impl),
+        //  2. and match the independent assembled-oracle value.
+        //  3. and neither read may disturb the other's cursor rules.
+        let mut rng = Lcg(0x51ED_31ED);
+        let mut data = [0u8; 16];
+        for d in &mut data {
+            *d = rng.next_u8();
+        }
+        let total = data.len() * 8;
+
+        for start in 0..total {
+            let byte_start = start >> 3;
+            let pad = start & 7;
+            for width in 1..=32usize {
+                // Fresh reader per probe: the cursor only moves forward.
+                let mut r = BitReader::new(&data[byte_start..]);
+                if pad > 0 {
+                    let _ = r.read_bits(pad as u32).unwrap();
+                }
+                let pos = start - (byte_start * 8); // cursor within subslice
+
+                // Reference values from the unsigned path + independent oracle.
+                let unsigned_expect = {
+                    let mut u = BitReader::new(&data[byte_start..]);
+                    if pad > 0 {
+                        let _ = u.read_bits(pad as u32).unwrap();
+                    }
+                    match u.read_bits(width as u32) {
+                        Ok(v) => v,
+                        Err(Error::EndOfStream) => {
+                            assert!(start + width > total);
+                            continue;
+                        }
+                        Err(e) => panic!("unsigned read failed: {e:?}"),
+                    }
+                };
+                // shl+arith-shr idiom, written out here from the *unsigned*
+                // read: move the field's sign bit to bit 31, drag it down.
+                let sign_extended =
+                    (((unsigned_expect << (32 - width)) as i32) >> (32 - width)) as i64;
+                let oracle = ref_signed(&data, start, width) as i64;
+
+                match r.read_signed(width as u32) {
+                    Ok(val) => {
+                        assert_eq!(val as i64, sign_extended, "start {start}, width {width}");
+                        assert_eq!(val as i64, oracle, "start {start}, width {width}");
+                        assert_eq!(r.bit_position(), pad + width, "cursor must advance");
                     }
                     Err(Error::EndOfStream) => assert!(start + width > total),
                     Err(e) => panic!("unexpected at start {start}, width {width}: {e:?}"),

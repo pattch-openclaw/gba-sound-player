@@ -387,7 +387,7 @@ Scaffolding only — **no decoding logic implemented yet**:
 Next steps, in order:
 
 1. [ ] Implement `bits::BitReader` + host unit tests (smallest testable unit).
-   **Not done**: the read path is implemented and hardware-validated, but 4
+   **Not done**: the read path is implemented and hardware-validated, but 3
    reader methods and both CRC helpers are still `todo!()` scaffold (listed
    below).
    - [x] **Core read path — done 2026-09-04** (PR #25): `new`, `read_bits`,
@@ -415,7 +415,22 @@ Next steps, in order:
      worst case via peek, and an exhaustive alignment×width sweep against
      the independent oracle. `make flac-test` green (17 tests + thumbv4t
      compile gate).
-   - [ ] `read_signed` — two's-complement sign extension after `read_bits`.
+   - [x] **`read_signed` — done 2026-09-05**: delegates to `read_bits` (so
+     width validation + EOF/cursor rules are identical by construction), then
+     sign-extends with the shl-then-arithmetic-shr idiom — no divide, no
+     subtract, and **no special case for n == 32** (both shifts are by 0 there,
+     which Rust defines; the result is the plain `as i32` reinterpretation).
+     7 new `core`-only tests: hand-computed fields (all three sign cases from
+     one byte pattern), a deliberately-unaligned negative crossing a byte
+     boundary, per-width extremes (−1 at every width over 66 bytes; the
+     min-negative at every width), the n=32 boundary (−1 / i32::MIN /
+     i32::MAX), width validation, EOF cursor invariants, and an exhaustive
+     alignment×width differential sweep vs an independent subtract-based
+     oracle (raw − 2^w, a different mechanism than the shift impl). Lesson
+     baked into the tests: the first draft's failures were all *test* bugs —
+     hand-computed bit fields were mis-derived and the oracle itself had
+     dropped its arithmetic shift; the impl never changed. `make flac-test`
+     green (31 tests + thumbv4t compile gate).
    - [ ] `read_utf8_coded` — FLAC's zero-padded prefix numbers (RFC 9629
      §5.1.4.1 / §7.2), used for frame/sample numbers and channel assignments.
    - [ ] `byte_align` — discard to the next byte boundary, returning bits
