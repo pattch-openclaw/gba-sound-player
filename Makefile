@@ -280,6 +280,9 @@ clean:
 	cd crates/flac-lite && $(CARGO) clean
 	cd $(FLAC_CRATE_DIR) && $(CARGO) clean
 	rm -f $(ROM) $(FLAC_ROM)
+# mGBA drops a .sav beside each ROM on local runs — emulator state,
+# remove it with the ROMs it belongs to.
+	@rm -f $(ROM:.gba=.sav) $(FLAC_ROM:.gba=.sav) *.sav
 
 # Drop the container build caches (the named volumes behind $(CACHE_MOUNTS)).
 # Safe: they are pure build caches — the next container run rebuilds from
