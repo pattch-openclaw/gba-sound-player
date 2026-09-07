@@ -355,18 +355,25 @@ in the root `Makefile` (full table in README → "Build Process (Standardized)")
 
 `examples/flac_integration/` is a standalone workspace ROM crate (`agb` +
 path-dependency on `crates/flac-lite`) that **compiles, links, fixes, and boots**
-with the decoder in the image. It does not decode yet: `flac-lite` is scaffold, so
-the ROM holds a `#[used]` fn-pointer **link anchor** that references the decode
-path without ever calling it — the build path is fully exercised while no `todo!()`
-can panic on hardware. This is the intended shape of the ongoing check: correctness
-lives in `flac-test`, bundling/memory/scheduling lives in `*-flac-rom`, and the two
-failing independently is the diagnostic.
+with the decoder in the image. It does not decode audio yet: everything past the
+bit reader is still `todo!()` scaffold, so the ROM holds a `#[used]` fn-pointer
+**link anchor** that pulls the decode path into the image without running it (what
+the ROM does run is a live `BitReader` proof — see
+`examples/flac_integration/src/main.rs`) — the build path is fully exercised while
+no `todo!()` can panic on hardware. This is the intended shape of the ongoing
+check: correctness lives in `flac-test`, bundling/memory/scheduling lives in
+`*-flac-rom`, and the two failing independently is the diagnostic.
 
 The root ROM crate still carries **no** FLAC dependency; the baseline is unaffected
 if the experiment breaks. `agb` mixer/DMA integration stays deferred until the perf
 gate is settled.
 
-### Scaffold status (2026-08-30)
+### Scaffold status (2026-08-30) — historical snapshot
+
+> **Superseded 2026-09-06.** Accurate as of this date, false as a present-tense
+> claim: `bits::BitReader` landed in PRs #25–#32 (41 host tests). Outstanding
+> work lives in the **Phased plan** at the end of this file. Kept below for
+> provenance — read it as history, never as status.
 
 Scaffolding only — **no decoding logic implemented yet**:
 

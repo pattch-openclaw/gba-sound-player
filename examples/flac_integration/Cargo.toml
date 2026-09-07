@@ -13,9 +13,10 @@ edition = "2024"
 #   make native-flac-rom      # this host (no virtualization needed)
 #   make podman-flac-rom      # containerized, reproducible
 #
-# It produces a bootable ROM. It does NOT decode audio yet — flac-lite is still
-# scaffold (`todo!()` bodies), and the link anchor in src/main.rs deliberately
-# never runs the decoder, so the ROM boots normally instead of panicking.
+# It produces a bootable ROM. It does NOT decode audio yet — everything past
+# flac-lite's bit reader is still `todo!()` scaffold, and the link anchor in
+# src/main.rs deliberately never runs the decoder, so the ROM boots normally
+# instead of panicking. (What it does run is a live BitReader proof.)
 #
 # Standalone (own Cargo.toml + [workspace] + .cargo/config.toml) for the same
 # reason as flac-lite: the root crate must stay free of any FLAC dependency so
