@@ -384,12 +384,16 @@ Scaffolding only — **no decoding logic implemented yet**:
   integration (path dependency + mixer example) is deliberately deferred until the
   perf gate is settled.
 
-Next steps, in order:
+### Completed: `bits::BitReader` (2026-09-04 → 2026-09-06)
 
-1. [ ] Implement `bits::BitReader` + host unit tests (smallest testable unit).
-   **Not done**: the read path is implemented and hardware-validated, but 2
-   reader methods and both CRC helpers are still `todo!()` scaffold (listed
-   below).
+**Not a roadmap.** Outstanding work lives in the Phased plan below — the single
+source of truth for this project's roadmap. This section is finished history,
+kept for provenance and for the lessons baked into each step. `bits` is complete
+for the decode path as of PR #32; the only `todo!()`s left in `bits.rs` are
+`crc8` and `crc16`, tracked as Phase 2 step 5.
+
+1. [x] `bits::BitReader` + host unit tests — **done 2026-09-06** (PRs #25–#32;
+   41 `core`-only tests, thumbv4t compile gate green).
    - [x] **Core read path — done 2026-09-04** (PR #25): `new`, `read_bits`,
      `bit_position`, `bits_remaining` on the **position-only** design — cursor
      is a plain bit offset, no refill accumulator. All byte touching lives in
@@ -483,13 +487,16 @@ Next steps, in order:
      bugs before any Rust ran — sync `0x3FF8` is not a valid sync code (the
      14-bit fixed-blocksize code is `0x3FFE`), and blocksize code 9 is 512,
      not 2048 (codes 8..13 = 256/512/1024/2048/4096/8192; 2048 = code 11).
-   - [ ] `crc8` + `crc16` — FLAC polynomials, table-free for now; revisit a
-     256×u16 table only if the perf spike shows it pays for itself. **Not a
-     spike prerequisite** — the perf gate runs with CRC verify skipped (design
-     already allows: checked in debug, skippable in release). Deferred to
-     Phase 2.
+   - `crc8` + `crc16` — **not part of this step.** FLAC polynomials, table-free
+     by design (a 256×u16 table is 512 bytes of ROM we could spend elsewhere);
+     the perf gate runs with CRC verify skipped, which the design already
+     allows (checked in debug, skippable in release), so they were never a spike
+     prerequisite. Tracked as **Phase 2 step 5**.
 
-#### Phased plan: PoC/perf-gate first, production pipeline after (2026-09-06)
+### Phased plan: PoC/perf-gate first, production pipeline after (2026-09-06)
+
+**The roadmap — single source of truth.** The numbering below is execution order
+across both phases; nothing outside these two lists is outstanding work.
 
 Re-sequenced deliberately. The perf gate ("can a 16.78MHz ARM7TDMI decode
 FIXED+Rice in real time?") is the project's critical unknown, and its answer

@@ -300,7 +300,7 @@ broken experiment can never take the baseline down with it.
 > and the ROM references the decoder via a `#[used]` link anchor that is never
 > called, so the image exercises the full build path without ever hitting a
 > `todo!()` panic on hardware. Replace the anchor with a real decode loop once
-> decoding lands (see [FLAC.md](FLAC.md) → next steps).
+> decoding lands (see [FLAC.md](FLAC.md) → "Phased plan", the roadmap).
 
 ### Toolchain resolution (conda / non-rustup `cargo` on PATH)
 

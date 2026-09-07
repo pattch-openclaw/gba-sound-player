@@ -146,5 +146,6 @@ can be revisited for `i16` later if we need the space.
 
 ## Next steps
 
-See FLAC.md → "Next steps". `bits::BitReader` first: smallest unit that can be
-tested against hand-computed bit patterns.
+The roadmap is a single list in **FLAC.md → "Phased plan"** (the only source of
+truth for outstanding work). `bits::BitReader` is complete for the decode path
+(PR #32); the next item is Phase 1 step 2, the minimal `frame` header parse.
