@@ -3,9 +3,11 @@
 //! A minimal FLAC **frame** decoder for the Game Boy Advance: `#![no_std]`,
 //! zero dependencies, zero allocation on the decode path.
 //!
-//! ⚠️ **SCAFFOLD STATE (2026-08-30): nothing here is implemented.** Every
-//! function body is `todo!()`. The module layout, types, and signatures are the
-//! deliverable — they are the contract the implementation will fill in.
+//! ⚠️ **IMPLEMENTATION STATE (2026-09-06):** `bits::BitReader` is complete for
+//! the decode path (PRs #25–#32, 41 host tests; only `crc8`/`crc16` remain,
+//! parked in Phase 2). Every later module is still `todo!()` scaffold against
+//! real signatures — the module layout, types, and signatures are the contract
+//! the implementation fills in.
 //! Design rationale and the decision to write this at all live in
 //! [`../../../FLAC.md`](../../../../FLAC.md).
 //!

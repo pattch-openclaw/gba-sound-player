@@ -1,7 +1,8 @@
 # flac-lite
 
 Minimal FLAC frame decoder for GBA: `#![no_std]`, **zero dependencies**, **zero
-allocation** on the decode path. Scaffold only — every function body is `todo!()`.
+allocation** on the decode path. `bits::BitReader` is implemented (41 host
+tests); every later module is still `todo!()` scaffold against real signatures.
 Decision record and rationale: [`../../FLAC.md`](../../FLAC.md).
 
 ```
@@ -146,5 +147,6 @@ can be revisited for `i16` later if we need the space.
 
 ## Next steps
 
-See FLAC.md → "Next steps". `bits::BitReader` first: smallest unit that can be
-tested against hand-computed bit patterns.
+The roadmap is a single list in **FLAC.md → "Phased plan"** (the only source of
+truth for outstanding work). `bits::BitReader` is complete for the decode path
+(PR #32); the next item is Phase 1 step 2, the minimal `frame` header parse.

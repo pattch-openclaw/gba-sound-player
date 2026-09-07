@@ -70,7 +70,7 @@ the top-level ROM depends on.
 - `examples/pcm_playback.rs` — demonstrates sample-based (PCM) audio playback using `agb`'s native software mixer and a pre-converted 32kHz `.wav` file.
 - `src/main.rs` is a clean slate baseline (no FLAC dependency, builds clean).
 - `examples/symphonia_flac_probe/` — standalone FLAC compile probe (`symphonia-bundle-flac` from the keks no-std fork, with its own `Cargo.toml`). **Expected to fail compilation**; the failure analysis is documented in **[FLAC.md](FLAC.md)**.
-- `crates/flac-lite/` — our own `no_std`, zero-dependency, zero-allocation FLAC frame decoder (**scaffold only**: real signatures, `todo!()` bodies). Decision + design in **[FLAC.md](FLAC.md)**; byte-level `GAFP` contract in [`crates/flac-lite/README.md`](crates/flac-lite/README.md).
+- `crates/flac-lite/` — our own `no_std`, zero-dependency, zero-allocation FLAC frame decoder (**partially implemented**: `bits::BitReader` is done and host-tested; later modules are still `todo!()` scaffold against real signatures). Decision + design in **[FLAC.md](FLAC.md)**; byte-level `GAFP` contract in [`crates/flac-lite/README.md`](crates/flac-lite/README.md).
 - `examples/flac_integration/` — **EXPERIMENTAL** standalone ROM crate that links `flac-lite` into a bootable GBA ROM. This is the ongoing build sanity check that the decoder keeps fitting the target end to end (see `make native-flac-rom` below). It builds, links, and boots; it does not play audio yet.
 - The project also includes a basic `#[test_case]` suite runnable via `mgba-test-runner`.
 - `Makefile` — standardized build/test entrypoints, see **[Build Process](#build-process-standardized)**.
@@ -296,11 +296,12 @@ broken experiment can never take the baseline down with it.
 
 > **Current state of the FLAC ROM build:** `flac-integration.gba` compiles,
 > links, fixes, and boots (purple backdrop, logs the linked anchor address).
-> It does **not** decode audio yet — `flac-lite` is scaffold (`todo!()` bodies),
-> and the ROM references the decoder via a `#[used]` link anchor that is never
-> called, so the image exercises the full build path without ever hitting a
-> `todo!()` panic on hardware. Replace the anchor with a real decode loop once
-> decoding lands (see [FLAC.md](FLAC.md) → next steps).
+> It does **not** decode audio yet — everything past `flac-lite`'s bit reader is
+> still `todo!()` scaffold, and the ROM references the decoder via a `#[used]`
+> link anchor that is never called, so the image exercises the full build path
+> without ever hitting a `todo!()` panic on hardware. Replace the anchor with a
+> real decode loop once decoding lands (see [FLAC.md](FLAC.md) → "Phased plan",
+> the roadmap).
 
 ### Toolchain resolution (conda / non-rustup `cargo` on PATH)
 

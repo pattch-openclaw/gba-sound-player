@@ -2,11 +2,10 @@
 //!
 //! STATUS (2026-09-06): **the read path is complete** — `new`, `read_bits`,
 //! `peek_bits`, `read_signed`, `read_utf8_coded`, `byte_align`, `read_u8`,
-//! `bit_position`, `bits_remaining` (roadmap Step 1 + `peek_bits` +
-//! `read_signed` + `read_utf8_coded` + the last two frame-header blockers,
-//! FLAC.md "Next steps"). Only the CRC helpers (`crc8`, `crc16`) remain
-//! `todo!()` scaffold: deferred to Phase 2, because the perf gate runs with CRC
-//! verification skipped.
+//! `bit_position`, `bits_remaining` (Phase 1 step 1, complete in PRs #25–#32).
+//! Only the CRC helpers (`crc8`, `crc16`) remain `todo!()` scaffold: deferred to
+//! Phase 2 step 5, because the perf gate runs with CRC verification skipped.
+//! The roadmap itself lives in FLAC.md → "Phased plan" (single source of truth).
 //!
 //! FLAC packs its fields MSB-first across byte boundaries, so the whole decoder
 //! is built on this one primitive. Design notes for the implementation:
