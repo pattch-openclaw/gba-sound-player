@@ -116,8 +116,13 @@ The decoder only needs to handle what our encoder is allowed to produce:
 - 16-bit PCM, 32 kHz (65,536 Hz later), mono or stereo
 - block size fixed per track: 1024 or 2048 samples
 - fixed block size (no blocking strategy / variable frames)
-- predictors capped at **FIXED order 0–4** — encode with `-l 4`; full LPC stays
-  *parsed* but rejected under `strict-profile`, pending the perf spike
+- **max predictor order ≤ 4** — encode with `-l 4`; higher orders stay *parsed*
+  but rejected under `strict-profile`, pending the perf spike.
+  ⚠️ Corrected 2026-09-07: this previously said "predictors capped at **FIXED
+  order 0–4**", which misreads `-l`. `-l, --max-lpc-order` is a maximum **LPC**
+  order; `-l 4` emits real LPC-4 subframes (measured: `lpc4` ×156/157 frames), and
+  FIXED-only is `-l 0`. The `strict-profile` switch is therefore "order > 4",
+  not "is LPC". See FLAC.md → "Correction 3".
 - partitioned Rice / Rice2 residuals; escaped partitions supported
 - stereo: independent **and** mid/side (`-m`); left-side, right-side
 - no metadata blocks other than what the manifest replaces
@@ -125,8 +130,19 @@ The decoder only needs to handle what our encoder is allowed to produce:
 Reference encode command (the packer will run this):
 
 ```sh
-flac -1 -f -l 4 -b 2048 -m --force-utf8-legacy-noop input.wav
+flac -1 -f -l 4 -b 2048 -m input.wav
 ```
+
+For the FIXED-only arm of the perf gate (a materially different stream — see the
+note above): `flac -1 -f -l 0 -b 2048 -m input.wav`.
+For 65,536 Hz: add `--lax` (that rate is outside FLAC's streamable subset, so
+every frame then carries sample-rate code `0b0000` = "from stream", which the
+decoder resolves via `frame::StreamDefaults`).
+
+An earlier revision of this command ended in `--force-utf8-legacy-noop`. That is
+**not a libFLAC option** — 1.5.0 exits 1 with `unrecognized option` (verified by
+running it). Frame numbers are UTF-8-coded by spec, not by flag; nothing here
+needs forcing.
 
 ## Design rules that must survive implementation
 

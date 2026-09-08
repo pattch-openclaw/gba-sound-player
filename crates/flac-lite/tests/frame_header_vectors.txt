@@ -1,0 +1,266 @@
+# flac-lite frame-header golden vectors -- GENERATED
+# DO NOT EDIT BY HAND.  Regenerate with:  scripts/gen_frame_vectors.sh
+# Generator + expected-value derivation: scripts/frame_vectors.py
+# Source streams: scripts/frame_vectors.py synth (integer-exact, no RNG)
+# Encoder: flac 1.5.0
+#
+# These are REAL frame headers captured from libFLAC, with expected field
+# values derived by an independent RFC 9639 9.1 bit parser -- never by
+# asking libFLAC, never hand-packed. Hand-packing is how the 31-vs-32-bit
+# fixed-field error entered the scaffold AND how a unit test came to assert
+# it as truth (FLAC.md 'Frame header: measured byte layout').
+#
+# Consumed by crates/flac-lite/tests/frame_header_layout.rs, which feeds
+# `bytes` through bits::BitReader and asserts every field width, cursor
+# position, the coded number, and the CRC-8 byte. Phase 1 step 2 replaces
+# that test's hand-written expectations with FrameHeader::parse over the
+# same table, so the vectors outlive the scratch test.
+#
+# Two facts every vector here proves, and neither was true in the scaffold:
+#   * fixed fields are 32 bits (sync 14 + reserved 1 + blocking 1 +
+#     blocksize 4 + rate 4 + CHANNELS 4 + size 3 + reserved 1)
+#   * the coded number is whole octets, so the CRC-8 ALWAYS lands on a byte
+#     boundary -> byte_align() before the CRC-8 is a no-op there anyway, and
+#     writing it 'because the header CRC is unaligned' encodes a lie.
+
+vector stereo-6byte-first
+source_stream l4_stereo.flac
+note 6-byte header: 1-octet coded frame number, CRC-8 at bit 40
+required true
+bytes FF F8 B8 A8 00 81
+frame_offset 8304
+stream_frame_count 157
+header_bits 48
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0xB
+blocksize 2048
+samplerate_code 0x8
+samplerate_hz 32000
+stream_samplerate_hz 32000
+channels_code 0xA
+subframes 2
+decorrelation mid-side
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 0
+coded_number_octets 1
+extra_field_bytes 0
+crc8_byte 0x81
+crc8_bit_position 40
+crc8_byte_aligned true
+subframe0_type lpc4
+
+vector stereo-7byte-num128
+source_stream l4_stereo.flac
+note 7-byte header: 2-octet coded number (>=128 forces the wider form)
+required true
+bytes FF F8 B8 A8 C2 80 C0
+frame_offset 693021
+stream_frame_count 157
+header_bits 56
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0xB
+blocksize 2048
+samplerate_code 0x8
+samplerate_hz 32000
+stream_samplerate_hz 32000
+channels_code 0xA
+subframes 2
+decorrelation mid-side
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 128
+coded_number_octets 2
+extra_field_bytes 0
+crc8_byte 0xC0
+crc8_bit_position 48
+crc8_byte_aligned true
+subframe0_type lpc4
+
+vector stereo-last
+source_stream l4_stereo.flac
+note final frame: short blocksize (the tail is 512, not the track's 2048) AND a 7-byte coded number -- the frame most decoders get wrong
+required true
+bytes FF F8 98 A8 C2 9C 5A
+frame_offset 842826
+stream_frame_count 157
+header_bits 56
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0x9
+blocksize 512
+samplerate_code 0x8
+samplerate_hz 32000
+stream_samplerate_hz 32000
+channels_code 0xA
+subframes 2
+decorrelation mid-side
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 156
+coded_number_octets 2
+extra_field_bytes 0
+crc8_byte 0x5A
+crc8_bit_position 48
+crc8_byte_aligned true
+subframe0_type lpc3
+
+vector mono-b1024-first
+source_stream l4_mono.flac
+note mono: channels code 0b0000, one subframe per frame
+required true
+bytes FF F8 A8 08 00 3B
+frame_offset 8304
+stream_frame_count 313
+header_bits 48
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0xA
+blocksize 1024
+samplerate_code 0x8
+samplerate_hz 32000
+stream_samplerate_hz 32000
+channels_code 0x0
+subframes 1
+decorrelation none
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 0
+coded_number_octets 1
+extra_field_bytes 0
+crc8_byte 0x3B
+crc8_bit_position 40
+crc8_byte_aligned true
+subframe0_type lpc3
+
+vector r65k-rate-from-stream
+source_stream r65k.flac
+note sample-rate code 0b0000: 65536 Hz has no 4-bit code, so it lives only in STREAMINFO -> the FromStreamDefault path the GBA 65kHz goal depends on
+required true
+bytes FF F8 B0 A8 00 D0
+frame_offset 8304
+stream_frame_count 320
+header_bits 48
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0xB
+blocksize 2048
+samplerate_code 0x0
+samplerate_hz from-stream
+stream_samplerate_hz 65536
+channels_code 0xA
+subframes 2
+decorrelation mid-side
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 0
+coded_number_octets 1
+extra_field_bytes 0
+crc8_byte 0xD0
+crc8_bit_position 40
+crc8_byte_aligned true
+subframe0_type lpc4
+
+vector fixed-only-first
+source_stream l0_stereo.flac
+note `-l 0` encode: FIXED-only subframes, the perf gate's FIXED arm
+required true
+bytes FF F8 B8 A8 00 81
+frame_offset 8304
+stream_frame_count 157
+header_bits 48
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0xB
+blocksize 2048
+samplerate_code 0x8
+samplerate_hz 32000
+stream_samplerate_hz 32000
+channels_code 0xA
+subframes 2
+decorrelation mid-side
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 0
+coded_number_octets 1
+extra_field_bytes 0
+crc8_byte 0x81
+crc8_bit_position 40
+crc8_byte_aligned true
+subframe0_type fixed0
+
+vector silence-constant
+source_stream l4_silence.flac
+note CONSTANT subframes (digitally silent input)
+required false
+bytes FF F8 B8 18 00 CE
+frame_offset 8304
+stream_frame_count 32
+header_bits 48
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0xB
+blocksize 2048
+samplerate_code 0x8
+samplerate_hz 32000
+stream_samplerate_hz 32000
+channels_code 0x1
+subframes 2
+decorrelation none
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 0
+coded_number_octets 1
+extra_field_bytes 0
+crc8_byte 0xCE
+crc8_bit_position 40
+crc8_byte_aligned true
+subframe0_type constant
+
+vector stereo-midside
+source_stream l4_stereo.flac
+note mid/side decorrelation: channels code 0b1010
+required false
+bytes FF F8 B8 A8 00 81
+frame_offset 8304
+stream_frame_count 157
+header_bits 48
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0xB
+blocksize 2048
+samplerate_code 0x8
+samplerate_hz 32000
+stream_samplerate_hz 32000
+channels_code 0xA
+subframes 2
+decorrelation mid-side
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 0
+coded_number_octets 1
+extra_field_bytes 0
+crc8_byte 0x81
+crc8_bit_position 40
+crc8_byte_aligned true
+subframe0_type lpc4
+
+# --- measured encoder behaviour (cite these instead of guessing) ---------
+# First-subframe type across a whole 10s encode of the same source:
+#   l0_stereo.flac   fixed0 x157
+#                    decorrelation chosen: mid-side x157
+#   l4_stereo.flac   lpc3 x1, lpc4 x156
+#                    decorrelation chosen: mid-side x157
+# => `-l N` is MAX LPC ORDER, not a FIXED-predictor cap (flac --help:
+#    '-l, --max-lpc-order=#   Max LPC order; 0 => only fixed predictors').
+#    `-l 0` is FIXED-only; `-l 4` emits real LPC subframes of order <= 4.

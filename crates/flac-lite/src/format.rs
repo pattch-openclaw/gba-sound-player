@@ -27,9 +27,13 @@ pub const VERSION: u8 = 1;
 /// Sample rate, resolved from FLAC's 4-bit code table at manifest-parse time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SampleRate {
-    /// Directly encoded (manifest stores the literal Hz value).
+    /// Directly encoded via one of the 4-bit table codes (and the manifest
+    /// stores the literal Hz value).
     Explicit(u32),
-    /// FLAC code 0b001 — use the stream's default sample rate.
+    /// FLAC code `0b0000` — "get from stream". Not a corner case: it is the
+    /// *only* way a sample rate outside the 4-bit table can be carried, which
+    /// includes 65,536 Hz (measured: all 320 frames of a 65,536 Hz encode use
+    /// it). Resolve through [`crate::frame::StreamDefaults`].
     FromStreamDefault,
 }
 
@@ -63,24 +67,28 @@ impl Blocksize {
     }
 }
 
-/// Channel assignment, from the 4-bit frame-header field.
+/// Channel assignment, from the 4-bit frame-header field (RFC 9639 9.1.3,
+/// Table 16). Codes `0b0010..0b0111` (3–8 channels) and `0b1011..0b1111`
+/// (reserved) are outside the profile → [`crate::Error::ProfileViolation`].
+///
+/// There is **no** swapped/"side is first" mid/side variant in FLAC: the three
+/// decorrelation codes are distinct and unambiguous. An earlier draft of this
+/// enum carried a `MidSide { side_bit }` flag modelled on assignments "0b101
+/// vs 0b110" — those codes are actually 6-channel and 7-channel, and the flag
+/// had nothing in the format to set it. Phantom field, phantom branch: removed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChannelConfig {
-    /// Independent stereo (channel assignment 0b000 / 0b001).
-    /// `channels` is the subframe count (1 or 2).
+    /// Independent channel(s), no interchannel decorrelation (assignment
+    /// `0b0000` mono / `0b0001` left-right). `channels` is the subframe count.
     Independent {
         /// Number of independently-coded subframes (1 or 2).
         channels: u8,
     },
-    /// Mid/side: mid is the primary subframe, side the secondary.
-    /// `side_bit` is the swapped-pair flag (assignment 0b101 vs 0b110).
-    MidSide {
-        /// Whether the mid/side subframe order is swapped in the frame.
-        side_bit: bool,
-    },
-    /// Left/side.
+    /// Mid/side, assignment `0b1010`: subframe 0 is the mid, subframe 1 the side.
+    MidSide,
+    /// Left/side, assignment `0b1000`: subframe 0 is the left, subframe 1 the side.
     LeftSide,
-    /// Right/side.
+    /// Side/right, assignment `0b1001`: subframe 0 is the side, subframe 1 the right.
     RightSide,
 }
 

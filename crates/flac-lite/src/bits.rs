@@ -149,11 +149,20 @@ impl<'a> BitReader<'a> {
     /// one — both consumers call this first.
     ///
     /// Notably **not** a caller: the frame header's CRC-8. The header's fixed
-    /// fields total 31 bits (sync 14 + reserved + blocking + blocksize 4 +
-    /// sample rate 4 + channels 3 + sample size 3 + reserved), and the UTF-8
-    /// coded number after them is whole octets, so the CRC-8 always lands at
-    /// bit `31 + 8k` — never byte-aligned. Aligning there would skip the top
-    /// bit of the CRC. That is why [`Self::read_u8`] is bit-level.
+    /// fields total **32** bits (sync 14 + reserved 1 + blocking 1 + blocksize 4
+    /// + sample rate 4 + **channels 4** + sample size 3 + reserved 1), and every
+    /// field before the CRC is whole octets, so the CRC-8 always lands on a byte
+    /// boundary — bit 40 behind a 1-octet coded number, 48 behind 2, and still
+    /// aligned after the optional uncommon blocksize/rate fields (8/16/24 bits).
+    /// Aligning there is a no-op.
+    ///
+    /// Earlier revision of this comment claimed 31 fixed bits with a 3-bit
+    /// `channels` field and concluded the header CRC was *never* byte-aligned,
+    /// so aligning would drop the CRC's top bit. Both the width and the
+    /// conclusion were wrong (measured over 979 real libFLAC frames; pinned by
+    /// `tests/frame_header_layout.rs`). [`Self::read_u8`] stays bit-level for the
+    /// case that genuinely needs it — the **footer** read below, right after
+    /// subframe padding — not the header. FLAC.md → "Correction 1".
     ///
     /// **Infallible, and it cannot overrun the slice**: a slice's bit count is
     /// always a multiple of 8, so aligning any in-bounds cursor lands on a
@@ -1086,50 +1095,53 @@ mod tests {
     // ---- composition: the patterns the frame layer will actually use ---------
 
     #[test]
-    fn header_tail_pattern_reads_the_crc_byte_straddling_a_boundary() {
-        // A faithful FLAC frame header, hand-packed bit by bit: 31 bits of
-        // fixed fields, a 2-octet UTF-8 coded frame number, then the CRC-8.
-        // The header is 31 + 16 + 8 = 55 bits — it does not even end on a byte
-        // boundary, which is the proof that `read_u8` must be bit-level and
-        // that `byte_align` before the CRC would be *wrong* (it would drop the
-        // CRC's top bit).
+    fn unaligned_coded_number_then_byte_straddling_read() {
+        // A SYNTHETIC unaligned composition. Its job is the bit reader: put a
+        // UTF-8 coded number mid-byte, then read 8 bits that straddle two
+        // source bytes.
         //
-        // Fields: sync 0x3FFE (14 ones ending in 0 = fixed blocksize) |
-        // reserved 0 | fixed blocking 0 | blocksize code 11 (2048) |
-        // sample-rate code 0 (from stream, what real encoders emit) | channels
-        // code 1 (left/side) | sample size code 4 (16-bit) | reserved 0, frame
-        // number 300 (2-octet: 0xC4 0xAC), CRC-8 0x7A (consumed, not verified
-        // — verification is Phase 2). Bytes re-derived with an independent
-        // Python bit packer, which caught two hand-packing bugs: a sync of
-        // 0x3FF8 is not a valid sync code, and blocksize code 9 is 512, not
-        // 2048 (codes 8..13 = 256/512/1024/2048/4096/8192).
-        let data = [0xFF, 0xF8, 0xB0, 0x31, 0x89, 0x58, 0xF4];
+        // This is deliberately NOT billed as a FLAC frame header any more. Real
+        // headers keep the coded number and the header CRC-8 byte-aligned (the
+        // fixed fields sum to 32 bits — see the `byte_align` docs, and
+        // `tests/frame_header_layout.rs`, which parses real libFLAC bytes).
+        // What *is* real and unaligned is a footer read right after subframe
+        // padding; that case lives in `footer_padding_pattern_...` below.
+        //
+        // History, kept so the mistake is not repeated: this test used to be
+        // billed as "a faithful FLAC frame header" and asserted 31 fixed bits
+        // with a 3-bit channels field, concluding the header CRC-8 is never
+        // byte aligned. Both the width and the conclusion were wrong, and the
+        // hand-packed bytes were not a valid header at all — parsed correctly
+        // they decode as a 4-channel frame with reserved bits set. The lesson
+        // generalises past this test: **a hand-packed vector cannot witness a
+        // field-width claim; it only records what the author believed.** Real
+        // encoder output is the only witness for that, so that is what
+        // tests/frame_header_layout.rs uses.
+        //
+        // Bytes re-derived with an independent Python bit packer (the habit
+        // that earlier caught sync 0x3FF8 being no sync code at all, and
+        // blocksize code 9 being 512 rather than 2048):
+        //   1011_1000 0001_0111 1011_0110 1100_0000
+        //   ^^^ lead-in = 0b101, cursor now at bit 3
+        //       ^^^^^ 11000000 = 2-octet lead at bit 3, payload 0b00001
+        //                ^^^^^^ 10111101 continuation, payload 0b111101
+        //                       -> coded number 0b00001_111101 = 61, bit 19
+        //                          ^^^^^^^^ bits [19..27) = 0b10110110 = 0xB6,
+        //                                   straddling data[2] and data[3]
+        let data = [0xB8, 0x17, 0xB6, 0xC0];
         let mut r = BitReader::new(&data);
-        assert_eq!(r.read_bits(14).unwrap(), 0x3FFE, "sync");
-        assert_eq!(r.read_bits(1).unwrap(), 0, "reserved");
-        assert_eq!(r.read_bits(1).unwrap(), 0, "fixed blocking strategy");
-        assert_eq!(r.read_bits(4).unwrap(), 11, "blocksize code 11 = 2048");
-        assert_eq!(r.read_bits(4).unwrap(), 0, "sample rate from stream");
-        assert_eq!(r.read_bits(3).unwrap(), 1, "left/side decorrelation");
-        assert_eq!(r.read_bits(3).unwrap(), 4, "16-bit");
-        assert_eq!(r.read_bits(1).unwrap(), 0, "reserved");
-        assert_eq!(r.bit_position(), 31, "fixed fields are 31 bits");
 
-        assert_eq!(r.read_utf8_coded().unwrap(), 300, "coded frame number");
-        assert_eq!(r.bit_position(), 47);
-        assert_ne!(
-            r.bit_position() % 8,
-            0,
-            "CRC position is inherently unaligned"
-        );
+        assert_eq!(r.read_bits(3).unwrap(), 0b101, "synthetic lead-in");
+        assert_eq!(r.bit_position(), 3);
+        assert_ne!(r.bit_position() % 8, 0, "setup must be unaligned");
 
-        assert_eq!(r.read_u8().unwrap(), 0x7A, "CRC-8: consumed, not verified");
-        assert_eq!(r.bit_position(), 55);
-        assert_eq!(
-            r.bits_remaining(),
-            1,
-            "one subframe bit follows in a real frame"
-        );
+        assert_eq!(r.read_utf8_coded().unwrap(), 61, "coded number");
+        assert_eq!(r.bit_position(), 19, "3 + 16 bits of coded number");
+        assert_ne!(r.bit_position() % 8, 0, "still unaligned");
+
+        assert_eq!(r.read_u8().unwrap(), 0xB6, "unaligned 8-bit read");
+        assert_eq!(r.bit_position(), 27);
+        assert_eq!(r.bits_remaining(), 5);
     }
 
     #[test]
