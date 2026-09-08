@@ -24,3 +24,6 @@
 # Same story for the experimental FLAC integration ROM crate (examples/flac_integration/
 # is its own workspace, builds only for thumbv4t-none-eabi via `make native-flac-rom`).
 /examples/flac_integration/target/
+
+# Python bytecode caches (scripts/*.py); never commit.
+__pycache__/

@@ -28,9 +28,13 @@
 //!   >> shift) + residual[i]`. Accumulate in `i64` in debug; the perf spike
 //!   decides whether `i32` is provably safe (it is for 16-bit input, but prove
 //!   it before trusting it).
-//! - Under the constrained encode profile (`-l 4`) full-LPC subframes should
-//!   never appear; with `strict-profile` on, return
-//!   [`crate::Error::ProfileViolation`] instead of decoding them.
+//! - Under the constrained encode profile the constraint is **max predictor
+//!   order**, not "fixed vs LPC". `-l N` is libFLAC's *max LPC order* (`-l 0` is
+//!   what means FIXED-only), so a `-l 4` encode is mostly **LPC-4** subframes —
+//!   measured 156/157 frames `lpc4` on the vector source, vs `fixed0` ×157 for
+//!   `-l 0`. With `strict-profile` on, the check is therefore `order > 4` (and
+//!   `order > 0` under a `-l 0` profile) → [`crate::Error::ProfileViolation`];
+//!   never "reject LPC" as a category. See FLAC.md → "Correction 3".
 
 use crate::bits::BitReader;
 

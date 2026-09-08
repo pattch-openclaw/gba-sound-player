@@ -196,10 +196,17 @@ STREAMINFO/seektable/Vorbis metadata and emits a manifest holding stream info
 Because we own the encoder, we pin the features the decoder must support:
 
 - 16-bit, 32kHz to start (65,536Hz later), mono or stereo
-- blocksize fixed per track (1024 or 2048)
-- `-l 4` → predictors capped at FIXED order 0–4 (full LPC order ≤32 still *parsed*,
-  but banned by profile → see perf gate)
+- blocksize fixed per track (1024 or 2048) — with the **final frame legitimately
+  short**, so per-frame blocksize comes from the frame header, not the manifest
+- **max predictor order ≤ 4** (encode `-l 4`), `-l 0` for FIXED-only. Predictors
+  above order 4 stay *parsed* but off-profile → see perf gate.
+  ⚠️ Wording corrected 2026-09-07: this line previously read "`-l 4` → predictors
+  capped at FIXED order 0–4", which is not what `-l` does — `-l` is a maximum
+  **LPC** order and `-l 4` emits real LPC-4 frames. See
+  [Correction 3](#correction-3--l-4-does-not-mean-fixed-order-04).
 - Rice / Rice2 residuals; mid/side + left/right-side decorrelation
+- sample rate above the 4-bit table (65,536 Hz) travels as code `0b0000` + stream
+  default, which needs `--lax` at encode time
 - no metadata blocks other than STREAMINFO (stripped by the packer)
 
 ### Crate layout (`crates/flac-lite/`)
@@ -229,10 +236,16 @@ IRQ boundary.
 The open question is not "can we write it" but **whether a 16.78MHz ARM7TDMI sustains
 decode + playback in real time**. Gate before building the full decoder:
 
-1. Spike: FIXED-only + Rice (no full LPC) and benchmark a ~10s clip on mGBA with an
-   explicit frame-decode **cycle counter** (timer capture around `decode_frame`).
-2. If FIXED-only fits but LPC does not, `flac -l 4` graduates from preference to
-   **hard project constraint** — and the parser can then reject LPC frames outright.
+1. Spike: FIXED + Rice **and** low-order LPC, benchmarking a ~10s clip on mGBA with
+   an explicit frame-decode **cycle counter** (timer capture around `decode_frame`).
+   Two arms, because the decision is a comparison: a `-l 0` clip (FIXED-only) and a
+   `-l 4` clip (LPC ≤4) — measured, these really are different streams
+   (`fixed0` ×157 vs `lpc4` ×156), so one clip cannot answer for both.
+2. If FIXED fits but LPC does not, cap the profile at **max predictor order 0 via
+   `-l 0`** (a stronger constraint than `-l 4`, which permits LPC) and reject
+   higher-order/LPC frames in the parser. Restated 2026-09-07: the old wording
+   ("`flac -l 4` becomes a hard constraint, reject LPC frames") was incoherent —
+   `-l 4` *allows* LPC, so it could never have been the reject-LPC switch.
 3. If even FIXED-only misses the budget, fall back to frame-level offline
    pre-processing (e.g. store FIXED order 0–1 only) or reduce scope to short loops.
 
@@ -474,26 +487,44 @@ for the decode path as of PR #32; the only `todo!()`s left in `bits.rs` are
      bounds. `read_u8` delegates to `read_bits(8)` (EOF/cursor rules identical
      by construction, same delegation as `read_signed`). Design decision found
      *during* implementation, not before: `read_u8` is **bit-level, not
-     alignment-enforcing**, because the frame header's fixed fields are
-     **31 bits** (sync 14 + reserved + blocking + blocksize 4 + rate 4 +
-     channels 3 + size 3 + reserved) and the coded number after them is whole
-     octets — so the header CRC-8 always sits at bit `31 + 8k`, **never**
-     byte-aligned. An earlier draft of these notes claimed the fixed fields
-     were 24 bits and the CRC "aligned by construction": both wrong, and
-     `byte_align`-before-CRC would drop the CRC's top bit and break
-     `decode_frame`. 10 new `core`-only tests: drop-width sweep at every
+     alignment-enforcing**.
+
+     > ⚠️ **Corrected 2026-09-07 — the reasoning recorded here was wrong, and
+     > confidently so.** This entry justified bit-level `read_u8` by claiming the
+     > frame header's fixed fields are **31 bits** ("channels 3") and that the
+     > header CRC-8 therefore always lands at bit `31 + 8k`, i.e. **never**
+     > byte-aligned. Channel assignment is a **4-bit** field, the fixed fields
+     > are **32 bits**, and the CRC-8 is therefore **always byte-aligned**
+     > (bit 40 behind a 1-octet coded number, 48 behind 2). Measured against real
+     > libFLAC 1.5.0 frames and pinned by `tests/frame_header_layout.rs`. The
+     > *conclusion* survives — `read_u8` must stay bit-level — but its real
+     > justification is the **frame footer** (the CRC-16 read after subframe
+     > padding), never the header. Authoritative layout + the full post-mortem:
+     > [Frame header: measured byte layout](#frame-header-measured-byte-layout--the-31-vs-32-bit-correction-2026-09-07).
+
+     10 new `core`-only tests: drop-width sweep at every
      alignment, exhaustive length×position no-overrun sweep, idempotence,
      `read_u8` differential vs `read_bits(8)` + naive oracle at every
      alignment, all-256-byte stream order, EOF cursor invariants, and two
-     composite frame-layer patterns — a faithful 55-bit header tail (31 fixed
-     bits + 2-octet coded 300 + CRC-8 straddling a byte boundary) and
-     padding→footer with a counterfactual assertion (the unaligned read is a
-     *different* byte, so skipping `byte_align` cannot pass).
+     composite frame-layer patterns — a "faithful 55-bit header tail" and a
+     padding→footer read with a counterfactual assertion (the unaligned read is
+     a *different* byte, so skipping `byte_align` cannot pass).
      `make flac-test` green (41 tests + thumbv4t compile gate). Lesson baked
      in again: an independent Python bit packer caught two hand-packed vector
      bugs before any Rust ran — sync `0x3FF8` is not a valid sync code (the
      14-bit fixed-blocksize code is `0x3FFE`), and blocksize code 9 is 512,
      not 2048 (codes 8..13 = 256/512/1024/2048/4096/8192; 2048 = code 11).
+
+     > The "faithful 55-bit header tail" pattern was **not** faithful: it was
+     > hand-packed from the same wrong 31-bit model, and parsed correctly it is
+     > not a valid frame header at all (channels code 3 → 4-channel, reserved bit
+     > set). Retired to a clearly-labelled synthetic bit-reader test
+     > (`unaligned_coded_number_then_byte_straddling_read`). The lesson this step
+     > actually taught, one level up: **a hand-packed vector cannot witness a
+     > field-width claim — it only records what the author believed.** Two
+     > reviewers had read that test and the prose above and agreed. Only real
+     > encoder output is a witness; see
+     > [Golden vectors](#golden-vectors--how-to-regenerate-them).
    - `crc8` + `crc16` — **not part of this step.** FLAC polynomials, table-free
      by design (a 256×u16 table is 512 bytes of ROM we could spend elsewhere);
      the perf gate runs with CRC verify skipped, which the design already
@@ -527,16 +558,35 @@ gets built later for the shipping path regardless.
    tables, UTF-8 coded frame number, **consume** (do not verify) the header
    CRC-8. Enough to position the reader at the subframe data of a real
    `flac -l 4` frame.
+   - Prerequisite **done 2026-09-07** (`docs/flac-frame-header-findings`): the
+     header's real byte layout measured against libFLAC 1.5.0, the scaffold's
+     31-bit/3-bit-channels model corrected, `StreamDefaults` added to the
+     `parse` signature ("from stream" codes must resolve, and 65 kHz hits that
+     path on every frame), and golden vectors from real encodes committed with a
+     regeneration script. See
+     [Frame header: measured byte layout](#frame-header-measured-byte-layout--the-31-vs-32-bit-correction-2026-09-07).
+   - So the parse now has a witness: implement it against
+     `tests/frame_header_vectors.txt` rather than against a hand-packed array.
 3. [ ] `subframe` FIXED (orders 0–4) + `residual` partitioned Rice/Rice2 —
    the decode math the gate measures.
-4. [ ] **Perf gate spike** in `examples/flac_spike/`: ROM embeds a ~10s
-   `flac -l 4` clip via `include_bytes!`; frames located by sync scan or a
-   hand-computed offset array (no GAFP, no manifest — deliberately
-   throwaway); timer-capture cycle counter around `decode_frame`; decode-loop
-   cadence vs the 64ms/frame @ 2048×32kHz real-time budget, measured on mGBA.
-   - Decision rule (from the risk gate above): FIXED-only fits but LPC does
-     not → `flac -l 4` becomes a hard constraint and the parser rejects LPC
-     frames. FIXED-only misses the budget → offline pre-processing
+   - **Amended 2026-09-07:** if the spike clip is a `-l 4` encode, FIXED alone
+     cannot decode it (measured: `lpc4` on 156/157 frames). Either step 3 grows
+     low-order LPC, or the spike runs a `-l 0` clip for the FIXED arm — see step 4.
+4. [ ] **Perf gate spike** in `examples/flac_spike/`: ROM embeds a ~10s clip via
+   `include_bytes!`; frames located by a **hand-computed offset array** (no GAFP,
+   no manifest — deliberately throwaway); timer-capture cycle counter around
+   `decode_frame`; decode-loop cadence vs the 64ms/frame @ 2048×32kHz real-time
+   budget, measured on mGBA.
+   - **Amended 2026-09-07 — sync scan dropped as the frame finder.** Measured on
+     real encodes it over-matches by 1.1×–9.4× depending on the audio, and CRC-8
+     alone still admits 1–2 false positives per stream; `crc8` stays parked in
+     Phase 2. Numbers + reasoning:
+     [Frame sync scanning: what actually filters](#frame-sync-scanning-what-actually-filters).
+   - **Two clips, not one** (`-l 0` FIXED-only and `-l ≤4` LPC), because the gate's
+     question is a comparison and those are measurably different streams.
+   - Decision rule (from the risk gate above): FIXED fits but LPC does not → cap
+     the profile at **`-l 0`** (which is what FIXED-only means) and reject
+     higher-order frames. FIXED-only misses the budget → offline pre-processing
      (FIXED order 0–1) or scope reduction.
 
 **Phase 2 — production pipeline (starts only after the gate resolves):**
@@ -553,3 +603,321 @@ gets built later for the shipping path regardless.
 9. [ ] `agb` integration: replace the integration ROM's `#[used]` link anchor
      with a real decode loop; mixer/DMA double-buffer playback; A/B against
      the same WAV.
+
+---
+
+## Frame header: measured byte layout — the 31-vs-32-bit correction (2026-09-07)
+
+Step 2 is "parse the frame header", so before writing it the header was measured
+rather than recalled: real streams encoded by **libFLAC 1.5.0** (`flac` 1.5.0 via
+brew on this host) and parsed byte-by-byte with an independent Python parser
+cross-checked against **RFC 9639 §9.1.2–9.1.3**. 979 frames across five streams.
+The scaffold was wrong in two ways that both land exactly on step 2.
+
+### The layout (what real encoders emit)
+
+```text
+byte 0        byte 1        byte 2        byte 3        byte 4..  last
+FF            F8            B8            18            00   CE   46...
+└──────────────── fixed fields: 32 bits ────────────┘   └─┬─┘  └┬┘
+                                                            │     └ subframe 0
+ sync 14 = 0x3FFE (fixed blocksize)                          └ CRC-8 (poly 0x07)
+ reserved 1 = 0        blocking 1 = 0 (fixed)
+ blocksize 4 = 0xB (2048)   rate 4 = 0x8 (32 kHz)
+ channels 4 = 0x1 (L/R)     size 3 = 0x4 (16-bit)   reserved 1 = 0
+```
+
+Field order and widths, authoritative (RFC 9639 Table 15/16, confirmed on
+libFLAC bytes):
+
+| Field | Bits | Notes |
+|---|---|---|
+| `synccode` | 14 | `0b11111111111110` fixed blocksize, `…11` variable. Not 8 bits, and **not** 16 — `0xFFF9` is not a sync code |
+| reserved | 1 | must be 0 |
+| blocking strategy | 1 | 0 = fixed blocksize (our profile) |
+| blocksize code | 4 | full table below |
+| sample-rate code | 4 | full table below |
+| **channel assignment** | **4** | **4 bits, not 3** — see the correction |
+| sample-size code | 3 | 0 = from stream, 1 = 8, 4 = 16, `0b011` reserved |
+| reserved | 1 | must be 0 |
+| — fixed fields total — | **32** | lands exactly on byte 4 |
+| UTF-8 coded number | 8·1..10 | whole octets, always starts byte-aligned |
+| uncommon blocksize | 8 \| 16 | only when blocksize code is `0b0110`/`0b0111` |
+| uncommon sample rate | 8 \| 16 \| 24 | only for rate codes `0b1100..0b1110` |
+| CRC-8 | 8 | **always byte-aligned** |
+
+**Blocksize codes**: `0b0000` reserved · `0b0001` 192 · `0b0101..0b0111`
+`144·2ᵛ` / 8-bit uncommon / 16-bit uncommon · `0b1000..0b1101` =
+256·2ᵛ⁻⁸ → **8:256 9:512 10:1024 11:2048 12:4096 13:8192** · `0b1110..1111`
+reserved.
+
+**Sample-rate codes**: `0b0000` **from stream** · `0b0001` 88.2k ·
+`0b0010` 176400 · `0b0011` 192000 · `0b0100` 8k · `0b0101` 16k · `0b0110` 22050 ·
+`0b0111` 24k · `0b1000` **32k** · `0b1001` 44100 · `0b1010` 48k · `0b1011` 96k ·
+`0b1100..0b1110` = get-8/16/24 · `0b1111` reserved.
+**There is no code for 65,536 Hz.** It can only travel as `0b0000` + stream
+default — see the profile section below.
+
+**Channel assignment**: `0b0000` mono · `0b0001` L/R · `0b0010..0b0111` 3–8
+channels · `0b1000` left/side · `0b1001` side/right · `0b1010` mid/side ·
+`0b1011..0b1111` reserved.
+
+### Correction 1 — channel assignment is 4 bits; fixed fields are 32, not 31
+
+`FLAC.md` (this file, the 2026-09-06 `byte_align`/`read_u8` entry) and
+`bits.rs`'s header-tail unit test both recorded the fixed fields as
+`sync 14 + reserved + blocking + blocksize 4 + rate 4 + channels 3 + size 3 +
+reserved` = **31 bits**, and drew a conclusion from it: that the header CRC-8
+"always sits at bit `31 + 8k`, **never** byte-aligned", so `byte_align()` before
+the CRC would drop the CRC's top bit.
+
+Both the width and the conclusion are wrong.
+
+* **Why it matters:** reading 3 bits for channels desynchronises the cursor by
+  one bit for everything after it. The header still "parses" — sync matches,
+  blocksize decodes to something plausible — and the damage surfaces later: the
+  coded number, the CRC byte, and then the subframe type field are all read from
+  the wrong offset. Debugging that means staring at subframe code, not header
+  code.
+* **Why 4 is forced, format-wise:** the field must encode mono, independent
+  stereo, three decorrelation modes, 3–8 channel layouts, *and* reserved values.
+  Three bits cannot cover mono + stereo + 3 decorrelation modes without stealing
+  the 3–8-channel codes; the spec's own table (Table 16) is 4 bits.
+* **Measured:** the CRC-8 lands at bit 40 (1-octet coded number) or bit 48
+  (2-octet) — `% 8 == 0` on every one of the 979 frames examined. With 32 fixed
+  bits, everything before the CRC is whole octets, so **byte-alignment isn't just
+  observed, it's structurally guaranteed**: 32 + 8·(coded octets) + 8·(optional
+  uncommon fields, which are 8/16/24 bits).
+* **What survives:** `read_u8` staying bit-level. Its real justification is the
+  **frame footer** — the CRC-16 read that follows subframe data and its padding
+  to a byte boundary, which genuinely can end unaligned — plus verbatim /
+  raw-signature samples. The header was never the reason.
+* **What to delete from memory:** the idea that `byte_align()` before the header
+  CRC is *dangerous*. It is a no-op there. Writing it "defensively" would be
+  harmless at runtime but would encode a false claim about FLAC, which is how
+  this error propagated in the first place.
+
+### Correction 2 — there is no swapped mid/side (`side_bit` was a phantom)
+
+`format::ChannelConfig::MidSide { side_bit }` was documented as "the swapped-pair
+flag (assignment 0b101 vs 0b110)". FLAC has no swapped mid/side variant. Codes
+`0b0101` and `0b0110` are **6-channel and 7-channel** layouts. The three
+decorrelation codes are distinct and unambiguous, so nothing in the format could
+ever set that flag. Removed: a phantom field invites a phantom branch, and
+"unknown/never-taken" branches are exactly what a `strict-profile` audit trips over.
+
+### Correction 3 — `-l 4` does not mean "FIXED order 0–4"
+
+The profile said `-l 4` caps predictors at FIXED order 0–4. `flac --help` says:
+`-l, --max-lpc-order=#   Max LPC order; 0 => only fixed predictors`. So **`-l N`
+is a maximum *LPC* order**, and only `-l 0` is FIXED-only. Measured on the same
+10 s source (census over every frame of each encode):
+
+| Encode | Subframe 0 across the whole stream | Decorrelation chosen |
+|---|---|---|
+| `-l 0` | `fixed0` ×157 | mid-side ×157 |
+| `-l 4` | `lpc4` ×156, `lpc3` ×1 | mid-side ×157 |
+
+So a `-l 4` clip is **mostly full-LPC frames**. Three things follow, and they
+cascade into the roadmap:
+
+1. **Step 3 (the perf gate's decode math) needs more than FIXED.** If the spike
+   embeds a `-l 4` clip, the decoder must decode LPC or it will reject nearly
+   every frame. Either the spike embeds a **`-l 0`** clip for the FIXED arm
+   *and* a `-l ≤4` clip for the LPC arm (this is now the plan — the gate compares
+   FIXED vs LPC cost, which is the actual decision), or step 3 must grow LPC.
+2. **The `strict-profile` reject rule changes shape.** "Reject LPC" is not the
+   same switch as "reject predictor order > 4". The gate's decision rule
+   ("FIXED fits, LPC doesn't → make `-l 4` a hard constraint") needs restating:
+   the enforceable constraint is **max predictor order ≤ N plus an explicit
+   fixed/LPC flag**, not a FIXED-only assumption.
+3. **The profile wording is fixed** (see below): "max predictor order ≤ N,
+   `-l 0` for FIXED-only", never "FIXED order 0–4".
+
+### The final frame is legitimately short
+
+A track's last frame carries a **smaller blocksize** than STREAMINFO's maximum:
+320,000 samples at blocksize 2048 is 156 full frames plus one 512-sample frame
+(visible in the `stereo-last` golden vector: blocksize code `0b1001` = 512 where
+the track uses 2048). Anything that filters candidate frames by "blocksize must
+equal the track's blocksize" therefore **silently drops the last frame of every
+track**. This is not speculation — a first cut of the vector harness did exactly
+that, an assertion fired, and the "bad parse" was the harness being over-strict
+about a legal stream. Corollary for the packer: frame count is
+`ceil(total_samples / blocksize)`, and the manifest must carry the last frame's
+sample count (or the decoder reads it per-frame from the header, which is what
+`FrameHeader::blocksize` is for).
+
+### Frame sync scanning: what actually filters
+
+The plan lists "locate frames by sync scan" as the spike's frame finder. Measured
+over real encodes (`0xFF 0xF8`-shape candidates vs. the true frame count):
+
+| Stream | real frames | sync-shape candidates | + CRC-8 only |
+|---|---|---|---|
+| `l4_stereo` | 157 | 214 | 157 |
+| `l0_stereo` | 157 | 200 | 157 |
+| `l4_mono` | 313 | 330 | 313 |
+| `l4_silence` | 32 | 32 | 32 |
+| `r65k` | 320 | 447 | 320 |
+| **total** | **979** | **1223** | **979** |
+
+A second, different source (sine + hash-noise material) was worse: **1476**
+candidates for 157 real frames (~9.4×), because noise-like payload bytes happen
+to look like sync + reserved-clear far more often. Two conclusions:
+
+* **Sync shape alone is not a frame finder.** 1.1× on clean synthetic tones,
+  up to ~10× on noisy material. It's a *recovery* mechanism (`Error::FrameSync`),
+  not an index.
+* **CRC-8 alone is close but not exact**: the `r65k` and second-source streams
+  admit 1–2 false positives each (a payload byte sequence that both looks like a
+  header and happens to CRC). What *was* exact, on all 979 frames of both
+  sources: **strict RFC field validation + CRC-8**, checked as "frame numbers are
+  exactly `0..N-1` in stream order". That is the filter the harness uses.
+
+**Decision for the spike (step 4):** locate frames with a **hand-computed offset
+table** generated offline (option (a) from the earlier review) — zero new decoder
+code, and it matches the container's real design, where the manifest's offset
+table *is* the seek mechanism. Keep `crc8` parked in Phase 2 step 5. Do not ship
+sync-scan-without-a-filter.
+
+### What the encoder actually chooses (cite this instead of guessing)
+
+* `-l 0` → FIXED only; `-l N` → LPC up to order N (`-l 4` produced `lpc4`).
+* `-m` (try mid/side per frame) chose **mid/side on every frame** of a
+  mid/side-shaped source; on a source with uncorrelated channels it chose
+  independent L/R for every frame. Left/side and side/right may never appear in a
+  given encode — so the golden-vector spec treats them as **optional** vectors
+  rather than required ones, and `--no-mid-side` / `-B` are the levers if forced
+  coverage is ever needed.
+* 65,536 Hz requires **`--lax`** (outside FLAC's streamable subset); every frame
+  then carries sample-rate code `0b0000`, i.e. the `FromStreamDefault` path.
+* Digitally silent input → **CONSTANT** subframes, and `flac` still emits a
+  normal header + Rice-coded residual structure around them.
+
+### `--force-utf8-legacy-noop` is not a real flag
+
+Both `crates/flac-lite/README.md` and `scripts/pack_flac.sh` carry a reference
+encode command ending in `--force-utf8-legacy-noop`. libFLAC 1.5.0 rejects it:
+`flac: unrecognized option` (the only UTF-8-related flag is `--no-utf8-convert`,
+which is about tag charsets, not frame numbers). Both places now use the plain
+command. Frame numbers are UTF-8-coded regardless — that is a spec property, not
+something to be configured — which is exactly why `read_utf8_coded` exists and why
+the 6-byte/7-byte header pair is in the vector set.
+
+## Golden vectors — how to regenerate them
+
+`crates/flac-lite/tests/frame_header_vectors.txt` holds real frame headers cut
+from real encodes, with expected field values derived by an **independent RFC
+parser**, never by hand-packing and never by asking libFLAC to explain itself.
+Consumed by `crates/flac-lite/tests/frame_header_layout.rs`.
+
+**Why machine-generated.** The 31-bit error entered the project through a
+hand-packed test vector and survived review *because* it looked authoritative:
+whoever packed those bytes believed 31 bits, and the test asserted 31 bits.
+A hand-packed vector cannot witness a field-width claim. Encoder output can, so
+the vectors are encoder output, end to end.
+
+### Regenerating
+
+```sh
+# from the repo root; needs `flac` + `metaflac` on PATH (brew install flac)
+./scripts/gen_frame_vectors.sh [output-path]
+```
+
+That script: synthesizes the source PCM (`scripts/frame_vectors.py synth`,
+integer arithmetic only — no floats, no RNG, so bytes are identical on every
+platform), runs each encode profile, runs the harness's **stream invariants**
+(fail-closed), and writes the vector table (default:
+`crates/flac-lite/tests/frame_header_vectors.txt`). Pass a path to emit somewhere
+else without touching the committed table.
+
+Pieces:
+
+* `scripts/frame_vectors.py` — the oracle: RFC tables, a strict frame-header
+  parser, CRC-8, deterministic PCM synthesis, frame finding, stream checks,
+  vector emission. Subcommands: `synth DIR`, `emit DIR OUT`, `measure DIR`.
+* `scripts/gen_frame_vectors.sh` — the deterministic driver (synth → encode →
+  check → emit), plus a census of what the encoder chose, appended as comments.
+
+### The invariants that make the table trustworthy
+
+`emit` refuses to write unless, for **every** source stream:
+
+1. frames found == `ceil(total_samples / max_blocksize)` from STREAMINFO;
+2. every frame header's **CRC-8 verifies**;
+3. coded frame numbers are **exactly `0..N-1` in stream order** — this is the
+   assertion that proves the parser reads every field at the right width, since
+   one mis-sized field corrupts the coded number;
+4. frame offsets strictly ascending;
+5. every **non-final** frame's blocksize equals STREAMINFO's maximum (the final
+   frame may be short — see above).
+
+And `frame_header_layout.rs` asserts, per vector, that walking the bytes through
+`bits::BitReader` reproduces every field, the coded number, the CRC-8 byte, the
+exact header bit-length, and that the CRC-8 position is byte-aligned (a
+regression tripwire: if that ever fails, someone changed a field width).
+
+### Checking new source material before trusting it
+
+`scripts/frame_vectors.py measure DIR` runs the strict-vs-lenient comparison over
+any directory of `.flac` files and prints real/candidate counts per stream, and
+**fails loudly** if the strict filter is not exact. Use it whenever adding a
+vector source — it is how the sync-scan numbers above were produced, and how the
+"final frame is short" over-rejection was caught.
+
+Two things it also taught, both now encoded in the synthesis parameters:
+
+* **A too-pure tonal source makes the vectors lie.** The first synthesis pass
+  produced `-l 4` and `-l 0` encodes that were *both* all-FIXED, so the table's
+  census line contradicted the `-l` semantics it was there to demonstrate. The
+  source needed a broadband floor for LPC to win: the committed synthesis has a
+  noise floor and several non-harmonically-related partials, and the emitted
+  census (`lpc4` at `-l 4`, `fixed0` at `-l 0`) is the check that it still does.
+* **Decorrelation must be earned.** Mid/side vectors only exist because the
+  synthesis is `L = center + side`, `R = center − side`. With independent
+  channels libFLAC picks plain L/R and the vector silently disappears.
+
+### Vector set (as generated by flac 1.5.0)
+
+| Vector | Why it's in the set | Required |
+|---|---|---|
+| `stereo-6byte-first` | 6-byte header, 1-octet coded number, CRC-8 at bit 40 | yes |
+| `stereo-7byte-num128` | 7-byte header — frame ≥128 forces the 2-octet form | yes |
+| `stereo-last` | final frame: **short blocksize** *and* a 7-byte number | yes |
+| `mono-b1024-first` | mono (channels `0b0000`), blocksize 1024, `lpc4` subframe | yes |
+| `r65k-rate-from-stream` | sample-rate code `0b0000` — the 65 kHz path | yes |
+| `fixed-only-first` | `-l 0` encode: FIXED-only, the perf gate's FIXED arm | yes |
+| `silence-constant` | CONSTANT subframes from digital silence | no |
+| `stereo-midside` | channels `0b1010` | no |
+| `stereo-leftside`, `stereo-sideright` | the other two decorrelation modes; **encoder-dependent**, emitted only if chosen | no |
+
+Required vectors fail the generator if absent; optional ones are skipped with
+nothing emitted, because "the encoder didn't choose left/side for this source"
+is a fact about the source, not a harness bug.
+
+## Prior assumptions that did not survive measurement
+
+Kept deliberately, since each one looked like a reasonable note and cost real
+time. The pattern is worth naming: **every one of these was a claim about a
+format recorded from recall rather than from bytes**, and every one was in a file
+that read like documentation, which is what made it survive review.
+
+| Prior assumption | Reality (measured) | How it was caught |
+|---|---|---|
+| Frame header fixed fields = 31 bits, `channels 3` | 32 bits, `channels 4` | Python parser over 979 real frames; assertion #3 above |
+| Header CRC-8 "never byte-aligned"; `byte_align` there would corrupt it | Always byte-aligned; `byte_align` is a no-op | CRC bit position `% 8` over all frames |
+| `read_u8` must be bit-level *because of the header CRC* | True, because of the **footer** (post-padding CRC-16) | Layout walk; footer case checked separately |
+| `MidSide { side_bit }` = "swapped pair, 0b101 vs 0b110" | No such variant; `0b0101`/`0b0110` are 6/7-channel | RFC Table 16 vs the scaffold's own comment |
+| `-l 4` → "predictors capped at FIXED order 0–4" | `-l` = max **LPC** order; `-l 4` emitted `lpc4`; FIXED-only needs `-l 0` | `flac --help` + per-frame census of both encodes |
+| A `-l 4` clip is a reasonable FIXED-path test asset | It is mostly LPC frames — the spike would reject ~all of it | Census of subframe types across a full encode |
+| Filter candidate frames by the track's blocksize | The **final frame is legitimately short** → drops the last frame of every track | Harness assertion fired on a legal stream |
+| Sync-scan needs no filter ("nearly free") | 1.1×–9.4× over-match; CRC-8 alone still admits 1–2 false positives | `measure` over two different source types |
+| 65,536 Hz is reachable with a rate code | No 4-bit code exists; needs `--lax` + code `0b0000` on every frame | `flac` refused without `--lax`; all 320 frames code 0 |
+| `bits_per_sample: u8` in the header struct | Code `0b000` would silently yield a bogus number → needs `StreamDefaults` | Signature review against the measured rate-code-0 case |
+| `--force-utf8-legacy-noop` in reference encode commands | Not a libFLAC flag — 1.5.0 exits 1 with `unrecognized option` | Ran the command |
+| Hand-packed vectors + prose notes are sufficient evidence of layout | They record the author's belief, and two reviewers agreed with a wrong one | This whole pass; vectors are now encoder-derived |
+
+**Rule going forward:** any claim in these docs about *format bytes* carries its
+witness — an RFC section, or a measurement with the command that produced it. If
+neither is cited, treat it as a hypothesis, not documentation.
