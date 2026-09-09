@@ -554,10 +554,12 @@ gets built later for the shipping path regardless.
    (+ host unit tests). Small, division-free, and the genuine last blockers
    in `bits`. **Done 2026-09-06** — `bits` is complete for the decode path
    (CRCs remain, Phase 2); the frame header parse below is unblocked.
-2. [ ] Minimal `frame` header parse: sync/code checks, blocksize & sample-rate
+2. [x] Minimal `frame` header parse: sync/code checks, blocksize & sample-rate
    tables, UTF-8 coded frame number, **consume** (do not verify) the header
    CRC-8. Enough to position the reader at the subframe data of a real
-   `flac -l 4` frame.
+   `flac -l 4` frame. **Done 2026-09-08** — see
+   [Completed: `FrameHeader::parse`](#completed-frameheaderparse-2026-09-08)
+   for what landed, including three doc claims the implementation disproved.
    - Prerequisite **done 2026-09-07** (`docs/flac-frame-header-findings`): the
      header's real byte layout measured against libFLAC 1.5.0, the scaffold's
      31-bit/3-bit-channels model corrected, `StreamDefaults` added to the
@@ -632,7 +634,7 @@ libFLAC bytes):
 
 | Field | Bits | Notes |
 |---|---|---|
-| `synccode` | 14 | `0b11111111111110` fixed blocksize, `…11` variable. Not 8 bits, and **not** 16 — `0xFFF9` is not a sync code |
+| `synccode` | 14 | `0b11111111111110` — **the same 14-bit value for both blocking strategies**. RFC 9639 §9.1 defines a *15*-bit sync `0b111111111111100` followed by the strategy bit, which is why a frame starts `0xFFF8`/`0xFFF9`. Not 8 bits, and **not** 16. (Corrected 2026-09-08 while implementing step 2: this row previously read "`…11` variable", implying a second 14-bit sync code. There isn't one — `0x3FFF` is not a sync, it is a sync plus the variable-blocksize bit, which is why `parse` reads 14 bits for sync and validates the strategy separately.) |
 | reserved | 1 | must be 0 |
 | blocking strategy | 1 | 0 = fixed blocksize (our profile) |
 | blocksize code | 4 | full table below |
@@ -643,20 +645,28 @@ libFLAC bytes):
 | — fixed fields total — | **32** | lands exactly on byte 4 |
 | UTF-8 coded number | 8·1..10 | whole octets, always starts byte-aligned |
 | uncommon blocksize | 8 \| 16 | only when blocksize code is `0b0110`/`0b0111` |
-| uncommon sample rate | 8 \| 16 \| 24 | only for rate codes `0b1100..0b1110` |
+| uncommon sample rate | 8 \| 16 | only for rate codes `0b1100..0b1110`; **never 24-bit** (corrected 2026-09-08 — the scaffold comment and this row both said `8 | 16 | 24` with no witness; §9.1.7 defines 8-bit kHz, 16-bit Hz, 16-bit Hz÷10, and libFLAC 1.5.0 emits exactly those) |
 | CRC-8 | 8 | **always byte-aligned** |
 
-**Blocksize codes**: `0b0000` reserved · `0b0001` 192 · `0b0101..0b0111`
-`144·2ᵛ` / 8-bit uncommon / 16-bit uncommon · `0b1000..0b1101` =
-256·2ᵛ⁻⁸ → **8:256 9:512 10:1024 11:2048 12:4096 13:8192** · `0b1110..1111`
-reserved.
+**Blocksize codes** (RFC 9639 Table 14, restated correctly 2026-09-08 — the
+prose here had the `144·2ᵛ` range one code too high and wrongly called the top
+two codes reserved; the independent oracle in `scripts/frame_vectors.py` was
+right all along, which is what pinned it):
+`0b0000` reserved · `0b0001` 192 · `0b0010..0b0101` = `144·2ᵛ` →
+**2:576 3:1152 4:2304 5:4608** · `0b0110` 8-bit uncommon (value + 1) ·
+`0b0111` 16-bit uncommon (value + 1) · `0b1000..0b1111` = `2ᵛ` →
+**8:256 9:512 10:1024 11:2048 12:4096 13:8192 14:16384 15:32768**.
 
 **Sample-rate codes**: `0b0000` **from stream** · `0b0001` 88.2k ·
 `0b0010` 176400 · `0b0011` 192000 · `0b0100` 8k · `0b0101` 16k · `0b0110` 22050 ·
 `0b0111` 24k · `0b1000` **32k** · `0b1001` 44100 · `0b1010` 48k · `0b1011` 96k ·
-`0b1100..0b1110` = get-8/16/24 · `0b1111` reserved.
+`0b1100` = kHz as 8-bit · `0b1101` = Hz as 16-bit · `0b1110` = Hz÷10 as 16-bit ·
+`0b1111` forbidden.
 **There is no code for 65,536 Hz.** It can only travel as `0b0000` + stream
-default — see the profile section below.
+default — see the profile section below. (Rates that *do* have uncommon-code
+representations — measured 56000 as `0b1100`, 48001 as `0b1101`, 10010 as
+`0b1110` — encode **without** `--lax`, unlike 65,536, which has no code at all.
+Both paths now carry golden vectors.)
 
 **Channel assignment**: `0b0000` mono · `0b0001` L/R · `0b0010..0b0111` 3–8
 channels · `0b1000` left/side · `0b1001` side/right · `0b1010` mid/side ·
@@ -917,7 +927,64 @@ that read like documentation, which is what made it survive review.
 | `bits_per_sample: u8` in the header struct | Code `0b000` would silently yield a bogus number → needs `StreamDefaults` | Signature review against the measured rate-code-0 case |
 | `--force-utf8-legacy-noop` in reference encode commands | Not a libFLAC flag — 1.5.0 exits 1 with `unrecognized option` | Ran the command |
 | Hand-packed vectors + prose notes are sufficient evidence of layout | They record the author's belief, and two reviewers agreed with a wrong one | This whole pass; vectors are now encoder-derived |
+| The 14-bit sync is `0x3FFE` for fixed blocksize, `0x3FFF` for variable | §9.1's sync is **15** bits (`0b111111111111100`) plus the strategy bit; `0x3FFE` covers **both** strategies | Writing `parse` against §9.1 — a 14-bit `0x3FFF` check would reject variable-blocksize streams at the sync instead of at the strategy bit |
+| Uncommon sample rate is stored as 8 \| 16 \| **24** bits | §9.1.7: 8-bit kHz, 16-bit Hz, 16-bit Hz÷10 — **never 24-bit** | §9.1.7 + libFLAC 1.5.0 encodes of 56000/48001/10010 Hz; a 24-bit read strands the cursor 8 bits short of the CRC-8 |
+| Blocksize codes `0b1110..0b1111` are "reserved"; `144·2ᵛ` starts at `0b0101` | Table 14: `0b0010..0b0101` are the `144·2ᵛ` family, and `0b1110`/`0b1111` are **16384/32768** | Table 14 while writing the blocksize table test; the Python oracle had it right, the prose did not |
+| Real headers are 6 or 7 bytes (asserted over the golden set) | **6 to 9** bytes: the uncommon blocksize/rate octets lengthen the header | Regenerating vectors with the tail/rate streams — the old assertion failed immediately, which is what it was for |
 
 **Rule going forward:** any claim in these docs about *format bytes* carries its
 witness — an RFC section, or a measurement with the command that produced it. If
 neither is cited, treat it as a hypothesis, not documentation.
+
+## Completed: `FrameHeader::parse` (2026-09-08)
+
+Phase 1 step 2 landed. `FrameHeader::parse` walks RFC 9639 §9.1.1–9.1.8 in field
+order and leaves the cursor exactly on the first subframe bit; the 3–8-channel,
+unsupported-depth, reserved-code and forbidden-value cases each return a
+distinct, documented error (taxonomy in `frame.rs` module docs). Implemented
+alongside it, as the parse's dependencies: `SampleRate::{hz, from_flac_code}`
+and `ChannelConfig::subframe_count`. `decode_frame` below it is still `todo!()`
+— step 3 is the next thing.
+
+**What the vectors became.** Step 2's rule was "implement against
+`tests/frame_header_vectors.txt`, not a hand-packed array", and the same rule
+applies to the parts of the header the original set did not cover. So the
+generator now encodes five more streams and the table carries **13 vectors**
+(was 8): final frames of 1512 and 100 samples — lengths no table blocksize can
+express, so libFLAC must emit the uncommon 16-bit and 8-bit forms — and rates
+56000 / 48001 / 10010 Hz, one per uncommon sample-rate code. The independent
+parser grew to resolve those appended values (blocksize minus 1; rate ×1000 /
+×1 / ×10), and its stream invariants still have to hold before the generator
+writes anything. Header-length coverage went 6→9 bytes, which broke the
+harness's own `vec![6, 7]` assertion the moment real uncommon fields arrived —
+the over-narrow assertion, not the decoder, was what was wrong.
+
+**Rejection has no encoder witness, so it gets a mutation witness instead.
+libFLAC never emits an invalid stream**, so `Error::FrameSync` /
+`InvalidField` / `ProfileViolation` / `UnsupportedSampleSize` cannot be golden-
+vected. `tests/frame_header_layout.rs` instead takes a real header out of the
+table at runtime and mutates **one field at a time** — sync, each reserved bit,
+the blocking strategy, each reserved/forbidden code, a broken coded number, the
+§9.1.5 31-bit number cap, blocksize 65536, sample rate 0, an unaligned cursor —
+and asserts the specific variant. Every case names its mutation; the untouched
+bytes keep the field widths honest.
+
+**Three doc claims the implementation disproved** (all in the table above with
+their witnesses): the phantom `0x3FFF` "variable-blocksize sync code", the
+phantom **24-bit** uncommon sample rate, and the blocksize prose that called
+16384/32768 reserved. Same pattern this file already names — prose about format
+bytes written from recall, surviving review because it read like documentation.
+Two of the three would have compiled and been *plausibly* wrong: a 24-bit read
+lands the cursor 8 bits short of the CRC-8, and a `0x3FFF` sync check rejects
+legal streams at the door. Only the third would have failed loudly, by refusing
+a legal 16384/32768-sample frame.
+
+**Deferred on purpose** (module docs carry the full list): the §9.1.6 rule that
+uncommon blocksize values 1–15 are final-frame-only, and strict-profile
+blocksize gating. Neither is judgeable from one header — "final" needs the frame
+count, and the final frame's short blocksize looks exactly like a violation to
+any frame-local check. Both belong to the packer/decoder loop, not the parser.
+
+**Gates:** `make flac-test` green — thumbv4t compile gate + 45 host unit tests
+(4 new, in `format.rs`) + 11 integration tests; `make native-flac-rom` still
+builds/links/fixes with the parse in the image; `make check` clean.
