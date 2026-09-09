@@ -149,7 +149,7 @@ def hash_noise(index, mult, span):
 
 
 def synth_pcm(seconds, rate, center_partials, side_period, side_weight,
-              noise_l, noise_r, mono=False):
+              noise_l, noise_r, mono=False, exact=None):
     """Correlated stereo (or mono) material tuned to make the *encoder* choose
     the features the vectors are supposed to demonstrate.
 
@@ -170,7 +170,10 @@ def synth_pcm(seconds, rate, center_partials, side_period, side_weight,
     Integer arithmetic only (no float accumulation, no RNG), so the bytes are
     identical on every platform and every run.
     """
-    count = int(seconds * rate)
+    # `exact` overrides the float-derived count: the tail-length streams need a
+    # precise sample count (it decides the final frame's blocksize), and a float
+    # multiply must never be allowed to shave one sample off it.
+    count = exact if exact is not None else int(seconds * rate)
     square_period = 32
     samples = []
     for i in range(count):
@@ -206,6 +209,22 @@ PARTIALS_32K = [(128, 5), (192, 4), (250, 3), (80, 2)]
 PARTIALS_64K = [(64, 5), (128, 4), (256, 3), (512, 2)]
 
 
+# Streams whose *final frame* cannot be expressed by the 4-bit blocksize
+# table, so libFLAC must emit the uncommon ("get 8/16-bit") form. Both sample
+# counts are chosen against a 2048 blocksize:
+#   321000 = 156*2048 + 1512  -> 1512 is not a table size -> 16-bit form
+#   20580  = 10*2048  + 100   -> 100  ""                       -> 8-bit form
+TAIL16_SAMPLES = 321000
+TAIL8_SAMPLES = 20580
+
+# Rates with no place in the 4-bit table, carried by the uncommon sample-rate
+# codes. Measured on libFLAC 1.5.0: none of these need `--lax` (unlike 65536,
+# which has no code at all and travels as `0b0000` + stream default).
+RATE_STREAMS = (("rate_khz.wav", 56000, 0.25),    # 0b1100, kHz as 8-bit
+                ("rate_hz.wav", 48001, 0.25),     # 0b1101, Hz as 16-bit
+                ("rate_hz10.wav", 10010, 0.25))   # 0b1110, Hz/10 as 16-bit
+
+
 def synth(dst):
     write_wav(os.path.join(dst, "stereo.wav"), 32000, 2,
               synth_pcm(10.0, 32000, PARTIALS_32K, 1000, 3, 700, 400))
@@ -214,7 +233,17 @@ def synth(dst):
     write_wav(os.path.join(dst, "r65k.wav"), 65536, 2,
               synth_pcm(10.0, 65536, PARTIALS_64K, 1024, 3, 700, 400))
     write_wav(os.path.join(dst, "silence.wav"), 32000, 2, [0] * (32000 * 2 * 2))
-    print("   synthesized stereo/mono/r65k/silence WAV in %s" % dst)
+    # Short-tail streams: mono, same synthesis, lengths chosen so the final
+    # frame forces each uncommon blocksize form.
+    for name, count in (("tail16.wav", TAIL16_SAMPLES), ("tail8.wav", TAIL8_SAMPLES)):
+        write_wav(os.path.join(dst, name), 32000, 1,
+                  synth_pcm(0, 32000, PARTIALS_32K, 1000, 3, 700, 400,
+                            mono=True, exact=count))
+    for name, rate, seconds in RATE_STREAMS:
+        write_wav(os.path.join(dst, name), rate, 1,
+                  synth_pcm(seconds, rate, PARTIALS_32K, 1000, 3, 700, 400,
+                            mono=True))
+    print("   synthesized stereo/mono/r65k/silence/tails/rates WAVs in %s" % dst)
 
 
 # ---------------------------------------------------------------- parsing
@@ -301,14 +330,31 @@ def parse_frame_header(data, pos):
     value = raw[0] & (0x7F if octets == 1 else (0xFF >> (octets + 1)))
     for byte in raw[1:]:
         value = (value << 6) | (byte & 0x3F)
+    # Uncommon block size / sample rate follow the coded number, big-endian,
+    # block size first (9.1.6, 9.1.7). Block size is stored minus one; the rate
+    # carries its own unit per code (kHz 8-bit, Hz 16-bit, Hz/10 16-bit) --
+    # never 24-bit. Walking the tail in field order is what keeps the CRC-8
+    # position right when both uncommon fields are present at once.
+    tail = pos + 4 + octets
     extra = 0
+    blocksize_resolved = BLOCKSIZE[bs_code]
     if bs_code == 0b0110:
+        blocksize_resolved = data[tail] + 1
+        tail += 1
         extra += 1
-    if bs_code == 0b0111:
+    elif bs_code == 0b0111:
+        blocksize_resolved = int.from_bytes(data[tail:tail + 2], "big") + 1
+        tail += 2
         extra += 2
+    rate_resolved = SAMPLERATE[rate_code]
     if rate_code == 0b1100:
+        rate_resolved = data[tail] * 1000
+        tail += 1
         extra += 1
-    if rate_code in (0b1101, 0b1110):
+    elif rate_code in (0b1101, 0b1110):
+        unit = 1 if rate_code == 0b1101 else 10
+        rate_resolved = int.from_bytes(data[tail:tail + 2], "big") * unit
+        tail += 2
         extra += 2
     crc_at = 4 + octets + extra
     if pos + crc_at + 2 > len(data):
@@ -321,9 +367,9 @@ def parse_frame_header(data, pos):
         offset=pos,
         header=data[pos:pos + crc_at + 1],
         blocksize_code=bs_code,
-        blocksize=BLOCKSIZE[bs_code],
+        blocksize=blocksize_resolved,
         rate_code=rate_code,
-        rate_hz=SAMPLERATE[rate_code],
+        rate_hz=rate_resolved,
         chan_code=chan_code,
         subframes=CHANNELS[chan_code][0],
         decorrelation=CHANNELS[chan_code][1],
@@ -433,6 +479,23 @@ VECTOR_SPECS = [
     ("stereo-midside", "l4_stereo.flac",
      lambda f: next(h for h in f if h["decorrelation"] == "mid-side"), False,
      "mid/side decorrelation: channels code 0b1010"),
+    # --- uncommon blocksize forms (9.1.6): the header is only parseable if the
+    # appended value is consumed at the right cursor position. Both are final
+    # frames, which is exactly where they occur in practice.
+    ("tail-uncommon16", "tail16.flac", lambda f: f[-1], True,
+     "final frame of 1512 samples: no table size fits, so blocksize code "
+     "0b0111 + 16-bit (blocksize minus 1) after the coded number"),
+    ("tail-uncommon8", "tail8.flac", lambda f: f[-1], True,
+     "final frame of 100 samples: blocksize code 0b0110 + 8-bit value"),
+    # --- uncommon sample rates (9.1.7): each code carries its own unit, and
+    # the value sits after the uncommon blocksize when both are present.
+    ("rate-khz-8bit", "rate_khz.flac", lambda f: f[0], True,
+     "56000 Hz: no table code, so 0b1100 + rate in kHz as an 8-bit number"),
+    ("rate-hz-16bit", "rate_hz.flac", lambda f: f[0], True,
+     "48001 Hz: 0b1101 + rate in Hz as a 16-bit number"),
+    ("rate-hz10-16bit", "rate_hz10.flac", lambda f: f[0], True,
+     "10010 Hz: 0b1110 + rate/10 as a 16-bit number (units are per-code, and "
+     "never 24-bit -- the scaffold's '8 | 16 | 24' note had no witness)"),
     ("stereo-leftside", "l4_stereo.flac",
      lambda f: next(h for h in f if h["decorrelation"] == "left-side"), False,
      "left/side decorrelation: channels code 0b1000"),
@@ -527,11 +590,11 @@ def emit(src, out_path):
         w("fixed_fields_bits 32")
         w("sync 0x3FFE")
         w("blocksize_code 0x%X" % header["blocksize_code"])
-        w("blocksize %s" % (header["blocksize"] or "from-stream"))
+        w("blocksize %d" % header["blocksize"])
         w("samplerate_code 0x%X" % header["rate_code"])
         w("samplerate_hz %s" % (header["rate_hz"]
                                 if isinstance(header["rate_hz"], int)
-                                else header["rate_hz"] or "from-stream"))
+                                else "from-stream"))
         w("stream_samplerate_hz %d" % info["sample_rate"])
         w("channels_code 0x%X" % header["chan_code"])
         w("subframes %d" % header["subframes"])
@@ -575,7 +638,8 @@ def emit(src, out_path):
 
 
 STREAMS = ("l4_stereo.flac", "l0_stereo.flac", "l4_mono.flac",
-           "l4_silence.flac", "r65k.flac")
+           "l4_silence.flac", "r65k.flac", "tail16.flac", "tail8.flac",
+           "rate_khz.flac", "rate_hz.flac", "rate_hz10.flac")
 
 
 def measure(src):

@@ -45,6 +45,15 @@ flac -1 -f -s -l 4 -b 2048 -m -o "$tmp/l4_silence.flac"    "$tmp/silence.wav"
 # 65536 Hz is outside FLAC's streamable subset (no 4-bit code for it), so
 # libFLAC needs --lax; every frame then says "rate from stream" (code 0).
 flac -1 -f -s -l 4 -b 2048 -m --lax -o "$tmp/r65k.flac"    "$tmp/r65k.wav"
+# Final frames whose length is not a table block size force the uncommon
+# ("get 8/16-bit") blocksize form -- the only way those frames can be carried.
+flac -1 -f -s -l 4 -b 2048    -o "$tmp/tail16.flac"        "$tmp/tail16.wav"
+flac -1 -f -s -l 4 -b 2048    -o "$tmp/tail8.flac"         "$tmp/tail8.wav"
+# Rates absent from the 4-bit table travel as uncommon sample-rate codes.
+# Unlike 65536 Hz these do NOT need --lax (measured, libFLAC 1.5.0).
+flac -1 -f -s -l 4 -b 1024    -o "$tmp/rate_khz.flac"      "$tmp/rate_khz.wav"
+flac -1 -f -s -l 4 -b 1024    -o "$tmp/rate_hz.flac"       "$tmp/rate_hz.wav"
+flac -1 -f -s -l 4 -b 1024    -o "$tmp/rate_hz10.flac"     "$tmp/rate_hz10.wav"
 
 echo "== extracting vectors with the independent parser"
 python3 "$here/frame_vectors.py" emit "$tmp" "$out"

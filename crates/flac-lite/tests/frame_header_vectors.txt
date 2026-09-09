@@ -255,6 +255,151 @@ crc8_bit_position 40
 crc8_byte_aligned true
 subframe0_type lpc4
 
+vector tail-uncommon16
+source_stream tail16.flac
+note final frame of 1512 samples: no table size fits, so blocksize code 0b0111 + 16-bit (blocksize minus 1) after the coded number
+required true
+bytes FF F8 78 08 C2 9C 05 E7 26
+frame_offset 399693
+stream_frame_count 157
+header_bits 72
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0x7
+blocksize 1512
+samplerate_code 0x8
+samplerate_hz 32000
+stream_samplerate_hz 32000
+channels_code 0x0
+subframes 1
+decorrelation none
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 156
+coded_number_octets 2
+extra_field_bytes 2
+crc8_byte 0x26
+crc8_bit_position 64
+crc8_byte_aligned true
+subframe0_type lpc4
+
+vector tail-uncommon8
+source_stream tail8.flac
+note final frame of 100 samples: blocksize code 0b0110 + 8-bit value
+required true
+bytes FF F8 68 08 0A 63 A7
+frame_offset 33393
+stream_frame_count 11
+header_bits 56
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0x6
+blocksize 100
+samplerate_code 0x8
+samplerate_hz 32000
+stream_samplerate_hz 32000
+channels_code 0x0
+subframes 1
+decorrelation none
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 10
+coded_number_octets 1
+extra_field_bytes 1
+crc8_byte 0xA7
+crc8_bit_position 48
+crc8_byte_aligned true
+subframe0_type lpc3
+
+vector rate-khz-8bit
+source_stream rate_khz.flac
+note 56000 Hz: no table code, so 0b1100 + rate in kHz as an 8-bit number
+required true
+bytes FF F8 AC 08 00 38 51
+frame_offset 8304
+stream_frame_count 14
+header_bits 56
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0xA
+blocksize 1024
+samplerate_code 0xC
+samplerate_hz 56000
+stream_samplerate_hz 56000
+channels_code 0x0
+subframes 1
+decorrelation none
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 0
+coded_number_octets 1
+extra_field_bytes 1
+crc8_byte 0x51
+crc8_bit_position 48
+crc8_byte_aligned true
+subframe0_type lpc3
+
+vector rate-hz-16bit
+source_stream rate_hz.flac
+note 48001 Hz: 0b1101 + rate in Hz as a 16-bit number
+required true
+bytes FF F8 AD 08 00 BB 81 D5
+frame_offset 8304
+stream_frame_count 12
+header_bits 64
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0xA
+blocksize 1024
+samplerate_code 0xD
+samplerate_hz 48001
+stream_samplerate_hz 48001
+channels_code 0x0
+subframes 1
+decorrelation none
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 0
+coded_number_octets 1
+extra_field_bytes 2
+crc8_byte 0xD5
+crc8_bit_position 56
+crc8_byte_aligned true
+subframe0_type lpc3
+
+vector rate-hz10-16bit
+source_stream rate_hz10.flac
+note 10010 Hz: 0b1110 + rate/10 as a 16-bit number (units are per-code, and never 24-bit -- the scaffold's '8 | 16 | 24' note had no witness)
+required true
+bytes FF F8 AE 08 00 03 E9 8B
+frame_offset 8304
+stream_frame_count 3
+header_bits 64
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0xA
+blocksize 1024
+samplerate_code 0xE
+samplerate_hz 10010
+stream_samplerate_hz 10010
+channels_code 0x0
+subframes 1
+decorrelation none
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 0
+coded_number_octets 1
+extra_field_bytes 2
+crc8_byte 0x8B
+crc8_bit_position 56
+crc8_byte_aligned true
+subframe0_type lpc3
+
 # --- measured encoder behaviour (cite these instead of guessing) ---------
 # First-subframe type across a whole 10s encode of the same source:
 #   l0_stereo.flac   fixed0 x157

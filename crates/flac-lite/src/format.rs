@@ -39,24 +39,65 @@ pub enum SampleRate {
 
 impl SampleRate {
     /// Samples per second, given the stream's default rate.
+    ///
+    /// `Explicit` ignores the default entirely — a frame that names its rate
+    /// (table code or uncommon value) never consults the stream, which is what
+    /// lets the perf spike hand-write `StreamDefaults` without corrupting
+    /// explicit-rate frames. Only [`SampleRate::FromStreamDefault`] consults it.
     pub fn hz(self, stream_default: u32) -> u32 {
-        todo!("flac-lite scaffold: SampleRate::hz")
+        match self {
+            SampleRate::Explicit(hz) => hz,
+            SampleRate::FromStreamDefault => stream_default,
+        }
     }
 
-    /// Decode FLAC's 4-bit sample-rate code (frame header, 0b1100..0b1110 range).
+    /// Decode FLAC's 4-bit sample-rate code (RFC 9639 Table 15) for the codes
+    /// that are **self-contained**: `0b0000` → [`SampleRate::FromStreamDefault`],
+    /// the eleven table rates → [`SampleRate::Explicit`], `0b1111` (forbidden)
+    /// → [`crate::Error::InvalidField`].
+    ///
+    /// The three *uncommon* codes `0b1100..=0b1110` carry their value **after
+    /// the coded number** (8-bit kHz, 16-bit Hz, 16-bit Hz÷10 respectively —
+    /// never 24-bit; measured against libFLAC 1.5.0, see FLAC.md), so the code
+    /// alone cannot resolve them and this function refuses them with
+    /// [`crate::Error::InvalidField`]. That rejection is a *domain* boundary,
+    /// not a stream verdict: `FrameHeader::parse` reads the appended value at
+    /// the right cursor position and constructs `Explicit` directly. Pinned by
+    /// `format_refuses_codes_that_carry_a_value` below.
     pub fn from_flac_code(code: u8) -> crate::Result<Self> {
-        todo!("flac-lite scaffold: SampleRate::from_flac_code")
+        // Table 15 in full; every arm is a constant, no division (ARMv4T).
+        let hz = match code {
+            0b0000 => return Ok(SampleRate::FromStreamDefault),
+            0b0001 => 88_200,
+            0b0010 => 176_400,
+            0b0011 => 192_000,
+            0b0100 => 8_000,
+            0b0101 => 16_000,
+            0b0110 => 22_050,
+            0b0111 => 24_000,
+            0b1000 => 32_000,
+            0b1001 => 44_100,
+            0b1010 => 48_000,
+            0b1011 => 96_000,
+            // 0b1100..=0b1110: value lives after the coded number — see docs.
+            0b1100..=0b1110 => return Err(crate::Error::InvalidField),
+            // 0b1111: forbidden by the spec.
+            _ => return Err(crate::Error::InvalidField),
+        };
+        Ok(SampleRate::Explicit(hz))
     }
 }
 
 /// Block size (samples per subframe), from FLAC's 4-bit code table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Blocksize {
-    /// Single value written after the code (`0b0010` = 8, `0b0110` = get 8-bit,
-    /// `0b0111` = get 16-bit).
+    /// A concrete sample count, resolved from a table code or an uncommon
+    /// ("get 8/16-bit") value.
     Explicit(u16),
-    /// Sample rate is unknown at frame time — illegal in our constrained
-    /// profile; the packer must always pin an explicit block size.
+    /// Reserved code `0b0000`, or an uncommon value the profile forbids. The
+    /// manifest must never carry one; frame-side resolution lives in
+    /// [`crate::frame`] (the frame header's blocksize is resolved per frame,
+    /// since the final frame is legitimately short).
     Invalid,
 }
 
@@ -94,8 +135,92 @@ pub enum ChannelConfig {
 
 impl ChannelConfig {
     /// Number of subframes in the frame (1 or 2).
+    ///
+    /// Every variant the type can hold is 1 or 2 — 3–8-channel assignments
+    /// never become a `ChannelConfig` ([`crate::Error::ProfileViolation`]),
+    /// which is what keeps this total without an error path.
     pub fn subframe_count(self) -> u8 {
-        todo!("flac-lite scaffold: ChannelConfig::subframe_count")
+        match self {
+            ChannelConfig::Independent { channels } => channels,
+            ChannelConfig::MidSide | ChannelConfig::LeftSide | ChannelConfig::RightSide => 2,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Error;
+
+    #[test]
+    fn from_flac_code_covers_the_self_contained_table() {
+        // RFC 9639 Table 15, every self-contained row. The r65k frame path
+        // (code 0b0000) is asserted here as well as in the golden vectors.
+        let cases: &[(u8, SampleRate)] = &[
+            (0b0000, SampleRate::FromStreamDefault),
+            (0b0001, SampleRate::Explicit(88_200)),
+            (0b0010, SampleRate::Explicit(176_400)),
+            (0b0011, SampleRate::Explicit(192_000)),
+            (0b0100, SampleRate::Explicit(8_000)),
+            (0b0101, SampleRate::Explicit(16_000)),
+            (0b0110, SampleRate::Explicit(22_050)),
+            (0b0111, SampleRate::Explicit(24_000)),
+            (0b1000, SampleRate::Explicit(32_000)),
+            (0b1001, SampleRate::Explicit(44_100)),
+            (0b1010, SampleRate::Explicit(48_000)),
+            (0b1011, SampleRate::Explicit(96_000)),
+        ];
+        for &(code, want) in cases {
+            assert_eq!(
+                SampleRate::from_flac_code(code),
+                Ok(want),
+                "code {code:#06b}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_refuses_codes_that_carry_a_value() {
+        // The domain boundary, pinned: 0b1100..=0b1110 are legal FLAC codes but
+        // NOT resolvable from the code alone (their value follows the coded
+        // number), and 0b1111 is forbidden. `FrameHeader::parse` never calls
+        // this function for the first range — it reads the appended value and
+        // builds `Explicit` itself.
+        for code in 0b1100u8..=0b1111 {
+            assert_eq!(
+                SampleRate::from_flac_code(code),
+                Err(Error::InvalidField),
+                "code {code:#06b} must not resolve code-only"
+            );
+        }
+    }
+
+    #[test]
+    fn hz_only_consults_the_default_for_from_stream() {
+        // Explicit ignores the stream default entirely (spike-safe hand-written
+        // defaults), FromStreamDefault is exactly the default.
+        assert_eq!(SampleRate::Explicit(32_000).hz(65_536), 32_000);
+        assert_eq!(SampleRate::Explicit(56_000).hz(999), 56_000);
+        assert_eq!(SampleRate::FromStreamDefault.hz(65_536), 65_536);
+    }
+
+    #[test]
+    fn subframe_count_matches_the_channel_table() {
+        assert_eq!(
+            ChannelConfig::Independent { channels: 1 }.subframe_count(),
+            1
+        );
+        assert_eq!(
+            ChannelConfig::Independent { channels: 2 }.subframe_count(),
+            2
+        );
+        for cfg in [
+            ChannelConfig::MidSide,
+            ChannelConfig::LeftSide,
+            ChannelConfig::RightSide,
+        ] {
+            assert_eq!(cfg.subframe_count(), 2, "{cfg:?}");
+        }
     }
 }
 
