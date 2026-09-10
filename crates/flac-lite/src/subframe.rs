@@ -157,13 +157,25 @@ impl PredictorState {
     /// Not `const fn`: `todo!()` is not a permitted call in a const context, and
     /// making this const is a decision for the implementation pass (it would be
     /// zero-cost to do so — a zeroed array).
-    pub fn new() -> Self {
-        todo!("flac-lite scaffold: PredictorState::new")
+    pub const fn new() -> Self {
+        Self {
+            warm_up: [0; crate::MAX_LPC_ORDER],
+            len: 0,
+        }
     }
 
     /// Seed from the tail of a decoded subframe (the next frame's warm-up).
     pub fn update(&mut self, decoded: &[i32], order: usize) {
-        todo!("flac-lite scaffold: PredictorState::update")
+        debug_assert!(order <= crate::MAX_LPC_ORDER);
+        self.len = order;
+        if order == 0 || decoded.is_empty() {
+            return;
+        }
+        let start = decoded.len().saturating_sub(order);
+        let tail = &decoded[start..];
+        for (i, &sample) in tail.iter().rev().enumerate() {
+            self.warm_up[i] = sample;
+        }
     }
 }
 
@@ -186,7 +198,69 @@ pub fn decode_subframe(
 ///
 /// Implemented as nested running sums (no multiplies) — see module docs.
 fn integrate_fixed(order: u8, warm_up: &PredictorState, residual: &mut [i32]) -> crate::Result<()> {
-    todo!("flac-lite scaffold: integrate_fixed")
+    if order == 0 {
+        return Ok(());
+    }
+    if order > 4 {
+        return Err(crate::Error::UnsupportedPredictorOrder);
+    }
+
+    let mut acc0 = 0i32;
+    let mut acc1 = 0i32;
+    let mut acc2 = 0i32;
+    let mut acc3 = 0i32;
+
+    if order > 0 {
+        acc0 = warm_up.warm_up[0];
+    }
+    if order > 1 {
+        acc1 = acc0.wrapping_sub(warm_up.warm_up[1]);
+    }
+    if order > 2 {
+        let d1 = warm_up.warm_up[1].wrapping_sub(warm_up.warm_up[2]);
+        acc2 = acc1.wrapping_sub(d1);
+        if order > 3 {
+            let d2 = warm_up.warm_up[2].wrapping_sub(warm_up.warm_up[3]);
+            let d12 = d1.wrapping_sub(d2);
+            acc3 = acc2.wrapping_sub(d12);
+        }
+    }
+
+    match order {
+        1 => {
+            for res in residual.iter_mut() {
+                acc0 = acc0.wrapping_add(*res);
+                *res = acc0;
+            }
+        }
+        2 => {
+            for res in residual.iter_mut() {
+                acc1 = acc1.wrapping_add(*res);
+                acc0 = acc0.wrapping_add(acc1);
+                *res = acc0;
+            }
+        }
+        3 => {
+            for res in residual.iter_mut() {
+                acc2 = acc2.wrapping_add(*res);
+                acc1 = acc1.wrapping_add(acc2);
+                acc0 = acc0.wrapping_add(acc1);
+                *res = acc0;
+            }
+        }
+        4 => {
+            for res in residual.iter_mut() {
+                acc3 = acc3.wrapping_add(*res);
+                acc2 = acc2.wrapping_add(acc3);
+                acc1 = acc1.wrapping_add(acc2);
+                acc0 = acc0.wrapping_add(acc1);
+                *res = acc0;
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    Ok(())
 }
 
 /// Integrate a residual through LPC coefficients.
@@ -197,4 +271,100 @@ fn integrate_lpc(
     residual: &mut [i32],
 ) -> crate::Result<()> {
     todo!("flac-lite scaffold: integrate_lpc")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_predictor_state_update() {
+        let mut state = PredictorState::new();
+        let frame1 = [10, 20, 30, 40, 50];
+
+        // Update with order = 3
+        state.update(&frame1, 3);
+        assert_eq!(state.len, 3);
+        // Should be most-recent-past first: 50, 40, 30
+        assert_eq!(state.warm_up[0], 50);
+        assert_eq!(state.warm_up[1], 40);
+        assert_eq!(state.warm_up[2], 30);
+    }
+
+    #[test]
+    fn test_integrate_fixed_order_0() {
+        let state = PredictorState::new();
+        let mut residual = [1, 2, 3, -4];
+        integrate_fixed(0, &state, &mut residual).unwrap();
+        // Order 0: output = residual
+        assert_eq!(residual, [1, 2, 3, -4]);
+    }
+
+    #[test]
+    fn test_integrate_fixed_order_1() {
+        let mut state = PredictorState::new();
+        state.len = 1;
+        state.warm_up[0] = 10; // y[-1]
+
+        let mut residual = [2, -3, 5, 0];
+        integrate_fixed(1, &state, &mut residual).unwrap();
+
+        // y[0] = y[-1] + r[0] = 10 + 2 = 12
+        // y[1] = y[0] + r[1] = 12 - 3 = 9
+        // y[2] = y[1] + r[2] = 9 + 5 = 14
+        // y[3] = y[2] + r[3] = 14 + 0 = 14
+        assert_eq!(residual, [12, 9, 14, 14]);
+    }
+
+    #[test]
+    fn test_integrate_fixed_order_2() {
+        let mut state = PredictorState::new();
+        state.len = 2;
+        state.warm_up[0] = 5; // y[-1]
+        state.warm_up[1] = 2; // y[-2]
+
+        let mut residual = [1, -2, 0];
+        integrate_fixed(2, &state, &mut residual).unwrap();
+
+        // y[n] = 2y[n-1] - y[n-2] + r[n]
+        // y[0] = 2(5) - 2 + 1 = 9
+        // y[1] = 2(9) - 5 - 2 = 11
+        // y[2] = 2(11) - 9 + 0 = 13
+        assert_eq!(residual, [9, 11, 13]);
+    }
+
+    #[test]
+    fn test_integrate_fixed_order_3() {
+        let mut state = PredictorState::new();
+        state.len = 3;
+        state.warm_up[0] = 3; // y[-1]
+        state.warm_up[1] = 1; // y[-2]
+        state.warm_up[2] = -1; // y[-3]
+
+        let mut residual = [2, 0];
+        integrate_fixed(3, &state, &mut residual).unwrap();
+
+        // y[n] = 3y[n-1] - 3y[n-2] + y[n-3] + r[n]
+        // y[0] = 3(3) - 3(1) + (-1) + 2 = 9 - 3 - 1 + 2 = 7
+        // y[1] = 3(7) - 3(3) + 1 + 0 = 21 - 9 + 1 = 13
+        assert_eq!(residual, [7, 13]);
+    }
+
+    #[test]
+    fn test_integrate_fixed_order_4() {
+        let mut state = PredictorState::new();
+        state.len = 4;
+        state.warm_up[0] = 5; // y[-1]
+        state.warm_up[1] = 2; // y[-2]
+        state.warm_up[2] = -1; // y[-3]
+        state.warm_up[3] = -4; // y[-4]
+
+        let mut residual = [-2, 3];
+        integrate_fixed(4, &state, &mut residual).unwrap();
+
+        // y[n] = 4y[n-1] - 6y[n-2] + 4y[n-3] - y[n-4] + r[n]
+        // y[0] = 4(5) - 6(2) + 4(-1) - (-4) + (-2) = 20 - 12 - 4 + 4 - 2 = 6
+        // y[1] = 4(6) - 6(5) + 4(2) - (-1) + 3 = 24 - 30 + 8 + 1 + 3 = 6
+        assert_eq!(residual, [6, 6]);
+    }
 }
