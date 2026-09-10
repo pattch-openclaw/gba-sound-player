@@ -136,10 +136,13 @@ fn load_vectors() -> Vec<Vector> {
             "crc8_bit_position" => v.crc8_bit_position = number() as usize,
             "header_bits" => v.header_bits = number() as usize,
             "crc8_byte_aligned" => v.crc8_byte_aligned = value == "true",
-            // Bookkeeping / prose fields this test does not assert on.
+            // Bookkeeping / prose fields this test does not assert on. (The
+            // subframe0_* witness lines are consumed by
+            // tests/subframe_header_layout.rs, not here.)
             "source_stream" | "note" | "required" | "frame_offset" | "stream_frame_count"
             | "fixed_fields_bits" | "sync" | "blocksize_code" | "samplerate_code"
-            | "samplesize_code" | "subframe0_type" => {}
+            | "samplesize_code" | "subframe0_type" | "subframe0_kind" | "subframe0_order"
+            | "subframe0_wasted" | "subframe0_bytes" => {}
             other => panic!("unexpected vector-table key {other:?} in {}", v.label),
         }
     }

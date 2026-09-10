@@ -51,6 +51,10 @@ crc8_byte 0x81
 crc8_bit_position 40
 crc8_byte_aligned true
 subframe0_type lpc4
+subframe0_kind lpc
+subframe0_order 4
+subframe0_wasted 0
+subframe0_bytes 46 FE
 
 vector stereo-7byte-num128
 source_stream l4_stereo.flac
@@ -80,6 +84,10 @@ crc8_byte 0xC0
 crc8_bit_position 48
 crc8_byte_aligned true
 subframe0_type lpc4
+subframe0_kind lpc
+subframe0_order 4
+subframe0_wasted 0
+subframe0_bytes 46 FF
 
 vector stereo-last
 source_stream l4_stereo.flac
@@ -109,6 +117,10 @@ crc8_byte 0x5A
 crc8_bit_position 48
 crc8_byte_aligned true
 subframe0_type lpc3
+subframe0_kind lpc
+subframe0_order 3
+subframe0_wasted 0
+subframe0_bytes 44 01
 
 vector mono-b1024-first
 source_stream l4_mono.flac
@@ -138,6 +150,10 @@ crc8_byte 0x3B
 crc8_bit_position 40
 crc8_byte_aligned true
 subframe0_type lpc3
+subframe0_kind lpc
+subframe0_order 3
+subframe0_wasted 0
+subframe0_bytes 44 FD
 
 vector r65k-rate-from-stream
 source_stream r65k.flac
@@ -167,6 +183,10 @@ crc8_byte 0xD0
 crc8_bit_position 40
 crc8_byte_aligned true
 subframe0_type lpc4
+subframe0_kind lpc
+subframe0_order 4
+subframe0_wasted 0
+subframe0_bytes 46 FE
 
 vector fixed-only-first
 source_stream l0_stereo.flac
@@ -196,6 +216,43 @@ crc8_byte 0x81
 crc8_bit_position 40
 crc8_byte_aligned true
 subframe0_type fixed0
+subframe0_kind fixed
+subframe0_order 0
+subframe0_wasted 0
+subframe0_bytes 10 02
+
+vector subframe-wasted-bits
+source_stream wasted_square.flac
+note subframe header WITH wasted bits: coarse square wave encodes FIXED-1 + wasted 5 (measured, libFLAC 1.5.0). Witnesses that SubframeType::parse consumes pad+type (7 bits) and stops exactly before the wasted flag
+required false
+bytes FF F8 B8 08 00 99
+frame_offset 8304
+stream_frame_count 16
+header_bits 48
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0xB
+blocksize 2048
+samplerate_code 0x8
+samplerate_hz 32000
+stream_samplerate_hz 32000
+channels_code 0x0
+subframes 1
+decorrelation none
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 0
+coded_number_octets 1
+extra_field_bytes 0
+crc8_byte 0x99
+crc8_bit_position 40
+crc8_byte_aligned true
+subframe0_type fixed1
+subframe0_kind fixed
+subframe0_order 1
+subframe0_wasted 5
+subframe0_bytes 13 0A
 
 vector silence-constant
 source_stream l4_silence.flac
@@ -225,6 +282,10 @@ crc8_byte 0xCE
 crc8_bit_position 40
 crc8_byte_aligned true
 subframe0_type constant
+subframe0_kind constant
+subframe0_order 0
+subframe0_wasted 0
+subframe0_bytes 00 00
 
 vector stereo-midside
 source_stream l4_stereo.flac
@@ -254,6 +315,10 @@ crc8_byte 0x81
 crc8_bit_position 40
 crc8_byte_aligned true
 subframe0_type lpc4
+subframe0_kind lpc
+subframe0_order 4
+subframe0_wasted 0
+subframe0_bytes 46 FE
 
 vector tail-uncommon16
 source_stream tail16.flac
@@ -283,6 +348,10 @@ crc8_byte 0x26
 crc8_bit_position 64
 crc8_byte_aligned true
 subframe0_type lpc4
+subframe0_kind lpc
+subframe0_order 4
+subframe0_wasted 0
+subframe0_bytes 46 FE
 
 vector tail-uncommon8
 source_stream tail8.flac
@@ -312,6 +381,10 @@ crc8_byte 0xA7
 crc8_bit_position 48
 crc8_byte_aligned true
 subframe0_type lpc3
+subframe0_kind lpc
+subframe0_order 3
+subframe0_wasted 0
+subframe0_bytes 44 02
 
 vector rate-khz-8bit
 source_stream rate_khz.flac
@@ -341,6 +414,10 @@ crc8_byte 0x51
 crc8_bit_position 48
 crc8_byte_aligned true
 subframe0_type lpc3
+subframe0_kind lpc
+subframe0_order 3
+subframe0_wasted 0
+subframe0_bytes 44 FD
 
 vector rate-hz-16bit
 source_stream rate_hz.flac
@@ -370,6 +447,10 @@ crc8_byte 0xD5
 crc8_bit_position 56
 crc8_byte_aligned true
 subframe0_type lpc3
+subframe0_kind lpc
+subframe0_order 3
+subframe0_wasted 0
+subframe0_bytes 44 FD
 
 vector rate-hz10-16bit
 source_stream rate_hz10.flac
@@ -399,6 +480,10 @@ crc8_byte 0x8B
 crc8_bit_position 56
 crc8_byte_aligned true
 subframe0_type lpc3
+subframe0_kind lpc
+subframe0_order 3
+subframe0_wasted 0
+subframe0_bytes 44 FD
 
 # --- measured encoder behaviour (cite these instead of guessing) ---------
 # First-subframe type across a whole 10s encode of the same source:
