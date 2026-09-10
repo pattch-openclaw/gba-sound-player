@@ -233,6 +233,13 @@ def synth(dst):
     write_wav(os.path.join(dst, "r65k.wav"), 65536, 2,
               synth_pcm(10.0, 65536, PARTIALS_64K, 1024, 3, 700, 400))
     write_wav(os.path.join(dst, "silence.wav"), 32000, 2, [0] * (32000 * 2 * 2))
+    # Wasted-bits witness stream: a coarse square wave has zero LSBs by
+    # construction, so libFLAC signals wasted bits in the subframe header
+    # (measured, 1.5.0: FIXED order 1 + wasted 5 on every frame). Pure integer
+    # synthesis like everything else here, so the bytes are platform-stable.
+    write_wav(os.path.join(dst, "wasted_square.wav"), 32000, 1,
+              [20000 if (i // 300) % 2 == 0 else -20000
+               for i in range(32000)])
     # Short-tail streams: mono, same synthesis, lengths chosen so the final
     # frame forces each uncommon blocksize form.
     for name, count in (("tail16.wav", TAIL16_SAMPLES), ("tail8.wav", TAIL8_SAMPLES)):
@@ -363,6 +370,36 @@ def parse_frame_header(data, pos):
     sub0_byte = data[pos + crc_at + 1]
     subframe0 = ("invalid" if (sub0_byte & 0x80)
                  else SUBFRAME[(sub0_byte >> 1) & 0x3F])
+    # 9.2.1/9.2.2 subframe-0 header witness: the type field is pad(1) + code(6)
+    # = 7 bits, so the wasted-bits flag is bit 7 (LSB of the byte after the
+    # CRC-8) and its unary run continues from the MSB of the NEXT byte. Read
+    # exactly that: kind/order derive from the code; wasted is flag + zeros.
+    if subframe0 in ("invalid", "reserved"):
+        sf_kind, sf_order, sf_wasted = subframe0, None, None
+    else:
+        if subframe0 == "constant":
+            sf_kind, sf_order = "constant", 0
+        elif subframe0 == "verbatim":
+            sf_kind, sf_order = "verbatim", 0
+        elif subframe0.startswith("fixed"):
+            sf_kind, sf_order = "fixed", int(subframe0[5:])
+        else:
+            sf_kind, sf_order = "lpc", int(subframe0[3:])
+        if sub0_byte & 1 == 0:
+            sf_wasted = 0
+        else:
+            k, bi = 0, pos + crc_at + 2
+            while True:
+                byte = data[bi]
+                j = 0
+                while j < 8 and (byte >> (7 - j)) & 1 == 0:
+                    k += 1
+                    j += 1
+                if j < 8:
+                    sf_wasted = k + 1  # terminated by a one at bit j
+                    break
+                bi += 1  # an all-zeros byte just extends the unary run
+                assert bi < len(data), "%s: unterminated wasted-bits unary" % pos
     return dict(
         offset=pos,
         header=data[pos:pos + crc_at + 1],
@@ -384,6 +421,10 @@ def parse_frame_header(data, pos):
         crc_ok=crc_byte == crc8(data[pos:pos + crc_at]),
         header_bits=8 * (crc_at + 1),
         subframe0=subframe0,
+        subframe0_kind=sf_kind,
+        subframe0_order=sf_order,
+        subframe0_wasted=sf_wasted,
+        subframe0_bytes=data[pos + crc_at + 1:pos + crc_at + 3],
     )
 
 
@@ -474,6 +515,10 @@ VECTOR_SPECS = [
      "STREAMINFO -> the FromStreamDefault path the GBA 65kHz goal depends on"),
     ("fixed-only-first", "l0_stereo.flac", lambda f: f[0], True,
      "`-l 0` encode: FIXED-only subframes, the perf gate's FIXED arm"),
+    ("subframe-wasted-bits", "wasted_square.flac", lambda f: f[0], False,
+     "subframe header WITH wasted bits: coarse square wave encodes FIXED-1 + "
+     "wasted 5 (measured, libFLAC 1.5.0). Witnesses that SubframeType::parse "
+     "consumes pad+type (7 bits) and stops exactly before the wasted flag"),
     ("silence-constant", "l4_silence.flac", lambda f: f[0], False,
      "CONSTANT subframes (digitally silent input)"),
     ("stereo-midside", "l4_stereo.flac",
@@ -609,6 +654,11 @@ def emit(src, out_path):
         w("crc8_bit_position %d" % header["crc_bit"])
         w("crc8_byte_aligned %s" % ("true" if header["crc_bit"] % 8 == 0 else "false"))
         w("subframe0_type %s" % header["subframe0"])
+        w("subframe0_kind %s" % header["subframe0_kind"])
+        w("subframe0_order %s" % header["subframe0_order"])
+        w("subframe0_wasted %s" % header["subframe0_wasted"])
+        w("subframe0_bytes %s" % " ".join(
+            format(b, "02X") for b in header["subframe0_bytes"]))
         w("")
 
     w("# --- measured encoder behaviour (cite these instead of guessing) ---------")

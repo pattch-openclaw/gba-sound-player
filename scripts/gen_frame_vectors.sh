@@ -42,6 +42,10 @@ flac -1 -f -s -l 4 -b 2048 -m -o "$tmp/l4_stereo.flac"     "$tmp/stereo.wav"
 flac -1 -f -s -l 0 -b 2048 -m -o "$tmp/l0_stereo.flac"     "$tmp/stereo.wav"
 flac -1 -f -s -l 4 -b 1024    -o "$tmp/l4_mono.flac"       "$tmp/mono.wav"
 flac -1 -f -s -l 4 -b 2048 -m -o "$tmp/l4_silence.flac"    "$tmp/silence.wav"
+# Wasted-bits witness: coarse square wave (zero LSBs by construction) makes
+# libFLAC signal wasted bits in the subframe header. -l 0 keeps it FIXED, so
+# the vector witnesses the type field AND the wasted flag that follows it.
+flac -1 -f -s -l 0 -b 2048    -o "$tmp/wasted_square.flac" "$tmp/wasted_square.wav"
 # 65536 Hz is outside FLAC's streamable subset (no 4-bit code for it), so
 # libFLAC needs --lax; every frame then says "rate from stream" (code 0).
 flac -1 -f -s -l 4 -b 2048 -m --lax -o "$tmp/r65k.flac"    "$tmp/r65k.wav"

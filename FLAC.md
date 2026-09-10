@@ -216,7 +216,7 @@ Because we own the encoder, we pin the features the decoder must support:
 | `bits` | MSB-first bit reader over `&[u8]` (u32 accumulator + `clz`, available on ARMv4T); UTF-8-style coded numbers; byte alignment for verbatim/raw-signature subframes |
 | `format` | `GAFP` manifest parse (borrowed, zero-alloc), sample-rate/blocksize tables, encode-profile validation |
 | `frame` | frame header (sync `0xFFxF`, blocksize/sample-rate tables, coded frame number, CRC-8 — checked in debug, skippable in release), `decode_frame` |
-| `subframe` | CONSTANT, VERBATIM, FIXED (orders 0–4), LPC (order ≤32, precisions 0/15/16); warm-up/predictor state |
+| `subframe` | CONSTANT, VERBATIM, FIXED (orders 0–4), LPC (order ≤32); warm-up/predictor state. LPC coefficient precision is a **body** field (§9.2.6 Table 22 `u(4)`, after warm-up), not part of the subframe type — the "precisions 0/15/16" note here was a phantom, see [Prior assumptions](#prior-assumptions-that-did-not-survive-measurement) |
 | `residual` | partitioned Rice, Rice2, and escape-record residual |
 | `stereo` | mid/side, left/side, right/side decorrelation |
 | `decoder` | top-level cursor API: `FrameStream` + per-frame warm-up state, decode into caller-provided channel buffers |
@@ -574,6 +574,11 @@ gets built later for the shipping path regardless.
    - **Amended 2026-09-07:** if the spike clip is a `-l 4` encode, FIXED alone
      cannot decode it (measured: `lpc4` on 156/157 frames). Either step 3 grows
      low-order LPC, or the spike runs a `-l 0` clip for the FIXED arm — see step 4.
+   - **Partial 2026-09-09:** the subframe *header* (`SubframeType::parse` +
+     `order()`) landed — see
+     [Completed: `SubframeType::parse`](#completed-subframetypeparse-2026-09-09).
+     The step stays open: `decode_subframe`, warm-up, the integrators and all of
+     `residual` are still `todo!()`.
 4. [ ] **Perf gate spike** in `examples/flac_spike/`: ROM embeds a ~10s clip via
    `include_bytes!`; frames located by a **hand-computed offset array** (no GAFP,
    no manifest — deliberately throwaway); timer-capture cycle counter around
@@ -931,6 +936,10 @@ that read like documentation, which is what made it survive review.
 | Uncommon sample rate is stored as 8 \| 16 \| **24** bits | §9.1.7: 8-bit kHz, 16-bit Hz, 16-bit Hz÷10 — **never 24-bit** | §9.1.7 + libFLAC 1.5.0 encodes of 56000/48001/10010 Hz; a 24-bit read strands the cursor 8 bits short of the CRC-8 |
 | Blocksize codes `0b1110..0b1111` are "reserved"; `144·2ᵛ` starts at `0b0101` | Table 14: `0b0010..0b0101` are the `144·2ᵛ` family, and `0b1110`/`0b1111` are **16384/32768** | Table 14 while writing the blocksize table test; the Python oracle had it right, the prose did not |
 | Real headers are 6 or 7 bytes (asserted over the golden set) | **6 to 9** bytes: the uncommon blocksize/rate octets lengthen the header | Regenerating vectors with the tail/rate streams — the old assertion failed immediately, which is what it was for |
+| LPC `precision_bits` rides in the subframe-type field (`0b00`→15-bit, `0b01`→16-bit) | The type field carries **no** precision. §9.2.6 Table 22: `u(4)` = precision−1 (0b1111 forbidden) sits in the **body**, after the warm-up samples, then `s(5)` shift, then coefficients | Reading §9.2.6 to implement `SubframeType::parse`; confirmed by walking the field at the real cursor on `-l 4` encodes |
+| `SubframeType::parse` reads the type field "plus the order bits that follow" | Nothing follows. Order lives *inside* the 6-bit code: FIXED = v−8, LPC = v−31 (Table 19) | Table 19 while writing `parse` — reading trailing order bits would strand the cursor inside the wasted-bits run |
+| Subframe layout `[type][warm-up][wasted bits][residual]` | `[type][wasted bits][warm-up][residual]` — wasted precedes warm-up, and must: warm-up width is `subframe bps × order`, and subframe bps = frame bps − wasted | §9.2.5/§9.2.6 width formulas while placing `parse`'s exit cursor |
+| `EndOfStream` is reachable mid-field (a 1-byte slice is too short) | Degenerate: the field is 7 bits and reads are byte-granular, so any non-empty slice holds it; a 1-byte `0xFF` is a pad-bit rejection, not EOF | Writing the EOF test — the reader disagreed with the assertion, and was right |
 
 **Rule going forward:** any claim in these docs about *format bytes* carries its
 witness — an RFC section, or a measurement with the command that produced it. If
@@ -988,3 +997,83 @@ any frame-local check. Both belong to the packer/decoder loop, not the parser.
 **Gates:** `make flac-test` green — thumbv4t compile gate + 45 host unit tests
 (4 new, in `format.rs`) + 11 integration tests; `make native-flac-rom` still
 builds/links/fixes with the parse in the image; `make check` clean.
+
+## Completed: `SubframeType::parse` (2026-09-09)
+
+Phase 1 step 3's first piece: the §9.2.1 subframe-type field. `parse` reads the
+leading zero pad bit + the 6-bit type code (Table 19) and leaves the cursor on
+the **wasted-bits flag** — the first bit `decode_subframe` needs. `order()` is
+the warm-up count the body carries.
+
+**Two phantoms died here, both in the scaffold's own prose** (rows added to the
+prior-assumptions table below; same failure mode this file already names —
+format bytes described from recall). My first independent measurement script
+reproduced one of them and had to be corrected before it could serve as a
+witness, which is the usual value of building the oracle first: **941** real
+subframe-0 headers across seven encode profiles, cross-checked against
+`flac --analyze`, zero mismatches after the fix.
+
+1. **"`precision` field maps `0b00 → 15-bit, 0b01 → 16-bit`"** (module doc +
+   `Lpc { precision_bits }`). The type field carries **no** precision. §9.2.6
+   Table 22 places `u(4)` = precision−1 (0b1111 forbidden) *after* the warm-up
+   samples, then `s(5)` shift, then the coefficients. `Lpc` now carries `order`
+   alone; precision is step 3's body work.
+2. **"plus the order bits that follow for FIXED/LPC"** (`parse`'s doc).
+   Nothing follows: order is *inside* the 6-bit code (FIXED = v−8, LPC = v−31).
+3. Adjacent, caught while re-reading §9.2.1: the module's layout sketch listed
+   `[type][warm-up][wasted bits][residual]`. The wasted-bits field comes
+   **before** warm-up — and it must, since warm-up width is `subframe bps ×
+   order` and subframe bps is `frame bps − wasted`. Wrong only bites at step 3,
+   where that width is computed.
+
+**Design decision: `parse` consumes 7 bits, full stop.** Wasted bits are a
+property of how the body is coded, not of the predictor's identity, so they are
+`decode_subframe`'s (it needs them for subframe bps), not this enum's. The
+cursor contract is therefore "lands on the wasted flag", and it is *witnessed*
+rather than asserted: the test reads the wasted field from parse's exit cursor
+and requires the value to equal the oracle's independently derived number.
+Reading too few bits strands the residual mid-header; too many eats the unary
+run. `Fixed(1)` with wasted = 5 lands both.
+
+**Witnesses.** The golden-vector table grew a second layer: `scripts/frame_vectors.py`
+now derives `subframe0_kind/order/wasted/bytes` for every frame header it
+already emits (same independent-parser rule — never hand-packed, never asked of
+libFLAC), and a new `subframe-wasted-bits` source stream (coarse square wave,
+zero LSBs by construction → FIXED-1 + wasted 5, measured) is the table's only
+wasted-bits vector. Committed frame-header vectors are otherwise byte-stable:
+regeneration changed nothing but additions. Coverage witnessed on real bytes:
+`Fixed(0)`, `Fixed(1)`, `Lpc{3}`, `Lpc{4}`, wasted 0 **and** 5. Still **not**
+witnessed, and recorded as gaps rather than coverage: `Constant` (optional
+vector only — the committed `silence-constant` vector's `subframe0_*` lines do
+carry it, but it is encoder-dependent and can vanish on regeneration) and
+**`Verbatim` — no vector at all yet**, needs an incompressible source stream
+(measured: full-range integer noise produces `verbatim` frames at `-l 0`, but
+libFLAC's default `-l 12` on the same source produces `fixed1`; a future
+source/flag pair must pin it). The four Table 19 *boundary* codes (`Fixed(0)`,
+`Fixed(4)`, `Lpc{1}`, `Lpc{32}`) never appeared in any encode either, so they
+are synthesized from the spec table — with `octet()` calibrated against a real
+vector byte first, so the synthesized patterns are provably the encoder's own
+encoding of those codes rather than a private invention.
+
+**Rejection has no encoder witness** (libFLAC never emits reserved codes), so
+`tests/subframe_header_layout.rs` mutates one field of a real subframe byte: pad
+bit set → `InvalidField`; each reserved code range (`0b000010..0b000111`,
+`0b001101..0b011111`) → `InvalidField`, at both extremes and middles.
+
+**One lesson about EOF, learned from a test bug:** `EndOfStream` is
+*degenerate* for this field. It is 7 bits and reads are byte-granular, so any
+non-empty slice holds it — the only reachable error states are the pad-bit and
+reserved-code rejections. My first draft asserted that a 1-byte slice was too
+short; the reader disagreed, and was right. Also pinned while proving this: a
+1-byte `0xFF` is *not* an EOF case either (top bit is the pad bit →
+`InvalidField`), which a first draft misread as a failure. The test now names
+both traps in place of asserting them wrongly.
+
+**Profile gating stays out.** All legal LPC orders 1..=32 parse as `Lpc`; the
+`order > profile.max` check happens where an `EncodeProfile` is in scope — the
+same separation `FrameHeader::parse` uses for strict-profile blocksize gating.
+"Reject LPC" remains the wrong switch (Correction 3).
+
+**Gates:** `make flac-test` green — thumbv4t compile gate + 45 unit + 11
+frame-header + 5 subframe integration tests; `make native-flac-rom` builds/
+links/fixes/boot-checks unchanged; `make test-rom` green; `make check` clean.
