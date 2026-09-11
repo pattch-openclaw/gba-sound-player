@@ -76,7 +76,9 @@ pub struct DecodedFrame<'a> {
 pub struct Decoder<'a> {
     /// Stream facts + frame index (borrowed from the ROM blob).
     manifest: Manifest<'a>,
-    /// Predictor warm-up, one slot per subframe (per channel).
+    /// Per-subframe warm-up scratch, one slot per channel/subframe. Reused,
+    /// never retained as history — each subframe carries its own warm-up
+    /// samples (see `subframe` module docs; corrected 2026-09-10).
     state: [PredictorState; 2],
     /// Next frame index to decode.
     next: usize,
@@ -104,8 +106,11 @@ impl<'a> Decoder<'a> {
     }
 
     /// Move the cursor to an arbitrary frame (O(1); the manifest's offset table
-    /// *is* the seek table). Resets predictor state, since warm-up samples from
-    /// a non-adjacent preceding frame would be wrong.
+    /// *is* the seek table). Safe by construction: every subframe carries its
+    /// own warm-up samples, so any frame is independently decodable and no
+    /// cross-frame warm-up reconstruction exists to get wrong (corrected
+    /// 2026-09-10 — the old "resets state from the previous frame" concern was
+    /// the scaffold's myth; the scratch reset is bookkeeping only).
     pub fn seek_frame(&mut self, index: usize) -> crate::Result<()> {
         todo!("flac-lite scaffold: Decoder::seek_frame")
     }

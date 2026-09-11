@@ -346,16 +346,18 @@ impl FrameHeader {
 
 /// Decode one whole frame into `left` / `right`.
 ///
-/// `left` is the only slice used for mono. `state` carries predictor warm-up
-/// across frames (one [`PredictorState`] per channel/subframe slot). PCM is
+/// `left` is the only slice used for mono. `state` is per-subframe scratch
+/// (one [`PredictorState`] per channel/subframe slot, reused across frames —
+/// warm-up samples travel in each subframe's own header, not across frames;
+/// see `subframe` module docs, corrected 2026-09-10). PCM is
 /// written as sign-extended `i32` in the stream's native precision; conversion
 /// to the mixer's 8-bit unsigned format happens at the playback boundary, not
 /// here, so this stays reusable (and testable) independent of `agb`.
 ///
 /// Returns the header so the caller can track sample position / sample rate.
 ///
-/// SCAFFOLD STATE: step 3 (FIXED + Rice, then the LPC decision the perf gate
-/// makes). Callers that only need header facts use [`FrameHeader::parse`].
+/// SCAFFOLD STATE: step 3, substeps 3a–3f (FLAC.md phased plan; 3a landed).
+/// Callers that only need header facts use [`FrameHeader::parse`].
 pub fn decode_frame(
     reader: &mut BitReader<'_>,
     header: &FrameHeader,

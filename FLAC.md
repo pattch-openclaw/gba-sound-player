@@ -577,8 +577,71 @@ gets built later for the shipping path regardless.
    - **Partial 2026-09-09:** the subframe *header* (`SubframeType::parse` +
      `order()`) landed — see
      [Completed: `SubframeType::parse`](#completed-subframetypeparse-2026-09-09).
-     The step stays open: `decode_subframe`, warm-up, the integrators and all of
-     `residual` are still `todo!()`.
+   - **Substeps 3a–3f (ordered 2026-09-10; dependency-driven).** Step 3 is two
+     independent subtracks that meet only at `decode_subframe`: a **bit side**
+     (reader → residual samples, strictly sequential internally) and a **math
+     side** (residual samples → PCM, pure array transforms with no bit-reader
+     dependency). The order below gives every PR an independent witness;
+     3d can run parallel to 3b/3c if capacity allows. Each substep = its own
+     PR, each keeps both flac gates green, each follows the project witness
+     rule — bit-layout claims pinned to encoder bytes, integer maps to spec
+     text plus a differential oracle:
+     - [x] **3a — leaves (done 2026-09-10, PR pending):** the three pieces
+       nothing else depends on. `BitReader::read_wasted_bits` (§9.2.2 flag +
+       unary, atomic cursor, all alignments vs a naive oracle),
+       `residual::rice_unmap` (§9.2.7.2 folded-residual sign map — which the
+       scaffold had sign-flipped; see the step 3a entry), and
+       `PredictorState::new`/`fill` shaping — which required deleting the
+       scaffold's "warm-up = previous frame's tail" myth, measured false
+       (`scripts/measure_warmup_semantics.py`: 64/64 frames carry their OWN
+       first samples, 0/64 match the previous frame's tail). See
+       [Completed: step 3a leaves](#completed-step-3a-leaves--wasted-bits-reader-rice_unmap-and-the-warm-up-correction-2026-09-10).
+     - [ ] **3b — `decode_rice_partition`:** the hot inner loop (zeros-count +
+       remainder + `rice_unmap`), the §9.2.7.3 `i32::MIN` rejection, and the
+       escape-record partition (raw two's-complement samples). Witness:
+       extend `scripts/frame_vectors.py` to parse real partitions from the
+       committed streams (it already walks subframe 0 to the residual cursor)
+       and assert exact residual values + exact exit cursor per partition.
+       Also the first place to micro-benchmark on-host — the perf gate's
+       cycles concentrate here.
+     - [ ] **3c — `decode_residual`:** residual header (method, partition
+       order/count), per-partition sample-count rules (first partition loses
+       the predictor order), and the sample-size header with its `0b111`
+       "unknown" escape — derive the max by scanning partitions *while
+       decoding* (zero-alloc rule: no second pass over a buffer). Witness:
+       whole-residual parse of real frames (oracle values vs cursor).
+     - [ ] **3d — integrators + `PredictorState::fill`:** `integrate_fixed`
+       (orders 0–4 as nested running sums, no multiplies — Table 20),
+       `integrate_lpc` (§9.2.6 dot-product + `>> shift`, most-recent-past
+       coefficient order), and `fill` (warm-up read: `read_signed(subframe
+       bps) × order`, `<< wasted` padding, oldest-first in stream /
+       stored most-recent-first). Pure array transforms: verified against
+       *synthetic* residuals + an independent Python reference — no
+       bitstream dependency, no golden-vector work needed. FIXED-as-cascade
+       vs FIXED-as-dot-product agreement is a free cross-check.
+     - [ ] **3e — `decode_subframe`:** composition — `read_wasted_bits` →
+       subframe bps check (§9.2.2: bps > 0) → `fill` → body dispatch
+       (CONSTANT single value / VERBATIM `read_signed` loop / residual) →
+       LPC body (u(4) precision−1, 0b1111 forbidden; s(5) shift, MUST NOT be
+       negative; coefficients) → integrate → return type. This is where the
+       **VERBATIM golden vector gap stops being theoretical**: pin the
+       incompressible-source + `-l 0` generator pair (measured: full-range
+       integer noise produces `verbatim` at `-l 0`, `fixed1` at `-l 12`) as
+       a required vector, and extend the oracle to per-subframe ground truth
+       (warm-up values, bps, residual exit position).
+     - [ ] **3f — `decode_frame` + decorrelation:** subframe loop over 1–2
+       subframes, side-subframe bps −1 (the sneakiest byte-level fact of the
+       step — mid/side & friends code the side at bps−1), mid/side /
+       left/side / right/side restoration (pure add/shift, ~10 lines, but
+       measured: libFLAC picks mid/side on *every* frame of correlated
+       stereo, so the spike's stereo clip needs it), frame footer
+       (`byte_align` + CRC-16 consume — verify stays Phase 2). Cursor
+       contract witnessed by chaining: decode frame N, parse frame N+1 from
+       the same cursor, agree with the manifest offset. Finish with the
+       end-to-end witness: decode real frame runs and diff **bit-exact**
+       against `flac -d` PCM (pulls a slice of step 8 forward, cheaply).
+       LPC ≤4 integration belongs here-or-3d per how 3d shakes out — the
+       gate needs both arms (Correction 3), so one of them must land LPC.
 4. [ ] **Perf gate spike** in `examples/flac_spike/`: ROM embeds a ~10s clip via
    `include_bytes!`; frames located by a **hand-computed offset array** (no GAFP,
    no manifest — deliberately throwaway); timer-capture cycle counter around
@@ -940,6 +1003,8 @@ that read like documentation, which is what made it survive review.
 | `SubframeType::parse` reads the type field "plus the order bits that follow" | Nothing follows. Order lives *inside* the 6-bit code: FIXED = v−8, LPC = v−31 (Table 19) | Table 19 while writing `parse` — reading trailing order bits would strand the cursor inside the wasted-bits run |
 | Subframe layout `[type][warm-up][wasted bits][residual]` | `[type][wasted bits][warm-up][residual]` — wasted precedes warm-up, and must: warm-up width is `subframe bps × order`, and subframe bps = frame bps − wasted | §9.2.5/§9.2.6 width formulas while placing `parse`'s exit cursor |
 | `EndOfStream` is reachable mid-field (a 1-byte slice is too short) | Degenerate: the field is 7 bits and reads are byte-granular, so any non-empty slice holds it; a 1-byte `0xFF` is a pad-bit rejection, not EOF | Writing the EOF test — the reader disagreed with the assertion, and was right |
+| Warm-up samples are "the previous frame's tail samples", the only cross-frame state the decoder retains | Warm-up lives **inside each subframe's own header**, unencoded; §9.2.5: "each subframe in FLAC is coded completely independently". Frame 0 has warm-up and no previous frame. Consequence: frames are independently decodable, `seek_frame` is safe by construction, `PredictorState` is scratch, not history | `scripts/measure_warmup_semantics.py`: over real `-l 0` and `-l 4` encodes, every frame's warm-up equals its OWN first decoded samples (64/64) and none equal the previous frame's tail (0/64). Found while implementing step 3a, before any code depended on the myth |
+| `rice_unmap` scaffold doc: "odd → (n+1)/2, even → −n/2" (`negative = n & 1`) | Sign-flipped. §9.2.7.2 folds `x ≥ 0 → 2x`, `x < 0 → −2x − 1`, so the decode is **even → `n>>1`, odd → `!(n>>1)`** | The RFC's own worked example (folded 38 → +19; the scaffold mapping returns −19), pinned as a unit assertion |
 
 **Rule going forward:** any claim in these docs about *format bytes* carries its
 witness — an RFC section, or a measurement with the command that produced it. If
@@ -1077,3 +1142,85 @@ same separation `FrameHeader::parse` uses for strict-profile blocksize gating.
 **Gates:** `make flac-test` green — thumbv4t compile gate + 45 unit + 11
 frame-header + 5 subframe integration tests; `make native-flac-rom` builds/
 links/fixes/boot-checks unchanged; `make test-rom` green; `make check` clean.
+
+## Completed: step 3a leaves — wasted-bits reader, rice_unmap, and the warm-up correction (2026-09-10)
+
+Step 3's dependency order (documented as substeps 3a–3f in the phased plan
+above) starts with the three pieces nothing else depends on. What landed, and
+the two scaffold claims that died on the way:
+
+**1. `BitReader::read_wasted_bits` (§9.2.2).** The flag + unary field the
+subframe body needs, closing the last gap in `bits` for the decode path
+(CRCs remain, Phase 2). Bit-level and interpretation-free like the rest of the
+module: the §9.2.2 rule "resulting bits per sample MUST be larger than zero"
+needs frame bps, so it gates at `decode_subframe` (3e), not here. Cursor is
+**atomic** (same contract as `read_utf8_coded`): an unterminated run restores
+the cursor to the flag bit and returns `EndOfStream`; the slice itself bounds
+the unary, so no length cap exists to get wrong. 5 unit tests: flag-clear,
+hand-packed runs (k=1/3/5/8 — k=5 crosses a byte, k=8 runs 41 bits), an
+over-long k=40 run, mid-slice failure restoration, and an exhaustive
+alignment×outcome sweep against a naive bit-loop oracle at every start bit of
+a 9-byte stream. **Encoder witness, one layer up:** `tests/subframe_header_layout.rs`
+now also calls the *library* reader from `SubframeType::parse`'s exit cursor on
+every golden vector and requires it to agree with both the harness's independent
+oracle read and the harness cursor position — so the library reader is witnessed
+by libFLAC bytes, not only by a same-file oracle. (The pre-existing harness
+`read_wasted` stays: it is the independent witness, and agreement is the point.)
+
+**2. `residual::rice_unmap` (§9.2.7.2) — and a sign-flip correction.** The
+scaffold's doc claimed the residual sign map was "odd → (n+1)/2, even → −n/2"
+with `negative = n & 1`. Reading §9.2.7.2 before implementing found the
+opposite convention, and the RFC's own worked example settles it: a folded 38
+(unary 4 ≪ 3 | binary 6, Rice parameter 3) unfolds to **+19**; the scaffold
+mapping returns −19. The encoder folds `x ≥ 0 → 2x`, `x < 0 → −2x − 1`, so the
+decoder's inverse is **even → `n >> 1`, odd → `!(n >> 1)`** — the same
+zigzag's other side, no multiply, no divide. Had the scaffold's version
+shipped, every decoded residual in every FIXED and LPC frame would have been
+sign-flipped — and it would have *survived* a header-level test suite, because
+nothing before step 3 touches residual values. 4 tests: the RFC worked example
+pinned as an assertion (38 → 19), dense roundtrip of the spec-text fold around
+zero, a differential sweep against a negate-and-subtract oracle (different
+mechanism) over [0, 64Ki) and a 64Ki window at the u32::MAX end, and the
+extremes — including that `0xFFFF_FFFF` maps to `i32::MIN`, the value §9.2.7.3
+forbids in a stream: this pure map stays total and returns it; *rejecting* it
+is `decode_rice_partition`'s job in 3b, pinned so the seam is explicit. Kept
+crate-private until 3b consumes it (the crate-wide `allow(dead_code)` covers
+the in-between).
+
+**3. `PredictorState` — the warm-up myth, measured dead.** The scaffold said
+warm-up samples "are the previous frame's tail samples and are the only
+cross-frame state the decoder must retain", and `Decoder::seek_frame` documented
+a warm-up-reconstruction hazard that follows from it. §9.2.5 says the
+contradictory thing plainly — "each subframe in FLAC is coded completely
+independently", warm-up "stored unencoded" *in the subframe* — and frame 0 was
+the free counterexample: it has warm-up samples and no previous frame.
+`scripts/measure_warmup_semantics.py` measures it over real encodes (determin-
+istic PCM, `-l 0` and `-l 4`, reference samples from `flac -d`, subframe walk
+by the independent harness): **64/64 frames carry their OWN first decoded
+samples in their own headers; 0/64 match the previous frame's tail** (both
+hypotheses checked with §9.2.2's `<< wasted` padding applied). What changed in
+the code before any of it was implemented: `PredictorState` is documented as
+per-subframe scratch (reused, never history), `update(decoded)` — a method
+whose *purpose* was the myth — is replaced by `fill(reader, order,
+subframe_bits, wasted)`, the read this module actually needs (3e wires it in),
+and `seek_frame`'s hazard note becomes the reverse: seek is **safe by
+construction**, which is exactly the property the GAFP manifest's O(1) seek
+design has been assuming all along. The myth survived because it read like a
+reasonable design note; had it been implemented as documented, the decoder
+would have needed sequential-only decode and would have corrupted samples
+after every seek — caught at design time by the project's own rule (any claim
+about format bytes carries its witness).
+
+**Deliberate scope cuts.** `read_wasted_bits` lands without the bps check
+(layer separation); `rice_unmap` lands without §9.2.7.3 enforcement (stream
+layer's job); `PredictorState::fill` lands as a corrected *signature* with
+`todo!()` (its read is 3e's composition; the type and contract were the
+load-bearing parts and they were wrong, so they could not wait for 3e). The
+warm-up finding is recorded in "Prior assumptions that did not survive
+measurement" (two rows: the myth, the sign flip) with their witnesses.
+
+**Gates:** `make flac-test` green — thumbv4t compile gate + 54 unit (was 45:
++5 wasted-bits, +4 rice_unmap) + 11 frame-header + 5 subframe integration
+tests (the subframe suite now also witnesses the library wasted reader against
+the oracle on every vector); `make native-flac-rom` unchanged (build sanity);
+`make check` clean.
