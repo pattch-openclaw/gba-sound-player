@@ -1,8 +1,12 @@
 //! Subframe decoding: CONSTANT, VERBATIM, FIXED (orders 0–4), LPC (order ≤ 32).
 //!
 //! IMPLEMENTED: [`SubframeType::parse`] + [`SubframeType::order`] (§9.2.1 type
-//! field). `decode_subframe`, the integrators, [`PredictorState`] and the whole
-//! of `residual` are still `todo!()` scaffold (Phase 1 step 3).
+//! field), plus step 3a's leaves: the wasted-bits reader
+//! ([`crate::bits::BitReader::read_wasted_bits`]) and the residual sign map
+//! (`residual::rice_unmap`, crate-private until 3b consumes it). The
+//! composition (`decode_subframe`), the integrators, [`PredictorState::fill`],
+//! and `residual`'s readers are still `todo!()` scaffold (Phase 1 step 3,
+//! substeps 3b–3f).
 //!
 //! A subframe is one channel's worth of samples for one frame. Layout:
 //!
@@ -16,9 +20,26 @@
 //! wasted bits are read. The old scaffold order was wrong in a way that only
 //! bites at step 3, where warm-up width is computed.)
 //!
-//! Reconstruction is: decode the residual, then integrate it through the
-//! predictor. Warm-up samples are the previous frame's tail samples and are the
-//! only cross-frame state the decoder must retain (see [`crate::decoder`]).
+//! Reconstruction is: read the warm-up samples from the subframe header, then
+//! decode the residual and integrate it through the predictor.
+//!
+//! **Corrected 2026-09-10 — warm-up samples are NOT cross-frame state.** This
+//! module claimed they were "the previous frame's tail samples", which would
+//! have forced sequential decode + retained state across frames. §9.2.5 is
+//! explicit: "each subframe in FLAC is coded completely independently", and
+//! the warm-up samples "are stored unencoded, bypassing the predictor and
+//! residual coding stages" — *in the subframe itself* (Table 21/22: `s(n)`,
+//! `n = subframe bps × order`). Measured over real libFLAC encodes
+//! (`scripts/measure_warmup_semantics.py`): every frame's warm-up — including
+//! **frame 0, which has no previous frame** — sits in its own bitstream
+//! position and equals its own subframe's first decoded samples
+//! (64/64 frames across `-l 0` and `-l 4` encodes; the previous-frame-tail
+//! hypothesis matched 0/64). Consequences that matter: [`PredictorState`] is a
+//! per-subframe scratch buffer reused across calls, not retained history;
+//! [`crate::decoder::Decoder::seek_frame`] needs no warm-up reconstruction
+//! beyond a reset; and frames are independently decodable, which is what
+//! makes the O(1) manifest seek design sound. FLAC.md → "Prior assumptions"
+//! + step 3a entry.
 //!
 //! Implementation notes:
 //!
@@ -139,39 +160,71 @@ impl SubframeType {
     }
 }
 
-/// Per-subframe predictor state retained across frames.
+/// Per-subframe warm-up scratch: the `order` unencoded samples the subframe
+/// header carries, consumed by the integrators as the seed of the predictor.
 ///
-/// Fixed-size and `Copy`: exactly [`crate::MAX_LPC_ORDER`] warm-up slots, so no
+/// Fixed-size and `Copy`: exactly [`crate::MAX_LPC_ORDER`] slots, so no
 /// allocation and no `Vec`. Only the first `order` entries are meaningful.
+///
+/// **Not cross-frame state** (corrected 2026-09-10 — see the module docs and
+/// `scripts/measure_warmup_semantics.py`). Each subframe carries its own
+/// warm-up samples in its own header; the next subframe does not inherit
+/// this buffer. What remains true about the struct's shape: the frame layer
+/// can own one per subframe slot and *reuse* it — `fill()` overwrites the
+/// meaningful prefix on every call, so reuse costs nothing and the type
+/// never pretends to be history.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PredictorState {
-    /// Previous output samples, most recent first (warm-up source).
+    /// Warm-up samples for the subframe being decoded, most recent first
+    /// (stream order is oldest-first; `fill` stores them reversed so the
+    /// integrators index `warm_up[j] = sample[i-1-j]` directly, matching the
+    /// stream's most-recent-past coefficient order).
     pub warm_up: [i32; crate::MAX_LPC_ORDER],
-    /// Number of valid entries in `warm_up`.
+    /// Number of valid entries in `warm_up` (the subframe's predictor order).
     pub len: usize,
 }
 
 impl PredictorState {
-    /// An empty state (used for the first frame of a stream).
-    ///
-    /// Not `const fn`: `todo!()` is not a permitted call in a const context, and
-    /// making this const is a decision for the implementation pass (it would be
-    /// zero-cost to do so — a zeroed array).
-    pub fn new() -> Self {
-        todo!("flac-lite scaffold: PredictorState::new")
+    /// An empty scratch (valid for any order-0 subframe; `fill` populates it
+    /// for predictors with order > 0).
+    pub const fn new() -> Self {
+        Self {
+            warm_up: [0; crate::MAX_LPC_ORDER],
+            len: 0,
+        }
     }
 
-    /// Seed from the tail of a decoded subframe (the next frame's warm-up).
-    pub fn update(&mut self, decoded: &[i32], order: usize) {
-        todo!("flac-lite scaffold: PredictorState::update")
+    /// Read this subframe's warm-up samples from the bitstream (§9.2.5
+    /// Table 21, §9.2.6 Table 22: `s(subframe bps × order)`, two's
+    /// complement, oldest first in the stream), left-padding each by
+    /// `wasted` per §9.2.2's decoder rule, and store them most-recent-first.
+    ///
+    /// `order` must be ≤ [`crate::MAX_LPC_ORDER`]; the subframe layer gates
+    /// profile order before calling. Cursor contract: lands on the first bit
+    /// of the coded residual (LPC's precision/shift/coefficient fields sit
+    /// between warm-up and residual and are this method's caller's job —
+    /// `decode_subframe`, step 3d).
+    ///
+    /// Scaffold (step 3e wires it into `decode_subframe`): the implementation
+    /// is a `read_signed(subframe_bits)` × `order` loop plus a pad shift.
+    pub fn fill(
+        &mut self,
+        reader: &mut crate::bits::BitReader<'_>,
+        order: usize,
+        subframe_bits: u8,
+        wasted: u32,
+    ) -> crate::Result<()> {
+        todo!("flac-lite scaffold: PredictorState::fill (step 3d)")
     }
 }
 
 /// Decode one subframe into `out`.
 ///
-/// `state` supplies warm-up samples and is updated in place with this frame's
-/// tail. `sample_bits` is the frame header's sample size, adjusted by the
-/// caller's `-1` for the side subframe of a decorrelated pair.
+/// `state` is per-subframe scratch (NOT cross-frame state — see module
+/// docs): this function fills it from the subframe's own header and uses it
+/// to seed the integrator. `sample_bits` is the frame header's sample size,
+/// adjusted by the caller's `-1` for the side subframe of a decorrelated
+/// pair.
 pub fn decode_subframe(
     reader: &mut BitReader<'_>,
     blocksize: usize,
@@ -179,22 +232,27 @@ pub fn decode_subframe(
     state: &mut PredictorState,
     out: &mut [i32],
 ) -> crate::Result<SubframeType> {
-    todo!("flac-lite scaffold: decode_subframe")
+    todo!("flac-lite scaffold: decode_subframe (step 3e)")
 }
 
 /// Integrate a residual through FIXED predictor coefficients of the given order.
 ///
 /// Implemented as nested running sums (no multiplies) — see module docs.
+/// Scaffold (step 3d): pure array transform, verifiable against synthetic
+/// residuals — no bitstream needed.
 fn integrate_fixed(order: u8, warm_up: &PredictorState, residual: &mut [i32]) -> crate::Result<()> {
-    todo!("flac-lite scaffold: integrate_fixed")
+    todo!("flac-lite scaffold: integrate_fixed (step 3e)")
 }
 
 /// Integrate a residual through LPC coefficients.
+///
+/// Scaffold (step 3d): `sample[i] = (Σ coeff[j]·out[i-1-j] >> shift) +
+/// residual[i]`, seeded from `warm_up`; pure array transform.
 fn integrate_lpc(
     coefficients: &[i32],
     shift: i8,
     warm_up: &PredictorState,
     residual: &mut [i32],
 ) -> crate::Result<()> {
-    todo!("flac-lite scaffold: integrate_lpc")
+    todo!("flac-lite scaffold: integrate_lpc (step 3e)")
 }

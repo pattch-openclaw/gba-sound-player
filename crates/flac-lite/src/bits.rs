@@ -1,10 +1,12 @@
 //! MSB-first bit reader over an immutable byte slice.
 //!
-//! STATUS (2026-09-06): **the read path is complete** — `new`, `read_bits`,
+//! STATUS (2026-09-10): **the read path is complete** — `new`, `read_bits`,
 //! `peek_bits`, `read_signed`, `read_utf8_coded`, `byte_align`, `read_u8`,
-//! `bit_position`, `bits_remaining` (Phase 1 step 1, complete in PRs #25–#32).
-//! Only the CRC helpers (`crc8`, `crc16`) remain `todo!()` scaffold: deferred to
-//! Phase 2 step 5, because the perf gate runs with CRC verification skipped.
+//! `read_wasted_bits`, `bit_position`, `bits_remaining` (Phase 1 step 1,
+//! complete in PRs #25–#32; `read_wasted_bits` landed with step 3a as the
+//! subframe body's wasted-bits reader). Only the CRC helpers (`crc8`, `crc16`)
+//! remain `todo!()` scaffold: deferred to Phase 2 step 5, because the perf
+//! gate runs with CRC verification skipped.
 //! The roadmap itself lives in FLAC.md → "Phased plan" (single source of truth).
 //!
 //! FLAC packs its fields MSB-first across byte boundaries, so the whole decoder
@@ -198,6 +200,53 @@ impl<'a> BitReader<'a> {
     /// actually check alignment is the frame parser.
     pub fn read_u8(&mut self) -> Result<u8> {
         self.read_bits(8).map(|v| v as u8)
+    }
+
+    /// Read FLAC's wasted-bits-per-sample field (§9.2.2), returning `k`.
+    ///
+    /// Layout: a flag bit. `0` → `k = 0`, nothing follows. `1` → `k − 1`
+    /// zero bits terminated by a one follow, so `k ≥ 1`. The caller must
+    /// sit on the flag bit — exactly where
+    /// [`crate::subframe::SubframeType::parse`] leaves the cursor (its 7-bit
+    /// pad+type contract), witnessed against encoder bytes in
+    /// `tests/subframe_header_layout.rs`.
+    ///
+    /// Deliberately **bit-level**: no interpretation of what `k` means. The
+    /// §9.2.2 rule "resulting bits per sample MUST be larger than zero" is
+    /// `k < frame bps`, which needs the frame's sample size — that check
+    /// belongs to the subframe layer, not here (same separation as
+    /// profile-gating everywhere else).
+    ///
+    /// Cursor is **atomic** like [`Self::read_utf8_coded`]: a run that
+    /// reaches EOF unterminated restores the cursor to the flag bit and
+    /// returns [`Error::EndOfStream`]; on success the cursor sits just past
+    /// the terminating one. The run is bounded by the slice, so no separate
+    /// length cap is imposed — an unbounded unary is exactly what EOF
+    /// rejects.
+    pub fn read_wasted_bits(&mut self) -> Result<u32> {
+        let start = self.bit_pos;
+        match self.wasted_inner() {
+            Ok(k) => Ok(k),
+            Err(e) => {
+                self.bit_pos = start;
+                Err(e)
+            }
+        }
+    }
+
+    fn wasted_inner(&mut self) -> Result<u32> {
+        if self.read_bits(1)? == 0 {
+            return Ok(0);
+        }
+        // Flag set: count the unary zeros; the terminating one is consumed.
+        // Failure inside the loop propagates through the atomic wrapper.
+        let mut zeros: u32 = 0;
+        loop {
+            if self.read_bits(1)? == 1 {
+                return Ok(zeros + 1);
+            }
+            zeros += 1;
+        }
     }
 
     /// Bits remaining in the backing slice from the current cursor.
@@ -1266,6 +1315,119 @@ mod tests {
                     Err(Error::EndOfStream) => assert!(start + width > total),
                     Err(e) => panic!("unexpected error at start {start}, width {width}: {e:?}"),
                 }
+            }
+        }
+    }
+
+    // ---- read_wasted_bits --------------------------------------------------
+
+    #[test]
+    fn read_wasted_bits_flag_clear_consumes_only_the_flag() {
+        let mut r = BitReader::new(&[0b0111_1111]);
+        assert_eq!(r.read_wasted_bits().unwrap(), 0);
+        assert_eq!(r.bit_position(), 1);
+    }
+
+    #[test]
+    fn read_wasted_bits_hand_packed_runs() {
+        // k=1: flag + terminator, no zeros: bits "11".
+        let mut r = BitReader::new(&[0b1100_0000]);
+        assert_eq!(r.read_wasted_bits().unwrap(), 1);
+        assert_eq!(r.bit_position(), 2);
+        // k=3: 1, 0, 0, 1 → "1001".
+        let mut r = BitReader::new(&[0b1001_0000]);
+        assert_eq!(r.read_wasted_bits().unwrap(), 3);
+        assert_eq!(r.bit_position(), 4);
+        // k=5: flag, k−1 = 4 zeros, terminator → bits 1,0,0,0,0,1 = 0b100001
+        // from the MSB = 0b1000_0100.
+        let mut r = BitReader::new(&[0b1000_0100]);
+        assert_eq!(r.read_wasted_bits().unwrap(), 5);
+        assert_eq!(r.bit_position(), 6);
+        // k=8: flag, seven zeros, terminator → 9 bits, crossing into byte 2
+        // (bit 8 is byte 1's MSB).
+        let mut r = BitReader::new(&[0x80, 0x80]);
+        assert_eq!(r.read_wasted_bits().unwrap(), 8);
+        assert_eq!(r.bit_position(), 9);
+    }
+
+    #[test]
+    fn read_wasted_bits_long_run() {
+        // k=40: flag, 39 zeros, terminator → 41 bits. Byte 0 = 0x80, bytes
+        // 1..5 all zero, bit 40 = byte 5's MSB. Wide runs stay the bits
+        // layer's problem to read, not to judge (frame bps gates them).
+        let mut r = BitReader::new(&[0x80, 0x00, 0x00, 0x00, 0x00, 0x80]);
+        assert_eq!(r.read_wasted_bits().unwrap(), 40);
+        assert_eq!(r.bit_position(), 41);
+    }
+
+    #[test]
+    fn read_wasted_bits_unterminated_run_restores_cursor() {
+        // flag + zeros, no terminator before EOF.
+        let mut r = BitReader::new(&[0x80, 0x00]);
+        assert_eq!(r.read_wasted_bits(), Err(Error::EndOfStream));
+        assert_eq!(r.bit_position(), 0);
+        // Mid-slice: pad three bits first (0x10's top three bits are 000);
+        // the flag is bit 3 (0x10 = 0001_0000), then zeros run to EOF. A
+        // failure must restore to three, not zero and not into the run.
+        let mut r = BitReader::new(&[0x10, 0x00, 0x00]);
+        assert_eq!(r.read_bits(3).unwrap(), 0b000);
+        assert_eq!(r.read_wasted_bits(), Err(Error::EndOfStream));
+        assert_eq!(r.bit_position(), 3);
+        // Empty slice: the flag read itself fails.
+        let mut r = BitReader::new(&[]);
+        assert_eq!(r.read_wasted_bits(), Err(Error::EndOfStream));
+        assert_eq!(r.bit_position(), 0);
+    }
+
+    #[test]
+    fn read_wasted_bits_matches_naive_oracle_at_every_alignment() {
+        // Independent oracle: a plain bit-by-bit loop over `ref_bit`, run
+        // from every start position; disagreement or a terminator beyond
+        // the slice is a failure either way.
+        let mut data = [0u8; 9];
+        let mut rng = Lcg(0xCAFE_F00D);
+        for d in data.iter_mut() {
+            *d = rng.next_u8();
+        }
+        let total = data.len() * 8;
+        for start in 0..total {
+            // Naive expectation, computed first.
+            let mut want: Option<u32> = None;
+            if ref_bit(&data, start) == 0 {
+                want = Some(0);
+            } else {
+                let mut zeros = 0u32;
+                let mut pos = start + 1;
+                loop {
+                    if pos >= total {
+                        break;
+                    }
+                    if ref_bit(&data, pos) == 1 {
+                        want = Some(zeros + 1);
+                        break;
+                    }
+                    zeros += 1;
+                    pos += 1;
+                }
+            }
+            let mut r = BitReader::new(&data);
+            r.bit_pos = start;
+            match (want, r.read_wasted_bits()) {
+                (Some(k), Ok(got)) => {
+                    assert_eq!(got, k, "start {start}");
+                    // flag(1) + (k−1) zeros + terminator(1): k+1 bits for k≥1,
+                    // just the flag for k=0.
+                    let consumed = if k == 0 { 1 } else { k + 1 };
+                    assert_eq!(r.bit_position(), start + consumed as usize, "start {start}");
+                }
+                (None, Err(Error::EndOfStream)) => {
+                    assert_eq!(
+                        r.bit_position(),
+                        start,
+                        "start {start}: failed read must restore"
+                    );
+                }
+                (want, got) => panic!("start {start}: oracle says {want:?}, reader {got:?}"),
             }
         }
     }

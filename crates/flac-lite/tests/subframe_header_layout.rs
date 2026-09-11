@@ -207,11 +207,32 @@ fn parse_matches_the_vector_table_on_every_real_subframe() {
         );
 
         // Cursor witness: the wasted value derived from where parse stopped
-        // must equal the oracle's independently-derived value.
+        // must equal the oracle's independently-derived value. The harness
+        // read is deliberately naive (bit-by-bit loop, this file's own code).
+        let want_wasted = v.wasted.expect("real vectors carry a wasted value");
         assert_eq!(
             read_wasted(&mut reader),
-            v.wasted.expect("real vectors carry a wasted value"),
+            want_wasted,
             "{what}: wasted bits read from parse's exit cursor"
+        );
+
+        // Library agreement (step 3a): `BitReader::read_wasted_bits` must
+        // reproduce the oracle's value from the same cursor — encoder bytes
+        // witness the library reader, not just the harness's copy of it.
+        let mut reader2 = cursor_past_header(&v);
+        let parsed2 = SubframeType::parse(&mut reader2)
+            .unwrap_or_else(|e| panic!("{what}: re-parse rejected: {e:?}"));
+        assert_eq!(parsed2, want, "{what}: re-parse must be deterministic");
+        assert_eq!(
+            reader2.read_wasted_bits().unwrap() as u64,
+            want_wasted,
+            "{what}: library wasted reader vs oracle"
+        );
+        // Same composite cursor: library read lands where the naive loop did.
+        assert_eq!(
+            reader2.bit_position(),
+            reader.bit_position(),
+            "{what}: library and harness must consume the same field width"
         );
 
         // `order()` is the warm-up count the body carries (§9.2.5/9.2.6 tables).
