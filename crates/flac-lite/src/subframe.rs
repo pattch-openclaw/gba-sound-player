@@ -3,10 +3,10 @@
 //! IMPLEMENTED: [`SubframeType::parse`] + [`SubframeType::order`] (§9.2.1 type
 //! field), plus step 3a's leaves: the wasted-bits reader
 //! ([`crate::bits::BitReader::read_wasted_bits`]) and the residual sign map
-//! (`residual::rice_unmap`, crate-private until 3b consumes it). The
+//! (`residual::rice_unmap`, consumed by 3b since 2026-09-11). The
 //! composition (`decode_subframe`), the integrators, [`PredictorState::fill`],
-//! and `residual`'s readers are still `todo!()` scaffold (Phase 1 step 3,
-//! substeps 3b–3f).
+//! and `residual`'s header reader (`decode_residual`) are still `todo!()`
+//! scaffold (Phase 1 step 3, substeps 3c–3f).
 //!
 //! A subframe is one channel's worth of samples for one frame. Layout:
 //!

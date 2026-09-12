@@ -596,14 +596,17 @@ gets built later for the shipping path regardless.
        (`scripts/measure_warmup_semantics.py`: 64/64 frames carry their OWN
        first samples, 0/64 match the previous frame's tail). See
        [Completed: step 3a leaves](#completed-step-3a-leaves--wasted-bits-reader-rice_unmap-and-the-warm-up-correction-2026-09-10).
-     - [ ] **3b — `decode_rice_partition`:** the hot inner loop (zeros-count +
-       remainder + `rice_unmap`), the §9.2.7.3 `i32::MIN` rejection, and the
-       escape-record partition (raw two's-complement samples). Witness:
-       extend `scripts/frame_vectors.py` to parse real partitions from the
-       committed streams (it already walks subframe 0 to the residual cursor)
-       and assert exact residual values + exact exit cursor per partition.
-       Also the first place to micro-benchmark on-host — the perf gate's
-       cycles concentrate here.
+     - [x] **3b — `decode_rice_partition` (done 2026-09-11):** the hot inner
+       loop (zeros-count + remainder + `rice_unmap`), the §9.2.7.3 `i32::MIN`
+       rejection, and the escape-record partition (raw two's-complement
+       samples). **Witness scope, per Sam's 2026-09-11 direction:** the
+       frame_vectors.py per-partition oracle extension and the on-host
+       micro-benchmark are **deferred** — unit tests + an independent bit
+       packer suffice for correctness now, and perf measurement is a
+       dedicated later effort once more of the real implementation exists.
+       If it later turns out real-world partitions differ hugely from the
+       synthetic ones, that's the trigger to build the harness. See
+       [Completed: step 3b](#completed-step-3b--decode_rice_partition-2026-09-11).
      - [ ] **3c — `decode_residual`:** residual header (method, partition
        order/count), per-partition sample-count rules (first partition loses
        the predictor order), and the sample-size header with its `0b111`
@@ -1005,6 +1008,8 @@ that read like documentation, which is what made it survive review.
 | `EndOfStream` is reachable mid-field (a 1-byte slice is too short) | Degenerate: the field is 7 bits and reads are byte-granular, so any non-empty slice holds it; a 1-byte `0xFF` is a pad-bit rejection, not EOF | Writing the EOF test — the reader disagreed with the assertion, and was right |
 | Warm-up samples are "the previous frame's tail samples", the only cross-frame state the decoder retains | Warm-up lives **inside each subframe's own header**, unencoded; §9.2.5: "each subframe in FLAC is coded completely independently". Frame 0 has warm-up and no previous frame. Consequence: frames are independently decodable, `seek_frame` is safe by construction, `PredictorState` is scratch, not history | `scripts/measure_warmup_semantics.py`: over real `-l 0` and `-l 4` encodes, every frame's warm-up equals its OWN first decoded samples (64/64) and none equal the previous frame's tail (0/64). Found while implementing step 3a, before any code depended on the myth |
 | `rice_unmap` scaffold doc: "odd → (n+1)/2, even → −n/2" (`negative = n & 1`) | Sign-flipped. §9.2.7.2 folds `x ≥ 0 → 2x`, `x < 0 → −2x − 1`, so the decode is **even → `n>>1`, odd → `!(n>>1)`** | The RFC's own worked example (folded 38 → +19; the scaffold mapping returns −19), pinned as a unit assertion |
+| Escape partition `raw_bits` is a "4-bit field" (`PartitionHeader` doc) | §9.2.7.1: **5 bits** follow the escape code (so widths reach 31, and the 4-bit note would truncate a legal escape partition) | Reading §9.2.7.1 to implement 3b's escape branch |
+| `quotient.checked_shl(order)` is a sufficient folded-value overflow guard | `checked_shl` only rejects shift *amounts* ≥ 32 and **wraps** value bits shifted out: quotient 4 at order 30 yielded `folded = 0` | The 3b rejection test asserted `InvalidField` and got `Ok(())` — the impl disagreed with the assertion, and the assertion's author was wrong about `checked_shl`, not the code |
 
 **Rule going forward:** any claim in these docs about *format bytes* carries its
 witness — an RFC section, or a measurement with the command that produced it. If
@@ -1224,3 +1229,63 @@ measurement" (two rows: the myth, the sign flip) with their witnesses.
 tests (the subframe suite now also witnesses the library wasted reader against
 the oracle on every vector); `make native-flac-rom` unchanged (build sanity);
 `make check` clean.
+
+## Completed: step 3b — `decode_rice_partition` (2026-09-11)
+
+Phase 1 step 3b landed: the Rice partition body (unary quotient + `order`
+remainder bits + `rice_unmap`) and the §9.2.7.1 escape-record partition (raw
+signed two's-complement samples, incl. the legal `raw_bits == 0` =
+all-zeros-stored-with-no-bits case). The function consumes the partition
+**body** only — the parameter field and escape-code split stay with the
+caller (3c), which keeps the inner loop testable standalone.
+
+**Two design facts the implementation had to get right, both pinned by
+unit tests:**
+
+- **`order == 0` skips the remainder read entirely.** `read_bits(0)` is
+  `InvalidField` by design (a caller bug, not a stream condition), so the
+  unary-only case cannot be expressed as "read 0 bits" — it must branch.
+  Conflating the two would desynchronise every subsequent codeword.
+- **§9.2.7.3 rejection lives here, not in `rice_unmap`.** `folded ==
+  0xFFFF_FFFF` (the unique `i32::MIN` pre-image) → `InvalidField`, and a
+  quotient that cannot shift into `u32` → `InvalidField`. The seam 3a pinned
+  (map stays total; the stream layer rejects) is now enforced.
+
+**Found by test, not by review (the `checked_shl` trap).** The first draft
+used `quotient.checked_shl(order)` as the overflow guard. `checked_shl` only
+rejects a shift *amount* ≥ 32 — it **wraps bits shifted out of the value**.
+Quotient 4 at order 30 silently yielded `folded = 0` (4 ≪ 30 mod 2³²), i.e.
+a corrupt stream decoded as a valid zero residual. The test that was supposed
+to prove rejection failed with `Ok(())`, and that disagreement was the bug.
+Fix: guard on the quotient (`quotient > u32::MAX >> order`, with `order >= 32`
+short-circuited first so the shift amount is always < 32) before shifting.
+
+**Found by test, one level up (the hand-vector lesson, again).** The
+multi-sample hand-packed vector mis-derived `fold(−2)` as 5; the spec fold
+(`x < 0 → −2x − 1`) gives 3 — 5 is `fold(−3)`. The decoder faithfully returned
+−3 from the bits actually packed: the *test* was wrong, the implementation
+right. Same lesson as steps 1/3a, newly expensive: hand-derived bit expectations
+record the author's belief. The differential sweeps (pack straight from the
+spec text → decode → compare, at every Rice parameter 1..14 × every start-bit
+alignment, and every escape width 1..31) are what actually witness the loop;
+the hand vectors only demonstrate the RFC §9.2.7.2 worked example (folded 38 →
++19) and the order-0 / escape shapes.
+
+**One scaffold doc claim corrected:** `PartitionHeader::raw_bits` was
+documented as a "4-bit field". §9.2.7.1: "Directly following the escape code
+are **5 bits** containing the number of bits with which each residual sample
+is stored." Row added to the prior-assumptions table. (Latent, not live —
+nothing read the field before this step — but a packer written against the
+4-bit note would emit an escape partition libFLAC can't read.)
+
+**Deliberate scope cuts (Sam's 2026-09-11 direction).** No frame_vectors.py
+per-partition oracle and no on-host micro-benchmark in this PR: correctness
+documented via independent packer + RFC worked example + edge-case unit tests;
+perf measurement is a dedicated separate effort once more of the decoder is
+real. The oracle extension returns if real-world partitions prove materially
+different from synthetic ones.
+
+**Gates:** `make flac-test` green — thumbv4t compile gate + 65 unit (was 54:
++11 for 3b) + 11 frame-header + 5 subframe integration tests; the
+thumbv4t `-Zbuild-std=core,alloc` check compiles the new code for the real
+target; host tests unchanged otherwise.
