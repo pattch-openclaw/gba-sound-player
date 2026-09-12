@@ -607,12 +607,17 @@ gets built later for the shipping path regardless.
        If it later turns out real-world partitions differ hugely from the
        synthetic ones, that's the trigger to build the harness. See
        [Completed: step 3b](#completed-step-3b--decode_rice_partition-2026-09-11).
-     - [ ] **3c — `decode_residual`:** residual header (method, partition
-       order/count), per-partition sample-count rules (first partition loses
-       the predictor order), and the sample-size header with its `0b111`
-       "unknown" escape — derive the max by scanning partitions *while
-       decoding* (zero-alloc rule: no second pass over a buffer). Witness:
-       whole-residual parse of real frames (oracle values vs cursor).
+     - [x] **3c — `decode_residual` (done 2026-09-11):** residual header
+       (coding method, partition order), per-partition sample-count rules
+       (first partition loses the predictor order), escape/Rice dispatch per
+       partition. **The planned "sample-size header with its `0b111` unknown
+       escape" turned out to be a phantom — no such field exists in a coded
+       residual** (witnessed before implementation; see
+       [Completed: step 3c](#completed-step-3c--decode_residual-2026-09-11)).
+       Witness: RFC 9639 Appendix D.2.7 — a real libFLAC 1.3.3 residual whose
+       15 samples the RFC itself publishes (Table 39) — reused as committed
+       data per Sam's 2026-09-11 direction (no new encoding), plus
+       packer-oracle unit tests for the header rules.
      - [ ] **3d — integrators + `PredictorState::fill`:** `integrate_fixed`
        (orders 0–4 as nested running sums, no multiplies — Table 20),
        `integrate_lpc` (§9.2.6 dot-product + `>> shift`, most-recent-past
@@ -1010,6 +1015,8 @@ that read like documentation, which is what made it survive review.
 | `rice_unmap` scaffold doc: "odd → (n+1)/2, even → −n/2" (`negative = n & 1`) | Sign-flipped. §9.2.7.2 folds `x ≥ 0 → 2x`, `x < 0 → −2x − 1`, so the decode is **even → `n>>1`, odd → `!(n>>1)`** | The RFC's own worked example (folded 38 → +19; the scaffold mapping returns −19), pinned as a unit assertion |
 | Escape partition `raw_bits` is a "4-bit field" (`PartitionHeader` doc) | §9.2.7.1: **5 bits** follow the escape code (so widths reach 31, and the 4-bit note would truncate a legal escape partition) | Reading §9.2.7.1 to implement 3b's escape branch |
 | `quotient.checked_shl(order)` is a sufficient folded-value overflow guard | `checked_shl` only rejects shift *amounts* ≥ 32 and **wraps** value bits shifted out: quotient 4 at order 30 yielded `folded = 0` | The 3b rejection test asserted `InvalidField` and got `Ok(())` — the impl disagreed with the assertion, and the assertion's author was wrong about `checked_shl`, not the code |
+| A coded residual carries a **sample-size header** with a `0b111` "unknown" escape, derived by scanning partitions (scaffold module doc + the original 3c plan line) | **No such field exists.** §9.2.7 is complete with method `u(2)` + partition order `u(4)` + per-partition parameter (`u(4)`/`u(5)`, escape adds raw width `u(5)`); residual width is implicit in the codewords, nothing is derived | Implementing 3c against §9.2.7 read in full + Appendix D Table 38 (real residual: header, parameter, straight into quotients) + libFLAC's `read_residual_partitioned_rice_` (reads nothing else). Caught before any code depended on it — the planned 8 phantom-bit read would have desynced every frame |
+| A hand-packed byte can witness a residual-header rejection (`0b0000_0001` = "partition order 1") | MSB-first that byte is method `00` + order `0b0000` = 0 — **legal** for the test's blocksize; the test would have passed on an unrelated EOF | The 3c probe test disagreed with its own bytes; fixed structurally by routing every header probe through the `Packer` oracle so named fields are encoded fields |
 
 **Rule going forward:** any claim in these docs about *format bytes* carries its
 witness — an RFC section, or a measurement with the command that produced it. If
@@ -1289,3 +1296,69 @@ different from synthetic ones.
 +11 for 3b) + 11 frame-header + 5 subframe integration tests; the
 thumbv4t `-Zbuild-std=core,alloc` check compiles the new code for the real
 target; host tests unchanged otherwise.
+
+## Completed: step 3c — `decode_residual` (2026-09-11)
+
+Phase 1 step 3c landed: the complete coded-residual read (§9.2.7) — coding
+method `u(2)`, partition order `u(4)`, then per partition: parameter
+`u(4)`/`u(5)`, escape (`0b1111`/`0b11111`) → raw width `u(5)` →
+`decode_rice_partition`. Sample counts follow §9.2.7 exactly: partition 0
+carries `(blocksize >> order) − predictor_order`, the rest
+`blocksize >> order`; total `blocksize − order` is the `out` contract. The
+three stream MUSTs (divisible blocksize, `blocksize >> order > order`, no
+reserved method codes) are enforced as `InvalidField`, all division-free
+(`& (partitions − 1)` mask, not a divide — ARMv4T rule).
+
+**The phantom sample-size field, dead before it could be coded.** The 3c plan
+line (and the scaffold's module doc) claimed a "sample-size header with its
+`0b111` unknown escape, derived by scanning partitions." **No such field
+exists in a coded residual.** §9.2.7 in full is: method, partition order,
+per-partition parameter (+ escape width) — the residual sample width is
+implicit in the Rice codewords; nothing is declared, derived, or scanned.
+Witness, three ways: §9.2.7 read end-to-end (grep for any residual-size
+wording: nothing), Appendix D Table 38 (a real residual walked bit-exactly:
+2 + 4 + parameter, then straight into quotients), and libFLAC's
+`read_residual_partitioned_rice_` (reads nothing else). Row added to the
+prior-assumptions table. Had it been implemented as planned, the decoder
+would have consumed 8 phantom bits per residual — desyncing every frame
+after the header. Caught at design time, exactly like the warm-up myth: the
+plan text was treated as a hypothesis until the spec confirmed it.
+
+**Witness: committed data, zero new encoding (Sam's 2026-09-11 direction
+held).** RFC 9639 Appendix D.2.7 is a fully worked decode of a real libFLAC
+1.3.3 encode — Example File 2's first frame, published as hex, walked
+bit-by-bit by the spec itself, with the 15 residual values in Table 39 and
+the stream's MD5 verified in D.2.9. The test embeds those 37 bytes and
+decodes through the full chain: `FrameHeader::parse` → `SubframeType::parse`
+→ `read_wasted_bits` → `read_signed(17)` warm-up (= 4302, Table 40) →
+`decode_residual` → **all 15 values equal Table 39**, cursor lands exactly
+at `0xAC+0` where the RFC's subframe 1 begins (witnessed by parsing subframe
+1's real type byte after it). The Python cross-check (`drafts/`, throwaway)
+reproduced Table 39 from the RFC hexdump before any Rust was written — the
+same oracle-first rule the bits steps used. Unit tests cover what the single
+witness cannot: multi-partition counts (the first-partition penalty), mixed
+Rice+escape partitions, width-0 escape in-place, 5-bit method reaching
+parameter 20, and the three MUSTs (with the RFC's own 4096/order-4 → max
+partition-order-9 boundary, its legal side witnessed by an EOF-beats-
+rejection pass-through probe).
+
+**Found by test (the hand-packed-vector lesson, fourth firing).** A header
+rejection test hand-packed `0b0000_0001` meaning "partition order 1" — but
+MSB-first that byte is method `00` + partition order `0b0000` = **0**, which
+is legal for the test's blocksize. The test would have passed on the wrong
+rule (asserting `InvalidField` against an EOF from a different path — a
+coincidence away from a false green). Fixed structurally, not by correcting
+the byte: every header-rejection probe now routes through the `Packer`
+oracle, so field names in the test are the fields the bits encode. The
+recurring rule earns its keep: hand-packed bytes record the author's belief;
+only a packer/encoder witnesses a field layout.
+
+**Deliberate scope cuts.** No `frame_vectors.py` whole-residual oracle
+extension: the Appendix D witness is real encoder output and the header
+rules are packer-witnessed; per-frame residual ground truth over the
+committed streams would only pay off once 3e/3f compose the full subframe
+and a PCM diff (step 3f's end-to-end) subsumes it. No profiling (3b
+rule holds).
+
+**Gates:** `make flac-test` green — thumbv4t compile gate + 74 unit (was 65:
++9 for 3c) + 11 frame-header + 5 subframe integration; `make check` clean.

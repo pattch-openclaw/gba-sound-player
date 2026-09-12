@@ -13,10 +13,11 @@
 //! 3b's partition body (`residual::decode_rice_partition`: Rice + §9.2.7.1
 //! escape-record) decodes.
 //! `format.rs` carries the implemented sample-rate/channel helpers the parse
-//! needs; the composition (`subframe::decode_subframe`, `frame::decode_frame`),
-//! the integrators, the residual header (`decode_residual`, step 3c),
-//! `stereo`, `decoder`, and
-//! `format::Manifest` are still `todo!()` scaffold against real signatures —
+//! needs; the residual decode path is complete through step 3c (`rice_unmap`,
+//! `decode_rice_partition`, `decode_residual`). What remains `todo!()`:
+//! the subframe/frame composition (`subframe::decode_subframe`, the
+//! integrators, `PredictorState::fill`, `frame::decode_frame`), `stereo`,
+//! `decoder`, and `format::Manifest` —
 //! the module layout, types, and signatures are the contract the
 //! implementation fills in (FLAC.md → phased plan, step 3 substeps 3b–3f).
 //! Design rationale and the decision to write this at all live in

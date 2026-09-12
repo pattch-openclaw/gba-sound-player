@@ -1,12 +1,11 @@
 //! Subframe decoding: CONSTANT, VERBATIM, FIXED (orders 0–4), LPC (order ≤ 32).
 //!
 //! IMPLEMENTED: [`SubframeType::parse`] + [`SubframeType::order`] (§9.2.1 type
-//! field), plus step 3a's leaves: the wasted-bits reader
-//! ([`crate::bits::BitReader::read_wasted_bits`]) and the residual sign map
-//! (`residual::rice_unmap`, consumed by 3b since 2026-09-11). The
-//! composition (`decode_subframe`), the integrators, [`PredictorState::fill`],
-//! and `residual`'s header reader (`decode_residual`) are still `todo!()`
-//! scaffold (Phase 1 step 3, substeps 3c–3f).
+//! field), plus the whole residual path beneath this module —
+//! `residual::rice_unmap` (3a), `residual::decode_rice_partition` (3b), and
+//! `residual::decode_residual` (3c). What remains `todo!()` here: the
+//! composition (`decode_subframe`), the integrators, and
+//! [`PredictorState::fill`] (Phase 1 step 3, substeps 3d–3f).
 //!
 //! A subframe is one channel's worth of samples for one frame. Layout:
 //!
