@@ -3,16 +3,19 @@
 //! A minimal FLAC **frame** decoder for the Game Boy Advance: `#![no_std]`,
 //! zero dependencies, zero allocation on the decode path.
 //!
-//! **IMPLEMENTATION STATE (2026-09-10):** `bits::BitReader` is complete for
+//! **IMPLEMENTATION STATE (2026-09-11):** `bits::BitReader` is complete for
 //! the decode path (PRs #25–#32 plus step 3a's `read_wasted_bits`; only
 //! `crc8`/`crc16` remain, parked in Phase 2). `frame::FrameHeader::parse`
 //! (step 2) and `subframe::SubframeType::parse` landed against real libFLAC
 //! bytes in `tests/`; step 3a's leaves — the wasted-bits reader, the Rice
 //! residual sign map (`residual::rice_unmap`), and the `PredictorState`
-//! correction (warm-up is per-subframe, not cross-frame) — are in.
+//! correction (warm-up is per-subframe, not cross-frame) — are in, and step
+//! 3b's partition body (`residual::decode_rice_partition`: Rice + §9.2.7.1
+//! escape-record) decodes.
 //! `format.rs` carries the implemented sample-rate/channel helpers the parse
 //! needs; the composition (`subframe::decode_subframe`, `frame::decode_frame`),
-//! the integrators, the residual readers, `stereo`, `decoder`, and
+//! the integrators, the residual header (`decode_residual`, step 3c),
+//! `stereo`, `decoder`, and
 //! `format::Manifest` are still `todo!()` scaffold against real signatures —
 //! the module layout, types, and signatures are the contract the
 //! implementation fills in (FLAC.md → phased plan, step 3 substeps 3b–3f).
