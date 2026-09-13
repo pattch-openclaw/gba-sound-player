@@ -618,15 +618,16 @@ gets built later for the shipping path regardless.
        15 samples the RFC itself publishes (Table 39) — reused as committed
        data per Sam's 2026-09-11 direction (no new encoding), plus
        packer-oracle unit tests for the header rules.
-     - [ ] **3d — integrators + `PredictorState::fill`:** `integrate_fixed`
-       (orders 0–4 as nested running sums, no multiplies — Table 20),
-       `integrate_lpc` (§9.2.6 dot-product + `>> shift`, most-recent-past
-       coefficient order), and `fill` (warm-up read: `read_signed(subframe
-       bps) × order`, `<< wasted` padding, oldest-first in stream /
-       stored most-recent-first). Pure array transforms: verified against
-       *synthetic* residuals + an independent Python reference — no
+     - [x] **3d — integrators + `PredictorState::fill` (done 2026-09-12):**
+       `integrate_fixed` (orders 0–4 as nested running sums, no multiplies —
+       Table 20), `integrate_lpc` (§9.2.6 dot-product + `>> shift`,
+       most-recent-past coefficient order), and `fill` (warm-up read:
+       `read_signed(subframe bps) × order`, `<< wasted` padding, oldest-first
+       in stream / stored most-recent-first). Pure array transforms: verified
+       against *synthetic* residuals + an independent Python reference — no
        bitstream dependency, no golden-vector work needed. FIXED-as-cascade
-       vs FIXED-as-dot-product agreement is a free cross-check.
+       vs FIXED-as-dot-product agreement is a free cross-check. **Done** —
+       see [Completed: step 3d](#completed-step-3d--integrators--predictorstatefill-2026-09-12).
      - [ ] **3e — `decode_subframe`:** composition — `read_wasted_bits` →
        subframe bps check (§9.2.2: bps > 0) → `fill` → body dispatch
        (CONSTANT single value / VERBATIM `read_signed` loop / residual) →
@@ -1362,3 +1363,96 @@ rule holds).
 
 **Gates:** `make flac-test` green — thumbv4t compile gate + 74 unit (was 65:
 +9 for 3c) + 11 frame-header + 5 subframe integration; `make check` clean.
+
+## Completed: step 3d — integrators + `PredictorState::fill` (2026-09-12)
+
+Phase 1 step 3d landed: the three pure array transforms —
+`subframe::integrate_fixed`, `subframe::integrate_lpc`, and
+`PredictorState::fill` — with no bitstream dependency beyond `fill`'s
+`read_signed` loop. Both integrators run **in place** (residual slice in,
+decoded samples out): correct because the predictor recurrence reads *decoded*
+past samples, and 3e's buffer contract stays "one caller slice per subframe".
+
+**The FIXED integrator is the forward-difference cascade, seeded with the
+warm-up's differences.** Table 20's FIXED-k predictor is exactly "the k-th
+forward difference of the output equals the residual", so orders 1–4 run k
+running-sum accumulators + one output accumulator, no multiplies (module-doc
+rule). The non-obvious part was the **seed**: the accumulators must start at
+the warm-up's forward differences (`d1 = w0−w1`, `d2 = w0−2w1+w2`,
+`d3 = w0−3w1+3w2−w3` — differences-of-differences, w most-recent-first), not
+at the warm-up values themselves. A wrong seed agrees with the truth for at
+most the first sample or two, so the vectors below pin it hard.
+
+**Witness strategy (3d plan's rule: synthetic residuals + an independent
+Python reference; no golden-vector work needed).** `drafts/flac3d_oracle.py`
+(throwaway, per step 3c's drafts/ precedent) implements §9.2.5/§9.2.6
+reconstruction with arbitrary-precision integers and **generates** the vectors
+rather than asserting sums: a deterministic smooth signal is built, the
+residual is derived by the encoder's inverse formula
+(`residual = signal − predicted`), and every vector requires the decode to
+recover **the signal itself**. A mis-indexed past, wrong shift, or dropped
+warm-up breaks signal recovery even if oracle and impl had shared the same
+summing bug — generation evades the hand-packed-vector failure mode FLAC.md
+records firing four times (the oracle here is the same mechanism-vs-mechanism
+differential the bits/residual steps used, one layer up).
+
+- **FIXED orders 0–4:** 5 oracle vector sets (24 samples each; oracle's
+  explicit Table 20 dot product vs the impl's cascade — different mechanism,
+  different accumulator structure, Python big-int vs i64). Plus the plan's
+  **free cross-check escalated**: cascade-vs-dot-product agreement is pinned
+  both on the oracle vectors and on pseudo-random wide residuals per order.
+- **LPC:** 4 oracle cases — `[64]>>6`, `[96,−32]>>5` (mixed signs → negative
+  accumulators reach the shift: the **floor-vs-truncate seam**, pinned further
+  by `(-1)>>1 == -1`), `[80,40,−20,−8]>>4`, and order-5 extreme coeffs at
+  `shift 0` (order 5 also witnesses LPC orders beyond `MAX_FIXED_ORDER` —
+  LPC's cap is 32, not 4). Plus an in-place-vs-separate-history differential:
+  the impl aliases decoded samples into the residual slice; the reference uses
+  an absolute-position history buffer (warm-up oldest-first + decoded) — a
+  different indexing scheme, agreeing sample-for-sample.
+- **`fill`:** 4 oracle vector cases (order × subframe-bps × wasted × cursor
+  alignment: 13-bit values at bit 0, 11-bit at bit 5 with `wasted 3`, 16-bit
+  at bit 3, 8-bit at bit 7 — every field straddles bytes at worst case), each
+  pinning state contents (`<< wasted` padding, most-recent-first storage) and
+  the cursor landing exactly at `start + order × subframe_bits`.
+- **fill × integrator seam:** the 4 fill states each feed FIXED order 1 over
+  a shared residual, with oracle-computed expectations — `fill`'s padding and
+  the seed layout are load-bearing in the composition, not just per-unit.
+
+**Contracts pinned (rejections write nothing, cursor untouched):**
+`integrate_fixed`: `order > MAX_FIXED_ORDER` → `UnsupportedPredictorOrder`,
+`warm_up.len < order` → `InvalidField` (caller bug — `fill` guarantees
+`len == order`). `integrate_lpc`: **§9.2.6's "shift MUST NOT be negative"** →
+`InvalidField` (the first place the rule becomes enforceable — the s(5)
+coefficient field is 3e's parse, but the integrator refuses to trust it),
+shift ≥ 64 rejected for the same not-relying-on-the-caller reason, `len >
+MAX_LPC_ORDER` → `UnsupportedPredictorOrder`, short warm-up → `InvalidField`.
+`fill`: `order > MAX_LPC_ORDER` → `UnsupportedPredictorOrder` and
+`wasted ≥ 32` → `InvalidField` *before any read* (the format keeps
+`subframe_bits + wasted ≤ 24`, so a wider pad is a corrupt/mis-placed read;
+rejecting keeps the pad shift from being a silent `shl` wrap — the
+`checked_shl` trap from 3b generalized). State is **commit-only-on-success**
+(reads land in a local buffer): the EOF test shows a real partial read (one
+13-bit warm-up sample consumed of three) leaving the previous state fully
+intact and the cursor exactly at the failing read's start — per-read atomicity
+plus module-wide state atomicity, matching the residual readers' contract.
+Padding computes in `i64` then truncates (same convention as the integrators'
+accumulators; the perf spike revisits intermediates, not this seam).
+
+**No prior-assumption rows this step** — nothing the docs claimed about bytes
+or semantics turned out false; the step's risk (cascade seeds, in-place
+aliasing, shift flooring) was all novel implementation surface, and the
+oracle-first rule meant the vectors, not a correction pass, carried the
+burden.
+
+**Deliberate scope cuts (narrow, per Sam's 2026-09-12 direction):**
+`decode_subframe` stays `todo!()` — 3e's composition (wasted read → bps gate
+→ `fill` → body dispatch → integrate) is the next PR; no frame_vectors.py
+extension, no profiling (3b/3c rules hold; the gate's cycle counts are
+step 4's dedicated effort). The `i32` truncation convention in the
+accumulators is flagged, not enforced — the same "prove before trusting" note
+the module already carries.
+
+**Gates:** `make flac-test` green — thumbv4t compile gate + **90 unit** (was
+74: +16 for 3d) + 11 frame-header + 5 subframe integration; `make
+native-flac-rom` builds/links/fixes unchanged; `make check` clean (fmt
+included).

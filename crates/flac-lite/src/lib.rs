@@ -3,7 +3,7 @@
 //! A minimal FLAC **frame** decoder for the Game Boy Advance: `#![no_std]`,
 //! zero dependencies, zero allocation on the decode path.
 //!
-//! **IMPLEMENTATION STATE (2026-09-11):** `bits::BitReader` is complete for
+//! **IMPLEMENTATION STATE (2026-09-12):** `bits::BitReader` is complete for
 //! the decode path (PRs #25–#32 plus step 3a's `read_wasted_bits`; only
 //! `crc8`/`crc16` remain, parked in Phase 2). `frame::FrameHeader::parse`
 //! (step 2) and `subframe::SubframeType::parse` landed against real libFLAC
@@ -14,12 +14,14 @@
 //! escape-record) decodes.
 //! `format.rs` carries the implemented sample-rate/channel helpers the parse
 //! needs; the residual decode path is complete through step 3c (`rice_unmap`,
-//! `decode_rice_partition`, `decode_residual`). What remains `todo!()`:
-//! the subframe/frame composition (`subframe::decode_subframe`, the
-//! integrators, `PredictorState::fill`, `frame::decode_frame`), `stereo`,
-//! `decoder`, and `format::Manifest` —
+//! `decode_rice_partition`, `decode_residual`), and step 3d's integrators are
+//! in: `subframe::integrate_fixed` (forward-difference cascade),
+//! `subframe::integrate_lpc` (§9.2.6 dot product), and
+//! `PredictorState::fill` (warm-up read + `<< wasted` padding). What remains
+//! `todo!()`: the subframe/frame composition (`subframe::decode_subframe`,
+//! `frame::decode_frame`), `stereo`, `decoder`, and `format::Manifest` —
 //! the module layout, types, and signatures are the contract the
-//! implementation fills in (FLAC.md → phased plan, step 3 substeps 3b–3f).
+//! implementation fills in (FLAC.md → phased plan, step 3 substeps 3e–3f).
 //! Design rationale and the decision to write this at all live in
 //! [`../../../FLAC.md`](../../../../FLAC.md).
 //!

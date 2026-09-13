@@ -1,11 +1,12 @@
 //! Subframe decoding: CONSTANT, VERBATIM, FIXED (orders 0–4), LPC (order ≤ 32).
 //!
 //! IMPLEMENTED: [`SubframeType::parse`] + [`SubframeType::order`] (§9.2.1 type
-//! field), plus the whole residual path beneath this module —
+//! field), the whole residual path beneath this module —
 //! `residual::rice_unmap` (3a), `residual::decode_rice_partition` (3b), and
-//! `residual::decode_residual` (3c). What remains `todo!()` here: the
-//! composition (`decode_subframe`), the integrators, and
-//! [`PredictorState::fill`] (Phase 1 step 3, substeps 3d–3f).
+//! `residual::decode_residual` (3c) — and the step 3d integrators:
+//! [`PredictorState::fill`] (warm-up read), the FIXED cascade and the LPC
+//! dot product. What remains `todo!()` here: the composition
+//! (`decode_subframe`, step 3e; frame-level wiring is 3f).
 //!
 //! A subframe is one channel's worth of samples for one frame. Layout:
 //!
@@ -198,14 +199,28 @@ impl PredictorState {
     /// complement, oldest first in the stream), left-padding each by
     /// `wasted` per §9.2.2's decoder rule, and store them most-recent-first.
     ///
-    /// `order` must be ≤ [`crate::MAX_LPC_ORDER`]; the subframe layer gates
-    /// profile order before calling. Cursor contract: lands on the first bit
-    /// of the coded residual (LPC's precision/shift/coefficient fields sit
-    /// between warm-up and residual and are this method's caller's job —
-    /// `decode_subframe`, step 3d).
+    /// `order` must be ≤ [`crate::MAX_LPC_ORDER`] (a larger one is a caller
+    /// bug → [`crate::Error::UnsupportedPredictorOrder`], cursor untouched);
+    /// the subframe layer gates profile order before calling.
+    /// `subframe_bits` is the *subframe* sample width — frame bps minus
+    /// wasted bits, the caller's subtraction (§9.2.2's "MUST be larger than
+    /// zero" gate is `decode_subframe`'s, 3e). `wasted ≥ 32` is rejected as
+    /// [`crate::Error::InvalidField`]: the format keeps
+    /// `subframe_bits + wasted` ≤ 24, so a wider pad is a corrupt or
+    /// mis-placed read, and rejecting it keeps the pad shift from being a
+    /// silent wrap.
     ///
-    /// Scaffold (step 3e wires it into `decode_subframe`): the implementation
-    /// is a `read_signed(subframe_bits)` × `order` loop plus a pad shift.
+    /// Padding is computed in `i64` and truncated to `i32` — legal streams
+    /// cannot overflow it under the profile (see the module's i64 note), and
+    /// the perf spike revisits the intermediate, not this seam.
+    ///
+    /// Cursor contract: on success lands on the first bit after the warm-up
+    /// (LPC's precision/shift/coefficient fields sit between warm-up and
+    /// residual and are the caller's job — `decode_subframe`, 3e). On error
+    /// the *state* is untouched (reads land in a local buffer, committed only
+    /// on success) while the cursor stays where the failing read left it —
+    /// per-read atomicity, same contract as [`crate::residual`]'s readers.
+    /// `order == 0` consumes nothing and yields an empty state.
     pub fn fill(
         &mut self,
         reader: &mut crate::bits::BitReader<'_>,
@@ -213,7 +228,25 @@ impl PredictorState {
         subframe_bits: u8,
         wasted: u32,
     ) -> crate::Result<()> {
-        todo!("flac-lite scaffold: PredictorState::fill (step 3d)")
+        if order > crate::MAX_LPC_ORDER {
+            return Err(crate::Error::UnsupportedPredictorOrder);
+        }
+        if wasted >= 32 {
+            // Pad shift must stay in `i32`'s defined range; no legal field
+            // reaches it (see doc).
+            return Err(crate::Error::InvalidField);
+        }
+        let mut warm = [0i32; crate::MAX_LPC_ORDER];
+        // Stream order is oldest-first; storing into descending slots means
+        // slot j ends up `sample[i-1-j]` — the most-recent-first layout the
+        // integrators index directly.
+        for slot in (0..order).rev() {
+            let v = reader.read_signed(u32::from(subframe_bits))?;
+            warm[slot] = ((i64::from(v)) << wasted) as i32;
+        }
+        self.warm_up = warm;
+        self.len = order;
+        Ok(())
     }
 }
 
@@ -234,24 +267,695 @@ pub fn decode_subframe(
     todo!("flac-lite scaffold: decode_subframe (step 3e)")
 }
 
-/// Integrate a residual through FIXED predictor coefficients of the given order.
+/// Integrate a residual through FIXED predictor coefficients of the given
+/// order, in place: on success `residual` holds the decoded samples.
 ///
 /// Implemented as nested running sums (no multiplies) — see module docs.
-/// Scaffold (step 3d): pure array transform, verifiable against synthetic
-/// residuals — no bitstream needed.
+/// Table 20's FIXED-k polynomial `Σ C(k,j)·(−1)^{j+1}·out[i−1−j] + r[i]` is
+/// exactly "the k-th forward difference of the output equals the residual",
+/// so the cascade runs k difference accumulators plus the output accumulator:
+///
+/// ```text
+/// for each sample: acc_k += r;  ... acc_1 += acc_2;  out += acc_1;  emit out
+/// ```
+///
+/// seeded with the warm-up's forward differences
+/// (`acc_1 = w0 − w1`, `acc_2 = w0 − 2w1 + w2`, `acc_3 = w0 − 3w1 + 3w2 − w3`,
+/// differences of the differences). The unit tests pin this against the
+/// oracle's explicit Table 20 dot product for every order — the cascade-vs-
+/// dot-product agreement the 3d plan calls its free cross-check, escalated
+/// from "agreement between two impls" to "agreement with generated vectors"
+/// so a shared misunderstanding of the seed values still fails.
+///
+/// Accumulates in `i64`, stores `as i32` (truncation, same convention as the
+/// module's perf note; legal profile streams never reach the edge).
+///
+/// Contract: `order ≤ MAX_FIXED_ORDER` (else [`crate::Error::UnsupportedPredictorOrder`])
+/// and `warm_up.len ≥ order` (a shorter warm-up is a caller bug — the
+/// subframe's `fill` guarantees `len == order` — and yields
+/// [`crate::Error::InvalidField`] before any sample is written).
 fn integrate_fixed(order: u8, warm_up: &PredictorState, residual: &mut [i32]) -> crate::Result<()> {
-    todo!("flac-lite scaffold: integrate_fixed (step 3e)")
+    let order = usize::from(order);
+    if order > crate::MAX_FIXED_ORDER {
+        return Err(crate::Error::UnsupportedPredictorOrder);
+    }
+    if warm_up.len < order {
+        return Err(crate::Error::InvalidField);
+    }
+    let w = &warm_up.warm_up;
+    // Forward differences of the warm-up (most-recent-first: w0 = out[-1],
+    // w1 = out[-2], ...). Only the arms that index them read them, so the
+    // order-0/1 arms never touch uninitialized slots.
+    // d1 needs no initializer: every arm that reaches the loop (orders 1–4)
+    // assigns it first, and order 0 returns below.
+    let mut d1;
+    let mut d2 = 0i64;
+    let mut d3 = 0i64;
+    let mut out = 0i64;
+    match order {
+        // Order 0: the residual IS the signal.
+        0 => return Ok(()),
+        1 => {
+            d1 = i64::from(w[0]);
+        }
+        2 => {
+            d1 = i64::from(w[0]) - i64::from(w[1]);
+            out = i64::from(w[0]);
+        }
+        3 => {
+            d2 = i64::from(w[0]) - 2 * i64::from(w[1]) + i64::from(w[2]);
+            d1 = i64::from(w[0]) - i64::from(w[1]);
+            out = i64::from(w[0]);
+        }
+        _ => {
+            // order == 4 (gated above)
+            d3 = i64::from(w[0]) - 3 * i64::from(w[1]) + 3 * i64::from(w[2]) - i64::from(w[3]);
+            d2 = i64::from(w[0]) - 2 * i64::from(w[1]) + i64::from(w[2]);
+            d1 = i64::from(w[0]) - i64::from(w[1]);
+            out = i64::from(w[0]);
+        }
+    }
+    for sample in residual.iter_mut() {
+        let r = i64::from(*sample);
+        match order {
+            1 => {
+                d1 += r;
+                out = d1;
+            }
+            2 => {
+                d1 += r;
+                out += d1;
+            }
+            3 => {
+                d2 += r;
+                d1 += d2;
+                out += d1;
+            }
+            _ => {
+                d3 += r;
+                d2 += d3;
+                d1 += d2;
+                out += d1;
+            }
+        }
+        *sample = out as i32;
+    }
+    Ok(())
 }
 
-/// Integrate a residual through LPC coefficients.
+/// Integrate a residual through LPC coefficients (§9.2.6):
+/// `sample[i] = (Σ coeff[j]·sample[i-1-j] >> shift) + residual[i]`, seeded
+/// from `warm_up`; in place, like [`integrate_fixed`].
 ///
-/// Scaffold (step 3d): `sample[i] = (Σ coeff[j]·out[i-1-j] >> shift) +
-/// residual[i]`, seeded from `warm_up`; pure array transform.
+/// `coefficients` are the stream's **most-recent-past-first** order, which is
+/// exactly the order [`PredictorState::fill`] stores warm-up in — index `j`
+/// addresses both. Past samples are the already-integrated prefix of
+/// `residual` (that is what makes in-place integration correct: the LPC
+/// recurrence reads *decoded* samples, not residuals).
+///
+/// **`shift` MUST NOT be negative (§9.2.6)** → [`crate::Error::InvalidField`].
+/// A shift ≥ 64 is rejected the same way (the s(5) field caps at 15; the
+/// guard exists because `i64 >> 64` is not a thing to panic on, and a
+/// standalone-pure function should not rely on its caller — 3e's parser —
+/// for memory-safety-adjacent bounds).
+///
+/// Contract: `coefficients.len() ≤ MAX_LPC_ORDER` (else
+/// [`crate::Error::UnsupportedPredictorOrder`]) and `warm_up.len ≥
+/// coefficients.len()` (caller bug → [`crate::Error::InvalidField`], no
+/// sample written). Accumulates the dot product in `i64`; the right shift is
+/// Rust's arithmetic shift on `i64` (floor for negatives — matches ARM `asr`
+/// and the oracle's Python `>>`, whose negative-accumulator vectors pin
+/// exactly this behaviour).
 fn integrate_lpc(
     coefficients: &[i32],
     shift: i8,
     warm_up: &PredictorState,
     residual: &mut [i32],
 ) -> crate::Result<()> {
-    todo!("flac-lite scaffold: integrate_lpc (step 3e)")
+    if shift < 0 {
+        return Err(crate::Error::InvalidField);
+    }
+    let order = coefficients.len();
+    if order > crate::MAX_LPC_ORDER {
+        return Err(crate::Error::UnsupportedPredictorOrder);
+    }
+    if warm_up.len < order {
+        return Err(crate::Error::InvalidField);
+    }
+    let shift = u32::from(shift as u8);
+    if shift >= 64 {
+        return Err(crate::Error::InvalidField);
+    }
+    let w = &warm_up.warm_up;
+    for i in 0..residual.len() {
+        let mut acc = 0i64;
+        for (j, &c) in coefficients.iter().enumerate() {
+            // past[i-1-j]: decoded prefix, else warm-up. Warm-up is stored
+            // most-recent-first (w[m] = sample[-1-m]), so for k = i-1-j < 0
+            // the slot index is m = -1-k = j-i.
+            let past = if j < i {
+                i64::from(residual[i - 1 - j])
+            } else {
+                i64::from(w[j - i])
+            };
+            acc += i64::from(c) * past;
+        }
+        residual[i] = ((acc >> shift) + i64::from(residual[i])) as i32;
+    }
+    Ok(())
+}
+
+// Unit tests compile as part of the lib under the host test harness (Gate 2,
+// run from *outside* the repo — see README "Cargo config leak"). `core`-only,
+// like the rest of the crate's unit tests.
+//
+// Witness rule (3d plan): *synthetic residuals + an independent Python
+// reference — no bitstream dependency, no golden-vector work needed.* The
+// vectors below were emitted by `drafts/flac3d_oracle.py` (throwaway, not
+// committed — the step 3c drafts/ precedent), which implements §9.2.5/§9.2.6
+// reconstruction with arbitrary-precision integers. Two properties make the
+// vectors witnesses, not transcriptions of the author's belief (the lesson
+// FLAC.md records firing four times):
+//
+// 1. **Generation, not assertion.** Each vector is built by deriving a
+//    residual from a known smooth signal via the encoder's inverse formula,
+//    then requiring the decode to recover *the signal itself*. A mis-indexed
+//    past, wrong shift, or dropped warm-up breaks recovery even if oracle
+//    and impl shared the same summing bug.
+// 2. **Independent mechanism.** Python big-int dot products (no i64, no
+//    cascade, no in-place aliasing) vs the impl's nested accumulators, i64
+//    dot product, and in-place writes. The FIXED-as-cascade vs FIXED-as-
+//    dot-product agreement the plan calls its free cross-check is also
+//    pinned in-test (against Table 20's explicit coefficients) and on
+//    pseudo-random residuals.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Error;
+
+    // ---- oracle-generated vectors (drafts/flac3d_oracle.py, 2026-09-12) ----
+
+    // FIXED order 0: warm-up is a dummy — order 0 means "the residual IS the
+    // signal"; the vector's identity pins that the impl never touches it.
+    const FIXED0_RESID: [i32; 24] = [
+        377, 402, 362, 391, 292, -77, -127, -33, 60, -60, -101, -441, -357, -417, -361, -479, -371,
+        -706, -719, -523, -296, -118, 49, -137,
+    ];
+    const FIXED0_EXPECT: [i32; 24] = FIXED0_RESID;
+
+    // FIXED order 1: warm-up (most-recent-first), residual, expected signal
+    const FIXED1_WARM: [i32; 1] = [498];
+    const FIXED1_RESID: [i32; 24] = [
+        -128, -54, 329, 129, -209, -76, 23, -110, 319, -182, -66, 128, 48, 96, 117, -322, -111,
+        -256, 216, -219, 17, 10, 80, 6,
+    ];
+    const FIXED1_EXPECT: [i32; 24] = [
+        370, 316, 645, 774, 565, 489, 512, 402, 721, 539, 473, 601, 649, 745, 862, 540, 429, 173,
+        389, 170, 187, 197, 277, 283,
+    ];
+
+    // FIXED order 2
+    const FIXED2_WARM: [i32; 2] = [-433, -142];
+    const FIXED2_RESID: [i32; 24] = [
+        614, -456, 166, -405, 654, -65, -121, -346, 194, -124, 89, 22, 17, -233, 463, -39, 132,
+        -448, 21, 123, -160, 35, 215, -396,
+    ];
+    const FIXED2_EXPECT: [i32; 24] = [
+        -110, -243, -210, -582, -300, -83, 13, -237, -293, -473, -564, -633, -685, -970, -792,
+        -653, -382, -559, -715, -748, -941, -1099, -1042, -1381,
+    ];
+
+    // FIXED order 3
+    const FIXED3_WARM: [i32; 3] = [-226, 138, 50];
+    const FIXED3_RESID: [i32; 24] = [
+        989, -922, 398, -22, 389, -643, 459, -90, -147, -371, 538, -212, 200, -155, 409, -672, 421,
+        -203, 193, -27, 29, -697, 884, -349,
+    ];
+    const FIXED3_EXPECT: [i32; 24] = [
+        -53, -265, -464, -672, -500, -591, -486, -275, -105, -347, -463, -665, -753, -882, -643,
+        -708, -656, -690, -617, -464, -202, -528, -558, -641,
+    ];
+
+    // FIXED order 4
+    const FIXED4_WARM: [i32; 4] = [518, 418, 289, 363];
+    const FIXED4_RESID: [i32; 24] = [
+        120, 3, 820, -1450, 1251, -670, 58, 17, -86, 346, 149, -274, -657, 1146, -611, -580, 1257,
+        -497, -65, -866, 1699, -1137, 44, 601,
+    ];
+    const FIXED4_EXPECT: [i32; 24] = [
+        477, 186, 356, 248, 374, 576, 754, 825, 620, 316, 239, 441, 317, 408, 644, 375, 208, 253,
+        555, 293, 345, 452, 399, 572,
+    ];
+
+    // LPC case 0: coeffs [64] shift 6
+    const LPC0_COEFFS: [i32; 1] = [64];
+    const LPC0_SHIFT: i8 = 6;
+    const LPC0_WARM: [i32; 1] = [-372];
+    const LPC0_RESID: [i32; 20] = [
+        -99, 132, 13, 5, 191, -209, 159, -124, 142, 125, 356, -17, -177, 77, -5, -240, -177, -103,
+        352, 140,
+    ];
+    const LPC0_EXPECT: [i32; 20] = [
+        -471, -339, -326, -321, -130, -339, -180, -304, -162, -37, 319, 302, 125, 202, 197, -43,
+        -220, -323, 29, 169,
+    ];
+
+    // LPC case 1: coeffs [96, -32] shift 5 (mixed signs → negative
+    // accumulators reach the shift: the floor-vs-truncate seam)
+    const LPC1_COEFFS: [i32; 2] = [96, -32];
+    const LPC1_SHIFT: i8 = 5;
+    const LPC1_WARM: [i32; 2] = [-670, -340];
+    const LPC1_RESID: [i32; 20] = [
+        878, 909, 665, 997, 977, 1173, 1252, 1229, 986, 495, 736, 763, 587, 1122, 1047, 1094, 997,
+        1018, 1956, 932,
+    ];
+    const LPC1_EXPECT: [i32; 20] = [
+        -792, -797, -934, -1008, -1113, -1158, -1109, -940, -725, -740, -759, -774, -976, -1032,
+        -1073, -1093, -1209, -1516, -1383, -1701,
+    ];
+
+    // LPC case 2: coeffs [80, 40, -20, -8] shift 4
+    const LPC2_COEFFS: [i32; 4] = [80, 40, -20, -8];
+    const LPC2_SHIFT: i8 = 4;
+    const LPC2_WARM: [i32; 4] = [234, 493, 240, 346];
+    const LPC2_RESID: [i32; 20] = [
+        -1776, -538, 171, -1652, -1226, -1595, -2705, -2455, -1183, -2159, -2005, -2199, -1880,
+        -3709, -3481, -1898, -2570, -2768, -3035, -3069,
+    ];
+    const LPC2_EXPECT: [i32; 20] = [
+        153, 75, 389, 172, 436, 491, 430, 291, 515, 360, 503, 426, 800, 547, 470, 606, 551, 641,
+        555, 316,
+    ];
+
+    // LPC case 3: coeffs [-12345, 999, -7, 33, 4096] shift 0 (extreme coeffs,
+    // shift-0 identity path, order 5 > MAX_FIXED_ORDER — LPC-only order)
+    const LPC3_COEFFS: [i32; 5] = [-12345, 999, -7, 33, 4096];
+    const LPC3_SHIFT: i8 = 0;
+    const LPC3_WARM: [i32; 5] = [-64, 188, -158, -311, -170];
+    const LPC3_RESID: [i32; 20] = [
+        -272583, -730021, -3920006, -3090565, -5874370, -4749244, -1994688, -4131982, -121137,
+        3190315, -1377617, 3905411, 916380, 4159667, 7660184, 3755631, 677187, -377940, -1877786,
+        3351499,
+    ];
+    const LPC3_EXPECT: [i32; 20] = [
+        -168, -383, -219, -515, -483, -328, -435, -217, 80, -215, 154, 15, 364, 579, 402, 93, 99,
+        49, 409, 313,
+    ];
+
+    // fill case 0: order 3, subframe_bits 13, wasted 0, stream oldest-first
+    // [-1234, 567, -8], 0 filler bits
+    const FILL0_BYTES: [u8; 5] = [217, 112, 141, 255, 240];
+    const FILL0_EXPECT: [i32; 3] = [-8, 567, -1234];
+    const FILL0_START_BITS: usize = 0;
+    const FILL0_ORDER: usize = 3;
+    const FILL0_BITS: u8 = 13;
+    const FILL0_WASTED: u32 = 0;
+
+    // fill case 1: order 2, subframe_bits 11, wasted 3, stream oldest-first
+    // [17, -25], 5 filler bits (mid-byte cursor + wasted padding)
+    const FILL1_BYTES: [u8; 4] = [208, 17, 252, 224];
+    const FILL1_EXPECT: [i32; 2] = [-200, 136];
+    const FILL1_START_BITS: usize = 5;
+    const FILL1_ORDER: usize = 2;
+    const FILL1_BITS: u8 = 11;
+    const FILL1_WASTED: u32 = 3;
+
+    // fill case 2: order 1, subframe_bits 16, wasted 0, stream oldest-first
+    // [-32768], 3 filler bits (i16 extreme)
+    const FILL2_BYTES: [u8; 3] = [80, 0, 0];
+    const FILL2_EXPECT: [i32; 1] = [-32768];
+    const FILL2_START_BITS: usize = 3;
+    const FILL2_ORDER: usize = 1;
+    const FILL2_BITS: u8 = 16;
+    const FILL2_WASTED: u32 = 0;
+
+    // fill case 3: order 4, subframe_bits 8, wasted 2, stream oldest-first
+    // [100, -100, 127, -128], 7 filler bits (worst-case alignment)
+    const FILL3_BYTES: [u8; 5] = [180, 201, 56, 255, 0];
+    const FILL3_EXPECT: [i32; 4] = [-512, 508, -400, 400];
+    const FILL3_START_BITS: usize = 7;
+    const FILL3_ORDER: usize = 4;
+    const FILL3_BITS: u8 = 8;
+    const FILL3_WASTED: u32 = 2;
+
+    // Shared combo residuals: fill's padded state feeding FIXED order 1
+    // (oracle-computed expectations per case).
+    const COMBO_RESID: [i32; 6] = [5, -5, 7, 0, -1, 3];
+    const FILL0_COMBO_EXPECT: [i32; 6] = [-3, -8, -1, -1, -2, 1];
+    const FILL1_COMBO_EXPECT: [i32; 6] = [-195, -200, -193, -193, -194, -191];
+    const FILL2_COMBO_EXPECT: [i32; 6] = [-32763, -32768, -32761, -32761, -32762, -32759];
+    const FILL3_COMBO_EXPECT: [i32; 6] = [-507, -512, -505, -505, -506, -503];
+
+    // ---- helpers -----------------------------------------------------------
+
+    /// Build scratch state from an already-most-recent-first warm-up slice
+    /// (the oracle emits warm-up in exactly the stored order).
+    fn warm_state(most_recent_first: &[i32]) -> PredictorState {
+        let mut s = PredictorState::new();
+        for (slot, &v) in s.warm_up.iter_mut().zip(most_recent_first) {
+            *slot = v;
+        }
+        s.len = most_recent_first.len();
+        s
+    }
+
+    /// Table 20's explicit FIXED coefficients — the dot-product form of the
+    /// same predictor the cascade implements. Independent mechanism, per the
+    /// 3d plan's free cross-check.
+    const FIXED_COEFFS: [&[i32]; crate::MAX_FIXED_ORDER + 1] =
+        [&[], &[1], &[2, -1], &[3, -3, 1], &[4, -6, 4, -1]];
+
+    fn fixed_dot(order: usize, warm: &PredictorState, residual: &[i32], out: &mut [i32]) {
+        for i in 0..residual.len() {
+            let mut acc = i64::from(residual[i]);
+            for (j, &c) in FIXED_COEFFS[order].iter().enumerate() {
+                let past = if j < i {
+                    i64::from(out[i - 1 - j])
+                } else {
+                    i64::from(warm.warm_up[j - i])
+                };
+                acc += i64::from(c) * past;
+            }
+            out[i] = acc as i32;
+        }
+    }
+
+    fn lcg(seed: &mut u32) -> i32 {
+        *seed = seed
+            .wrapping_mul(1664525)
+            .wrapping_add(1013904223)
+            .wrapping_shr(16);
+        (*seed % 4001) as i32 - 2000
+    }
+
+    // ---- integrate_fixed ---------------------------------------------------
+
+    #[test]
+    fn fixed_orders_recover_the_oracle_signal() {
+        let cases: [(u8, &[i32], &[i32; 24], &[i32; 24]); 5] = [
+            (0, &[0], &FIXED0_RESID, &FIXED0_EXPECT),
+            (1, &FIXED1_WARM, &FIXED1_RESID, &FIXED1_EXPECT),
+            (2, &FIXED2_WARM, &FIXED2_RESID, &FIXED2_EXPECT),
+            (3, &FIXED3_WARM, &FIXED3_RESID, &FIXED3_EXPECT),
+            (4, &FIXED4_WARM, &FIXED4_RESID, &FIXED4_EXPECT),
+        ];
+        for (order, warm, resid, expect) in cases {
+            let mut out = [0i32; 24];
+            out.copy_from_slice(resid);
+            integrate_fixed(order, &warm_state(warm), &mut out)
+                .unwrap_or_else(|e| panic!("FIXED order {order}: {e:?}"));
+            assert_eq!(&out, expect, "FIXED order {order} vs oracle signal");
+        }
+    }
+
+    #[test]
+    fn fixed_cascade_matches_table20_dot_product_on_vectors() {
+        // The plan's cross-check, pinned on the oracle vectors: cascade and
+        // explicit-coefficient dot product must agree sample-for-sample —
+        // which also proves the cascade's forward-difference warm-up seeds
+        // (a wrong seed agrees on nothing but the first few samples at best).
+        let cases: [(u8, &[i32], &[i32; 24]); 5] = [
+            (0, &[0], &FIXED0_RESID),
+            (1, &FIXED1_WARM, &FIXED1_RESID),
+            (2, &FIXED2_WARM, &FIXED2_RESID),
+            (3, &FIXED3_WARM, &FIXED3_RESID),
+            (4, &FIXED4_WARM, &FIXED4_RESID),
+        ];
+        for (order, warm, resid) in cases {
+            let st = warm_state(warm);
+            let mut cascade = [0i32; 24];
+            cascade.copy_from_slice(resid);
+            integrate_fixed(order, &st, &mut cascade).unwrap();
+            let mut dot = [0i32; 24];
+            fixed_dot(usize::from(order), &st, resid, &mut dot);
+            assert_eq!(cascade, dot, "FIXED order {order}: cascade vs dot product");
+        }
+    }
+
+    #[test]
+    fn fixed_cascade_matches_dot_product_on_pseudo_random_residuals() {
+        // The smooth vectors keep residuals small (real audio does); a
+        // differential sweep with wider residuals catches cascade wiring the
+        // vectors' structure might not, without needing any stream witness.
+        for order in 0..=crate::MAX_FIXED_ORDER as u8 {
+            let mut seed = 0x2545_F49Bu32 ^ (u32::from(order) * 7919);
+            let mut resid = [0i32; 40];
+            for r in resid.iter_mut() {
+                *r = lcg(&mut seed);
+            }
+            let st = warm_state(&[7i32, -3, 9, -1][..usize::from(order)]);
+            let mut cascade = resid;
+            integrate_fixed(order, &st, &mut cascade).unwrap();
+            let mut dot = [0i32; 40];
+            fixed_dot(usize::from(order), &st, &resid, &mut dot);
+            assert_eq!(cascade, dot, "FIXED order {order}: sweep");
+        }
+    }
+
+    // ---- integrate_lpc -----------------------------------------------------
+
+    #[test]
+    fn lpc_recovers_the_oracle_signal() {
+        let mut out = [0i32; 20];
+        out.copy_from_slice(&LPC0_RESID);
+        integrate_lpc(&LPC0_COEFFS, LPC0_SHIFT, &warm_state(&LPC0_WARM), &mut out).unwrap();
+        assert_eq!(&out, &LPC0_EXPECT, "LPC case 0");
+
+        out.copy_from_slice(&LPC1_RESID);
+        integrate_lpc(&LPC1_COEFFS, LPC1_SHIFT, &warm_state(&LPC1_WARM), &mut out).unwrap();
+        assert_eq!(&out, &LPC1_EXPECT, "LPC case 1 (negative accumulators)");
+
+        out.copy_from_slice(&LPC2_RESID);
+        integrate_lpc(&LPC2_COEFFS, LPC2_SHIFT, &warm_state(&LPC2_WARM), &mut out).unwrap();
+        assert_eq!(&out, &LPC2_EXPECT, "LPC case 2");
+
+        out.copy_from_slice(&LPC3_RESID);
+        integrate_lpc(&LPC3_COEFFS, LPC3_SHIFT, &warm_state(&LPC3_WARM), &mut out).unwrap();
+        assert_eq!(&out, &LPC3_EXPECT, "LPC case 3 (shift 0, extreme coeffs)");
+    }
+
+    #[test]
+    fn lpc_in_place_matches_separate_history_impl() {
+        // In-place integration aliases residuals and decoded samples in one
+        // slice; the reference keeps them apart in an absolute-position
+        // history buffer (warm-up oldest-first, then decoded) — a different
+        // indexing scheme than the impl's decoded-prefix + warm-slot math.
+        let coeffs = [64i32, -32, 16, -8];
+        let shift = 4i8;
+        let warm_mrf = [5i32, -9, 3, 11];
+        let mut seed = 0xC0FF_EEu32;
+        let mut resid = [0i32; 36];
+        for r in resid.iter_mut() {
+            *r = lcg(&mut seed);
+        }
+        let st = warm_state(&warm_mrf);
+        let mut out = resid;
+        integrate_lpc(&coeffs, shift, &st, &mut out).unwrap();
+
+        const W: usize = 4; // warm-up length
+        let mut hist = [0i32; W + 36];
+        for m in 0..W {
+            hist[W - 1 - m] = warm_mrf[m]; // oldest-first by absolute position
+        }
+        for i in 0..36usize {
+            let mut acc = 0i64;
+            for (j, &c) in coeffs.iter().enumerate() {
+                acc += i64::from(c) * i64::from(hist[W + i - 1 - j]);
+            }
+            hist[W + i] = ((acc >> shift) + i64::from(resid[i])) as i32;
+            assert_eq!(hist[W + i], out[i], "LPC sweep sample {i}");
+        }
+    }
+
+    #[test]
+    fn lpc_shift_is_arithmetic_like_asr() {
+        // (-1) >> 1 must floor to -1 (ARM asr, Python >>), not truncate to 0.
+        // Mixed-sign vectors exercise negative accumulators broadly; this
+        // pins the seam alone.
+        let mut resid = [0i32; 3];
+        integrate_lpc(&[1i32], 1, &warm_state(&[-1]), &mut resid).unwrap();
+        assert_eq!(resid, [-1, -1, -1]);
+    }
+
+    // ---- PredictorState::fill ----------------------------------------------
+
+    #[test]
+    fn fill_reads_pads_and_stores_most_recent_first() {
+        // (bytes, start bits, order, subframe bps, wasted, expected state)
+        let cases: [(&[u8], usize, usize, u8, u32, &[i32]); 4] = [
+            (
+                &FILL0_BYTES,
+                FILL0_START_BITS,
+                FILL0_ORDER,
+                FILL0_BITS,
+                FILL0_WASTED,
+                &FILL0_EXPECT,
+            ),
+            (
+                &FILL1_BYTES,
+                FILL1_START_BITS,
+                FILL1_ORDER,
+                FILL1_BITS,
+                FILL1_WASTED,
+                &FILL1_EXPECT,
+            ),
+            (
+                &FILL2_BYTES,
+                FILL2_START_BITS,
+                FILL2_ORDER,
+                FILL2_BITS,
+                FILL2_WASTED,
+                &FILL2_EXPECT,
+            ),
+            (
+                &FILL3_BYTES,
+                FILL3_START_BITS,
+                FILL3_ORDER,
+                FILL3_BITS,
+                FILL3_WASTED,
+                &FILL3_EXPECT,
+            ),
+        ];
+        for (idx, (bytes, start, order, bits, wasted, expect)) in cases.iter().enumerate() {
+            let mut r = BitReader::new(bytes);
+            if *start > 0 {
+                // `read_bits(0)` is an InvalidField by design, so the
+                // aligned case skips rather than zero-reads.
+                r.read_bits((*start) as u32).unwrap();
+            }
+            let mut st = PredictorState::new();
+            st.fill(&mut r, *order, *bits, *wasted)
+                .unwrap_or_else(|e| panic!("fill case {idx}: {e:?}"));
+            assert_eq!(st.len, *order, "fill case {idx}: len");
+            assert_eq!(&st.warm_up[..*order], *expect, "fill case {idx}: state");
+            assert_eq!(
+                r.bit_position(),
+                start + order * usize::from(*bits),
+                "fill case {idx}: cursor lands on the next field"
+            );
+        }
+    }
+
+    #[test]
+    fn fill_commit_and_rejection_contracts() {
+        // order 0: consumes nothing, even from empty input.
+        let mut r = BitReader::new(&[]);
+        let mut st = PredictorState::new();
+        st.fill(&mut r, 0, 16, 0).unwrap();
+        assert_eq!(st.len, 0);
+        assert_eq!(r.bit_position(), 0);
+
+        // EOF: state untouched, cursor exactly where the failing read stopped
+        // (per-read atomicity + commit-only-on-success, the module-wide rule).
+        let mut st = warm_state(&[111, 222, 333]);
+        let mut r = BitReader::new(&FILL0_BYTES[..3]); // 24 bits; order 3 wants 39
+        assert_eq!(st.fill(&mut r, 3, 13, 0), Err(Error::EndOfStream));
+        assert_eq!(st.len, 3, "state untouched on failure");
+        assert_eq!(&st.warm_up[..3], &[111, 222, 333]);
+        assert_eq!(r.bit_position(), 13, "one 13-bit read succeeded");
+
+        // wasted >= 32: InvalidField before any read (keeps the pad shift
+        // from being a silent wrap; no legal field reaches it).
+        let mut r = BitReader::new(&FILL0_BYTES);
+        assert_eq!(st.fill(&mut r, 3, 13, 32), Err(Error::InvalidField));
+        assert_eq!(r.bit_position(), 0);
+
+        // order > MAX_LPC_ORDER: caller bug, zero reads.
+        assert_eq!(
+            st.fill(&mut r, crate::MAX_LPC_ORDER + 1, 16, 0),
+            Err(Error::UnsupportedPredictorOrder)
+        );
+        assert_eq!(r.bit_position(), 0);
+    }
+
+    #[test]
+    fn fill_pads_feed_the_integrator() {
+        // End-to-end witness for the two halves of 3d meeting: fill's
+        // `<< wasted` padding is exactly what makes the padded warm-up the
+        // integrator's seed (the padded signal = real signal, wasted LSBs
+        // included — the oracle composes the same way).
+        let cases: [(&[u8], usize, usize, u8, u32, &[i32; 6]); 4] = [
+            (
+                &FILL0_BYTES,
+                FILL0_START_BITS,
+                FILL0_ORDER,
+                FILL0_BITS,
+                FILL0_WASTED,
+                &FILL0_COMBO_EXPECT,
+            ),
+            (
+                &FILL1_BYTES,
+                FILL1_START_BITS,
+                FILL1_ORDER,
+                FILL1_BITS,
+                FILL1_WASTED,
+                &FILL1_COMBO_EXPECT,
+            ),
+            (
+                &FILL2_BYTES,
+                FILL2_START_BITS,
+                FILL2_ORDER,
+                FILL2_BITS,
+                FILL2_WASTED,
+                &FILL2_COMBO_EXPECT,
+            ),
+            (
+                &FILL3_BYTES,
+                FILL3_START_BITS,
+                FILL3_ORDER,
+                FILL3_BITS,
+                FILL3_WASTED,
+                &FILL3_COMBO_EXPECT,
+            ),
+        ];
+        for (idx, (bytes, start, order, bits, wasted, expect)) in cases.iter().enumerate() {
+            let mut r = BitReader::new(bytes);
+            if *start > 0 {
+                r.read_bits((*start) as u32).unwrap();
+            }
+            let mut st = PredictorState::new();
+            st.fill(&mut r, *order, *bits, *wasted).unwrap();
+            // FIXED order 1 needs only warm[0]; every case has order >= 1.
+            let mut out = [0i32; 6];
+            out.copy_from_slice(&COMBO_RESID);
+            integrate_fixed(1, &st, &mut out).unwrap();
+            assert_eq!(&out, *expect, "fill+FIXED1 combo case {idx}");
+        }
+    }
+
+    // ---- contract rejections -------------------------------------------------
+
+    #[test]
+    fn integrator_contract_rejections_write_nothing() {
+        let st3 = warm_state(&[1, 2, 3]);
+        let mut resid = [7i32; 4];
+
+        assert_eq!(
+            integrate_fixed(5, &st3, &mut resid),
+            Err(Error::UnsupportedPredictorOrder)
+        );
+        assert_eq!(
+            integrate_fixed(2, &warm_state(&[1]), &mut resid),
+            Err(Error::InvalidField)
+        );
+        assert_eq!(resid, [7; 4], "FIXED rejections precede every write");
+
+        assert_eq!(
+            integrate_lpc(&[1, 2], -1, &st3, &mut resid),
+            Err(Error::InvalidField)
+        );
+        assert_eq!(
+            integrate_lpc(&[1i32; crate::MAX_LPC_ORDER + 1], 0, &st3, &mut resid),
+            Err(Error::UnsupportedPredictorOrder)
+        );
+        assert_eq!(
+            integrate_lpc(&[1, 2, 3, 4], 0, &st3, &mut resid),
+            Err(Error::InvalidField)
+        );
+        assert_eq!(
+            integrate_lpc(&[1], 127, &st3, &mut resid),
+            Err(Error::InvalidField)
+        );
+        assert_eq!(resid, [7; 4], "LPC rejections precede every write");
+    }
 }
