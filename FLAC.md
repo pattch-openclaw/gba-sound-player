@@ -628,16 +628,16 @@ gets built later for the shipping path regardless.
        bitstream dependency, no golden-vector work needed. FIXED-as-cascade
        vs FIXED-as-dot-product agreement is a free cross-check. **Done** —
        see [Completed: step 3d](#completed-step-3d--integrators--predictorstatefill-2026-09-12).
-     - [ ] **3e — `decode_subframe`:** composition — `read_wasted_bits` →
-       subframe bps check (§9.2.2: bps > 0) → `fill` → body dispatch
-       (CONSTANT single value / VERBATIM `read_signed` loop / residual) →
-       LPC body (u(4) precision−1, 0b1111 forbidden; s(5) shift, MUST NOT be
-       negative; coefficients) → integrate → return type. This is where the
-       **VERBATIM golden vector gap stops being theoretical**: pin the
-       incompressible-source + `-l 0` generator pair (measured: full-range
-       integer noise produces `verbatim` at `-l 0`, `fixed1` at `-l 12`) as
-       a required vector, and extend the oracle to per-subframe ground truth
-       (warm-up values, bps, residual exit position).
+     - [x] **3e — `decode_subframe` (done 2026-09-15):** the composition
+       landed — wasted read → §9.2.2 bps gate → `fill` → body dispatch
+       (CONSTANT / VERBATIM / residual) → LPC fields → integrate → return
+       type. The step's finding: **wasted padding applies once, at block
+       exit, after prediction** (pad-before disproven on the LPC × wasted
+       crossing; `lpc-wasted-256` is the committed discriminating vector).
+       The VERBATIM golden-vector gap closed with the fail-closed `-l 0`
+       incompressible-source pair, and per-subframe ground truth now exists
+       (warm-up values, bps, `exit_bits`, reference PCM). See
+       [Completed: step 3e](#completed-step-3e--decode_subframe-composition-and-the-wasted-scale-rule-2026-09-15).
      - [ ] **3f — `decode_frame` + decorrelation:** subframe loop over 1–2
        subframes, side-subframe bps −1 (the sneakiest byte-level fact of the
        step — mid/side & friends code the side at bps−1), mid/side /
@@ -1456,3 +1456,99 @@ the module already carries.
 74: +16 for 3d) + 11 frame-header + 5 subframe integration; `make
 native-flac-rom` builds/links/fixes unchanged; `make check` clean (fmt
 included).
+
+## Completed: step 3e — `decode_subframe`: composition and the wasted-scale rule (2026-09-15)
+
+Phase 1 step 3e landed: `subframe::decode_subframe` composes the whole
+subframe — type parse → `read_wasted_bits` → §9.2.2 bps gate (`0 < frame bps
+− wasted ≤ 32`, the only place the MUST can be judged) → `fill` → body
+dispatch (CONSTANT one stripped value / VERBATIM `read_signed` loop /
+residual) → LPC body fields (u(4) precision−1 with `0b1111` forbidden, s(5)
+shift rejecting negatives *before* the coefficient reads, coefficients
+most-recent-past first) → integrate → `pad_block` → return the type. Nothing
+remains `todo!()` in `subframe.rs`; frame wiring (footer, side bps−1,
+decorrelation) is 3f.
+
+**The step's finding: §9.2.2's wasted multiply runs once, at block exit,
+after prediction — not at the warm-up read.** libFLAC 1.5.0's
+`read_subframe_` shifts the entire output array *after* its type dispatch
+(stream_decoder.c:3028), so prediction runs entirely on the wasted-stripped
+codec scale: `fill` is called with `wasted = 0`, the residual and integrators
+never see padded values, and `pad_block` applies the `<< wasted` once to the
+finished block. Padding before prediction is **not equivalent**: the LPC dot
+product's arithmetic `>> shift` floors, and flooring does not commute with
+left-shifting. Measured on the crossing vector (LPC-3 + wasted 5): 252/256
+samples wrong pad-first, 0/256 pad-after. The mixed-scale variant was
+witnessed wrong twice before the rule landed — `fixed1-wasted5-256` decoded
+the ±20000 square wave as 20000/18750 — and the FIXED cascade provably agrees
+either order (pure addition), so no FIXED vector discriminates. Both
+wasted-crossing vectors are committed: `fixed1-wasted5-256` pins presence,
+`lpc-wasted-256` (quantized tonal: libFLAC still picks LPC-3, wasted 5 —
+quantized smooth material collapses to FIXED, unquantized tonal carries no
+wasted bits, so only quantized tonal content crosses the features) pins
+*order*.
+
+**The warm-up doubles as the block's first `order` samples** (3a's finding,
+now composed): FIXED/LPC write the prefix directly from `state` (reversed to
+stream order) and decode `out[order..]` through residual + integrator.
+
+**Witness strategy — real encoder bytes, two independent ground-truth
+layers.** New committed table `tests/subframe_body_vectors.txt`, regenerated
+by `scripts/gen_frame_vectors.sh` (`frame_vectors.py emit_bodies`): one mono
+256-sample stream per subframe type (`-b 256` → exactly one frame per
+stream, so the stream's kind census IS the frame's type), every expected kind
+fail-closed at emit time. Field values come from a naive bit-loop `Bits`
+walk — a second mechanism from the crate's accumulator reader — and
+`pcm_samples` from the reference decoder (`flac -d`), so reconstruction is
+witnessed by a *second decoder*, not the harness re-deriving its own sums.
+Generation-time invariants (all fail-closed): footer-gap to the next frame
+per the measured footer rule, warm-up == own first PCM `>> wasted`,
+verbatim/constant bodies == reference PCM. Four witnesses per vector at test
+time: dispatch outcome, warm-up state (coded scale, most-recent-first), exit
+cursor at exactly `exit_bits` — which pins by arithmetic every field width
+*below* the header (wasted run, warm-up, LPC fields, residual partitions) —
+and bit-exact `flac -d` PCM. The **VERBATIM golden gap closed**: header table
+vector `verbatim-first` from the incompressible Knuth-hash pair (measured:
+verbatim on every frame at `-l 0`, zero verbatim at `-l 12` — `-l 0` is the
+switch, census refuses to write if that ever changes).
+
+**Rejections libFLAC can never witness** (precision `0b1111`, negative
+shift) mutate ONE field of the real `lpc-256` frame at runtime, mutation
+bit-positions derived from the vector's own witnessed fields (header exit +
+observed widths, never constants), with a control decode of the unmutated
+bytes. The first draft's probe re-parsed the *pristine* frame and every
+mutation "decoded Ok" — the assert firing `Ok` was the bug; decoding the
+mutated slice is now pinned by a comment. Each rejection asserts zero bits
+consumed behind the rejected field and no residual samples written.
+
+**Contracts pinned (rejections read and write nothing):** caller contracts
+(`out.len() == blocksize`, `order > blocksize`) gate before the first bit;
+§9.2.2's bps gate and the §9.2.6 field rejections fire before the bits
+behind them; `EndOfStream` leaves the cursor at the failing read (per-read
+atomicity holds through the whole composition). The bps gate also enforces
+width ≤ 32 locally rather than trusting `read_signed`'s contract — same
+refusal-to-trust-the-caller as the integrators' shift guard.
+
+**Prior assumptions corrected:** 3d's `fill(wasted)` signature implied the
+warm-up's `<< wasted` pad lands at read time; composition disproved that at
+the LPC × wasted crossing — `fill` is now called with `wasted = 0` and the
+pad moved to block exit. (The warm-up-scale assertion itself was wrong in
+both directions during the step — padded-state vs stripped impl, then the
+reverse — FLAC.md's "test bug, not impl bug" lesson firing twice; the
+coded-scale pin now documents which side was wrong each time.) FIXED ×
+wasted passing either padding order was itself a surprise: a fix passing
+every committed vector can still be wrong in an unexercised feature
+crossing — the crossing enumeration is what forced `lpc-wasted-256`.
+
+**Deliberate scope cuts (narrow):** frame footer (byte-align + CRC-16
+consume), subframe loop, side-subframe bps−1, and decorrelation all stay 3f
+— the `sample_bits` parameter already documents the caller's `−1` seam; no
+profiling (3b/3c/3d rules hold; cycle counts are step 4's dedicated
+effort). The `i32` truncation convention carries into `pad_block` (i64 then
+truncate) — flagged, not enforced.
+
+**Gates:** `make flac-test` green — thumbv4t compile gate + **84 unit**
+(unchanged: 3e's witnesses are encoder-byte integration suites, not unit
+tests) + 11 frame-header + **2 subframe-body (new suite)** + 5
+subframe-header; `make native-flac-rom` builds/links/fixes unchanged; `make
+check` clean (fmt included).

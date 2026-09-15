@@ -485,6 +485,39 @@ subframe0_order 3
 subframe0_wasted 0
 subframe0_bytes 44 FD
 
+vector verbatim-first
+source_stream verbatim.flac
+note VERBATIM subframes from an incompressible source (Knuth hash PCM) at `-l 0`: closes the golden-vector gap step 3e's plan pinned. Required: the fail-closed census in emit_body_streams refuses to write the table if any frame of this stream stops being verbatim
+required true
+bytes FF F8 B8 08 00 99
+frame_offset 8304
+stream_frame_count 16
+header_bits 48
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0xB
+blocksize 2048
+samplerate_code 0x8
+samplerate_hz 32000
+stream_samplerate_hz 32000
+channels_code 0x0
+subframes 1
+decorrelation none
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 0
+coded_number_octets 1
+extra_field_bytes 0
+crc8_byte 0x99
+crc8_bit_position 40
+crc8_byte_aligned true
+subframe0_type verbatim
+subframe0_kind verbatim
+subframe0_order 0
+subframe0_wasted 0
+subframe0_bytes 02 80
+
 # --- measured encoder behaviour (cite these instead of guessing) ---------
 # First-subframe type across a whole 10s encode of the same source:
 #   l0_stereo.flac   fixed0 x157

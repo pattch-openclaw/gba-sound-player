@@ -3,10 +3,11 @@
 //! IMPLEMENTED: [`SubframeType::parse`] + [`SubframeType::order`] (§9.2.1 type
 //! field), the whole residual path beneath this module —
 //! `residual::rice_unmap` (3a), `residual::decode_rice_partition` (3b), and
-//! `residual::decode_residual` (3c) — and the step 3d integrators:
-//! [`PredictorState::fill`] (warm-up read), the FIXED cascade and the LPC
-//! dot product. What remains `todo!()` here: the composition
-//! (`decode_subframe`, step 3e; frame-level wiring is 3f).
+//! `residual::decode_residual` (3c) — the step 3d integrators
+//! ([`PredictorState::fill`], the FIXED cascade, the LPC dot product), and
+//! the step 3e composition [`decode_subframe`]. What remains `todo!()`
+//! here: nothing — frame-level wiring (`frame::decode_frame`, stereo
+//! decorrelation, footer) is 3f.
 //!
 //! A subframe is one channel's worth of samples for one frame. Layout:
 //!
@@ -84,6 +85,7 @@
 //!   never "reject LPC" as a category. See FLAC.md → "Correction 3".
 
 use crate::bits::BitReader;
+use crate::residual::decode_residual;
 
 /// Subframe type, from the leading pad bit + 6-bit field (§9.2.1 Table 19).
 ///
@@ -250,13 +252,51 @@ impl PredictorState {
     }
 }
 
-/// Decode one subframe into `out`.
+/// Decode one whole subframe into `out`: type field → wasted bits → bps gate
+/// → warm-up → body dispatch (CONSTANT / VERBATIM / residual) → LPC body
+/// fields → integrate. Returns the subframe type for the caller's dispatch
+/// bookkeeping (3f's stereo layer needs CONSTANT-vs-side shapes).
 ///
 /// `state` is per-subframe scratch (NOT cross-frame state — see module
 /// docs): this function fills it from the subframe's own header and uses it
 /// to seed the integrator. `sample_bits` is the frame header's sample size,
 /// adjusted by the caller's `-1` for the side subframe of a decorrelated
-/// pair.
+/// pair (3f's seam).
+///
+/// **Cursor contract:** starts at the subframe's first bit (the §9.2.1 pad
+/// bit) and lands exactly at the end of the subframe body — *before* the
+/// frame footer (pad-to-byte + CRC-16), which is 3f's. Witnessed bit-exactly
+/// by `tests/subframe_body_vectors.txt` (`exit_bits` over real libFLAC
+/// frames).
+///
+/// **The warm-up doubles as the block's first `order` samples.** Measured
+/// 64/64 (step 3a): each subframe's warm-up equals its own first decoded
+/// samples. So FIXED/LPC write the prefix directly and decode `out[order..]`
+/// through residual + integrator — the only source those samples have.
+/// Witnessed end-to-end by the body vectors' `pcm_samples`
+/// (reference-`flac -d` PCM).
+///
+/// **Wasted-bit padding is applied once, at block exit, to the whole decoded
+/// block** — RFC 9639 §9.2.2's decoder rule ("the decoded samples… are
+/// multiplied by 2^wasted"), measured on libFLAC 1.5.0: `read_subframe_`
+/// shifts the entire output array *after* the type dispatch, so prediction
+/// runs entirely on the **stripped** scale — warm-up (read via `fill` with
+/// `wasted = 0`), residual, and integrators alike. Padding *before*
+/// prediction is not equivalent: the LPC dot product's `>> shift` floor does
+/// not commute with `<< wasted`, and the mixed-scale variant was witnessed
+/// wrong twice — `fixed1-wasted5-256` decoded the ±20000 square wave as
+/// 20000/18750, and the `lpc-wasted-256` vector (tonal quantized to
+/// multiples of 32, measured LPC-3 + wasted 5) is the committed regression
+/// that discriminates padding *order*, not just its presence.
+///
+/// **Rejections read and write nothing** (crate rule): the `out`-length and
+/// `order > blocksize` caller contracts gate before the first bit; §9.2.2's
+/// "resulting bits per sample MUST be larger than zero" gate and the
+/// §9.2.6 field rejections (precision `0b1111`, negative shift) fire before
+/// the bits *behind* them are consumed. Stream errors (`EndOfStream`) leave
+/// the cursor at the failing read, per the module-wide per-read atomicity
+/// contract; a failed subframe is discarded wholesale, so a partially
+/// written `out` is undefined.
 pub fn decode_subframe(
     reader: &mut BitReader<'_>,
     blocksize: usize,
@@ -264,7 +304,100 @@ pub fn decode_subframe(
     state: &mut PredictorState,
     out: &mut [i32],
 ) -> crate::Result<SubframeType> {
-    todo!("flac-lite scaffold: decode_subframe (step 3e)")
+    // Caller contract first, before any bit is consumed: one caller-provided
+    // slice per subframe (3d buffer contract).
+    if out.len() != blocksize {
+        return Err(crate::Error::InvalidField);
+    }
+    let kind = SubframeType::parse(reader)?;
+    let order = kind.order();
+    // A predictor longer than the block is corruption (or a caller bug);
+    // `decode_residual` rejects it one read deeper, but the prefix write
+    // below must not panic first.
+    if order > blocksize {
+        return Err(crate::Error::InvalidField);
+    }
+    let wasted = reader.read_wasted_bits()?;
+    // §9.2.2's MUST: this is the only place it can be judged (needs frame
+    // bps and wasted together). Width > 32 is unreachable for frame bps
+    // ≤ 32 but keeps `read_signed`'s width contract local instead of
+    // trusting it (same reasoning as the integrators' shift guard).
+    let sub_bits = u32::from(sample_bits)
+        .checked_sub(wasted)
+        .filter(|&b| b > 0 && b <= 32)
+        .ok_or(crate::Error::InvalidField)?;
+    let subframe_bits = sub_bits as u8;
+    // `wasted = 0` here on purpose: prediction runs on the stripped scale
+    // (see contract note); `pad_block` applies §9.2.2's multiply once, after
+    // the whole block — warm-up prefix included.
+    state.fill(reader, order, subframe_bits, 0)?;
+    // Warm-up = the block's own first samples (see contract note). Stored
+    // most-recent-first; the output is stream order, hence the reversal.
+    for (i, slot) in state.warm_up[..order].iter().rev().enumerate() {
+        out[i] = *slot;
+    }
+    match kind {
+        SubframeType::Constant => {
+            // One stripped value for the whole block; pad_block multiplies it
+            // into the output scale like every other type.
+            let v = reader.read_signed(sub_bits)?;
+            out.fill(v);
+        }
+        SubframeType::Verbatim => {
+            // Raw two's-complement samples (stripped scale), no predictor, no
+            // residual. The exit cursor lands at start + blocksize ×
+            // subframe_bits exactly (witnessed by the `verbatim-256` body
+            // vector).
+            for sample in out.iter_mut() {
+                *sample = reader.read_signed(sub_bits)?;
+            }
+        }
+        SubframeType::Fixed(order_u8) => {
+            decode_residual(reader, blocksize, order, &mut out[order..])?;
+            integrate_fixed(order_u8, state, &mut out[order..])?;
+        }
+        SubframeType::Lpc { order: order_u8 } => {
+            // §9.2.6 Table 22 body fields, in measured order: u(4) =
+            // precision − 1 (0b1111 forbidden), s(5) shift (MUST NOT be
+            // negative), then order × s(precision) coefficients,
+            // most-recent-past first.
+            let precision_minus_one = reader.read_bits(4)?;
+            if precision_minus_one == 0b1111 {
+                return Err(crate::Error::InvalidField);
+            }
+            let precision = precision_minus_one + 1;
+            let shift = reader.read_signed(5)?;
+            // Reject before the coefficient reads: integrate_lpc keeps its
+            // own guard (refusing to trust its caller), but here the earlier
+            // rejection also consumes zero coefficient bits.
+            if shift < 0 {
+                return Err(crate::Error::InvalidField);
+            }
+            let mut coeffs = [0i32; crate::MAX_LPC_ORDER];
+            for c in coeffs.iter_mut().take(order) {
+                *c = reader.read_signed(precision)?;
+            }
+            decode_residual(reader, blocksize, order, &mut out[order..])?;
+            integrate_lpc(&coeffs[..order], shift as i8, state, &mut out[order..])?;
+        }
+    }
+    pad_block(out, wasted);
+    Ok(kind)
+}
+
+/// §9.2.2's decoder multiply: shift the *fully decoded* block from the
+/// wasted-stripped scale back to the sample scale, once, at block exit —
+/// exactly what libFLAC's `read_subframe_` does after its type dispatch.
+/// Same i64-then-truncate convention as the integrators; `wasted == 0` is a
+/// no-op. The shift is always < 32 here: the §9.2.2 gate above forces
+/// `wasted < sample_bits ≤ 32`.
+fn pad_block(out: &mut [i32], wasted: u32) {
+    if wasted == 0 {
+        return;
+    }
+    for s in out.iter_mut() {
+        *s = ((i64::from(*s)) << wasted) as i32;
+    }
 }
 
 /// Integrate a residual through FIXED predictor coefficients of the given
