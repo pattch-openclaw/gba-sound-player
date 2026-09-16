@@ -260,8 +260,13 @@ impl PredictorState {
 /// `state` is per-subframe scratch (NOT cross-frame state — see module
 /// docs): this function fills it from the subframe's own header and uses it
 /// to seed the integrator. `sample_bits` is the frame header's sample size,
-/// adjusted by the caller's `-1` for the side subframe of a decorrelated
-/// pair (3f's seam).
+/// adjusted by the caller's `+1` for the **side** subframe of a decorrelated
+/// pair (3f's seam): §4.2's "the side channel needs one extra bit of bit
+/// depth", libFLAC 1.5.0 `read_subframe_` does `bps++` on the side slot, and
+/// encoder bytes confirm it — anti-phase frames carry side warm-ups beyond
+/// the 16-bit field (FLAC.md → step 3f). (An earlier version of this note
+/// said `-1`, copied from the plan line; measured false — the side is the
+/// *wider* subframe, since L−R can reach twice the bit-depth maximum.)
 ///
 /// **Cursor contract:** starts at the subframe's first bit (the §9.2.1 pad
 /// bit) and lands exactly at the end of the subframe body — *before* the
