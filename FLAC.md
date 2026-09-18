@@ -638,9 +638,17 @@ gets built later for the shipping path regardless.
        incompressible-source pair, and per-subframe ground truth now exists
        (warm-up values, bps, `exit_bits`, reference PCM). See
        [Completed: step 3e](#completed-step-3e--decode_subframe-composition-and-the-wasted-scale-rule-2026-09-15).
-     - [ ] **3f — `decode_frame` + decorrelation:** subframe loop over 1–2
-       subframes, side-subframe bps −1 (the sneakiest byte-level fact of the
-       step — mid/side & friends code the side at bps−1), mid/side /
+     - [ ] **3f — `decode_frame` + decorrelation:** *(split 2026-09-16.
+       Part 1 — `stereo::decorrelate` + the side-width/orientation
+       measurements — landed; see* [Completed: step 3f part
+       1](#completed-step-3f-part-1--stereodecorrelate-and-the-side-width-and-orientation-measurements-2026-09-16).
+       *Part 2 — the frame wiring below — is the open work.)* Subframe loop
+       over 1–2 subframes, side subframe coded at **bps + 1** (the sneakiest
+       byte-level fact of the step — §4.2's "the side channel needs one extra
+       bit of bit depth", libFLAC's `read_subframe_` does `bps++` on the side
+       slot, and encoder bytes confirm it. The plan line previously read
+       **bps −1, the wrong direction**; measured dead before any part-2 code
+       depended on it — step 3f part 1 entry), mid/side /
        left/side / right/side restoration (pure add/shift, ~10 lines, but
        measured: libFLAC picks mid/side on *every* frame of correlated
        stereo, so the spike's stereo clip needs it), frame footer
@@ -873,10 +881,18 @@ sync-scan-without-a-filter.
 * `-l 0` → FIXED only; `-l N` → LPC up to order N (`-l 4` produced `lpc4`).
 * `-m` (try mid/side per frame) chose **mid/side on every frame** of a
   mid/side-shaped source; on a source with uncorrelated channels it chose
-  independent L/R for every frame. Left/side and side/right may never appear in a
-  given encode — so the golden-vector spec treats them as **optional** vectors
-  rather than required ones, and `--no-mid-side` / `-B` are the levers if forced
-  coverage is ever needed.
+  independent L/R for every frame. Left/side and side/right **do** appear,
+  just rarely from `-m`-default sources — corrected 2026-09-16 by
+  construction: a near-identical-channels source (R a smooth triangle, L = R
+  + tiny quantized noise) makes libFLAC 1.5.0 choose **side/right on 63/63
+  frames**, and an identical-quantized pair produced left/side on 63/63; the
+  anti-phase source that looks like the obvious side/right bait picks
+  **mid/side** instead (the encoder's per-frame cost model wins the argument,
+  not intuition). The golden-vector spec still treats them as **optional**
+  vectors — the *committed* vector source does not produce them — and
+  `--no-mid-side` / `-B` remain the levers if forced coverage is needed. The
+  corrected claim matters because "never" was load-bearing for skipping
+  orientation witnesses; see step 3f part 1.
 * 65,536 Hz requires **`--lax`** (outside FLAC's streamable subset); every frame
   then carries sample-rate code `0b0000`, i.e. the `FromStreamDefault` path.
 * Digitally silent input → **CONSTANT** subframes, and `flac` still emits a
@@ -1018,6 +1034,8 @@ that read like documentation, which is what made it survive review.
 | `quotient.checked_shl(order)` is a sufficient folded-value overflow guard | `checked_shl` only rejects shift *amounts* ≥ 32 and **wraps** value bits shifted out: quotient 4 at order 30 yielded `folded = 0` | The 3b rejection test asserted `InvalidField` and got `Ok(())` — the impl disagreed with the assertion, and the assertion's author was wrong about `checked_shl`, not the code |
 | A coded residual carries a **sample-size header** with a `0b111` "unknown" escape, derived by scanning partitions (scaffold module doc + the original 3c plan line) | **No such field exists.** §9.2.7 is complete with method `u(2)` + partition order `u(4)` + per-partition parameter (`u(4)`/`u(5)`, escape adds raw width `u(5)`); residual width is implicit in the codewords, nothing is derived | Implementing 3c against §9.2.7 read in full + Appendix D Table 38 (real residual: header, parameter, straight into quotients) + libFLAC's `read_residual_partitioned_rice_` (reads nothing else). Caught before any code depended on it — the planned 8 phantom-bit read would have desynced every frame |
 | A hand-packed byte can witness a residual-header rejection (`0b0000_0001` = "partition order 1") | MSB-first that byte is method `00` + order `0b0000` = 0 — **legal** for the test's blocksize; the test would have passed on an unrelated EOF | The 3c probe test disagreed with its own bytes; fixed structurally by routing every header probe through the `Packer` oracle so named fields are encoded fields |
+| The side subframe is coded at frame **bps − 1** (3f plan line, inherited by `decode_subframe`'s "caller's `-1`" seam note: "mid/side & friends code the side at bps−1") | The side is coded at **bps + 1** — the opposite direction. §4.2: "The side channel needs one extra bit of bit depth, as the subtraction can produce sample values twice as large"; libFLAC 1.5.0 `read_subframe_` does `bps++` on the side slot (channel 0 for right-side, channel 1 for left/mid-side). A `−1` would desync every decorrelated frame and reject legal warm-ups. | Anti-phase encode (R = −L, \|L−R\| beyond 16-bit): side warm-up read at bps+1 == `flac -d`'s L−R on 24/24 frames, 12 of them values the 16-bit field **cannot hold**; the same read at bps disagrees on 24/24. `drafts/flac3f_width_probe.py` (throwaway), libFLAC 1.5.0 |
+| Scaffold `stereo.rs`: "right/side: `right` = primary" (subframe 0 holds R) — flatly contradicting `format::ChannelConfig::RightSide`'s doc ("subframe 0 is the side"); two crate docs disagreed and neither was trusted | Subframe 0 is the **side**. Table 16: "`0b1001` — 2 channels: left, right; **stored as side-right** stereo"; §4.2's decode wording ("the left subblock is restored by adding the samples in the side subframe to the … right subframe"); libFLAC `undo_channel_coding` RIGHT_SIDE arm: `output[0][i] += output[1][i]`. | The rarity excuse lived in FLAC.md's own "encoder choices" bullet ("may never appear"), which is why no witness had ever existed — and it was false: the near_smooth construction (R smooth triangle, L = R + tiny quantized noise) emits **0b1001 on 63/63 frames**, and subframe 0's warm-up (read at bps+1) equals L−R from `flac -d` on 12/12 fingerprinted frames. `drafts/flac3f_width_probe.py` |
 
 **Rule going forward:** any claim in these docs about *format bytes* carries its
 witness — an RFC section, or a measurement with the command that produced it. If
@@ -1466,8 +1484,9 @@ dispatch (CONSTANT one stripped value / VERBATIM `read_signed` loop /
 residual) → LPC body fields (u(4) precision−1 with `0b1111` forbidden, s(5)
 shift rejecting negatives *before* the coefficient reads, coefficients
 most-recent-past first) → integrate → `pad_block` → return the type. Nothing
-remains `todo!()` in `subframe.rs`; frame wiring (footer, side bps−1,
-decorrelation) is 3f.
+remains `todo!()` in `subframe.rs`; frame wiring (footer, side subframe
+width — written `bps−1` here, measured **`bps+1`** by 3f part 1, see
+"Prior assumptions", decorrelation) is 3f.
 
 **The step's finding: §9.2.2's wasted multiply runs once, at block exit,
 after prediction — not at the warm-up read.** libFLAC 1.5.0's
@@ -1541,10 +1560,11 @@ every committed vector can still be wrong in an unexercised feature
 crossing — the crossing enumeration is what forced `lpc-wasted-256`.
 
 **Deliberate scope cuts (narrow):** frame footer (byte-align + CRC-16
-consume), subframe loop, side-subframe bps−1, and decorrelation all stay 3f
-— the `sample_bits` parameter already documents the caller's `−1` seam; no
-profiling (3b/3c/3d rules hold; cycle counts are step 4's dedicated
-effort). The `i32` truncation convention carries into `pad_block` (i64 then
+consume), subframe loop, side-subframe width (written `bps−1` here; the
+seam direction was later measured **`bps+1`** — 3f part 1, "Prior
+assumptions"), and decorrelation all stay 3f — the `sample_bits` parameter
+already documents the caller's seam; no profiling (3b/3c/3d rules hold;
+cycle counts are step 4's dedicated effort). The `i32` truncation convention carries into `pad_block` (i64 then
 truncate) — flagged, not enforced.
 
 **Gates:** `make flac-test` green — thumbv4t compile gate + **84 unit**
@@ -1552,3 +1572,110 @@ truncate) — flagged, not enforced.
 tests) + 11 frame-header + **2 subframe-body (new suite)** + 5
 subframe-header; `make native-flac-rom` builds/links/fixes unchanged; `make
 check` clean (fmt included).
+
+---
+
+## Completed: step 3f part 1 — `stereo::decorrelate`, and the side width and orientation measurements (2026-09-16)
+
+Phase 1 step 3f split in two. Part 1 (this) lands
+`stereo::decorrelate` — the three recombination transforms — and, before
+any part-2 code could depend on them, measures the step's two remaining
+claims about encoder bytes: the side subframe's storage width, and what
+subframe 0 holds under `0b1001`. **Both measurements killed a claim**: the
+plan line said side is coded at **bps − 1** (measured **bps + 1**), and the
+crate contradicted itself about side/right orientation (two docs, opposite
+answers; resolved toward side-first). Part 2 — `decode_frame`'s subframe
+loop, footer, cursor-chaining, end-to-end PCM diff — is the open work;
+`decorrelate` is not wired into a frame yet.
+
+**What landed.** `decorrelate(config, blocksize, left, right)` recombines
+the decoded subframe pair in place: left/side `(p, p − s)`; side/right
+`(side + r, r)` — the left slot holds the **side** (Table 16); mid/side
+`m_ext = (mid << 1) | (side & 1)`, then the exact halvings
+`(m_ext ± side) >> 1`. The halvings are exact because `m_ext ± side` are
+even by construction (`m_ext = L + R` recovered, `side = L − R`; same
+parity is the identity `L+R − (L−R) = 2R`), so the `& 1` recovery *is* the
+rounding term — no separate `+1` exists. The scaffold's `mid_side_recover`
+folded into `decorrelate`: the transform is one pass, and a separate LSB
+pass would touch the block twice for nothing. Length contracts gate before
+any write (rejections write nothing); exactly `blocksize` samples
+processed — buffers are reused across frames and the final frame is
+legitimately short, so the tail beyond `blocksize` must survive untouched.
+Arithmetic in `i64`, truncate at store (crate convention): `mid << 1` at
+the top of the i32 range cannot wrap silently. Module docs gained the
+orientation table with full witness citations.
+
+**Witness strategy (the transform math).** Generation, not assertion:
+`drafts/flac3f_stereo_oracle.py` (throwaway, `drafts/` precedent) starts
+from true `(L, R)`, derives the **stored** pair with the encoder-side
+formulas, and the tests require recovery of `(L, R)` — a wrong
+decoder-side formula or LSB rule fails recovery, and cannot pass by
+agreeing with a shared hand-transcription. 55 pairs: 16-bit-domain
+extremes — including the side-saturating `(32767, −32768)`, whose stored
+side `65535` is a value only a bps+1 slot could ever hold — plus an LCG
+sweep. The oracle's output was inserted into `stereo.rs` mechanically and
+a throwaway comparison re-verified every committed constant against the
+oracle's live output before the gates ran. **That check fired
+immediately**: the hand-typed insertion had diverged from the oracle on
+the LCG block *and* had used truncating rather than flooring `>>1` for
+negative-odd mid values (`(-1) >> 1 = -1`, not 0 — the floor-vs-truncate
+seam `integrate_lpc` pinned in 3d, re-earning its keep one module over).
+The lesson generalizes one level: even "copy the oracle's output" is a
+transcription — verify mechanically. Plus a live brute force over
+`[−16, 16]²` in all three modes, stored pairs recomputed in-test by the
+encoder-side formulas (an independent spec reading from the impl's).
+
+**The two measurements (the claims that died). Rows added to "Prior
+assumptions" for both.**
+
+1. **Side width = bps + 1, not bps − 1.** Anti-phase encode (R = −L, |L|
+   high enough that |L−R| crosses 32767): the side subframe's warm-up —
+   the subframe's own first decoded samples (3a's finding) — read at
+   bps+1 equals `flac -d`'s L−R on **24/24** frames, 12 of them values a
+   16-bit field **cannot hold**, and the same read at bps disagrees on
+   **24/24**. RFC §4.2 ("the side channel needs one extra bit of bit
+depth, as the subtraction can produce sample values twice as large") and
+   libFLAC 1.5.0 `read_subframe_` (`bps++` on the side slot: channel 0 for
+   side-right, channel 1 for left/mid-side) agree with the bytes. The
+   plan's −1 would have desynchronized every decorrelated frame — a
+   reader at −1 lands mid-codeword everywhere. Caught before any part-2
+   code was written; `decode_subframe`'s seam doc corrected in the same PR.
+2. **`0b1001` is side-first.** Scaffold `stereo.rs` claimed subframe 0
+   holds R; `format::ChannelConfig::RightSide` claimed subframe 0 holds
+   the side. Neither trusted. RFC Table 16 ("stored as side-right"), §4.2
+   decode wording ("the left subblock is restored by **adding** the
+   samples in the side subframe to the … right subframe"), and libFLAC
+   `undo_channel_coding` (`output[0][i] += output[1][i]`) all say side.
+   The encoder-byte witness needed libFLAC to *emit* `0b1001` — FLAC.md
+   had recorded that it may never appear, which is why no orientation
+   witness had ever existed. It does appear: a near-identical-channels
+   construction (R a smooth triangle; L = R + tiny quantized noise → side
+   cheap, R strictly more compressible) chose `0b1001` on **63/63**
+   frames, and subframe 0's warm-up read at bps+1 matched L−R on **12/12**
+   fingerprinted frames. The obvious bait — anti-phase — picks mid/side
+   instead; the encoder's per-frame cost model wins such arguments, not
+   intuition. FLAC.md's "encoder choices" bullet corrected in this PR.
+
+**Found by re-derivation (a comment, not a test).** The mid/side extreme
+test's hand-written comment claimed the no-LSB-recovery counterfactual
+"lands on (32767, −32767)". Recomputing: it lands on **(32766, −32769)** —
+*both* outputs off by one. A comment about a specific number the code
+never computes is a claim nothing can disagree with — the exact shape that
+survives to mislead later. Fixed before commit.
+
+**Deliberate scope cuts (narrow).** `decode_frame` stays `todo!()`: the
+subframe loop (with the now-measured bps+1 side seam), footer consume,
+cursor-chaining and the bit-exact `flac -d` diff are part 2. The oracle
+and width probe stay in `drafts/` (3c/3d precedent — committed vectors are
+the oracle's *emitted output*, which is the witness; no new harness
+surface this PR). `scripts/frame_vectors.py` untouched: if part 2 wants a
+`0b1001` stream in the committed set, the near_smooth construction can be
+graduated through the census-fail-closed generator proper. No profiling
+(3b/3c/3d rules hold; cycle counts are step 4's dedicated effort).
+
+**Gates:** `make flac-test` green — thumbv4t compile gate + **91 unit**
+(was 84: +7 for `decorrelate`) + 11 frame-header + 2 subframe-body + 5
+subframe-header; `make native-flac-rom` builds/links/fixes unchanged;`make
+check` clean (fmt included — note `flac-lite` is a standalone workspace,
+so only the crate-level `cargo fmt` reaches it; the Makefile target runs
+per-crate for exactly this reason).
