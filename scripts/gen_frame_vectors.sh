@@ -11,12 +11,17 @@
 # independent Bits walk + reference-decoder PCM — tests/
 # subframe_body_layout.rs decodes them with decode_subframe (step 3e).
 #
+# And crates/flac-lite/tests/frame_run_vectors.txt: contiguous 2-frame runs
+# (256+100 @ -b 256), one per channel assignment, for frame::decode_frame
+# (step 3f part 2) — chaining, the bps+1 side seam, decorrelation, and a
+# bit-exact whole-run PCM diff against `flac -d`.
+#
 # Why real bytes and not hand-packed ones: hand-packed headers are how the
 # 31-vs-32-bit field-width bug got baked into the scaffold (see FLAC.md
 # "Frame header: measured byte layout"). Real encoder output cannot be wrong
 # about what encoders emit.
 #
-# Usage:  scripts/gen_frame_vectors.sh [HEADER_OUT [BODY_OUT]]
+# Usage:  scripts/gen_frame_vectors.sh [HEADER_OUT [BODY_OUT [RUN_OUT]]]
 # Deps:   flac (encode + metaflac), python3 (stdlib only)
 #
 # Reproducibility: the source audio is synthesized deterministically (a fixed
@@ -31,6 +36,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 out="${1:-$here/../crates/flac-lite/tests/frame_header_vectors.txt}"
 body_out="${2:-$here/../crates/flac-lite/tests/subframe_body_vectors.txt}"
+run_out="${3:-$here/../crates/flac-lite/tests/frame_run_vectors.txt}"
 
 command -v flac >/dev/null || { echo "error: flac not on PATH (brew install flac)" >&2; exit 1; }
 command -v metaflac >/dev/null || { echo "error: metaflac not on PATH" >&2; exit 1; }
@@ -77,11 +83,25 @@ flac -1 -f -s -l 0 -b 256     -o "$tmp/square256.flac"     "$tmp/square256.wav"
 flac -1 -f -s -l 4 -b 256     -o "$tmp/tonal256.flac"      "$tmp/tonal256.wav"
 flac -1 -f -s -l 4 -b 256     -o "$tmp/lpcw256.flac"       "$tmp/lpcw256.wav"
 flac -1 -f -s -l 4 -b 256     -o "$tmp/smooth256.flac"     "$tmp/smooth256.wav"
+# Frame-run vectors (step 3f part 2): five 356-sample streams -> 2 frames
+# [256, 100] each (the 100 tail forces the uncommon 8-bit blocksize form),
+# one per channel assignment. DEFAULT compression level, no -m: the fast
+# stereo heuristic (-1) collapses every construction to mid/side; the
+# exhaustive per-frame search at the default level is what actually picks
+# 0b1000/0b1001 for their baits (measured, libFLAC 1.5.0 + the run censes;
+# drafts flac3f_run_census*.py recorded all three modes winning on every
+# frame). The fail-closed uniform-mode censuses in frame_vectors.py
+# emit_runs refuse to write the table if any stream stops being uniform.
+for s in mono indep leftside sideright midside; do
+  flac -f -s -b 256 -l 4 -o "$tmp/run_$s.flac" "$tmp/run_$s.wav"
+done
 
 echo "== extracting vectors with the independent parser"
 python3 "$here/frame_vectors.py" emit "$tmp" "$out"
 python3 "$here/frame_vectors.py" emit_bodies "$tmp" "$body_out"
+python3 "$here/frame_vectors.py" emit_runs "$tmp" "$run_out"
 
 echo "wrote $out"
 echo "wrote $body_out"
+echo "wrote $run_out"
 flac --version | head -1 | sed 's/^/  encoder: /'

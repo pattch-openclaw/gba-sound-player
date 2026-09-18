@@ -3,7 +3,7 @@
 //! A minimal FLAC **frame** decoder for the Game Boy Advance: `#![no_std]`,
 //! zero dependencies, zero allocation on the decode path.
 //!
-//! **IMPLEMENTATION STATE (2026-09-16):** `bits::BitReader` is complete for
+//! **IMPLEMENTATION STATE (2026-09-18):** `bits::BitReader` is complete for
 //! the decode path (PRs #25–#32 plus step 3a's `read_wasted_bits`; only
 //! `crc8`/`crc16` remain, parked in Phase 2). `frame::FrameHeader::parse`
 //! (step 2) and `subframe::SubframeType::parse` landed against real libFLAC
@@ -26,11 +26,18 @@
 //! recombination transforms with the mid/side LSB parity recovery,
 //! generation-witnessed; the side subframe's **bps + 1** storage width and
 //! `0b1001`'s side-first orientation were measured on encoder bytes
-//! (FLAC.md → step 3f part 1). What remains `todo!()`: the frame layer
-//! (`frame::decode_frame` + frame footer), `decoder`, and
-//! `format::Manifest` —
+//! (FLAC.md → step 3f part 1). Step 3f part 2 closes the frame layer:
+//! `frame::decode_frame` composes the subframe loop (side slot at the
+//! measured bps + 1), `decorrelate`, and the footer consume (`byte_align`
+//! + CRC-16 consumed, verified never — Phase 2), witnessed on whole
+//! libFLAC frame runs in `tests/frame_run_vectors.txt` — a layout suite
+//! replaying the committed table through the primitives, then production
+//! `decode_frame` on the same table, both bit-exact against `flac -d`
+//! PCM (FLAC.md → step 3f part 2). Phase 1's decode path through
+//! `decode_frame` is complete. What remains `todo!()`: `decoder` (the
+//! per-frame loop above this layer) and `format::Manifest` —
 //! the module layout, types, and signatures are the contract the
-//! implementation fills in (FLAC.md → phased plan, step 3 substep 3f).
+//! implementation fills in (FLAC.md → phased plan, step 4 onward).
 //! Design rationale and the decision to write this at all live in
 //! [`../../../FLAC.md`](../../../../FLAC.md).
 //!
