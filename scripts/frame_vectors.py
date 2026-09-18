@@ -250,6 +250,84 @@ RATE_STREAMS = (("rate_khz.wav", 56000, 0.25),    # 0b1100, kHz as 8-bit
                 ("rate_hz10.wav", 10010, 0.25))   # 0b1110, Hz/10 as 16-bit
 
 
+# Frame-run vector geometry (step 3f part 2): 356 samples @ -b 256 -> frames
+# [256, 100]. 100 is not a table blocksize (uncommon 8-bit code), and a
+# 100-sample decorrelated tail into a 256-slot buffer is exactly what forces
+# the tail contract to be witnessed, not assumed.
+RUN_SAMPLES = 356
+
+
+def _clamp16(v):
+    # -32768..32767, the signed 16-bit domain (asymmetric: symmetric clamps
+    # before negations produced an out-of-range sample in an early probe).
+    return max(-32768, min(32767, v))
+
+
+def _tri_amp(index, period, amp):
+    """Integer triangle in [-amp, amp]; same exact-integer shape as tri()."""
+    x = index % period
+    half = period // 2
+    if x < half:
+        return (2 * amp * x) // half - amp
+    return amp - (2 * amp * (x - half)) // half
+
+
+def _sum_tri(index):
+    """Smooth multi-period material (peaks well beyond 16-bit -- callers
+    clamp). Chosen by measurement (run-census drafts): it keeps libFLAC on
+    predictors and lets the stereo baits below keep their channel modes."""
+    return (3 * _tri_amp(index, 512, 4000) + 3 * _tri_amp(index, 131, 3500)
+            + 4 * _tri_amp(index, 97, 4500) + 2 * _tri_amp(index, 61, 4000)
+            + 2 * _tri_amp(index, 32, 2000))
+
+
+def _hash_span(index, span):
+    return ((index * 2654435761) & 0xFFFFFFFF) % (2 * span + 1) - span
+
+
+def run_sideright_pcm(count):
+    """side/right (0b1001) bait: R smooth, L = R + tiny QUANTIZED noise.
+    Side = L-R is then cheap AND strictly more expensive to code than R,
+    which is what makes libFLAC store side-first (measured 63/63 frames at
+    the default level, 3/3 at run size; step 3f part 1's orientation
+    witness). Clamp BEFORE quantizing: _sum_tri peaks beyond 16-bit."""
+    samples = []
+    for i in range(count):
+        r = _clamp16(_sum_tri(i))
+        l = _clamp16(r + ((_hash_span(i, 60) >> 4) << 4))
+        samples += [l, r]
+    return samples
+
+
+def run_leftside_pcm(count):
+    """left/side (0b1000) bait: the mirror -- L smooth (quantized-cheap),
+    R = L + tiny noise, so side is cheap and L strictly more compressible
+    (measured 2/2 frames at run size)."""
+    samples = []
+    for i in range(count):
+        l = _clamp16(_sum_tri(i))
+        r = _clamp16(l + ((_hash_span(i, 60) >> 4) << 4))
+        samples += [l, r]
+    return samples
+
+
+def run_indep_pcm(count):
+    """Independent stereo (0b0001) that COMPRESSES: two uncorrelated smooth
+    channels (disjoint partial sets + small disjoint noise), so the encoder
+    keeps 0b0001 and codes both with predictors instead of collapsing to
+    verbatim (measured: fixed1 subframes, 2/2 frames at run size). The
+    independent-2f vector needs a 0b0001 run, and hash-noise stereo would
+    have given verbatim-only frames."""
+    samples = []
+    for i in range(count):
+        l = _clamp16(_tri_amp(i, 512, 9000) + _tri_amp(i, 131, 4000)
+                     + ((i * 104729) % 601) - 300)
+        r = _clamp16(_tri_amp(i, 307, 8000) + _tri_amp(i, 71, 5000)
+                     + ((i * 15485863) % 601) - 300)
+        samples += [l, r]
+    return samples
+
+
 def synth(dst):
     write_wav(os.path.join(dst, "stereo.wav"), 32000, 2,
               synth_pcm(10.0, 32000, PARTIALS_32K, 1000, 3, 700, 400))
@@ -312,7 +390,29 @@ def synth(dst):
     tri_period = 128
     write_wav(os.path.join(dst, "smooth256.wav"), 32000, 1,
               [tri(i, tri_period) for i in range(256)])
-    print("   synthesized stereo/mono/r65k/silence/tails/rates/verbatim/body WAVs in %s" % dst)
+    # Frame-RUN sources (step 3f part 2): five 356-sample streams -> exactly
+    # 2 frames at -b 256 (256 + 100; the 100 tail forces the uncommon 8-bit
+    # blocksize form, and is short enough to make the decorrelate tail
+    # contract -- samples beyond blocksize must survive -- load-bearing).
+    # One stream per channel assignment: mono, independent, and each of the
+    # three decorrelation modes, uniform per construction (fail-closed census
+    # in emit_runs). Encoded at the DEFAULT compression level: the fast
+    # stereo heuristic at -1 collapses every construction to mid/side; the
+    # exhaustive per-frame search (default level) is what actually compares
+    # modes (measured, libFLAC 1.5.0; the run-census drafts recorded all
+    # three modes winning their baits on every frame).
+    for name, samples in (("run_mono.wav",
+                           synth_pcm(0, 32000, PARTIALS_32K, 1000, 3, 700,
+                                     400, mono=True, exact=RUN_SAMPLES)),
+                          ("run_indep.wav", run_indep_pcm(RUN_SAMPLES)),
+                          ("run_leftside.wav", run_leftside_pcm(RUN_SAMPLES)),
+                          ("run_sideright.wav", run_sideright_pcm(RUN_SAMPLES)),
+                          ("run_midside.wav",
+                           synth_pcm(0, 32000, PARTIALS_32K, 1000, 3, 700,
+                                     400, exact=RUN_SAMPLES))):
+        write_wav(os.path.join(dst, name), 32000, 2 if name != "run_mono.wav" else 1,
+                  samples)
+    print("   synthesized stereo/mono/r65k/silence/tails/rates/verbatim/body/run WAVs in %s" % dst)
 
 
 # ---------------------------------------------------------------- parsing
@@ -1078,6 +1178,279 @@ def emit_bodies(src, out_path):
           % (out_path, n))
 
 
+# ------------------------------------------------ frame-run vectors (3f pt 2)
+
+# Expected mode -> (channel code, subframe count, side slot, stored-slot
+# formulas). side_slot is the subframe coded at bps + 1: slot 0 for
+# side/right, slot 1 for left/side and mid/side (measured on encoder bytes +
+# libFLAC read_subframe_'s bps++ on the side slot -- step 3f part 1; the
+# anti-phase encode whose side warm-ups are values a bps-wide field cannot
+# hold). stored[i] turns (L, R) into what slot i actually holds -- the
+# ENCODER-side reading of the spec, independent of the decoder-side recovery
+# the crate implements (the same two-readings discipline as the decorrelate
+# oracle: a wrong shared formula fails the warm-up/body vs stored-pcm
+# invariants here, at generation time, not just the crate's decode in the
+# Rust suite). The `>> 1` for mid is Python's arithmetic shift -- floor on
+# negatives, matching libFLAC's C >> and the crate's i64 >>; the stored-slot
+# warm-up/body asserts below would catch a divergence from the encoder's
+# actual stored bits on negative-odd (L+R).
+RUN_MODES = {
+    # NOTE the trailing comma on mono's stored tuple: without it the
+    # parenthesised lambda is a bare function, not a 1-tuple (this exact
+    # bug fired on the first emit_runs run).
+    "mono":        {"code": 0b0000, "subframes": 1, "side_slot": None,
+                    "stored": (lambda l, r: l,)},
+    "independent": {"code": 0b0001, "subframes": 2, "side_slot": None,
+                    "stored": (lambda l, r: l, lambda l, r: r)},
+    "left-side":   {"code": 0b1000, "subframes": 2, "side_slot": 1,
+                    "stored": (lambda l, r: l, lambda l, r: l - r)},
+    "side-right":  {"code": 0b1001, "subframes": 2, "side_slot": 0,
+                    "stored": (lambda l, r: l - r, lambda l, r: r)},
+    "mid-side":    {"code": 0b1010, "subframes": 2, "side_slot": 1,
+                    "stored": (lambda l, r: (l + r) >> 1, lambda l, r: l - r)},
+}
+
+
+def walk_stream_runs(filename, path, expected):
+    """Walk every frame of a run stream (mono or stereo), slot by slot, and
+    return (frames, per-frame slot walks, info, pcm_interleaved, stored_pcm).
+
+    `expected` is the RUN_MODES label and a PARAMETER, never derived from
+    the header: the harness names mono and independent-stereo both "none",
+    so the channel code alone cannot tell them apart -- the expected label
+    is the fail-closed source, same rule as BODY_SPECS' expected kinds.
+
+    Fail-closed invariants beyond what walk_stream_bodies does for mono:
+      * exactly 2 frames with blocksizes [256, 100] (RUN_SAMPLES geometry),
+        the tail frame at the UNCOMMON 8-bit blocksize code (0b0110) -- the
+        whole point of the 356-sample size
+      * channel assignment UNIFORM across frames and equal to the expected
+        mode's code, subframe count equal to STREAMINFO's channel count
+        (a per-frame switch would make the table's single `decorrelation`
+        label a lie)
+      * the side slot walked at bps + 1, and its warm-up / verbatim body /
+        constant value equal the stored-slot reference (side = L-R at a
+        width a bps-wide field cannot hold, when the content says so)
+      * per frame: last slot's exit + footer gap lands exactly on the next
+        frame's offset (or end of stream) -- the measured footer rule
+      * per slot: warm-up == own stored first samples >> wasted, verbatim
+        body == stored block, constant body == one value << wasted
+    """
+    data = open(path, "rb").read()
+    info = streaminfo(path)
+    bps = info["bits-per-sample"]
+    frames = find_frames(data)
+    check_stream(filename, frames, info)
+    assert [h["blocksize"] for h in frames] == [256, RUN_SAMPLES - 256], \
+        "%s: run geometry wants blocksizes [256, %d] (RUN_SAMPLES %d @ " \
+        "blocksize %d), got %s" % (filename, RUN_SAMPLES - 256, RUN_SAMPLES,
+                                   info["maximum blocksize"],
+                                   [h["blocksize"] for h in frames])
+    assert frames[1]["blocksize_code"] == 0b0110, \
+        "%s: tail frame blocksize code 0x%X, expected the uncommon 8-bit " \
+        "0b0110 -- the tail form is why RUN_SAMPLES is 356" % (
+            filename, frames[1]["blocksize_code"])
+    mode = RUN_MODES[expected]
+    assert all(h["chan_code"] == mode["code"] for h in frames), \
+        "%s: channel assignment switched mid-stream or is not %s (%s) -- the " \
+        "table's single decorrelation label would be false" % (
+            filename, expected, [hex(h["chan_code"]) for h in frames])
+    assert info["channels"] == mode["subframes"], \
+        "%s: mode %s wants %d subframes, STREAMINFO says %d channels" % (
+            filename, expected, mode["subframes"], info["channels"])
+    pcm = reference_pcm(path)
+    if info["channels"] == 2:
+        interleaved = list(zip(pcm[0::2], pcm[1::2]))
+        stored_pcm = [[mode["stored"][s](l, r) for (l, r) in interleaved]
+                      for s in range(2)]
+    else:
+        interleaved = [(v,) for v in pcm]
+        stored_pcm = [[mode["stored"][0](v, 0) for (v,) in interleaved]]
+    total = sum(h["blocksize"] for h in frames)
+    assert len(interleaved) == total, \
+        "%s: reference PCM length %d != sum of frame blocksizes %d" % (
+            filename, len(interleaved), total)
+    walks = []
+    pos_samples = 0
+    for i, h in enumerate(frames):
+        frame_walks = []
+        b = Bits(data, h["offset"] * 8 + h["header_bits"])
+        for s in range(mode["subframes"]):
+            slot_bps = bps + (1 if mode["side_slot"] == s else 0)
+            w = walk_subframe(b, h["blocksize"], slot_bps)
+            start = pos_samples
+            block = stored_pcm[s][start:start + h["blocksize"]]
+            for j in range(w["order"]):
+                assert w["warm"][j] == block[j] >> w["wasted"], \
+                    "%s frame %d slot %d: warm-up %d != stored>>wasted %d" % (
+                        filename, i, s, w["warm"][j], block[j] >> w["wasted"])
+            if w["kind"] == "verbatim":
+                assert w["body"] == block, \
+                    "%s frame %d slot %d: verbatim body != stored PCM" % (
+                        filename, i, s)
+            if w["kind"] == "constant":
+                assert all(v == (w["body"] << w["wasted"]) for v in block), \
+                    "%s frame %d slot %d: constant body != stored PCM" % (
+                        filename, i, s)
+            frame_walks.append(w)
+        next_bit = (frames[i + 1]["offset"] * 8 if i + 1 < len(frames)
+                    else len(data) * 8)
+        exit_bits = frame_walks[-1]["exit_bits"]
+        gap = next_bit - exit_bits
+        expect_gap = (16 if exit_bits % 8 == 0 else (8 - exit_bits % 8) + 16)
+        assert gap == expect_gap, \
+            "%s frame %d: footer gap %d != %d (exit %% 8 = %d) -- a body " \
+            "field is mis-sized" % (filename, i, gap, expect_gap, exit_bits % 8)
+        walks.append(frame_walks)
+        pos_samples += h["blocksize"]
+    return frames, walks, info, pcm, stored_pcm
+
+
+# (label, stream, expected mode, why)
+RUN_SPECS = [
+    ("mono-2f", "run_mono.flac", "mono",
+     "Mono run: single subframe per frame, tail frame at the uncommon 8-bit "
+     "blocksize (100 samples) -- chaining + short-tail decode"),
+    ("independent-2f", "run_indep.flac", "independent",
+     "Independent stereo (0b0001) that COMPRESSES (two uncorrelated smooth "
+     "channels): 2 subframes at frame bps each, no decorrelation; the arm "
+     "the decorrelated baits cannot witness (their frames all pick side slots)"),
+    ("leftside-2f", "run_leftside.flac", "left-side",
+     "Left/side (0b1000) run: L primary at bps, side at bps+1; uniform mode "
+     "census over both frames"),
+    ("sideright-2f", "run_sideright.flac", "side-right",
+     "Side/right (0b1001) run: SIDE primary at bps+1 (subframe 0 holds the "
+     "side -- step 3f part 1's orientation), R at bps"),
+    ("midside-2f", "run_midside.flac", "mid-side",
+     "Mid/side (0b1010) run: mid primary at bps (parity LSB stolen into the "
+     "side), side at bps+1; the mode libFLAC picks on correlated material"),
+]
+
+
+def emit_runs(src, out_path):
+    """Emit the frame-run golden table for step 3f part 2. What the table
+    COMMITS is what the Rust side needs to drive and diff a frame decode:
+    contiguous per-frame raw bytes, per-frame blocksize, the stream facts,
+    the side-slot seam label, and both ground-truth layers -- `slot_stored_N`
+    (what each SUBFRAME holds, encoder-side formulas over the reference PCM)
+    and `pcm_left`/`pcm_right` (true L/R from `flac -d`). The per-slot field
+    ground truth (warm-up, kinds, exits) is asserted at GENERATION time
+    (walk_stream_runs); it stays in the harness, keeping the file small."""
+    version = subprocess.run(["flac", "--version"], capture_output=True,
+                             text=True).stdout.strip().splitlines()[0]
+    lines = []
+
+    def w(text=""):
+        lines.append(text)
+
+    w("# flac-lite frame-RUN golden vectors -- GENERATED")
+    w("# DO NOT EDIT BY HAND.  Regenerate with:  scripts/gen_frame_vectors.sh")
+    w("# Generator + independent walk: scripts/frame_vectors.py (emit_runs)")
+    w("# Source streams: scripts/frame_vectors.py synth (integer-exact, no RNG)")
+    w("# Encoder: %s" % version)
+    w("#")
+    w("# Ground truth for step 3f part 2's `decode_frame`: whole 2-frame runs")
+    w("# (256 + 100 samples @ -b 256; the 100 tail forces the uncommon 8-bit")
+    w("# blocksize form). `frame_hex` rows are raw libFLAC frames IN STREAM")
+    w("# ORDER, each covering its frame THROUGH the footer (padding +")
+    w("# CRC-16) to the next frame's first byte -- concatenating the rows in")
+    w("# order reproduces the contiguous frame region byte-exactly, so a")
+    w("# single BitReader can chain frame N -> frame N+1 exactly as a real")
+    w("# decode loop does; `frame_blocksize` rows pair with them by position.")
+    w("# `side_slot` names the decorrelated slot coded at bps + 1 (none/0/1)")
+    w("# -- step 3f part 1's measured seam, table-driven so the Rust side")
+    w("# reads it, never re-derives it. `side_width_sensitive` says whether")
+    w("# that seam is OBSERVABLE on this run's side slot (none/true/false),")
+    w("# computed from the walk's own kind/order: FIXED-0 subframes never")
+    w("# consult frame bps (no warm-up reads, width-independent Rice codewords,")
+    w("# pad by the wasted field), so left/side and side/right -- whose tiny")
+    w("# quantized-noise sides measure as FIXED-0 wasted 4 -- carry an inert")
+    w("# seam (false); mid/side's side is LPC-3 on frame 0, so its warm-up")
+    w("# reads make the seam load-bearing (true). The Rust suite's negative")
+    w("# control demands divergence exactly where the flag says true, and")
+    w("# demands width-INvariance where it says false -- the flag is checked,")
+    w("# not trusted.")
+    w("# Two ground-truth layers, both whole-stream: `slot_stored_N` is slot")
+    w("# N's DECODED subframe samples (on decorrelated runs the side slot")
+    w("# holds L-R, the mid slot (L+R)>>1) -- derived from pcm_left/pcm_right")
+    w("# by the encoder-side formulas and re-checked at generation time")
+    w("# against each subframe's own warm-up/verbatim/constant fields by the")
+    w("# independent Bits walk (an encoder-side reading of the spec,")
+    w("# independent of the crate's decoder-side recovery). pcm_left/")
+    w("# pcm_right are the reference DECODER (flac -d) whole-stream PCM")
+    w("# de-interleaved -- always the TRUE L/R, even where the subframe")
+    w("# holds a stored value; a full frame decode (decorrelate included)")
+    w("# must match them on every vector.")
+    w("# Generation-time invariants (fail-closed, walk_stream_runs): blocksizes")
+    w("# [256, 100] with the tail at the uncommon 8-bit code; uniform channel")
+    w("# census == the label; side slot walked at bps+1; per-frame footer gap")
+    w("# landing exactly on the next frame offset; warm-up == stored >>")
+    w("# wasted; verbatim body == stored block; constant body == one value")
+    w("# << wasted. A libFLAC upgrade that changes any mode choice refuses to")
+    w("# write this file.")
+    w("")
+    for label, name, expected, why in RUN_SPECS:
+        path = os.path.join(src, name)
+        frames, walks, info, pcm, stored_pcm = walk_stream_runs(name, path,
+                                                                expected)
+        mode = RUN_MODES[expected]
+        data = open(path, "rb").read()
+        w("run_vector %s" % label)
+        w("source_stream %s" % name)
+        w("note %s" % why)
+        w("stream_samplerate_hz %d" % info["sample_rate"])
+        w("stream_bits_per_sample %d" % info["bits-per-sample"])
+        w("channels %d" % info["channels"])
+        w("decorrelation %s" % expected)
+        w("side_slot %s" % ("none" if mode["side_slot"] is None
+                            else mode["side_slot"]))
+        # Is the bps+1 seam OBSERVABLE on this run's side slot? Measured
+        # (libFLAC 1.5.0, the run streams): left/side and side/right encode
+        # their side as FIXED order 0 (tiny quantized noise is
+        # uncompressible -- no predictor helps), and a FIXED-0 subframe
+        # never consults frame bps: no warm-up reads (order x bits = 0),
+        # Rice codewords are width-independent, pad_block shifts by the
+        # wasted field. Reading the side at bps+0 then decodes bit-identical
+        # -- the seam is un-witnessable there, by grammar, not by table bug
+        # (discovered by the Rust suite's negative control: leftside at
+        # bps+0 still matched ground truth). mid/side's side carries an
+        # LPC-3 warm-up, so the seam is observable on that run. Computed
+        # from the walk's own kind/order -- never hand-labeled.
+        side = mode["side_slot"]
+        if side is None:
+            sens = "none"
+        else:
+            sens = "true" if any(
+                fw[side]["order"] > 0
+                or fw[side]["kind"] in ("verbatim", "constant")
+                for fw in walks) else "false"
+        w("side_width_sensitive %s" % sens)
+        w("frame_count %d" % len(frames))
+        for h in frames:
+            end = frames[h["number"] + 1]["offset"] if h["number"] + 1 < len(frames) \
+                else len(data)
+            frame = data[h["offset"]:end]
+            w("frame_blocksize %d" % h["blocksize"])
+            w("frame_hex %s" % " ".join(format(x, "02X") for x in frame))
+        for s, block in enumerate(stored_pcm):
+            w("slot_stored_%d %s" % (s, " ".join(str(v) for v in block)))
+        if info["channels"] == 2:
+            left = pcm[0::2]
+            right = pcm[1::2]
+        else:
+            left, right = pcm, []
+        w("pcm_left %s" % " ".join(str(v) for v in left))
+        if right:
+            w("pcm_right %s" % " ".join(str(v) for v in right))
+        w("")
+
+    with open(out_path, "w") as handle:
+        handle.write("\n".join(lines))
+    n = sum(1 for line in lines if line.startswith("run_vector "))
+    print("   wrote %s (%d run vectors, uniform-mode censuses + stored-slot "
+          "invariants + footer gaps green)" % (out_path, n))
+
+
 def measure(src):
     """Print the candidate-filtering measurement quoted by FLAC.md and the
     generated vector header. Numbers here are the only sync-scan figures this
@@ -1145,11 +1518,14 @@ def main():
         emit(sys.argv[2], sys.argv[3])
     elif what == "emit_bodies":
         emit_bodies(sys.argv[2], sys.argv[3])
+    elif what == "emit_runs":
+        emit_runs(sys.argv[2], sys.argv[3])
     elif what == "measure":
         measure(sys.argv[2])
     else:
         raise SystemExit("usage: frame_vectors.py synth DIR | emit DIR OUT "
-                         "| emit_bodies DIR OUT | measure DIR")
+                         "| emit_bodies DIR OUT | emit_runs DIR OUT "
+                         "| measure DIR")
 
 
 if __name__ == "__main__":
