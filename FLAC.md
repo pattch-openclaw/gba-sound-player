@@ -569,8 +569,11 @@ gets built later for the shipping path regardless.
      [Frame header: measured byte layout](#frame-header-measured-byte-layout--the-31-vs-32-bit-correction-2026-09-07).
    - So the parse now has a witness: implement it against
      `tests/frame_header_vectors.txt` rather than against a hand-packed array.
-3. [ ] `subframe` FIXED (orders 0–4) + `residual` partitioned Rice/Rice2 —
-   the decode math the gate measures.
+3. [x] `subframe` FIXED (orders 0–4) + `residual` partitioned Rice/Rice2 —
+   the decode math the gate measures. **Done 2026-09-18** — substeps 3a–3f
+   all landed; the Phase 1 decode path runs end to end
+   (`decode_frame` witnessed bit-exact against `flac -d` on real frame
+   runs). Phase 1's remaining work is the step 4 perf gate.
    - **Amended 2026-09-07:** if the spike clip is a `-l 4` encode, FIXED alone
      cannot decode it (measured: `lpc4` on 156/157 frames). Either step 3 grows
      low-order LPC, or the spike runs a `-l 0` clip for the FIXED arm — see step 4.
@@ -638,27 +641,24 @@ gets built later for the shipping path regardless.
        incompressible-source pair, and per-subframe ground truth now exists
        (warm-up values, bps, `exit_bits`, reference PCM). See
        [Completed: step 3e](#completed-step-3e--decode_subframe-composition-and-the-wasted-scale-rule-2026-09-15).
-     - [ ] **3f — `decode_frame` + decorrelation:** *(split 2026-09-16.
-       Part 1 — `stereo::decorrelate` + the side-width/orientation
-       measurements — landed; see* [Completed: step 3f part
+     - [x] **3f — `decode_frame` + decorrelation (done 2026-09-18):** *(split
+       2026-09-16; landed in two parts.)* Part 1 — `stereo::decorrelate` +
+       the side-width/orientation measurements — see
+       [Completed: step 3f part
        1](#completed-step-3f-part-1--stereodecorrelate-and-the-side-width-and-orientation-measurements-2026-09-16).
-       *Part 2 — the frame wiring below — is the open work.)* Subframe loop
-       over 1–2 subframes, side subframe coded at **bps + 1** (the sneakiest
-       byte-level fact of the step — §4.2's "the side channel needs one extra
-       bit of bit depth", libFLAC's `read_subframe_` does `bps++` on the side
-       slot, and encoder bytes confirm it. The plan line previously read
-       **bps −1, the wrong direction**; measured dead before any part-2 code
-       depended on it — step 3f part 1 entry), mid/side /
-       left/side / right/side restoration (pure add/shift, ~10 lines, but
-       measured: libFLAC picks mid/side on *every* frame of correlated
-       stereo, so the spike's stereo clip needs it), frame footer
-       (`byte_align` + CRC-16 consume — verify stays Phase 2). Cursor
-       contract witnessed by chaining: decode frame N, parse frame N+1 from
-       the same cursor, agree with the manifest offset. Finish with the
-       end-to-end witness: decode real frame runs and diff **bit-exact**
-       against `flac -d` PCM (pulls a slice of step 8 forward, cheaply).
-       LPC ≤4 integration belongs here-or-3d per how 3d shakes out — the
-       gate needs both arms (Correction 3), so one of them must land LPC.
+       Part 2 — the frame wiring: subframe loop over 1–2 slots with the side
+       coded at the measured **bps + 1** (orientation derived from the
+       header's channel code, never a caller hint), `decorrelate` after the
+       loop, footer (`byte_align` + CRC-16 **consume** — verify stays Phase
+       2), cursor contract witnessed by chaining one reader frame N → N+1,
+       and the end-to-end witness: five libFLAC 1.5.0 frame runs (one per
+       channel assignment, 256 + a 100-sample uncommon-blocksize tail)
+       decoded twice — through the *existing* primitives first (layout
+       suite: the table's ground truth pinned before any frame code existed)
+       then through production `decode_frame`, **bit-exact** against
+       `flac -d` PCM (pulls step 8's diff forward onto the frame layer).
+       See
+       [Completed: step 3f part 2](#completed-step-3f-part-2--decode_frame-and-the-frame-run-vectors-2026-09-18).
 4. [ ] **Perf gate spike** in `examples/flac_spike/`: ROM embeds a ~10s clip via
    `include_bytes!`; frames located by a **hand-computed offset array** (no GAFP,
    no manifest — deliberately throwaway); timer-capture cycle counter around
@@ -1679,3 +1679,120 @@ subframe-header; `make native-flac-rom` builds/links/fixes unchanged;`make
 check` clean (fmt included — note `flac-lite` is a standalone workspace,
 so only the crate-level `cargo fmt` reaches it; the Makefile target runs
 per-crate for exactly this reason).
+
+## Completed: step 3f part 2 — `decode_frame` and the frame-run vectors (2026-09-18)
+
+Part 2 of the split step lands the frame layer: `frame::decode_frame`
+composes the subframe loop, the measured bps+1 side seam, `decorrelate`,
+and the footer consume into one driver, witnessed on **whole frame runs** —
+five libFLAC 1.5.0 runs (one per channel assignment, 256 + a 100-sample
+uncommon-blocksize tail each), decoded twice over the same committed
+table: once through the *existing* primitives (a layout suite that proves
+the table's ground truth with zero new frame code), once through the
+production driver; the two agreeing, bit-exact against `flac -d`, is the
+witness. With this the 3f plan line is discharged end to end — including
+its "pulls a slice of step 8 forward" clause: the bit-exact `flac -d`
+PCM diff now exists at the frame layer. Step 3 (and with it the Phase 1
+decode path through `decode_frame`) is complete; only the step 4 perf
+gate remains in Phase 1.
+
+**What landed.** `decode_frame(reader, header, left, right, state)` —
+subframe loop over 1–2 slots (`subframe_count()` from the header's own
+channel code; 3–8-channel streams never reach it, rejected as
+`ProfileViolation` at header parse), the side slot decoded at `bps + 1`
+with the slot derived from the channel code (right/side → slot 0,
+left/mid-side → slot 1) exactly as part 1 measured, `decorrelate` after
+the loop, then the footer: `byte_align` + big-endian CRC-16 **consumed,
+never verified** (Phase 2 step 5). Returns the sample count written.
+The scaffold's `defaults: &StreamDefaults` parameter is **gone** (see
+prior assumptions). Buffer contract: `len() >= blocksize` per used
+channel, exactly `blocksize` written, tail untouched — playback reuses
+one fixed buffer per channel and the final frame is legitimately short,
+so the tail contract is load-bearing and tested with sentinels. Mono
+passes a legal zero-length `right`; the driver slices the secondary
+window only for two-subframe modes, and `decorrelate`'s Independent-1
+arm covers `left` alone. Short-buffer rejection gates **before the
+first bit**: cursor unmoved, nothing written (crate rejection rule);
+past the first bit the frame is dead — re-seek from the manifest
+offset, the doc comment says so.
+
+**Witness strategy (composition pattern).** Two suites, one committed
+table (`tests/frame_run_vectors.txt`, regenerated by
+`scripts/gen_frame_vectors.sh` → `frame_vectors.py emit_runs`): each
+run's `frame_hex` rows cover every frame **through its footer**, so the
+rows concatenate into the contiguous frame region and one `BitReader`
+walks frame N → N+1 exactly as a decode loop does. `frame_run_layout.rs`
+replays the table through `FrameHeader::parse` + `decode_subframe` +
+`decorrelate` only — it passes at this commit's *primitives*, before any
+frame driver existed to hide a shared misreading. `frame_run_decode.rs`
+runs production `decode_frame` on the same table; agreement is the
+witness (a production-only suite could share one misreading of ground
+truth with the table). Ground truth is layered twice: `slot_stored_N`
+(stored subframe values — side = L−R, mid = (L+R)>>1 — derived from the
+reference PCM by encoder-side formulas and re-checked against each
+subframe's warm-up/verbatim/constant fields by the harness's independent
+Bits walk) and `pcm_left`/`pcm_right` (`flac -d` whole-stream PCM).
+The layout suite diffs **both layers** (raw slot output before
+`decorrelate`, final PCM after), so orientation and transform math are
+re-witnessed on real stereo bytes, not just part 1's synthetic oracle.
+Chaining is pinned by cursor position — the per-frame footer gap rule
+(exit on a byte boundary → bare 16-bit CRC gap, else pad + 16) is
+witnessed frame by frame by the next header parse landing at the table's
+byte offset.
+
+**The seam control, generalized (the part-1 rule earned its keep again).**
+The first draft of the negative control demanded bps+1 divergence on
+*every* decorrelated run — and fired on a legitimate vector:
+left/side and side/right here carry **FIXED-0** sides (tiny quantized
+noise; no predictor helps), and a FIXED-0 subframe never consults frame
+bps (no warm-up reads, width-independent Rice codewords, pad by the
+wasted field), so bps+0 decodes bit-identical — divergence is
+grammatically impossible there, exactly part 1's inert-feature lesson
+replayed one layer up. The generator now derives `side_width_sensitive`
+(true/false) from its own walk's kind/order, and the suite **checks the
+flag both ways**: divergence demanded where `true` (mid-side's LPC-3
+side carries the seam witness), bit-exact width-**in**variance demanded
+where `false` (the crate's reader re-proving FIXED-0 inertness end to
+end; a mislabeled label would diverge and fail), plus a tripwire that ≥1
+observable vector exists so a libFLAC upgrade cannot silently degrade
+the witness to the inert branch alone.
+
+**The encodes (measured, libFLAC 1.5.0).** All five runs encode `-l 4
+-b 256` at the **default compression level** — measured: `-1` collapses
+every construction to mid/side, and the fast heuristic would have made
+`0b1000`/`0b1001` unproducible no matter the audio. The side-channel
+baits are the quantized-noise constructions (one channel smooth, the
+other = smooth + tiny quantized noise; mirrored for left/side vs
+side/right), uniform-mode censuses over both frames fail closed — the
+table refuses to be written if any stream stops being the labeled mode.
+The independent-stereo run uses two *uncorrelated* smooth channels: the
+arm that actually compresses to `0b0001` at default level, which no
+decorrelated bait can witness. `-l 4` puts LPC on the gate path through
+the frame layer (mid-side frame 0's side measures as LPC-3), so
+Correction 3's both-arms requirement is exercised by the runs, not just
+by 3d's unit tests.
+
+**Prior assumptions (what died this step).**
+
+| Claim | Reality |
+|---|---|
+| Scaffold `decode_frame` took `&StreamDefaults` ("from stream" codes must resolve at the body) | Stream defaults never reach the frame body: `FrameHeader::parse` already resolved blocksize, bps, and channels into the header. The driver takes only the header — parameter dropped. |
+| `byte_align` "asserts a falsehood" (frame module doc, step 2's correction — the *header*'s fixed fields end byte-aligned) | Header-local. The **footer** is genuinely unaligned whenever body bits miss a byte boundary; `byte_align` is the honest call there, and the run table's per-frame gap rule witnesses it. |
+| The chaining witness needs the GAFP manifest ("agree with the manifest offset") | No Phase 2 surface needed: footer-through `frame_hex` rows make the table itself the offset source; the cursor lands on the next row's byte, frame after frame. |
+
+**Deliberate scope cuts.** CRC-8/CRC-16 *verification* stays Phase 2
+step 5 (both consumed here). 3–8-channel streams stay rejected at
+header parse — no multi-channel decode path. No profiling (step 4 owns
+cycle counts). The seam negative control and stored-slot diff live only
+in the layout suite (only the primitive composition can express them);
+the decode suite owns what only production can show: chaining, bit-exact
+run PCM, the reused-buffer tail contract, rejection-before-the-first-bit.
+
+**Gates:** `make flac-test` green — thumbv4t compile gate + **91 unit**
+unchanged (composition adds zero unit tests — the suites that grew are
+integration: **18 → 24**, two new 3-test suites `frame_run_layout` +
+`frame_run_decode`; old count re-measured at HEAD in a clean worktree,
+not trusted from part 1's entry). `make native-flac-rom` builds, links,
+and fixes (crate API changed — signature). `make check` clean (fmt
+included; one pre-existing `subframe_body_layout` paren warning from
+step 3e left alone — unrelated committed test code).

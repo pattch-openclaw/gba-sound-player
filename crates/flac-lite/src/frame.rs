@@ -1,9 +1,11 @@
 //! Frame layer: header parse + one-frame decode driver.
 //!
-//! STATE (2026-09-08): [`FrameHeader::parse`] is **implemented** (Phase 1
-//! step 2), validated against the golden vectors in `tests/` (real libFLAC
-//! 1.5.0 bytes). `decode_frame` below it is still `todo!()` scaffold — the
-//! subframe/residual math is step 3.
+//! STATE (2026-09-17): [`FrameHeader::parse`] (step 2) and [`decode_frame`]
+//! (step 3f) are both **implemented** and validated against real libFLAC
+//! 1.5.0 bytes in `tests/` — header vectors, and the frame-RUN table
+//! (`tests/frame_run_vectors.txt`) for whole-frame chaining + PCM diffs.
+//! CRC *verification* (header CRC-8, footer CRC-16) stays Phase 2 step 5:
+//! both are consumed, never checked.
 //!
 //! Frame layout (RFC 9639 §9.1). Field widths below are **measured against real
 //! libFLAC output**, not transcribed from memory — see the byte-level breakdown
@@ -91,7 +93,8 @@
 use crate::Error;
 use crate::bits::BitReader;
 use crate::format::{ChannelConfig, SampleRate};
-use crate::subframe::PredictorState;
+use crate::stereo::decorrelate;
+use crate::subframe::{PredictorState, decode_subframe};
 
 /// The 14-bit frame sync shared by both blocking strategies (see module
 /// docs: RFC 9639 §9.1 — 15-bit sync `0b111111111111100` + strategy bit).
@@ -344,27 +347,115 @@ impl FrameHeader {
     }
 }
 
-/// Decode one whole frame into `left` / `right`.
+/// Decode one whole frame — subframe loop, decorrelation, footer — into
+/// `left` / `right`.
 ///
-/// `left` is the only slice used for mono. `state` is per-subframe scratch
-/// (one [`PredictorState`] per channel/subframe slot, reused across frames —
-/// warm-up samples travel in each subframe's own header, not across frames;
-/// see `subframe` module docs, corrected 2026-09-10). PCM is
-/// written as sign-extended `i32` in the stream's native precision; conversion
-/// to the mixer's 8-bit unsigned format happens at the playback boundary, not
-/// here, so this stays reusable (and testable) independent of `agb`.
+/// `header` must be the header parsed at this exact cursor position (its
+/// fields are the composition's only inputs — `parse` has already resolved
+/// blocksize, bit depth, and channel mode through [`StreamDefaults`], so
+/// stream defaults never reach the frame body and this driver takes none).
 ///
-/// Returns the header so the caller can track sample position / sample rate.
+/// Buffers: **exactly `header.blocksize` samples per channel are written;**
+/// samples beyond `blocksize` in a longer buffer are left untouched. The
+/// contract is therefore `len() >= blocksize`, not `==` — playback reuses one
+/// fixed 2048-slot buffer across frames, and the final frame of a track is
+/// legitimately short (measured; see module docs on `blocksize`), so "leave
+/// the tail alone" is load-bearing, not cosmetic. Mono may pass a
+/// zero-length `right`; the secondary window is only touched for
+/// two-subframe channel modes.
 ///
-/// SCAFFOLD STATE: step 3, substeps 3a–3f (FLAC.md phased plan; 3a landed).
-/// Callers that only need header facts use [`FrameHeader::parse`].
+/// `state` is per-subframe scratch (one [`PredictorState`] per slot, reused
+/// across frames — warm-up samples travel in each subframe's own header, not
+/// across frames; see `subframe` module docs, corrected 2026-09-10). PCM is
+/// written as sign-extended `i32` in the stream's native precision;
+/// conversion to the mixer's 8-bit unsigned format happens at the playback
+/// boundary, not here, so this stays reusable (and testable) independent of
+/// `agb`.
+///
+/// **Side slot width:** the decorrelated slot is coded at `bps + 1` (§4.2:
+/// "the side channel needs one extra bit of bit depth"), slot 0 for
+/// side/right and slot 1 for left/mid-side (Table 16 "stored as side-right"
+/// + libFLAC's `bps++` on the side slot — both measured on encoder bytes,
+/// FLAC.md step 3f part 1). The mapping is derived from the header's own
+/// channel code, never from a caller-supplied hint.
+///
+/// **Footer:** after the last subframe the frame pads to a byte boundary and
+/// carries a big-endian CRC-16 (measured, libFLAC 1.5.0). Both are consumed,
+/// never verified — verification is Phase 2 step 5. The run vectors' chaining
+/// (`tests/frame_run_layout.rs`) pins that this consume lands the cursor
+/// exactly on the next frame's first byte.
+///
+/// Errors: caller-contract violations (short buffers) gate **before any bit
+/// is consumed**, rejections write nothing (crate rule). Past the first bit,
+/// a stream error leaves the cursor wherever the failing sub-read stopped
+/// (per-read atomicity from the layers below); either way the frame is dead —
+/// re-seek from the manifest offset, do not continue.
+///
+/// Returns the number of samples written per channel (`header.blocksize`).
 pub fn decode_frame(
     reader: &mut BitReader<'_>,
     header: &FrameHeader,
-    defaults: &StreamDefaults,
     left: &mut [i32],
     right: &mut [i32],
     state: &mut [PredictorState; 2],
 ) -> crate::Result<usize> {
-    todo!("flac-lite scaffold: decode_frame")
+    let blocksize = header.blocksize;
+    let slots = usize::from(header.channels.subframe_count());
+
+    // Caller contract before the first bit: mono never touches `right`, so
+    // only the two-subframe modes need it at full length.
+    if left.len() < blocksize || (slots == 2 && right.len() < blocksize) {
+        return Err(Error::InvalidField);
+    }
+
+    // Which slot carries the extra side bit (see doc note).
+    let side_slot = match header.channels {
+        ChannelConfig::RightSide => Some(0),
+        ChannelConfig::LeftSide | ChannelConfig::MidSide => Some(1),
+        ChannelConfig::Independent { .. } => None,
+    };
+    // Resolved bps is 8 or 16, so +1 cannot overflow u8; compute in u32 so
+    // the arithmetic stays honest without relying on that fact.
+    let slot_bits = |slot: usize| -> u8 {
+        (u32::from(header.bits_per_sample) + u32::from(side_slot == Some(slot))) as u8
+    };
+
+    decode_subframe(
+        reader,
+        blocksize,
+        slot_bits(0),
+        &mut state[0],
+        &mut left[..blocksize],
+    )?;
+    if slots == 2 {
+        decode_subframe(
+            reader,
+            blocksize,
+            slot_bits(1),
+            &mut state[1],
+            &mut right[..blocksize],
+        )?;
+    }
+
+    // Mono passes a zero-width right window: `decorrelate`'s
+    // Independent-1-arm contract covers `left` only, and slicing
+    // `right[..blocksize]` here would panic on the legal empty call.
+    let right_span = if slots == 2 { blocksize } else { 0 };
+    decorrelate(
+        header.channels,
+        blocksize,
+        &mut left[..blocksize],
+        &mut right[..right_span],
+    )?;
+
+    // Footer: pad to the byte boundary, consume the CRC-16. `byte_align` is
+    // the honest call here (unlike the header, where it would assert a
+    // falsehood — module docs): subframe bodies end unaligned whenever the
+    // total body bits miss a byte boundary, and the run vectors' gap rule
+    // (`exit % 8 == 0 → 16-bit gap, else pad + 16`) is witnessed per frame.
+    reader.byte_align();
+    let _crc16_hi = reader.read_u8()?;
+    let _crc16_lo = reader.read_u8()?;
+
+    Ok(blocksize)
 }
