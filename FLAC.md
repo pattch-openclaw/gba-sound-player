@@ -675,6 +675,9 @@ gets built later for the shipping path regardless.
      the profile at **`-l 0`** (which is what FIXED-only means) and reject
      higher-order frames. FIXED-only misses the budget → offline pre-processing
      (FIXED order 0–1) or scope reduction.
+   - **Concrete plan + validation process (2026-09-18):** this step executes as
+     five PRs — see
+     [Perf gate spike — concrete plan and validation process](#perf-gate-spike--concrete-plan-and-validation-process-2026-09-18).
 
 **Phase 2 — production pipeline (starts only after the gate resolves):**
 
@@ -692,6 +695,124 @@ gets built later for the shipping path regardless.
      the same WAV.
 
 ---
+
+## Perf gate spike — concrete plan and validation process (2026-09-18)
+
+**The concrete plan for Phase 1 step 4.** The decode path (`bits` →
+`decode_frame`) landed 2026-09-06 → 09-18, and both measurement arms run today:
+LPC ≤ 32 is implemented (3d/3e), so `-l 0` and `-l 4` clips both decode. This
+section is the execution plan — five focused PRs, each with its own witness,
+each keeping the existing gates green. The sketch in
+`examples/flac_spike/README.md` keeps its intent ("what gets measured"), but
+this plan supersedes it; the budget correction below must land in that README
+via PR 5.
+
+### Budget, derived (not recalled)
+
+At the initial profile (2048-sample frames @ 32,768 Hz), the real-time budget
+per frame is:
+
+```text
+2048 / 32768 s × 16.78 MHz ≈ 1,048,750 cycles/frame ≈ 512 cycles/sample
+```
+
+⚠️ `examples/flac_spike/README.md` states "62,500 cycles per frame" — that
+figure is 62,500 **microseconds** (62.5 ms) with its unit misapplied; the same
+formula one line above it yields ~1,049,000 cycles at 16.78 MHz (16.78× more).
+Its working targets (≤ 35,000 mean / ≤ 55,000 max) inherit the error: they are
+~3% of the true budget, so they are accidentally *stricter* than real-time,
+while claiming to be a margin. PR 3 re-derives the working target against
+**measured** mixer/DMA/vsync load rather than any recalled figure, and PR 5
+corrects the README. Until then the gate's question is the one FLAC.md has
+always asked: **does the worst frame fit the real-time budget with room left
+for the playback path?**
+
+### The five PRs
+
+1. **Spike scaffold + assets.** Standalone workspace crate
+   `examples/flac_spike/` — inherits the root `.cargo/config.toml`, never
+   re-declares it (the duplicated `-Tgba.ld` rule). New Makefile gates
+   `make native-spike-rom` / `podman-spike-rom`, mirroring the `*-flac-rom`
+   pattern. Assets: extend `scripts/frame_vectors.py` (new `spike-assets`
+   subcommand) to synthesize one deterministic ~10 s source (integer-only, the
+   existing synthesis rule) and encode both arms — `flac -l 0 -b 2048` and
+   `flac -l 4 -b 2048`, 16-bit stereo 32 kHz (the existing 157-frame `l4_stereo`
+   / `l0_stereo` streams already have this shape) — emitting the raw frame
+   region plus a **committed offset array** produced by the existing strict
+   frame finder (the only filter proven exact on all 979 frames). No sync scan,
+   no GAFP, no manifest — deliberately throwaway. ROM `include_bytes!`s both
+   clips and boots showing metadata (frame count, sizes, subframe census).
+   *Witness:* the existing fail-closed stream invariants before any emit;
+   a census assertion (`-l 0` all-FIXED, `-l 4` majority LPC) appended as
+   table comments; a host integration test that decodes the **exact embedded
+   bytes** through `decode_frame` and asserts bit-exact `flac -d` PCM; ROM
+   builds, links, fixes, boots.
+2. **On-target decode correctness.** The spike ROM decodes every frame of both
+   embedded clips; an FNV-1a checksum of the decoded PCM is compared against
+   expected values computed on the host from `flac -d` output. Screen verdict
+   per clip (blue = match, red = mismatch) plus per-frame serial log — the
+   BitReader PoC's convention. Buffers per the memory plan (per-channel
+   `blocksize × i32` scratch + alternating halves; EWRAM has room).
+   *Witness:* the embedded ROM bytes themselves — correctness is proven on the
+   same image that will be measured. **This PR gates PRs 3–5: no perf number is
+   trusted from a ROM image whose decode has not been proven correct on its own
+   embedded bytes** (a fast wrong decode measures nothing).
+3. **Cycle harness + per-frame cost.** A free-running 16.78 MHz counter around
+   `decode_frame` — DIV result counter (32-bit, full-speed cycle ticks) or
+   overflow-chained timer, chosen at implementation; empty-window calibration
+   run first so harness overhead is subtracted and reported alongside raw.
+   IRQs off during measurement windows: this is decode cost, not system cost.
+   Report per clip per arm: min / max / mean cycles + worst-frame index to
+   mGBA serial; screen shows worst-frame-vs-budget verdict.
+   *Witness:* calibration window measures ≈ 0 net cycles; repeated runs of the
+   same ROM give identical numbers (deterministic emulator, deterministic ROM —
+   any variance is harness noise and gets fixed before results are trusted).
+4. **Cadence test.** Full-clip loop: decode frame N into buffer half B while
+   half A "plays", alternating, for the whole ~10 s of each clip, with no
+   artificial waits — pass = every frame's decode stays inside the time the
+   previous half would take to play. The closest available real-time simulation
+   until the mixer/DMA path exists (Phase 2 step 9), where it becomes a true
+   IRQ-driven test. The legitimately short final frame is inside the loop; its
+   cost counts.
+   *Witness:* zero over-budget frames per arm + worst-frame margin recorded;
+   both arms (`-l 0` and `-l 4`) measured on the same run.
+5. **Verdict + decision.** Results table into FLAC.md: arm × {mean, max, worst
+   frame, % of budget} × {mGBA, hardware}. One real-hardware confirmation run
+   of the exact PR-4 ROM on flash cart (the BitReader PoC proved on-cart runs
+   work; mGBA stays the primary measurement — it is an emulator, and the table
+   records any hardware divergence). Then execute step 4's decision rule:
+   LPC fits → profile stays a preference; FIXED fits but LPC doesn't → cap the
+   profile at `-l 0` (enforcement lands with Phase 2 steps 6–7, pack-time
+   strict-profile validation); FIXED-only misses → offline pre-processing
+   (FIXED order 0–1) or scope reduction. PR 5 also corrects the spike README's
+   budget units and restates the encode-profile wording per the verdict —
+   remembering Correction 3: the enforceable constraint is max predictor order
+   + a fixed/LPC flag, never a "reject LPC" assumption baked into the parser.
+
+### Validation process (applies to every PR)
+
+- **Existing gates:** `make flac-test` (thumbv4t compile + host suites) and
+  `make check` green on every PR. The root ROM crate carries **no** spike
+  dependency — the baseline `.gba` never sees this code.
+- **New gate from PR 1:** `make native-spike-rom` and `make podman-spike-rom`
+  build the spike ROM native *and* in the container, like the integration ROM.
+- **Correctness-before-speed rule:** PR 2 gates PRs 3–5. Numbers are only ever
+  reported from a ROM image that has proven its decode correct (host bit-exact
+  + on-target checksum) on its own embedded bytes.
+- **Asset discipline:** clips come only from the deterministic synthesis
+  (integer arithmetic, no floats/RNG); censuses and stream invariants fail
+  closed at emit time; committed blobs are generator output, never hand-edited
+  — the hand-packed-vector rule, applied to whole clips.
+- **Measurement discipline:** harness overhead subtracted and reported
+  alongside raw; the **same ROM bytes** used for host checks, mGBA runs, and
+  the hardware run (clips live in `.text`, as the BitReader PoC's bytes do);
+  the tail is first-class — one over-budget frame is an audible glitch, so max
+  is reported alongside mean; repeat runs must be identical or the harness is
+  wrong.
+- **Claims carry witnesses:** budget math shown as arithmetic (above); working
+  targets tied to *measured* mixer/DMA/IRQ load when Phase 2 step 9 makes that
+  possible, never to a recalled margin; the verdict table cites ROM checksum,
+  mGBA version, and run date per row.
 
 ## Frame header: measured byte layout — the 31-vs-32-bit correction (2026-09-07)
 
