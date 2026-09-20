@@ -1,6 +1,7 @@
 /target
 /gba-sound-player.gba
 /flac-integration.gba
+/flac-spike.gba
 *.d
 
 # mGBA writes a save file beside the ROM on every local run
@@ -24,6 +25,13 @@
 # Same story for the experimental FLAC integration ROM crate (examples/flac_integration/
 # is its own workspace, builds only for thumbv4t-none-eabi via `make native-flac-rom`).
 /examples/flac_integration/target/
+
+# And the perf-gate spike crate (examples/flac_spike/ — own workspace; builds
+# for the GBA target via `make native-spike-rom` AND for the host triple for
+# its witness tests, so the paths vary; ignore the whole dir). NOTE: its
+# assets/*.bin + src/assets.rs are deliberately TRACKED — they are committed
+# generator output, the witness the spike measures.
+/examples/flac_spike/target/
 
 # Python bytecode caches (scripts/*.py); never commit.
 __pycache__/
