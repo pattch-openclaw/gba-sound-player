@@ -64,8 +64,8 @@ FNV-1a pins, censuses, `include_bytes!`).
 
 | Command | What it proves |
 |---|---|
-| `make spike-test` | Host witness suite: both embedded regions decode **bit-exact** vs `flac -d`, hash pins reproduce (Python ↔ Rust), corrupted seek entry breaks the walk (negative control) |
-| `make native-spike-rom` / `podman-spike-rom` | The spike ROM builds, links, fixes for `thumbv4t-none-eabi`; boots showing clip metadata + region hash verdicts (blue/red screen, BitReader-PoC convention) |
+| `make spike-test` | Host witness suite: both embedded regions decode **bit-exact** vs `flac -d`, hash pins reproduce (Python ↔ Rust), the ROM's shared fold (`fold_i16le_stereo`) reaches the `fnv_pcm` pins on the host, corrupted seek entry breaks the walk (negative control) |
+| `make native-spike-rom` / `podman-spike-rom` | The spike ROM builds, links, fixes for `thumbv4t-none-eabi`; boots, verifies region hash pins, then **decodes both arms on-target** and compares the PCM FNV-1a against the pins (blue/red screen, BitReader-PoC convention) |
 
 Standalone workspace; cargo config is **inherited** from the repo root — do
 not add a local `.cargo/config.toml` (the duplicated `-Tgba.ld` leak, FLAC.md).
@@ -75,7 +75,7 @@ not add a local `.cargo/config.toml` (the duplicated `-Tgba.ld` leak, FLAC.md).
 | PR | Scope | Status |
 |---|---|---|
 | 1 | scaffold, clips, gates, host witness | ✅ |
-| 2 | on-target decode checksum (gates every perf number) | — |
+| 2 | on-target decode checksum (gates every perf number) | ✅ |
 | 3 | cycle harness (calibrated, overhead subtracted) | — |
 | 4 | full-clip cadence test (double buffers vs playback time) | — |
 | 5 | verdict table + decision rule + hardware run | — |

@@ -750,7 +750,10 @@ for the playback path?**
    table comments; a host integration test that decodes the **exact embedded
    bytes** through `decode_frame` and asserts bit-exact `flac -d` PCM; ROM
    builds, links, fixes, boots.
-2. **On-target decode correctness.** The spike ROM decodes every frame of both
+2. **On-target decode correctness.** **Done 2026-09-20** — see
+   [Completed: spike PR 2 — on-target decode
+   proof](#completed-spike-pr-2--on-target-decode-proof-2026-09-20).
+   The spike ROM decodes every frame of both
    embedded clips; an FNV-1a checksum of the decoded PCM is compared against
    expected values computed on the host from `flac -d` output. Screen verdict
    per clip (blue = match, red = mismatch) plus per-frame serial log — the
@@ -1985,3 +1988,92 @@ the working-target caveat (re-derive in PR 3 against measured load).
 spike-test` green (4 + 6), `make native-spike-rom` builds/links/fixes, `make
 check` clean (spike workspace added to format/check). The root ROM crate and
 the integration ROM are untouched; the baseline `.gba` never sees this code.
+
+## Completed: spike PR 2 — on-target decode proof (2026-09-20)
+
+Phase 1 step 4's second PR lands the gate every perf number must pass: the
+spike ROM now **decodes every frame of both embedded arms on-target** and
+proves the result against the generator's PCM pins. The BLUE screen changed
+meaning with this PR: PR 1's blue meant asset integrity; PR 2's blue means
+**decode proven on the image's own bytes** — the exact image PRs 3–5 will
+time. Measured run: mGBA, ROM `flac-spike.gba`
+sha256 `e81ca982692b0ede…9fb6c01`, both arms 157/157 frames, PCM FNV-1a-64
+`0x54C7B356621B6E15` matched on **both** arms and cross-arm (one source, one
+ground truth), verdict line `PR 2 verdict PASSED — screen BLUE`.
+
+**What landed.** `src/main.rs`: after PR 1's asset checkpoints, a
+`decode_proof` pass per arm — decode buffers, `driver::decode_clip` (the same
+seek-table path the host witness walks), per-frame fold of the decoded block
+into a running FNV-1a-64, walk-total cross-check against the manifest, then
+final-hash-vs-`fnv_pcm`-pin; then a cross-arm hash-agreement checkpoint.
+Screen stays one global verdict (BitReader-PoC convention; per-arm detail is
+the serial log). Buffers: one `max_blocksize × i32` per channel (2048 × 4B
+each), allocated from agb's EWRAM block-heap global allocator — the serial
+log prints the raw addresses (`0x02000610`/`0x02002610`), witnessing EWRAM
+placement for PR 4's buffer rotation. Alternating playback halves stay PR 4.
+
+**The shared-fold rule (the step's design decision).** The PCM fold lives in
+the **library** (`checksum::fold_i16le_stereo`), not the ROM entry: the host
+witness (`make spike-test`, new test
+`rom_fold_reproduces_pcm_pins_on_host`) drives the *same function* through
+the *same driver* on the *same embedded bytes* and asserts the same
+`fnv_pcm` pins. Host and ROM therefore cannot share a transcription mistake
+of the interleave rule (L,R per pair, i16-LE) — a second hand-written fold
+would be the hand-packed-vector failure with a screen verdict for an oracle.
+The fold checks i16 fit *then* folds (never a silent truncation — a sample
+outside the 16-bit profile means decode desync, and laundering garbage into
+the proof hash is exactly what PR 2 exists to catch), commit-only-on-success:
+on `Err` the caller's hash is untouched and the first offending sample is
+returned.
+
+**Verbose semantic checkpoints (Sam's direction, this PR).** Serial is the
+localization record, in strict order: metadata/census/why (PR 1) → seek-table
+invariants → region pins → `checkpoint: asset verification` → per arm
+`decode buffers ready` (sizes + EWRAM addresses) → `decode proof: walking N
+frames via seek table` → per-frame `off/bs/running-hash` (314 lines; a
+mismatch localizes to the first frame whose running hash diverges from the
+host's same-sequence dump — the short tail frame is visible, `bs=512`) →
+`walk complete` + totals-vs-manifest (`157/157`, `320000`) → `pcm fnv:
+expected/actual [MATCH]` → `cross-arm pcm … agree=true` → final verdict line
+naming which layers passed. Failure modes named on serial: each
+`DriverError` variant prints its evidence (`buffer too small`, `frame N
+offset past region (table/blob mismatch)`, `blocksize table=… header=…
+(asset corruption)`, `flac-lite rejected: <variant>`); an out-of-range
+decoded sample logs per-frame with the offender and keeps walking (first
+offender recorded) so the divergence point is visible; totals mismatch prints
+`MISMATCH` with both sides.
+
+**Witness strategy.** The plan line's witness, executed: the embedded ROM
+bytes themselves — correctness proven on the same image that will be
+measured. Layers: region pins (bytes intact, PR 1) + on-target decode of
+those bytes + on-target fold == host fold == generator's Python-computed pin
+(three implementations meeting: Python generator, host Rust, ROM Rust).
+Cross-arm agreement is the free third witness (same source ⇒ one ground
+truth). No new committed vectors needed: the committed assets and pins are
+this PR's ground truth.
+
+**Prior assumptions: none died this step** — no doc claim about bytes or
+semantics turned out false (the step is composition + logging over landed
+primitives). Two build facts found by the compiler, not review, in the
+no_std library: the `checksum.rs` test module needed `extern crate alloc`
+(`Vec` is not ambient in a `#![no_std]` test module), and `{:p}` was replaced
+by explicit `as usize` hex — the allocator region address is itself evidence
+PR 4 reads, an opaque placeholder isn't.
+
+**Deliberate scope cuts (narrow).** No cycle counting (PR 3), no IRQ-off
+windows, no cadence/buffer alternation (PR 4). Decode runs at boot before
+the gfx loop. A failed region pin does **not** abort the decode pass — its
+logs stay diagnostic while the verdict is already red (decoding drifted
+bytes can still localize asset corruption). `podman-spike-rom` not run on
+this host (no nested virtualization; FLAC.md build constraint) — native
+gate + host witnesses carry the PR.
+
+**Gates:** `make spike-test` green — **8 unit** (was 4: +4 fold tests —
+interleave order vs hand-assembled bytes, mono window, empty-window identity,
+atomic out-of-range rejection) + **7 integration** (was 6: +1 shared-fold
+pin witness); old counts re-measured at HEAD in a clean worktree, not
+recalled. `make flac-test` unchanged-green (91 unit + all integration
+suites; flac-lite untouched). `make native-spike-rom` builds/links/fixes.
+`make check` clean (fmt included). mGBA run: 338 serial lines, 0 FAIL/
+MISMATCH, BLUE (mgba-test-runner still hangs as a gfx-loop ROM — expected,
+PR 1's note; killed after the verdict line lands).

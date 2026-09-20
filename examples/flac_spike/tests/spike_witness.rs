@@ -27,7 +27,7 @@
 //!    just the region's natural frame chaining.
 
 use flac_spike::assets::{CLIPS, FrameMeta, L0_FIXED, L4_LPC};
-use flac_spike::checksum::fnv1a64;
+use flac_spike::checksum::{Fnv1a64, fnv1a64, fold_i16le_stereo};
 use flac_spike::driver;
 
 /// The reference PCM blobs, included at compile time (host-test ground truth
@@ -126,6 +126,44 @@ fn decode_is_bit_exact_against_the_reference_pcm() {
             "{}: decoded PCM is not bit-exact against `flac -d` reference",
             clip.name
         );
+    }
+}
+
+#[test]
+fn rom_fold_reproduces_pcm_pins_on_host() {
+    // PR 2's shared-fold witness. The ROM's decode proof (src/main.rs) folds
+    // every decoded block through `checksum::fold_i16le_stereo` and compares
+    // against `fnv_pcm`. This test runs the *same library fold function*
+    // through the *same driver* on the *same embedded bytes* on the host and
+    // requires the same pins — so the on-target hash is not a second
+    // transcription of the interleave rule that could agree with its own
+    // mistake. A fold that reaches the pin here is the fold the ROM runs;
+    // agreement of ROM and host is then a property of the hardware, not of
+    // two separately-written folds.
+    for clip in CLIPS {
+        let max = usize::from(clip.max_blocksize);
+        let mut left = vec![0i32; max];
+        let mut right = vec![0i32; max];
+        let mut state = Default::default();
+        let mut hash = Fnv1a64::new();
+
+        let stats = driver::decode_clip(clip, &mut left, &mut right, &mut state, |_frame, l, r| {
+            fold_i16le_stereo(&mut hash, l, r)
+                .expect("bit-exact decode of a 16-bit stream always fits i16")
+        })
+        .unwrap_or_else(|e| panic!("{}: clip walk failed: {e:?}", clip.name));
+
+        assert_eq!(stats.frames, clip.frames.len(), "{}: frames", clip.name);
+        assert_eq!(
+            hash.finish(),
+            clip.fnv_pcm,
+            "{}: the ROM's fold sequence must reach the generator's PCM pin",
+            clip.name
+        );
+        // The fold is over exactly the reference blob's bytes: pin == hash of
+        // the blob is asserted separately (pcm_blobs_match_their_pins_*), so
+        // equality here means fold-sequence == blob, byte for byte.
+        assert_eq!(hash.finish(), fnv1a64(pcm_for(clip.name).0));
     }
 }
 
