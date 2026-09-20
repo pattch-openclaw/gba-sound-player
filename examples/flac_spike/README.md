@@ -1,55 +1,84 @@
-# flac_spike — performance gate (placeholder)
+# flac_spike — the perf gate (Phase 1 step 4)
 
-**Status: placeholder. No code, no `Cargo.toml` — deliberately not wired into the
-build** (the root crate uses `autoexamples = false` and declares examples
-explicitly, so nothing here can be compiled by accident).
-
-This directory is where the go/no-go measurement for FLAC-on-GBA happens, before
-any real decoder work beyond the minimum needed to measure. Full rationale:
-[`../../FLAC.md`](../../FLAC.md) → "Risk & gate".
+**Status: PR 1 landed — scaffold + embedded clips.** This crate is the
+go/no-go measurement vehicle for FLAC-on-GBA. Full plan + validation rules:
+[`../../FLAC.md`](../../FLAC.md) → "Perf gate spike — concrete plan and
+validation process (2026-09-18)".
 
 ## The question
 
-Can a 16.78 MHz ARM7TDMI decode FLAC frames fast enough to keep a DMA-fed PCM
-buffer full, in real time, with no headroom for a second attempt?
+Can a 16.78 MHz ARM7TDMI decode `flac-lite` frames fast enough to keep a
+playback buffer fed, in real time, with no headroom for a second attempt?
 
-Budget per frame at the initial target (2048 samples @ 32768 Hz):
+Budget per frame at the initial profile (2048 samples @ 32,768 Hz):
 
+```text
+2048 / 32768 s × 16.78 MHz ≈ 1,048,750 cycles/frame ≈ 512 cycles/sample
 ```
-62,500 cycles per frame  (2048 / 32768 s × 16.78 MHz)
-```
 
-Leaving a sane margin for the mixer, DMA IRQs and vsync work, the working target
-is **≤ ~35,000 cycles/frame average, and no single frame above ~55,000**.
+> ⚠️ This README's placeholder stated "62,500 cycles per frame" — that is the
+> **microsecond** figure (62.5 ms = 62,500 µs) with its unit misapplied. The
+> derived budget above is ~16.78× larger, and the placeholder's working
+> targets (≤35k mean / ≤55k max) inherit the error — they are ~3% of the true
+> budget. Per the FLAC.md plan, the gate's working targets are re-derived in
+> PR 3 against *measured* mixer/DMA/vsync load, never against a recalled
+> margin. (The plan scheduled this correction for PR 5; it came early because
+> the crate landed now and a false README is worse than an early one.)
 
 ## What gets measured
 
-1. Decode-only cost per frame, FIXED predictors (orders 0–4) + partitioned Rice —
-   the constrained profile with full LPC banned (`flac -l 4`).
-2. Same, with full LPC subframes allowed — to learn what LPC costs and whether
-   `-l 4` must become a hard constraint.
-3. Cost split: bit reading vs residual decode vs predictor integration.
+1. Decode-only cost per frame for the FIXED arm (`flac -l 0`),
+2. The same for the LPC arm (`flac -l 4`) — the gate's question is the
+   **comparison** (`-l 4` emits real LPC frames; FLAC.md Correction 3),
+3. The tail, not just the mean: one over-budget frame is an audible glitch,
+   so max is reported next to min/mean.
 
-## How
+## The two embedded arms (generated, never hand-edited)
 
-- ROM example: `include_bytes!` a packed clip, decode N frames in a loop, bracket
-  each `decode_frame` with a free-running timer counter (or `agb`'s cycle-ish
-  timing facilities), and report min/max/mean cycles per frame via
-  `agb::eprintln!` so mGBA's log is the measurement output.
-- Sanity-check against a host build of the same code for correctness first — a
-  fast wrong decode measures nothing.
-- Watch the tail, not just the mean: one over-budget frame is an audible glitch.
+| Arm | Encode | Census (measured, libFLAC 1.5.0) |
+|---|---|---|
+| `L0_FIXED` | `flac -1 -l 0 -b 2048 -m` on the 10 s deterministic source | `fixed0` ×157, both slots |
+| `L4_LPC` | `flac -1 -l 4 -b 2048 -m`, same source | `lpc4` ×156 + `lpc3` ×1, both slots |
 
-## Outcomes
+Same source, two encodes ⇒ both arms must decode to byte-identical PCM (the
+witness suite asserts it). Regenerate everything:
 
-| Result | Consequence |
+```sh
+scripts/gen_spike_assets.sh    # needs flac + metaflac + python3
+```
+
+The generator (`scripts/frame_vectors.py spike_assets`) fails closed: strict
+frame-finder invariants, per-frame subframe walks with the measured footer-gap
+rule, and arm censuses — if a libFLAC upgrade ever makes `-l 0` not
+FIXED-only, or `-l 4` not majority-LPC, it refuses to write rather than emit a
+silently degenerate comparison. Committed blobs are generator output; the
+hand-packed-vector rule applies to whole clips.
+
+Files: `assets/*_frames.bin` are the raw frame regions (what the ROM embeds —
+no fLaC magic, no STREAMINFO); `assets/*_pcm.bin` are `flac -d` reference PCM
+(host-test ground truth, never embedded); `src/assets.rs` is the generated
+manifest (per-frame offset table standing in for the GAFP seek table, sizes,
+FNV-1a pins, censuses, `include_bytes!`).
+
+## Gates
+
+| Command | What it proves |
 |---|---|
-| FIXED-only fits, LPC fits | Keep the full decoder; profile stays a preference. |
-| FIXED-only fits, LPC doesn't | `flac -l 4` becomes a **hard project constraint**; reject LPC frames at pack time. |
-| Neither fits | Reduce scope: shorter loops, lower rate, order 0–1 predictors, or offline pre-processing. FLAC may not be viable on this hardware and that is a valid answer. |
+| `make spike-test` | Host witness suite: both embedded regions decode **bit-exact** vs `flac -d`, hash pins reproduce (Python ↔ Rust), corrupted seek entry breaks the walk (negative control) |
+| `make native-spike-rom` / `podman-spike-rom` | The spike ROM builds, links, fixes for `thumbv4t-none-eabi`; boots showing clip metadata + region hash verdicts (blue/red screen, BitReader-PoC convention) |
 
-## Prerequisites (in order, per FLAC.md)
+Standalone workspace; cargo config is **inherited** from the repo root — do
+not add a local `.cargo/config.toml` (the duplicated `-Tgba.ld` leak, FLAC.md).
 
-1. `bits::BitReader` + tests
-2. `format::Manifest` + real `scripts/pack_flac.sh`
-3. `subframe` FIXED + `residual` Rice → **this spike**
+## PR sequence (per the FLAC.md plan)
+
+| PR | Scope | Status |
+|---|---|---|
+| 1 | scaffold, clips, gates, host witness | ✅ |
+| 2 | on-target decode checksum (gates every perf number) | — |
+| 3 | cycle harness (calibrated, overhead subtracted) | — |
+| 4 | full-clip cadence test (double buffers vs playback time) | — |
+| 5 | verdict table + decision rule + hardware run | — |
+
+Correctness-before-speed: **no perf number is ever reported from a ROM image
+whose decode has not been proven correct on its own embedded bytes** (PR 2).

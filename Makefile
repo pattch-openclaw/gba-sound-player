@@ -1,5 +1,6 @@
 .PHONY: format build rom native-rom podman-rom flac-rom native-flac-rom podman-flac-rom \
-        test test-rom flac-test podman-test podman-test-rom podman-flac-test \
+        spike-rom native-spike-rom podman-spike-rom \
+        test test-rom flac-test spike-test podman-test podman-test-rom podman-flac-test \
         clean clean-cache check podman-check help toolchain-check
 
 # ---------------------------------------------------------------------------
@@ -52,9 +53,11 @@ IMAGE ?= gba-builder
 CARGO_CACHE   ?= gba-cargo-target
 FLAC_CACHE    ?= gba-flac-lite-target
 FLACROM_CACHE ?= gba-flac-integration-target
+SPIKE_CACHE   ?= gba-flac-spike-target
 CACHE_MOUNTS := -v $(CARGO_CACHE):/app/target:Z \
                 -v $(FLAC_CACHE):/app/crates/flac-lite/target:Z \
-                -v $(FLACROM_CACHE):/app/examples/flac_integration/target:Z
+                -v $(FLACROM_CACHE):/app/examples/flac_integration/target:Z \
+                -v $(SPIKE_CACHE):/app/examples/flac_spike/target:Z
 # GBA test harness (ROM tests boot headlessly in mGBA). Override to point
 # elsewhere, or set empty to see the raw cargo command.
 GBA_TEST_RUNNER ?= mgba-test-runner
@@ -81,6 +84,13 @@ FLAC_CRATE_DIR := examples/flac_integration
 # runs from outside the repo so the root's cargo config is not inherited).
 FLAC_CRATE_DIR_MANIFEST := $(abspath crates/flac-lite/Cargo.toml)
 FLAC_CRATE_BIN := target/$(TARGET)/release/flac-integration
+# The perf-gate spike ROM crate (examples/flac_spike/) — Phase 1 step 4, see
+# FLAC.md "Perf gate spike". Its host witness gate runs the same out-of-tree
+# --manifest-path way as flac-test (cargo config leak; FLAC.md).
+SPIKE_ROM := flac-spike.gba
+SPIKE_CRATE_DIR := examples/flac_spike
+SPIKE_CRATE_MANIFEST := $(abspath examples/flac_spike/Cargo.toml)
+SPIKE_CRATE_BIN := target/$(TARGET)/release/flac-spike
 
 # `rom` is the command run INSIDE the container (where agb-gbafix lives); the
 # *-rom targets above it are the host-facing entrypoints. Keep `rom` = the
@@ -102,6 +112,7 @@ format:
 	$(CARGO) fmt
 	cd crates/flac-lite && $(CARGO) fmt
 	cd $(FLAC_CRATE_DIR) && $(CARGO) fmt
+	cd $(SPIKE_CRATE_DIR) && $(CARGO) fmt
 else
 format:
 	@echo "format: skipping — no rustfmt for '$(TOOLCHAIN)' (build continues)."
@@ -162,6 +173,29 @@ podman-flac-rom:
 	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make flac-rom
 
 # ---------------------------------------------------------------------------
+# PERF-GATE SPIKE ROM (Phase 1 step 4 — FLAC.md "Perf gate spike").
+#
+#   spike-rom           build + fix the spike ROM (bare name: runs anywhere)
+#   native-spike-rom    build it here
+#   podman-spike-rom    build it in the container
+#
+# The measurement vehicle for the go/no-go perf gate. The root ROM crate and
+# the flac_integration sanity ROM are untouched by it.
+# ---------------------------------------------------------------------------
+
+spike-rom: format
+	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
+	agb-gbafix $(SPIKE_CRATE_DIR)/$(SPIKE_CRATE_BIN) -o $(SPIKE_ROM)
+	@echo "Spike ROM built: $(SPIKE_ROM)"
+
+native-spike-rom: spike-rom
+	@echo "native-spike-rom done: $(SPIKE_ROM)"
+
+podman-spike-rom:
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make spike-rom
+
+# ---------------------------------------------------------------------------
 # Containerized testing.
 #
 # Same convention as the ROM builds: the BARE names (`rom`, `flac-rom`, `test`,
@@ -216,6 +250,18 @@ flac-test: toolchain-check
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE)
 	@echo "flac-test passed: flac-lite compiles for $(TARGET) and passes host tests"
+
+# The spike's assets witness: the host tests (examples/flac_spike/tests/) decode
+# the EXACT embedded clips bit-exactly against flac -d reference PCM. Same
+# out-of-tree pattern as flac-test's host half — the spike crate inherits the
+# root's GBA config otherwise (cargo config leak, FLAC.md). The thumbv4t half
+# of the spike's compile gate is `make spike-rom` itself (it links the real
+# ROM, so a bare `check` would understate it).
+spike-test: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(SPIKE_CRATE_MANIFEST) --target $(HOST_TRIPLE)
+	@echo "spike-test passed: spike clips decode bit-exactly on the host"
 
 # Cargo's runner env var is the upper-cased target triple with dashes replaced
 # by underscores: CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER.
@@ -279,7 +325,8 @@ clean:
 	$(CARGO) clean
 	cd crates/flac-lite && $(CARGO) clean
 	cd $(FLAC_CRATE_DIR) && $(CARGO) clean
-	rm -f $(ROM) $(FLAC_ROM)
+	cd $(SPIKE_CRATE_DIR) && $(CARGO) clean
+	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM)
 # mGBA drops a .sav beside each ROM on local runs — emulator state,
 # remove it with the ROMs it belongs to.
 	@rm -f $(ROM:.gba=.sav) $(FLAC_ROM:.gba=.sav) *.sav
@@ -288,13 +335,14 @@ clean:
 # Safe: they are pure build caches — the next container run rebuilds from
 # scratch, slowly once, then repopulates them. Does NOT touch ./target.
 clean-cache:
-	-$(CONTAINER) volume rm $(CARGO_CACHE) $(FLAC_CACHE) $(FLACROM_CACHE) 2>/dev/null || true
-	@echo "container build-cache volumes removed ($(CARGO_CACHE), $(FLAC_CACHE), $(FLACROM_CACHE))."
+	-$(CONTAINER) volume rm $(CARGO_CACHE) $(FLAC_CACHE) $(FLACROM_CACHE) $(SPIKE_CACHE) 2>/dev/null || true
+	@echo "container build-cache volumes removed ($(CARGO_CACHE), $(FLAC_CACHE), $(FLACROM_CACHE), $(SPIKE_CACHE))."
 
 check:
 	$(CARGO) fmt --check
 	cd crates/flac-lite && $(CARGO) fmt --check
 	cd $(FLAC_CRATE_DIR) && $(CARGO) fmt --check
+	cd $(SPIKE_CRATE_DIR) && $(CARGO) fmt --check
 
 # Fail early and legibly when the pinned toolchain isn't reachable, instead of
 # half-running a gate (e.g. `--target ''` when the host triple can't be probed).
@@ -319,6 +367,11 @@ help:
 	@echo "    native-flac-rom   build $(FLAC_ROM) natively"
 	@echo "    podman-flac-rom   build $(FLAC_ROM) in the container"
 	@echo ""
+	@echo "  PERF-GATE SPIKE (FLAC.md step 4):"
+	@echo "    native-spike-rom  build $(SPIKE_ROM) natively"
+	@echo "    podman-spike-rom  build $(SPIKE_ROM) in the container"
+	@echo "    spike-test        spike asset witness tests (host, bit-exact)"
+	@echo ""
 	@echo "  Tests — native gates (need nightly + agb-gbafix + mgba-test-runner locally):"
 	@echo "    test              test-rom + flac-test (verify-only: no reformat)"
 	@echo "    test-rom          ROM #[test_case] suite in mGBA"
@@ -334,7 +387,7 @@ help:
 	@echo "    format            cargo fmt all workspaces (writes; runs before builds)"
 	@echo "    check             cargo fmt --check (verify-only gate; never writes)"
 	@echo ""
-	@echo "  Other: build, rom, flac-rom, clean, clean-cache, help"
+	@echo "  Other: build, rom, flac-rom, spike-rom, clean, clean-cache, help"
 	@echo ""
 	@echo "  Builds never gate on tests; they DO auto-run 'format' first."
 	@echo "  (no rustfmt for $(TOOLCHAIN)? format prints a notice and skips.)"

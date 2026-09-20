@@ -1,0 +1,56 @@
+[package]
+name = "flac-spike"
+version = "0.1.0"
+edition = "2024"
+
+# The perf-gate spike ROM (Phase 1 step 4) — see ../../FLAC.md, "Perf gate
+# spike — concrete plan and validation process (2026-09-18)".
+#
+# PR 1 scope: scaffold + embedded clips. Two ~10 s arms of the same
+# deterministic source (FIXED-only at -l 0, LPC at -l 4), sliced to raw frame
+# regions with a generated offset table (the deliberate stand-in for the GAFP
+# manifest). The ROM boots and verifies its embedded region hashes; the host
+# witness tests (tests/spike_witness.rs) decode the exact embedded bytes
+# bit-exactly against `flac -d` reference PCM.
+#
+# Standalone workspace (own Cargo.toml + [workspace]), config INHERITED from
+# the repo root — do NOT add a local .cargo/config.toml: cargo concatenates
+# target.<triple>.rustflags across config layers, and a local re-declaration
+# links `-Tgba.ld` twice (FLAC.md, "Second leak variant").
+#
+#   make native-spike-rom    build + fix the spike ROM (this host)
+#   make spike-test          host witness tests (correctness of the assets)
+#
+# The root ROM crate stays FLAC-free; the baseline .gba never sees this code.
+
+[dependencies]
+flac-lite = { path = "../../crates/flac-lite" }
+
+# agb exists only for the GBA target, and it cannot build for the host triple
+# — while the host witness tests (make spike-test) compile this crate's lib
+# + tests natively. Gate by architecture: thumbv4t-none-eabi reports
+# target_arch = "arm"; the macOS/Linux hosts are aarch64/x86_64. This mirrors
+# what a per-target dependency in agb project templates does, and it keeps
+# `cargo test --target <host>` free of the agb dependency graph entirely.
+[target.'cfg(target_arch = "arm")'.dependencies]
+agb = "0.25.0"
+
+[[bin]]
+name = "flac-spike"
+path = "src/main.rs"
+# `cargo test` must not build the ROM bin: it is a no_main GBA binary whose
+# entry exists only under agb. The witness tests link against the lib alone.
+test = false
+bench = false
+
+[workspace]
+
+# Same profile choices as examples/flac_integration/: the release ROM is what
+# PR 3 will measure, so optimization must match what ships to the emulator.
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true

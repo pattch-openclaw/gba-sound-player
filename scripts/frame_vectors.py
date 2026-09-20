@@ -8,6 +8,9 @@ Subcommands:
   emit  SRC_DIR OUT_FILE   parse SRC_DIR/*.flac, write the vector table
   emit_bodies SRC_DIR OUT  walk whole subframes of the body-vector streams,
                           write the subframe-body table (step 3e ground truth)
+  spike_assets SRC_DIR DIR stage the perf-gate spike's embedded clips (raw
+                          frame regions, reference PCM, generated manifest;
+                          arm censuses fail closed — FLAC.md "Perf gate spike")
 
 Why this exists: the frame-header golden vectors must not be hand-packed.
 Hand-packing is exactly how the "fixed fields are 31 bits / channels is 3 bits"
@@ -1508,6 +1511,293 @@ def measure(src):
           ("TOTAL", totals[0], totals[1], totals[2], totals[3]))
 
 
+# ------------------------------------------------ perf-gate spike assets (step 4)
+
+def fnv1a64(data):
+    """FNV-1a 64-bit over bytes. Mirrored in Rust in the spike crate (the host
+    witness recomputes it, PR 2's ROM recomputes it on hardware): two
+    independent implementations of one simple hash, meeting on committed
+    bytes. Python's unbounded ints are masked to 64 bits per step, which is
+    exactly Rust's wrapping arithmetic."""
+    h = 0xCBF43CE95DE684B7
+    for byte in data:
+        h ^= byte
+        h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def spike_census(filename, frames, data, info):
+    """Walk EVERY subframe slot of EVERY frame of a stereo spike stream;
+    return a census string like 'slot 0: fixed0 x157 | slot 1: fixed0 x157'.
+
+    Fail-closed on the two measured facts the perf gate's comparison stands on
+    (FLAC.md Correction 3): `-l 0` is FIXED-only, `-l 4` is majority real LPC.
+    If a libFLAC upgrade ever breaks an arm, the two arms stop being a
+    comparison — the generator must refuse, loudly, not emit a silently
+    degenerate gate.
+
+    The walk doubles as the region-slicing witness: every frame's subframe
+    exit + the measured footer gap (pad-to-byte, then the 16-bit CRC) must
+    land exactly on the next frame's offset (EOF for the last frame). A
+    mis-sized field anywhere breaks that arithmetic on every frame.
+
+    Side-slot width follows the *measured* seam (FLAC.md step 3f part 1): a
+    decorrelated frame codes its side subframe at bps + 1.
+    """
+    tally = []
+    for i, header in enumerate(frames):
+        bps = header["bps"] or info["bits-per-sample"]
+        assert header["subframes"] == 2, \
+            "%s frame %d: expected stereo, got %d subframes" % (
+                filename, i, header["subframes"])
+        bits = Bits(data, header["offset"] * 8 + header["header_bits"])
+        # Side slot per the measured orientation (FLAC.md step 3f): left-side
+        # stores the side at slot 1, side-right at slot 0, mid-side at slot 1
+        # — the same mapping crate-internal decode_frame uses.
+        side_slot = {0b1000: 1, 0b1001: 0, 0b1010: 1}.get(header["chan_code"])
+        kinds = []
+        for slot in range(2):
+            slot_bps = bps + 1 if slot == side_slot else bps
+            walk = walk_subframe(bits, header["blocksize"], slot_bps)
+            kinds.append("%s%d" % (walk["kind"], walk["order"]))
+        tally.append(kinds)
+        exit_bit = bits.pos
+        padded = exit_bit + ((8 - exit_bit % 8) % 8)
+        end_bit = (frames[i + 1]["offset"] * 8 if i + 1 < len(frames)
+                   else len(data) * 8)
+        assert padded + 16 == end_bit, \
+            ("%s frame %d: subframe exit %d + footer gap does not land on the "
+             "next frame (expected end bit %d) — census walk or region "
+             "slicing is wrong" % (filename, i, exit_bit, end_bit))
+    per_slot = []
+    for slot in range(2):
+        slot_tally = {}
+        for kinds in tally:
+            slot_tally[kinds[slot]] = slot_tally.get(kinds[slot], 0) + 1
+        per_slot.append(", ".join("%s x%d" % kv
+                                  for kv in sorted(slot_tally.items())))
+    census = "slot 0: %s | slot 1: %s" % (per_slot[0], per_slot[1])
+
+    # Arm censuses, fail closed (measured libFLAC 1.5.0 facts).
+    flat = [k for kinds in tally for k in kinds]
+    if filename == "l0_stereo.flac":
+        assert all(k.startswith("fixed") for k in flat), \
+            "%s: the -l 0 arm is no longer FIXED-only (%s) — the gate's FIXED "\
+            "arm would silently measure something else. Re-measure first." % (
+                filename, census)
+    elif filename == "l4_stereo.flac":
+        assert all(k.startswith(("fixed", "lpc")) for k in flat), \
+            "%s: the -l 4 arm carries kinds outside fixed/lpc (%s)" % (
+                filename, census)
+        lpc = sum(1 for k in flat if k.startswith("lpc"))
+        assert lpc * 2 >= len(flat), \
+            "%s: the -l 4 arm is no longer majority LPC (%d/%d, %s) — the "\
+            "FIXED-vs-LPC comparison would measure one arm twice. "\
+            "Re-measure first." % (filename, lpc, len(flat), census)
+    return census
+
+
+def spike_assets(src, crate_dir):
+    """Stage the perf gate spike's embedded clips (FLAC.md, "Perf gate spike —
+    concrete plan", PR 1). Writes under the spike crate:
+
+      assets/spike_l0_frames.bin    raw frame region, the -l 0 encode
+      assets/spike_l0_pcm.bin       reference PCM (flac -d), 16-bit LE interleaved
+      assets/spike_l4_frames.bin    raw frame region, the -l 4 encode
+      assets/spike_l4_pcm.bin       reference PCM likewise
+      src/assets.rs                 generated manifest: offset table, sizes,
+                                    FNV-1a pins, censuses, include_bytes! pins
+
+    Offsets are RELATIVE TO THE REGION (the region alone is what gets
+    embedded: no fLaC magic, no STREAMINFO). This is the plan's hand-computed
+    offset array — the spike's deliberate stand-in for the GAFP manifest's
+    seek table. Everything derives from the strict frame finder whose
+    exactness check_stream proves per stream; nothing is hand-packed.
+
+    The PCM .bin files are host-test ground truth only; src/assets.rs
+    embeds the frame regions and pins the PCM by hash, so the ROM image
+    never carries a byte of reference data."""
+    import hashlib
+    import json
+    version = subprocess.run(["flac", "--version"], capture_output=True,
+                             text=True).stdout.strip().splitlines()[0]
+
+    def qstr(text):
+        # Rust-safe double-quoted string literal. ensure_ascii=False is
+        # load-bearing: json's default escapes non-ASCII to \\uXXXX, which is
+        # valid JSON but NOT valid Rust (Rust wants \\u{XXXX}). With literal
+        # UTF-8, the only escapes are \", \\, and control chars — where JSON
+        # and Rust agree exactly. (Caught by the compiler on the em dash in
+        # the LPC arm's `why` — a generated-file bug, found by the build, not
+        # by review: the gates earning their keep.)
+        return json.dumps(text, ensure_ascii=False)
+
+    arms = (
+        # (stream, const, blob prefix, why this arm exists)
+        ("l0_stereo.flac", "L0_FIXED", "spike_l0",
+         "FIXED-only arm (flac -1 -l 0 -b 2048 -m): the gate's conservative "
+         "predictor cost"),
+        ("l4_stereo.flac", "L4_LPC", "spike_l4",
+         "LPC arm (flac -1 -l 4 -b 2048 -m): the gate's full-profile cost "
+         "(majority LPC — FLAC.md Correction 3)"),
+    )
+    assets_dir = os.path.join(crate_dir, "assets")
+    os.makedirs(assets_dir, exist_ok=True)
+    clips = []
+    for filename, const, prefix, why in arms:
+        path = os.path.join(src, filename)
+        with open(path, "rb") as handle:
+            data = handle.read()
+        info = streaminfo(path)
+        frames = find_frames(data)
+        check_stream(filename, frames, info)
+        assert (info["channels"], info["bits-per-sample"], info["sample_rate"]) \
+            == (2, 16, 32000), "%s: expected 16-bit stereo 32 kHz, got %s" % (
+                filename, info)
+        census = spike_census(filename, frames, data, info)
+        start = first_frame_offset(data)
+        assert frames[0]["offset"] == start, \
+            "%s: first found frame is not the region start" % filename
+        region = data[start:]
+        offsets = [h["offset"] - start for h in frames]
+        assert offsets[0] == 0, "%s: first frame not at region start" % filename
+        assert offsets == sorted(set(offsets)), \
+            "%s: frame offsets not strictly ascending" % filename
+        ends = offsets[1:] + [len(region)]
+        assert all(e > o for e, o in zip(ends, offsets)), \
+            "%s: degenerate frame span" % filename
+        assert sum(e - o for e, o in zip(ends, offsets)) == len(region), \
+            "%s: frame table does not tile the region exactly" % filename
+        assert sum(h["blocksize"] for h in frames) == info["total samples"], \
+            "%s: per-frame blocksizes do not cover total samples" % filename
+        pcm = reference_pcm(path)
+        pcm_bytes = struct.pack("<%dh" % len(pcm), *pcm)
+        assert len(pcm_bytes) == info["total samples"] * 2 * 2, \
+            "%s: reference PCM size mismatch" % filename
+        region_path = os.path.join(assets_dir, prefix + "_frames.bin")
+        pcm_path = os.path.join(assets_dir, prefix + "_pcm.bin")
+        with open(region_path, "wb") as handle:
+            handle.write(region)
+        with open(pcm_path, "wb") as handle:
+            handle.write(pcm_bytes)
+        clips.append(dict(
+            filename=filename, const=const, prefix=prefix, why=why,
+            region=region, region_path=region_path, frames=frames,
+            offsets=offsets, census=census, info=info,
+            fnv_frames=fnv1a64(region), fnv_pcm=fnv1a64(pcm_bytes),
+            sha_region=hashlib.sha256(region).hexdigest(),
+            sha_pcm=hashlib.sha256(pcm_bytes).hexdigest(),
+        ))
+
+    lines = []
+    w = lines.append
+    w("//! flac_spike embedded clips — GENERATED")
+    w("//! DO NOT EDIT BY HAND.  Regenerate:  scripts/gen_spike_assets.sh")
+    w("//! Generator: scripts/frame_vectors.py spike_assets (strict frame finder,")
+    w("//! fail-closed arm censuses; FLAC.md 'Perf gate spike' validation rules).")
+    w("//! Encoder: %s" % version)
+    w("//!")
+    w("//! sha256 pins (regeneration tripwires; the witness tests carry the")
+    w("//! FNV-1a pins in code, these are for humans reviewing a regen diff):")
+    for clip in clips:
+        w("//!   %-24s region %s" % (os.path.basename(clip["region_path"]),
+                                     clip["sha_region"]))
+        w("//!   %-24s pcm    %s" % (clip["prefix"] + "_pcm.bin", clip["sha_pcm"]))
+        w("//!   census(%s): %s" % (clip["filename"], clip["census"]))
+    w("//!")
+    w("//! Offsets are BYTE OFFSETS WITHIN THE EMBEDDED REGION (frame 0 at 0),")
+    w("//! the spike's deliberate stand-in for the GAFP manifest's seek table.")
+    w("//!")
+    w("//! fnv_* are FNV-1a 64-bit: fnv_frames over the region bytes, fnv_pcm")
+    w("//! over the reference PCM bytes (16-bit LE interleaved L,R). Witness")
+    w("//! layers: the host test recomputes both in Rust and decodes the region")
+    w("//! bit-exactly into the PCM; PR 2's ROM recomputes fnv_pcm on hardware.")
+    w("")
+    w("/// One frame's placement in the region: byte offset and sample count")
+    w("/// (the final frame of a track is legitimately short — FLAC.md).")
+    w("/// `Clone + Copy`: two plain ints; the witness tests (and PR 4's")
+    w("/// buffer rotation) build mutated copies of seek-table slices.")
+    w("#[derive(Clone, Copy)]")
+    w("pub struct FrameMeta {")
+    w("    /// Byte offset of the frame header within the embedded region.")
+    w("    pub offset: u32,")
+    w("    /// Samples per subframe for THIS frame. Per-frame truth, not a")
+    w("    /// track-wide constant: the tail frame is short.")
+    w("    pub blocksize: u16,")
+    w("}")
+    w("")
+    w("/// One embedded arm: metadata, the seek table, the `include_bytes!`")
+    w("/// region, and the hash pins. The reference PCM lives only in the")
+    w("/// `assets/*_pcm.bin` files (host-test ground truth) — the ROM image")
+    w("/// never embeds reference data, it pins it by hash.")
+    w("pub struct SpikeClip {")
+    w("    /// Arm label for logs.")
+    w("    pub name: &'static str,")
+    w("    /// What this arm measures (generated; logged at ROM boot).")
+    w("    pub why: &'static str,")
+    w("    /// Measured subframe census (generator refuses a broken census).")
+    w("    pub census: &'static str,")
+    w("    /// Stream sample rate in Hz (the profile pins one rate per clip).")
+    w("    pub sample_rate_hz: u32,")
+    w("    /// Stream bit depth (the profile's 16-bit).")
+    w("    pub bits_per_sample: u8,")
+    w("    /// Channel count (2 for both arms).")
+    w("    pub channels: u8,")
+    w("    /// Total samples per channel across all frames.")
+    w("    pub total_samples: u32,")
+    w("    /// Largest per-frame blocksize: the playback buffer size per channel.")
+    w("    pub max_blocksize: u16,")
+    w("    /// The seek table: frame 0 at offset 0, ascending, tiling exactly.")
+    w("    pub frames: &'static [FrameMeta],")
+    w("    /// The raw frame region — what `include_bytes!` embeds in the ROM.")
+    w("    pub region: &'static [u8],")
+    w("    /// File name (under `assets/`) of the reference PCM blob —")
+    w("    /// host-test ground truth only, never embedded by the ROM.")
+    w("    pub pcm_file: &'static str,")
+    w("    /// FNV-1a 64 of `region`.")
+    w("    pub fnv_frames: u64,")
+    w("    /// FNV-1a 64 of the reference PCM bytes (NOT embedded).")
+    w("    pub fnv_pcm: u64,")
+    w("}")
+    for clip in clips:
+        w("")
+        w("/// %s" % clip["why"])
+        w("pub const %s: SpikeClip = SpikeClip {" % clip["const"])
+        w("    name: %s," % qstr(os.path.splitext(clip["filename"])[0]))
+        w("    why: %s," % qstr(clip["why"]))
+        w("    census: %s," % qstr(clip["census"]))
+        w("    sample_rate_hz: %d," % clip["info"]["sample_rate"])
+        w("    bits_per_sample: %d," % clip["info"]["bits-per-sample"])
+        w("    channels: %d," % clip["info"]["channels"])
+        w("    total_samples: %d," % clip["info"]["total samples"])
+        w("    max_blocksize: %d," % max(h["blocksize"] for h in clip["frames"]))
+        w("    frames: &[")
+        for h, off in zip(clip["frames"], clip["offsets"]):
+            w("        FrameMeta { offset: %d, blocksize: %d }," % (off, h["blocksize"]))
+        w("    ],")
+        w("    region: include_bytes!(%s)," % qstr("../assets/" + os.path.basename(clip["region_path"])))
+        w("    pcm_file: %s," % qstr(clip["prefix"] + "_pcm.bin"))
+        w("    fnv_frames: 0x%016X," % clip["fnv_frames"])
+        w("    fnv_pcm: 0x%016X," % clip["fnv_pcm"])
+        # A const item's struct-literal initializer must end `};` — `}` alone
+        # parses as an expression statement, and the NEXT item's doc comment
+        # becomes "unexpected token". (A lexer error earlier in the file
+        # masked this on the first build: fix one generated-file bug, the
+        # parser advances just far enough to reveal the next. Compile gates.)
+        w("};")
+        print("   %-16s %9d frame bytes, %6d frames, census: %s"
+              % (clip["filename"], len(clip["region"]), len(clip["frames"]),
+                 clip["census"]))
+    w("")
+    w("/// Both arms, in gate order (FIXED first — the arm a decision defaults to).")
+    w("pub const CLIPS: [&SpikeClip; 2] = [&L0_FIXED, &L4_LPC];")
+    out_path = os.path.join(crate_dir, "src", "assets.rs")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "w") as handle:
+        handle.write("\n".join(lines) + "\n")
+    print("   wrote %s (%d clips)" % (out_path, len(clips)))
+
+
 def main():
     if len(sys.argv) < 3:
         raise SystemExit(__doc__)
@@ -1520,12 +1810,14 @@ def main():
         emit_bodies(sys.argv[2], sys.argv[3])
     elif what == "emit_runs":
         emit_runs(sys.argv[2], sys.argv[3])
+    elif what == "spike_assets":
+        spike_assets(sys.argv[2], sys.argv[3])
     elif what == "measure":
         measure(sys.argv[2])
     else:
         raise SystemExit("usage: frame_vectors.py synth DIR | emit DIR OUT "
                          "| emit_bodies DIR OUT | emit_runs DIR OUT "
-                         "| measure DIR")
+                         "| spike_assets DIR CRATE_DIR | measure DIR")
 
 
 if __name__ == "__main__":
