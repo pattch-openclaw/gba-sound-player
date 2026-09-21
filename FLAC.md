@@ -2153,9 +2153,11 @@ the driver hands both windows sliced to `written` each. Same failure mode as
 a hand-packed vector (author's belief about the bytes), caught by the same
 discipline — the witness, not review.
 
-**Measurements (mGBA 0.10.5, 2026-09-20; ROM `flac-spike.gba` sha256
-`8443b1b2e0023179324f7d9ae8dc6c457712602be7dd3eeab3822d20a80dea3a`; net of
-the 22-cycle overhead; both arms 157 frames, 320,000 samples):**
+**Measurements (mGBA 0.10.5; ROM `flac-spike.gba` sha256
+`0d97659165b2900600305ee1d7438f90c9f3e05d479068431ef7b6cc6bfeedb3` —
+rebuild of the committed source, hashes identical across rebuilds; runs
+2026-09-21; net of the 22-cycle overhead; both arms 157 frames, 320,000
+samples):**
 
 | arm | min @frame | max @frame | sum (cycles) | mean = sum/157 (derived) | worst % of 1,048,750 budget | mean cycles/sample (sum/320,000) |
 |---|---|---|---|---|---|---|
@@ -2170,14 +2172,21 @@ the 512-sample tail (frame 156, budget 262,187) costs 585,301 on FIXED —
 roughly proportionally. **No decision is taken here** — PR 5 executes the
 rule (cap at `-l 0` / pre-processing / scope reduction) after PR 4's cadence
 data and the hardware confirmation; candidate explanations (EWRAM scratch
-wait-states, i32 accumulation width, emulator-vs-hardware timing) are PR
-4/5's investigation list, not findings.
+wait-states, i32 accumulation width, emulator-vs-hardware timing) are
+collected as the [perf follow-up experiment
+menu](#perf-follow-ups--experiment-menu-for-the-over-budget-numbers-2026-09-21)
+— explorations to run, explicitly not findings.
 
 **Witness strategy, executed.** The plan line's two witnesses: (1)
 calibration ≈ 0 net — 22-cycle stable overhead, nets all 0, both arms; (2)
 repeated runs of the same ROM identical — two full headless mGBA runs, 675
 serial lines each, `cmp` byte-identical (mgba-test-runner still hangs as a
-gfx-loop ROM — expected, killed after the verdict line lands). Plus the
+gfx-loop ROM — expected, killed after the verdict line lands). The same
+holds across the verdict-line rework: the pre-rework image
+(`8443b1b2e0023179…`, run twice 2026-09-20, also byte-identical to itself)
+diffs against the committed image's log on exactly one line — the verdict
+wording — every calibration, per-frame net, stats, and budget line
+identical, so the table above is the measurement of both images. Plus the
 shared-fold witness (stats fold + budget arithmetic through the driver on
 the embedded bytes), the calibration-as-determinism-probe (5 identical raws
 required before any frame is timed — an unstable calibration voids numbers
@@ -2200,10 +2209,13 @@ an explicit named one.
 (PR 4). No verdict table, hardware run, spike-README budget correction, or
 encode-profile restatement (PR 5 — the RED screen here reports a measurement,
 not yet the project's verdict). The screen verdict ANDs budget into the
-timing pass/fail, so an over-budget run prints `timing+budget 0/2` even
-though both arms timed completely — the serial lines disambiguate
-(`[OVER BUDGET]` vs harness `FAIL` lines); reworking the summary line waits
-for PR 5's verdict UI. `podman-spike-rom` not run on this host (no nested
+timing pass/fail, but the summary line distinguishes the two failure modes:
+an over-budget run prints `measured 2/2, within budget 0/2` — harness
+completion and budget verdict counted separately — while per-arm
+`[OVER BUDGET]` lines disambiguate from harness `FAIL` lines. (An earlier
+draft collapsed both into `timing+budget 0/2`, misreading a completed
+measurement as zero arms measured; the rework shipped in this PR rather
+than waiting for PR 5's verdict UI.) `podman-spike-rom` not run on this host (no nested
 virtualization — FLAC.md build constraint, same note as PR 1/PR 2).
 
 **Gates:** `make spike-test` green — **15 unit** (was 8: +7 stats — wrap
@@ -2214,3 +2226,95 @@ counts re-measured at HEAD in a clean worktree. `make flac-test`
 unchanged-green (91 unit + all integration suites; flac-lite untouched).
 `make native-spike-rom` builds/links/fixes; the rebuilt image hashes
 identical (asset regions untouched). `make check` clean (fmt included).
+
+## Perf follow-ups — experiment menu for the over-budget numbers (2026-09-21)
+
+**Explorations, not the plan.** PR 3 measured both arms far over the derived
+budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
+512) with the harness itself witnessed clean. The magnitude has no
+explanation yet — for context, FIXED-0 decode is Rice codewords plus a
+running sum, so an optimized GBA decode should land far below budget, not
+2.2× over: the gap is plausibly plumbing (memory timing, accumulator
+widths), not algorithmic. Nothing here changes the plan of record (PR 4
+cadence, PR 5 verdict + hardware run); these are candidate probes, written
+for manual tinkering on the PR #49 branch. All suspicion claims below are
+**hypotheses to measure**, not findings — same rule as everywhere else in
+this file.
+
+**Method rules per variant** (the discipline that makes tinkering honest):
+one variable per run; `make spike-test` stays green (it re-decodes the exact
+embedded bytes bit-exact vs `flac -d` — a speed change that keeps it green
+changes *how*, never *what*); record the new ROM sha256 per variant; two
+headless runs `cmp` byte-identical; report the same stats (min/max/sum +
+worst-frame index) on both arms, net of that variant's own calibration.
+Loop: `make native-spike-rom` → `mgba-test-runner flac-spike.gba` with
+serial captured to a log (kill after the verdict line — the runner hangs on
+gfx-loop ROMs, expected) → `grep -E "stats:|budget:|verdict" <log>`.
+
+**Measurement entry points** (spike crate): `timing_pass()` — the per-frame
+loop; the closure handed to `timed()` is exactly what is measured.
+`timed()` — window mechanics (IME-off critical section, composite reads);
+`CALIBRATION_SAMPLES` just above. `BUDGET_CYCLES_PER_FRAME` — the
+`real_time_budget(2048, 32_768)` constant. Never touch `src/assets.rs` or
+the committed `.bin`s — region pins gate every layer above.
+
+### E1 — ROM→RAM staging (the decisive first probe; spike-only)
+
+In the timing loop, memcpy each frame's region slice into a static scratch
+buffer **outside** the measurement window, then decode from a borrowed copy
+(`SpikeClip.region` swapped to the RAM slice; offsets are region-relative,
+so the seek table stays valid — frame N's length is offset N+1 − offset N,
+tail to region end). The copy itself reads ROM, so it gets its own timed
+window, reported alongside. Reading: if net decode cycles collapse while
+staged, cartridge-read timing dominates the current numbers → E2 is the
+production fix (shipping decode always reads ROM); if they don't, memory
+timing is not the story and E3/E4 move up. Regions are 865,340 / 835,884 B
+(PR 1 serial) — stage per frame (avg ≈5.3 KB/frame; a 16 KB static is
+ample), not whole-clip.
+
+### E2 — Bit-reader refill accumulator (`bits.rs`)
+
+The reader is position-only: every `read_bits` recomputes from `bit_pos`,
+re-fetching from the backing slice (up to 5 byte loads worst case at
+n=32; the Rice unary loop's 1-bit calls re-fetch their byte every call —
+no byte ever stays in a register between reads). The module doc
+pre-authorized exactly this change: *"If the perf spike … shows the bit
+reader hot, a buffer can be added behind the same API without touching
+callers."* Shape: a 32- or 64-bit big-endian accumulator + refill, with
+`clz` for the unary quotient (`residual.rs`'s `while read_bits(1)? == 0`
+becomes one masked `clz`). The API is unchanged, so the whole witness suite
+carries correctness for free. ARMv4T has CLZ and no divide — the design
+fits the target.
+
+### E3 — Decode scratch to IWRAM
+
+`timing_pass` heap-allocates the two `2048 × i32` buffers from agb's EWRAM
+heap (PR 2 serial: `0x02000610` / `0x02002610`) — every decoded sample
+write and every LPC/warm-up read pays EWRAM wait-states. Variant: static
+buffers in IWRAM (16 KB vs the 32 KB budget, tight against stack + agb
+internals — confirm the section/attribute against the linker script the agb
+build actually uses before trusting any `.iwram` incantation). The EWRAM
+allocation can remain as the control arm in the same run.
+
+### E4 — i64 intermediates → proven-safe i32 (`subframe.rs`)
+
+`integrate_fixed`'s cascade, `pad_block`, and the warm-up `fill` accumulate
+in i64 — multi-instruction arithmetic on a 32-bit ARM7TDMI with no 64-bit
+registers. The module doc already routed this decision here: *"the perf
+spike decides whether i32 is provably safe (it is for 16-bit input, but
+prove it before trusting it)."* Prove = a carry/overflow analysis over the
+constrained profile (16-bit samples, FIXED order ≤4 cascade, LPC dot
+product bounds), documented in the commit — not vibes. Expect the LPC arm
+to move most.
+
+### E5 — Emulator fidelity (arbitration, not an experiment)
+
+mGBA's gamepak wait-state model may be stricter or looser than hardware.
+PR 5's on-cart run of the exact ROM is the planned arbiter. If E1–E3 close
+the gap on mGBA, hardware confirms; if mGBA drops but hardware doesn't,
+the emulator was overestimating cart waits — record which way, it changes
+what "real-time on hardware" claims for the whole gate.
+
+**Ordering:** E1 first (cheapest, splits the hypothesis space), then E2 if
+E1 blames ROM reads, E3/E4 otherwise — but any order is fine for tinkering
+as long as each run changes one variable and reports the full stats line.
