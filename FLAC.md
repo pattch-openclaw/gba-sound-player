@@ -763,7 +763,13 @@ for the playback path?**
    same image that will be measured. **This PR gates PRs 3–5: no perf number is
    trusted from a ROM image whose decode has not been proven correct on its own
    embedded bytes** (a fast wrong decode measures nothing).
-3. **Cycle harness + per-frame cost.** A free-running 16.78 MHz counter around
+3. **Cycle harness + per-frame cost.** **Done 2026-09-20** — see
+   [Completed: spike PR 3 — cycle harness + per-frame
+   cost](#completed-spike-pr-3--cycle-harness--per-frame-cost-2026-09-20).
+   First numbers in: both arms measured **over** the derived budget on mGBA
+   (FIXED mean ≈219% of budget, LPC ≈654%); harness witnesses green, so the
+   numbers are real — interpretation and the decision rule are PR 5's job.
+   Original plan line: a free-running 16.78 MHz counter around
    `decode_frame` — DIV result counter (32-bit, full-speed cycle ticks) or
    overflow-chained timer, chosen at implementation; empty-window calibration
    run first so harness overhead is subtracted and reported alongside raw.
@@ -2077,3 +2083,134 @@ suites; flac-lite untouched). `make native-spike-rom` builds/links/fixes.
 `make check` clean (fmt included). mGBA run: 338 serial lines, 0 FAIL/
 MISMATCH, BLUE (mgba-test-runner still hangs as a gfx-loop ROM — expected,
 PR 1's note; killed after the verdict line lands).
+
+## Completed: spike PR 3 — cycle harness + per-frame cost (2026-09-20)
+
+Phase 1 step 4's third PR lands the measurement instrument and, with it, the
+gate's **first real numbers**: both arms decode far over the derived
+real-time budget on mGBA — FIXED mean ≈ 219% of budget, LPC ≈ 654%. The
+harness witnesses are green, so these numbers are what they claim to be;
+interpreting them and executing the decision rule stay deliberately PR 5's
+job (that PR also owns the hardware-confirmation run — mGBA is an emulator).
+
+**Counter mechanism (chosen at implementation, per the plan line).** Timer2
+at /1 (one tick per CPU cycle at 16.78 MHz) free-running and cascading into
+timer3, read as a 32-bit composite with the low–high–low stability recheck
+(one retry resolves the race: ~2 reads wide against a 65,536-cycle tick
+period). Chosen over the DIV result counter because the timer pair is
+documented hardware driven entirely through agb 0.25's safe API
+(`set_divider`/`set_cascade`/`set_enabled`/`value`/`set_overflow_amount`),
+while trusting DIV as an idle-cycle counter would rest on an unverified
+emulator-behavior claim — exactly the recalled-figure failure mode FLAC.md
+keeps catching. A window that outlives the composite (pair wraps mid-frame)
+cannot be recovered from two reads: it saturates to `stats::WORST_WRAPPED`,
+reports as worst, and fails the checkpoint loudly rather than silently
+reporting the modulo — a truncated cycle count would understate precisely
+the one number this gate exists to catch (`wrapped=false` on both arms).
+
+**What landed.** `examples/flac_spike/src/stats.rs` (new lib module):
+`FrameCost` (running min/max/sum/worst-index, ties held by the first frame —
+pinned by host tests), `cycles_between` (the wrap rule above), and
+`real_time_budget(blocksize, rate)` — the budget as `const fn` arithmetic
+(u64 multiply then one divide, evaluated at compile time in the ROM).
+Shared-fold rule from PR 2 applied again: the ROM calls this one
+implementation; the host witness drives the same fold through the same
+driver over the embedded bytes. `mean()` exists but is **host-only** — the
+ARM7TDMI has no hardware divide, so the ROM reports `sum + count` and the
+mean is derived as arithmetic (stated deviation from the plan line's "mean
+cycles to serial"; the serial prints the division itself: `sum/count`).
+ROM (`src/main.rs`): checkpoint 4 after PR 2's decode proof — per arm, 5
+empty-window calibration samples first, then one timed `driver::decode_one`
+per frame (decode logic untouched, same seek-table seam). Windows run inside
+agb's `critical_section` (its acquire/release is an IME save/disable/
+restore), IME witnessed 0 inside via the calibration probe and logged before/
+after the section; **all logging happens outside the window** — a serial
+write inside would measure the logger. Per-frame serial: `*** <arm> frame
+N/157 bs= raw= net=`; per arm: stats line (count/min@frame/max@frame/sum/
+wrapped), the mean-as-division line, and worst-frame-vs-budget against
+`real_time_budget(2048, 32_768) = 1,048,750` — the plan's stricter figure,
+not the clips' true 32 kHz window (1,073,920); both pinned by tests as
+arithmetic. Correctness-before-speed is structural: any failed decode proof
+skips timing for every arm; the screen verdict ANDs decode-proof with the
+budget check, and the log says timing was skipped on an unproven image.
+
+**Calibration caught the harness measuring itself (the step's finding).**
+The first draft recorded `ime_inside` with an `if i == 0` store *inside* the
+calibration closure — bookkeeping asymmetric to the other windows. mGBA
+measured exactly that: raw 24 on sample 1 vs 22 on samples 2–5, and the
+stability check refused the run (`calibration unstable — numbers void`).
+Fix: every calibration window now runs byte-identical code (one IME probe),
+bookkeeping outside. Final calibration: **raw 22 stable on all 5 samples,
+both arms; all nets 0** — the ≈0 witness, and overhead 22 cycles subtracted
+from every frame window (raw reported alongside net everywhere).
+
+**The new witness caught a blocksize double-count live.** The host witness
+(`cycle_fold_witness_on_embedded_bytes`, `make spike-test`) folds each
+frame's `real_time_budget` through `FrameCost` and asserts against the seek
+table's own blocksizes. First draft summed both channel windows → the
+assertion fired 4096 vs 2048: FLAC blocksize is samples **per channel**;
+the driver hands both windows sliced to `written` each. Same failure mode as
+a hand-packed vector (author's belief about the bytes), caught by the same
+discipline — the witness, not review.
+
+**Measurements (mGBA 0.10.5, 2026-09-20; ROM `flac-spike.gba` sha256
+`8443b1b2e0023179324f7d9ae8dc6c457712602be7dd3eeab3822d20a80dea3a`; net of
+the 22-cycle overhead; both arms 157 frames, 320,000 samples):**
+
+| arm | min @frame | max @frame | sum (cycles) | mean = sum/157 (derived) | worst % of 1,048,750 budget | mean cycles/sample (sum/320,000) |
+|---|---|---|---|---|---|---|
+| `l0_stereo` (FIXED) | 585,301 @156 | 2,314,473 @60 | 361,095,055 | 2,299,968 (+79 rem) | 220.7% | ≈ 1,128 |
+| `l4_stereo` (LPC ≤4) | 1,506,681 @156 | 6,901,384 @136 | 1,077,175,030 | 6,860,987 (+71 rem) | 658.0% | ≈ 3,366 |
+
+Budget arithmetic for comparison: 512 cycles/sample at the plan's 32,768-Hz
+budget (524.4 at the clips' true 32 kHz). The LPC/FIXED ratio ≈ 2.98 is the
+gate's comparison signal. Even the cheapest frame is over its own budget:
+the 512-sample tail (frame 156, budget 262,187) costs 585,301 on FIXED —
+2.2×, so this is not a long-frame tail effect; cost tracks sample count
+roughly proportionally. **No decision is taken here** — PR 5 executes the
+rule (cap at `-l 0` / pre-processing / scope reduction) after PR 4's cadence
+data and the hardware confirmation; candidate explanations (EWRAM scratch
+wait-states, i32 accumulation width, emulator-vs-hardware timing) are PR
+4/5's investigation list, not findings.
+
+**Witness strategy, executed.** The plan line's two witnesses: (1)
+calibration ≈ 0 net — 22-cycle stable overhead, nets all 0, both arms; (2)
+repeated runs of the same ROM identical — two full headless mGBA runs, 675
+serial lines each, `cmp` byte-identical (mgba-test-runner still hangs as a
+gfx-loop ROM — expected, killed after the verdict line lands). Plus the
+shared-fold witness (stats fold + budget arithmetic through the driver on
+the embedded bytes), the calibration-as-determinism-probe (5 identical raws
+required before any frame is timed — an unstable calibration voids numbers
+rather than reporting them), and PR 2's decode proof as a required preceding
+layer: this image's timing is only trusted because this image's decode was
+proven on its own bytes (PCM FNV `0x54C7B356621B6E15` matched, cross-arm
+agree).
+
+**Prior assumptions that died this step.** None about FLAC bytes or decode
+semantics (the step is measurement over landed primitives). Two about the
+harness, both killed by witnesses not review: (a) "an empty calibration
+window is symmetric" — false for the first draft's asymmetric bookkeeping,
+measured 24 vs 22; (b) "frame blocksize = samples across the frame" — false,
+it is per channel, caught live by the new witness's assertion. Compiler, not
+review, found the rest: agb's `Timer` setters need `&mut` (the counter holds
+`&mut` handles), and `Timers` has two lifetimes so the counter's borrow needs
+an explicit named one.
+
+**Deliberate scope cuts (narrow).** No cadence / buffer-half alternation
+(PR 4). No verdict table, hardware run, spike-README budget correction, or
+encode-profile restatement (PR 5 — the RED screen here reports a measurement,
+not yet the project's verdict). The screen verdict ANDs budget into the
+timing pass/fail, so an over-budget run prints `timing+budget 0/2` even
+though both arms timed completely — the serial lines disambiguate
+(`[OVER BUDGET]` vs harness `FAIL` lines); reworking the summary line waits
+for PR 5's verdict UI. `podman-spike-rom` not run on this host (no nested
+virtualization — FLAC.md build constraint, same note as PR 1/PR 2).
+
+**Gates:** `make spike-test` green — **15 unit** (was 8: +7 stats — wrap
+rule ×2, fold min/max/sum/worst-index, tie convention, sentinel/sum-width,
+budget arithmetic vs the plan's derivation, host-only mean) + **8
+integration** (was 7: +1 cycle-fold witness on the embedded bytes); old
+counts re-measured at HEAD in a clean worktree. `make flac-test`
+unchanged-green (91 unit + all integration suites; flac-lite untouched).
+`make native-spike-rom` builds/links/fixes; the rebuilt image hashes
+identical (asset regions untouched). `make check` clean (fmt included).
