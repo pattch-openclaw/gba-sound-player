@@ -277,3 +277,87 @@ impl PcmLen for flac_spike::assets::SpikeClip {
         usize::try_from(self.total_samples).unwrap() * usize::from(self.channels) * 2
     }
 }
+
+/// PR 3 witness: the ROM's shared cycle-cost fold (`stats::FrameCost`) and
+/// its budget function (`stats::real_time_budget`) agree, frame-by-frame,
+/// with the driver's own blocksize accounting over the **exact embedded
+/// bytes**. The ROM folds each timed window through `observe`; this test
+/// folds the per-frame real-time allowance (derived from the same blocksize
+/// the seek table carries) through the same fold, pinning the tie convention
+/// and the plan's budget arithmetic against an independent walk of the
+/// stream.
+#[test]
+fn cycle_fold_witness_on_embedded_bytes() {
+    use flac_spike::stats::{FrameCost, real_time_budget};
+
+    for clip in CLIPS {
+        let max = usize::from(clip.max_blocksize);
+        let mut left = vec![0i32; max];
+        let mut right = vec![0i32; max];
+        let mut state = Default::default();
+        let mut cost = FrameCost::new();
+
+        let stats = driver::decode_clip(clip, &mut left, &mut right, &mut state, |frame, l, r| {
+            // FLAC's blocksize is samples *per channel*: the driver hands
+            // a stereo callback both channel windows sliced to `written`
+            // each (mono: the right window is empty), so l.len() is the
+            // frame's blocksize — summing the channels would double it
+            // (caught live by this very assertion: 4096 vs the table's 2048).
+            let block = l.len();
+            assert_eq!(
+                block,
+                usize::from(clip.frames[frame].blocksize),
+                "{}: frame {frame} blocksize vs seek table",
+                clip.name
+            );
+            cost.observe(frame, real_time_budget(block, clip.sample_rate_hz));
+        })
+        .unwrap_or_else(|e| panic!("{}: clip walk failed: {e:?}", clip.name));
+
+        assert_eq!(
+            stats.frames,
+            clip.frames.len(),
+            "{}: frame count",
+            clip.name
+        );
+        assert_eq!(
+            cost.count as usize, stats.frames,
+            "{}: fold frame count",
+            clip.name
+        );
+        // The budget arithmetic PR 3's verdict runs on, recomputed here from
+        // FLAC.md's plan rather than recalled. Two numbers, both pinned:
+        // the TRUE worst-frame window at the clips' encode rate (2048 @
+        // 32,000 Hz), and the stricter 32,768-Hz budget the ROM screen
+        // compares against (the plan keeps it deliberately — exactly
+        // 2.34375% tighter than real-time at 32 kHz: 1 − 1,048,750/1,073,920).
+        let true_window = real_time_budget(usize::from(clip.max_blocksize), clip.sample_rate_hz);
+        assert_eq!(
+            true_window, 1_073_920,
+            "{}: true worst-window arithmetic",
+            clip.name
+        );
+        assert_eq!(
+            real_time_budget(2048, 32_768),
+            1_048_750,
+            "{}: ROM verdict budget (the plan's 512 cycles/sample arithmetic)",
+            clip.name
+        );
+        assert!(
+            cost.max <= true_window,
+            "{}: table-derived worst-frame allowance {} exceeds true window {true_window}",
+            clip.name,
+            cost.max
+        );
+        // min/max identity guards: every window is positive (no zero-length
+        // frames in the table), and worst == min only for a constant table.
+        assert!(cost.min > 0, "{}: zero-length frame window", clip.name);
+        let expect_worst = clip
+            .frames
+            .iter()
+            .map(|m| real_time_budget(usize::from(m.blocksize), clip.sample_rate_hz))
+            .max()
+            .unwrap();
+        assert_eq!(cost.max, expect_worst, "{}: worst window", clip.name);
+    }
+}

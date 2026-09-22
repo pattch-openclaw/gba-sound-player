@@ -76,7 +76,7 @@ not add a local `.cargo/config.toml` (the duplicated `-Tgba.ld` leak, FLAC.md).
 |---|---|---|
 | 1 | scaffold, clips, gates, host witness | ✅ |
 | 2 | on-target decode checksum (gates every perf number) | ✅ |
-| 3 | cycle harness (calibrated, overhead subtracted) | — |
+| 3 | cycle harness (calibrated, overhead subtracted) | ✅ |
 | 4 | full-clip cadence test (double buffers vs playback time) | — |
 | 5 | verdict table + decision rule + hardware run | — |
 
