@@ -1,0 +1,605 @@
+diff --git a/examples/flac_spike/src/driver.rs b/examples/flac_spike/src/driver.rs
+index 80f4f0d..72f8bda 100644
+--- a/examples/flac_spike/src/driver.rs
++++ b/examples/flac_spike/src/driver.rs
+@@ -11,6 +11,7 @@
+ //! | 2 | ROM decode proof | hash-as-you-go (`Fnv1a64::update_i16le`) |
+ //! | 3 | cycle harness | time each `decode_one` window |
+ //! | 4 | cadence test | decode into alternating playback halves |
++//! | E1 | staging probe (experiment) | decode a RAM-staged copy via [`ClipView`] |
+ //!
+ //! The entry point [`decode_one`] decodes exactly one frame **from its
+ //! seek-table offset**, with a fresh cursor. Frames are independently
+@@ -26,7 +27,7 @@
+ //! blocksize and leaves the tail untouched — playback reuses one fixed buffer
+ //! per channel, and the final frame is legitimately short.
+ 
+-use crate::assets::SpikeClip;
++use crate::assets::{FrameMeta, SpikeClip};
+ use flac_lite::bits::BitReader;
+ use flac_lite::frame::{self, FrameHeader, StreamDefaults};
+ use flac_lite::subframe::PredictorState;
+@@ -83,6 +84,10 @@ pub struct Stats {
+ /// of samples written (the frame's own blocksize, cross-checked against the
+ /// table before any decode). This is the window PR 3 wraps in the cycle
+ /// counter; PR 4 alternates buffer halves between calls.
++///
++/// Delegates to [`decode_view_one`] through [`view_of`] — there is exactly
++/// one decode path, whether the bytes live in ROM or in a staged RAM copy
++/// (the E1 experiment's requirement: one instrument, two memory regions).
+ pub fn decode_one(
+     clip: &SpikeClip,
+     frame_index: usize,
+@@ -90,15 +95,69 @@ pub fn decode_one(
+     right: &mut [i32],
+     state: &mut [PredictorState; 2],
+ ) -> Result<usize, DriverError> {
+-    let frame = &clip.frames[frame_index];
+-    let max = usize::from(clip.max_blocksize);
++    decode_view_one(&view_of(clip), frame_index, left, right, state)
++}
++
++/// The decode inputs of a [`SpikeClip`], borrowed — everything
++/// [`decode_view_one`] consumes except the frame index and caller buffers.
++///
++/// Why it exists: `SpikeClip::region` is `&'static [u8]` (the
++/// `include_bytes!` embedding contract), so a RAM copy of a frame region
++/// cannot be handed to it. A `ClipView` is the same decode seam over any
++/// bytes at any lifetime — the E1 ROM→RAM staging probe (FLAC.md "Perf
++/// follow-ups") decodes a staged copy through the identical code path as
++/// the embedded region; offsets stay region-relative, so staging one frame
++/// means a one-entry table at offset 0 and the blocksize cross-check still
++/// witnesses the copy for drift.
++pub struct ClipView<'a> {
++    /// The seek table (same invariants as `SpikeClip::frames`).
++    pub frames: &'a [FrameMeta],
++    /// The raw frame region the offsets index into.
++    pub region: &'a [u8],
++    /// Largest per-frame blocksize — the buffer-length contract.
++    pub max_blocksize: u16,
++    /// Stream sample rate in Hz (stream-default resolution for the header).
++    pub sample_rate_hz: u32,
++    /// Stream bit depth (stream-default resolution for the header).
++    pub bits_per_sample: u8,
++    /// Channel count (2 selects the `right`-buffer contract).
++    pub channels: u8,
++}
++
++/// Borrow a [`SpikeClip`]'s decode inputs as a [`ClipView`].
++#[must_use]
++pub const fn view_of(clip: &SpikeClip) -> ClipView<'_> {
++    ClipView {
++        frames: clip.frames,
++        region: clip.region,
++        max_blocksize: clip.max_blocksize,
++        sample_rate_hz: clip.sample_rate_hz,
++        bits_per_sample: clip.bits_per_sample,
++        channels: clip.channels,
++    }
++}
++
++/// Decode one frame from a borrowed [`ClipView`] — the single decode path
++/// for embedded ROM regions and staged RAM copies alike. Semantics are
++/// identical to [`decode_one`] (fresh cursor at the seek-table offset,
++/// table-vs-header blocksize cross-check, buffer contracts), because they
++/// are the same function.
++pub fn decode_view_one(
++    view: &ClipView<'_>,
++    frame_index: usize,
++    left: &mut [i32],
++    right: &mut [i32],
++    state: &mut [PredictorState; 2],
++) -> Result<usize, DriverError> {
++    let frame = &view.frames[frame_index];
++    let max = usize::from(view.max_blocksize);
+     if left.len() < max {
+         return Err(DriverError::BufferTooSmall {
+             need: max,
+             have: left.len(),
+         });
+     }
+-    if clip.channels == 2 && right.len() < max {
++    if view.channels == 2 && right.len() < max {
+         return Err(DriverError::BufferTooSmall {
+             need: max,
+             have: right.len(),
+@@ -115,22 +174,22 @@ pub fn decode_one(
+             return Err(DriverError::FrameOffsetOutOfRange {
+                 frame: frame_index,
+                 offset: usize::MAX,
+-                len: clip.region.len(),
++                len: view.region.len(),
+             });
+         }
+     };
+-    let region = clip
++    let region = view
+         .region
+         .get(offset..)
+         .ok_or(DriverError::FrameOffsetOutOfRange {
+             frame: frame_index,
+             offset,
+-            len: clip.region.len(),
++            len: view.region.len(),
+         })?;
+ 
+     let defaults = StreamDefaults {
+-        sample_rate_hz: clip.sample_rate_hz,
+-        bits_per_sample: clip.bits_per_sample,
++        sample_rate_hz: view.sample_rate_hz,
++        bits_per_sample: view.bits_per_sample,
+     };
+     let mut reader = BitReader::new(region);
+     let header = FrameHeader::parse(&mut reader, &defaults).map_err(DriverError::Decode)?;
+diff --git a/examples/flac_spike/src/main.rs b/examples/flac_spike/src/main.rs
+index c6025fa..7fd5126 100644
+--- a/examples/flac_spike/src/main.rs
++++ b/examples/flac_spike/src/main.rs
+@@ -1,5 +1,14 @@
+ //! Perf-gate spike ROM — PR 3: cycle harness + per-frame cost.
+ //!
++//! E1 EXPERIMENT BRANCH (FLAC.md → "Perf follow-ups — experiment menu", E1):
++//! the timing pass now runs THREE IRQ-off windows per frame — control decode
++//! from ROM (PR 3's measurement, kept as the same-run control), the staging
++//! memcpy into an EWRAM scratch buffer (its own window; this is the ROM-read
++//! traffic), and decode from the staged copy through `driver::ClipView`. The
++//! comparison ctrl-vs-staged is one instrument on one image; the screen
++//! verdict's budget check follows the staged arm. Nothing else moves: decode
++//! logic, assets, calibration, and the decode-proof gate are untouched.
++//!
+ //! PURPOSE (see ../../../FLAC.md → "Perf gate spike — concrete plan and
+ //! validation process"): this ROM is the measurement vehicle for the go/no-go
+ //! perf gate. PR 1 landed the vehicle (boot + embedded region hashes); PR 2
+@@ -79,7 +88,7 @@ mod rom {
+     use agb::display::Rgb;
+     use agb::timer::Divider;
+     use flac_lite::subframe::PredictorState;
+-    use flac_spike::assets::{CLIPS, SpikeClip};
++    use flac_spike::assets::{CLIPS, FrameMeta, SpikeClip};
+     use flac_spike::checksum::{Fnv1a64, fnv1a64, fold_i16le_stereo};
+     use flac_spike::driver::{self, DriverError};
+     use flac_spike::stats::{FrameCost, WORST_WRAPPED, cycles_between, real_time_budget};
+@@ -103,6 +112,16 @@ mod rom {
+     /// windows must come back raw-identical before any frame is timed.
+     const CALIBRATION_SAMPLES: usize = 5;
+ 
++    /// E1 harness note: discarded warm-up windows before the reported set.
++    /// The E1 image's first calibration window measured systematically 2
++    /// cycles *below* the hot loop (raws 31/33/33/33/33, byte-identical
++    /// across runs — deterministic, so a cold-bus/prefetch property of the
++    /// pass's first window, not noise). PR 3's layout happened not to show
++    /// it; this branch's does. The stability witness must judge the path
++    /// frames will actually run on (hot), so a few byte-identical warm-up
++    /// windows precede the reported 5; they are logged, never subtracted.
++    const CALIBRATION_WARMUP: usize = 3;
++
+     // GBA interrupt registers (IO region, always mapped, 16-bit): IE, IF,
+     // IME. Read-only here — logged to witness the IRQ-off discipline.
+     const REG_IE: usize = 0x0400_0200;
+@@ -450,22 +469,102 @@ mod rom {
+         (out, raw)
+     }
+ 
+-    /// One arm's timing pass. Runs ONLY after that arm's PR 2 decode proof
+-    /// passed (correctness-before-speed). Returns `Some((fold, overhead,
+-    /// fits_budget))` whenever the harness completed — calibration stable,
+-    /// IME off in-window, every frame timed, no composite wrap. `None` is
+-    /// reserved for harness failure (numbers void), and every such failure
+-    /// names itself on serial. A budget miss is NOT a harness failure: the
+-    /// measurement is valid evidence either way, so it comes back in the
+-    /// bool — the verdict line then distinguishes "arms measured" from
+-    /// "arms inside budget" instead of collapsing both into a count.
+-    fn timing_pass(clip: &SpikeClip, counter: &mut Counter<'_>) -> Option<(FrameCost, u32, bool)> {
++    /// One arm's timing pass — PR 3 harness + the E1 staging probe. Runs
++    /// ONLY after that arm's PR 2 decode proof passed
++    /// (correctness-before-speed). Per frame, three IRQ-off windows:
++    /// 1. **control decode** — `driver::decode_one` straight from the
++    ///    embedded ROM region: PR 3's exact measurement, kept as the
++    ///    same-run control (E1's comparison needs the old number from the
++    ///    same instrument and image, not recalled from the PR 3 log);
++    /// 2. **stage copy** — memcpy of the frame's region slice (offset
++    ///    N..N+1, tail to region end) into the staging scratch. The copy
++    ///    IS the ROM-read traffic: its own timed window, reported
++    ///    alongside, per the E1 method;
++    /// 3. **staged decode** — the same driver through `ClipView` against
++    ///    the staged copy: a one-entry seek table at offset 0, so the
++    ///    blocksize cross-check still witnesses the copy for drift.
++    ///
++    /// Reading (FLAC.md E1): if staged collapses while control stays high,
++    /// cartridge-read timing dominates the current numbers and E2/E3 become
++    /// the production story; if it does not, memory timing is not the story
++    /// and E3/E4 move up.
++    ///
++    /// Returns `Some((ctrl, copy, staged, overhead, staged_fits))` whenever
++    /// the harness completed — calibration stable, IME off in-window, every
++    /// frame timed, no composite wrap. `None` is reserved for harness
++    /// failure (numbers void), and every such failure names itself on
++    /// serial. A budget miss is NOT a harness failure: the measurement is
++    /// valid evidence either way, so it comes back in the bool — the verdict
++    /// line then distinguishes "arms measured" from "arms inside budget"
++    /// instead of collapsing both into a count. The budget bit follows the
++    /// STAGED decode (the variant under test).
++    fn timing_pass(
++        clip: &SpikeClip,
++        counter: &mut Counter<'_>,
++    ) -> Option<(FrameCost, FrameCost, FrameCost, u32, bool)> {
+         let name = clip.name;
+         let max = usize::from(clip.max_blocksize);
+         let mut left: alloc::vec::Vec<i32> = alloc::vec![0; max];
+         let mut right: alloc::vec::Vec<i32> = alloc::vec![0; max];
+         let mut state = [PredictorState::new(), PredictorState::new()];
+ 
++        // E1 staging scratch: one frame at a time, sized from the seek
++        // table (max of end−start — subtraction only, division stays out,
++        // and the table is a manifest stand-in whose offsets this loop
++        // already trusts elsewhere). EWRAM heap like the decode buffers
++        // (agb's block allocator): the E1 variable is ROM-read vs
++        // RAM-read decode; IWRAM-vs-EWRAM is E3's separate arm, so the
++        // scratch deliberately lands in the same region class as the
++        // existing scratch. Regions are ~850 KB over 157 frames (avg
++        // ≈5.4 KB/frame), so a per-frame buffer is ample.
++        let mut max_frame_bytes = 0usize;
++        for i in 0..clip.frames.len() {
++            let start = usize::try_from(clip.frames[i].offset).unwrap_or(usize::MAX);
++            let end = if i + 1 < clip.frames.len() {
++                usize::try_from(clip.frames[i + 1].offset).unwrap_or(usize::MAX)
++            } else {
++                clip.region.len()
++            };
++            if end > start {
++                max_frame_bytes = max_frame_bytes.max(end - start);
++            }
++        }
++        let mut stage: alloc::vec::Vec<u8> = alloc::vec![0; max_frame_bytes];
++        // E1 correctness witness: the staged decode must produce the
++        // control decode's samples exactly. The control window runs first
++        // and PR 2 already proved the ROM path on these bytes, so
++        // staged == ctrl per frame proves the staged arm decodes correctly
++        // — a staged number from a differently-decoding copy would measure
++        // nothing (correctness-before-speed). Comparison runs OUTSIDE the
++        // timing windows; `expect` holds the ctrl output between the two
++        // decodes of each frame.
++        let mut expect_left: alloc::vec::Vec<i32> = alloc::vec![0; max];
++        let mut expect_right: alloc::vec::Vec<i32> = alloc::vec![0; max];
++        agb::println!(
++            "[spike] {} E1 staging buffer: {} bytes at 0x{:08X} (EWRAM heap)",
++            name,
++            max_frame_bytes,
++            stage.as_ptr() as usize
++        );
++
++        // Calibration warm-up (E1): byte-identical windows, discarded — see
++        // CALIBRATION_WARMUP's note. They put the window path hot before the
++        // reported samples, so "stable" judges the hot path every frame
++        // window runs on, not the pass's cold first window.
++        for w in 0..CALIBRATION_WARMUP {
++            let (_, raw) = timed(counter, || {
++                // SAFETY: REG_IME is an even address in the I/O region.
++                unsafe { io_read_u16(REG_IME) }
++            });
++            agb::println!(
++                "*** {} calib warmup {}/{} raw={}",
++                name,
++                w + 1,
++                CALIBRATION_WARMUP,
++                raw
++            );
++        }
++
+         // Calibration: 5 empty windows (the work inside is a single IME
+         // register read — the smallest possible probe, which also witnesses
+         // IME == 0 inside the window). Deterministic emulator + deterministic
+@@ -526,92 +625,225 @@ mod rom {
+             return None;
+         }
+ 
+-        // The pass itself: one timed decode_one per frame, in seek-table
+-        // order, through the same driver seam (decode logic untouched).
++        // The pass itself: per frame, three IRQ-off windows (E1 probe —
++        // FLAC.md "Perf follow-ups" E1). Decode logic untouched; the
++        // control window is PR 3's measurement verbatim, so ctrl-vs-staged
++        // compares two reads of one instrument on one image, not two builds
++        // and not a recalled log.
++        let n = clip.frames.len();
+         agb::println!(
+-            "*** {} timing pass: walking {} frames via seek table (IRQ-off windows)",
++            "*** {} timing pass: walking {} frames via seek table (IRQ-off windows; E1: ctrl / stage-copy / staged-decode)",
+             name,
+-            clip.frames.len()
++            n
+         );
+-        let mut cost = FrameCost::new();
+-        for frame_index in 0..clip.frames.len() {
+-            let (result, raw) = timed(counter, || {
++        let mut ctrl_cost = FrameCost::new();
++        let mut copy_cost = FrameCost::new();
++        let mut staged_cost = FrameCost::new();
++        for frame_index in 0..n {
++            // Frame slice: offset N..N+1, tail to region end. Offsets are
++            // region-relative and the staged slice starts at the frame's
++            // own header, so staging one frame needs no re-basing beyond a
++            // one-entry table at offset 0 (the E1 note's observation).
++            let start_off = usize::try_from(clip.frames[frame_index].offset).unwrap_or(usize::MAX);
++            let end_off = if frame_index + 1 < n {
++                usize::try_from(clip.frames[frame_index + 1].offset).unwrap_or(usize::MAX)
++            } else {
++                clip.region.len()
++            };
++            let frame_bytes = end_off.saturating_sub(start_off);
++
++            // Window 1: control decode — PR 3's path verbatim (ROM reads).
++            let (ctrl, raw_ctrl) = timed(counter, || {
+                 driver::decode_one(clip, frame_index, &mut left, &mut right, &mut state)
+             });
+-            match result {
+-                Ok(written) => {
+-                    let net = raw.saturating_sub(overhead);
+-                    cost.observe(frame_index, net);
++            // Park the control output for the staged-vs-ctrl witness below
++            // (outside the window; the staged decode overwrites the same
++            // scratch buffers next). copied() on the Ok side (usize: Copy)
++            // leaves `ctrl` itself untouched for the error handling below;
++            // an Err parks 0 samples and returns from that handler.
++            let parked = ctrl.as_ref().copied().unwrap_or(0);
++            expect_left[..parked].copy_from_slice(&left[..parked]);
++            expect_right[..parked].copy_from_slice(&right[..parked]);
++            // Window 2: the staging copy — the ROM-read traffic itself,
++            // timed separately and reported alongside the decodes. Copying
++            // the exact slice also proves the slice is decode-complete: a
++            // frame needing bytes past its end would desync the staged
++            // read and fail the cross-check below.
++            let (_, raw_copy) = timed(counter, || {
++                stage[..frame_bytes].copy_from_slice(&clip.region[start_off..end_off]);
++            });
++            // Window 3: staged decode — same driver code, RAM backing.
++            // The blocksize cross-check witnesses the copy against drift.
++            let staged_meta = FrameMeta {
++                offset: 0,
++                blocksize: clip.frames[frame_index].blocksize,
++            };
++            let staged_view = driver::ClipView {
++                frames: core::slice::from_ref(&staged_meta),
++                region: &stage[..frame_bytes],
++                max_blocksize: clip.max_blocksize,
++                sample_rate_hz: clip.sample_rate_hz,
++                bits_per_sample: clip.bits_per_sample,
++                channels: clip.channels,
++            };
++            let (staged_res, raw_staged) = timed(counter, || {
++                driver::decode_view_one(&staged_view, 0, &mut left, &mut right, &mut state)
++            });
++
++            // PR 2 proved this arm decodes; a rejection in either decode
++            // window is the harness regressing the image — or, for staged,
++            // a bad slice/copy. Either way: numbers void, named on serial.
++            let ctrl_written = match ctrl {
++                Ok(written) => written,
++                Err(err) => {
+                     agb::println!(
+-                        "*** {} frame {:>3}/{} bs={} raw={} net={}",
++                        "*** {} FAIL frame {}: control decode rejected in timing pass after decode proof passed: {:?}",
+                         name,
+                         frame_index,
+-                        clip.frames.len(),
+-                        written,
+-                        raw,
+-                        net
++                        err
+                     );
++                    return None;
+                 }
++            };
++            let staged_written = match staged_res {
++                Ok(written) => written,
+                 Err(err) => {
+-                    // PR 2 proved this arm decodes; a failure here is the
+-                    // harness regressing the image, not the stream's fault.
+                     agb::println!(
+-                        "*** {} FAIL frame {}: driver rejected in timing pass after decode proof passed: {:?}",
++                        "*** {} FAIL frame {}: staged decode rejected ({} bytes staged) though control passed: {:?}",
+                         name,
+                         frame_index,
++                        frame_bytes,
+                         err
+                     );
+                     return None;
+                 }
++            };
++            if ctrl_written != staged_written {
++                agb::println!(
++                    "*** {} FAIL frame {}: ctrl wrote {} but staged wrote {} — harness bug",
++                    name,
++                    frame_index,
++                    ctrl_written,
++                    staged_written
++                );
++                return None;
++            }
++            // The staged arm's per-frame correctness witness: the staged
++            // decode must reproduce the control's samples bit-exactly
++            // (first offender named, walk aborts — numbers void otherwise).
++            if let Some((ch, i, a, b)) = (0..ctrl_written).find_map(|i| {
++                if left[i] != expect_left[i] {
++                    Some(("left", i, left[i], expect_left[i]))
++                } else if clip.channels == 2 && right[i] != expect_right[i] {
++                    Some(("right", i, right[i], expect_right[i]))
++                } else {
++                    None
++                }
++            }) {
++                agb::println!(
++                    "*** {} FAIL frame {}: staged decode diverges from control — {}[{}] staged={} ctrl={} (staged numbers void)",
++                    name,
++                    frame_index,
++                    ch,
++                    i,
++                    a,
++                    b
++                );
++                return None;
+             }
++
++            let ctrl_net = raw_ctrl.saturating_sub(overhead);
++            let copy_net = raw_copy.saturating_sub(overhead);
++            let staged_net = raw_staged.saturating_sub(overhead);
++            ctrl_cost.observe(frame_index, ctrl_net);
++            copy_cost.observe(frame_index, copy_net);
++            staged_cost.observe(frame_index, staged_net);
++            agb::println!(
++                "*** {} frame {:>3}/{} bs={} ctrl raw={} net={} | copy raw={} net={} | staged raw={} net={}",
++                name,
++                frame_index,
++                n,
++                ctrl_written,
++                raw_ctrl,
++                ctrl_net,
++                raw_copy,
++                copy_net,
++                raw_staged,
++                staged_net
++            );
+         }
+ 
+-        let mut pass = cost.count == clip.frames.len();
++        let mut pass = ctrl_cost.count == n && copy_cost.count == n && staged_cost.count == n;
+         if !pass {
+             agb::println!(
+-                "*** {} FAIL timed frames={} expected={}",
++                "*** {} FAIL timed frames ctrl={} copy={} staged={} expected={}",
+                 name,
+-                cost.count,
+-                clip.frames.len()
++                ctrl_cost.count,
++                copy_cost.count,
++                staged_cost.count,
++                n
+             );
+         }
+-        if cost.wrapped {
+-            pass = false;
++        for (label, cost) in [
++            ("ctrl", &ctrl_cost),
++            ("copy", &copy_cost),
++            ("staged", &staged_cost),
++        ] {
++            if cost.wrapped {
++                pass = false;
++                agb::println!(
++                    "*** {} FAIL {} window exceeded the 32-bit composite (counter wrapped mid-frame): frame {} reported at sentinel {}",
++                    name,
++                    label,
++                    cost.max_frame,
++                    WORST_WRAPPED
++                );
++            }
+             agb::println!(
+-                "*** {} FAIL a window exceeded the 32-bit composite (counter wrapped mid-frame): frame {} reported at sentinel {}",
++                "*** {} {} stats: count={} min={}@{} max={}@{} sum={} wrapped={}",
+                 name,
++                label,
++                cost.count,
++                cost.min,
++                cost.min_frame,
++                cost.max,
+                 cost.max_frame,
+-                WORST_WRAPPED
++                cost.sum,
++                cost.wrapped
+             );
+         }
+         agb::println!(
+-            "*** {} stats: count={} min={}@{} max={}@{} sum={} wrapped={}",
++            "*** {} ctrl mean = sum/count = {}/{} — derived host-side (ROM division-free)",
++            name,
++            ctrl_cost.sum,
++            ctrl_cost.count
++        );
++        agb::println!(
++            "*** {} staged mean = sum/count = {}/{} — derived host-side (ROM division-free)",
+             name,
+-            cost.count,
+-            cost.min,
+-            cost.min_frame,
+-            cost.max,
+-            cost.max_frame,
+-            cost.sum,
+-            cost.wrapped
++            staged_cost.sum,
++            staged_cost.count
+         );
++        let ctrl_fits = ctrl_cost.max <= BUDGET_CYCLES_PER_FRAME;
++        let fits = staged_cost.max <= BUDGET_CYCLES_PER_FRAME;
+         agb::println!(
+-            "*** {} mean = sum/count = {}/{} — derived host-side (ROM division-free)",
++            "*** {} budget(ctrl): worst_frame={} worst_net={} vs budget={} [{}]",
+             name,
+-            cost.sum,
+-            cost.count
++            ctrl_cost.max_frame,
++            ctrl_cost.max,
++            BUDGET_CYCLES_PER_FRAME,
++            if ctrl_fits { "FITS" } else { "OVER BUDGET" }
+         );
+-        let fits = cost.max <= BUDGET_CYCLES_PER_FRAME;
+         agb::println!(
+-            "*** {} budget: worst_frame={} worst_net={} vs budget={} [{}]",
++            "*** {} budget(staged): worst_frame={} worst_net={} vs budget={} [{}]",
+             name,
+-            cost.max_frame,
+-            cost.max,
++            staged_cost.max_frame,
++            staged_cost.max,
+             BUDGET_CYCLES_PER_FRAME,
+             if fits { "FITS" } else { "OVER BUDGET" }
+         );
+         if pass {
+-            Some((cost, overhead, fits))
++            Some((ctrl_cost, copy_cost, staged_cost, overhead, fits))
+         } else {
+             None
+         }
+@@ -620,7 +852,7 @@ mod rom {
+     #[agb::entry]
+     fn main(mut gba: agb::Gba) -> ! {
+         agb::eprintln!(
+-            "[spike] entry started — perf-gate spike ROM (PR 3: cycle harness + per-frame cost)"
++            "[spike] entry started — perf-gate spike ROM (PR 3 harness + E1 staging probe)"
+         );
+ 
+         let mut gfx = gba.graphics.get();
+@@ -681,7 +913,7 @@ mod rom {
+                 "SKIPPED (correctness-before-speed: no numbers from an unproven image)"
+             }
+         );
+-        let mut timing: [Option<(FrameCost, u32, bool)>; 2] = [None, None];
++        let mut timing: [Option<(FrameCost, FrameCost, FrameCost, u32, bool)>; 2] = [None, None];
+         if proofs_pass {
+             // Interrupt-register witnesses around the whole timing section.
+             // The inside-window witness (IME == 0) is printed by each arm's
+@@ -702,7 +934,8 @@ mod rom {
+                 // completed measurement that misses budget — but the two
+                 // counts stay separate in the verdict line below: a budget
+                 // miss is a valid measurement, not a failed harness.
+-                pass &= timing[slot].as_ref().is_some_and(|t| t.2);
++                // E1: the budget bit is the STAGED decode's fit.
++                pass &= timing[slot].as_ref().is_some_and(|t| t.4);
+             }
+             agb::println!(
+                 "[spike] irq state after timing: IE=0x{:04X} IF=0x{:04X} IME={} (IME=1 means the harness restored it)",
+@@ -719,14 +952,14 @@ mod rom {
+         };
+         gfx.set_background_palette_colour(0, 0, color);
+         agb::eprintln!(
+-            "[spike] PR 3 verdict {} — screen {} (assets={}, decode proof={}, measured {}/{}, within budget {}/{})",
++            "[spike] PR 3 + E1 staging verdict {} — screen {} (assets={}, decode proof={}, measured {}/{}, staged within budget {}/{})",
+             if pass { "PASSED" } else { "FAILED" },
+             label,
+             assets_pass,
+             proofs_pass,
+             timing.iter().filter(|t| t.is_some()).count(),
+             CLIPS.len(),
+-            timing.iter().flatten().filter(|t| t.2).count(),
++            timing.iter().flatten().filter(|t| t.4).count(),
+             CLIPS.len()
+         );
+ 
