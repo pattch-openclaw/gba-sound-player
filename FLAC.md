@@ -2229,6 +2229,13 @@ identical (asset regions untouched). `make check` clean (fmt included).
 
 ## Perf follow-ups — experiment menu for the over-budget numbers (2026-09-21)
 
+> **Status 2026-09-22: E1 measured.** ROM→RAM staging did **not** collapse
+> the cost (4.7% FIXED / 1.8% LPC, both arms still >200%/640% of budget) —
+> cartridge-read timing is not the story. Full result + method:
+> [E1 result](#e1-result--romram-staging-cartridge-reads-are-not-the-story-2026-09-22).
+> Per the ordering rule below, E3/E4 move up; staging is ruled out as a
+> production mitigation too (even paying for the copy, the net gain is ~1–3%).
+
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
 512) with the harness itself witnessed clean. The magnitude has no
@@ -2258,7 +2265,7 @@ loop; the closure handed to `timed()` is exactly what is measured.
 `real_time_budget(2048, 32_768)` constant. Never touch `src/assets.rs` or
 the committed `.bin`s — region pins gate every layer above.
 
-### E1 — ROM→RAM staging (the decisive first probe; spike-only)
+### E1 — ROM→RAM staging (the decisive first probe; spike-only) — **measured 2026-09-22: no collapse; [see result](#e1-result--romram-staging-cartridge-reads-are-not-the-story-2026-09-22)**
 
 In the timing loop, memcpy each frame's region slice into a static scratch
 buffer **outside** the measurement window, then decode from a borrowed copy
@@ -2318,3 +2325,106 @@ what "real-time on hardware" claims for the whole gate.
 **Ordering:** E1 first (cheapest, splits the hypothesis space), then E2 if
 E1 blames ROM reads, E3/E4 otherwise — but any order is fine for tinkering
 as long as each run changes one variable and reports the full stats line.
+
+## E1 result — ROM→RAM staging: cartridge reads are not the story (2026-09-22)
+
+**Sample, not integrated.** The probe never lands on the live spike sources:
+its code is preserved as a reappliable sample under
+`examples/flac_spike/experiments/e1-rom-ram-staging/` (README +
+`e1-rom-ram-staging.patch` — the diff against main @ `756220b`, verified
+`git apply --check` clean there; re-apply instructions and the measured
+values are in that README). The plan of record — PR 4 cadence, PR 5 verdict
+— is untouched. ROM
+`flac-spike.gba` sha256 `6a9cd9f184cb347440f5a951bf82aed83243fe8c2b498f0dc7f5fcaa56e19d8c`;
+mGBA runs 2026-09-22 on the same host runner as PR 3 (same mGBA build; the
+agb 0.25 `mgba-test-runner`), two headless runs byte-identical (`cmp`, 691
+lines). Gates green on the patched tree: `make spike-test`, `make
+flac-test`, `make check`.
+
+**Harness shape (three IRQ-off windows per frame, one image, one instrument):**
+
+1. **ctrl** — PR 3's `driver::decode_one` from the embedded ROM region,
+   verbatim, kept as the *same-run control* (the comparison needs the old
+   number from the same image, not a recalled log);
+2. **copy** — the staging memcpy itself (frame slice offset N..N+1, tail to
+   region end) into a per-frame EWRAM scratch — timed separately, per the
+   E1 method (the copy *is* the ROM-read traffic);
+3. **staged** — the same decode over the staged copy through the
+   `driver::ClipView` seam the sample patch introduces (borrowed decode
+   inputs, any lifetime —
+   `SpikeClip::region` is `&'static` so a RAM copy cannot be handed to it;
+   `decode_one` now delegates through it, one decode path). A one-entry
+   seek table at offset 0 keeps the table-vs-header blocksize cross-check
+   witnessing the copy for drift, and a **per-frame staged-vs-ctrl sample
+   equality witness** (ctrl output parked, staged compared after the
+   windows; first offender named, numbers void on divergence) passed 157
+   frames × 2 arms — the staged numbers come from a proven-correct decode.
+
+Calibration witness: overhead 22, stable, nets 0 — identical to PR 3's.
+One harness finding en route: on *this* layout the pass's first calibration
+window measured 2 cycles below steady state (raws 31/33/33/33/33 — stable
+but cold), so 3 discarded warm-up windows now precede the reported 5.
+Micro-windows are code-layout sensitive (±4 cycles, prefetch-scale); noted
+because it also explains why ctrl stats here differ from PR 3's by a
+constant +104 cycles/frame (+0.005%) — which doubles as the control
+reproducing the baseline: worst-frame **indices** match exactly (frame 60
+FIXED / 136 LPC / 156 min both arms).
+
+**Results (net of this variant's own calibration; 157 frames, 320,000
+samples; budget 1,048,750/frame ≈ 512 c/sample):**
+
+| arm | fold | sum | mean | mean %budget | max @frame | min @frame |
+|---|---|---|---|---|---|---|
+| FIXED ctrl | ROM decode | 361,111,383 | 2,300,072 | 219.3% | 2,314,577 @60 | 585,405 @156 |
+| FIXED copy | staging memcpy | 7,956,425 | 50,678 | — | 77,701 @136 | 3,911 @156 |
+| **FIXED staged** | **RAM decode** | **344,071,398** | **2,191,537** | **209.0%** | **2,205,189 @60** | **557,770 @156** |
+| LPC ctrl | ROM decode | 1,077,191,358 | 6,861,091 | 654.2% | 6,901,488 @136 | 1,506,785 @156 |
+| LPC copy | staging memcpy | 7,551,209 | 48,096 | — | 75,083 @105 | 9,666 @156 |
+| **LPC staged** | **RAM decode** | **1,058,039,914** | **6,739,107** | **642.6%** | **6,778,205 @136** | **1,475,566 @156** |
+
+- **FIXED:** staging saves 17,039,985 cycles (108,535/frame, **4.72%**);
+  paying for the copy too, net −2.51%. Staged still 1,075 c/sample.
+- **LPC:** staging saves 19,151,444 (121,984/frame, **1.78%**); net of the
+  copy −1.08%. Staged still 3,306 c/sample.
+- Worst frames stay **OVER BUDGET in every arm** (staged worst: 210.3% /
+  646.3%). Screen verdict RED = measurement completed, budget missed —
+  harness completed 2/2, decode proof matched the PCM pin
+  (`0x54C7B356621B6E15`, cross-arm agree) before any timing.
+
+**Reading (the E1 rule, executed):** staged decode did **not** collapse →
+**cartridge-read timing is not the story.** The bound is arithmetic: a
+frame's whole input is ~5.5 KB, and the measured memcpy — a *bulk* path
+with better per-byte timing than the bit reader's per-bit access — costs
+~50,700 cycles/frame (≈9.2 c/B FIXED, ≈9.0 c/B LPC, consistent across
+arms); even generously counting ALL of decode's ROM traffic at that rate
+bounds the wait-state component well under 10% of the 2.3M-frame. The
+remaining ≥90% is inside the decoder loop. Two hypotheses the result
+promotes: **E4 (i64 intermediates — ~7–20× above a plausible compute floor
+for FIXED-0 arithmetic, region-independent)** and **E3 (EWRAM scratch
+wait-states — a different region with far more traffic than the input
+bytes)**. E1 also kills *staging* as a production idea: shipping decode
+always reads ROM, and per this measurement staging recovers ~1–3% net at
+best. One observation, hypothesis-grade: the staged saving (108k/frame)
+exceeds the copy's own cost (51k), i.e. the bit reader's per-access ROM
+pattern pays a larger wait-state premium per byte than a bulk copy does —
+relevant if E2 is revisited, but immaterial against the 2.3M total.
+
+**Method compliance (the menu's rules):** one variable per window set
+(memory region of the decode *input* only — decode logic, assets, and
+decode-proof gate untouched; `make spike-test` green ⇒ same *what*, only
+*how* changed); new ROM sha recorded; two headless runs `cmp`-identical;
+full stats (min/max/sum/worst-index) per fold, net of this variant's own
+calibration; raw reported alongside net on every per-frame line. This is a
+tinkering result, not the gate verdict — PR 5 still owns the verdict table
+and the hardware arbitration (E5): if a future on-cart run shows mGBA
+diverges from hardware on gamepak timing, the *absolute* numbers here shift
+but the ctrl-vs-staged *relative* result was measured within one model.
+
+**Preservation:** everything the probe added — the `ClipView` /
+`decode_view_one` seam, the three-window pass, the staging scratch, the
+staged-vs-ctrl witness, and the calibration warm-up — lives in the sample
+patch, nothing in the live tree. Re-applying against a harness that has
+since moved (PR 4/5) should take the three-window *method* from the patch
+rather than forcing hunks; the method is the finding's carrier, the line
+numbers are not. The `perf/flac-spike-e1-ram-staging` branch that ran the
+measurement is superseded by the sample (delete after this docs PR merges).
