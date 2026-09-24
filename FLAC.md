@@ -2235,6 +2235,18 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > [E1 result](#e1-result--romram-staging-cartridge-reads-are-not-the-story-2026-09-22).
 > Per the ordering rule below, E3/E4 move up; staging is ruled out as a
 > production mitigation too (even paying for the copy, the net gain is ~1–3%).
+>
+> **Status 2026-09-23: E4 measured.** i32 intermediates cut the **LPC arm
+> 46.9%** (652% → 346% mean of budget) — software 64-bit arithmetic was
+> half that arm's cost — but the **FIXED arm only 3.7%**, because FIXED-0
+> integration is inert: its remaining cost is the bit reader, which promotes
+> **E2** (the refill accumulator) as the next FIXED-side lever. Full result
+> + proof:
+> [E4 result](#e4-result--i32-intermediates-halve-the-lpc-arm-fixed-barely-moves-2026-09-23).
+> Neither arm reaches budget on this lever alone; E3 (IWRAM scratch) stays
+> open but its expected ceiling is sub-1% (EWRAM costs one extra cycle per
+> 32-bit access; the scratch sees ~12–30K accesses/frame against multi-million
+> cycle frames) — worth a control-arm run only as hypothesis-space closure.
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -2303,7 +2315,7 @@ internals — confirm the section/attribute against the linker script the agb
 build actually uses before trusting any `.iwram` incantation). The EWRAM
 allocation can remain as the control arm in the same run.
 
-### E4 — i64 intermediates → proven-safe i32 (`subframe.rs`)
+### E4 — i64 intermediates → proven-safe i32 (`subframe.rs`) — **measured 2026-09-23: LPC −46.9%, FIXED −3.7%; [see result](#e4-result--i32-intermediates-halve-the-lpc-arm-fixed-barely-moves-2026-09-23)**
 
 `integrate_fixed`'s cascade, `pad_block`, and the warm-up `fill` accumulate
 in i64 — multi-instruction arithmetic on a 32-bit ARM7TDMI with no 64-bit
@@ -2428,3 +2440,126 @@ since moved (PR 4/5) should take the three-window *method* from the patch
 rather than forcing hunks; the method is the finding's carrier, the line
 numbers are not. The `perf/flac-spike-e1-ram-staging` branch that ran the
 measurement is superseded by the sample (delete after this docs PR merges).
+
+## E4 result — i32 intermediates halve the LPC arm; FIXED barely moves (2026-09-23)
+
+**Sample, not integrated.** As with E1, the probe never lands on the live
+spike sources: its code is preserved as a reappliable sample under
+`examples/flac_spike/experiments/e4-i32-intermediates/` (README +
+`e4-i32-intermediates.patch` — the diff against main @ `73566b8`, verified
+`git apply --check` clean there). The plan of record — PR 4 cadence, PR 5
+verdict — is untouched, and no decoder file in `crates/flac-lite/` changed:
+the variant is a **vendored copy of the hot path** in the spike crate
+(`e4.rs`), so the measurement compares two decode paths on one image. ROM
+`flac-spike.gba` sha256
+`59be708d53f9a7b1943cadbb677368beaceab6c29ddc472254a75f87294403f8`;
+mGBA runs 2026-09-23 on the same host runner as PR 3 / E1, two headless
+runs byte-identical (`cmp`, 1005 lines). Gates green on the patched tree:
+`make spike-test` (including the new `tests/e4_witness.rs`), `make
+flac-test`, `make check`.
+
+**Harness shape (two IRQ-off windows per frame, one image, one instrument):**
+
+1. **ctrl** — PR 3's `driver::decode_one` (verbatim i64 path), the same-run
+   control;
+2. **variant** — `e4::decode_one_i32`: vendored
+   `decode_frame`/`decode_subframe`/integrators/`decorrelate` with `i32`
+   intermediates (`wrapping_*` + arithmetic `>>` — one `asr` instead of the
+   `__aeabi` helper calls a *variable* i64 shift compiles to). Shared with
+   the control: field readers, `PredictorState::fill`, `decode_residual` —
+   the variable is the hot-path arithmetic width, only.
+
+Correctness before timing, both layers: on the host the variant decodes the
+exact embedded clips bit-exactly vs `flac -d` (`e4_witness.rs`); on the ROM,
+a per-frame variant-vs-control **sample-equality** witness (the E1 pattern)
+passed 314/314 frame-windows. Decode proof matched the PCM pin
+(`0x54C7B356621B6E15`, cross-arm agree) before any timing.
+
+**Calibration finding (harness science, applies to every future micro-window
+run):** this layout broke PR 3's calibration twice over. First, E1's
+cold-first-window property returned (raws 22/24/24/24/24) — E1's separate
+warm-up windows fixed that; then the e4 pass showed a *serial write
+immediately before a window shifts that window ~2 cycles* — so warm-up
+windows logged between reported windows re-poisoned them. Verified fix (in
+the patch, both passes): **ONE byte-identical loop over 3 discarded + 5
+reported windows, unconditional stores, nothing logged between windows**;
+every reported window is then entered with exactly the preceding code the
+discarded ones ran. Overhead on this image: 24 (PR 3's was 22), stable,
+nets 0. Cross-session consequence repeats E1's: the same image's PR
+3-shape pass (same patch, calibration only) read FIXED sum=357,947,179
+max=2,294,325@60 / LPC sum=1,074,036,562 max=6,881,296@136 — the e4 ctrl
+arm sits a constant +11 cyc/frame above it (code layout), which is exactly
+why ctrl-vs-variant must come from one image.
+
+**Results (net of this variant's own calibration; 157 frames, 320,000
+samples; budget 1,048,750/frame):**
+
+| arm | fold | sum | mean | mean %budget | max @frame | min @frame |
+|---|---|---|---|---|---|---|
+| FIXED ctrl | i64 decode | 357,948,906 | 2,279,929 | 217.4% | 2,294,336 @60 | 580,524 @156 |
+| **FIXED variant** | **i32 decode** | **344,549,255** | **2,194,581** | **209.3%** | **2,208,577 @60** | **559,277 @156** |
+| LPC ctrl | i64 decode | 1,074,038,289 | 6,841,008 | 652.3% | 6,881,307 @136 | 1,501,952 @156 |
+| **LPC variant** | **i32 decode** | **570,270,032** | **3,632,293** | **346.3%** | **3,656,120 @136** | **862,867 @156** |
+
+- **LPC:** i32 intermediates save 503,768,257 cycles (3,208,715/frame,
+  **46.90%**). The arm halves: 3,340 → 1,774 cycles/sample. Worst-frame
+  index unchanged (136); min moves −42.6%.
+- **FIXED:** saves 13,399,651 (85,348/frame, **3.74%**). Worst stays 210.6%
+  of budget.
+
+**Reading (the menu's own rule, executed):** E4 was predicted "region-
+independent, expect the LPC arm to move most" — confirmed, and then some:
+**half of the LPC arm's cost was software 64-bit arithmetic.** The asymmetry
+is the diagnostic: the FIXED arm's integrator is FIXED-0, which
+`integrate_fixed` early-returns (`the residual IS the signal`) — there is
+**no i64 math in its hot loop at all**, so a width change is inert there by
+construction; its 3.7% is the non-integrator sites (`pad_block` — its
+wasted=1 frames — and side decorrelation) plus layout. What the FIXED arm's
+remaining 2.19M/frame is NOT, after E1 + E4: cartridge reads (E1, ruled
+out), 64-bit integrator math (E4, ruled out by inertness). What remains
+standing in its hot loop: the position-only **bit reader** (per-bit ROM
+re-fetches — E1's note that its per-access pattern pays an above-bulk
+premium) and generic decode plumbing. **E4's result promotes E2 (bit-reader
+refill accumulator) as the next FIXED-side lever**; for LPC, E2 + whatever
+else sits under the halved 1.77 c/sample. E3's bounded ceiling (sub-1% —
+EWRAM is one extra cycle per 32-bit access) is unchanged by this result.
+
+**The i32 proof (the menu's "prove it before trusting it"), two-tier:**
+
+- **Ring sites — unconditional equivalence.** `+`, `−`, `×`, `<<` commute
+  with i32 truncation (π(x⊕y) = π(π(x)⊕π(y))), and the i64 path's existing
+  convention is truncate-at-store — so wrapping-i32 with the same store is
+  bit-identical for ANY input, legal or corrupt: `integrate_fixed` cascade
+  + seeds, `pad_block`, the side decorrelation arms.
+- **Arithmetic-shift sites — conditional range bound.** `>>` does not
+  commute; two sites right-shift an intermediate (LPC `(acc >> shift)`,
+  mid/side `(m_ext ± side) >> 1`), exact whenever the true value fits i32.
+  Profile bound: |acc| ≤ order × |coeff| × |sample| ≤ 4 × 2^(prec−1) ×
+  2^16 — safe for precision ≤ 13 (2^30); precision 15 would NOT be (2^32),
+  so production adoption needs a **pack-time LPC-precision guard** (the
+  encode profile is ours). Measured on the exact embedded regions (field
+  walk through the public readers): precision ≤ 11, shift ∈ [0, 11],
+  |coeff| ≤ 751, final |sample| ≤ 1115 ⇒ bound 3.35e6 ≪ 2^31. Mid/side:
+  |m_ext ± side| ≤ 3×2^16 for legal 8/16-bit streams — fits with margin.
+  The witnesses: host bit-exact (`e4_witness.rs`) + ROM per-frame equality
+  + libFLAC's own bit-exactness of the clips pin the outcome; the proof
+  pins *why* they cannot diverge.
+
+**Method compliance (the menu's rules):** one variable (hot-path arithmetic
+width; shared field readers/fill/residual keep the comparison honest);
+`make spike-test` green including the variant's own bit-exact witness ⇒
+same *what*, only *how*; new ROM sha recorded; two headless runs
+`cmp`-identical; full stats per fold net of this variant's own calibration;
+raw alongside net per frame; equality witness gates every variant number.
+Still tinkering evidence, not the gate verdict — PR 5 owns the verdict
+table and E5's hardware arbitration; the ctrl-vs-variant *relative* result
+is measured within one emulator model.
+
+**Preservation:** the vendored variant, the two-window pass, the equality
+witness, the host witness test, and the unified calibration loop all live
+in the sample patch; nothing in the live tree. The `perf/flac-spike-e4-i32-
+intermediates` branch that ran the measurement is superseded by the sample
+(delete after this docs PR merges). If the harness has moved when a future
+run re-applies (PR 4/5), take the two-window + equality-witness +
+unified-calibration *method* from the patch; `e4.rs` is a standalone module
+and should port verbatim.
