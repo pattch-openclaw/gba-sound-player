@@ -2257,6 +2257,19 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > way — but ARMv4T has no CLZ to count with; see the E2 entry's correction
 > note) and generic decode plumbing. Full result + method:
 > [E2 result](#e2-result--the-accumulator-reader-does-not-collapse-the-fixed-arm-2026-09-24).
+>
+> **Status 2026-09-25: menu extended (E6–E10).** Gap analysis of what
+> E1–E5 structurally do not cover (inspected against the repo's own build
+> and link config, 2026-09-25): **E6** pins decode *code* into IWRAM — E1
+> moved decode *data* to RAM, but instruction fetch still runs from
+> cartridge ROM and no menu item touches code placement; **E7** probes a
+> build flag baked into every measured image
+> (`-Cforce-frame-pointers=yes`); **E8** attributes cost to decode
+> *sub-stages* directly instead of inferring it from arm asymmetries;
+> **E9** measures *stacked* variants (every gain so far was measured in
+> isolation — orthogonality is argued, never measured); **E10** is the
+> ARM-mode hand-written codeword loop, E2b's ceiling. These are menu-grade
+> hypotheses like everything else here — measure before believing.
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -2344,9 +2357,107 @@ the gap on mGBA, hardware confirms; if mGBA drops but hardware doesn't,
 the emulator was overestimating cart waits — record which way, it changes
 what "real-time on hardware" claims for the whole gate.
 
+### E6 — Hot decode code to IWRAM (`.text_iwram`) — instruction fetch (proposed 2026-09-25; unmeasured)
+
+E1 staged decode's *input data* into RAM; the decode *code* still executes
+from cartridge ROM, and nothing in E1–E4 changes that. The ARM7TDMI has no
+instruction cache — just a small prefetch buffer — so a branch-dense loop
+like the Rice unary loop (`while read_bits(1)? == 0`, one branch per
+iteration, the E2 result's named survivor) pays non-sequential instruction
+fetches from the gamepak on nearly every iteration. This is the one
+hypothesis the ruled-out list is structurally blind to: E1 moved data
+reads, E3 would move data writes, E4 changed arithmetic — none moved code.
+Mechanism facts verified in the link config the build actually uses (agb
+0.25.0's `gba.ld`, emitted by its build script and linked via
+`-Tgba.ld`): `.text` goes to `> rom`; the `.iwram` section collects
+`*(.text_iwram .text_iwram.*)` with `> iwram AT>rom`; `CommonInit`
+(agb's `entrypoint.s`) copies that section ROM→IWRAM at boot via BIOS
+`CPUSet` (`swi 0x000B0000`) — so `#[link_section = ".text_iwram"]` on the
+hot functions lands in machinery that already runs. Budget: IWRAM is 32 KB
+minus a 256 B BIOS reservation at `0x03000000` — E3's scratch note (16 KB
+tight against stack + agb internals) applies, so pin the hot loop only
+(`decode_rice_partition`, the reader's hot path, the integrator — the
+E2a vendor boundary is the right scope guide), not the crate. Same-image
+two-window control/variant, per-frame sample-equality witness, one
+variable (code placement only); confirm the section survives the real
+link (attributes × LTO placement) before trusting any numbers. **Reading
+rule:** if FIXED collapses, the 2.2× floor is instruction fetch and E6 is
+the production fix; if it doesn't, code timing joins the ruled-out list
+and E8's attribution picks the next lever.
+
+### E7 — Build flags on the measured image: `-Cforce-frame-pointers=yes` (proposed 2026-09-25; unmeasured)
+
+The root `.cargo/config.toml` rustflags carry `-Cforce-frame-pointers=yes`
+and apply to every release ROM measured so far (it predates the FLAC
+work, present since `73ae6b0`). On Thumb, pinning a register as frame
+pointer costs a live register in exactly the small hot loops under
+measurement and adds prologue/epilogue stores. The flag serves agb's
+backtrace convention — `entrypoint.s` zeroes r7 "so that stack traces are
+guaranteed to terminate" — not correctness, and the spike harness reads
+serial stats, never backtraces. Variant: rebuild the identical source
+without the flag; control is the same source with it. Decode logic is
+byte-identical source — a pure build-flag variable (the ROM sha
+necessarily differs; `make spike-test` green, full stats per fold).
+Cheapest probe on the menu; if any panic/debug path in the harness needs
+the flag, record that and close the item.
+
+### E8 — Sub-stage attribution (measurement, not a variant; proposed 2026-09-25; unmeasured)
+
+Every lever so far measured whole-frame cost and *inferred* the cost
+center from arm asymmetries (E4's FIXED inertness, E2a's LPC regression —
+clever, but indirect). Variant: one image, one pass, several timed
+windows per frame partitioning the same decode: header parse / residual
+loop (per partition) / integrator / decorrelate + `pad_block`. The E4
+calibration findings bind here hardest: micro-windows are layout- and
+serial-write-sensitive (±2 cyc), so use the unified loop shape, report and
+net each window's own calibration, and add the closure check that the
+sub-stage sums bracket the whole-frame window. **Reading:** this names
+where FIXED's ~1,078 c/sample actually sits instead of narrowing to it by
+elimination — run it before investing further in E2b/E10 shapes so the
+next lever is chosen from a table, not an inference.
+
+### E9 — Composite arms: stacked variants vs isolated gains (proposed 2026-09-25; unmeasured)
+
+E1/E2a/E4 each measured one variable against the *live i64/position*
+baseline; nobody has measured the levers stacked. The gains are argued
+orthogonal (arithmetic width vs reader shape vs code/data placement) but
+that argument has never been measured: compounding can be super-linear
+(a shorter loop body fetches cheaper from IWRAM) or sub-linear (two
+levers relieving the same bottleneck). Variant: as each component lands
+as a *sample*, measure composites on one image — minimum: E4-i32 + E2b +
+E6 — reporting each component's **marginal** delta inside the stack, not
+just the composite total. Run before PR 5's verdict so the verdict table
+reflects the best-known decode path, not the baseline-plus-one.
+
+### E10 — ARM-mode hand-written codeword loop (E2b's ceiling; proposed 2026-09-25; last resort)
+
+The Rust target `thumbv4t-none-eabi` compiles Thumb only; ARM32 mode buys
+three-operand arithmetic and barrel-shifter operand modifiers that fold
+the quotient count and the `rice_unmap` fold further (CLZ is absent in ARM
+v4T too — the E2 correction applies unchanged). Hand-written ARM sits in
+the spike crate behind the same vendored-module seam and must pass the
+same host bit-exact + ROM sample-equality witnesses. Only worth its cost
+if E8 attributes a large share to the codeword loop *and* E2b's
+no-CLZ count (masked-ones / run-length table) underdelivers — measure
+E2b first.
+
+**Ruled out by inspection, no probe needed (2026-09-25):** flac-lite's
+own `[profile.release] opt-level = "z"` is *not* how the measured ROM was
+built — flac-lite is a path dependency of the spike workspace, and cargo
+applies the workspace-root profile (the spike's `opt-level = 3`,
+`lto = "fat"`) to dependency compilation; the crate's own profile section
+governs only builds where it is the workspace root (the host-test gate).
+Don't re-litigate this as a perf gap.
+
 **Ordering:** E1 first (cheapest, splits the hypothesis space), then E2 if
 E1 blames ROM reads, E3/E4 otherwise — but any order is fine for tinkering
 as long as each run changes one variable and reports the full stats line.
+
+**Ordering for the 2026-09-25 additions:** E7 first (a rebuild flag-flip —
+minutes), then E6 (the highest-ceiling untested hypothesis); run E8
+alongside or immediately after, to replace inference with attribution
+before choosing between E2b and further levers; E9 before PR 5's verdict;
+E10 last, gated on E8's numbers.
 
 ## E1 result — ROM→RAM staging: cartridge reads are not the story (2026-09-22)
 
