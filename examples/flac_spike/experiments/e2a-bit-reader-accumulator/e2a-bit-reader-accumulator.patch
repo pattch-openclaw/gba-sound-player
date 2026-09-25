@@ -1,0 +1,1575 @@
+diff --git a/examples/flac_spike/src/e2.rs b/examples/flac_spike/src/e2.rs
+new file mode 100644
+index 0000000..108cad9
+--- /dev/null
++++ b/examples/flac_spike/src/e2.rs
+@@ -0,0 +1,1129 @@
++//! E2a sample — bit-reader refill-accumulator decode path (**probe code;
++//! never lands on `main`'s spike sources**).
++//!
++//! FLAC.md "Perf follow-ups — experiment menu", E2: the live reader is
++//! position-only — every `read_bits` recomputes its field from `bit_pos`,
++//! re-gathering up to 5 bytes from the backing slice (the Rice unary loop's
++//! 1-bit calls re-fetch their byte every call; no byte ever stays in a
++//! register between reads). E1 observed that the reader's per-access ROM
++//! pattern pays an above-bulk wait-state premium per byte; E4's inert FIXED
++//! arm leaves the reader as the standing suspect in that arm's hot loop.
++//! This module is a vendored variant of the `flac-lite` hot path
++//! (`frame::decode_frame` → `subframe::decode_subframe` → residual +
++//! integrators → `decorrelate`) whose *only* change is the bit reader:
++//! [`AccumulatorReader`] replaces the position-only reader throughout the
++//! vendored body. `flac-lite` itself is untouched — the same sample-only
++//! discipline as `experiments/e1-rom-ram-staging/` and
++//! `experiments/e4-i32-intermediates/`.
++//!
++//! ## The one variable: reader implementation
++//!
++//! Every function below that touches the reader is vendored because the
++//! live signatures take `&mut flac_lite::bits::BitReader`: the frame-header
++//! parse, the subframe-type parse, `PredictorState::fill`, the wasted-bits
++//! and coded-number readers, the residual decode, and the rice-partition
++//! loop. Everything that does NOT touch the reader is carried **verbatim in
++//! arithmetic** — the i64 integrators (`integrate_fixed`, `integrate_lpc`),
++//! `pad_block`, `rice_unmap`, and the shared `stereo::decorrelate` (a real
++//! shared call — it takes no reader). All arithmetic stays **i64 exactly as
++//! live**: E4's i32 result was never merged and is NOT part of this
++//! variable. The unary quotient loop stays literally
++//! `while reader.read_bits(1)? == 0 { quotient += 1 }` — no clz/quotient
++//! count optimization (that would be E2b; ARMv4T/ARM7TDMI has no CLZ —
++//! CLZ is ARMv5T, and the bits.rs module doc / FLAC.md menu claim to the
++//! contrary is wrong; the correction is recorded in FLAC.md's E2 entry).
++//!
++//! ## Reader design (agreed 2026-09-24 — implement exactly this)
++//!
++//! `struct { data, pos: usize /* bytes consumed */, acc: u32, valid: u32 }`.
++//! `acc` is **left-aligned, MSB-first**: the next bit to consume is always
++//! bit 31. Invariant, maintained by every operation:
++//!
++//! ```text
++//! logical cursor = pos * 8 − valid        (bits, from the start of data)
++//! ```
++//!
++//! so `bit_position()` / `bits_remaining()` derive exactly, and the API
++//! surface the decode path needs (`read_bits`, `peek_bits`, `read_signed`,
++//! `read_utf8_coded`, `byte_align`, `read_u8`, `read_wasted_bits`,
++//! `bit_position`, `bits_remaining`) is unchanged in spirit — the callers
++//! cannot tell the difference.
++//!
++//! - **`read_bits(n)` fast path** (`1 <= n <= 31` and `valid >= n`):
++//!   `val = acc >> (32 − n); acc <<= n; valid −= n`.
++//! - **Cold path** (`valid < n`, *including every `n == 32` read* — 32-bit
++//!   reads are never forced through the accumulator — and every illegal
++//!   width, so the rejection rules stay identical): fall back to the
++//!   retained position-based recompute, the live `peek_at` logic applied at
++//!   the derived logical cursor. Its validation (width 1..=32,
++//!   `cursor + n <= data.len() * 8` → `EndOfStream`) reproduces the live
++//!   reader's rules bit-for-bit, so error values and cursor atomicity are
++//!   identical by construction: a failed read never touches
++//!   `acc`/`valid`/`pos`.
++//! - **Refill: byte-at-a-time only** (the `ldrb`-class load — no word
++//!   loads, no alignment assumptions; the spike's regions are byte-aligned
++//!   `include_bytes!` slices but the reader must not depend on that), done
++//!   whenever `valid <= 24`: `acc |= (byte as u32) << (24 − valid);
++//!   valid += 8`. Appending below the valid window leaves the invariant
++//!   untouched (`pos` and `valid` move 8 bits together), i.e. refill is
++//!   cursor-neutral — which is why failed reads need no rollback.
++//! - **`byte_align`**: `drop = valid & 7; acc <<= drop; valid &= !7`,
++//!   returning `drop`. Through the invariant the live
++//!   `(8 − (bit_pos & 7)) & 7` is exactly `valid & 7`:
++//!   `bit_pos ≡ −valid (mod 8)`, so the dropped count and the new
++//!   byte-aligned cursor land identically to the old rule — verified by
++//!   the witnesses (host bit-exact + ROM per-frame equality).
++//! - **`peek_bits`**: fast-path extract when `valid >= n` (an `n == 32`
++//!   peek fast-extracts at shift 0 — peek consumes nothing, so no
++//!   shift-by-32 exists), else the same position-based fallback; state
++//!   untouched on success and failure alike.
++//!
++//! ## Witness chain (before any number counts)
++//!
++//! 1. Host (`tests/e2_witness.rs`): this vendored path decodes the exact
++//!    embedded clips bit-exactly vs the `flac -d` reference PCM — the same
++//!    layer-2 witness `spike_witness.rs` runs for the production path.
++//! 2. ROM: a per-frame variant-vs-control sample-equality pass (the E1/E4
++//!    pattern) proves both paths agree on the measured image itself; first
++//!    offender named; divergence voids the numbers.
++
++use crate::assets::SpikeClip;
++use crate::driver::DriverError;
++use flac_lite::format::{ChannelConfig, SampleRate};
++use flac_lite::frame::StreamDefaults;
++use flac_lite::residual::PartitionHeader;
++use flac_lite::stereo::decorrelate;
++use flac_lite::subframe::{PredictorState, SubframeType};
++use flac_lite::{Error, MAX_FIXED_ORDER, MAX_LPC_ORDER};
++
++/// The 14-bit frame sync (shared constant value from `frame.rs`).
++const SYNC_14: u32 = 0x3FFE;
++
++/// The E2a refill-accumulator bit reader. Left-aligned MSB-first `acc`
++/// (next bit = bit 31); invariant `logical cursor = pos * 8 − valid`.
++#[derive(Clone, Copy, Debug)]
++pub struct AccumulatorReader<'a> {
++    /// Backing bytes (the frame's region slice).
++    data: &'a [u8],
++    /// Bytes consumed — the byte just past the last fully buffered bit.
++    /// Invariant: `pos <= data.len()`.
++    pos: usize,
++    /// Bits buffered, MSB-first: the next bit to consume is bit 31. The
++    /// low `32 − valid` bits of `acc` are always zero.
++    acc: u32,
++    /// Valid bits in `acc` (0..=32).
++    valid: u32,
++}
++
++impl<'a> AccumulatorReader<'a> {
++    /// Wrap a byte slice for bit-level reading, cursor at bit 0.
++    pub fn new(data: &'a [u8]) -> Self {
++        Self {
++            data,
++            pos: 0,
++            acc: 0,
++            valid: 0,
++        }
++    }
++
++    /// Current logical cursor in bits — exactly what the position-only
++    /// control's `bit_position()` reports at the same point.
++    #[inline]
++    pub fn bit_position(&self) -> usize {
++        self.pos * 8 - self.valid as usize
++    }
++
++    /// Bits remaining in the backing slice from the logical cursor.
++    #[inline]
++    pub fn bits_remaining(&self) -> usize {
++        (self.data.len() << 3) - self.bit_position()
++    }
++
++    /// Refill **byte-at-a-time** while `valid <= 24` (after one byte
++    /// `valid` lands in 25..=32, so at most one byte load feeds one fast
++    /// read). The append at bit `24 − valid` (shift 0..=24) moves `pos`
++    /// and `valid` together: cursor-neutral by construction.
++    #[inline]
++    fn refill(&mut self) {
++        while self.valid <= 24 && self.pos < self.data.len() {
++            let byte = u32::from(self.data[self.pos]);
++            self.acc |= byte << (24 - self.valid);
++            self.pos += 1;
++            self.valid += 8;
++        }
++    }
++
++    /// Read `n` bits (1..=32) as an unsigned value, MSB-first.
++    ///
++    /// Fast path when the accumulator holds `n` bits (widths 1..=31):
++    /// extract at the top, consume by left-shifting. Cold path (`valid < n`,
++    /// every `n == 32`, and every illegal width): the retained
++    /// position-based recompute at the derived logical cursor, then an
++    /// exact resync of `(pos, acc, valid)` behind the new cursor.
++    #[inline]
++    pub fn read_bits(&mut self, n: u32) -> Result<u32, Error> {
++        self.refill();
++        if n >= 1 && n <= 31 && self.valid >= n {
++            // acc is zero below bit (32 − valid) ≤ (32 − n), so the
++            // extract takes exactly the next n bits, MSB-first.
++            let val = self.acc >> (32 - n);
++            self.acc <<= n;
++            self.valid -= n;
++            return Ok(val);
++        }
++        let val = self.peek_at(self.bit_position(), n)?;
++        // Resync the window to sit just past the consumed field. Validated
++        // (peek_at succeeded), so the cursor arithmetic stays in range:
++        // the read ended at or before data.len() * 8 bits.
++        let take = n - self.valid; // n > valid guaranteed by the guard above
++        self.valid = 0;
++        self.acc = 0;
++        self.pos += (take >> 3) as usize;
++        let rem = take & 7;
++        if rem != 0 {
++            // A validated read ending mid-byte implies the next byte
++            // exists (its remaining bits are inside data); keep it total
++            // anyway. The partial byte appends exactly like a refill onto
++            // an empty window (byte << 24) whose top rem bits were already
++            // consumed (acc <<= rem): the byte's MSB-first bit `rem` lands
++            // at acc bit 31, matching the invariant at cursor pos*8 −
++            // (8 − rem) = pos*8 + rem.
++            let partial = u32::from(self.data.get(self.pos).copied().unwrap_or(0)) << (24 + rem);
++            self.acc = partial;
++            self.valid = 8 - rem;
++            self.pos += 1;
++        }
++        Ok(val)
++    }
++
++    /// The retained position-based recompute — the live `bits.rs::peek_at`
++    /// verbatim (≤ 5-byte big-endian gather, shift+mask, identical width
++    /// and EOF rules), applied at `pos`. Serves the cold path and peeks.
++    fn peek_at(&self, pos: usize, n: u32) -> Result<u32, Error> {
++        if n == 0 || n > 32 {
++            return Err(Error::InvalidField);
++        }
++        let total_bits = self.data.len() << 3;
++        pos.checked_add(n as usize)
++            .filter(|&e| e <= total_bits)
++            .ok_or(Error::EndOfStream)?;
++
++        let byte_idx = pos >> 3;
++        let off = (pos & 7) as u32; // bit offset within the first byte, 0..=7
++        // Bytes spanned by bits [pos, pos+n): division-free ceil((off + n) / 8).
++        let bytes_needed = (((off + n + 7) >> 3) as usize).min(self.data.len()); // <= 5
++
++        // Gather the spanned bytes, big-endian, into a bottom-aligned u64
++        // accumulator (width = bytes_needed * 8 <= 40 bits).
++        let mut acc: u64 = 0;
++        for &b in &self.data[byte_idx..byte_idx + bytes_needed] {
++            acc = (acc << 8) | u64::from(b);
++        }
++        // The field ends `off` bits below the gather's top; its LSB sits at
++        // bit index (bytes_needed*8 − off − n), always in 0..40 — no
++        // shift-by-64 even for n == 32.
++        let shift = bytes_needed as u32 * 8 - off - n;
++        let mask = (1u64 << n) - 1; // n in 1..=32, so this cannot overflow u64
++        Ok(((acc >> shift) & mask) as u32)
++    }
++
++    /// Peek at the next `n` bits (1..=32) without advancing the cursor.
++    ///
++    /// Fast-path extract when the accumulator already holds them, else the
++    /// position-based fallback — the two paths provably agree, so peek
++    /// needs no refill and touches nothing (peek consumes nothing, so the
++    /// `n == 32` fast extract is a shift by 0, never a shift by 32 —
++    /// unlike `read_bits`, where 32-bit reads ride the cold path).
++    /// Same width/EOF semantics as `read_bits`; state untouched on success
++    /// *and* failure.
++    pub fn peek_bits(&self, n: u32) -> Result<u32, Error> {
++        if n >= 1 && n <= 32 && self.valid >= n {
++            return Ok(self.acc >> (32 - n));
++        }
++        self.peek_at(self.bit_position(), n)
++    }
++
++    /// Read `n` bits (1..=32) as a two's-complement signed value — the
++    /// live shl-then-arithmetic-shr idiom, delegating to `read_bits`.
++    pub fn read_signed(&mut self, n: u32) -> Result<i32, Error> {
++        let raw = self.read_bits(n)?;
++        let shift = 32 - n;
++        Ok(((raw << shift) as i32) >> shift)
++    }
++
++    /// Read FLAC's UTF-8-style coded number (RFC 9639 §9.1.5). Composite
++    /// read, atomic: a failure anywhere restores the full reader state —
++    /// the same contract as the live reader's `bit_pos` restore, carried
++    /// here by the `(pos, acc, valid)` snapshot.
++    pub fn read_utf8_coded(&mut self) -> Result<u64, Error> {
++        let start = (self.pos, self.acc, self.valid);
++        match self.coded_number_inner() {
++            Ok(v) => Ok(v),
++            Err(e) => {
++                self.pos = start.0;
++                self.acc = start.1;
++                self.valid = start.2;
++                Err(e)
++            }
++        }
++    }
++
++    /// Consume bits up to the next byte boundary; returns bits dropped
++    /// (0..7).
++    ///
++    /// Accumulator form of the live `(8 − (bit_pos & 7)) & 7`: through the
++    /// invariant `bit_pos ≡ −valid (mod 8)`, so the drop count is exactly
++    /// `valid & 7`. Discarding that many bits from the top of the window
++    /// (`acc <<= drop; valid &= !7`) lands the logical cursor on the same
++    /// boundary the live rule reaches; infallible, cannot overrun (a
++    /// slice's bit count is a multiple of 8), and an aligned cursor is an
++    /// exact no-op (drop 0).
++    pub fn byte_align(&mut self) -> u32 {
++        let drop = self.valid & 7;
++        self.acc <<= drop;
++        self.valid &= !7;
++        drop
++    }
++
++    /// Read a `u8` (8 bits) — bit-level, identical to the live reader by
++    /// delegation.
++    pub fn read_u8(&mut self) -> Result<u8, Error> {
++        self.read_bits(8).map(|v| v as u8)
++    }
++
++    /// Read FLAC's wasted-bits-per-sample field (§9.2.2); atomic across
++    /// the composite run, same contract as the live reader.
++    pub fn read_wasted_bits(&mut self) -> Result<u32, Error> {
++        let start = (self.pos, self.acc, self.valid);
++        match self.wasted_inner() {
++            Ok(k) => Ok(k),
++            Err(e) => {
++                self.pos = start.0;
++                self.acc = start.1;
++                self.valid = start.2;
++                Err(e)
++            }
++        }
++    }
++
++    fn wasted_inner(&mut self) -> Result<u32, Error> {
++        if self.read_bits(1)? == 0 {
++            return Ok(0);
++        }
++        let mut zeros: u32 = 0;
++        loop {
++            if self.read_bits(1)? == 1 {
++                return Ok(zeros + 1);
++            }
++            zeros += 1;
++        }
++    }
++
++    fn coded_number_inner(&mut self) -> Result<u64, Error> {
++        let lead = self.read_bits(8)? as u8;
++        let mut prefix: u32 = 0;
++        let mut mask = 0x80u8;
++        while lead & mask != 0 {
++            prefix += 1;
++            mask >>= 1;
++        }
++        if prefix == 1 || prefix == 8 {
++            return Err(Error::InvalidField);
++        }
++        let total = if prefix == 0 { 1 } else { prefix };
++        let mut value = u64::from(u32::from(lead) & (0xFFu32 >> (prefix + 1)));
++        for _ in 1..total {
++            let cont = self.read_bits(8)? as u8;
++            if cont & 0xC0 != 0x80 {
++                return Err(Error::InvalidField);
++            }
++            value = (value << 6) | u64::from(cont & 0x3F);
++        }
++        Ok(value)
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Vendored decode path — reader type swapped; arithmetic verbatim.
++// ---------------------------------------------------------------------------
++
++/// Vendored twin of `frame.rs`'s private `BlocksizeCode`: the two-phase
++/// blocksize resolution (code now, uncommon value after the coded number).
++enum BlocksizeCode {
++    Table(u16),
++    Uncommon8,
++    Uncommon16,
++}
++
++/// Vendored `frame::blocksize_code` (pure; no reader).
++fn blocksize_code(code: u8) -> Result<BlocksizeCode, Error> {
++    match code {
++        0b0000 => Err(Error::InvalidField),
++        0b0001 => Ok(BlocksizeCode::Table(192)),
++        0b0010..=0b0101 => Ok(BlocksizeCode::Table((144u32 << code) as u16)),
++        0b0110 => Ok(BlocksizeCode::Uncommon8),
++        0b0111 => Ok(BlocksizeCode::Uncommon16),
++        0b1000..=0b1111 => Ok(BlocksizeCode::Table((1u32 << code as u32) as u16)),
++        _ => Err(Error::InvalidField),
++    }
++}
++
++/// Vendored `frame::channel_config` (pure; no reader).
++fn channel_config(code: u8) -> Result<ChannelConfig, Error> {
++    match code {
++        0b0000 => Ok(ChannelConfig::Independent { channels: 1 }),
++        0b0001 => Ok(ChannelConfig::Independent { channels: 2 }),
++        0b0010..=0b0111 => Err(Error::ProfileViolation),
++        0b1000 => Ok(ChannelConfig::LeftSide),
++        0b1001 => Ok(ChannelConfig::RightSide),
++        0b1010 => Ok(ChannelConfig::MidSide),
++        _ => Err(Error::InvalidField),
++    }
++}
++
++/// Vendored `frame::bits_per_sample` (pure; no reader).
++fn bits_per_sample(code: u8, defaults: &StreamDefaults) -> Result<u8, Error> {
++    match code {
++        0b000 => match defaults.bits_per_sample {
++            8 | 16 => Ok(defaults.bits_per_sample),
++            _ => Err(Error::UnsupportedSampleSize),
++        },
++        0b001 => Ok(8),
++        0b100 => Ok(16),
++        0b011 => Err(Error::InvalidField),
++        _ => Err(Error::UnsupportedSampleSize),
++    }
++}
++
++/// Vendored `frame::sample_rate` (reader type swapped).
++fn sample_rate(code: u8, reader: &mut AccumulatorReader<'_>) -> Result<SampleRate, Error> {
++    let hz = match code {
++        0b1100 => {
++            let khz = reader.read_u8()? as u32;
++            if khz == 0 {
++                return Err(Error::InvalidField);
++            }
++            khz * 1000
++        }
++        0b1101 => {
++            let hz = reader.read_bits(16)?;
++            if hz == 0 {
++                return Err(Error::InvalidField);
++            }
++            return Ok(SampleRate::Explicit(hz));
++        }
++        0b1110 => {
++            let hz10 = reader.read_bits(16)?;
++            if hz10 == 0 {
++                return Err(Error::InvalidField);
++            }
++            hz10 * 10
++        }
++        _ => return SampleRate::from_flac_code(code),
++    };
++    Ok(SampleRate::Explicit(hz))
++}
++
++/// Vendored `frame::FrameHeader::parse` (reader type swapped; field order,
++/// validation, and cursor rules line-for-line identical).
++fn parse_header(
++    reader: &mut AccumulatorReader<'_>,
++    defaults: &StreamDefaults,
++) -> Result<flac_lite::frame::FrameHeader, Error> {
++    if reader.bit_position() % 8 != 0 {
++        return Err(Error::FrameSync);
++    }
++
++    let sync = reader.read_bits(14)?;
++    if sync != SYNC_14 {
++        return Err(Error::FrameSync);
++    }
++    if reader.read_bits(1)? != 0 {
++        return Err(Error::InvalidField); // reserved bit must be zero
++    }
++    if reader.read_bits(1)? != 0 {
++        return Err(Error::ProfileViolation); // variable blocksize: off-profile
++    }
++    let bs_bits = reader.read_bits(4)? as u8;
++    let rate_code = reader.read_bits(4)? as u8;
++    let channels_code = reader.read_bits(4)? as u8;
++    let size_code = reader.read_bits(3)? as u8;
++    if reader.read_bits(1)? != 0 {
++        return Err(Error::InvalidField); // reserved bit must be zero
++    }
++    debug_assert_eq!(reader.bit_position() % 8, 0, "fixed fields are 32 bits");
++
++    let channels = channel_config(channels_code)?;
++    let bits_per_sample = bits_per_sample(size_code, defaults)?;
++    let bs_code = blocksize_code(bs_bits)?;
++
++    let number = reader.read_utf8_coded()?;
++    if number > 0x7FFF_FFFF {
++        return Err(Error::InvalidField);
++    }
++
++    let blocksize = match bs_code {
++        BlocksizeCode::Table(n) => n as usize,
++        BlocksizeCode::Uncommon8 => reader.read_u8()? as usize + 1,
++        BlocksizeCode::Uncommon16 => {
++            let stored = reader.read_bits(16)?;
++            if stored == 0xFFFF {
++                return Err(Error::InvalidField);
++            }
++            stored as usize + 1
++        }
++    };
++
++    let sample_rate = sample_rate(rate_code, reader)?;
++
++    let _crc8 = reader.read_u8()?;
++
++    Ok(flac_lite::frame::FrameHeader {
++        blocksize,
++        sample_rate,
++        channels,
++        bits_per_sample,
++        number,
++    })
++}
++
++/// Vendored `subframe::SubframeType::parse` (reader type swapped).
++fn parse_subframe_type(reader: &mut AccumulatorReader<'_>) -> Result<SubframeType, Error> {
++    if reader.read_bits(1)? != 0 {
++        return Err(Error::InvalidField);
++    }
++    let code = reader.read_bits(6)? as u8;
++    match code {
++        0b000000 => Ok(SubframeType::Constant),
++        0b000001 => Ok(SubframeType::Verbatim),
++        0b001000..=0b001100 => Ok(SubframeType::Fixed(code - 8)),
++        0b100000..=0b111111 => Ok(SubframeType::Lpc { order: code - 31 }),
++        _ => Err(Error::InvalidField),
++    }
++}
++
++/// Vendored `subframe::PredictorState::fill` (reader type swapped; the
++/// i64 pad kept verbatim — outside the per-sample loop, so sharing it by
++/// copy keeps the variable the reader, only).
++fn fill_state(
++    state: &mut PredictorState,
++    reader: &mut AccumulatorReader<'_>,
++    order: usize,
++    subframe_bits: u8,
++    wasted: u32,
++) -> Result<(), Error> {
++    if order > MAX_LPC_ORDER {
++        return Err(Error::UnsupportedPredictorOrder);
++    }
++    if wasted >= 32 {
++        return Err(Error::InvalidField);
++    }
++    let mut warm = [0i32; MAX_LPC_ORDER];
++    for slot in (0..order).rev() {
++        let v = reader.read_signed(u32::from(subframe_bits))?;
++        warm[slot] = ((i64::from(v)) << wasted) as i32;
++    }
++    state.warm_up = warm;
++    state.len = order;
++    Ok(())
++}
++
++/// Vendored `residual::rice_unmap` (pure; no reader).
++fn rice_unmap(n: u32) -> i32 {
++    if n & 1 == 0 {
++        (n >> 1) as i32
++    } else {
++        (!(n >> 1)) as i32
++    }
++}
++
++/// Vendored `subframe::pad_block` — i64-then-truncate exactly as live.
++fn pad_block(out: &mut [i32], wasted: u32) {
++    if wasted == 0 {
++        return;
++    }
++    for s in out.iter_mut() {
++        *s = ((i64::from(*s)) << wasted) as i32;
++    }
++}
++
++/// Vendored `subframe::integrate_fixed` — i64 cascade exactly as live
++/// (this is NOT E4; the variable is the reader).
++fn integrate_fixed(order: u8, warm_up: &PredictorState, residual: &mut [i32]) -> Result<(), Error> {
++    let order = usize::from(order);
++    if order > MAX_FIXED_ORDER {
++        return Err(Error::UnsupportedPredictorOrder);
++    }
++    if warm_up.len < order {
++        return Err(Error::InvalidField);
++    }
++    let w = &warm_up.warm_up;
++    let mut d1;
++    let mut d2 = 0i64;
++    let mut d3 = 0i64;
++    let mut out = 0i64;
++    match order {
++        0 => return Ok(()),
++        1 => {
++            d1 = i64::from(w[0]);
++        }
++        2 => {
++            d1 = i64::from(w[0]) - i64::from(w[1]);
++            out = i64::from(w[0]);
++        }
++        3 => {
++            d2 = i64::from(w[0]) - 2 * i64::from(w[1]) + i64::from(w[2]);
++            d1 = i64::from(w[0]) - i64::from(w[1]);
++            out = i64::from(w[0]);
++        }
++        _ => {
++            d3 = i64::from(w[0]) - 3 * i64::from(w[1]) + 3 * i64::from(w[2]) - i64::from(w[3]);
++            d2 = i64::from(w[0]) - 2 * i64::from(w[1]) + i64::from(w[2]);
++            d1 = i64::from(w[0]) - i64::from(w[1]);
++            out = i64::from(w[0]);
++        }
++    }
++    for sample in residual.iter_mut() {
++        let r = i64::from(*sample);
++        match order {
++            1 => {
++                d1 += r;
++                out = d1;
++            }
++            2 => {
++                d1 += r;
++                out += d1;
++            }
++            3 => {
++                d2 += r;
++                d1 += d2;
++                out += d1;
++            }
++            _ => {
++                d3 += r;
++                d2 += d3;
++                d1 += d2;
++                out += d1;
++            }
++        }
++        *sample = out as i32;
++    }
++    Ok(())
++}
++
++/// Vendored `subframe::integrate_lpc` — i64 dot product exactly as live.
++fn integrate_lpc(
++    coefficients: &[i32],
++    shift: i8,
++    warm_up: &PredictorState,
++    residual: &mut [i32],
++) -> Result<(), Error> {
++    if shift < 0 {
++        return Err(Error::InvalidField);
++    }
++    let order = coefficients.len();
++    if order > MAX_LPC_ORDER {
++        return Err(Error::UnsupportedPredictorOrder);
++    }
++    if warm_up.len < order {
++        return Err(Error::InvalidField);
++    }
++    let shift = u32::from(shift as u8);
++    if shift >= 64 {
++        return Err(Error::InvalidField);
++    }
++    let w = &warm_up.warm_up;
++    for i in 0..residual.len() {
++        let mut acc = 0i64;
++        for (j, &c) in coefficients.iter().enumerate() {
++            let past = if j < i {
++                i64::from(residual[i - 1 - j])
++            } else {
++                i64::from(w[j - i])
++            };
++            acc += i64::from(c) * past;
++        }
++        residual[i] = ((acc >> shift) + i64::from(residual[i])) as i32;
++    }
++    Ok(())
++}
++
++/// Vendored `residual::decode_rice_partition` (reader type swapped). The
++/// unary quotient loop stays literally `while reader.read_bits(1)? == 0`
++/// — counting the quotient another way would be E2b, not this variable.
++fn decode_rice_partition(
++    reader: &mut AccumulatorReader<'_>,
++    header: &PartitionHeader,
++    out: &mut [i32],
++) -> Result<(), Error> {
++    if out.len() != usize::from(header.sample_count) {
++        return Err(Error::InvalidField);
++    }
++    if header.is_escape {
++        for sample in out.iter_mut() {
++            *sample = if header.raw_bits == 0 {
++                0
++            } else {
++                reader.read_signed(u32::from(header.raw_bits))?
++            };
++        }
++        return Ok(());
++    }
++    let order = u32::from(header.order);
++    for sample in out.iter_mut() {
++        let mut quotient: u32 = 0;
++        while reader.read_bits(1)? == 0 {
++            quotient += 1;
++        }
++        let remainder = if order == 0 {
++            0
++        } else {
++            reader.read_bits(order)?
++        };
++        if order >= 32 || quotient > (u32::MAX >> order) {
++            return Err(Error::InvalidField);
++        }
++        let folded = (quotient << order) | remainder;
++        if folded == u32::MAX {
++            return Err(Error::InvalidField);
++        }
++        *sample = rice_unmap(folded);
++    }
++    Ok(())
++}
++
++/// Vendored `residual::decode_residual` (reader type swapped).
++fn decode_residual(
++    reader: &mut AccumulatorReader<'_>,
++    blocksize: usize,
++    predictor_order: usize,
++    out: &mut [i32],
++) -> Result<(), Error> {
++    let Some(total) = blocksize.checked_sub(predictor_order) else {
++        return Err(Error::InvalidField);
++    };
++    if out.len() != total {
++        return Err(Error::InvalidField);
++    }
++    let (plen, escape) = match reader.read_bits(2)? {
++        0b00 => (4u32, 15u32),
++        0b01 => (5, 31),
++        _ => return Err(Error::InvalidField),
++    };
++    let partition_order = reader.read_bits(4)? as usize;
++    let partitions = 1usize << partition_order;
++    if blocksize & (partitions - 1) != 0 {
++        return Err(Error::InvalidField);
++    }
++    let partition_samples = blocksize >> partition_order;
++    if predictor_order >= partition_samples {
++        return Err(Error::InvalidField);
++    }
++    let mut rest = out;
++    for partition in 0..partitions {
++        let count = if partition == 0 {
++            partition_samples - predictor_order
++        } else {
++            partition_samples
++        };
++        let param = reader.read_bits(plen)?;
++        let header = if param == escape {
++            let raw_bits = reader.read_bits(5)? as u8;
++            PartitionHeader {
++                order: 0,
++                is_escape: true,
++                raw_bits,
++                sample_count: count as u16,
++            }
++        } else {
++            PartitionHeader {
++                order: param as u8,
++                is_escape: false,
++                raw_bits: 0,
++                sample_count: count as u16,
++            }
++        };
++        let (head, tail) = rest.split_at_mut(count);
++        decode_rice_partition(reader, &header, head)?;
++        rest = tail;
++    }
++    Ok(())
++}
++
++/// Vendored `subframe::decode_subframe` (reader type swapped; shared
++/// `SubframeType`/`PredictorState` types, shared `decorrelate` beneath).
++fn decode_subframe(
++    reader: &mut AccumulatorReader<'_>,
++    blocksize: usize,
++    sample_bits: u8,
++    state: &mut PredictorState,
++    out: &mut [i32],
++) -> Result<SubframeType, Error> {
++    if out.len() != blocksize {
++        return Err(Error::InvalidField);
++    }
++    let kind = parse_subframe_type(reader)?;
++    let order = kind.order();
++    if order > blocksize {
++        return Err(Error::InvalidField);
++    }
++    let wasted = reader.read_wasted_bits()?;
++    let sub_bits = u32::from(sample_bits)
++        .checked_sub(wasted)
++        .filter(|&b| b > 0 && b <= 32)
++        .ok_or(Error::InvalidField)?;
++    let subframe_bits = sub_bits as u8;
++    fill_state(state, reader, order, subframe_bits, 0)?;
++    for (i, slot) in state.warm_up[..order].iter().rev().enumerate() {
++        out[i] = *slot;
++    }
++    match kind {
++        SubframeType::Constant => {
++            let v = reader.read_signed(sub_bits)?;
++            out.fill(v);
++        }
++        SubframeType::Verbatim => {
++            for sample in out.iter_mut() {
++                *sample = reader.read_signed(sub_bits)?;
++            }
++        }
++        SubframeType::Fixed(order_u8) => {
++            decode_residual(reader, blocksize, order, &mut out[order..])?;
++            integrate_fixed(order_u8, state, &mut out[order..])?;
++        }
++        SubframeType::Lpc { order: _order_u8 } => {
++            let precision_minus_one = reader.read_bits(4)?;
++            if precision_minus_one == 0b1111 {
++                return Err(Error::InvalidField);
++            }
++            let precision = precision_minus_one + 1;
++            let shift = reader.read_signed(5)?;
++            if shift < 0 {
++                return Err(Error::InvalidField);
++            }
++            let mut coeffs = [0i32; MAX_LPC_ORDER];
++            for c in coeffs.iter_mut().take(order) {
++                *c = reader.read_signed(precision)?;
++            }
++            decode_residual(reader, blocksize, order, &mut out[order..])?;
++            integrate_lpc(&coeffs[..order], shift as i8, state, &mut out[order..])?;
++        }
++    }
++    pad_block(out, wasted);
++    Ok(kind)
++}
++
++/// Vendored `frame::decode_frame` (reader type swapped; `decorrelate` is a
++/// real shared call — it takes no reader).
++fn decode_frame(
++    reader: &mut AccumulatorReader<'_>,
++    header: &flac_lite::frame::FrameHeader,
++    left: &mut [i32],
++    right: &mut [i32],
++    state: &mut [PredictorState; 2],
++) -> Result<usize, Error> {
++    let blocksize = header.blocksize;
++    let slots = usize::from(header.channels.subframe_count());
++
++    if left.len() < blocksize || (slots == 2 && right.len() < blocksize) {
++        return Err(Error::InvalidField);
++    }
++    let side_slot = match header.channels {
++        ChannelConfig::RightSide => Some(0),
++        ChannelConfig::LeftSide | ChannelConfig::MidSide => Some(1),
++        ChannelConfig::Independent { .. } => None,
++    };
++    let slot_bits = |slot: usize| -> u8 {
++        (u32::from(header.bits_per_sample) + u32::from(side_slot == Some(slot))) as u8
++    };
++
++    decode_subframe(
++        reader,
++        blocksize,
++        slot_bits(0),
++        &mut state[0],
++        &mut left[..blocksize],
++    )?;
++    if slots == 2 {
++        decode_subframe(
++            reader,
++            blocksize,
++            slot_bits(1),
++            &mut state[1],
++            &mut right[..blocksize],
++        )?;
++    }
++    let right_span = if slots == 2 { blocksize } else { 0 };
++    decorrelate(
++        header.channels,
++        blocksize,
++        &mut left[..blocksize],
++        &mut right[..right_span],
++    )?;
++
++    reader.byte_align();
++    let _crc16_hi = reader.read_u8()?;
++    let _crc16_lo = reader.read_u8()?;
++    Ok(blocksize)
++}
++
++/// Decode exactly one frame with the accumulator-reader path — the variant
++/// twin of `driver::decode_one` (same seek-table offset walk, same table
++/// cross-check, same fresh cursor; the only difference is which reader and
++/// which vendored frame body run beneath).
++pub fn decode_one_accumulator(
++    clip: &SpikeClip,
++    frame_index: usize,
++    left: &mut [i32],
++    right: &mut [i32],
++    state: &mut [PredictorState; 2],
++) -> Result<usize, DriverError> {
++    let frame = &clip.frames[frame_index];
++    let max = usize::from(clip.max_blocksize);
++    if left.len() < max {
++        return Err(DriverError::BufferTooSmall {
++            need: max,
++            have: left.len(),
++        });
++    }
++    if clip.channels == 2 && right.len() < max {
++        return Err(DriverError::BufferTooSmall {
++            need: max,
++            have: right.len(),
++        });
++    }
++    let offset = match usize::try_from(frame.offset) {
++        Ok(offset) => offset,
++        Err(_) => {
++            return Err(DriverError::FrameOffsetOutOfRange {
++                frame: frame_index,
++                offset: usize::MAX,
++                len: clip.region.len(),
++            });
++        }
++    };
++    let region = clip
++        .region
++        .get(offset..)
++        .ok_or(DriverError::FrameOffsetOutOfRange {
++            frame: frame_index,
++            offset,
++            len: clip.region.len(),
++        })?;
++
++    let defaults = StreamDefaults {
++        sample_rate_hz: clip.sample_rate_hz,
++        bits_per_sample: clip.bits_per_sample,
++    };
++    let mut reader = AccumulatorReader::new(region);
++    let header = parse_header(&mut reader, &defaults).map_err(DriverError::Decode)?;
++    if header.blocksize != usize::from(frame.blocksize) {
++        return Err(DriverError::MetadataMismatch {
++            frame: frame_index,
++            table: usize::from(frame.blocksize),
++            header: header.blocksize,
++        });
++    }
++    decode_frame(&mut reader, &header, left, right, state).map_err(DriverError::Decode)
++}
++
++// Unit tests compile as part of the lib under the host test harness (same
++// gate as stats.rs's). Core-only, like the crate's other unit tests.
++//
++// Witness shape: a *differential* sweep against the live position-only
++// `BitReader` — every operation's value, cursor, and error must agree, bit
++// for bit. The clip bit-exactness witness (`tests/e2_witness.rs`) carries
++// the decode path on the embedded bytes; these tests carry the reader's
++// edge cases the clips never exercise: n == 32 and illegal widths, EOF
++// rejections and composite atomicity, byte_align at every alignment.
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use flac_lite::bits::BitReader;
++
++    /// Deterministic pseudo-random bytes (LCG, same shape as bits.rs's).
++    struct Lcg(u32);
++    impl Lcg {
++        fn next_u8(&mut self) -> u8 {
++            self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
++            (self.0 >> 24) as u8
++        }
++    }
++
++    fn lcg_bytes(seed: u32, out: &mut [u8]) {
++        let mut rng = Lcg(seed);
++        for b in out.iter_mut() {
++            *b = rng.next_u8();
++        }
++    }
++
++    /// The accumulator's window invariant: `pos` never passes the slice,
++    /// buffered bits never exceed consumed bits, and the low `32 − valid`
++    /// bits of `acc` are zero (so fast extracts are exact).
++    fn assert_window(r: &AccumulatorReader<'_>, where_: &str) {
++        assert!(r.pos <= r.data.len(), "{where_}: pos past slice");
++        assert!(
++            (r.valid as usize) <= r.pos * 8,
++            "{where_}: valid exceeds consumed bits"
++        );
++        assert!(r.valid <= 32, "{where_}: valid > 32");
++        // valid == 0 ⇒ mask all 32 bits (acc must be clean); valid == 32
++        // ⇒ no low bits exist. The mid widths are the only real shift.
++        let low_mask = match r.valid {
++            0 => u32::MAX,
++            32.. => 0u32,
++            v => (1u32 << (32 - v)) - 1,
++        };
++        assert_eq!(r.acc & low_mask, 0, "{where_}: acc dirty below valid");
++    }
++
++    #[test]
++    fn accumulator_matches_position_reader_on_mixed_width_sweeps() {
++        // Widths incl. 32 (always cold), 33/0 (illegal), and widths that
++        // straddle the refill boundary (24/25) and the fast/cold seam.
++        let widths: [u32; 18] = [
++            1, 1, 1, 2, 3, 5, 7, 8, 9, 12, 16, 20, 24, 25, 31, 32, 33, 11,
++        ];
++        for seed in [0x1234_5678u32, 0xDEAD_BEEF, 0x0F0F_F0F0, 0x88C7_7A3B] {
++            let mut data = [0u8; 40];
++            lcg_bytes(seed, &mut data);
++            let mut ctrl = BitReader::new(&data);
++            let mut var = AccumulatorReader::new(&data);
++            assert_window(&var, "fresh");
++            for round in 0..250usize {
++                let n = widths[(round * 7 + data[round % data.len()] as usize) % widths.len()];
++                let c = ctrl.read_bits(n);
++                let v = var.read_bits(n);
++                assert_eq!(c, v, "seed {seed:#X} round {round} width {n}: value");
++                assert_eq!(
++                    ctrl.bit_position(),
++                    var.bit_position(),
++                    "seed {seed:#X} round {round} width {n}: cursor"
++                );
++                assert_eq!(
++                    ctrl.bits_remaining(),
++                    var.bits_remaining(),
++                    "seed {seed:#X} round {round} width {n}: remaining"
++                );
++                assert_window(&var, "sweep");
++                // Peeks (incl. the n == 32 fast extract) must agree and
++                // must not move either reader.
++                for pn in [1u32, 7, 32] {
++                    assert_eq!(
++                        ctrl.peek_bits(pn),
++                        var.peek_bits(pn),
++                        "seed {seed:#X} round {round}: peek {pn}"
++                    );
++                    assert_eq!(ctrl.bit_position(), var.bit_position());
++                    assert_window(&var, "sweep-peek");
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn byte_align_lands_identically_to_the_live_rule() {
++        let mut data = [0u8; 16];
++        lcg_bytes(0xC0FF_EE11, &mut data);
++        // Reach every alignment through mixed preceding reads, then align,
++        // re-align (idempotent no-op), and read across the boundary.
++        for pre1 in [0u32, 1, 3, 5, 13] {
++            for pre2 in [0u32, 4, 9, 32] {
++                let mut ctrl = BitReader::new(&data);
++                let mut var = AccumulatorReader::new(&data);
++                if pre1 > 0 {
++                    assert_eq!(ctrl.read_bits(pre1), var.read_bits(pre1));
++                }
++                if pre2 > 0 {
++                    assert_eq!(ctrl.read_bits(pre2), var.read_bits(pre2));
++                }
++                let cd = ctrl.byte_align();
++                let vd = var.byte_align();
++                assert_eq!(cd, vd, "pre {pre1}+{pre2}: dropped");
++                assert_eq!(
++                    ctrl.bit_position(),
++                    var.bit_position(),
++                    "pre {pre1}+{pre2}: aligned cursor"
++                );
++                assert_eq!(var.bit_position() % 8, 0);
++                assert_eq!(ctrl.byte_align(), var.byte_align(), "idempotent drop");
++                assert_eq!(ctrl.bit_position(), var.bit_position());
++                assert_window(&var, "align");
++                for w in [8u32, 16, 32] {
++                    assert_eq!(ctrl.read_bits(w), var.read_bits(w), "post-align {w}");
++                    assert_eq!(ctrl.bit_position(), var.bit_position());
++                    assert_window(&var, "post-align");
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn composites_agree_including_atomicity() {
++        // Coded-number leads at every bit alignment (legal 1/2/7-byte
++        // forms, the invalid 0xFF and stray-continuation leads), followed
++        // by wasted-bits runs on the same stream — values, cursors, and
++        // rejection atomicity all compared against the live reader.
++        let patterns: [&[u8]; 5] = [
++            &[0x00],
++            &[0xC2, 0x80],
++            &[0xFE, 0x82, 0x80, 0x80, 0x80, 0x80, 0x80],
++            &[0xFF],
++            &[0xC2, 0x00],
++        ];
++        let mut fill = [0u8; 32];
++        lcg_bytes(0x5EED_1234, &mut fill);
++        for (pi, pat) in patterns.iter().enumerate() {
++            for pad in 0usize..8 {
++                let mut buf = [0u8; 32];
++                let total_bits = pad + pat.len() * 8 + 24;
++                for i in 0..total_bits {
++                    let bit = if i < pad {
++                        (i as u8 * 37 + 11) & 1
++                    } else if i - pad < pat.len() * 8 {
++                        let j = i - pad;
++                        (pat[j >> 3] >> (7 - (j & 7))) & 1
++                    } else {
++                        let j = i - pad - pat.len() * 8;
++                        (fill[j % fill.len()] >> (7 - (j & 7))) & 1
++                    };
++                    buf[i >> 3] |= bit << (7 - (i & 7));
++                }
++                let mut ctrl = BitReader::new(&buf);
++                let mut var = AccumulatorReader::new(&buf);
++                if pad > 0 {
++                    let _ = ctrl.read_bits(pad as u32).unwrap();
++                    let _ = var.read_bits(pad as u32).unwrap();
++                }
++                let c = ctrl.read_utf8_coded();
++                let v = var.read_utf8_coded();
++                assert_eq!(c, v, "pattern {pi} pad {pad}: coded value");
++                assert_eq!(
++                    ctrl.bit_position(),
++                    var.bit_position(),
++                    "pattern {pi} pad {pad}: coded cursor"
++                );
++                assert_window(&var, "coded");
++                let cw = ctrl.read_wasted_bits();
++                let vw = var.read_wasted_bits();
++                assert_eq!(cw, vw, "pattern {pi} pad {pad}: wasted value");
++                assert_eq!(
++                    ctrl.bit_position(),
++                    var.bit_position(),
++                    "pattern {pi} pad {pad}: wasted cursor"
++                );
++                assert_window(&var, "wasted");
++                // read_signed agreement on the continuation, incl. width 32.
++                for w in [1u32, 8, 16, 32] {
++                    assert_eq!(
++                        ctrl.read_signed(w).map(i64::from),
++                        var.read_signed(w).map(i64::from),
++                        "pattern {pi} pad {pad}: signed {w}"
++                    );
++                    assert_eq!(ctrl.bit_position(), var.bit_position());
++                    assert_window(&var, "signed");
++                }
++            }
++        }
++    }
++}
+diff --git a/examples/flac_spike/src/lib.rs b/examples/flac_spike/src/lib.rs
+index dd05974..7b41e6f 100644
+--- a/examples/flac_spike/src/lib.rs
++++ b/examples/flac_spike/src/lib.rs
+@@ -38,4 +38,8 @@
+ pub mod assets;
+ pub mod checksum;
+ pub mod driver;
++/// E2a probe (sample code, never lands): bit-reader refill-accumulator
++/// variant decode path — see the module docs and FLAC.md's perf follow-up
++/// menu.
++pub mod e2;
+ pub mod stats;
+diff --git a/examples/flac_spike/src/main.rs b/examples/flac_spike/src/main.rs
+index c6025fa..5f7b350 100644
+--- a/examples/flac_spike/src/main.rs
++++ b/examples/flac_spike/src/main.rs
+@@ -82,6 +82,7 @@ mod rom {
+     use flac_spike::assets::{CLIPS, SpikeClip};
+     use flac_spike::checksum::{Fnv1a64, fnv1a64, fold_i16le_stereo};
+     use flac_spike::driver::{self, DriverError};
++    use flac_spike::e2;
+     use flac_spike::stats::{FrameCost, WORST_WRAPPED, cycles_between, real_time_budget};
+ 
+     const COLOR_PENDING: agb::display::Rgb15 = Rgb::new(128, 0, 255).to_rgb15();
+@@ -466,37 +467,48 @@ mod rom {
+         let mut right: alloc::vec::Vec<i32> = alloc::vec![0; max];
+         let mut state = [PredictorState::new(), PredictorState::new()];
+ 
+-        // Calibration: 5 empty windows (the work inside is a single IME
+-        // register read — the smallest possible probe, which also witnesses
+-        // IME == 0 inside the window). Deterministic emulator + deterministic
+-        // ROM ⇒ all 5 raws must be identical; that stability is what licenses
+-        // subtracting the value as harness overhead.
+-        let mut ime_inside = 0xFFFFu16;
+-        let mut raws = [0u32; CALIBRATION_SAMPLES];
+-        for (i, slot) in raws.iter_mut().enumerate() {
++        // Calibration (E2a build: unified warm-up + reported loop).
++        // Empty windows, one IME probe inside (also the IME == 0 in-window
++        // witness). This build's layout moved (the e2 pass added code), and
++        // PR 3's original shape goes unstable exactly the way E1/E4
++        // documented (raws 22/24/24/24/24 or 22/20/20/20/20 — whatever
++        // immediately precedes a micro-window shifts it ~2 cycles at
++        // prefetch scale). E4's verified fix (in both passes): ONE
++        // byte-identical loop over 3 discarded + 5 reported windows,
++        // unconditional stores, nothing logged between windows — every
++        // reported window is then entered with exactly the preceding code
++        // the discarded windows ran, and the stability witness judges the
++        // hot path every frame window runs on.
++        const CALIB_TOTAL: usize = 3 + CALIBRATION_SAMPLES;
++        let mut calib = [0u32; CALIB_TOTAL];
++        let mut probes = [0xFFFFu16; CALIB_TOTAL];
++        for (i, slot) in calib.iter_mut().enumerate() {
+             // Every calibration window runs byte-identical code inside: one
+             // IME probe (which also witnesses IME == 0 in-window). First-run
+-            // bookkeeping stays OUTSIDE the window — the first draft recorded
+-            // the first probe inside window 1 only, and mGBA measured exactly
+-            // that: raw 24 on sample 1 vs 22 on samples 2-5. The harness was
+-            // timing a conditional store, not its own overhead.
++            // bookkeeping stays OUTSIDE the window (PR 3's lesson: a
++            // conditional store inside window 1 measured exactly that).
+             let (probe, raw) = timed(counter, || {
+                 // SAFETY: REG_IME is an even address in the I/O region.
+                 unsafe { io_read_u16(REG_IME) }
+             });
+-            if i == 0 {
+-                ime_inside = probe;
+-            }
++            // Unconditional stores: identical outside-window code for every
++            // iteration, discarded and reported alike.
++            probes[i] = probe;
+             *slot = raw;
++        }
++        let mut raws = [0u32; CALIBRATION_SAMPLES];
++        for i in 0..CALIBRATION_SAMPLES {
++            raws[i] = calib[CALIB_TOTAL - CALIBRATION_SAMPLES + i];
+             agb::println!(
+                 "*** {} calib sample {}/{} raw={} ime_inside={}",
+                 name,
+                 i + 1,
+                 CALIBRATION_SAMPLES,
+-                raw,
+-                probe
++                raws[i],
++                probes[CALIB_TOTAL - CALIBRATION_SAMPLES + i]
+             );
+         }
++        let ime_inside = probes[CALIB_TOTAL - CALIBRATION_SAMPLES];
+         let overhead = raws[0];
+         let stable = raws.iter().all(|r| *r == overhead);
+         agb::println!(
+@@ -617,6 +629,227 @@ mod rom {
+         }
+     }
+ 
++    /// E2a probe pass (sample code): per frame, the verbatim PR 3 control
++    /// decode (`driver::decode_one`, position-only reader) and the
++    /// accumulator-reader variant (`e2::decode_one_accumulator`), each in
++    /// its own IRQ-off window, on one image. Same two-window discipline as
++    /// the E4 sample: control and variant measured side by side (never
++    /// against a recalled log), plus a per-frame variant-vs-control
++    /// sample-equality witness OUTSIDE the windows — the variant's numbers
++    /// only count on a frame whose decoded samples are bit-identical to the
++    /// proven-correct control's.
++    ///
++    /// Calibration uses E4's verified shape: ONE byte-identical loop over 3
++    /// discarded + 5 reported windows, unconditional stores, nothing logged
++    /// between windows (micro-windows are code-layout sensitive; the
++    /// E1/E4 findings apply to this layout too).
++    ///
++    /// Returns `Some((ctrl_cost, variant_cost, overhead, ctrl_fits,
++    /// variant_fits))` whenever the harness completed; `None` = numbers
++    /// void (unstable calibration, IME on in-window, a driver rejection,
++    /// or a variant-vs-control divergence — each named on serial).
++    fn e2_timing_pass(
++        clip: &SpikeClip,
++        counter: &mut Counter<'_>,
++    ) -> Option<(FrameCost, FrameCost, u32, bool, bool)> {
++        let name = clip.name;
++        let max = usize::from(clip.max_blocksize);
++        let mut ctrl_l: alloc::vec::Vec<i32> = alloc::vec![0; max];
++        let mut ctrl_r: alloc::vec::Vec<i32> = alloc::vec![0; max];
++        let mut var_l: alloc::vec::Vec<i32> = alloc::vec![0; max];
++        let mut var_r: alloc::vec::Vec<i32> = alloc::vec![0; max];
++        let mut state_c = [PredictorState::new(), PredictorState::new()];
++        let mut state_v = [PredictorState::new(), PredictorState::new()];
++
++        // Calibration: same unified loop as the (patched) PR 3 pass — 3
++        // discarded + 5 reported windows in ONE byte-identical loop, no
++        // logging between windows. Whatever immediately precedes a
++        // micro-window shifts it at prefetch scale, so every reported
++        // window must be entered with exactly the preceding code the
++        // discarded windows ran.
++        const E2_CALIB_TOTAL: usize = 3 + CALIBRATION_SAMPLES;
++        let mut calib = [0u32; E2_CALIB_TOTAL];
++        let mut probes = [0xFFFFu16; E2_CALIB_TOTAL];
++        for (i, slot) in calib.iter_mut().enumerate() {
++            let (probe, raw) = timed(counter, || {
++                // SAFETY: REG_IME is an even address in the I/O region.
++                unsafe { io_read_u16(REG_IME) }
++            });
++            probes[i] = probe;
++            *slot = raw;
++        }
++        let mut raws = [0u32; CALIBRATION_SAMPLES];
++        for i in 0..CALIBRATION_SAMPLES {
++            raws[i] = calib[E2_CALIB_TOTAL - CALIBRATION_SAMPLES + i];
++        }
++        let ime_inside = probes[E2_CALIB_TOTAL - CALIBRATION_SAMPLES];
++        let overhead = raws[0];
++        let stable = raws.iter().all(|r| *r == overhead);
++        agb::println!(
++            "*** {} e2: ctrl = driver::decode_one (verbatim PR 3) | variant = e2::decode_one_accumulator",
++            name
++        );
++        agb::println!(
++            "*** {} e2 calibration: overhead_estimate={} stable={} ime_inside={} raws=[{} {} {} {} {}]",
++            name,
++            overhead,
++            stable,
++            ime_inside,
++            raws[0],
++            raws[1],
++            raws[2],
++            raws[3],
++            raws[4]
++        );
++        if !stable {
++            agb::println!(
++                "*** {} e2 FAIL calibration unstable — harness noise, numbers void",
++                name
++            );
++            return None;
++        }
++        if ime_inside != 0 {
++            agb::println!(
++                "*** {} e2 FAIL IME={} inside window (expected 0) — windows were interruptable",
++                name,
++                ime_inside
++            );
++            return None;
++        }
++
++        agb::println!(
++            "*** {} e2 pass: walking {} frames (two IRQ-off windows + equality witness per frame)",
++            name,
++            clip.frames.len()
++        );
++        let mut ctrl_cost = FrameCost::new();
++        let mut var_cost = FrameCost::new();
++        for frame_index in 0..clip.frames.len() {
++            let (ctrl_res, ctrl_raw) = timed(counter, || {
++                driver::decode_one(clip, frame_index, &mut ctrl_l, &mut ctrl_r, &mut state_c)
++            });
++            let (var_res, var_raw) = timed(counter, || {
++                e2::decode_one_accumulator(clip, frame_index, &mut var_l, &mut var_r, &mut state_v)
++            });
++            let written = match (&ctrl_res, &var_res) {
++                (Ok(w), Ok(v)) if w == v => *w,
++                (ctrl, var) => {
++                    // PR 2 proved this arm decodes through the driver; a
++                    // rejection here (or a blocksize disagreement between
++                    // the two paths) is the harness regressing the image.
++                    agb::println!(
++                        "*** {} e2 FAIL frame {}: ctrl={:?} variant={:?} — driver rejected in e2 pass after decode proof passed",
++                        name,
++                        frame_index,
++                        ctrl,
++                        var
++                    );
++                    return None;
++                }
++            };
++            // The equality witness, OUTSIDE both windows: the variant arm
++            // must decode bit-identically to the proven-correct control.
++            let bad = {
++                let mut found = None;
++                for k in 0..written {
++                    if ctrl_l[k] != var_l[k] {
++                        found = Some(("left", k, ctrl_l[k], var_l[k]));
++                        break;
++                    }
++                    if clip.channels == 2 && ctrl_r[k] != var_r[k] {
++                        found = Some(("right", k, ctrl_r[k], var_r[k]));
++                        break;
++                    }
++                }
++                found
++            };
++            if let Some((slot, k, cv, vv)) = bad {
++                agb::println!(
++                    "*** {} e2 FAIL frame {}: variant diverges from ctrl in {}[{}] ctrl={} variant={} — numbers void",
++                    name,
++                    frame_index,
++                    slot,
++                    k,
++                    cv,
++                    vv
++                );
++                return None;
++            }
++            let ctrl_net = ctrl_raw.saturating_sub(overhead);
++            let var_net = var_raw.saturating_sub(overhead);
++            ctrl_cost.observe(frame_index, ctrl_net);
++            var_cost.observe(frame_index, var_net);
++            agb::println!(
++                "*** {} e2 frame {:>3}/{} bs={} ctrl_raw={} ctrl_net={} var_raw={} var_net={} eq=1",
++                name,
++                frame_index,
++                clip.frames.len(),
++                written,
++                ctrl_raw,
++                ctrl_net,
++                var_raw,
++                var_net
++            );
++        }
++
++        let mut pass = ctrl_cost.count == clip.frames.len() && var_cost.count == clip.frames.len();
++        if !pass {
++            agb::println!(
++                "*** {} e2 FAIL timed frames ctrl={} variant={} expected={}",
++                name,
++                ctrl_cost.count,
++                var_cost.count,
++                clip.frames.len()
++            );
++        }
++        for (arm, cost) in [("ctrl", &ctrl_cost), ("variant", &var_cost)] {
++            if cost.wrapped {
++                pass = false;
++                agb::println!(
++                    "*** {} e2 FAIL {} arm: a window exceeded the 32-bit composite: frame {} at sentinel {}",
++                    name,
++                    arm,
++                    cost.max_frame,
++                    WORST_WRAPPED
++                );
++            }
++        }
++        for (arm, cost) in [("ctrl", &ctrl_cost), ("variant", &var_cost)] {
++            agb::println!(
++                "*** {} e2 {} stats: count={} min={}@{} max={}@{} sum={} wrapped={}",
++                name,
++                arm,
++                cost.count,
++                cost.min,
++                cost.min_frame,
++                cost.max,
++                cost.max_frame,
++                cost.sum,
++                cost.wrapped
++            );
++            agb::println!(
++                "*** {} e2 {} budget: worst_frame={} worst_net={} vs budget={} [{}]",
++                name,
++                arm,
++                cost.max_frame,
++                cost.max,
++                BUDGET_CYCLES_PER_FRAME,
++                if cost.max <= BUDGET_CYCLES_PER_FRAME {
++                    "FITS"
++                } else {
++                    "OVER BUDGET"
++                }
++            );
++        }
++        let ctrl_fits = ctrl_cost.max <= BUDGET_CYCLES_PER_FRAME;
++        let var_fits = var_cost.max <= BUDGET_CYCLES_PER_FRAME;
++        if pass {
++            Some((ctrl_cost, var_cost, overhead, ctrl_fits, var_fits))
++        } else {
++            None
++        }
++    }
++
+     #[agb::entry]
+     fn main(mut gba: agb::Gba) -> ! {
+         agb::eprintln!(
+@@ -712,6 +945,44 @@ mod rom {
+             );
+         }
+ 
++        // E2a probe section (sample code): ctrl vs accumulator-reader
++        // variant, one image. Runs only on proven images too
++        // (correctness-before-speed), and never changes the PR 3 verdict
++        // semantics — the e2 pass prints its own stats lines; a
++        // completed-with-equality run is reported on the e2 summary line.
++        // Harness failure / divergence voids the e2 numbers loudly (the
++        // pass names it on serial).
++        if proofs_pass {
++            let mut timers = gba.timers.timers();
++            let mut counter = Counter::start(&mut timers);
++            for clip in CLIPS {
++                match e2_timing_pass(clip, &mut counter) {
++                    Some((ctrl, var, overhead, ctrl_fits, var_fits)) => {
++                        agb::println!(
++                            "*** {} e2 summary: overhead={} ctrl_sum={} var_sum={} delta={} ctrl_worst={}@{} var_worst={}@{} ctrl_fits={} var_fits={}",
++                            clip.name,
++                            overhead,
++                            ctrl.sum,
++                            var.sum,
++                            ctrl.sum.saturating_sub(var.sum),
++                            ctrl.max,
++                            ctrl.max_frame,
++                            var.max,
++                            var.max_frame,
++                            ctrl_fits,
++                            var_fits
++                        );
++                    }
++                    None => {
++                        agb::println!(
++                            "*** {} e2 summary: VOID (see failure line above)",
++                            clip.name
++                        );
++                    }
++                }
++            }
++        }
++
+         let (color, label) = if pass {
+             (COLOR_PASS, "BLUE")
+         } else {
+diff --git a/examples/flac_spike/tests/e2_witness.rs b/examples/flac_spike/tests/e2_witness.rs
+new file mode 100644
+index 0000000..fe0251d
+--- /dev/null
++++ b/examples/flac_spike/tests/e2_witness.rs
+@@ -0,0 +1,70 @@
++//! E2a probe witness: the vendored **accumulator-reader variant** decode
++//! path (`e2::decode_one_accumulator`) decodes the exact embedded clips
++//! **bit-exactly** against the `flac -d` reference PCM — the same
++//! layer-2 witness `spike_witness.rs` runs for the production
++//! position-reader path.
++//!
++//! This is the host half of the E2a equality story; the ROM adds the
++//! per-frame variant-vs-control witness on the measured image itself. The
++//! equivalence claim (module docs of `e2.rs`): the accumulator reader is a
++//! pure re-implementation of the same cursor — same values, same widths,
++//! same EOF/atomicity rules, `byte_align` landing on the same boundary —
++//! so a bit-exact decode against the encoder's ground truth is the machine
++//! check that the reader swap changed *how* bits are fetched, never
++//! *which* bits.
++//!
++//! Sample code, never lands on `main`'s spike sources (see
++//! `experiments/e2a-bit-reader-accumulator/`).
++
++use flac_spike::assets::{CLIPS, L0_FIXED, L4_LPC};
++use flac_spike::e2;
++
++/// The reference PCM blobs (host ground truth only — same blobs
++/// `spike_witness.rs` includes; re-included here so this file is a
++/// self-contained witness).
++const L0_PCM: &[u8] = include_bytes!("../assets/spike_l0_pcm.bin");
++const L4_PCM: &[u8] = include_bytes!("../assets/spike_l4_pcm.bin");
++
++fn pcm_for(name: &str) -> &'static [u8] {
++    if name == L0_FIXED.name {
++        L0_PCM
++    } else if name == L4_LPC.name {
++        L4_PCM
++    } else {
++        panic!("e2 witness does not know a blob for arm {name:?}");
++    }
++}
++
++#[test]
++fn accumulator_variant_decodes_bit_exact_against_the_reference_pcm() {
++    for clip in CLIPS {
++        let max = usize::from(clip.max_blocksize);
++        let mut left = vec![0i32; max];
++        let mut right = vec![0i32; max];
++        let mut state = Default::default();
++        let expected_len =
++            usize::try_from(clip.total_samples).unwrap() * usize::from(clip.channels) * 2;
++        let mut got: Vec<u8> = Vec::with_capacity(expected_len);
++
++        for frame_index in 0..clip.frames.len() {
++            let written =
++                e2::decode_one_accumulator(clip, frame_index, &mut left, &mut right, &mut state)
++                    .unwrap_or_else(|e| panic!("{}: frame {frame_index} failed: {e:?}", clip.name));
++            for k in 0..written {
++                let (a, b) = (
++                    i16::try_from(left[k]).expect("decoded left fits i16 (16-bit profile)"),
++                    i16::try_from(right[k]).expect("decoded right fits i16 (16-bit profile)"),
++                );
++                got.extend_from_slice(&a.to_le_bytes());
++                got.extend_from_slice(&b.to_le_bytes());
++            }
++        }
++
++        assert_eq!(
++            got,
++            pcm_for(clip.name),
++            "{}: the accumulator-reader variant is not bit-exact against `flac -d`",
++            clip.name
++        );
++    }
++}

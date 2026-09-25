@@ -2247,6 +2247,16 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > open but its expected ceiling is sub-1% (EWRAM costs one extra cycle per
 > 32-bit access; the scratch sees ~12–30K accesses/frame against multi-million
 > cycle frames) — worth a control-arm run only as hypothesis-space closure.
+>
+> **Status 2026-09-24: E2 measured (E2a, the reader swap).** The refill-
+> accumulator reader did **not** collapse the FIXED arm (mean −3.14%, 217%
+> → 211% of budget, still ~1,078 c/sample vs the budget's 512) and made
+> the LPC arm deterministically 1.41% **slower** — the reader *implementation*
+> is ruled out as the cost center; what remains in the FIXED hot loop is
+> the unary per-bit loop *as a shape* (E2b would count the quotient another
+> way — but ARMv4T has no CLZ to count with; see the E2 entry's correction
+> note) and generic decode plumbing. Full result + method:
+> [E2 result](#e2-result--the-accumulator-reader-does-not-collapse-the-fixed-arm-2026-09-24).
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -2291,7 +2301,7 @@ timing is not the story and E3/E4 move up. Regions are 865,340 / 835,884 B
 (PR 1 serial) — stage per frame (avg ≈5.3 KB/frame; a 16 KB static is
 ample), not whole-clip.
 
-### E2 — Bit-reader refill accumulator (`bits.rs`)
+### E2 — Bit-reader refill accumulator (`bits.rs`) — **measured 2026-09-24 (E2a): no collapse (FIXED −3.1%, LPC +1.4%); [see result](#e2-result--the-accumulator-reader-does-not-collapse-the-fixed-arm-2026-09-24)**
 
 The reader is position-only: every `read_bits` recomputes from `bit_pos`,
 re-fetching from the backing slice (up to 5 byte loads worst case at
@@ -2563,3 +2573,136 @@ intermediates` branch that ran the measurement is superseded by the sample
 run re-applies (PR 4/5), take the two-window + equality-witness +
 unified-calibration *method* from the patch; `e4.rs` is a standalone module
 and should port verbatim.
+
+## E2 result — the accumulator reader does not collapse the FIXED arm (2026-09-24)
+
+**Correction first (the menu and `bits.rs`'s module doc were wrong about
+the target):** the E2 menu item and `crates/flac-lite/src/bits.rs` both
+claim "ARMv4T has CLZ". **ARMv4T (ARM7TDMI) has no CLZ — CLZ arrived with
+ARMv5T.** The GBA's CPU can count a unary run with shifts/compares (or a
+table), but there is no single-instruction leading-zero count to fold the
+Rice quotient loop into; any E2b must count without CLZ. This entry records
+the correction; the live crate doc is deliberately *not* edited here (a
+docs-only probe PR leaves the live tree untouched — the fix belongs with
+whichever change next touches `bits.rs`).
+
+**Sample, not integrated.** As with E1/E4, the probe never lands on the
+live spike sources: its code is preserved as a reappliable sample under
+`examples/flac_spike/experiments/e2a-bit-reader-accumulator/` (README +
+`e2a-bit-reader-accumulator.patch` — the diff against main @ `743a913`,
+verified `git apply --check` clean there). The plan of record — PR 4
+cadence, PR 5 verdict — is untouched, and no decoder file in
+`crates/flac-lite/` changed. ROM `flac-spike.gba` sha256
+`fc807f02d6fb4829e1b23ad94fa3a016ef7d0da823be002b0fef0aac3dd338c4`;
+mGBA runs 2026-09-24 on the same host runner as PR 3 / E1 / E4 (agb 0.25
+`mgba-test-runner`, Rust nightly 1.100.0-nightly a69a63265 2026-09-03),
+two headless runs byte-identical (`cmp`, 1005 lines). Gates green on the
+patched tree: `make spike-test` (host tests 23 → 27: lib 15 → 18 + the new
+`tests/e2_witness.rs`, `spike_witness` 8 unchanged), `make flac-test` (115
+passed, 1 ignored — unchanged, `crates/flac-lite/` untouched), `make
+check`, `make native-spike-rom`.
+
+**Harness shape (two IRQ-off windows per frame, one image, one
+instrument — the E4 patch's shape, applied to a different variable):**
+
+1. **ctrl** — PR 3's `driver::decode_one` (verbatim i64 path on the
+   position-only reader), the same-run control;
+2. **variant** — `e2::decode_one_accumulator`: the vendored hot path with
+   the reader swapped to `AccumulatorReader` — `data + pos (bytes consumed)
+   + acc (u32, left-aligned MSB-first, next bit = bit 31) + valid`,
+   invariant *logical cursor = pos·8 − valid* (`bit_position()` /
+   `bits_remaining()` derive exactly). Fast path
+   (`1 ≤ n ≤ 31, valid ≥ n`): `val = acc >> (32−n); acc <<= n; valid −= n`.
+   Cold path (`valid < n`, **every n == 32 read** — 32-bit reads are never
+   forced through the accumulator — and every illegal width, so rejection
+   rules stay identical): the retained position-based `peek_at` recompute
+   at the derived cursor, then an exact resync of `(pos, acc, valid)`.
+   Refill byte-at-a-time only (ldrb-class, no word loads / alignment
+   assumptions) while `valid ≤ 24`: `acc |= byte << (24 − valid); valid += 8`
+   — cursor-neutral, so failed reads are atomic with no rollback.
+   `byte_align`: `drop = valid & 7; acc <<= drop; valid &= !7` — through
+   the invariant, `bit_pos ≡ −valid (mod 8)`, so this is exactly the live
+   `(8 − (bit_pos & 7)) & 7` rule (witnessed, see below). All arithmetic
+   **i64 exactly as live** (E4's i32 was never merged — not this variable),
+   and the unary loop stays literally `while read_bits(1)? == 0 { q += 1 }`
+   (counting the quotient another way = E2b, not E2a).
+
+Correctness before timing, both layers: on the host the variant decodes the
+exact embedded clips bit-exactly vs `flac -d` (`e2_witness.rs`), plus
+reader-level differential sweeps against the live `BitReader` (mixed-width
+incl. n=32/illegal widths/EOF, `byte_align` at every alignment, composite
+coded-number/wasted atomicity); on the ROM, a per-frame variant-vs-control
+**sample-equality** witness (the E1/E4 pattern) passed **314/314**
+frame-windows — including `byte_align` landing identically on every real
+frame footer. Decode proof matched the PCM pin (`0x54C7B356621B6E15`,
+cross-arm agree) before any timing. Calibration (unified loop in both
+passes, E4's verified shape): overhead **24** on this image, stable, nets
+0 — all three passes.
+
+**Results (net of this variant's own calibration; 157 frames, 320,000
+samples; budget 1,048,750/frame):**
+
+| arm | fold | sum | mean | mean %budget | max @frame | min @frame |
+|---|---|---|---|---|---|---|
+| FIXED ctrl | position reader | 357,908,871 | 2,279,674 | 217.4% | 2,294,081 @60 | 580,269 @156 |
+| **FIXED variant** | **accumulator reader** | **346,677,917** | **2,208,139** | **210.5%** | **2,222,598 @4** | **560,665 @156** |
+| LPC ctrl | position reader | 1,073,988,846 | 6,840,693 | 652.3% | 6,880,992 @136 | 1,501,649 @156 |
+| **LPC variant** | **accumulator reader** | **1,089,162,991** | **6,937,344** | **661.5%** | **6,979,771 @145** | **1,524,325 @156** |
+
+- **FIXED:** accumulator saves 11,230,954 cycles (71,535/frame,
+  **3.14%**). Mean 1,113 → **1,078 c/sample**; worst stays 211.9% of
+  budget. Worst-frame index moves @60 → @4 — the top frames sit within
+  ~0.3% of each other and micro-layout shuffles their order; the mean is
+  the reading.
+- **LPC:** accumulator **costs** 15,174,145 cycles (96,651/frame,
+  **+1.41% slower**, deterministic across both runs). The vendored LPC
+  reads (warm-up `read_signed`, coefficients, escaped partitions) are
+  multi-bit — they were already cold-path-shaped — and the vendored
+  header/subframe plumbing costs slightly more than the shared functions
+  it replaces; the reader swap is not a free substitution there.
+- Worst frames stay **OVER BUDGET in every arm**. Screen verdict RED =
+  measurement completed, budget missed — harness completed 2/2.
+- **Control reproduces the recorded baseline shape:** worst-frame indices
+  exact (FIXED @60 / LPC @136 / min @156 both arms); this image's PR
+  3-shape pass read FIXED sum=357,906,830 max=2,294,068@60 and LPC
+  sum=1,073,986,805 max=6,880,979@136, the e2 ctrl arm a constant +13
+  cyc/frame above it (code layout) — the cross-session witness, same
+  pattern as E1 (+104) and E4 (+11).
+
+**Reading (the E2 menu rule, executed): the accumulator did NOT collapse
+the FIXED arm.** −3.14% is the same order as E4's FIXED movement (3.7%) —
+layout-adjacent noise around a real but small saving — against the
+"collapse" the menu predicted. So the *implementation* of the reader was
+never the FIXED arm's cost center; the reader's per-access ROM premium E1
+observed is intrinsic to fetching many small fields bit-by-bit, not to how
+`bit_pos` is turned into a value. Adding to the ruled-out list (E1 cartridge
+reads, E4 i64 integrator math): a position-vs-accumulator reader swap.
+What is left standing in the FIXED hot loop after E1+E4+E2a: the Rice
+**unary loop as a shape** — per-quotient-bit iterations, ~2 reads/sample
+plus the quotient run, each an independent function-call + branch — and
+generic decode plumbing (call layers, bounds checks). E2b (count the
+quotient in fewer steps) remains the only reader-side lever with
+headroom, but it must count **without CLZ** (see the correction above):
+byte-at-a-time masked-ones counting or a run-length table, not `clz`.
+Neither arm crosses 512 c/sample on E2a; PR 5's verdict table and E5's
+hardware arbitration are unchanged.
+
+**Method compliance (the menu's rules):** one variable (reader
+implementation — i64 arithmetic verbatim, unary loop verbatim,
+`decorrelate` a real shared call, integrators/pad verbatim copies of the
+live functions); `make spike-test` green including the variant's own
+bit-exact witness ⇒ same *what*, only *how*; new ROM sha recorded; two
+headless runs `cmp`-identical; full stats per fold net of this variant's
+own calibration; raw alongside net per frame; equality witness gates
+every variant number. Still tinkering evidence, not the gate verdict.
+
+**Preservation:** the vendored variant module (`e2.rs` — reader + vendored
+header/subframe/residual, since the live signatures take
+`&mut BitReader`), the two-window pass, the equality witness, the host
+witness test, and the unified calibration loop (both passes) all live in
+the sample patch; nothing in the live tree. The
+`perf/flac-spike-e2a-accumulator` branch that ran the measurement is
+superseded by the sample (delete after this docs PR merges). If the
+harness has moved when a future run re-applies (PR 4/5), take the
+two-window + equality-witness + unified-calibration *method* from the
+patch; `e2.rs` is a standalone module and should port verbatim.
