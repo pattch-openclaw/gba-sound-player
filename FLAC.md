@@ -2270,6 +2270,16 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > isolation — orthogonality is argued, never measured); **E10** is the
 > ARM-mode hand-written codeword loop, E2b's ceiling. These are menu-grade
 > hypotheses like everything else here — measure before believing.
+>
+> **Status 2026-09-25: E7 measured — inert.** `-Cforce-frame-pointers=yes`
+> is a no-op on `thumbv4t-none-eabi`: the target spec itself sets
+> `"frame-pointer": "always"`, so removing the flag (even flipping it to
+> `no`) builds a **byte-identical ROM** — same sha, same serial log, twice
+> verified. The flag line is redundant; the frame-pointer cost is paid by
+> every Rust build on this target regardless of our rustflags, and no
+> rustflag can reclaim it. Full result + mechanism:
+> [E7 result](#e7-result--the-flag-is-inert-thumbv4t-none-eabi-forces-frame-pointers-2026-09-25).
+> E7 drops out of the ordering; **E6 leads**.
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -2385,7 +2395,7 @@ rule:** if FIXED collapses, the 2.2× floor is instruction fetch and E6 is
 the production fix; if it doesn't, code timing joins the ruled-out list
 and E8's attribution picks the next lever.
 
-### E7 — Build flags on the measured image: `-Cforce-frame-pointers=yes` (proposed 2026-09-25; unmeasured)
+### E7 — Build flags on the measured image: `-Cforce-frame-pointers=yes` — **measured 2026-09-25: inert (the target forces frame pointers regardless); [see result](#e7-result--the-flag-is-inert-thumbv4t-none-eabi-forces-frame-pointers-2026-09-25)**
 
 The root `.cargo/config.toml` rustflags carry `-Cforce-frame-pointers=yes`
 and apply to every release ROM measured so far (it predates the FLAC
@@ -2453,8 +2463,9 @@ Don't re-litigate this as a perf gap.
 E1 blames ROM reads, E3/E4 otherwise — but any order is fine for tinkering
 as long as each run changes one variable and reports the full stats line.
 
-**Ordering for the 2026-09-25 additions:** E7 first (a rebuild flag-flip —
-minutes), then E6 (the highest-ceiling untested hypothesis); run E8
+**Ordering for the 2026-09-25 additions:** ~~E7 first~~ — E7 was run the
+same day and closed inert (flag is a no-op on this target; see its entry),
+so E6 leads (the highest-ceiling untested hypothesis); run E8
 alongside or immediately after, to replace inference with attribution
 before choosing between E2b and further levers; E9 before PR 5's verdict;
 E10 last, gated on E8's numbers.
@@ -2817,3 +2828,72 @@ superseded by the sample (delete after this docs PR merges). If the
 harness has moved when a future run re-applies (PR 4/5), take the
 two-window + equality-witness + unified-calibration *method* from the
 patch; `e2.rs` is a standalone module and should port verbatim.
+
+## E7 result — the flag is inert: thumbv4t-none-eabi forces frame pointers (2026-09-25)
+
+**Correction first (the menu entry's premise was half wrong):** E7 claimed
+`-Cforce-frame-pointers=yes` "applies to every release ROM measured so
+far" — true — and that removing it "costs a live register in exactly the
+small hot loops" recoverable by a flag flip — **false, and not
+recoverably so**: the `thumbv4t-none-eabi` **target spec itself** sets
+`"frame-pointer": "always"`. The flag line in `.cargo/config.toml` has
+always been redundant, and the frame-pointer cost is not a
+rustflag-addressable variable on this target.
+
+**Method (two builds of identical source at `6a6beb4`, one variable — the
+rustflag line; no probe code, so no measurement patch of decode paths):**
+
+1. **Control** — committed source, committed rustflags. `make
+   native-spike-rom` → ROM sha256
+   `0d97659165b2900600305ee1d7438f90c9f3e05d479068431ef7b6cc6bfeedb3`,
+   *bit-identical to PR 3's recorded image* (rebuild-hashes-stable
+   property confirmed cross-session); mgba runs twice, `cmp`-identical
+   (675 lines), decode proof `0x54C7B356621B6E15` MATCH both arms, stats
+   reproduce PR 3 exactly (FIXED sum=361,095,055 max=2,314,473@60; LPC
+   sum=1,077,175,030 max=6,901,384@136) — the same-run control witness
+   for every future probe.
+2. **Variant** — the one-line removal of `-Cforce-frame-pointers=yes`
+   (sample patch), full clean rebuild of `target/thumbv4t-none-eabi`.
+   `-c` verbose build confirmed the flag absent from every rustc
+   invocation (26 crates, 0 occurrences). **Result: identical ROM sha —
+   `0d97659165…`** — so the flag-flip variant image does not exist. mgba
+   run of the variant-built ROM is `cmp`-identical to the control's
+   serial log, as it must be for a byte-identical image.
+3. **Mechanism probe (outside the repo tree):** `rustc --target
+   thumbv4t-none-eabi --print target-spec-json -Z unstable-options`
+   (rustc 1.100.0-nightly a69a63265 2026-09-03, the toolchain that builds
+   the measured ROMs) reports `"frame-pointer": "always"` in the target
+   spec. Third probe to pin the override direction: a minimal `no_std`
+   crate built on the same target with `=yes` vs `=no` — **asm
+   byte-identical**, both emitting `push {r4, r5, r7, lr}` + `.setfp r7`
+   / `add r7, sp` prologues. The target default wins in both directions;
+   only a custom target JSON (unstable, out of scope) would reclaim r7.
+
+**Reading (the menu's own rule, executed):** E7 was "the cheapest probe on
+the menu" — it closed cheaper, without a measurement, because **there is
+nothing to compare**: control and variant are the same bytes. The register
+cost E7 hypothesized is real (visible in every prologue) but fixed by the
+target, not by our flags — so it joins the ruled-out list as *not a
+variable*, and the frame-pointer line in `.cargo/config.toml` may stay or
+go without any perf consequence. It also corrects the crash-diagnostic
+framing from the 2026-09-25 discussion: agb's r7 backtrace chain is held
+by the target's `frame-pointer: always`, **not** by our rustflag —
+removing the flag line cannot degrade panic traces, and PR 5 keeps the QR
+crash report either way. No trade-off exists on this lever.
+
+**Consequences:** the ordering note is amended (E6 leads); build-flag
+levers on the measured image are exhausted for frame pointers — if the
+prologue/register cost ever needs attacking, the lever is a custom target
+spec, which is not menu-grade (it changes the toolchain contract of every
+build). E6 (code placement) and E8 (attribution) are unaffected and remain
+the live levers.
+
+**Preservation:** probe code is one config line, kept as a reappliable
+sample under `examples/flac_spike/experiments/e7-frame-pointer-flag/`
+(README + `e7-frame-pointer-flag.patch` — the removal against main @
+`6a6beb4`, verified `git apply --check` clean there; the README records
+the build/run recipe, the sha a faithful re-run must reproduce, and the
+target-spec command). Live tree untouched beyond docs + the sample dir.
+The `perf/flac-spike-e7-frame-pointers` branch carried no commits (the
+measurement varied only the uncommitted config line) and was deleted on
+the spot — nothing superseded, the patch carries the variant.

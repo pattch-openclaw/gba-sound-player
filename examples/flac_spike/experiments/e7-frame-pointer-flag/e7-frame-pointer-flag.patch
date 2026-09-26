@@ -1,0 +1,13 @@
+diff --git a/.cargo/config.toml b/.cargo/config.toml
+index 282d7ab..af8a267 100644
+--- a/.cargo/config.toml
++++ b/.cargo/config.toml
+@@ -9,7 +9,6 @@ target = "thumbv4t-none-eabi"
+ rustflags = [
+     "-Clink-arg=-Tgba.ld",
+     "-Ctarget-cpu=arm7tdmi",
+-    "-Cforce-frame-pointers=yes",
+ ]
+ 
+ runner = ["echo", "no emulator available; ROM produced at target/thumbv4t-none-eabi/release/gba-sound-player.elf"]
+\ No newline at end of file
