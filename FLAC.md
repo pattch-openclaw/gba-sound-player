@@ -2279,7 +2279,18 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > every Rust build on this target regardless of our rustflags, and no
 > rustflag can reclaim it. Full result + mechanism:
 > [E7 result](#e7-result--the-flag-is-inert-thumbv4t-none-eabi-forces-frame-pointers-2026-09-25).
-> E7 drops out of the ordering; **E6 leads**.
+> E7 drops out of the ordering; ~~E6 leads~~.
+>
+> **Status 2026-09-26: E6 measured — IWRAM code pinning is *slower*.**
+> Pinning the hot decode path (vendored verbatim, placement attrs only) to
+> IWRAM moved the **FIXED arm +17.8%** (217.4% → 256.1% of budget) and the
+> **LPC arm +9.0%** (652.3% → 711.0%) — both arms regress, so instruction
+> fetch is ruled out: the FIXED hot loop runs *slower* with every
+> instruction served from zero-wait IWRAM than from cartridge ROM, which
+> falsifies fetch starvation as the 2.2× floor as strongly as a probe can.
+> Full result + method:
+> [E6 result](#e6-result--iwram-code-pinning-is-slower-instruction-fetch-is-ruled-out-2026-09-26).
+> **E8 (sub-stage attribution) leads.**
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -2367,7 +2378,7 @@ the gap on mGBA, hardware confirms; if mGBA drops but hardware doesn't,
 the emulator was overestimating cart waits — record which way, it changes
 what "real-time on hardware" claims for the whole gate.
 
-### E6 — Hot decode code to IWRAM (`.text_iwram`) — instruction fetch (proposed 2026-09-25; unmeasured)
+### E6 — Hot decode code to IWRAM (~~`.text_iwram`~~ — that section name never lands; plain `.iwram` is the working pin target, see the result) — instruction fetch — **measured 2026-09-26: slower on both arms; [see result](#e6-result--iwram-code-pinning-is-slower-instruction-fetch-is-ruled-out-2026-09-26)**
 
 E1 staged decode's *input data* into RAM; the decode *code* still executes
 from cartridge ROM, and nothing in E1–E4 changes that. The ARM7TDMI has no
@@ -2463,12 +2474,13 @@ Don't re-litigate this as a perf gap.
 E1 blames ROM reads, E3/E4 otherwise — but any order is fine for tinkering
 as long as each run changes one variable and reports the full stats line.
 
-**Ordering for the 2026-09-25 additions:** ~~E7 first~~ — E7 was run the
-same day and closed inert (flag is a no-op on this target; see its entry),
-so E6 leads (the highest-ceiling untested hypothesis); run E8
-alongside or immediately after, to replace inference with attribution
-before choosing between E2b and further levers; E9 before PR 5's verdict;
-E10 last, gated on E8's numbers.
+**Ordering for the 2026-09-25 additions (amended 2026-09-26):** ~~E7
+first~~ — E7 closed inert the same day (flag is a no-op on this target;
+see its entry). ~~E6 next~~ — E6 was measured 2026-09-26 and demoted:
+pinning is slower on both arms and code placement joins the ruled-out
+list (see its result). **E8 leads** — run it next to replace inference
+with attribution before choosing between E2b and further levers; E9
+before PR 5's verdict; E10 last, gated on E8's numbers.
 
 ## E1 result — ROM→RAM staging: cartridge reads are not the story (2026-09-22)
 
@@ -2897,3 +2909,138 @@ target-spec command). Live tree untouched beyond docs + the sample dir.
 The `perf/flac-spike-e7-frame-pointers` branch carried no commits (the
 measurement varied only the uncommitted config line) and was deleted on
 the spot — nothing superseded, the patch carries the variant.
+
+## E6 result — IWRAM code pinning is slower: instruction fetch is ruled out (2026-09-26)
+
+**Correction first (the menu named a section name that cannot work):** E6
+claimed `#[link_section = ".text_iwram"]` "lands in machinery that already
+runs." The machinery does run — that section name never reaches it.
+gba.ld's `.text : { *(.text .text*) } > rom` pattern matches
+`.text_iwram`, and GNU ld assigns an input section to the **first**
+matching output section, so `.text_iwram` is swallowed into ROM before
+the `.iwram` output section's own `*(.text_iwram .text_iwram.*)` entry can
+claim it. Measured on the built ELF: with the attribute set to
+`.text_iwram`, the symbols stayed at `0800xxxx` and `.iwram` stayed at its
+baseline size. Plain `.iwram` — agb's own IWRAM-resident-code section,
+where its `__aeabi`/`__agbabi` mem* helpers live — is the working pin
+target: `> iwram AT>rom`, copied ROM→IWRAM at boot by `CommonInit`'s BIOS
+`CPUSet`, and it lands.
+
+**Sample, not integrated.** As with E1/E2a/E4, the probe never lands on
+the live spike sources: its code is preserved as a reappliable sample
+under `examples/flac_spike/experiments/e6-iwram-code-pinning/` (README +
+`e6-iwram-code-pinning.patch` — the diff against main @ `7d8b412`, byte-
+identical to the measurement commit `bd48b04`'s diff, verified `git apply
+--check` clean there). The plan of record — PR 4 cadence, PR 5 verdict —
+is untouched, and no decoder file in `crates/flac-lite/` changed. Variant
+ROM `flac-spike.gba` sha256
+`ff3a2f56a84aa77197dc2d4c1b355bb59a0e87bbbd0d59f6d8b85a8ab3ea30f9`; mGBA
+0.10.5 `mgba-test-runner` runs 2026-09-26 on the same host runner as PR 3
+/ E1 / E2a / E4 / E7 (Rust nightly 1.100.0-nightly a69a63265 2026-09-03);
+two headless runs byte-identical (`cmp`, 1006 lines). The control image
+was built from a **separate worktree at base** `7d8b412` (sha256
+`65cd0c36e9e204ebbaf6a9376f20fb81ecc3936ffc617179fa908482b0c41e84`; two
+runs `cmp`-identical, 675 lines) — per the cross-tree rule its **stats**
+witness the control, never the sha; its serial log is `cmp`-identical to
+the E7 control run recorded on 2026-09-25, the same base commit. Gates
+green on the patched tree: `make spike-test` (host tests 23 → 25: lib 15
+unchanged, +2 `tests/e6_witness.rs`, `spike_witness` 8 unchanged), `make
+flac-test` (115 passed, 1 ignored — unchanged; `crates/flac-lite/`
+untouched by the patch), `make check`, `make native-spike-rom`.
+
+**Harness shape (two IRQ-off windows per frame, one image — the E2a
+pattern, applied to placement as the only source-level variable):**
+
+1. **ctrl** — PR 3's `driver::decode_one` (the verbatim i64 path on the
+   position-only `BitReader`), the same-run control;
+2. **variant** — `e6::decode_one`: a **verbatim vendored copy** of the hot
+   path (reader, header/subframe/residual decode, Rice loop, both
+   integrators — same arithmetic, same unary loop, same rejection rules)
+   whose hot functions carry
+   `#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]`:
+   a pinned **spine** (`inline(never)`): `decode_frame`,
+   `decode_subframe`, `decode_residual`, `decode_rice_partition`,
+   `integrate_fixed`, `integrate_lpc`; pinned **inline leaves**
+   (`inline(always)`): the reader primitives + `rice_unmap`/`pad_block`/
+   `fill_state`, so the per-bit loop carries no extra call vs the
+   LTO-inlined control; **unpinned** per-frame plumbing (header parse, the
+   `decode_one` wrapper, and the shared `stereo::decorrelate` — a real
+   shared call, E2a's vendor boundary) stays in ROM. `lib.rs`
+   `forbid(unsafe_code)` relaxes to `deny` only so the e6 module's
+   placement attribute can carry a module-scoped `allow` (edition-2024:
+   `link_section` is an unsafe attribute) — part of the sample patch.
+
+**Witnesses before any number counted:** host (`tests/e6_witness.rs`):
+the vendored path decodes the exact embedded clips bit-exactly vs the
+`flac -d` reference PCM, and differentially frame-by-frame against the
+production `driver::decode_one`. ROM: per-frame variant-vs-control
+**sample-equality** — 314/314 frame-windows equal, checksum delta 0,
+first offender named had any diverged. Link witness: `nm` on the built
+ELF — the six pinned spine functions from `decode_frame`
+(`0x0300_022c`) through `decode_rice_partition` (`0x0300_1178`, size
+`0x330`); the `.iwram` section totals `0x1540` = 5,440 B (pinned code
+4,732 B + agb's own IWRAM helpers + interworking thunks) of the 32,512 B
+budget. Runtime placement witness in the boot log:
+`pinned_rice=0x03001179` — the running image prints the hot function's
+IWRAM address. Calibration overhead 24, stable across passes, nets 0.
+Decode proof matched the PCM pin `0x54C7B356621B6E15` on both arms before
+any timing.
+
+**Numbers (net of this image's own calibration; 157 frames / arm; budget
+1,048,750 cycles/frame ≈ 512 c/sample against 157 × 2,048 block
+samples):**
+
+| arm | ctrl sum | variant sum | delta | ctrl mean %budget | variant mean %budget | variant worst %budget |
+|---|---|---|---|---|---|---|
+| FIXED (`l0_stereo`) | 357,908,871 | 421,705,665 | **+17.8% (slower)** | 217.4% | 256.1% | 257.8% |
+| LPC (`l4_stereo`) | 1,073,988,846 | 1,170,737,712 | **+9.0% (slower)** | 652.3% | 711.0% | 715.7% |
+
+c/sample: ctrl FIXED 1,113.1 → variant 1,311.5; ctrl LPC 3,340.2 →
+variant 3,641.1. Control reproduces the recorded baseline shape exactly:
+worst-frame indices **exact** (FIXED @60, LPC @136, min @156 both arms);
+this image's PR 3-shape pass printed FIXED sum=357,906,830
+max=2,294,068@60 and LPC sum=1,073,986,805 max=6,880,979@136 — the e6
+ctrl arm sits a constant +13 cyc/frame above it (+2,041 sum, code
+layout), the identical offset E2a recorded on its image. The variant's
+worst frame moves index (FIXED @60 → @4, LPC @136 → @145, deterministic
+across both runs) — the mean, not the worst, is the reading.
+
+**Reading (the menu's own rule, executed):** "if FIXED collapses, the 2.2×
+floor is instruction fetch and E6 is the production fix; if it doesn't,
+code timing joins the ruled-out list." It did not collapse — both arms
+deterministically **regressed**. E6 is demoted: code placement joins the
+ruled-out list, and E8's attribution picks the next lever, exactly the
+fallback this entry's rule named.
+
+**On the regression itself (one confound, stated honestly):** placement
+was implemented via vendoring (the menu's own discipline: the vendor
+boundary follows the type signatures), so the variant differs from the
+control in inlining layout as well as placement — visible in `nm` sizes:
+`e6::decode_subframe` `0x7f0` vs `flac_lite::decode_subframe` `0x56c`
+(the `inline(always)` leaves materialize inside it), `e6::decode_residual`
+`0x3fc` vs `0x574`. The answer's **direction** survives the confound:
+the collapse this menu predicted (217% → ≈100%) would have required the
+layout change alone to cost over 50% — no probe on this harness has ever
+moved the mean that far without a real algorithmic change (the pure-
+layout cross-session offset is the constant +13 cyc/frame both vendored
+probes print). For fetch starvation to still be the cost center, pinning
+every hot instruction to zero-wait IWRAM would have to have paid for a
+large layout regression *and* still hidden a collapse. If code timing is
+ever revisited, the layout-controlled follow-up is the same vendored
+module **un**pinned (placement isolated from layout) — not menu-grade
+while E8 remains unrun.
+
+**Consequences:** the ruled-out list grows — cartridge data reads (E1),
+reader implementation (E2a), i64 integrator math on the FIXED arm (E4),
+the frame-pointer flag (E7), and now **instruction fetch location** (E6).
+What remains for FIXED's ~1,113 c/sample is the unary loop's per-bit
+*execution* cost and generic plumbing — the menu's stated fallback, so
+**E8 (sub-stage attribution) leads**. E10's rationale is per-iteration
+work (three-operand arithmetic, barrel-shifter modifiers), a cost lever
+not a fetch lever, and this result leaves it untouched; E2b stays
+tempered. The ordering note above is amended.
+
+**Preservation:** probe code lives in the sample dir above, never on
+`main`'s spike sources. The `perf/flac-spike-e6-iwram-code` branch
+(`bd48b04`, never pushed) is superseded by the sample and is deleted
+after this docs PR merges, per convention.
