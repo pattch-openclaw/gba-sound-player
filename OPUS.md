@@ -98,6 +98,39 @@ resampler (48k → 32768 Hz, ratio ≈ 0.6827) or a cheap rate choice
 (24k → 32768, ratio ≈ 1.3653). Integer linear/cosine-interp resampling is a
 few cycles/sample; it joins the decode cost, and the witness set must pin it too.
 
+### "But does Opus support higher rates?" — no: 48 kHz is the ceiling (2026-09-27)
+
+Researched because 65,536 Hz is Goal #5 territory: **the Opus format never
+exceeds 48 kHz.** Internally the codec always operates at 48 kHz (RFC 6716 §2);
+the lower rates are SILK-native input/output modes, and libopus resamples
+internally for anything else. The API rates are exactly **{8, 12, 16, 24, 48}
+kHz — nothing arbitrary, nothing higher**. What reads as "higher rates" is
+almost certainly the *audio bandwidth* ladder (NB 4 kHz … FB 20 kHz "fullband")
+— bandwidth ≤ 20 kHz, Nyquist ≤ 24 kHz, never a 48 k-plus sample rate.
+
+opus-rs matches libopus exactly here, source-verified: both constructors reject
+everything else with `"Invalid sampling rate"` (`OpusEncoder::new` lib.rs:350,
+`OpusDecoder::new` lib.rs:1199; the list `[8000, 12000, 16000, 24000, 48000]`,
+no 44100 anywhere in the crate). **Highest supported rate: 48,000 Hz.**
+
+Consequences for a ~65 kHz GBA:
+
+- **Feasibility:** 48k → 65,536 is pure *upsampling* (512/375 ≈ 1.3653×).
+  Upsampling cannot alias — the reconstruction filter just removes images — so
+  it is strictly easier to do correctly than the 48k → 32768 downsample.
+- **Cost:** resampler work scales with *output* samples: 65536 produces ~2× the
+  output samples per decoded packet vs 32768, so ≈2× resampler cost per second
+  — plus the mixer running at 65k, which is precisely the un-built part of
+  Goal #5 (agb's sw mixer stops at 32768). Decode cost is unchanged either way:
+  decoding happens on 48 k frames regardless of the playback rate.
+- **What it buys:** at 32768 (Nyquist 16,384 Hz) the 16.4–20 kHz band of a
+  fullband encode is paid for in bits and then low-passed away. Two coherent
+  profiles instead: **32768 playback** ⇒ cap encoder bandwidth at superwideband
+  (12 kHz content, safely under Nyquist — stop paying for unrecoverable highs);
+  **65536 playback** (if Goal #5 lands) ⇒ fullband survives at ~2× mixer/resampler cost.
+- **Cheapest path overall stays 16k → 32768:** ratio 2.048 ≈ 2×, near-trivial
+  interpolation with a small filter — the speech-first profile's best friend.
+
 ## Probe (reproducible)
 
 Standalone probe crate (pattern of `examples/symphonia_flac_probe/`, but this
