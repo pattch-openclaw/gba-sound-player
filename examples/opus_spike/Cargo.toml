@@ -1,0 +1,60 @@
+[package]
+name = "opus-spike"
+version = "0.1.0"
+edition = "2024"
+
+# The Opus perf-gate spike (OPUS.md, "Measurement plan — start here
+# (2026-09-29)"). PR 1 scope = step 1 only: the vendored patched opus-rs and
+# this crate scaffold, with the compile/link proof against the real target.
+# The two embedded arms + host witness (step 2) land in the next PR, before
+# any ROM decode proof or cycle harness (correctness-before-speed ordering).
+#
+# Standalone workspace (own Cargo.toml + [workspace]), config INHERITED from
+# the repo root — do NOT add a local .cargo/config.toml: cargo concatenates
+# target.<triple>.rustflags across config layers, and a local re-declaration
+# links `-Tgba.ld` twice (FLAC.md, "Second leak variant").
+#
+#   make native-opus-rom   build + fix the scaffold ROM (this host) — the
+#                          compile gate: vendored patched opus-rs LINKS for
+#                          thumbv4t-none-eabi, not just checks
+#   make opus-test         host tests (scaffold pins; grows into the step-2
+#                          witness suite)
+#
+# The root ROM crate stays Opus-free; the baseline .gba never sees this code.
+
+[dependencies]
+# The vendored, patched decoder (vendor/opus-rs/ — provenance + patch
+# inventory: vendor/opus-rs/PATCHES.md). Exactly the OPUS.md profile:
+# no default features, libm soft-float math, no `heap` (std-coupled there).
+opus-rs = { path = "vendor/opus-rs", default-features = false, features = ["libm"] }
+
+# agb exists only for the GBA target, and it cannot build for the host triple
+# — while the host tests (make opus-test) compile this crate's lib natively.
+# Gate by architecture, mirroring examples/flac_spike/.
+[target.'cfg(target_arch = "arm")'.dependencies]
+agb = "0.25.0"
+
+[[bin]]
+name = "opus-spike"
+path = "src/main.rs"
+# `cargo test` must not build the ROM bin: it is a no_main GBA binary whose
+# entry exists only under agb. The host tests link against the lib alone.
+test = false
+bench = false
+
+# The vendored decoder is its OWN workspace root (vendor/opus-rs/Cargo.toml
+# carries [workspace]) so the OPUS.md patch recipe can be run standalone;
+# exclude it here so the implicit path-dependency membership rule does not
+# collide two workspace roots.
+[workspace]
+exclude = ["vendor/opus-rs"]
+
+# Same profile choices as examples/flac_spike/: the release build is what
+# later PRs measure, so optimization must match what ships to the emulator.
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true

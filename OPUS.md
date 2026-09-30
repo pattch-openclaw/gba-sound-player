@@ -222,6 +222,51 @@ still a genuinely different product from FLAC (music). If neither fits, Opus
 joins the ruled-out list and FLAC's remaining levers (E8 sub-stage attribution)
 stay the mainline.
 
+### Measurement plan — start here (added 2026-09-29)
+
+The concrete PR order, mirroring the flac gate step for step:
+
+1. **`examples/opus_spike/`** — standalone workspace crate exactly like
+   `examples/flac_spike/`: cargo config **inherited** from the repo root
+   (never re-declare `.cargo/config.toml` — the `-Tgba.ld` double-link rule),
+   dual target (thumbv4t ROM + host witness tests), vendored patched
+   `opus-rs` living in `vendor/opus-rs/` — **not** in the root ROM.
+2. **Two embedded arms, same clip, modes recorded not assumed:** encode the
+   same deterministic 10 s source twice — a **SILK speech arm**
+   (`-application voip`, API rate 16 kHz ⇒ SILK-only WB) and a **music arm**
+   (`-application audio`, API rate 48 kHz ⇒ what libopus actually picks at
+   FB/20 ms — *hybrid*, verified by the TOC census below, since TOC has no
+   pure-CELT 20 ms config: CELT-only tops out at 5 ms, RFC 6716 Table). A
+   pack script demuxes Ogg → raw packets + `(offset, length)` manifest →
+   `include_bytes!` blobs; fail-closed censuses (TOC mode, 20 ms pin, mono,
+   strict Ogg pages with CRC-32) refuse to write a degenerate arm. Generator
+   output, never hand-packed.
+3. **Driver seam like flac_spike's:** a `decode_clip` walking the manifest,
+   one packet per callback. One deliberate difference from FLAC: Opus decode
+   is a **state machine** (no per-packet independent decode), so the walk is
+   sequential with a fresh decoder per clip, and the offset table is the
+   product-shape manifest, not a seek-independence witness.
+4. **PR order copied from the FLAC gate (correctness-before-speed):** host
+   witness first — decode embedded packets with patched `opus-rs`, fold the
+   PCM, compare bit-exactly against the ffmpeg/libopus reference (the Opus
+   decoder is bit-exact by spec; any float-path divergence is a measured
+   finding with a recorded tolerance, never assumed away); then the ROM
+   decode proof; only then the cycle harness.
+5. **Reuse the harness wholesale when it arrives:** timer2/timer3 cascade at
+   /1, empty-window calibration subtracted, IRQs off in the window,
+   min/max/sum to mGBA serial, division-free with the mean derived host-side.
+   Time **decode + resample together** per packet — the decoder-internal
+   resampler is part of the product cost.
+6. **Budget derived, not recalled:** 20 ms @ 16.78 MHz = **335,600 cycles /
+   960 samples ≈ 350 c/sample** (vs flac-lite's measured ~1,113 c/sample
+   FIXED) — worst frame reported next to mean, since one over-budget frame
+   is an audible glitch.
+
+**The cheap first move is steps 1+2:** vendored patched `opus-rs` compiling
+inside `examples/opus_spike/` with the two embedded arms and the host witness
+green — no ROM cycle time spent, and the whole pipeline is proven before any
+cycle counting.
+
 ## Status (2026-09-27)
 
 - Survey + compile probes complete (this file is the deliverable; probes were
@@ -229,3 +274,63 @@ stay the mainline.
 - **No Opus dependency anywhere in the repo; root ROM unaffected.** No spike
   crate yet — `examples/opus_spike/` and the vendored patched `opus-rs` land
   only if we schedule the gate above.
+
+## Status (2026-09-29): step 1 landed — `examples/opus_spike/` PR 1 (scaffold + vendored decoder)
+
+- **The spike crate exists** with the vendored patched `opus-rs`; per Sam's
+  scope decision this PR carries **step 1 only** — step 2's arms + pack
+  script + decode witness are the next PR. The gates:
+  - `make native-opus-rom` — real thumbv4t build/link of the scaffold ROM
+    embedding the vendored decoder (the compile gate proving the vendored
+    `opus-rs` **links** for the target, not just `check`). The ROM logs a
+    decode-path link witness (`probe::decode_packet`'s address in the ROM
+    mapping — survives `lto = "fat"`) and the inline state size bounded
+    against the 256 KB EWRAM argument.
+  - `make opus-test` — out-of-tree host gate (same cargo-config-leak pattern
+    as `spike-test`): the constructor contract (five rates × mono/stereo,
+    44.1 kHz rejected), the derived 335,600-cycle budget arithmetic, and the
+    inline state size pinned to the measured 178,064 bytes (gotcha 1's
+    number — now a named test, not prose).
+  - Headless mGBA boot witness (2026-09-29, ROM sha256
+    `17ef387b7cc22e8104522437a0816b4155f5fefb097dc60c61831830a211ef7e`):
+    decode-path link `probe::decode_packet @ 0x08023EB9` inside the ROM
+    mapping (the vendored decoder survives `lto = "fat"`), and the state
+    size logged on-target: **177,864 bytes** — 200 below the host figure,
+    `size_of` being per-target; both readings carry the same ≈178 KB EWRAM
+    argument. BLUE verdict; the run log is the thumbv4t number's witness.
+- Vendor patch on `opus-rs` 0.1.34 is the one documented above (`compat.rs`:
+  `AtomicU8` via `portable_atomic`), applied to a vendored copy under
+  `examples/opus_spike/vendor/opus-rs/` (BSD-3, license + provenance +
+  re-verification recipe in `PATCHES.md`). **The vendored source is copied
+  as-is** (diff-audited 2026-09-30, `diff -rq src <crates.io source>`): all
+  67 `.rs` files byte-identical to the published crate except `compat.rs`,
+  whose single changed line is that import (plus the comment recording it)
+  — zero edits to any SILK/CELT/MDCT/range-coder/tables logic. The target
+  fit comes from build configuration, not tampering: feature flags
+  (`libm`, `heap` off), the dependency substitution, and target-gated
+  `portable-atomic` features; only the manifest is reconstructed (dev-
+  deps/tests stripped). Any future vendor sync should reproduce exactly
+  this one-file diff — more or less than it is drift to explain.
+  **Correction to the sketch here** (found by the first real ROM link,
+  2026-09-29): the `critical-section`
+  feature **cannot coexist with agb** — agb 0.25 enables portable-atomic's
+  `unsafe-assume-single-core` in every thumbv4t link, and portable-atomic
+  `compile_error!`s when the two combine. The vendor manifest therefore
+  mirrors agb's own feature set (`unsafe-assume-single-core` + `fallback`),
+  verified for both the ROM link and the standalone vendor build.
+  PATCHES.md note 1a carries the detail. No heap patch yet: the decoder
+  state stays inline (`heap` is std-coupled) — fine for the scaffold; the
+  EWRAM Box-via-`alloc` story is a later PR's tracked omission.
+- A seam contract measured from vendored source while wiring `probe.rs`:
+  `OpusDecoder::decode` **rejects `frame_size = 0`** ("frame_size too small")
+  — the TOC decides the actual decode geometry, but the caller must still
+  carry ≥ that many samples; there is no "let the TOC decide" zero
+  convention.
+- Still open (later PRs, per the plan above): step 2 (two embedded arms via
+  the pack script + fail-closed TOC censuses, host witness vs the
+  ffmpeg/libopus reference), then ROM decode proof, then the cycle harness
+  reusing flac_spike PR 3's counter discipline. A prepared measurement note
+  for step 2: ffmpeg 9.0.1's reference decode removes the front pre-skip and
+  trims the tail to source duration — the raw packet walk from sample 0 is
+  the reference's *prefix* by `pre_skip`; the generator must witness that
+  alignment, not assume it.

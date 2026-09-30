@@ -1,6 +1,7 @@
 .PHONY: format build rom native-rom podman-rom flac-rom native-flac-rom podman-flac-rom \
         spike-rom native-spike-rom podman-spike-rom \
-        test test-rom flac-test spike-test podman-test podman-test-rom podman-flac-test \
+        opus-rom native-opus-rom podman-opus-rom \
+        test test-rom flac-test spike-test opus-test podman-test podman-test-rom podman-flac-test podman-opus-test \
         clean clean-cache check podman-check help toolchain-check
 
 # ---------------------------------------------------------------------------
@@ -54,10 +55,12 @@ CARGO_CACHE   ?= gba-cargo-target
 FLAC_CACHE    ?= gba-flac-lite-target
 FLACROM_CACHE ?= gba-flac-integration-target
 SPIKE_CACHE   ?= gba-flac-spike-target
+OPUS_CACHE    ?= gba-opus-spike-target
 CACHE_MOUNTS := -v $(CARGO_CACHE):/app/target:Z \
                 -v $(FLAC_CACHE):/app/crates/flac-lite/target:Z \
                 -v $(FLACROM_CACHE):/app/examples/flac_integration/target:Z \
-                -v $(SPIKE_CACHE):/app/examples/flac_spike/target:Z
+                -v $(SPIKE_CACHE):/app/examples/flac_spike/target:Z \
+                -v $(OPUS_CACHE):/app/examples/opus_spike/target:Z
 # GBA test harness (ROM tests boot headlessly in mGBA). Override to point
 # elsewhere, or set empty to see the raw cargo command.
 GBA_TEST_RUNNER ?= mgba-test-runner
@@ -91,6 +94,15 @@ SPIKE_ROM := flac-spike.gba
 SPIKE_CRATE_DIR := examples/flac_spike
 SPIKE_CRATE_MANIFEST := $(abspath examples/flac_spike/Cargo.toml)
 SPIKE_CRATE_BIN := target/$(TARGET)/release/flac-spike
+# The Opus perf-gate spike crate (examples/opus_spike/) — OPUS.md "Measurement
+# plan — start here". Same standalone-workspace + inherited-config pattern as
+# the FLAC spike; its host gate runs out-of-tree the same way (cargo config
+# leak). PR 1 is the scaffold/compile-link gate; the decode witness grows into
+# `opus-test` with step 2's embedded arms.
+OPUS_ROM := opus-spike.gba
+OPUS_CRATE_DIR := examples/opus_spike
+OPUS_CRATE_MANIFEST := $(abspath examples/opus_spike/Cargo.toml)
+OPUS_CRATE_BIN := target/$(TARGET)/release/opus-spike
 
 # `rom` is the command run INSIDE the container (where agb-gbafix lives); the
 # *-rom targets above it are the host-facing entrypoints. Keep `rom` = the
@@ -113,6 +125,7 @@ format:
 	cd crates/flac-lite && $(CARGO) fmt
 	cd $(FLAC_CRATE_DIR) && $(CARGO) fmt
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) fmt
+	cd $(OPUS_CRATE_DIR) && $(CARGO) fmt
 else
 format:
 	@echo "format: skipping — no rustfmt for '$(TOOLCHAIN)' (build continues)."
@@ -196,6 +209,30 @@ podman-spike-rom:
 	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make spike-rom
 
 # ---------------------------------------------------------------------------
+# OPUS PERF-GATE SPIKE ROM (OPUS.md "Measurement plan — start here").
+#
+#   opus-rom            build + fix the scaffold ROM (bare name: runs anywhere)
+#   native-opus-rom     build it here
+#   podman-opus-rom     build it in the container
+#
+# PR 1: the compile/link gate — the vendored patched opus-rs (see the crate's
+# vendor/opus-rs/PATCHES.md) LINKS into a bootable ROM image for $(TARGET),
+# the real link rather than a bare check. The root ROM crate stays Opus-free.
+# ---------------------------------------------------------------------------
+
+opus-rom: format
+	cd $(OPUS_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
+	agb-gbafix $(OPUS_CRATE_DIR)/$(OPUS_CRATE_BIN) -o $(OPUS_ROM)
+	@echo "Opus spike ROM built: $(OPUS_ROM)"
+
+native-opus-rom: opus-rom
+	@echo "native-opus-rom done: $(OPUS_ROM)"
+
+podman-opus-rom:
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make opus-rom
+
+# ---------------------------------------------------------------------------
 # Containerized testing.
 #
 # Same convention as the ROM builds: the BARE names (`rom`, `flac-rom`, `test`,
@@ -262,6 +299,21 @@ spike-test: toolchain-check
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(SPIKE_CRATE_MANIFEST) --target $(HOST_TRIPLE)
 	@echo "spike-test passed: spike clips decode bit-exactly on the host"
+
+# The Opus spike's host gate: same out-of-tree --manifest-path pattern (cargo
+# config leak). PR 1 pins the scaffold facts (constructor contract, derived
+# budget, state size, seam forwarding); step 2 grows it into the decode
+# witness against the ffmpeg/libopus reference. The thumbv4t half of the
+# compile gate is `make opus-rom` itself (it links the real image).
+opus-test: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(OPUS_CRATE_MANIFEST) --target $(HOST_TRIPLE)
+	@echo "opus-test passed: opus spike scaffold pins hold on the host"
+
+podman-opus-test:
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make opus-test
 
 # Cargo's runner env var is the upper-cased target triple with dashes replaced
 # by underscores: CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER.
@@ -335,14 +387,15 @@ clean:
 # Safe: they are pure build caches — the next container run rebuilds from
 # scratch, slowly once, then repopulates them. Does NOT touch ./target.
 clean-cache:
-	-$(CONTAINER) volume rm $(CARGO_CACHE) $(FLAC_CACHE) $(FLACROM_CACHE) $(SPIKE_CACHE) 2>/dev/null || true
-	@echo "container build-cache volumes removed ($(CARGO_CACHE), $(FLAC_CACHE), $(FLACROM_CACHE), $(SPIKE_CACHE))."
+	-$(CONTAINER) volume rm $(CARGO_CACHE) $(FLAC_CACHE) $(FLACROM_CACHE) $(SPIKE_CACHE) $(OPUS_CACHE) 2>/dev/null || true
+	@echo "container build-cache volumes removed ($(CARGO_CACHE), $(FLAC_CACHE), $(FLACROM_CACHE), $(SPIKE_CACHE), $(OPUS_CACHE))."
 
 check:
 	$(CARGO) fmt --check
 	cd crates/flac-lite && $(CARGO) fmt --check
 	cd $(FLAC_CRATE_DIR) && $(CARGO) fmt --check
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) fmt --check
+	cd $(OPUS_CRATE_DIR) && $(CARGO) fmt --check
 
 # Fail early and legibly when the pinned toolchain isn't reachable, instead of
 # half-running a gate (e.g. `--target ''` when the host triple can't be probed).
@@ -371,6 +424,11 @@ help:
 	@echo "    native-spike-rom  build $(SPIKE_ROM) natively"
 	@echo "    podman-spike-rom  build $(SPIKE_ROM) in the container"
 	@echo "    spike-test        spike asset witness tests (host, bit-exact)"
+	@echo ""
+	@echo "  OPUS PERF-GATE SPIKE (OPUS.md):"
+	@echo "    native-opus-rom   build $(OPUS_ROM) natively (vendored opus-rs link gate)"
+	@echo "    podman-opus-rom   build $(OPUS_ROM) in the container"
+	@echo "    opus-test         opus spike host gate (scaffold pins; step-2 witness grows in)"
 	@echo ""
 	@echo "  Tests — native gates (need nightly + agb-gbafix + mgba-test-runner locally):"
 	@echo "    test              test-rom + flac-test (verify-only: no reformat)"
