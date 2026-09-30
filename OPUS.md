@@ -301,8 +301,18 @@ cycle counting.
 - Vendor patch on `opus-rs` 0.1.34 is the one documented above (`compat.rs`:
   `AtomicU8` via `portable_atomic`), applied to a vendored copy under
   `examples/opus_spike/vendor/opus-rs/` (BSD-3, license + provenance +
-  re-verification recipe in `PATCHES.md`). **Correction to the sketch here**
-  (found by the first real ROM link, 2026-09-29): the `critical-section`
+  re-verification recipe in `PATCHES.md`). **The vendored source is copied
+  as-is** (diff-audited 2026-09-30, `diff -rq src <crates.io source>`): all
+  67 `.rs` files byte-identical to the published crate except `compat.rs`,
+  whose single changed line is that import (plus the comment recording it)
+  — zero edits to any SILK/CELT/MDCT/range-coder/tables logic. The target
+  fit comes from build configuration, not tampering: feature flags
+  (`libm`, `heap` off), the dependency substitution, and target-gated
+  `portable-atomic` features; only the manifest is reconstructed (dev-
+  deps/tests stripped). Any future vendor sync should reproduce exactly
+  this one-file diff — more or less than it is drift to explain.
+  **Correction to the sketch here** (found by the first real ROM link,
+  2026-09-29): the `critical-section`
   feature **cannot coexist with agb** — agb 0.25 enables portable-atomic's
   `unsafe-assume-single-core` in every thumbv4t link, and portable-atomic
   `compile_error!`s when the two combine. The vendor manifest therefore
