@@ -2,6 +2,7 @@
 /gba-sound-player.gba
 /flac-integration.gba
 /flac-spike.gba
+/opus-spike.gba
 *.d
 
 # mGBA writes a save file beside the ROM on every local run
@@ -32,6 +33,17 @@
 # assets/*.bin + src/assets.rs are deliberately TRACKED — they are committed
 # generator output, the witness the spike measures.
 /examples/flac_spike/target/
+
+# The Opus spike crate (examples/opus_spike/ — own workspace, same pattern).
+# Its vendored decoder is its OWN workspace root (vendor/opus-rs/Cargo.toml
+# carries [workspace] — OPUS.md's standalone probe recipe runs from there),
+# so it builds a target/ of its own; ignore both build dirs.
+/examples/opus_spike/target/
+/examples/opus_spike/vendor/opus-rs/target/
+
+# The vendored decoder's committed lockfile pins the exact dependency graph
+# the thumbv4t gate builds with (flac_spike tracks its Cargo.lock — same rule).
+!/examples/opus_spike/Cargo.lock
 
 # Python bytecode caches (scripts/*.py); never commit.
 __pycache__/
