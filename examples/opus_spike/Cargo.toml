@@ -42,6 +42,18 @@ path = "src/main.rs"
 test = false
 bench = false
 
+# Feature-gated host tool for scripts/opus_assets.py (the pin-measuring walk
+# dump). `required-features` keeps it OUT of the default build on both
+# targets: the thumbv4t ROM build would fail on its std usage, and the host
+# gate need not compile it. The generator passes --features host-tools.
+[features]
+host-tools = []
+
+[[example]]
+name = "dump_walk"
+required-features = ["host-tools"]
+test = false
+
 # The vendored decoder is its OWN workspace root (vendor/opus-rs/Cargo.toml
 # carries [workspace]) so the OPUS.md patch recipe can be run standalone;
 # exclude it here so the implicit path-dependency membership rule does not
