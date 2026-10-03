@@ -62,7 +62,7 @@ mod rom {
         // Check 1 — decode-path link witness. Taking the seam's address
         // forces `probe::decode_packet` and its call graph (the vendored
         // decoder) to survive the link; the address itself proves placement.
-        let decode_fn = probe::decode_packet as usize;
+        let decode_fn = probe::decode_packet as *const () as usize;
         let linked = ROM_MAPPING.contains(&decode_fn);
         agb::println!(
             "[opus-spike] check decode-path link: probe::decode_packet @ 0x{:08X} in 0x08000000..0x0D800000 [{}]",

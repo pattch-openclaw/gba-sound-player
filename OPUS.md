@@ -334,3 +334,60 @@ cycle counting.
   trims the tail to source duration — the raw packet walk from sample 0 is
   the reference's *prefix* by `pre_skip`; the generator must witness that
   alignment, not assume it.
+
+## Status (2026-10-02): step 2 landed — two embedded arms + host witness (PR 2)
+
+- **The arms exist and the host witness proves the decode.** `scripts/gen_opus_assets.sh`
+  + `scripts/opus_assets.py` generate the two arms of the FLAC gate's deterministic
+  10 s source (silk: `-application voip` 12 kbps → census-pure config 9 SILK-only WB
+  ×501; music: `-application audio` 96 kbps → census-pure config 31 CELT-only FB 20 ms
+  ×501 — both at the 48 kHz API rate, the deviation from the 2026-09-29 sketch recorded
+  in the script header). `probe::decode_clip` walks the manifest sequentially (fresh
+  decoder per clip — the state-machine difference from flac_spike, plan item 3);
+  `tests/opus_witness.rs` proves the walk over the exact embedded bytes meets the
+  ffmpeg/libopus float reference. Gates: `make opus-test` 12 green (4 witness +
+  4 checksum unit + 4 scaffold pins), `make native-opus-rom` links the assets into the
+  ROM image, `make check` clean.
+- **Two prior claims this step measured FALSE (the correction is the finding):**
+  1. *"the raw packet walk from sample 0 is the reference's prefix by `pre_skip`"*
+     (the 2026-09-29 note above). False for the SILK arm: the vendored walk meets the
+     reference at **pre_skip − 3 = 309** (0 grid mismatches there; 478,439/480,000 when
+     compared at the header's 312). The CELT arm aligns exactly at pre_skip = 312.
+     Alignment is now a **per-arm measured pin** (`align_shift` in assets.rs): the
+     generator discovers it fail-closed by driving the crate's own
+     `probe::walk_region` through `examples/dump_walk.rs` (the production seam, not a
+     second decode loop), and the witness **re-derives it in Rust** over the
+     production walk's bytes — the two discovery implementations must agree with the
+     pin. Bands the generator refuses to write outside of: shift within ±16 of
+     pre_skip, every residual ≤ 1 LSB, residual count < 1% of samples.
+  2. *"the i16 fold is their measured equivalence class, 0 mismatches per arm"*
+     (draft, 2026-10-01, truncate-toward-zero — the vendored decoder's own output
+     convention). Not reproducible: on the CELT arm truncate disagrees with the
+     reference on **240,397/480,000** samples by exactly ±1 LSB — the port's
+     soft-float drift (max |Δ| ≈ 0.76 LSB) amplified by truncation's grid-offset
+     boundary. The honest grid is **round half up** (`checksum::fold_f32_to_i16`,
+     no_std-safe integer rounding, half-up pinned over half-away at exact .5):
+     residuals become SILK **0**, CELT **127 of 480,000**, every one ±1 LSB — soft
+     drift crossing grid boundaries, not decode divergence. The 127 ride as the
+     music arm's measured `fold_mismatch` pin: the witness asserts the count
+     exactly and bounds every delta at ≤ 1 LSB. Zero is not the equivalence class;
+     the measured residual is.
+- **Driver guard corrected.** The draft's per-entry `packet.len() != entry.len` check
+  was tautological (the slice is built from `entry.len`) — the length-drift negative
+  control caught it by returning `Ok`. The walk now verifies manifest **tiling** before
+  touching the decoder (start 0, contiguous, non-empty, exact cover; each violation a
+  named error at its index) and the witness carries **six** corrupt-manifest controls
+  (past-region / gap / overlap / **in-region lying length** / truncated table / empty
+  packet) plus an identity positive control so the guard can't pass by rejecting
+  everything. The decoder cannot be the guard: measured 2026-10-02 against the vendored
+  decoder, a first packet truncated 30 B → 14 B still returns `Ok(960)` — a lying
+  length inside the region decodes silently, which is why manifest integrity is the
+  driver's contract and content corruption is the decode-vs-reference layer's net.
+- **Deliberate scope cuts:** no ROM decode proof and no cycle counting (correctness-
+  before-speed orders them next, flac_spike PR 2→3); `dump_walk` is `host-tools`
+  feature-gated so it never enters the ROM build or the host gate; reference blobs
+  stay host-only (the ROM pins them by hash); the EWRAM Box story stays a tracked
+  omission. Asset sha256s after regeneration: silk packets
+  `76fa0525…`, music packets `7e26c8d6…`, refs unchanged (`bf4adc61…` / `4136341a…` —
+  encode + reference decode reproduce bit-identically; the generator's walk-dump step
+  is measurement-only and cannot move the blobs).
