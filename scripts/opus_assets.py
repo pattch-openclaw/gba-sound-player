@@ -85,6 +85,23 @@ def fold_half_up(x):
     return int(r)
 
 
+def fold_walk_fnv(walk_bytes):
+    """FNV-1a 64 over the vendored walk's OWN folded output (i16 LE, half-up
+    grid, every walk sample — no alignment shift). This is the ROM decode
+    proof's golden: unlike the FLAC gate, Opus cannot pin the on-target PCM
+    hash against the REFERENCE (the arms are lossy and the port has measured
+    ±1 LSB residuals vs libopus — the walk's hash never equals the
+    reference's). The walk-fold hash is a deterministic property of the
+    vendored decoder over the exact embedded bytes: the generator measures
+    it over the dump_walk output (the production seam), the host witness
+    re-derives it in Rust, and the ROM must reproduce it on-target."""
+    assert len(walk_bytes) % 4 == 0
+    parts = []
+    for (s,) in struct.iter_unpack("<f", walk_bytes):
+        parts.append(struct.pack("<h", fold_half_up(s)))
+    return fnv1a64(b"".join(parts))
+
+
 def discover_alignment(walk_bytes, ref_bytes, pre_skip):
     """Measure where the vendored decoder's walk meets the ffmpeg/libopus
     reference: scan shifts around OpusHead `pre_skip`, fold both sides with
@@ -415,7 +432,10 @@ def emit(crate, encoder_version, per_arm):
     w("//!")
     w("//! fnv_* are FNV-1a 64-bit: fnv_packets over the region bytes, fnv_ref_pcm")
     w("//! over the reference PCM bytes (32-bit float LE mono, ffmpeg/libopus")
-    w("//! pre-skip applied — host ground truth, never embedded).")
+    w("//! pre-skip applied — host ground truth, never embedded), and")
+    w("//! fnv_walk_fold over the VENDORED WALK's own folded output (i16 LE,")
+    w("//! half-up grid, all walk_samples — the ROM decode proof's golden;")
+    w("//! measured over the dump_walk output, i.e. the production seam).")
     w("")
     w("/// One packet's placement in the region: byte offset and length.")
     w("/// `Clone + Copy`: two plain ints.")
@@ -482,6 +502,15 @@ def emit(crate, encoder_version, per_arm):
     w("    pub fnv_packets: u64,")
     rustdoc(w, "FNV-1a 64 of the reference PCM bytes (f32-LE; NOT embedded).")
     w("    pub fnv_ref_pcm: u64,")
+    rustdoc(w, "FNV-1a 64 of the VENDORED WALK's folded output (every")
+    rustdoc(w, "walk sample folded through the shared round-half-up grid,")
+    rustdoc(w, "i16 LE bytes; no alignment shift). The ROM decode proof's")
+    rustdoc(w, "golden: the port is NOT bit-exact with the reference, so the")
+    rustdoc(w, "ROM pins its own decoder's deterministic output, and the")
+    rustdoc(w, "reference comparison stays the host witness's layer")
+    rustdoc(w, "(OPUS.md 2026-10-03: the FLAC fnv_pcm pattern does not")
+    rustdoc(w, "transfer to a lossy codec).")
+    w("    pub fnv_walk_fold: u64,")
     rustdoc(w, "File name (under `assets/`) of the reference PCM blob.")
     w("    pub ref_file: &'static str,")
     rustdoc(w, "The packet index: packet 0 at offset 0, ascending, tiling exactly.")
@@ -517,6 +546,7 @@ def emit(crate, encoder_version, per_arm):
         # error (generated-Rust discipline: the compile gate is the reviewer).
         w(f"    fnv_packets: {arm['fnv_packets']:#018x},")
         w(f"    fnv_ref_pcm: {arm['fnv_ref_pcm']:#018x},")
+        w(f"    fnv_walk_fold: {arm['fnv_walk_fold']:#018x},")
         w(f"    ref_file: {rust_str(arm['ref_file'])},")
         w(f"    index: {arm['label'].upper()}_INDEX,")
         w(f"    region: include_bytes!(\"../assets/{arm['packets_file']}\"),")
@@ -643,6 +673,7 @@ def opus_assets(tmp, crate, encoder_version):
             "packets_file": f"{label}_packets.bin",
             "ref_file": f"{label}_ref.bin",
             "fnv_packets": fnv1a64(region), "fnv_ref_pcm": fnv1a64(ref_bytes),
+            "fnv_walk_fold": fold_walk_fnv(walk_bytes),
         })
 
     for arm in per_arm:

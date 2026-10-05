@@ -57,6 +57,28 @@ pub fn new_decoder(rate_hz: i32, channels: usize) -> Result<OpusDecoder, &'stati
     OpusDecoder::new(rate_hz, channels)
 }
 
+/// Candidate construction shape for the on-target hang (OPUS.md, 2026-10-04
+/// probe findings): the Box is applied directly to the ctor result with no
+/// by-value wrapper in between, `#[inline(always)]` so the constructor's
+/// destination can propagate all the way into the heap allocation.
+/// **MEASURED on-target (probe ROM rev5/rev7): this candidate DIES** — jump
+/// trap 0x48084808 like the repro, with SP read at 0x02FAF610 (below IWRAM)
+/// at the stage's entry: caller-side destination propagation does not
+/// eliminate the by-value temporary, because intermediate by-value returns
+/// INSIDE the vendored ctor (sub-decoder constructors into the `Self`
+/// literal) survive every caller spelling. Kept as the measured negative —
+/// the fix must move into the construction path itself (no by-value hop
+/// anywhere), which is the follow-up PR. Host behavior is identical either
+/// way; this is a target-codegen claim, witnessed only on-target (probe ROM
+/// stage P4).
+#[inline(always)]
+pub fn new_decoder_boxed(
+    rate_hz: i32,
+    channels: usize,
+) -> Result<alloc::boxed::Box<OpusDecoder>, &'static str> {
+    Ok(alloc::boxed::Box::new(OpusDecoder::new(rate_hz, channels)?))
+}
+
 /// Decode exactly one packet through a caller-owned decoder, writing
 /// interleaved f32 at the API rate. Returns samples decoded per channel.
 ///
@@ -104,7 +126,7 @@ pub fn decode_packet(
 pub fn decode_clip(
     clip: &crate::assets::OpusClip,
     on_window: impl FnMut(&[f32]),
-) -> Result<(), (&'static str, usize)> {
+) -> Result<WalkStats, (&'static str, usize)> {
     walk_region(
         clip.region,
         clip.index.iter().map(|e| (e.offset, e.len)),
@@ -112,6 +134,24 @@ pub fn decode_clip(
         clip.channels,
         on_window,
     )
+}
+
+/// Tallies and placement of one completed [`walk_region`] pass. The ROM
+/// decode proof logs these: `packets`/`samples` cross-check the walk against
+/// the manifest (a silently skipped packet would keep a hash pin honest only
+/// for the bytes it did read), and `decoder_addr`/`window_addr` witness that
+/// the decode state really lives in EWRAM (0x0200_0000..0x0204_0000) — the
+/// OPUS.md memory plan made check, replacing PR 1's static bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WalkStats {
+    /// Packets decoded (one callback per packet).
+    pub packets: usize,
+    /// Samples produced at the API rate (packets × frame_samples).
+    pub samples: usize,
+    /// Address of the heap-allocated decoder state.
+    pub decoder_addr: usize,
+    /// Address of the heap-allocated decode window.
+    pub window_addr: usize,
 }
 
 /// Walk a packet region by (offset, len) entries: a fresh decoder, packets
@@ -150,14 +190,35 @@ pub fn walk_region(
     sample_rate_hz: u32,
     channels: u8,
     mut on_window: impl FnMut(&[f32]),
-) -> Result<(), (&'static str, usize)> {
-    let mut window = [0.0f32; 1920]; // 40 ms x mono at 48 kHz — 2x the pinned frame
+) -> Result<WalkStats, (&'static str, usize)> {
     let window_samples = frame_samples(sample_rate_hz);
-    if window_samples > window.len() {
+    const WINDOW_SAMPLES: usize = 1920; // 40 ms x mono at 48 kHz — 2x the pinned frame
+    if window_samples > WINDOW_SAMPLES {
         // Generated clips pin 48 kHz (960); anything wider is drift to name,
         // not a silent slice panic.
         return Err(("pinned geometry exceeds window buffer", 0));
     }
+    // The decode state lives on the heap (the global allocator — EWRAM's
+    // block heap under agb, the system allocator on host): the inline
+    // OpusDecoder is ~178 KB, stack-hostile by construction against agb's
+    // ~32 KB IWRAM stack (PR 1's tracked omission, landed here because the
+    // ROM decode proof is the first on-target EXECUTION of the decode path).
+    // Honesty note, MEASURED 2026-10-04: `Box::new(f())` elides the 178 KB
+    // stack temporary only via destination propagation (lto = "fat" +
+    // inlining) — and on-target that bet LOSES. The constructor-shape probe
+    // ROM (`src/ctor_probe.rs`) read SP at 0x02FAF610 in the construction
+    // frame: below IWRAM's 0x0300_0000 bottom — the sret temporary really
+    // materializes, wrapping the ~31 KB stack off IWRAM into EWRAM and
+    // silently destroying control flow (the proof ROM's 2026-10-03/04 hang;
+    // jump trap 0x48084808). An earlier draft of this note claimed the
+    // failure would "fail loudly rather than silently" — measured FALSE:
+    // the smash writes mapped RAM silently until the corrupted return jumps.
+    // The fix — a construction that never returns by value (in-place/boxed
+    // ctor in the vendored seam) — is the next PR's scope. This seam stays
+    // the production shape the host witness and the generator pins measured
+    // through: green on host, red on target, with the probe ROM owning the
+    // reading (OPUS.md, 2026-10-04 status entry).
+    let mut window = alloc::boxed::Box::<[f32; WINDOW_SAMPLES]>::new([0.0f32; WINDOW_SAMPLES]);
     // Manifest tiling, checked before constructing the decoder: one cursor
     // advances through the entries, so offset drift, gaps, overlaps, empty
     // packets, and past-region entries each fail at their own index, and a
@@ -185,7 +246,13 @@ pub fn walk_region(
         // only index there is).
         return Err(("manifest does not tile region", count - 1));
     }
-    let mut decoder = new_decoder(sample_rate_hz as i32, channels as usize).map_err(|e| (e, 0))?;
+    let mut decoder = alloc::boxed::Box::new(
+        new_decoder(sample_rate_hz as i32, channels as usize).map_err(|e| (e, 0))?,
+    );
+    let decoder_addr = &*decoder as *const OpusDecoder as usize;
+    let window_addr = &*window as *const [f32; WINDOW_SAMPLES] as usize;
+    let mut decoded_samples = 0usize;
+    let mut walked_packets = 0usize;
     for (i, (offset, len)) in entries.enumerate() {
         let start = offset as usize;
         // Slice safe: the tiling pass proved every window lies inside the region.
@@ -197,6 +264,13 @@ pub fn walk_region(
             return Err(("decoded geometry drift", i));
         }
         on_window(out);
+        walked_packets = i + 1;
+        decoded_samples += window_samples;
     }
-    Ok(())
+    Ok(WalkStats {
+        packets: walked_packets,
+        samples: decoded_samples,
+        decoder_addr,
+        window_addr,
+    })
 }

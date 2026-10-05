@@ -3,6 +3,7 @@
 /flac-integration.gba
 /flac-spike.gba
 /opus-spike.gba
+/ctor-probe.gba
 *.d
 
 # mGBA writes a save file beside the ROM on every local run

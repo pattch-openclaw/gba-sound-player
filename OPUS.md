@@ -391,3 +391,77 @@ cycle counting.
   `76fa0525…`, music packets `7e26c8d6…`, refs unchanged (`bf4adc61…` / `4136341a…` —
   encode + reference decode reproduce bit-identically; the generator's walk-dump step
   is measurement-only and cannot move the blobs).
+
+## Status (2026-10-04): step 3 in progress — ROM decode proof lands RED, hang mechanism proven (PR 3 WIP + constructor-shape probe)
+
+- **What lands:** the ROM decode proof (`src/main.rs`: region FNV → production-
+  seam walk → per-packet running hash → `fnv_walk_fold` golden → EWRAM
+  placement), `decode_clip`/`walk_region` returning `WalkStats` (totals +
+  decoder/window addresses — the placement witness and the manifest cross-
+  check), the generator's `fnv_walk_fold` pins (host witness re-derives them;
+  13 host tests green, 12 → 13), and the **constructor-shape probe ROM**
+  (`src/ctor_probe.rs`, `[[bin]] ctor-probe`, built beside the proof by
+  `make opus-rom`). **The proof image stays red on-target by measurement, not
+  by neglect** — this PR is the representative in-progress landing Sam asked
+  for: the harness that localizes the failure, with the fix as the next PR.
+- **The mechanism, measured end to end (probe ROM rev1–rev7).** The 2026-10-03/
+  04 hang was decoder construction: the walk banner prints, packet 1 never
+  does, mGBA dies at a wild PC (`F901F900` proof ROM; `48084808` probe).
+  Seven probe revisions, each death named by the last banner printed:
+  1. **Heap capacity: measured OUT.** The descending ladder (200,000 → 4,096 B,
+     raw `alloc::alloc`, 3-point writes, readback, dealloc) round-trips
+     **every rung clean** at 0x02008370 on the 229,664 B heap — allocator
+     call, write range, free-list reuse and split at scale all sound. (An
+     earlier ascending ladder got NULLs ≥ 131,072 B — correct allocator
+     behavior after fragmenting its own heap; the ordering was the mistake,
+     recorded because it confounded rev2–rev3's readings.)
+  2. **Construction shape: convicted.** Three spellings of "construct then
+     Box" all die before packet 1 on that same healthy heap: the production
+     `Box::new(new_decoder(..)?)` (probe P2), the repro `.map(|d| Box::new(d))`
+     (TAIL), and the candidate caller-side fix — `new_decoder_boxed`, an
+     `#[inline(always)]` wrapper applying `Box::new` directly to the ctor
+     result (P4). Caller-side destination propagation does **not** eliminate
+     the temporary: intermediate by-value returns *inside* the vendored ctor
+     (sub-decoder constructors building the `Self` literal) survive every
+     caller spelling. `new_decoder_boxed` stays in the seam as the measured
+     negative.
+  3. **The SP witness closes it.** `read_sp` reads SP by asm at stage entry
+     (valid: the `thumbv4t-none-eabi` target spec pins `"frame-pointer":
+     "always"`, so SP is never scratch — the compiler even refuses `r7` as
+     an inline-asm operand). P4's frame: **SP = 0x02FAF610 — 362,736 B below
+     agb's stack top (0x0300_7F00) and 330,224 B below IWRAM's bottom
+     (0x0300_0000)**. A frame that size cannot hold one 177,864 B temporary;
+     the arithmetic fits two (2 × 177,864 = 355,728 ≤ 362,736 — the outer
+     sret plus the ctor's own by-value temporaries inlined into the caller's
+     frame). The frame wraps off IWRAM's bottom into **mapped** EWRAM: the
+     writes succeed silently, destroying `.bss`/heap/allocator state, until
+     the corrupted return path jumps to garbage — which is exactly why the
+     failure was silent, and why the old honesty note's "fails loudly rather
+     than silently" prediction was measured FALSE (corrected in place).
+- **Prior-assumption corrections this step:** (1) the honesty note's
+  fail-loudly claim — false on mapped-RAM substrates; (2) the plan's implicit
+  assumption that `Box::new(ctor_result)` + `lto = "fat"` elides the large
+  return — false here, and not fixable at the call site; (3) the 2026-10-03
+  note's `F901F900` vs silence treated as two fault classes — one class
+  (corrupted return), landing-dependent.
+- **Gates & witnesses.** `make opus-test` 13 green (witness suite grows
+  4 → 5 with `walk_fold_hash_reproduces_the_rom_decode_golden`; the ROM's
+  golden is the seam's own folded output, never the reference — lossy-codec
+  rule). `make native-opus-rom` builds both images; sha256 witnesses for
+  this landing: proof `09f5de90…` (boots clean, region FNV MATCH, dies at
+  construction — status quo red), probe `0a358968…` (ladder all-clean,
+  `sp@entry=0x02FAF610 … STACK TEMPORARY CONFIRMED`, jump trap). The probe
+  is **build-only, never a test gate**: a dead ROM wedges
+  `mgba-test-runner`, so the deliberately-red image is captured by hand
+  (sha + serial tail), like the FLAC gate's boot checks but inverted.
+  Regeneration tripwire re-run green: all four asset blobs byte-identical
+  from a scratch crate dir (`assets.rs` differs only by post-generation fmt
+  reflow — token-stream equal, all scalar pins identical).
+- **Deliberate scope cuts (this PR):** the constructor fix does NOT land
+  here — the next PR adds an in-place construction path to the vendored
+  seam (no by-value hop anywhere: `Box::new_uninit`-style in-place init or a
+  boxed ctor), which is expected to turn the proof ROM green and re-runs
+  this probe as its before/after witness. The probe's P3 stage (rev1's
+  fused `vec![0u8; 200_000]` death) sits behind TAIL's expected death and
+  stays unmeasured; cycle counting stays ordered behind a green proof
+  (correctness-before-speed).

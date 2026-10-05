@@ -20,7 +20,10 @@
 //!
 //! fnv_* are FNV-1a 64-bit: fnv_packets over the region bytes, fnv_ref_pcm
 //! over the reference PCM bytes (32-bit float LE mono, ffmpeg/libopus
-//! pre-skip applied — host ground truth, never embedded).
+//! pre-skip applied — host ground truth, never embedded), and
+//! fnv_walk_fold over the VENDORED WALK's own folded output (i16 LE,
+//! half-up grid, all walk_samples — the ROM decode proof's golden;
+//! measured over the dump_walk output, i.e. the production seam).
 
 /// One packet's placement in the region: byte offset and length.
 /// `Clone + Copy`: two plain ints.
@@ -87,6 +90,15 @@ pub struct OpusClip {
     pub fnv_packets: u64,
     /// FNV-1a 64 of the reference PCM bytes (f32-LE; NOT embedded).
     pub fnv_ref_pcm: u64,
+    /// FNV-1a 64 of the VENDORED WALK's folded output (every
+    /// walk sample folded through the shared round-half-up grid,
+    /// i16 LE bytes; no alignment shift). The ROM decode proof's
+    /// golden: the port is NOT bit-exact with the reference, so the
+    /// ROM pins its own decoder's deterministic output, and the
+    /// reference comparison stays the host witness's layer
+    /// (OPUS.md 2026-10-03: the FLAC fnv_pcm pattern does not
+    /// transfer to a lossy codec).
+    pub fnv_walk_fold: u64,
     /// File name (under `assets/`) of the reference PCM blob.
     pub ref_file: &'static str,
     /// The packet index: packet 0 at offset 0, ascending, tiling exactly.
@@ -2116,6 +2128,7 @@ pub const OPUS_SILK: OpusClip = OpusClip {
     ref_bytes_len: 1920000,
     fnv_packets: 0x3f491c76528c74d2,
     fnv_ref_pcm: 0x71de2d4050d06f5e,
+    fnv_walk_fold: 0x79e9dceaba485bee,
     ref_file: "opus_silk_ref.bin",
     index: OPUS_SILK_INDEX,
     region: include_bytes!("../assets/opus_silk_packets.bin"),
@@ -4145,6 +4158,7 @@ pub const OPUS_MUSIC: OpusClip = OpusClip {
     ref_bytes_len: 1920000,
     fnv_packets: 0x24e4329875944a91,
     fnv_ref_pcm: 0xb11a8c59f1f26183,
+    fnv_walk_fold: 0x0c01ddf101fafa3f,
     ref_file: "opus_music_ref.bin",
     index: OPUS_MUSIC_INDEX,
     region: include_bytes!("../assets/opus_music_packets.bin"),
