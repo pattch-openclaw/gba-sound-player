@@ -100,6 +100,12 @@ SPIKE_CRATE_BIN := target/$(TARGET)/release/flac-spike
 # leak). PR 1 is the scaffold/compile-link gate; the decode witness grows into
 # `opus-test` with step 2's embedded arms.
 OPUS_ROM := opus-spike.gba
+# The constructor-shape probe ROM (deliberately-red repro control, PR 3
+# harness — src/ctor_probe.rs): built beside the proof ROM by `opus-rom`
+# because `cargo build` compiles both bins anyway; its expected on-target
+# death must never enter a test gate (a dead ROM wedges mgba-test-runner),
+# so it is a build-only artifact captured by hand (sha + serial tail).
+OPUS_PROBE_ROM := ctor-probe.gba
 OPUS_CRATE_DIR := examples/opus_spike
 OPUS_CRATE_MANIFEST := $(abspath examples/opus_spike/Cargo.toml)
 OPUS_CRATE_BIN := target/$(TARGET)/release/opus-spike
@@ -223,7 +229,8 @@ podman-spike-rom:
 opus-rom: format
 	cd $(OPUS_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
 	agb-gbafix $(OPUS_CRATE_DIR)/$(OPUS_CRATE_BIN) -o $(OPUS_ROM)
-	@echo "Opus spike ROM built: $(OPUS_ROM)"
+	agb-gbafix $(OPUS_CRATE_DIR)/target/$(TARGET)/release/ctor-probe -o $(OPUS_PROBE_ROM)
+	@echo "Opus spike ROM built: $(OPUS_ROM) (+ constructor probe $(OPUS_PROBE_ROM))"
 
 native-opus-rom: opus-rom
 	@echo "native-opus-rom done: $(OPUS_ROM)"
@@ -426,7 +433,7 @@ help:
 	@echo "    spike-test        spike asset witness tests (host, bit-exact)"
 	@echo ""
 	@echo "  OPUS PERF-GATE SPIKE (OPUS.md):"
-	@echo "    native-opus-rom   build $(OPUS_ROM) natively (vendored opus-rs link gate)"
+	@echo "    native-opus-rom   build $(OPUS_ROM) + $(OPUS_PROBE_ROM) natively (vendored opus-rs link gate)"
 	@echo "    podman-opus-rom   build $(OPUS_ROM) in the container"
 	@echo "    opus-test         opus spike host gate (scaffold pins; step-2 witness grows in)"
 	@echo ""

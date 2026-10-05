@@ -15,6 +15,9 @@
 //! 1. **Hash pins** — the Rust FNV-1a reproduces the Python generator's pins
 //!    over both the packet regions and the reference PCM blobs. Two
 //!    independent implementations of the hash meeting on committed bytes.
+//!    Layer 1b adds the ROM decode proof's golden: the FNV of the walk's
+//!    own folded output (`fnv_walk_fold`) — what the on-target decode proof
+//!    reproduces, since a lossy codec cannot pin against the reference hash.
 //! 2. **Grid decode at the MEASURED alignment** — the sequential walk, whole
 //!    clip, folded through the crate's shared `fold_f32_to_i16` (round half
 //!    up), compared to the folded reference from the per-arm `align_shift`.
@@ -173,6 +176,36 @@ fn rust_fnv_reproduces_the_generators_pins() {
             clip.ref_bytes_len as usize,
             reference.len(),
             "{}: ref_bytes_len disagrees with the blob on disk",
+            clip.name
+        );
+    }
+}
+
+#[test]
+fn walk_fold_hash_reproduces_the_rom_decode_golden() {
+    // Layer 1b: the ROM decode proof's golden (PR 3, 2026-10-03). The
+    // vendored walk's OWN folded output — every walk_sample through the
+    // shared round-half-up grid, i16 LE, no alignment shift — hashed to
+    // `fnv_walk_fold`. The FLAC gate pinned its ROM against the reference
+    // PCM hash; that pattern does NOT transfer to a lossy codec: the arms
+    // are decimated and the port drifts ±1 LSB from libopus, so the walk's
+    // hash can never equal the reference's. The walk's own hash is the
+    // deterministic property the ROM reproduces; the reference comparison
+    // stays layer 2's job. The Python twin is `fold_walk_fnv` in
+    // scripts/opus_assets.py (the generator measures the pin over the
+    // dump_walk output — the production seam); this is the Rust re-derivation.
+    for clip in CLIPS {
+        let folded = walk_folded(clip);
+        let mut bytes = Vec::with_capacity(folded.len() * 2);
+        for sample in folded {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        assert_eq!(
+            fnv1a64(&bytes),
+            clip.fnv_walk_fold,
+            "{}: FNV of the walk's own folded output disagrees with the \
+             generator's fnv_walk_fold pin — the ROM would fail its \
+             golden on-target",
             clip.name
         );
     }

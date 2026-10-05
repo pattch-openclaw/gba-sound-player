@@ -70,3 +70,13 @@ opt-level = 3
 opt-level = 3
 lto = "fat"
 debug = true
+
+# On-target constructor-shape probe ROM (PR 3 harness, 2026-10-04): the
+# deliberately-red repro control + the heap/production-shape probes that
+# localize the decode-proof ROM's silent hang. Same host-stub pattern as
+# the proof ROM: `cargo test` must not build it (no_main under agb).
+[[bin]]
+name = "ctor-probe"
+path = "src/ctor_probe.rs"
+test = false
+bench = false
