@@ -3,6 +3,15 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::needless_range_loop)]
 
+// VENDOR PATCH 2 (PATCHES.md): the in-place boxed constructor needs `alloc`
+// in the no_std build. This is the std-decoupled heap pattern OPUS.md
+// gotcha 1 asked for: the upstream `heap` feature (std-coupled) stays OFF
+// on target, and this is the only `alloc` use in the heap-off profile.
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+
 mod compat;
 mod fixedvec;
 
@@ -1258,6 +1267,177 @@ impl OpusDecoder {
             #[cfg(feature = "heap")]
             prev_pcm_tail: Box::new(FixedVec::from_value(0.0f32, 240 * channels)),
         })
+    }
+
+    /// VENDOR PATCH 2 (see PATCHES.md): construct the decoder state **directly
+    /// inside a heap allocation** — [`Self::init_in_place`] writes the fields
+    /// through the box's pointer, so no ~178 KB `Self` temporary ever exists.
+    ///
+    /// This is the construction shape that fits `thumbv4t-none-eabi`: `new()`
+    /// wrapped by a caller-side `Box::new(...)` materializes an sret temporary
+    /// on the stack, and the GBA's ~30 KB stack wraps off IWRAM's bottom into
+    /// mapped EWRAM, silently destroying control flow (the constructor-shape
+    /// probe ROM's measured death — OPUS.md 2026-10-04 status entry).
+    ///
+    /// Same contract as [`Self::new`]: the five RFC 6716 rates × channels
+    /// 1..=2; validation runs **before** the allocation, so a rejection
+    /// allocates nothing.
+    pub fn new_in_place(
+        sampling_rate: i32,
+        channels: usize,
+    ) -> Result<Box<OpusDecoder>, &'static str> {
+        if ![8000, 12000, 16000, 24000, 48000].contains(&sampling_rate) {
+            return Err("Invalid sampling rate");
+        }
+        if ![1, 2].contains(&channels) {
+            return Err("Invalid number of channels");
+        }
+        let mut slot: Box<core::mem::MaybeUninit<OpusDecoder>> = Box::new_uninit();
+        // SAFETY: `slot.as_mut_ptr()` is a valid, aligned, uniquely-owned
+        // uninitialized place for `OpusDecoder`; the rate/channel contract is
+        // validated above (the same guards `new` enforces — the CELT channel
+        // assert included); `init_in_place` fully initializes the place before
+        // returning (it never early-returns mid-write), so `assume_init` below
+        // sees a fully initialized value.
+        unsafe {
+            Self::init_in_place(
+                slot.as_mut_ptr().cast::<OpusDecoder>(),
+                sampling_rate,
+                channels,
+            );
+        }
+        // SAFETY: `init_in_place` just fully initialized the place.
+        Ok(unsafe { slot.assume_init() })
+    }
+
+    /// VENDOR PATCH 2 (see PATCHES.md): initialize a decoder **in place** at
+    /// `dst` — field by field through `dst`, so no `Self` temporary exists at
+    /// any point, at this level or in the sub-decoder constructors.
+    ///
+    /// Why this exists: `new()` returns `Self` by value. On
+    /// `thumbv4t-none-eabi` the 177,864-byte (target-size) sret temporary
+    /// materializes on the stack — the constructor-shape probe ROM read SP at
+    /// 0x02FAF610, ≈363 KB below agb's stack top: two decoder-sized temporaries
+    /// of frame — and the frame wraps off IWRAM's bottom into **mapped** EWRAM,
+    /// writing `.bss`/heap/allocator state silently until the corrupted return
+    /// jumps to garbage. Every by-value hop inside `new()` (this struct, plus
+    /// `CeltDecoder::new` at 81,952 B and `SilkDecoder::new` at 9,304 B,
+    /// host-size measured) is part of that frame, so the patch inverts the
+    /// construction direction at all three levels. OPUS.md 2026-10-04.
+    ///
+    /// Every field is written exactly as `new()`'s `Self` literal writes it
+    /// (`FixedVec::init_fill_at` is `FixedVec::from_value`'s in-place
+    /// equivalent — same length, same fill), and the SILK `init` +
+    /// `fs_api_hz` fixup follows `new()`'s verbatim.
+    ///
+    /// # Safety
+    ///
+    /// * `dst` points to allocated, aligned, **uninitialized** memory that may
+    ///   be written and later dropped as an `OpusDecoder`.
+    /// * `sampling_rate` / `channels` satisfy the constructor contract `new()`
+    ///   enforces (the rate list; channels 1..=2 — the CELT constructor re-
+    ///   asserts the channel bound, and a SILK `init` failure is treated as
+    ///   `new()` already treats it: ignored).
+    /// * On return the place is fully initialized; this function never
+    ///   returns before every field is written.
+    pub unsafe fn init_in_place(dst: *mut OpusDecoder, sampling_rate: i32, channels: usize) {
+        use core::ptr::addr_of_mut;
+
+        let mode = modes::default_mode();
+        #[cfg(not(feature = "heap"))]
+        CeltDecoder::init_in_place(addr_of_mut!((*dst).celt_dec), mode, channels, sampling_rate);
+        #[cfg(feature = "heap")]
+        core::ptr::write(
+            addr_of_mut!((*dst).celt_dec),
+            Box::new(CeltDecoder::new(mode, channels, sampling_rate)),
+        );
+
+        #[cfg(not(feature = "heap"))]
+        silk::dec_api::SilkDecoder::init_in_place(addr_of_mut!((*dst).silk_dec));
+        #[cfg(feature = "heap")]
+        core::ptr::write(
+            addr_of_mut!((*dst).silk_dec),
+            Box::new(silk::dec_api::SilkDecoder::new()),
+        );
+
+        // The place is fully initialized at this point (both sub-decoder
+        // inits above completed), so a `&mut` through the pointer is valid.
+        let silk_dec = &mut *addr_of_mut!((*dst).silk_dec);
+        silk_dec.init(sampling_rate.min(16000), channels as i32);
+        silk_dec.channel_state[0].fs_api_hz = sampling_rate;
+
+        core::ptr::write(addr_of_mut!((*dst).sampling_rate), sampling_rate);
+        core::ptr::write(addr_of_mut!((*dst).channels), channels);
+        core::ptr::write(addr_of_mut!((*dst).prev_mode), None);
+        core::ptr::write(addr_of_mut!((*dst).prev_redundancy), false);
+        core::ptr::write(addr_of_mut!((*dst).frame_size), 0);
+        core::ptr::write(addr_of_mut!((*dst).bandwidth), Bandwidth::Auto);
+        core::ptr::write(addr_of_mut!((*dst).stream_channels), channels);
+        core::ptr::write(
+            addr_of_mut!((*dst).silk_resampler),
+            silk::resampler::SilkResampler::default(),
+        );
+        core::ptr::write(
+            addr_of_mut!((*dst).silk_resampler_2),
+            silk::resampler::SilkResampler::default(),
+        );
+        core::ptr::write(addr_of_mut!((*dst).prev_internal_rate), 0);
+        core::ptr::write(addr_of_mut!((*dst).hybrid_skip_celt), false);
+
+        #[cfg(not(feature = "heap"))]
+        {
+            FixedVec::init_fill_at(addr_of_mut!((*dst).w_pcm_i16), 960 * channels, 0i16);
+            FixedVec::init_fill_at(
+                addr_of_mut!((*dst).w_silk_out),
+                OPUS_MAX_SUBFRAME * channels,
+                0.0f32,
+            );
+            FixedVec::init_fill_at(
+                addr_of_mut!((*dst).w_pcm_resampled),
+                OPUS_MAX_SUBFRAME * channels,
+                0i16,
+            );
+            FixedVec::init_fill_at(
+                addr_of_mut!((*dst).w_celt_planar),
+                OPUS_MAX_SUBFRAME * channels,
+                0.0f32,
+            );
+            FixedVec::init_fill_at(
+                addr_of_mut!((*dst).w_celt_out),
+                OPUS_MAX_SUBFRAME * channels,
+                0.0f32,
+            );
+            FixedVec::init_fill_at(addr_of_mut!((*dst).prev_pcm_tail), 240 * channels, 0.0f32);
+        }
+        #[cfg(feature = "heap")]
+        {
+            // The `heap` profile is std-coupled (host) — stack-sized there;
+            // mirror `new()`'s boxed fields verbatim.
+            core::ptr::write(
+                addr_of_mut!((*dst).w_pcm_i16),
+                Box::new(FixedVec::from_value(0i16, 960 * channels)),
+            );
+            core::ptr::write(
+                addr_of_mut!((*dst).w_silk_out),
+                Box::new(FixedVec::from_value(0.0f32, OPUS_MAX_SUBFRAME * channels)),
+            );
+            core::ptr::write(
+                addr_of_mut!((*dst).w_pcm_resampled),
+                Box::new(FixedVec::from_value(0i16, OPUS_MAX_SUBFRAME * channels)),
+            );
+            core::ptr::write(
+                addr_of_mut!((*dst).w_celt_planar),
+                Box::new(FixedVec::from_value(0.0f32, OPUS_MAX_SUBFRAME * channels)),
+            );
+            core::ptr::write(
+                addr_of_mut!((*dst).w_celt_out),
+                Box::new(FixedVec::from_value(0.0f32, OPUS_MAX_SUBFRAME * channels)),
+            );
+            core::ptr::write(
+                addr_of_mut!((*dst).prev_pcm_tail),
+                Box::new(FixedVec::from_value(0.0f32, 240 * channels)),
+            );
+        }
     }
 
     pub fn decode(

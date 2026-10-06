@@ -465,3 +465,73 @@ cycle counting.
   fused `vec![0u8; 200_000]` death) sits behind TAIL's expected death and
   stays unmeasured; cycle counting stays ordered behind a green proof
   (correctness-before-speed).
+
+## Status (2026-10-05): vendor patch 2 landed — in-place decoder construction (lib-only PR; ROM integration is the next PR)
+
+- **What lands:** the constructor fix the 2026-10-04 entry ordered, as
+  **vendor patch 2** — a narrow lib-only PR: no ROM was built or booted
+  (scope: vendor patch + host unit witnesses). Four additive APIs in
+  `vendor/opus-rs/` initialize the decoder state **directly through a
+  destination pointer**, so no `Self` temporary materializes anywhere on
+  the construction path: `FixedVec::init_fill_at` (in-place twin of
+  `from_value`; carries all 25 `FixedVec` fields),
+  `CeltDecoder::init_in_place` (removes the 81,952 B by-value hop),
+  `SilkDecoder::init_in_place` (removes the 9,304 B hop; the largest
+  residual temporary on that path is the 3,992 B
+  `SilkDecoderState::default()` written into the destination), and
+  `OpusDecoder::new_in_place -> Box<OpusDecoder>` +
+  `OpusDecoder::init_in_place` (validation with `new()`'s exact guards
+  **before** `Box::new_uninit`, so a rejection allocates nothing). `new()`
+  is byte-for-byte unchanged; the vendor diff against the published crate
+  is now exactly patch 1 + patch 2, purely additive, zero decode-path
+  bytes touched (PATCHES.md patch 2 carries the full inventory, sizes,
+  unsafe contracts, and the upstreamability note).
+- **How this fixes the ROM decode hang (mechanism → fix).** The probe
+  convicted the **by-value construction frame**: `Box::new(new(..)?)`
+  materialized sret temporaries sized like the decoder — SP read at
+  0x02FAF610, ≈363 KB below agb's stack top, two decoder-sized frames —
+  wrapping off IWRAM's bottom into mapped EWRAM and silently destroying
+  `.bss`/heap/control flow (2026-10-04 entry). Patch 2 removes the frame
+  at its source: with no by-value `Self` return left on the path
+  (178,064 B host / 177,864 B target), there is nothing for the stack to
+  materialize; the only allocation is the `Box` itself, landing in
+  EWRAM's heap — the substrate the ladder measured clean. This is the
+  shape libopus itself uses (`opus_decoder_create` initializes into the
+  caller's memory rather than returning the state by value). **The
+  on-target claim stays predicted until the next PR:** it wires
+  `probe::walk_region` to `new_in_place`, rebuilds the proof ROM, and
+  re-runs the constructor-shape probe as the designated before/after
+  witness (expected: candidate stage survives, proof ROM prints packet
+  1). `new_decoder_boxed` stays in the seam as the measured negative.
+- **Witnesses (host only, by scope).** `tests/in_place_ctor.rs`, 3 tests:
+  (1) **bit-identical differential** — both embedded arms (501 sequential
+  packets each) decoded side by side through `new()` and
+  `new_in_place()`, raw f32 compared bit-for-bit; same code, same
+  machine, so there is no drift to tolerate — any initialization
+  difference diverges the state machine, and the sequential walk
+  exercises every field the decode path reads; (2) **committed goldens**
+  — the in-place walk reproduces each arm's generator-measured
+  `fnv_walk_fold` (the ROM proof's golden, measured through the OLD
+  construction), pinning both ctor shapes against ground truth so layer
+  1 cannot pass on a shared construction mistake; (3) **contract
+  parity** — five rates × mono/stereo construct, every rejection returns
+  `new()`'s exact error string, and all built states drop soundly
+  (in-place-initialized memory drops through `FixedVec`'s existing
+  length-tracking Drop). Stated coverage limit: the arms are mono, so
+  the differential exercises mono decode; stereo is covered by
+  construction + drop only, until the gate grows stereo material.
+- **Gates.** `make opus-test` **16 green (13 → 16)**; `make check` clean;
+  the vendor standalone thumbv4t build (`--no-default-features --features
+  libm`, PATCHES.md re-verification recipe) compiles clean with patch 2;
+  the vendor default-features host build compiles clean from a
+  gate-neutral cwd with an explicit host `--target` (proves the
+  `heap`/`std` branches of the new code; the repo-root-config-leaked
+  default-features build keeps its documented expected-failure shape —
+  same std-coupling error class as the pre-patch baseline, OPUS.md
+  survey); vendor `cargo fmt --check` drift is unchanged from the
+  pre-patch baseline (16 pre-existing diffs in upstream-authored code
+  only — the patched files add zero).
+- **Prior-assumption corrections this step:** none — no documented claim
+  measured false. Every size cited in the patch docs was re-measured on
+  this tree (host `size_of` through a throwaway probe crate: 178,064 /
+  81,952 / 9,304 / 3,992 B), not recalled.

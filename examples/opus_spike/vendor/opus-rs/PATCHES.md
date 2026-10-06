@@ -77,6 +77,106 @@ provides `AtomicU8` for thumbv4t. The dependency family is still not new:
 flac_spike's lockfile already carries `portable-atomic 1.15.0` +
 `critical-section 1.2.0` (via agb's stack).
 
+## Patch 2 — in-place decoder construction (`new_in_place` / `init_in_place`)
+
+**Problem (measured, not assumed).** The proof ROM died at decoder
+construction: the walk banner printed, packet 1 never did, mGBA ended at a
+wild PC — while the identical seam passed the host gate. The
+constructor-shape probe ROM (spike `src/ctor_probe.rs`, rev1–rev7;
+OPUS.md 2026-10-04 status) localized it: the heap is sound (descending
+capacity ladder all-clean), and *every* caller-side spelling of
+"construct then `Box`" dies with SP read at 0x02FAF610 — ≈363 KB below
+agb's stack top, i.e. two decoder-sized sret temporaries of frame. The
+frame wraps off IWRAM's bottom (0x0300_0000) into **mapped** EWRAM: the
+writes succeed silently, destroying `.bss`/heap/allocator state, until the
+corrupted return jumps to garbage. Caller-side elision cannot fix it —
+`Box::new(Ctor::new()?)` with `#[inline(always)]` destination propagation
+is the probe's measured negative — because the by-value hops are *inside*
+the constructor chain:
+
+| By-value return | Host `size_of` (measured, libm/no-default profile) |
+|---|---|
+| `OpusDecoder::new` → `Self` | **178,064 B** (177,864 on target — ROM serial log) |
+| `CeltDecoder::new` → `Self` | **81,952 B** |
+| `SilkDecoder::new` → `Self` | 9,304 B |
+
+**The fix: invert the construction direction.** Four additive APIs write
+the state field-by-field through a destination pointer, so no `Self`
+temporary materializes at any level:
+
+- `fixedvec.rs` — `FixedVec::init_fill_at(dst, len, value)`: in-place twin
+  of `from_value` (writes `len = 0` first, making the place a valid empty
+  `Self`, then fills through `&mut` — same final value, zero temporary).
+  All 25 `FixedVec` fields on the construction path go through it.
+- `celt.rs` — `CeltDecoder::init_in_place(dst, mode, channels, sampling_rate)`:
+  every field written exactly as `new()`'s literal writes it; the channel
+  assert runs before any write.
+- `silk/dec_api.rs` — `SilkDecoder::init_in_place(dst)`: the two
+  `SilkDecoderState`s are written as `default()` values into the
+  destination and `silk_init_decoder` runs on `&mut` there — exactly what
+  `new()` does; the largest residual temporary is `SilkDecoderState::default()`
+  at 3,992 B (20× under the 82 KB hop, 45× under the 178 KB one).
+- `lib.rs` — `OpusDecoder::new_in_place(rate, channels) -> Result<Box<OpusDecoder>, &str>`:
+  validates with `new()`'s exact guards **before** `Box::new_uninit()`,
+  initializes through `OpusDecoder::init_in_place` (a safe wrapper over it
+  carries the `unsafe` contract in doc comments), then `assume_init`.
+  `OpusDecoder::init_in_place` is also exposed for callers that own the
+  destination (it mirrors `new()`'s `Self` literal field-for-field,
+  including the SILK `init` + `fs_api_hz` fixup).
+
+The no_std build gains `extern crate alloc` + `use alloc::boxed::Box`
+(gated `#[cfg(not(feature = "std"))]`). This is the std-decoupled heap
+pattern OPUS.md gotcha 1 asked for, in miniature: the std-coupled `heap`
+feature still stays **off** on target; the Box is the construction
+container, not the cfg-gated field layout. The `heap`/`std` branches of
+the new code mirror `new()`'s boxed fields verbatim, so the host default
+profile keeps compiling (verified: a `--target aarch64-apple-darwin`
+default-features build from a gate-neutral cwd is green — the repo-root
+config otherwise leaks thumbv4t; the leak-target default build keeps its
+documented expected-failure shape, OPUS.md survey, not a regression).
+
+**Invariants.** `new()` is byte-for-byte unchanged; the patch is purely
+additive (git diff against the pre-patch tree: insertions only) and edits
+zero SILK/CELT/MDCT/range-coder/tables logic — every decode-path byte is
+untouched. A future vendor sync must reproduce exactly Patch 1 + Patch 2.
+
+**Witness (`opus_spike/tests/in_place_ctor.rs`, host gate, 3 tests).**
+The patch is pure construction, so the witness proves the in-place ctor
+builds *exactly the decoder `new()` builds*:
+
+1. **Bit-identical differential** — both arms (501 sequential packets
+   each) decoded side by side through the two ctor shapes, raw f32
+   compared bit-for-bit. Two decoders of the same code on one machine have
+   no drift to tolerate; any initialization difference diverges the state
+   machine. This exercises every field the decode path reads.
+2. **Committed goldens** — the in-place walk reproduces each arm's
+   generator-measured `fnv_walk_fold` (the ROM decode proof's golden,
+   measured through the *old* construction). Layer 1 alone could share a
+   construction mistake with `new()`; this layer pins against ground truth.
+3. **Contract parity** — five rates × mono/stereo construct; rejections
+   return `new()`'s exact error strings (nothing allocates on the error
+   path); all ten built states drop soundly.
+
+Coverage limit, stated: the embedded arms are mono, so the decode
+differential exercises mono; stereo state is written by the same
+parameterized path and covered by construction + drop only, until the
+gate grows stereo material.
+
+**Scope boundary (what this patch does NOT claim).** Host witnesses prove
+state equality between the two construction shapes; the on-target claim
+— "the proof ROM now survives construction" — is the *predicted*
+consequence (no 82 KB / 178 KB temporary can materialize because no
+by-value return exists on the path) and gets its witness in the next PR:
+integrate `walk_region` to `new_in_place`, rebuild the proof ROM, and
+re-run the constructor-shape probe as the before/after witness
+(OPUS.md 2026-10-04 designated it exactly that). No ROM was built or
+booted for this PR — lib patch, host gates only, by scope.
+
+**Upstreamability.** The pattern is what libopus itself does
+(`opus_decoder_create` initializes into a user-provided buffer); the
+author's `heap` feature already boxes this state, only std-coupled. This
+patch is the alloc-native version of both.
+
 ## Manifest changes (this `Cargo.toml`)
 
 Reconstructed from the published normalized manifest with:
@@ -95,8 +195,11 @@ Reconstructed from the published normalized manifest with:
 
 `default-features = false, features = ["libm"]` — exactly the OPUS.md
 compile-probe profile. The `heap` feature is std-coupled upstream and stays
-off (gotcha 1): decoder state is inline (~178 KB, pinned by the host test);
-the Box-via-`alloc` EWRAM patch is a later PR, tracked in OPUS.md.
+off (gotcha 1): the field layout stays inline (~178 KB, pinned by the host
+test). Patch 2 supplies the missing construction shape — the state is
+built directly inside a `Box` (the EWRAM heap on target) with no by-value
+hop — while wiring the production seam to it remains a tracked follow-up
+in OPUS.md.
 
 ## Re-verification recipe
 
@@ -110,7 +213,10 @@ cargo +nightly build --release --no-default-features --features libm \
 
 ## Deliberate omissions (tracked, not forgotten)
 
-- **No heap/EWRAM patch yet** (state is inline; OPUS.md gotcha 1).
+- **The std-coupled `heap` field layout is not adopted** (OPUS.md gotcha
+  1): fields stay inline; Patch 2 boxes the *construction* instead, which
+  is what the target actually needed. Production-seam integration of
+  `new_in_place` is the tracked follow-up (OPUS.md 2026-10-05).
 - **No `#![forbid(unsafe_code)]`** — upstream contains `unsafe` (SIMD probes,
   OnceCell); vendoring does not sanitize it. The spike crate itself forbids
   unsafe in its own sources.

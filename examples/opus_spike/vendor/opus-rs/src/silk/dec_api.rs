@@ -47,6 +47,45 @@ impl SilkDecoder {
         dec
     }
 
+    /// VENDOR PATCH 2 (see PATCHES.md): `new`'s in-place twin — initialize a
+    /// `SilkDecoder` at `dst` field by field so no `Self` temporary (9,304 B
+    /// host size) is returned by value into `OpusDecoder` construction.
+    /// The two `SilkDecoderState`s (3,992 B each) are written through
+    /// `default()` values into the destination, then `silk_init_decoder` runs
+    /// over `&mut` on the already-initialized place — exactly what `new`
+    /// does. The largest residual temporary on this path is
+    /// `SilkDecoderState::default()` at 3,992 B (host size) — written into the
+    /// destination and re-initialized through `&mut` — over 20× under the
+    /// 81,952 B / 178,064 B by-value hops this patch removes (PATCHES.md
+    /// Patch 2, "scope").
+    ///
+    /// # Safety
+    ///
+    /// * `dst` points to allocated, aligned, **uninitialized** memory for
+    ///   `Self`.
+    /// * On return the place is fully initialized; this function never
+    ///   returns before every field is written.
+    pub unsafe fn init_in_place(dst: *mut SilkDecoder) {
+        use core::ptr::addr_of_mut;
+
+        let channel_state = addr_of_mut!((*dst).channel_state).cast::<SilkDecoderState>();
+        for i in 0..2 {
+            // `new` writes `SilkDecoderState::default()` then runs
+            // `silk_init_decoder` on each channel — same order, same effect.
+            let state = channel_state.add(i);
+            core::ptr::write(state, SilkDecoderState::default());
+            silk_init_decoder(&mut *state);
+        }
+        core::ptr::write(addr_of_mut!((*dst).n_channels_api), 1);
+        core::ptr::write(addr_of_mut!((*dst).n_channels_internal), 1);
+        core::ptr::write(addr_of_mut!((*dst).prev_decode_only_middle), 0);
+        core::ptr::write(addr_of_mut!((*dst).s_stereo), StereoDecState::default());
+        core::ptr::write(
+            addr_of_mut!((*dst).w_silk_buf),
+            [[0; MAX_FRAME_LENGTH + 2]; 2],
+        );
+    }
+
     pub fn init(&mut self, sample_rate_hz: i32, channels: i32) -> i32 {
         let fs_khz = sample_rate_hz / 1000;
         let ret = silk_decoder_set_fs(&mut self.channel_state[0], fs_khz, sample_rate_hz);

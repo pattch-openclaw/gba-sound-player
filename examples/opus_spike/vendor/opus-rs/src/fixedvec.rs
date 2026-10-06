@@ -58,6 +58,40 @@ impl<T, const N: usize> FixedVec<T, N> {
         s
     }
 
+    /// VENDOR PATCH 2 (see PATCHES.md): the in-place twin of
+    /// [`Self::from_value`] — initialize a `Self` at `dst` with `len` clones
+    /// of `value`, building no temporary. The decoder constructors use this so
+    /// their `FixedVec` fields (the bulk of the ~178 KB decoder state) are
+    /// written directly into the destination; no buffer temporary is ever
+    /// materialized on this path.
+    ///
+    /// # Safety
+    ///
+    /// * `dst` must point to allocated, aligned, **uninitialized** memory
+    ///   large enough for `Self` (the same contract the constructor patch's
+    ///   `init_in_place` functions carry — PATCHES.md Patch 2).
+    /// * `len <= N` — enforced by the assert below before any write.
+    pub unsafe fn init_fill_at(dst: *mut Self, len: usize, value: T)
+    where
+        T: Clone,
+    {
+        assert!(len <= N, "FixedVec capacity exceeded");
+        // SAFETY: `dst` is a valid, aligned, allocated place for `Self`
+        // (contract). Writing `len = 0` first makes the place a *valid* `Self`
+        // (exactly `new()`'s value: len 0, buffer uninit), so taking `&mut`
+        // below is sound; the loop then initializes `len` slots and rewrites
+        // `len`. On return the value matches `from_value(value, len)`
+        // field-for-field.
+        unsafe {
+            core::ptr::write(core::ptr::addr_of_mut!((*dst).len), 0);
+            let s = &mut *dst;
+            for i in 0..len {
+                s.buf[i].write(value.clone());
+            }
+            s.len = len;
+        }
+    }
+
     pub const fn len(&self) -> usize {
         self.len
     }

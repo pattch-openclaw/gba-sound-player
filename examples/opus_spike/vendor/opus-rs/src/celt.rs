@@ -3153,6 +3153,96 @@ impl CeltDecoder {
         }
     }
 
+    /// VENDOR PATCH 2 (see PATCHES.md): `new`'s in-place twin — initialize a
+    /// `CeltDecoder` at `dst` field by field, materializing no `Self`
+    /// temporary (81,952 B host size — one of the by-value hops that put the
+    /// GBA stack below IWRAM during `OpusDecoder` construction; the
+    /// constructor-shape probe ROM's measured death, OPUS.md 2026-10-04).
+    /// Every field is written exactly as `new()`'s `Self` literal writes it
+    /// (`FixedVec::init_fill_at` is `from_value`'s in-place equivalent — same
+    /// length, same fill).
+    ///
+    /// # Safety
+    ///
+    /// * `dst` points to allocated, aligned, **uninitialized** memory for
+    ///   `Self`.
+    /// * `channels` satisfies the constructor contract (`1..=2`, re-asserted
+    ///   below exactly as `new` does — the guard fires before any write).
+    /// * On return the place is fully initialized; this function never
+    ///   returns before every field is written.
+    pub unsafe fn init_in_place(
+        dst: *mut CeltDecoder,
+        mode: &'static CeltMode,
+        channels: usize,
+        sampling_rate: i32,
+    ) {
+        use core::ptr::addr_of_mut;
+
+        // Same guard as `new`, before any write.
+        assert!(
+            (1..=2).contains(&channels),
+            "CeltDecoder::new: channels must be 1 or 2 (got {channels})"
+        );
+        let overlap = mode.overlap;
+        let nb_ebands = mode.nb_ebands;
+        let nb_x_ch = nb_ebands * channels;
+        let dec_frame_x_ch = DECODE_BUFFER_SIZE * channels;
+
+        core::ptr::write(addr_of_mut!((*dst).mode), mode);
+        core::ptr::write(addr_of_mut!((*dst).channels), channels);
+        core::ptr::write(
+            addr_of_mut!((*dst).downsample),
+            resampling_factor(sampling_rate),
+        );
+        FixedVec::init_fill_at(
+            addr_of_mut!((*dst).decode_mem),
+            channels * (DECODE_BUFFER_SIZE + overlap),
+            0.0,
+        );
+        FixedVec::init_fill_at(addr_of_mut!((*dst).old_band_e), nb_x_ch, 0.0);
+        FixedVec::init_fill_at(addr_of_mut!((*dst).preemph_mem), channels, 0.0);
+        FixedVec::init_fill_at(
+            addr_of_mut!((*dst).prefilter_mem),
+            channels * COMBFILTER_MAXPERIOD,
+            0.0,
+        );
+        core::ptr::write(addr_of_mut!((*dst).prefilter_period), COMBFILTER_MINPERIOD);
+        core::ptr::write(
+            addr_of_mut!((*dst).prefilter_period_old),
+            COMBFILTER_MINPERIOD,
+        );
+        core::ptr::write(addr_of_mut!((*dst).prefilter_gain), 0.0);
+        core::ptr::write(addr_of_mut!((*dst).prefilter_gain_old), 0.0);
+        core::ptr::write(addr_of_mut!((*dst).prefilter_tapset), 0);
+        core::ptr::write(addr_of_mut!((*dst).prefilter_tapset_old), 0);
+        FixedVec::init_fill_at(addr_of_mut!((*dst).old_band_e2), nb_x_ch, 0.0);
+        FixedVec::init_fill_at(addr_of_mut!((*dst).old_band_e3), nb_x_ch, 0.0);
+        core::ptr::write(addr_of_mut!((*dst).rng), 0);
+
+        FixedVec::init_fill_at(addr_of_mut!((*dst).w_tf_res), nb_ebands, 0);
+        FixedVec::init_fill_at(addr_of_mut!((*dst).w_cap), nb_ebands, 0);
+        FixedVec::init_fill_at(addr_of_mut!((*dst).w_offsets), nb_ebands, 0);
+        FixedVec::init_fill_at(addr_of_mut!((*dst).w_pulses), nb_ebands, 0);
+        FixedVec::init_fill_at(addr_of_mut!((*dst).w_ebits), nb_x_ch, 0);
+        FixedVec::init_fill_at(addr_of_mut!((*dst).w_fine_priority), nb_x_ch, 0);
+
+        FixedVec::init_fill_at(
+            addr_of_mut!((*dst).w_x),
+            dec_frame_x_ch + STRIDE_ACCESS_PAD,
+            0.0,
+        );
+        FixedVec::init_fill_at(addr_of_mut!((*dst).w_collapse_masks), nb_x_ch, 0);
+        // +4: NEON backward pre-rotation reads up to 3 elements past n2 (as in `new`).
+        FixedVec::init_fill_at(addr_of_mut!((*dst).w_freq), dec_frame_x_ch + 4, 0.0);
+        FixedVec::init_fill_at(addr_of_mut!((*dst).w_band_amp), nb_x_ch, 0.0);
+        FixedVec::init_fill_at(addr_of_mut!((*dst).w_pcm_frame), DECODE_BUFFER_SIZE, 0.0);
+        FixedVec::init_fill_at(
+            addr_of_mut!((*dst).w_post),
+            DECODE_BUFFER_SIZE + COMBFILTER_MAXPERIOD,
+            0.0,
+        );
+    }
+
     pub fn decode(&mut self, compressed: &[u8], frame_size: usize, pcm: &mut [f32]) -> usize {
         self.decode_impl(compressed, frame_size, pcm, 0, self.mode.nb_ebands)
     }
