@@ -57,6 +57,24 @@ pub fn new_decoder(rate_hz: i32, channels: usize) -> Result<OpusDecoder, &'stati
     OpusDecoder::new(rate_hz, channels)
 }
 
+/// The landed construction shape — vendor patch 2's in-place ctor (OPUS.md,
+/// 2026-10-05): `OpusDecoder::new_in_place` validates with `new()`'s exact
+/// guards **before** `Box::new_uninit`, then writes the state field-by-field
+/// through the destination pointer, so no `Self` temporary materializes at
+/// any level of the constructor chain (`CeltDecoder::init_in_place` removes
+/// the 81,952 B by-value hop, `SilkDecoder::init_in_place` the 9,304 B one).
+/// The only allocation is the Box itself — EWRAM's heap under agb, the
+/// substrate the probe's descending ladder measured clean. Host equality
+/// with `new_decoder` is witnessed by tests/in_place_ctor.rs (bit-identical
+/// differential + committed goldens); the on-target claim gets its witness
+/// from the proof ROM and the constructor-shape probe re-run (this PR).
+pub fn new_decoder_in_place(
+    rate_hz: i32,
+    channels: usize,
+) -> Result<alloc::boxed::Box<OpusDecoder>, &'static str> {
+    OpusDecoder::new_in_place(rate_hz, channels)
+}
+
 /// Candidate construction shape for the on-target hang (OPUS.md, 2026-10-04
 /// probe findings): the Box is applied directly to the ctor result with no
 /// by-value wrapper in between, `#[inline(always)]` so the constructor's
@@ -203,21 +221,21 @@ pub fn walk_region(
     // OpusDecoder is ~178 KB, stack-hostile by construction against agb's
     // ~32 KB IWRAM stack (PR 1's tracked omission, landed here because the
     // ROM decode proof is the first on-target EXECUTION of the decode path).
-    // Honesty note, MEASURED 2026-10-04: `Box::new(f())` elides the 178 KB
-    // stack temporary only via destination propagation (lto = "fat" +
-    // inlining) — and on-target that bet LOSES. The constructor-shape probe
-    // ROM (`src/ctor_probe.rs`) read SP at 0x02FAF610 in the construction
-    // frame: below IWRAM's 0x0300_0000 bottom — the sret temporary really
-    // materializes, wrapping the ~31 KB stack off IWRAM into EWRAM and
+    // Construction shape, MEASURED HISTORY (OPUS.md 2026-10-03/04/05):
+    // the 2026-10-04 probe ROM convicted the by-value sret temporary —
+    // `Box::new(new_decoder(..)?)` read SP at 0x02FAF610 in the construction
+    // frame, below IWRAM's 0x0300_0000 bottom: the ~178 KB temporary really
+    // materialized, wrapping the stack off IWRAM into EWRAM (mapped RAM) and
     // silently destroying control flow (the proof ROM's 2026-10-03/04 hang;
     // jump trap 0x48084808). An earlier draft of this note claimed the
-    // failure would "fail loudly rather than silently" — measured FALSE:
-    // the smash writes mapped RAM silently until the corrupted return jumps.
-    // The fix — a construction that never returns by value (in-place/boxed
-    // ctor in the vendored seam) — is the next PR's scope. This seam stays
-    // the production shape the host witness and the generator pins measured
-    // through: green on host, red on target, with the probe ROM owning the
-    // reading (OPUS.md, 2026-10-04 status entry).
+    // failure would "fail loudly rather than silently" — measured FALSE: the
+    // smash writes mapped RAM silently until the corrupted return jumps.
+    // Caller-side elision is the measured negative (`new_decoder_boxed`).
+    // The fix landed as vendor patch 2: `new_decoder_in_place` writes the
+    // state directly into the Box — no by-value hop anywhere on the path —
+    // so there is nothing for the stack to materialize. The on-target
+    // witness (proof ROM packet 1 + probe re-run) is this PR's deliverable
+    // (OPUS.md, 2026-10-05 status entry: predicted until proven here).
     let mut window = alloc::boxed::Box::<[f32; WINDOW_SAMPLES]>::new([0.0f32; WINDOW_SAMPLES]);
     // Manifest tiling, checked before constructing the decoder: one cursor
     // advances through the entries, so offset drift, gaps, overlaps, empty
@@ -246,9 +264,8 @@ pub fn walk_region(
         // only index there is).
         return Err(("manifest does not tile region", count - 1));
     }
-    let mut decoder = alloc::boxed::Box::new(
-        new_decoder(sample_rate_hz as i32, channels as usize).map_err(|e| (e, 0))?,
-    );
+    let mut decoder =
+        new_decoder_in_place(sample_rate_hz as i32, channels as usize).map_err(|e| (e, 0))?;
     let decoder_addr = &*decoder as *const OpusDecoder as usize;
     let window_addr = &*window as *const [f32; WINDOW_SAMPLES] as usize;
     let mut decoded_samples = 0usize;

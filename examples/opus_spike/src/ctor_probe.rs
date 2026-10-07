@@ -57,6 +57,35 @@
 //! sub-decoder constructors building the `Self` literal) survive every
 //! caller spelling.
 //!
+//! REV9 (this revision, frame isolation): rev8 measured P4 `sp@entry =
+//! 0x02FC51F0` — still ~241 KB below IWRAM's bottom even though the P4
+//! candidate is the in-place shape whose own disassembled frame is
+//! `sub sp, #0xb4`. The reading is taken in the ENTRY function's frame:
+//! under `lto = "fat"` every stage inlines into main, so main's frame is the
+//! union of all of them — including TAIL's by-value repro temporary (~178 KB)
+//! — and SP wraps off IWRAM at main's own prologue. That wrap is a loaded
+//! gun: every local store from ANY stage lands at 0x02FC_xxxx, which
+//! address-aliases into EWRAM (the heap), destroying allocator state long
+//! before the stage that owns the temporary runs. Rev8's P4 death was that
+//! aliasing, not the candidate. Rev9 pins `#[inline(never)]` on every stage:
+//! main's frame stays small, each stage carries its own, and the repro's
+//! frame exists only while the repro runs. Reading rule: `sp@P4` inside
+//! IWRAM + candidate `ok` + P2 walks green ⇒ the in-place fix holds on
+//! target, with TAIL's own-frame death as the same-image negative control.
+//!
+//! REV8 (2026-10-06): P4 now carries the **landed fix shape**
+//! — `probe::new_decoder_in_place` (vendor patch 2: the ctor writes the state
+//! through a destination pointer, no by-value hop anywhere). The before/after
+//! witness OPUS.md 2026-10-05 designated: P4 SURVIVING (with `sp@P4` inside
+//! IWRAM and the box in EWRAM) proves the in-place construction eliminated
+//! the frame on target, and TAIL still reproducing the death proves the
+//! fault class is the by-value shape, not the build. P2 now walks through
+//! the rewired production seam (`walk_region` → `new_decoder_in_place`), so
+//! the walk banner → packet 1 span that died on rev4 is the span under test.
+//! Rev5's P4 (`new_decoder_boxed`) keeps its measurement as the recorded
+//! negative — the function stays in the seam, and TAIL remains the repro
+//! control; rev8's expected log: every stage prints through the verdict.
+//!
 //! REV6/REV7 measured (sha 3b9e4171…, the DECISIVE reading): `read_sp` — an
 //! asm SP read, valid because the target spec sets `"frame-pointer":
 //! "always"` so SP is never repurposed as a scratch register — printed
@@ -160,7 +189,7 @@ mod rom {
     #[agb::entry]
     fn main(mut gba: agb::Gba) -> ! {
         agb::eprintln!(
-            "[probe] entry started — opus constructor-shape probe (PR 3 harness, 2026-10-04 rev7)"
+            "[probe] entry started — opus constructor-shape probe (PR 3 harness, 2026-10-06 rev8: P4 = vendor patch 2 in-place ctor)"
         );
 
         let mut gfx = gba.graphics.get();
@@ -186,14 +215,11 @@ mod rom {
             }
         );
 
-        // TAIL — repro shape, outside the verdict: its expected death is
-        // not a probe failure. Rev5 runs it HERE (before P2/P3) so a P4
-        // survival is followed immediately by the shape-differential's
-        // expected death; P2/P3 carry their rev4 measurements.
-        bisect_tail();
-
         // P2 — production construction shape per arm, on the post-ladder
-        // heap. Rev4 measured: dies between banner and packet 1.
+        // heap. Rev4 measured: dies between banner and packet 1. Rev8:
+        // the seam now constructs via vendor patch 2 (in-place, no by-value
+        // hop), so this span is the FIX under test — expected: the full walk
+        // prints through the golden.
         for clip in CLIPS {
             pass &= walk_probe(clip);
         }
@@ -202,11 +228,21 @@ mod rom {
         pass &= fused_vec_probe();
 
         agb::println!(
-            "[probe] verdict {} — screen {} (ladder + P2 walks + P3 fused; P4 candidate reading above; TAIL ran as the repro control)",
+            "[probe] verdict {} — screen {} (ladder + P2 walks + P3 fused; P4 candidate reading above; TAIL runs after this line as the repro control)",
             if pass { "PASSED" } else { "FAILED" },
             if pass { "BLUE" } else { "RED" }
         );
         gfx.set_background_palette_colour(0, 0, if pass { COLOR_PASS } else { COLOR_FAIL });
+
+        // TAIL — repro shape, outside the verdict: its expected death is
+        // not a probe failure. Rev8 moves it LAST (rev5 ran it between P4
+        // and P2 because P4 was the candidate whose answer had to survive
+        // the death): now the in-place shape IS the production seam, so
+        // every information-bearing stage — P4 survival, P2's full walk on
+        // the same heap, the verdict — prints first, and TAIL's death is
+        // the log's last word. Same image, same heap, one differential:
+        // the in-place construction survives, the by-value repro still dies.
+        bisect_tail();
 
         loop {
             let frame = gfx.frame();
@@ -287,6 +323,7 @@ mod rom {
     /// region FNV, full walk folded through the shared grid, progress lines
     /// (a stuck counter names the packet; silence after the banner names the
     /// pre-decode span), walk totals, EWRAM placement, `fnv_walk_fold` golden.
+    #[inline(never)] // rev9 frame isolation — see the IWRAM const note
     fn walk_probe(clip: &OpusClip) -> bool {
         let expected_region = clip.fnv_packets;
         let actual_region = fnv1a64(clip.region);
@@ -362,6 +399,7 @@ mod rom {
     /// P3: rev1's killer as its own stage — the `vec![0u8; N]` macro (alloc
     /// + fill fused). Green ladder + death here convicts the macro's path
     /// (capacity layout, fill, or their interaction), not the raw allocator.
+    #[inline(never)] // rev9 frame isolation — see the IWRAM const note
     fn fused_vec_probe() -> bool {
         agb::println!(
             "[probe] P3 fused: vec![0u8; {}] — alloc+fill macro path (rev1 died inside this expression)",
@@ -401,19 +439,25 @@ mod rom {
 
     /// IWRAM range — a frame-pointer witness reading outside this range at
     /// function entry names a stack temporary that wrapped off IWRAM.
+    /// Rev9: meaningful only because the stage functions are
+    /// `#[inline(never)]` — with them inlined into main, the entry frame is
+    /// the union of every stage's temporaries (TAIL's 178 KB repro included)
+    /// and every stage's SP reading is convicted by stages that have not
+    /// run yet (rev8's measured confound).
     const IWRAM: core::ops::Range<usize> = 0x0300_0000..0x0300_8000;
 
-    /// P4 — the candidate fix shape (rev5): `probe::new_decoder_boxed`
-    /// applies the Box directly to the ctor result behind an
-    /// `#[inline(always)]` wrapper. Rev5 MEASURED: it died like TAIL (jump
-    /// trap 0x48084808) — caller-side destination propagation does not fix
-    /// the shape; intermediate by-value returns INSIDE the vendored ctor
-    /// (CeltDecoder::new, SilkDecoder::new into the Self literal) survive no
-    /// caller spelling. Rev6 adds the SP witness that convicts the stack
-    /// directly: `sp@P4` at entry — inside IWRAM = no big temporary (fault
-    /// is elsewhere, vendor internals); below 0x0300_0000 = the sret frame
-    /// wrapped off IWRAM, mechanism proven, fix must be in-place
-    /// construction with no by-value hop anywhere on the path.
+    /// P4 — the landed fix shape (rev8): `probe::new_decoder_in_place`
+    /// delegates to vendor patch 2's `OpusDecoder::new_in_place`, which
+    /// writes the state through a destination pointer — no by-value `Self`
+    /// return at any level (rev5 measured that caller-side destination
+    /// propagation via `new_decoder_boxed` DIES like TAIL: the by-value hops
+    /// are INSIDE the vendored ctor, so the fix had to move into the
+    /// construction path itself). The SP witness stays: `sp@P4` at entry —
+    /// inside IWRAM = no big temporary (the fix's on-target claim);
+    /// below 0x0300_0000 = the frame still wraps off IWRAM (patch failed
+    /// on target despite host witnesses). Survival here is the designated
+    /// before/after witness (OPUS.md 2026-10-05).
+    #[inline(never)] // rev9 frame isolation — see the IWRAM const note
     fn candidate_shape_probe() -> bool {
         let sp = read_sp();
         agb::println!(
@@ -427,9 +471,9 @@ mod rom {
             }
         );
         agb::println!(
-            "[probe] P4 candidate: new_decoder_boxed — Box applied directly to the ctor result (inline wrapper)"
+            "[probe] P4 candidate: new_decoder_in_place — vendor patch 2 in-place ctor (no by-value hop anywhere)"
         );
-        let result = probe::new_decoder_boxed(48_000, 1);
+        let result = probe::new_decoder_in_place(48_000, 1);
         match result {
             Ok(b) => {
                 let addr: *const _ = &*b;
@@ -457,6 +501,7 @@ mod rom {
     /// never does (or the wild PC traps). If `box ok` prints, elision
     /// changed between builds — a finding either way; neither changes the
     /// verdict above.
+    #[inline(never)] // rev9: the repro's own frame wraps — that IS the finding; isolation keeps it from poisoning the stages before it
     fn bisect_tail() {
         let sp = read_sp();
         agb::println!(
