@@ -535,3 +535,79 @@ cycle counting.
   measured false. Every size cited in the patch docs was re-measured on
   this tree (host `size_of` through a throwaway probe crate: 178,064 /
   81,952 / 9,304 / 3,992 B), not recalled.
+
+## Status (2026-10-06): seam wired to the in-place ctor + vendor patch 3 — construction measured CLEAN on target; SILK arm green, CELT arm's death moves to the decode path
+
+- **What lands:** (1) `walk_region` now constructs via
+  `probe::new_decoder_in_place` → `OpusDecoder::new_in_place` (vendor patch
+  2), replacing the `Box::new(new_decoder(..)?)` shape; `new_decoder_boxed`
+  stays as the recorded measured negative, `new_decoder` stays for the host
+  differential. (2) The constructor-shape probe ROM at **rev9**: P4 carries
+  the landed fix shape, every stage is `#[inline(never)]`, and TAIL (the
+  by-value repro control) moved after the verdict so every
+  information-bearing stage prints before the expected death. (3) **Vendor
+  patch 3** — in-place CELT mode construction (`OnceCell::get_or_init_in_place`,
+  `CeltMode::init_in_place`, `MdctLookup::init_in_place`,
+  `FixedVec::init_empty_at`; PATCHES.md patch 3 carries the inventory).
+  Vendor diff against the published crate is now exactly patches 1+2+3.
+- **New finding (the reason patch 3 exists).** Patch 2 alone did NOT clear
+  construction. Rev9 pinned per-stage frames and read `sp@P4 = 0x03007DC8`
+  **inside** IWRAM — P4's own frame is `sub sp, #0xb4` (disassembly) — yet
+  the ROM still died *inside* the `new_in_place` call: the frame was in a
+  callee. Disassembly of the literal-pool `add sp, rN` prologues convicted
+  the lazy CELT mode table: `OnceCell<CeltMode>::get_slow` carries a
+  **65,092 B frame** (literal `0xffff01bc`; `CeltMode` 32,296 B + nested
+  `MdctLookup::new` return 32,072 B + slack — host sizes measured in a
+  throwaway probe crate, arithmetic derived). Rev8's reading had been
+  convicted by an LTO-union entry frame — the per-stage `inline(never)` is
+  what made the witness separate the stages; the wrapped entry frame also
+  *aliased into EWRAM*, so rev8's P4 death was aliasing, not the candidate.
+- **Measured on-target (post-patch-3 images: proof `b4c26633…`, probe
+  `6eeeb25f…`):**
+  - Probe: **P4 SURVIVED** — `sp@P4` inside IWRAM, decoder box `0x02008370`
+    in EWRAM, `dropped ok`. The construction-shape hang is closed.
+  - **SILK arm green on-target for the first time** (probe P2 and the proof
+    ROM, same golden): region FNV MATCH, full 501/501 packet walk, totals
+    OK (480,960 samples), heap placement OK, and the walk-fold golden
+    `fnv_walk_fold = 0x79E9DCEABA485BEE` **MATCH** — the three-link chain
+    (region hash → target decode = host walk → host witness vs reference)
+    is now complete for SILK.
+  - **CELT (music) arm still dies after construction**, before packet 1
+    (proof ROM: jump trap `042BBC88`). This is a different problem class:
+    the decode path's **stack budget**, not construction. Measured frame
+    audit of the same linked image (literal-pool decode of every
+    `add sp, rN` / `sub sp, #imm` site ≥ 1024 B):
+    `probe::decode_packet` **18,140** (CELT machinery inlined into it),
+    `bands::quant_all_bands` **8,316**,
+    `pvq::pvq_search_fast_select` **7,132**,
+    `CeltDecoder::decode_impl_from_rc` 4,988, `SilkDecoder::decode` 5,196.
+    Nested CELT chain 18,140 + 8,316 + 7,132 = 33,588 B **exceeds the
+    ~32,512 B stack** (agb sets SP ≈ 0x03007F00; IWRAM bottom 0x0300_0000)
+    — same wrap class, different frame. SILK's chain (18,140 + 5,196)
+    fits, matching which arm survives.
+- **Gates.** `make opus-test` **16 green** (the in-place differential, the
+  committed goldens, and contract parity now all drive construction through
+  patch 3's path); `make check` clean; vendor standalone thumbv4t build
+  (`--no-default-features --features libm`) clean; vendor `cargo fmt --check`
+  drift unchanged from the 16-diff pre-patch baseline (all upstream-authored;
+  the patch 3 files add zero).
+- **Prior-assumption corrections this step:** patch 2's PATCHES.md scope
+  note predicted the proof ROM “now survives construction” once wired —
+  **measured false until patch 3**: construction survived only after the
+  mode-table frame was removed too (the patch inventory grew 1+2 → 1+2+3
+  as a result). And the frame audit shows the by-value-return survey is not
+  complete even now: the decode path's large `MaybeUninit` stack buffers
+  (MDCT `f_buf`/`f2_buf`, band workspaces) materialize as frames under
+  `lto = "fat"` regardless of construction shape.
+- **Next PR (named, correctness-before-speed order holds):** the CELT
+  decode-path stack. First move is a frame-reduction experiment, not a
+  vendor surgery guess: the CELT hot chain's big stack buffers live in
+  `mdct::forward` (`f_buf`/`f2_buf` ≈ 7.7 KB combined, inlined into
+  `decode_packet`'s 18,140 B frame) and in `quant_all_bands` /
+  `pvq_search_fast_select`; candidates are `#[inline(never)]` boundaries
+  (cheap, non-semantic, splits frames — but nesting still sums) versus
+  scratch-buffer ownership (thread a caller-owned scratch through the CELT
+  decode, patch-shaped, EWRAM-backed). Witness already exists: probe P2's
+  music walk printing packet 1, then the proof ROM's music-arm golden
+  `fnv_walk_fold = 0x0C01DDF101FAFA3F` MATCH — the same two checkpoints
+  that turned SILK green here. Cycle counting stays ordered behind both arms green.

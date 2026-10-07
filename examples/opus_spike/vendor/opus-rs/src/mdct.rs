@@ -56,6 +56,60 @@ impl MdctLookup {
         }
     }
 
+    /// VENDOR PATCH 3 (see PATCHES.md): `new`'s in-place twin — initialize an
+    /// `MdctLookup` at `dst` so no `Self` temporary (32,072 B host size) is
+    /// returned by value into the `CeltMode` constructor. The two `FixedVec`
+    /// fields become valid empty via [`FixedVec::init_empty_at`], then the
+    /// same push loop as `new` fills them through `&mut` on the destination.
+    /// The residual temporaries are the per-level `Option<KissFftState>`
+    /// (4,872 B) and its constructor's internals — a ~5 KB class, over
+    /// 100× under the frame this patch removes.
+    ///
+    /// # Safety
+    ///
+    /// * `dst` points to allocated, aligned, **uninitialized** memory for
+    ///   `Self`.
+    /// * On return the place is fully initialized; this function never
+    ///   returns before every field is written.
+    pub unsafe fn init_in_place(dst: *mut MdctLookup, n: usize, max_lm: usize) {
+        use core::ptr::addr_of_mut;
+        debug_assert!(max_lm <= MDCT_MAX_LM);
+
+        unsafe {
+            FixedVec::init_empty_at(addr_of_mut!((*dst).kfft));
+            FixedVec::init_empty_at(addr_of_mut!((*dst).trig));
+            // Both places are valid empty FixedVecs now, so `&mut` through
+            // the pointer is sound and `push` does the rest — exactly `new`'s
+            // fill, same order, same values.
+            let kfft = &mut *addr_of_mut!((*dst).kfft);
+            let trig = &mut *addr_of_mut!((*dst).trig);
+            let mut curr_n = n;
+
+            for shift in 0..=max_lm {
+                let n4 = curr_n / 4;
+
+                if shift == 0 {
+                    kfft.push(KissFftState::new(n4));
+                } else if let Some(base) = kfft.first().unwrap().as_ref() {
+                    kfft.push(KissFftState::new_sub(base, n4));
+                } else {
+                    kfft.push(None);
+                }
+
+                let n2 = curr_n / 2;
+                for i in 0..n2 {
+                    let angle = 2.0 * PI * (i as f32 + 0.125) / curr_n as f32;
+                    trig.push(angle.cos());
+                }
+
+                curr_n >>= 1;
+            }
+
+            core::ptr::write(addr_of_mut!((*dst).n), n);
+            core::ptr::write(addr_of_mut!((*dst).max_lm), max_lm);
+        }
+    }
+
     fn get_trig(&self, shift: usize) -> (&[f32], usize) {
         let mut offset = 0;
         let mut curr_n = self.n;

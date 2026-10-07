@@ -93,6 +93,55 @@ impl<T: Sync> OnceCell<T> {
         // SAFETY: initialization is complete and published.
         unsafe { (*self.storage.get()).assume_init_ref() }
     }
+
+    /// VENDOR PATCH 3 (see PATCHES.md): the in-place twin of [`Self::get`]
+    /// — initialize the cell by handing the storage pointer to `init_at`, so
+    /// the value never materializes as a `T` temporary on the initializer's
+    /// stack. `get`'s `(*storage).write(init())` needs an sret temporary
+    /// sized like `T`; for `CeltMode` (32,296 B host size, plus the 32,072 B
+    /// `MdctLookup` materialized inside its constructor) that single frame
+    /// — 65,092 B, read from the ROM disassembly of `get_slow` — wrapped the
+    /// GBA stack off IWRAM's bottom (constructor-shape probe rev9, OPUS.md).
+    ///
+    /// Same state machine and contract as [`Self::get`]: `init_at` runs at
+    /// most once, must fully initialize the place before returning, and must
+    /// not panic (a panic would strand the cell in the initializing state).
+    pub fn get_or_init_in_place(&self, init_at: impl FnOnce(*mut T)) -> &T {
+        if self.state.load(Ordering::Acquire) == 2 {
+            // SAFETY: initialization is complete; storage holds a valid `T`.
+            return unsafe { (*self.storage.get()).assume_init_ref() };
+        }
+        self.get_slow_in_place(init_at)
+    }
+
+    #[cold]
+    fn get_slow_in_place(&self, init_at: impl FnOnce(*mut T)) -> &T {
+        // Claim the initializer slot exactly as `get_slow` does.
+        while self
+            .state
+            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            if self.state.load(Ordering::Acquire) == 2 {
+                // SAFETY: another thread finished initialization.
+                return unsafe { (*self.storage.get()).assume_init_ref() };
+            }
+            hint::spin_loop();
+        }
+
+        // We claimed the slot; `init_at` writes the value directly into the
+        // inline storage — no `T` temporary anywhere on this path.
+        // SAFETY: we are the sole writer (state == 1); no reader can observe
+        // the storage until we publish state == 2 with Release ordering.
+        unsafe {
+            init_at((*self.storage.get()).as_mut_ptr());
+        }
+        self.state.store(2, Ordering::Release);
+        // SAFETY: `init_at` fully initialized the place (its documented
+        // contract), and no reader observed the storage before the Release
+        // publish above.
+        unsafe { (*self.storage.get()).assume_init_ref() }
+    }
 }
 
 impl<T: Sync> Default for OnceCell<T> {
