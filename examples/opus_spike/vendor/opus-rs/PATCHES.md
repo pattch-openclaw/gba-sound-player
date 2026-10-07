@@ -138,7 +138,8 @@ documented expected-failure shape, OPUS.md survey, not a regression).
 **Invariants.** `new()` is byte-for-byte unchanged; the patch is purely
 additive (git diff against the pre-patch tree: insertions only) and edits
 zero SILK/CELT/MDCT/range-coder/tables logic — every decode-path byte is
-untouched. A future vendor sync must reproduce exactly Patch 1 + Patch 2.
+untouched. A future vendor sync must reproduce exactly Patch 1 + Patch 2 +
+Patch 3 (this file).
 
 **Witness (`opus_spike/tests/in_place_ctor.rs`, host gate, 3 tests).**
 The patch is pure construction, so the witness proves the in-place ctor
@@ -176,6 +177,66 @@ booted for this PR — lib patch, host gates only, by scope.
 (`opus_decoder_create` initializes into a user-provided buffer); the
 author's `heap` feature already boxes this state, only std-coupled. This
 patch is the alloc-native version of both.
+
+## Patch 3 — in-place CELT mode construction (`get_or_init_in_place`)
+
+**Problem (measured, not assumed).** Patch 2 removed every decoder-sized
+by-value hop, yet the probe ROM (rev9, per-stage `#[inline(never)]` frames)
+read `sp@P4` **inside** IWRAM and still died *inside* the `new_in_place`
+call — the frame was in a callee. Disassembly of the measured image
+convicted the next by-value return on the path: the **lazy CELT mode
+table**. `init_in_place` starts at `modes::default_mode()`, whose cold
+`OnceCell::get_slow` prologue (`add sp, r6`, literal `0xffff01bc`) is a
+**65,092 B frame** — `CeltMode::new_48000_960_120` returns its `Self`
+(32,296 B, host-measured in a throwaway probe crate) through
+`(*storage).write(init())`, and the nested `MdctLookup::new` return
+(32,072 B) materializes inside it. First construction on a 31 KB stack:
+same wrap class as patch 2's original conviction.
+
+**The fix: no temporary on the lazy path either.** Four additive APIs, same
+invert-the-direction pattern:
+
+- `compat.rs` — `OnceCell::get_or_init_in_place` (+ `#[cold] get_slow_in_place`):
+  the initializer receives the storage **pointer**; the value is written
+  through it, never as a `T` temporary. Same state machine (0/1/2, same
+  CAS claim, same Release publish), same contract (`init_at` runs at most
+  once, fully initializes, must not panic).
+- `fixedvec.rs` — `FixedVec::init_empty_at`: writes `len = 0` into an
+  uninitialized place, making it exactly `new()`'s empty value (buf is
+  `MaybeUninit`), without a `Self` temporary.
+- `mdct.rs` — `MdctLookup::init_in_place(dst, n, max_lm)`: both `FixedVec`
+  fields become valid-empty via `init_empty_at`, then `new`'s push loop runs
+  verbatim through `&mut` on the destination. Largest residual temporary:
+  the per-level `Option<KissFftState>` (4,872 B host; 4,884 B target frame
+  measured in the post-patch audit — over 13× under the removed frame).
+- `modes.rs` — `CeltMode::init_in_place` mirrors `new_48000_960_120`'s
+  literal field-for-field (the `mdct` field through the mdct in-place init;
+  every remaining write is a `Copy` scalar or a `&'static` table reference),
+  and `default_mode_in_place()` fills the **same shared cell** via
+  `get_or_init_in_place`. Whichever entry point runs first wins; every later
+  call — `default_mode()` in decode paths included — takes the cell's fast
+  path (`state == 2`, no initializer frame ever runs there).
+
+`lib.rs` patch 2's `init_in_place` switches its seam line from
+`modes::default_mode()` to `modes::default_mode_in_place()`. That is the
+**only line this patch edits**, and it is a line patch 2 itself added —
+confirmed absent at `34a8870` (pre-patch-2). Upstream bytes stay
+byte-comparable; the patch remains purely additive against upstream.
+
+**Witnesses.** Host: `tests/in_place_ctor.rs` (all three layers) now drives
+construction **through** this path — the bit-identical differential,
+the committed `fnv_walk_fold` goldens, and contract parity all exercise the
+in-place mode construction (16 green). On-target (this PR's images, proof
+`b4c26633…`, probe `6eeeb25f…`): probe P4 **SURVIVED** — `sp@P4 =
+0x03007DC8` inside IWRAM, decoder box `0x02008370` in EWRAM — and the SILK
+arm's full 501-packet walk reproduced the golden on hardware-emulated
+target. The construction path is measured clean to depth.
+
+**Stated limit.** The CELT (music) arm still dies **after** construction —
+the CELT *decode path's* stack budget (frame audit in OPUS.md 2026-10-06:
+`decode_packet` 18,140 + `quant_all_bands` 8,316 + `pvq_search_fast_select`
+7,132 > 32,768 B IWRAM), a different problem class this patch neither
+claims nor touches. Vendor sync: reproduce Patch 1 + 2 + 3, no more.
 
 ## Manifest changes (this `Cargo.toml`)
 
