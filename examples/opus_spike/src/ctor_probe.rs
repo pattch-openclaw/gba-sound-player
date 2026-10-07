@@ -189,7 +189,7 @@ mod rom {
     #[agb::entry]
     fn main(mut gba: agb::Gba) -> ! {
         agb::eprintln!(
-            "[probe] entry started — opus constructor-shape probe (PR 3 harness, 2026-10-06 rev8: P4 = vendor patch 2 in-place ctor)"
+            "[probe] entry started — opus constructor-shape probe (PR 3 harness, 2026-10-06 rev9: P4 = in-place ctor, per-stage frames)"
         );
 
         let mut gfx = gba.graphics.get();

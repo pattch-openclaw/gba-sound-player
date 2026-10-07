@@ -1343,7 +1343,17 @@ impl OpusDecoder {
     pub unsafe fn init_in_place(dst: *mut OpusDecoder, sampling_rate: i32, channels: usize) {
         use core::ptr::addr_of_mut;
 
-        let mode = modes::default_mode();
+        // VENDOR PATCH 3 (see PATCHES.md): the CELT mode tables are built
+        // through the cell pointer (`get_or_init_in_place`), so the lazy
+        // first construction adds no frame either — the by-value
+        // `default_mode()` spelled a 65,092 B `get_slow` frame (CeltMode +
+        // nested MdctLookup temporaries) that killed this path on target
+        // after patch 2 had removed every decoder-sized hop (probe rev9).
+        // This line is a patch-2-added seam line (not upstream code):
+        // patch 3 edits only vendor-added code. Once filled, every later
+        // `default_mode()` call (decode paths included) takes the cell's
+        // fast path — state == 2, no initializer frame ever runs there.
+        let mode = modes::default_mode_in_place();
         #[cfg(not(feature = "heap"))]
         CeltDecoder::init_in_place(addr_of_mut!((*dst).celt_dec), mode, channels, sampling_rate);
         #[cfg(feature = "heap")]

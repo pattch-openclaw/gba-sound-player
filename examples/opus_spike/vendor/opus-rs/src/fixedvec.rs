@@ -92,6 +92,26 @@ impl<T, const N: usize> FixedVec<T, N> {
         }
     }
 
+    /// VENDOR PATCH 3 (see PATCHES.md): initialize a **valid empty** `Self`
+    /// at `dst` (`len = 0`, buffer uninit — exactly `new()`'s value) without
+    /// materializing a `Self` temporary. The in-place `MdctLookup`
+    /// constructor uses this for its two `FixedVec` fields, whose by-value
+    /// `new()` returns would themselves be 24 KB-class temporaries.
+    ///
+    /// # Safety
+    ///
+    /// * `dst` must point to allocated, aligned, **uninitialized** memory
+    ///   large enough for `Self` (the same contract `init_fill_at` carries).
+    pub unsafe fn init_empty_at(dst: *mut Self) {
+        // SAFETY: `dst` is a valid, aligned, allocated place for `Self`
+        // (contract). Writing only `len = 0` makes it exactly `new()`'s
+        // value: `buf` is `MaybeUninit`, so an empty `Self` carries no
+        // further initialization obligation.
+        unsafe {
+            core::ptr::write(core::ptr::addr_of_mut!((*dst).len), 0);
+        }
+    }
+
     pub const fn len(&self) -> usize {
         self.len
     }

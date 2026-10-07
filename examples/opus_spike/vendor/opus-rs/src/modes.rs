@@ -122,6 +122,61 @@ impl CeltMode {
             e_means: &E_MEANS,
         }
     }
+
+    /// VENDOR PATCH 3 (see PATCHES.md): `new_48000_960_120`'s in-place twin
+    /// — initialize a `CeltMode` at `dst` field by field so no `Self`
+    /// temporary is returned by value into the `OnceCell` storage.
+    /// `MdctLookup::init_in_place` removes the nested by-value hop; every
+    /// remaining write is a `Copy` scalar or a `&'static` table reference.
+    ///
+    /// # Safety
+    ///
+    /// * `dst` points to allocated, aligned, **uninitialized** memory for
+    ///   `Self`.
+    /// * On return the place is fully initialized; this function never
+    ///   returns before every field is written.
+    pub unsafe fn init_in_place(dst: *mut CeltMode) {
+        use core::ptr::addr_of_mut;
+
+        let short_mdct_size = 120;
+        let nb_short_mdcts = 8;
+        let max_lm = 3usize;
+
+        unsafe {
+            MdctLookup::init_in_place(
+                addr_of_mut!((*dst).mdct),
+                2 * short_mdct_size * nb_short_mdcts,
+                max_lm,
+            );
+            core::ptr::write(addr_of_mut!((*dst).fs), 48000);
+            core::ptr::write(addr_of_mut!((*dst).overlap), 120);
+            core::ptr::write(addr_of_mut!((*dst).nb_ebands), 21);
+            core::ptr::write(addr_of_mut!((*dst).eff_ebands), 21);
+            core::ptr::write(
+                addr_of_mut!((*dst).preemph),
+                [0.850_006_1, 0.100_006_1, 1.512_834_7, 0.661_010_7],
+            );
+            core::ptr::write(addr_of_mut!((*dst).e_bands), &EBAND_5MS);
+            core::ptr::write(addr_of_mut!((*dst).max_lm), max_lm);
+            core::ptr::write(addr_of_mut!((*dst).nb_short_mdcts), nb_short_mdcts);
+            core::ptr::write(addr_of_mut!((*dst).short_mdct_size), short_mdct_size);
+            core::ptr::write(addr_of_mut!((*dst).nb_alloc_vectors), 11);
+            core::ptr::write(addr_of_mut!((*dst).alloc_vectors), &BAND_ALLOCATION);
+            core::ptr::write(addr_of_mut!((*dst).alloc_stride), 21);
+            core::ptr::write(addr_of_mut!((*dst).log_n), &LOG_N_400);
+            core::ptr::write(addr_of_mut!((*dst).window), &WINDOW_120);
+            core::ptr::write(
+                addr_of_mut!((*dst).cache),
+                PulseCache {
+                    size: 392,
+                    index: &CACHE_INDEX50,
+                    bits: &CACHE_BITS50,
+                    caps: &CACHE_CAPS50,
+                },
+            );
+            core::ptr::write(addr_of_mut!((*dst).e_means), &E_MEANS);
+        }
+    }
 }
 
 pub const E_MEANS: [f32; 25] = [
@@ -131,6 +186,26 @@ pub const E_MEANS: [f32; 25] = [
 
 pub fn default_mode() -> &'static CeltMode {
     MODE_48000_960_120.get(CeltMode::new_48000_960_120)
+}
+
+/// VENDOR PATCH 3 (see PATCHES.md): the in-place twin of [`default_mode`]
+/// — the lazy first construction initializes the static cell **through a
+/// destination pointer** (`OnceCell::get_or_init_in_place`), so no `CeltMode`
+/// temporary (32,296 B host size) and no `MdctLookup` temporary (32,072 B,
+/// materialized inside `new_48000_960_120`'s `MdctLookup::new` return) ever
+/// sits on the initializer's stack. `get`'s `(*storage).write(init())`
+/// spelled exactly that frame: 65,092 B, measured from the ROM disassembly
+/// of `get_slow` (`add sp, r6` with literal 0xffff01bc) — the frame that
+/// killed the in-place construction on target after vendor patch 2 had
+/// removed every decoder-sized hop (constructor-shape probe rev9, OPUS.md
+/// 2026-10-06). Same value as `default_mode`'s, field-for-field (witness:
+/// the in-place differential and the committed `fnv_walk_fold` goldens);
+/// whichever entry point runs first fills the shared cell, and the other
+/// observes it through the same fast path.
+pub fn default_mode_in_place() -> &'static CeltMode {
+    // The closure wrapper is load-bearing: an `unsafe fn` item does not
+    // implement `FnOnce`, so the unsafe contract is carried at the call.
+    MODE_48000_960_120.get_or_init_in_place(|dst| unsafe { CeltMode::init_in_place(dst) })
 }
 
 static MODE_48000_960_120: OnceCell<CeltMode> = OnceCell::new();
