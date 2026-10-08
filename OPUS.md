@@ -611,3 +611,86 @@ cycle counting.
   music walk printing packet 1, then the proof ROM's music-arm golden
   `fnv_walk_fold = 0x0C01DDF101FAFA3F` MATCH — the same two checkpoints
   that turned SILK green here. Cycle counting stays ordered behind both arms green.
+
+## Status (2026-10-08): vendor patch 4 — CELT stack FIXED by frame-splitting the cold PLC bridge; music arm walks 501/501 for the first time; NEW finding: values diverge from the host golden at packet 61
+
+- **What lands:** **vendor patch 4** — `OpusDecoder::silk_plc_bridge`
+  (`#[inline(never)]`): `decode`'s mode-transition SILK PLC-bridge block
+  extracted verbatim behind a call boundary. PATCHES.md patch 4 carries the
+  inventory; vendor diff against the published crate is now 1+2+3+4. Zero
+  semantics: same instructions, same call graph, only the frame boundary
+  moved. Two experiment variants ran first (throwaway, not committed):
+  **variant A** forced `mdct::forward`/`mdct::backward` out-of-line —
+  `decode_packet`'s frame stayed **exactly 18,140 B**; **variant B** (this
+  patch) removed exactly 15,368 B → **2,772 B**.
+- **Prior-assumption correction (the 2026-10-06 frame attribution measured
+  false).** The 18,140 B entry frame was NOT the CELT machinery inlined
+  under `lto = "fat"` (MDCT `f_buf`/`f2_buf` were never the binding term —
+  variant A proves it). It was the **cold** mode-transition PLC bridge:
+  `plc_i16` (3,848 B site) + `resampled` (11,528 B site) FixedVec storage
+  unions into `decode`'s single entry frame and got reserved by the
+  `add sp, rN` prologue on **every** packet — including the CELT-only music
+  packets that can never reach the bridge. `lto = "fat"`'s union-frame
+  behavior strikes again (same confound family as the rev8 LTO-union note).
+- **Stack verdict.** Music hot chain now 2,772 + 4,988 (`decode_impl_from_rc`)
+  + 8,316 (`quant_all_bands`) + 7,132 (`pvq_search_fast_select`) =
+  **23,208 B < 32,512 B** (was 33,588 — the wrap). On target the death is
+  **gone**: probe P2 music walk 501/501 packets, proof ROM music walk
+  501/501, samples/totals/EWRAM-placement all OK. `pvq_search_fast_select`
+  never nests under `quant_all_bands` in the linked image (both are called
+  from `decode_impl_from_rc`'s inlined body) — the 2026-10-06 33,588 B sum
+  over-counted nesting AND the entry frame, two errors that happened to
+  agree on the conclusion.
+- **NEW finding (the arm is alive but RED): value divergence, first
+  divergent packet 61.** On-target fold `0xA781907825AB00AA` ≠ host golden
+  `0x0C01DDF101FAFA3F`. Per-packet running-hash diff (probe/proof vs the
+  host `dump_walk` stream through a Python fold twin — reproduces the golden
+  exactly): **packets 1–60 bit-identical, packet 61 onward diverge**
+  (441/501 hashes differ; all three ROM logs — proof×2, probe — identical
+  to each other). Stable across host opt-levels 0/2/fat (O0 == golden,
+  so the golden itself is opt-level robust). Hypothesis (recorded,
+  **unproven**): host f32 multiply-add **contraction** — the host binary
+  carries 75 `fmadd/fmla` sites, ALL in CELT quantizers (`alg_quant` 16,
+  `quant_all_bands` 14, `quant_partition` 14, `quant_partition_encode` 14,
+  `decode_impl_from_rc` 7, `renormalise_vector` 7, `alg_unquant` 3),
+  **zero in SILK** — matching exactly which arm stays bit-exact. The target
+  cannot contract (soft-float `__aeabi_*`, no FMA in the image), and the
+  port-vs-libopus drift band (~0.8 LSB, assets.rs 2026-10-02) crossing the
+  round-half-up fold grid explains how sub-ULP divergence flips hashes from
+  packet 61 while packets 1–60 ride the same code bit-exact. Attempted
+  disproofs on this host, all measured **identical output**: `-Cllvm-args=
+  --fp-contract=off` (accepted, zero codegen effect — `-Cfp-contract` does
+  not exist in the pinned nightly), LTO off, opt-level 0, vectorizer off,
+  `-Ctarget-feature=-fp-armv8,-neon` (std won't build soft-float; no
+  soft-float target installed, Rosetta absent so no x86_64 run).
+- **Gates.** `make opus-test` **16 green** — the in-place differential +
+  committed goldens reproduce **bit-exactly through patch 4** (zero-semantic
+  claim, witnessed); `make check` clean; vendor standalone thumbv4t build
+  (`--no-default-features --features libm`) clean; vendor host default-
+  features build clean (gate-neutral cwd); vendor `cargo fmt --check` drift
+  unchanged at the 16-diff upstream baseline (patch 4 files add zero).
+- **ROM captures.** proof `ff1ab006fdb89f16…` (serial `0x41`), probe
+  `7e2dbccb85528dd4…` (serial `0x54`, TAIL dies after the verdict as the
+  designed repro control; never in a test gate). Music arm stays
+  **deliberately RED**: 501/501 walks but golden MISMATCH — the honest
+  state of the branch.
+- **Tracked latent (not touched):** the mode-transition chain (a music
+  packet FOLLOWING a SILK/Hybrid packet) now nests 2,772 + 21,396
+  (`silk_plc_bridge`) + 5,196 (`SilkDecoder::decode`) + 4,716 (`silk_plc`)
+  = **34,080 B > 32,512 B**. Dormant for both embedded arms (single-mode
+  clips — no packet takes the bridge from CELT), live for real multi-mode
+  streams. Cheap fix when it matters: box the bridge's two FixedVec
+  temporaries (cold path; EWRAM allocator proven live by probe P3/P4).
+- **Next PR (named, correctness-before-speed order holds):** the packet-61
+  witness — pin the contraction mechanism, then re-measure the music golden
+  on the equivalence class the ROM actually lives on. Candidates, cheapest
+  first: (1) a **non-fused host reference** — replace `a*b+c` with the
+  strict (non-fusible) f32 mul/add intrinsics in the 7 convicted quantizer
+  functions, host-only experiment; if the strict host walk then matches the
+  ROM per-packet hashes from packet 1, the mechanism is proven and the
+  golden gets re-measured through the strict path (witness: the existing
+  per-packet running-hash logs, already emitted by probe P2 + proof).
+  (2) If hashes still diverge at 61, the drift band's fold-grid crossings
+  need their own on-target equivalence statement (per-packet fold compare +
+  mismatch census like the host witness's ±1 LSB rule). Cycle counting
+  stays behind both arms green.
