@@ -237,6 +237,74 @@ the CELT *decode path's* stack budget (frame audit in OPUS.md 2026-10-06:
 `decode_packet` 18,140 + `quant_all_bands` 8,316 + `pvq_search_fast_select`
 7,132 > 32,768 B IWRAM), a different problem class this patch neither
 claims nor touches. Vendor sync: reproduce Patch 1 + 2 + 3, no more.
+*(The stated limit — decode-path stack — is resolved for the music hot path
+by Patch 4; the mode-transition latent chain stays open, see Patch 4.)*
+
+## Patch 4 — frame-split the mode-transition PLC bridge (`silk_plc_bridge`)
+
+**Problem (measured, not assumed).** Patch 3's stated limit convicted the
+CELT decode-path stack: nested chain `decode_packet` 18,140 +
+`quant_all_bands` 8,316 + `pvq_search_fast_select` 7,132 = 33,588 B over the
+~32,512 B stack (SP ≈ `0x03007F00`, IWRAM bottom `0x0300_0000`) — same wrap
+class as the construction hang, and the music arm indeed died before packet 1
+(jump trap). OPUS.md 2026-10-06 attributed the 18,140 B entry frame to the
+CELT machinery itself (MDCT `f_buf`/`f2_buf`, band workspaces) inlined under
+`lto = "fat"`. **That attribution measured false**: forcing
+`mdct::forward`/`mdct::backward` out-of-line left `decode_packet`'s frame at
+exactly 18,140 B (variant A, this experiment), while extracting the
+**mode-transition SILK PLC bridge** — a cold branch that never runs on the
+CELT-only music arm — removed exactly 15,368 B (variant B). Under `lto =
+"fat"` a cold branch's locals union into the caller's single entry frame:
+the bridge's `plc_i16` (`FixedVec<i16, OPUS_PCM_I16>`, 3,848 B site) and
+`resampled` (`FixedVec<i16, OPUS_MAX_FRAME>`, 11,528 B site) storage —
+15,376 B, less 8 B union slack — was reserved by `decode`'s `add sp, rN`
+prologue on **every** packet, hot or cold.
+
+**The fix: move the cold branch's frame behind a call boundary.** One
+extraction, zero semantics: `OpusDecoder::silk_plc_bridge(&mut self,
+f5_bridge)` is `decode`'s PLC-bridge block verbatim (15,368 B of frame
+removed — the storages' 15,376 B less 8 B slack), marked
+`#[inline(never)]`, called from the same guard. Same instructions, same call
+graph — only the frame boundary moved, so the two FixedVec temporaries exist
+only while the cold branch runs. (`decode` itself stays one function; the
+`pub fn decode` signature and behavior are untouched.)
+
+**Witnesses.** Frame audit (literal-pool `add sp, rN` sites, linked image):
+`decode_packet` 18,140 → **2,772 B**; music hot chain 2,772 + 4,988 + 8,316
++ 7,132 = **23,208 B < 32,512 B** (was 33,588 — the wrap). On-target (proof
+`ff1ab006…`): the music arm walks **501/501 packets for the first time** —
+the death is gone; SILK unchanged green (`0x79E9DCEABA485BEE` MATCH). Host:
+`make opus-test` 16 green — the committed `fnv_walk_fold` goldens reproduce
+**bit-exactly through this path** (zero semantic change).
+
+**New finding this patch surfaced (open, NOT fixed here).** With the walk
+alive, the music arm's *values* diverge: on-target fold
+`0xA781907825AB00AA` vs host golden `0x0C01DDF101FAFA3F`, first divergent
+packet **61** (packets 1–60 bit-identical; stable across two ROM builds and
+three host opt levels). Mechanism hypothesis (recorded, unproven): f32
+multiply-add **contraction** — the host binary carries 75 fused `fmadd/fmla`
+sites, all in the CELT quantizers (`alg_quant`, `quant_all_bands`,
+`quant_partition*`, `renormalise_vector`, `alg_unquant`,
+`decode_impl_from_rc`); zero in SILK (matching which arm matches bit-exact);
+the target is soft-float with no contraction (`compiler_builtins` `__aeabi_*`
+only, no FMA in the image). The host's `fnv_walk_fold` golden itself embeds
+fused rounding and tolerates 127 ±1-LSB drift samples (assets.rs 2026-10-02),
+so a sub-ULP class drift crossing the fold grid at packet 61 is the leading
+explanation. Attempted disproofs (all measured identical host output):
+`-Cllvm-args=--fp-contract=off` (accepted, zero codegen effect), LTO off,
+`opt-level = 0`, vectorizer off — rustc exposes no working fp-contract knob
+and no soft-float host target is installed here (Rosetta absent). The next
+OPUS.md step (OPUS.md 2026-10-08) is the witness that settles it: per-packet
+fold comparison on-target, and/or a soft-float host target.
+
+**Stated limit.** The **mode-transition chain** (music packet following a
+SILK/Hybrid packet) now nests `decode_packet` 2,772 + `silk_plc_bridge`
+21,396 + `SilkDecoder::decode` 5,196 + `silk_plc` 4,716 = **34,080 B >
+32,512 B** — latent (both embedded arms are single-mode, so no packet takes
+that path; SILK's own chain 2,772 + 5,196 still fits). Same union-frame
+class one level deeper; the cheap fix is boxing the two FixedVec temporaries
+inside the bridge (cold path, EWRAM allocator proven live by probe P3/P4).
+Vendor sync: reproduce Patch 1 + 2 + 3 + 4, no more.
 
 ## Manifest changes (this `Cargo.toml`)
 

@@ -1450,6 +1450,74 @@ impl OpusDecoder {
         }
     }
 
+    /// VENDOR PATCH 4 (see PATCHES.md): the mode-transition SILK PLC bridge
+    /// extracted verbatim from `decode` behind `#[inline(never)]`. Its stack
+    /// temporaries (`plc_i16` + `resampled` FixedVec storage — measured 3,848 B
+    /// and 11,528 B frame sites) previously materialized inside the hot decode
+    /// frame: under `lto = "fat"` a cold branch's locals union into the
+    /// caller's single entry frame (reserved by the `add sp, rN` prologue
+    /// regardless of which branch runs), inflating the seam caller's frame by
+    /// ~15.4 KB on every packet (measured on the GBA image: 18,140 B → 2,772 B
+    /// after this seam; OPUS.md 2026-10-08). Behind this seam they live only
+    /// while this cold branch runs. Zero semantic change: same instructions,
+    /// same call graph — only the frame boundary moved (host `fnv_walk_fold`
+    /// goldens reproduce bit-exactly through this path).
+    #[inline(never)]
+    fn silk_plc_bridge(&mut self, f5_bridge: usize) {
+        let internal_rate = self.prev_internal_rate;
+        let plc_internal_len = (10 * internal_rate / 1000) as usize;
+        let mut plc_rc = RangeCoder::new_decoder(&[]);
+        let mut plc_i16: FixedVec<i16, OPUS_PCM_I16> =
+            FixedVec::from_value(0i16, plc_internal_len * self.channels);
+        let n = self.silk_dec.decode(
+            &mut plc_rc,
+            &mut plc_i16,
+            silk::decode_frame::FLAG_PACKET_LOST,
+            true,
+            10,
+            internal_rate,
+        );
+        if n > 0 {
+            let bridge_ch = f5_bridge * self.channels;
+            let bridge_len = bridge_ch.min(self.prev_pcm_tail.len());
+            if internal_rate == self.sampling_rate {
+                // No resampling: copy PLC samples directly (ch0 planar).
+                let n_us = n as usize;
+                for ch in 0..self.channels {
+                    let src_base = ch * n_us;
+                    for i in 0..(bridge_len / self.channels).min(n_us) {
+                        let dst = i * self.channels + ch;
+                        if dst < bridge_len {
+                            self.prev_pcm_tail[dst] = plc_i16[src_base + i] as f32 / 32768.0;
+                        }
+                    }
+                }
+            } else if self.silk_resampler.is_initialized() {
+                // Resample channel 0 to the API rate for the bridge.
+                // The resampler must receive an output buffer sized for the
+                // FULL resampled length (issue #15): truncating the buffer to
+                // `f5_bridge` caused out-of-bounds writes in the Up2HQ/Copy
+                // paths. We size it fully, then copy only the bridge window.
+                let ratio = self.sampling_rate as f64 / internal_rate as f64;
+                let full_len = ((n as f64 * ratio) as usize).max(1);
+                let out_len = full_len.min(f5_bridge);
+                let n_us = n as usize;
+                let mut resampled: FixedVec<i16, OPUS_MAX_FRAME> =
+                    FixedVec::from_value(0i16, full_len);
+                self.silk_resampler
+                    .process(&mut resampled, &plc_i16[..n_us], n);
+                for i in 0..out_len {
+                    if i < bridge_len / self.channels {
+                        for ch in 0..self.channels {
+                            self.prev_pcm_tail[i * self.channels + ch] =
+                                resampled[i] as f32 / 32768.0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn decode(
         &mut self,
         input: &[u8],
@@ -1652,58 +1720,7 @@ impl OpusDecoder {
             )
             && self.prev_internal_rate > 0
         {
-            let internal_rate = self.prev_internal_rate;
-            let plc_internal_len = (10 * internal_rate / 1000) as usize;
-            let mut plc_rc = RangeCoder::new_decoder(&[]);
-            let mut plc_i16: FixedVec<i16, OPUS_PCM_I16> =
-                FixedVec::from_value(0i16, plc_internal_len * self.channels);
-            let n = self.silk_dec.decode(
-                &mut plc_rc,
-                &mut plc_i16,
-                silk::decode_frame::FLAG_PACKET_LOST,
-                true,
-                10,
-                internal_rate,
-            );
-            if n > 0 {
-                let bridge_ch = f5_bridge * self.channels;
-                let bridge_len = bridge_ch.min(self.prev_pcm_tail.len());
-                if internal_rate == self.sampling_rate {
-                    // No resampling: copy PLC samples directly (ch0 planar).
-                    let n_us = n as usize;
-                    for ch in 0..self.channels {
-                        let src_base = ch * n_us;
-                        for i in 0..(bridge_len / self.channels).min(n_us) {
-                            let dst = i * self.channels + ch;
-                            if dst < bridge_len {
-                                self.prev_pcm_tail[dst] = plc_i16[src_base + i] as f32 / 32768.0;
-                            }
-                        }
-                    }
-                } else if self.silk_resampler.is_initialized() {
-                    // Resample channel 0 to the API rate for the bridge.
-                    // The resampler must receive an output buffer sized for the
-                    // FULL resampled length (issue #15): truncating the buffer to
-                    // `f5_bridge` caused out-of-bounds writes in the Up2HQ/Copy
-                    // paths. We size it fully, then copy only the bridge window.
-                    let ratio = self.sampling_rate as f64 / internal_rate as f64;
-                    let full_len = ((n as f64 * ratio) as usize).max(1);
-                    let out_len = full_len.min(f5_bridge);
-                    let n_us = n as usize;
-                    let mut resampled: FixedVec<i16, OPUS_MAX_FRAME> =
-                        FixedVec::from_value(0i16, full_len);
-                    self.silk_resampler
-                        .process(&mut resampled, &plc_i16[..n_us], n);
-                    for i in 0..out_len {
-                        if i < bridge_len / self.channels {
-                            for ch in 0..self.channels {
-                                self.prev_pcm_tail[i * self.channels + ch] =
-                                    resampled[i] as f32 / 32768.0;
-                            }
-                        }
-                    }
-                }
-            }
+            self.silk_plc_bridge(f5_bridge);
         }
 
         // Track whether this packet uses Hybrid redundancy.
