@@ -48,6 +48,10 @@ bench = false
 # gate need not compile it. The generator passes --features host-tools.
 [features]
 host-tools = []
+# Forwards vendor patch 5's opt-in host NEON (vendor/opus-rs/PATCHES.md).
+# Default OFF: host witnesses run the strict scalar paths — the thumbv4t
+# equivalence class. ON is the upstream-comparability witness only.
+host-simd = ["opus-rs/host-simd"]
 
 [[example]]
 name = "dump_walk"

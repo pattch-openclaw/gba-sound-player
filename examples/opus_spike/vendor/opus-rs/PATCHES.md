@@ -306,6 +306,76 @@ class one level deeper; the cheap fix is boxing the two FixedVec temporaries
 inside the bridge (cold path, EWRAM allocator proven live by probe P3/P4).
 Vendor sync: reproduce Patch 1 + 2 + 3 + 4, no more.
 
+## Patch 5 — gate aarch64 SIMD behind an opt-in `host-simd` feature (the packet-61 witness)
+
+**Problem (measured, closed).** Patch 4 left the music arm alive but RED:
+on-target fold `0xA781907825AB00AA` vs host golden `0x0C01DDF101FAFA3F`,
+first divergent packet **61** (packets 1–60 bit-identical; 441/501 hashes
+differ). OPUS.md 2026-10-08 recorded f32 mul-add contraction as the leading
+hypothesis (fused-site census: 75 sites in the host binary, all CELT
+quantizers, zero SILK) and named the witness that settles it: a strict
+non-fused host walk matching the ROM's per-packet hashes from packet 1.
+This patch **is** that witness, landed.
+
+**Mechanism correction (measured).** The fused sites are **not LLVM
+contraction** — they are the published crate's own aarch64 SIMD paths:
+explicit `vfmaq_f32` (NEON fused multiply-add) inside upstream-authored
+quantizer/resynth/MDCT/FFT/pitch kernels, gated behind
+`#[cfg(target_arch = "aarch64")]`. That is why every compiler-flag
+disproof measured inert: no flag unfuses an intrinsic. The host (hard-float
+aarch64) executes those NEON paths; the GBA never can (thumbv4t:
+soft-float `__aeabi_*`, no FMA, NEON never compiles). The resulting
+sub-ULP drift crosses the round-half-up fold grid at packet 61 and flips
+every packet hash after it.
+
+**The fix: the host's decode path becomes an opt-in choice, default = the
+product's equivalence class.** Every `target_arch = "aarch64"` cfg
+predicate in `src/` (140 sites, 9 files) becomes
+`all(target_arch = "aarch64", feature = "host-simd")`; the manifest gains
+`host-simd = []`, **default OFF**. OFF (the consumer's pinned profile):
+the host executes the crate's existing scalar f32 paths — the class the
+ROM lives on. ON: upstream 0.1.34 host behavior, bit-for-bit (the
+comparability witness). The 4 lint `cfg_attr`s are untouched (not code
+paths). Nine cfg attributes needed 4-line rustfmt wraps, hand-edited (the
+tree is never `cargo fmt`-ed); those wraps shift only embedded
+panic-location line numbers in the linked image (+3/+6), never
+instructions — witnessed below.
+
+**Witnesses.**
+- *Mechanism:* strict (feature-OFF) `dump_walk` of the music arm folds to
+  `0xA781907825AB00AA` — **exactly the ROM's** — with **501/501
+  per-packet running hashes matching the ROM log** (packet 61 included);
+  the strict binary's fused-site census is **0** (control: 75). SILK is
+  unchanged (`0x79E9DCEABA485BEE`, 0 residuals) — it never took a fused
+  path, matching which arm stayed bit-exact.
+- *Zero target effect:* proof ROM rebuilt with patch 5 alone (before the
+  pin re-measure) is **byte-identical** to the patch-4 ROM (`ff1ab006…`)
+  — the gating changes no thumbv4t codegen.
+- *Golden re-measured through the strict path* (generator): four asset
+  blobs byte-identical; only the music pins move — `fold_mismatch` 127 →
+  **126** (all ±1 LSB, align_shift 312 unchanged), `fnv_walk_fold` →
+  **`0xa781907825ab00aa`**. The final ROM differs from the patch-only ROM
+  in exactly **50 bytes**: 9 pin-data bytes + 41 embedded panic-location
+  line numbers shifted by the cfg wraps; `probe::decode_packet` still @
+  `0x08025E0D` — zero instruction delta.
+- *On target:* **both arms green for the first time** (proof ROM
+  `fbe2a6b6…`): silk MATCH, music `0xA781907825AB00AA` MATCH, PR 3
+  verdict PASSED.
+- *Upstream comparability:* a `host-simd`-ON rebuild reproduces **both**
+  pre-patch goldens bit-exactly (music `0x0C01DDF101FAFA3F`, silk
+  unchanged).
+- *Gates:* `make opus-test` 16 green (the witness re-derives the new pins
+  on the strict path); `make check` clean; vendor thumbv4t standalone and
+  host default-features builds clean; fmt drift unchanged at the 17-diff
+  upstream baseline (per-file counts).
+
+**Stated limit.** `host-simd` ON is a comparability mode, not the
+product's class: its music golden embeds fused-NEON rounding the GBA
+cannot reproduce — never repin the gate to it. Patch 4's mode-transition
+chain latent stays untouched: parked by product decision (2026-10-09) —
+ROM audio is packaged mode-pure, so no shipped stream takes the bridge.
+Vendor sync: reproduce Patch 1 + 2 + 3 + 4 + 5, no more.
+
 ## Manifest changes (this `Cargo.toml`)
 
 Reconstructed from the published normalized manifest with:

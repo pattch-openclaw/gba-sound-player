@@ -784,7 +784,7 @@ pub fn pvq_search(x: &[f32], y: &mut [i32], k: i32, n: usize) {
         return;
     }
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     if n <= 16 {
         pvq_search_neon(x, y, k, n);
         return;
@@ -801,7 +801,7 @@ pub fn pvq_search(x: &[f32], y: &mut [i32], k: i32, n: usize) {
     pvq_search_scalar(x, y, k, n);
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn pvq_fast_select_init_neon(
@@ -903,9 +903,9 @@ pub fn pvq_search_fast_select(x: &[f32], y: &mut [i32], k: i32, n: usize) -> f32
     let mut abs_x_mu = [MaybeUninit::<f32>::uninit(); MAX_PVQ_N];
     let mut signs_mu = [MaybeUninit::<i32>::uninit(); MAX_PVQ_N];
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     let sum = unsafe { pvq_fast_select_init_neon(x, n, &mut abs_x_mu, &mut signs_mu) };
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
     let sum = {
         let mut s = 0.0f32;
         for i in 0..n {
@@ -948,7 +948,7 @@ pub fn pvq_search_fast_select(x: &[f32], y: &mut [i32], k: i32, n: usize) -> f32
     const BATCH_SIZE: i32 = 4;
 
     if k < BATCH_SIZE * 2 || n < 16 {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
         {
             use core::arch::aarch64::*;
             let mut y2f_mu = [MaybeUninit::<f32>::uninit(); MAX_PVQ_N];
@@ -1013,7 +1013,7 @@ pub fn pvq_search_fast_select(x: &[f32], y: &mut [i32], k: i32, n: usize) -> f32
                 }
             }
         }
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
         {
             let mut y2f = [0.0f32; MAX_PVQ_N];
             let abs_x_ptr = abs_x.as_ptr();
@@ -1129,7 +1129,7 @@ pub fn pvq_search_fast_select(x: &[f32], y: &mut [i32], k: i32, n: usize) -> f32
     yy
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn pvq_search_scalar_init_neon(
@@ -1320,9 +1320,12 @@ fn pvq_search_scalar(x: &[f32], y: &mut [i32], k: i32, n: usize) {
     let mut y2f = [0.0f32; 32];
     let mut sign_x = [0i32; 32];
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     let sum = unsafe { pvq_search_scalar_init_neon(x, n, &mut abs_x, &mut sign_x) };
-    #[cfg(all(not(target_arch = "aarch64"), target_arch = "x86_64"))]
+    #[cfg(all(
+        not(all(target_arch = "aarch64", feature = "host-simd")),
+        target_arch = "x86_64"
+    ))]
     let sum = unsafe {
         if crate::compat::x86_has_avx2() {
             pvq_search_scalar_init_avx2(x, n, &mut abs_x, &mut sign_x)
@@ -1338,7 +1341,10 @@ fn pvq_search_scalar(x: &[f32], y: &mut [i32], k: i32, n: usize) {
             s
         }
     };
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(not(any(
+        all(target_arch = "aarch64", feature = "host-simd"),
+        target_arch = "x86_64"
+    )))]
     let sum = {
         let mut s = 0.0f32;
         for i in 0..n {
@@ -1423,7 +1429,7 @@ fn pvq_search_scalar(x: &[f32], y: &mut [i32], k: i32, n: usize) {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline]
 fn pvq_search_neon(x: &[f32], y: &mut [i32], k: i32, n: usize) {
     use core::arch::aarch64::*;
@@ -1840,11 +1846,11 @@ unsafe fn pvq_search_avx2(x: &[f32], y: &mut [i32], k: i32, n: usize) {
 
 #[inline]
 fn exp_rotation1(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     unsafe {
         exp_rotation1_neon(x, len, stride, c, s);
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
     {
         exp_rotation1_scalar(x, len, stride, c, s);
     }
@@ -1869,7 +1875,7 @@ fn exp_rotation1_scalar(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn exp_rotation1_neon(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
@@ -1956,7 +1962,7 @@ pub fn exp_rotation(x: &mut [f32], length: usize, dir: i32, stride: usize, k: i3
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn extract_collapse_mask_neon(iy: &[i32], n: usize, b: usize) -> u32 {
@@ -2010,11 +2016,11 @@ pub fn extract_collapse_mask(iy: &[i32], n: usize, b: usize) -> u32 {
         return 1;
     }
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     unsafe {
         extract_collapse_mask_neon(iy, n, b)
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
     {
         let n0 = n / b;
         let mut collapse_mask = 0u32;
@@ -2181,7 +2187,7 @@ unsafe fn pvq_search_scalar_init_avx2(
     sum
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn renormalise_vector_neon(x: &mut [f32], n: usize, gain: f32) {
@@ -2257,7 +2263,7 @@ unsafe fn renormalise_vector_neon(x: &mut [f32], n: usize, gain: f32) {
 }
 
 pub fn renormalise_vector(x: &mut [f32], n: usize, gain: f32) {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     unsafe {
         renormalise_vector_neon(x, n, gain);
     }
@@ -2268,7 +2274,7 @@ pub fn renormalise_vector(x: &mut [f32], n: usize, gain: f32) {
             return;
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
     {
         let mut e = 1e-15f32;
         for i in 0..n {
@@ -2281,7 +2287,7 @@ pub fn renormalise_vector(x: &mut [f32], n: usize, gain: f32) {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn alg_quant_resynth_neon(y: &[i32], x: &mut [f32], n: usize, gain: f32) {
@@ -2333,7 +2339,7 @@ unsafe fn alg_quant_resynth_neon(y: &[i32], x: &mut [f32], n: usize, gain: f32) 
     }
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
 #[inline(always)]
 fn alg_quant_resynth_scalar(y: &[i32], x: &mut [f32], n: usize, gain: f32) {
     #[cfg(target_arch = "x86_64")]
@@ -2391,11 +2397,11 @@ pub fn alg_quant(
         encode_pulses(y, n as u32, k as u32, rc);
 
         if resynth {
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
             unsafe {
                 alg_quant_resynth_neon(y, x, n, gain);
             }
-            #[cfg(not(target_arch = "aarch64"))]
+            #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
             alg_quant_resynth_scalar(y, x, n, gain);
             exp_rotation(x, n, -1, stride, k, spread);
         }
@@ -2411,11 +2417,11 @@ pub fn alg_quant(
         encode_pulses(&y[..n], n as u32, k as u32, rc);
 
         if resynth {
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
             unsafe {
                 alg_quant_resynth_neon(y, x, n, gain);
             }
-            #[cfg(not(target_arch = "aarch64"))]
+            #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
             alg_quant_resynth_scalar(y, x, n, gain);
             exp_rotation(x, n, -1, stride, k, spread);
         }
@@ -2461,11 +2467,11 @@ pub fn alg_quant_qext(
             }
 
             if resynth {
-                #[cfg(target_arch = "aarch64")]
+                #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
                 unsafe {
                     alg_quant_resynth_neon(y, x, n, gain);
                 }
-                #[cfg(not(target_arch = "aarch64"))]
+                #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
                 alg_quant_resynth_scalar(y, x, n, gain);
                 exp_rotation(x, n, -1, stride, k, spread);
             }
@@ -2490,11 +2496,11 @@ pub fn alg_quant_qext(
             }
 
             if resynth {
-                #[cfg(target_arch = "aarch64")]
+                #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
                 unsafe {
                     alg_quant_resynth_neon(&up_y, x, n, gain);
                 }
-                #[cfg(not(target_arch = "aarch64"))]
+                #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
                 alg_quant_resynth_scalar(&up_y, x, n, gain);
                 exp_rotation(x, n, -1, stride, k, spread);
             }
@@ -2506,11 +2512,11 @@ pub fn alg_quant_qext(
         encode_pulses(y, n as u32, k as u32, rc);
 
         if resynth {
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
             unsafe {
                 alg_quant_resynth_neon(y, x, n, gain);
             }
-            #[cfg(not(target_arch = "aarch64"))]
+            #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
             alg_quant_resynth_scalar(y, x, n, gain);
             exp_rotation(x, n, -1, stride, k, spread);
         }
@@ -2558,11 +2564,11 @@ pub fn alg_unquant(
 
     let mask = extract_collapse_mask(&y[..n], n, stride);
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     unsafe {
         alg_quant_resynth_neon(&y[..n], x, n, gain);
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
     {
         alg_quant_resynth_scalar(&y[..n], x, n, gain);
     }

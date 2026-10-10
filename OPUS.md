@@ -694,3 +694,80 @@ cycle counting.
   need their own on-target equivalence statement (per-packet fold compare +
   mismatch census like the host witness's ±1 LSB rule). Cycle counting
   stays behind both arms green.
+
+## Status (2026-10-09): vendor patch 5 — the packet-61 witness: the fusion was the crate's OWN NEON paths; the strict host walk matches the ROM 501/501; both arms green on-target for the first time
+
+- **What lands:** **vendor patch 5** (see PATCHES.md) — every
+  `target_arch = "aarch64"` cfg predicate in the vendored crate (140 sites,
+  9 files) becomes `all(target_arch = "aarch64", feature = "host-simd")`;
+  new manifest feature `host-simd = []`, **default OFF**. OFF is the
+  product equivalence class: the host executes the same scalar f32 paths
+  thumbv4t runs. ON reproduces upstream host behavior bit-for-bit. The
+  consumer crate forwards the feature (`opus_spike` `host-simd =
+  ["opus-rs/host-simd"]`), unused by any gate. With the patch, the
+  generator re-measures the music golden through the strict path: blobs
+  byte-identical, `fold_mismatch` 127 → **126**, `fnv_walk_fold` →
+  **`0xa781907825ab00aa`** (align_shift 312 unchanged). The 2026-10-08
+  prose claiming 127 residuals is corrected in place (checksum.rs,
+  witness doc, assets.rs doc via the generator template); the pins are the
+  truth.
+- **Prior-hypothesis correction (2026-10-08 "host f32 multiply-add
+  contraction" measured FALSE in its LLVM sense).** The 75-site FMA census
+  was real, but the sites are NOT rustc/LLVM contracting `a*b+c`: they are
+  the published crate's explicit `vfmaq_f32` NEON kernels (quantizers,
+  PVQ resynth, MDCT rotations, KissFFT, pitch, SILK sigproc) behind
+  `#[cfg(target_arch = "aarch64")]`. That is why every flag disproof was
+  inert — no flag unfuses an intrinsic. The scratch witness that proved
+  it: flipping the 144 cfg spellings in a throwaway vendor copy (no other
+  edit) made the host walk's final fold **exactly the ROM's**
+  `0xA781907825AB00AA` with **501/501 per-packet running hashes matching
+  the ROM log** (packet 61 included), and the rebuilt binary's FMA census
+  dropped 75 → 0. SILK unchanged at its pin (0 residuals — it never took a
+  fused path; matching which arm stayed bit-exact was never coincidence).
+- **Mechanism, stated precisely.** Hard-float hosts run NEON (fused);
+  thumbv4t cannot (soft-float `__aeabi_*`, no FMA). Sub-ULP drift is
+  carried from sample 0 by the decode state machine: control-vs-strict
+  sample census 90,921/480,960 differing, max |Δ| 0.001 i16-LSB — invisible
+  on the fold grid until a crossing at packet 61 flips the running hash.
+  Both sides were always deterministic; the split was decoder-path class,
+  not numerics noise.
+- **The witness is landed as an equivalence-class statement, not a
+  one-off experiment.** Default-off gating means the committed host gates
+  (`make opus-test`, the generator's pins, `dump_walk`) now run on the
+  class the ROM lives on. **On-target: PR 3 verdict PASSED — screen BLUE —
+  both arms green for the first time** (proof ROM `fbe2a6b6…`, serial
+  run: silk `0x79E9DCEABA485BEE` MATCH, music `0xA781907825AB00AA` MATCH,
+  region FNVs MATCH, heap placement OK).
+- **Zero-target-effect witnesses.** (1) ROM rebuilt with patch 5 ALONE
+  (before the pin re-measure) is **byte-identical** to the patch-4 ROM
+  (`ff1ab006…`) — the cfg gating changes no thumbv4t codegen. (2) The
+  final ROM differs from it in exactly **50 bytes**: the 9 pin-data bytes
+  (music `fnv_walk_fold` u64 + `fold_mismatch` word) and 41 embedded
+  panic-location line numbers shifted +3/+6 by the nine 4-line rustfmt
+  wraps the gating required (hand-edited; the vendor tree is never
+  `cargo fmt`-ed). `probe::decode_packet` still @ `0x08025E0D` — zero
+  instruction delta. (3) `host-simd`-ON rebuilds reproduce BOTH old
+  goldens bit-exactly (music `0x0C01DDF101FAFA3F`, silk unchanged) —
+  upstream comparability intact, and why ON must never repin the gate:
+  its music golden embeds fused-NEON rounding the GBA cannot reproduce.
+- **Gates.** `make opus-test` **16 green** (the witness re-derives the new
+  pins on the strict path — fold_mismatch 126 with every delta ≤ 1 LSB);
+  `make check` clean; vendor thumbv4t standalone build clean; vendor
+  host default-features build clean (gate-neutral cwd); fmt drift
+  unchanged at the **17-diff** upstream baseline (per-file counts; the
+  patch adds zero — the six new complaints my single-line gating produced
+  were hand-wrapped away, restoring the exact baseline set).
+- **Scoping decision (Sam, 2026-10-09).** The mode-transition PLC-bridge
+  stack latent (patch 4's stated limit, 34,080 B > 32,512 B) is **parked
+  by product design**: ROM audio packaging is under our control and stays
+  mode-pure per clip, so no shipped stream takes the bridge. Not a fix
+  candidate until multi-mode streams are ever bundled.
+- **Next PR (named, correctness-before-speed order holds):** with both
+  arms green, the gate unblocks step 5 of the measurement plan — the
+  **cycle harness** (timer2/timer3 cascade at /1, empty-window calibration
+  subtracted, IRQs off in the window, decode+resample timed together per
+  packet, min/max/sum to mGBA serial, division-free with the mean derived
+  host-side; budget 335,600 cycles/packet = 349 c/sample, worst frame
+  next to mean). The strict default also becomes the perf-gate's numeric
+  baseline: cycle counts measured on NEON host paths would not describe
+  the class the ROM lives on.

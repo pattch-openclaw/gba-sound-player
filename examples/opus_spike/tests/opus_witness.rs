@@ -29,7 +29,8 @@
 //!    SILK arm aligns 3 samples early — comparing at pre_skip "disagreed" on
 //!    478,439/480,000 samples that decode correctly); and on the round-half-up
 //!    grid the residuals are soft-float drift, bounded: exactly
-//!    `fold_mismatch` samples off, every one ≤ 1 LSB (SILK: 0; CELT: 127).
+//!    `fold_mismatch` samples off, every one ≤ 1 LSB (per-arm pins; strict
+//!    class 2026-10-09: SILK 0, CELT 126).
 //!    Raw f32 is never compared — it is not bit-exact between the decoders.
 //! 3. **Geometry pins** — manifest/region/census agreement re-derived from
 //!    the generated table (a no-degenerate-arms sanity net: packet count,

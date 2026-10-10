@@ -125,7 +125,7 @@ fn silk_nsq_del_dec_scale_states(
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn silk_lpc_prediction_neon(
@@ -182,7 +182,7 @@ fn silk_noise_shape_quantizer_short_prediction(
     a_q12: &[i16],
     predict_lpc_order: i32,
 ) -> i32 {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     // SAFETY: aarch64 always has NEON; bounds are guaranteed by SILK frame sizing.
     unsafe {
         return silk_lpc_prediction_neon(ps_lpc_q14, idx, a_q12, predict_lpc_order);

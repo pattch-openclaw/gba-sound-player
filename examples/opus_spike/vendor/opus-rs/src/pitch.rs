@@ -6,7 +6,7 @@ use crate::fixedvec::FixedVec;
 /// `COMBFILTER_MAXPERIOD = 1024` and the maximum pitch lag.
 const PITCH_BUF_MAX: usize = 1024;
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 use crate::celt_lpc::{autocorr, lpc};
 
 pub fn inner_prod(x: &[f32], y: &[f32], n: usize) -> f32 {
@@ -16,7 +16,7 @@ pub fn inner_prod(x: &[f32], y: &[f32], n: usize) -> f32 {
             return inner_prod_avx(x, y, n);
         }
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     unsafe {
         inner_prod_neon(x, y, n)
     }
@@ -25,7 +25,7 @@ pub fn inner_prod(x: &[f32], y: &[f32], n: usize) -> f32 {
         inner_prod_sse(x, y, n)
     }
     #[cfg(not(any(
-        target_arch = "aarch64",
+        all(target_arch = "aarch64", feature = "host-simd"),
         all(target_arch = "x86_64", target_feature = "sse")
     )))]
     {
@@ -44,7 +44,7 @@ pub fn dual_inner_prod(x: &[f32], y1: &[f32], y2: &[f32], n: usize) -> (f32, f32
             return dual_inner_prod_avx(x, y1, y2, n);
         }
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     unsafe {
         dual_inner_prod_neon(x, y1, y2, n)
     }
@@ -53,7 +53,7 @@ pub fn dual_inner_prod(x: &[f32], y1: &[f32], y2: &[f32], n: usize) -> (f32, f32
         dual_inner_prod_sse(x, y1, y2, n)
     }
     #[cfg(not(any(
-        target_arch = "aarch64",
+        all(target_arch = "aarch64", feature = "host-simd"),
         all(target_arch = "x86_64", target_feature = "sse")
     )))]
     {
@@ -85,7 +85,7 @@ pub fn pitch_xcorr(x: &[f32], y: &[f32], xcorr: &mut [f32], len: usize, max_pitc
             return pitch_xcorr_avx(x, y, xcorr, len, max_pitch);
         }
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     {
         if max_pitch >= 32 {
             unsafe {
@@ -101,7 +101,7 @@ pub fn pitch_xcorr(x: &[f32], y: &[f32], xcorr: &mut [f32], len: usize, max_pitc
         pitch_xcorr_sse(x, y, xcorr, len, max_pitch)
     }
     #[cfg(not(any(
-        target_arch = "aarch64",
+        all(target_arch = "aarch64", feature = "host-simd"),
         all(target_arch = "x86_64", target_feature = "sse")
     )))]
     {
@@ -111,7 +111,7 @@ pub fn pitch_xcorr(x: &[f32], y: &[f32], xcorr: &mut [f32], len: usize, max_pitc
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn inner_prod_neon(x: &[f32], y: &[f32], n: usize) -> f32 {
@@ -148,7 +148,7 @@ unsafe fn inner_prod_neon(x: &[f32], y: &[f32], n: usize) -> f32 {
     sum
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn dual_inner_prod_neon(x: &[f32], y1: &[f32], y2: &[f32], n: usize) -> (f32, f32) {
@@ -197,7 +197,7 @@ unsafe fn dual_inner_prod_neon(x: &[f32], y1: &[f32], y2: &[f32], n: usize) -> (
     (s1, s2)
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn xcorr_kernel_neon(x: &[f32], y: &[f32], sum: &mut [f32; 4], mut len: usize) {
@@ -280,7 +280,7 @@ unsafe fn xcorr_kernel_neon(x: &[f32], y: &[f32], sum: &mut [f32; 4], mut len: u
     vst1q_f32(sum.as_mut_ptr(), summ);
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn pitch_xcorr_neon(x: &[f32], y: &[f32], xcorr: &mut [f32], len: usize, max_pitch: usize) {
@@ -720,7 +720,7 @@ unsafe fn xcorr_kernel_avx(x: &[f32], y: &[f32], sum: &mut [f32; 4], len: usize)
     _mm_storeu_ps(sum.as_mut_ptr(), _mm_add_ps(xsum1, xsum2));
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 fn celt_fir5(x: &mut [f32], num: &[f32], n: usize) {
     let mut mem = [0.0f32; 5];
 
@@ -759,7 +759,7 @@ pub fn pitch_downsample(x: &[&[f32]], x_lp: &mut [f32], len: usize, c: usize, fa
     // samples per channel; only take it when every channel actually provides
     // them (the scalar loop below bounds-checks per sample instead)
     // (issue #27 deep scan).
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     if factor == 2 && c <= 2 && x.iter().take(c).all(|s| s.len() >= factor * len + offset) {
         pitch_downsample_neon(x, x_lp, len, c, offset);
         return;
@@ -801,7 +801,7 @@ fn pitch_downsample_boundary(x: &[&[f32]], x_lp: &mut [f32], c: usize, offset: u
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 fn pitch_downsample_neon(x: &[&[f32]], x_lp: &mut [f32], len: usize, c: usize, offset: usize) {
     use core::arch::aarch64::*;
 
@@ -905,7 +905,7 @@ fn find_best_pitch(
     best_pitch[0] = 0;
     best_pitch[1] = 1;
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     let mut syy = unsafe {
         use core::arch::aarch64::*;
         let mut sum_vec = vdupq_n_f32(0.0);
@@ -976,7 +976,11 @@ fn find_best_pitch(
             sum
         }
     };
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86", target_arch = "x86_64")))]
+    #[cfg(not(any(
+        all(target_arch = "aarch64", feature = "host-simd"),
+        target_arch = "x86",
+        target_arch = "x86_64"
+    )))]
     let mut syy = {
         let mut sum = 1.0f32;
         for j in 0..len {
@@ -1143,11 +1147,11 @@ static SECOND_CHECK: [usize; 16] = [0, 0, 3, 2, 3, 2, 5, 2, 3, 2, 3, 2, 5, 2, 3,
 
 #[inline(always)]
 fn sum_squares(x: &[f32], n: usize) -> f32 {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     unsafe {
         inner_prod_neon(x, x, n)
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
     {
         let mut sum = 0.0f32;
         for i in 0..n {

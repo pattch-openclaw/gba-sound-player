@@ -258,14 +258,14 @@ impl MdctLookup {
         }
         #[cfg(all(
             not(any(target_arch = "x86", target_arch = "x86_64")),
-            target_arch = "aarch64"
+            all(target_arch = "aarch64", feature = "host-simd")
         ))]
         {
             mdct_pre_rotation_neon(f, f2, trig, &st.bitrev[..n4], n4, scale);
         }
         #[cfg(all(
             not(any(target_arch = "x86", target_arch = "x86_64")),
-            not(target_arch = "aarch64")
+            not(all(target_arch = "aarch64", feature = "host-simd"))
         ))]
         for i in 0..n4 {
             let re = f[2 * i];
@@ -301,14 +301,14 @@ impl MdctLookup {
         }
         #[cfg(all(
             not(any(target_arch = "x86", target_arch = "x86_64")),
-            target_arch = "aarch64"
+            all(target_arch = "aarch64", feature = "host-simd")
         ))]
         {
             mdct_post_rotation_neon(f2, trig, output, n4, n2, stride);
         }
         #[cfg(all(
             not(any(target_arch = "x86", target_arch = "x86_64")),
-            not(target_arch = "aarch64")
+            not(all(target_arch = "aarch64", feature = "host-simd"))
         ))]
         for i in 0..n4 {
             let fp = &f2[i];
@@ -394,14 +394,14 @@ impl MdctLookup {
         }
         #[cfg(all(
             not(any(target_arch = "x86", target_arch = "x86_64")),
-            target_arch = "aarch64"
+            all(target_arch = "aarch64", feature = "host-simd")
         ))]
         {
             mdct_backward_pre_rotation_neon(input, f2, trig, &st.bitrev[..n4], n4, n2, stride);
         }
         #[cfg(all(
             not(any(target_arch = "x86", target_arch = "x86_64")),
-            not(target_arch = "aarch64")
+            not(all(target_arch = "aarch64", feature = "host-simd"))
         ))]
         for i in 0..n4 {
             let rev = st.bitrev[i] as usize;
@@ -450,14 +450,14 @@ impl MdctLookup {
         }
         #[cfg(all(
             not(any(target_arch = "x86", target_arch = "x86_64")),
-            target_arch = "aarch64"
+            all(target_arch = "aarch64", feature = "host-simd")
         ))]
         {
             mdct_backward_post_rotation_neon(f2, trig, output, n4, n2, overlap2);
         }
         #[cfg(all(
             not(any(target_arch = "x86", target_arch = "x86_64")),
-            not(target_arch = "aarch64")
+            not(all(target_arch = "aarch64", feature = "host-simd"))
         ))]
         for i in 0..((n4 + 1) >> 1) {
             let im0 = f2[i].r;
@@ -501,14 +501,14 @@ impl MdctLookup {
         }
         #[cfg(all(
             not(any(target_arch = "x86", target_arch = "x86_64")),
-            target_arch = "aarch64"
+            all(target_arch = "aarch64", feature = "host-simd")
         ))]
         {
             mdct_tdac_neon(output, window, overlap);
         }
         #[cfg(all(
             not(any(target_arch = "x86", target_arch = "x86_64")),
-            not(target_arch = "aarch64")
+            not(all(target_arch = "aarch64", feature = "host-simd"))
         ))]
         for i in 0..overlap2 {
             let x1 = output[overlap - 1 - i];
@@ -677,7 +677,7 @@ unsafe fn mdct_tdac_avx(output: &mut [f32], window: &[f32], overlap: usize) {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 fn mdct_pre_rotation_neon(
     f: &[f32],
@@ -742,7 +742,7 @@ fn mdct_pre_rotation_neon(
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 fn mdct_post_rotation_neon(
     f2: &[KissCpx],
@@ -813,7 +813,7 @@ fn mdct_post_rotation_neon(
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 fn mdct_backward_pre_rotation_neon(
     input: &[f32],
@@ -895,7 +895,7 @@ fn mdct_backward_pre_rotation_neon(
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 fn mdct_backward_post_rotation_neon(
     f2: &[KissCpx],
@@ -981,7 +981,7 @@ fn mdct_backward_post_rotation_neon(
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 fn mdct_tdac_neon(output: &mut [f32], window: &[f32], overlap: usize) {
     use core::arch::aarch64::*;

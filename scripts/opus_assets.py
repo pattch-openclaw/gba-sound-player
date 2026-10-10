@@ -483,8 +483,10 @@ def emit(crate, encoder_version, per_arm):
     rustdoc(w, "Fold-grid mismatches at `align_shift` on the round-half-up")
     rustdoc(w, "grid (the measured equivalence class — NOT the vendored")
     rustdoc(w, "truncate): the witness asserts exactly this count and every")
-    rustdoc(w, "residual ≤ 1 LSB. Measured 2026-10-02: SILK 0; CELT 127 of")
-    rustdoc(w, "480,000 (soft-float drift crossing grid boundaries).")
+    rustdoc(w, "residual ≤ 1 LSB. Measured 2026-10-09 on the strict")
+    rustdoc(w, "(host-simd OFF) equivalence class: SILK 0; CELT 126 of")
+    rustdoc(w, "480,000 (soft-float drift crossing grid boundaries; the")
+    rustdoc(w, "pre-patch-5 NEON host measured 127 — see OPUS.md).")
     w("    pub fold_mismatch: u32,")
     rustdoc(w, "Packet count.")
     w("    pub packets: usize,")
@@ -633,6 +635,10 @@ def opus_assets(tmp, crate, encoder_version):
         # Measured 2026-10-02 (ffmpeg 9.0.1, vendored opus-rs 0.1.34, round
         # half up): silk shift 309 (= pre_skip − 3), 0 mismatches; music
         # shift 312 (= pre_skip), 127 mismatches, all ±1 LSB.
+        # Re-measured 2026-10-09 through the strict default (vendor patch 5:
+        # host-simd feature OFF = the thumbv4t scalar equivalence class):
+        # music 126 mismatches — the fused NEON tails accounted for one
+        # grid crossing of the 2026-10-02 count. Silk unchanged at 0.
         align_shift, fold_mismatch, fold_max_lsb = discover_alignment(
             walk_bytes, ref_bytes, pre_skip)
         if abs(align_shift - pre_skip) > 16:
