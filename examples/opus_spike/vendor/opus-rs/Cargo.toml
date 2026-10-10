@@ -18,6 +18,13 @@ default = ["std", "heap"]
 heap = ["std"]
 libm = ["dep:libm"]
 std = []
+# VENDOR PATCH 5 (PATCHES.md): opt-IN host NEON. Every aarch64 SIMD cfg is
+# gated behind `all(target_arch = "aarch64", feature = "host-simd")`. OFF is
+# the product/ROM equivalence class: the host walk then executes the same
+# scalar arithmetic the thumbv4t soft-float target runs (the NEON paths fuse
+# mul+add via `vfmaq_f32`, which ARM7TDMI cannot). ON reproduces upstream
+# 0.1.34 host behavior exactly. thumbv4t never compiles NEON either way.
+host-simd = []
 
 [dependencies]
 libm = { version = "0.2", optional = true, default-features = false }

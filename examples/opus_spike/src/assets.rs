@@ -71,8 +71,10 @@ pub struct OpusClip {
     /// Fold-grid mismatches at `align_shift` on the round-half-up
     /// grid (the measured equivalence class — NOT the vendored
     /// truncate): the witness asserts exactly this count and every
-    /// residual ≤ 1 LSB. Measured 2026-10-02: SILK 0; CELT 127 of
-    /// 480,000 (soft-float drift crossing grid boundaries).
+    /// residual ≤ 1 LSB. Measured 2026-10-09 on the strict
+    /// (host-simd OFF) equivalence class: SILK 0; CELT 126 of
+    /// 480,000 (soft-float drift crossing grid boundaries; the
+    /// pre-patch-5 NEON host measured 127 — see OPUS.md).
     pub fold_mismatch: u32,
     /// Packet count.
     pub packets: usize,
@@ -4152,13 +4154,13 @@ pub const OPUS_MUSIC: OpusClip = OpusClip {
     channels: 1,
     pre_skip: 312,
     align_shift: 312,
-    fold_mismatch: 127,
+    fold_mismatch: 126,
     packets: 501,
     walk_samples: 480960,
     ref_bytes_len: 1920000,
     fnv_packets: 0x24e4329875944a91,
     fnv_ref_pcm: 0xb11a8c59f1f26183,
-    fnv_walk_fold: 0x0c01ddf101fafa3f,
+    fnv_walk_fold: 0xa781907825ab00aa,
     ref_file: "opus_music_ref.bin",
     index: OPUS_MUSIC_INDEX,
     region: include_bytes!("../assets/opus_music_packets.bin"),

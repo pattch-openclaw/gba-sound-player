@@ -103,11 +103,11 @@ pub fn silk_biquad_alt_stride2(
     s: &mut [i32],
     len: usize,
 ) {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     unsafe {
         silk_biquad_alt_stride2_neon(input_output, b_q28, a_q28, s, len);
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
     {
         let a0_l_q28 = (-a_q28[0]) & 0x00003FFF;
         let a0_u_q28 = -a_q28[0] >> 14;
@@ -141,7 +141,7 @@ pub fn silk_biquad_alt_stride2(
 
 #[inline]
 fn xcorr_kernel_c(x: &[i16], y: &[i16], sum: &mut [i32; 4], len: usize) {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     {
         unsafe {
             xcorr_kernel_neon_s16(x, y, sum, len);
@@ -152,7 +152,7 @@ fn xcorr_kernel_c(x: &[i16], y: &[i16], sum: &mut [i32; 4], len: usize) {
         unsafe { xcorr_kernel_avx2(x, y, sum, len) };
         return;
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
     xcorr_kernel_scalar(x, y, sum, len);
 }
 
@@ -228,7 +228,7 @@ fn xcorr_kernel_scalar(x: &[i16], y: &[i16], sum: &mut [i32; 4], len: usize) {
     let _ = (y_0, y_1, y_2, y_3);
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn xcorr_kernel_neon_s16(x: &[i16], y: &[i16], sum: &mut [i32; 4], mut len: usize) {
@@ -418,7 +418,7 @@ pub fn silk_sum_sqr_shift(energy: &mut i32, shift: &mut i32, x: &[i16], len: usi
 
     shft = (shft + 3 - silk_clz32(nrg)).max(0);
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     {
         nrg = unsafe { silk_sum_sqr_shift_neon(x, len, shft) };
     }
@@ -439,7 +439,10 @@ pub fn silk_sum_sqr_shift(energy: &mut i32, shift: &mut i32, x: &[i16], len: usi
             nrg = nrg.wrapping_add((nrg_tmp >> shft) as i32);
         }
     }
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(not(any(
+        all(target_arch = "aarch64", feature = "host-simd"),
+        target_arch = "x86_64"
+    )))]
     {
         nrg = 0;
         i = 0;
@@ -459,7 +462,7 @@ pub fn silk_sum_sqr_shift(energy: &mut i32, shift: &mut i32, x: &[i16], len: usi
     *energy = nrg;
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn silk_sum_sqr_shift_neon(x: &[i16], len: usize, shft: i32) -> i32 {
@@ -497,7 +500,7 @@ unsafe fn silk_sum_sqr_shift_neon(x: &[i16], len: usize, shft: i32) -> i32 {
 
 #[inline(always)]
 pub fn silk_inner_prod_aligned(ptr1: &[i16], ptr2: &[i16], len: usize) -> i32 {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     unsafe {
         silk_inner_prod_aligned_neon(ptr1, ptr2, len)
     }
@@ -505,7 +508,7 @@ pub fn silk_inner_prod_aligned(ptr1: &[i16], ptr2: &[i16], len: usize) -> i32 {
     if crate::compat::x86_has_avx2() {
         return unsafe { silk_inner_prod_aligned_avx2(ptr1, ptr2, len) };
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
     silk_inner_prod_aligned_scalar(ptr1, ptr2, len)
 }
 
@@ -539,7 +542,7 @@ fn silk_inner_prod_aligned_scalar(ptr1: &[i16], ptr2: &[i16], len: usize) -> i32
         .wrapping_add(sum3)
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn silk_inner_prod_aligned_neon(ptr1: &[i16], ptr2: &[i16], len: usize) -> i32 {
@@ -928,7 +931,7 @@ pub fn silk_lpc_analysis_filter(
         return;
     }
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     {
         // NEON-backed inner-product path helps most for larger orders (e.g. d=16)
         // and can regress small orders due to setup overhead.
@@ -939,7 +942,7 @@ pub fn silk_lpc_analysis_filter(
         }
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
     {
         silk_lpc_analysis_filter_scalar(out, input, b, len, d);
     }
@@ -1007,7 +1010,7 @@ fn silk_lpc_analysis_filter_scalar(
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 fn silk_lpc_analysis_filter_aarch64(
     out: &mut [i16],
@@ -1267,7 +1270,7 @@ unsafe fn silk_lpc_analysis_filter_avx2(
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn silk_biquad_alt_stride2_neon(

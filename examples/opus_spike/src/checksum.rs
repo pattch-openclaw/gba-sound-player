@@ -22,13 +22,16 @@
 //! the port's sub-LSB float drift into a ±1 LSB disagreement on ~50% of the
 //! CELT music arm's samples (240,397 / 480,000). Round-to-nearest collapses
 //! the same comparison to 127 mismatches (all exactly ±1 LSB, all drift-band
-//! crossings); the SILK arm is 0-mismatch on either convention once aligned.
+//! crossings; 126 since vendor patch 5 moved the host to the strict scalar
+//! equivalence class — 2026-10-09, the pins are the truth); the SILK arm is
+//! 0-mismatch on either convention once aligned.
 //! So the grid below is **round half up**: the grid that witnesses decoder
 //! equivalence rather than amplifying float drift. Half-up (floor(v+0.5)) is
 //! pinned over half-away-from-zero (`f32::round`) at the exact .5 cases so
-//! the convention is stated, not inherited; the residual 127 samples are
-//! measured, capped, and named by the witness (tests/opus_witness.rs
-//! layer 2), never absorbed by loosening this function.
+//! the convention is stated, not inherited; the residual samples
+//! (per-arm `fold_mismatch` pin) are measured, capped, and named by the
+//! witness (tests/opus_witness.rs layer 2), never absorbed by loosening
+//! this function.
 
 /// FNV-1a 64 offset basis.
 pub const FNV_OFFSET: u64 = 0xCBF4_3CE9_5DE6_84B7;
@@ -79,7 +82,8 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
 /// clamp to the i16 range. This is the measured equivalence grid between
 /// the vendored port and ffmpeg/libopus (module doc; measured 2026-10-02:
 /// SILK 0 mismatches, CELT 127 @ exactly ±1 LSB with this rule vs 240,397
-/// with the vendored truncate-toward-zero).
+/// with the vendored truncate-toward-zero; 2026-10-09 strict-class re-
+/// measure: music 126 — the per-arm `fold_mismatch` pin is the truth).
 ///
 /// No float library: the crate is `#![no_std]`, so `floor` is not an
 /// inherent method — the half-up rounding is done with a saturating `as

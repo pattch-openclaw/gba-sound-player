@@ -12,8 +12,8 @@
 //! The pin per arm is `fnv_walk_fold`: the hash of the **vendored walk's own
 //! folded output**, measured by the generator over the `dump_walk` dump of
 //! this exact seam. It is deliberately NOT the reference-PCM hash: Opus is
-//! lossy and the port drifts ±1 LSB from libopus (127 measured residuals on
-//! the music arm), so the walk's hash can never equal the reference's — the
+//! lossy and the port drifts ±1 LSB from libopus (per-arm `fold_mismatch`
+//! residuals on the music arm), so the walk's hash can never equal the reference's — the
 //! reference comparison stays the host witness's layer (OPUS.md, step-2
 //! findings). The chain that makes the on-target number meaningful is
 //! therefore: region-FNV proves the ROM carries the generator's bytes →

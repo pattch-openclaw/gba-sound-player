@@ -198,7 +198,7 @@ pub fn spreading_decision(
 }
 
 pub fn haar1(x: &mut [f32], n0: usize, stride: usize) {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     {
         if stride == 1 && n0 >= 64 {
             haar1_neon(x, n0);
@@ -218,7 +218,7 @@ pub fn haar1(x: &mut [f32], n0: usize, stride: usize) {
             return;
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
     haar1_scalar(x, n0, stride);
 }
 
@@ -289,7 +289,7 @@ fn haar1_scalar(x: &mut [f32], n0: usize, stride: usize) {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 fn haar1_neon(x: &mut [f32], n0: usize) {
     use core::arch::aarch64::*;
 
@@ -348,7 +348,7 @@ pub fn compute_qn(n: usize, b: i32, offset: i32, pulse_cap: i32, stereo: bool) -
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn stereo_itheta_neon(x: &[f32], y: &[f32], stereo: bool, n: usize) -> i32 {
@@ -496,19 +496,19 @@ unsafe fn stereo_itheta_neon(x: &[f32], y: &[f32], stereo: bool, n: usize) -> i3
 }
 
 #[inline(always)]
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 pub fn stereo_itheta(x: &[f32], y: &[f32], stereo: bool, n: usize) -> i32 {
     unsafe { stereo_itheta_neon(x, y, stereo, n) }
 }
 
 #[inline(always)]
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
 pub fn stereo_itheta(x: &[f32], y: &[f32], stereo: bool, n: usize) -> i32 {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     unsafe {
         return stereo_itheta_neon(x, y, stereo, n);
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
     {
         let mut emid = 1e-15f32;
         let mut eside = 1e-15f32;
@@ -1367,7 +1367,7 @@ pub fn quant_partition(
                 if fill_masked == 0 {
                     x[..n].fill(0.0);
                 } else if let Some(lb) = lowband {
-                    #[cfg(target_arch = "aarch64")]
+                    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
                     unsafe {
                         use core::arch::aarch64::*;
                         let n8 = n & !7;
@@ -1402,7 +1402,7 @@ pub fn quant_partition(
                                 };
                         }
                     }
-                    #[cfg(not(target_arch = "aarch64"))]
+                    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
                     {
                         for j in 0..n {
                             ctx.seed = celt_lcg_rand(ctx.seed);
@@ -1430,7 +1430,7 @@ pub fn quant_partition(
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 unsafe fn deinterleave_hadamard_neon(x: &mut [f32], n0: usize, stride: usize) {
     let n = n0 * stride;
@@ -1469,7 +1469,7 @@ pub fn deinterleave_hadamard(x: &mut [f32], n0: usize, stride: usize, hadamard: 
             }
         }
     } else {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
         unsafe {
             if n0 >= 4 {
                 deinterleave_hadamard_neon(x, n0, stride);
@@ -1485,7 +1485,7 @@ pub fn deinterleave_hadamard(x: &mut [f32], n0: usize, stride: usize, hadamard: 
     x[..n].copy_from_slice(tmp);
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 unsafe fn interleave_hadamard_neon(x: &mut [f32], n0: usize, stride: usize) {
     let n = n0 * stride;
@@ -1522,7 +1522,7 @@ pub fn interleave_hadamard(x: &mut [f32], n0: usize, stride: usize, hadamard: bo
             }
         }
     } else {
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
         unsafe {
             if n0 >= 4 {
                 interleave_hadamard_neon(x, n0, stride);
@@ -1925,7 +1925,7 @@ fn stereo_merge_scalar(x: &mut [f32], y: &mut [f32], mid: f32, side: f32, n: usi
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[allow(dead_code)]
 fn stereo_merge_neon(x: &mut [f32], y: &mut [f32], mid: f32, side: f32, n: usize) {
     use core::arch::aarch64::*;
@@ -2468,7 +2468,7 @@ pub fn quant_all_bands(
     *seed = ctx_seed;
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 fn compute_band_energy_neon(band: &[f32]) -> f32 {
     use core::arch::aarch64::*;
 
@@ -2584,7 +2584,7 @@ pub fn compute_band_energies(
             let n = ((m.e_bands[i + 1] - m.e_bands[i]) as usize) << lm;
             let band = &ch[offset..offset + n];
 
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
             {
                 band_e[c * m.nb_ebands + i] = compute_band_energy_neon(band);
             }
@@ -2597,7 +2597,10 @@ pub fn compute_band_energies(
                     band_e[c * m.nb_ebands + i] = sum.sqrt();
                 }
             }
-            #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "x86_64")))]
+            #[cfg(all(
+                not(all(target_arch = "aarch64", feature = "host-simd")),
+                not(target_arch = "x86_64")
+            ))]
             {
                 let sum = band.iter().fold(1e-27f32, |acc, &v| acc + v * v);
                 band_e[c * m.nb_ebands + i] = sum.sqrt();
@@ -2658,7 +2661,7 @@ pub fn normalise_bands(
                 unsafe { scale_slice_avx2(src, dst, norm, n) };
                 continue;
             }
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
             if n >= 8 {
                 unsafe { scale_slice_neon(src, dst, norm, n) };
                 continue;
@@ -2697,7 +2700,7 @@ unsafe fn scale_slice_avx2(src: &[f32], dst: &mut [f32], scale: f32, n: usize) {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn scale_slice_neon(src: &[f32], dst: &mut [f32], scale: f32, n: usize) {
@@ -2764,7 +2767,7 @@ pub fn denormalise_bands(
                 unsafe { scale_slice_avx2(src, dst, g, n) };
                 continue;
             }
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
             if n >= 8 {
                 unsafe { scale_slice_neon(src, dst, g, n) };
                 continue;
@@ -2780,7 +2783,7 @@ pub fn celt_lcg_rand(seed: u32) -> u32 {
     seed.wrapping_mul(1664525).wrapping_add(1013904223)
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn renormalise_vector_neon(x: &mut [f32], n: usize, gain: f32) {
@@ -2918,7 +2921,7 @@ unsafe fn renormalise_vector_avx2(x: &mut [f32], n: usize, gain: f32) {
 }
 
 pub fn renormalise_vector(x: &mut [f32], n: usize, gain: f32) {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     unsafe {
         renormalise_vector_neon(x, n, gain);
     }
@@ -2929,7 +2932,10 @@ pub fn renormalise_vector(x: &mut [f32], n: usize, gain: f32) {
             return;
         }
     }
-    #[cfg(all(not(target_arch = "aarch64"), not(target_arch = "x86_64")))]
+    #[cfg(all(
+        not(all(target_arch = "aarch64", feature = "host-simd")),
+        not(target_arch = "x86_64")
+    ))]
     {
         let mut e = 1e-15f32;
         for &xv in x[..n].iter() {

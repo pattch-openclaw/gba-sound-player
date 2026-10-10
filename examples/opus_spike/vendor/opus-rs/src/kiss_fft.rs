@@ -214,7 +214,7 @@ impl KissFftState {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 unsafe fn kf_bfly2_m1_neon(fout: &mut [KissCpx], n: usize) {
     use core::arch::aarch64::*;
@@ -291,11 +291,11 @@ fn kf_bfly2(fout: &mut [KissCpx], m: usize, n: usize) {
                 return;
             }
         }
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
         unsafe {
             kf_bfly2_m1_neon(fout, n);
         }
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
         for i in 0..n {
             let idx = i * 2;
             let t = fout[idx + 1];
@@ -332,7 +332,7 @@ fn kf_bfly2(fout: &mut [KissCpx], m: usize, n: usize) {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 unsafe fn kf_bfly4_m1_neon(fout: &mut [KissCpx], n: usize) {
     use core::arch::aarch64::*;
@@ -401,7 +401,7 @@ unsafe fn kf_bfly4_m1_neon(fout: &mut [KissCpx], n: usize) {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 unsafe fn kf_bfly4_neon_inner(
     fout: &mut [KissCpx],
@@ -493,11 +493,11 @@ fn kf_bfly4(
                 return;
             }
         }
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
         unsafe {
             kf_bfly4_m1_neon(fout, n);
         }
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
         for i in 0..n {
             let base = i * 4;
 
@@ -519,11 +519,11 @@ fn kf_bfly4(
                 return;
             }
         }
-        #[cfg(target_arch = "aarch64")]
+        #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
         unsafe {
             kf_bfly4_neon_inner(fout, twiddles, m, n, mm, fstride);
         }
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
         {
             let stride2 = fstride * 2;
             let stride3 = fstride * 3;
@@ -579,11 +579,11 @@ fn kf_bfly3(
             return;
         }
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     unsafe {
         kf_bfly3_neon_inner(fout, fstride, twiddles, m, n, mm);
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
     {
         let m2 = 2 * m;
 
@@ -642,11 +642,11 @@ fn kf_bfly5(
             return;
         }
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     unsafe {
         kf_bfly5_neon_inner(fout, fstride, twiddles, m, n, mm);
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
     {
         let ya = KissCpx::new(0.309_017, -0.95105652);
         let yb = KissCpx::new(-0.809_017, -0.58778525);
@@ -923,7 +923,7 @@ unsafe fn kf_bfly5_avx_inner(
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 unsafe fn neon_cmul_2(
     a: core::arch::aarch64::float32x4_t,
@@ -949,7 +949,7 @@ unsafe fn neon_cmul_2(
     vaddq_f32(t1, t2)
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 unsafe fn kf_bfly3_neon_inner(
     fout: &mut [KissCpx],
@@ -1043,7 +1043,7 @@ unsafe fn kf_bfly3_neon_inner(
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 unsafe fn kf_bfly5_neon_inner(
     fout: &mut [KissCpx],

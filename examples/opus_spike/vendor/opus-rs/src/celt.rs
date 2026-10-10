@@ -177,10 +177,10 @@ fn resampling_factor(sampling_rate: i32) -> usize {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 use core::arch::aarch64::*;
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn sum_abs_neon(x: &[f32], n: usize) -> f32 {
@@ -232,11 +232,11 @@ fn sum_abs(x: &[f32]) -> f32 {
             return sum_abs_avx(x, x.len());
         }
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     unsafe {
         sum_abs_neon(x, x.len())
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", feature = "host-simd")))]
     {
         x.iter().map(|&v| v.abs()).sum()
     }
@@ -397,7 +397,7 @@ fn l1_metric(tmp: &[f32], n: usize, lm: i32, bias: f32) -> f32 {
             return l1_metric_avx(tmp, n, lm, bias);
         }
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     {
         if n >= 16 {
             return unsafe { l1_metric_neon(tmp, n, lm, bias) };
@@ -461,7 +461,7 @@ unsafe fn l1_metric_avx(tmp: &[f32], n: usize, lm: i32, bias: f32) -> f32 {
     l1 + (lm as f32) * bias * l1
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[target_feature(enable = "neon")]
 unsafe fn l1_metric_neon(tmp: &[f32], n: usize, lm: i32, bias: f32) -> f32 {
     unsafe {
@@ -815,7 +815,7 @@ fn comb_filter_const(
     g11: f32,
     g12: f32,
 ) {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
     {
         comb_filter_const_neon(y, x, y_idx, x_idx, t, n, g10, g11, g12);
     }
@@ -833,7 +833,7 @@ fn comb_filter_const(
         return;
     }
     #[cfg(not(any(
-        target_arch = "aarch64",
+        all(target_arch = "aarch64", feature = "host-simd"),
         all(target_arch = "x86_64", target_feature = "sse")
     )))]
     {
@@ -875,7 +875,7 @@ fn comb_filter_const_scalar(
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 fn comb_filter_const_neon(
     y: &mut [f32],
     x: &[f32],
@@ -890,7 +890,7 @@ fn comb_filter_const_neon(
     unsafe { comb_filter_const_neon_impl(y, x, y_idx, x_idx, t, n, g10, g11, g12) }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", feature = "host-simd"))]
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn comb_filter_const_neon_impl(
