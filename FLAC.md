@@ -2291,6 +2291,21 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > Full result + method:
 > [E6 result](#e6-result--iwram-code-pinning-is-slower-instruction-fetch-is-ruled-out-2026-09-26).
 > **E8 (sub-stage attribution) leads.**
+>
+> **Status 2026-10-11: sample-rate lever opened as a proposal (tooling +
+> profiling track, not a single-variable probe).** E1–E10 all hold the
+> playback rate fixed, but decode cost is paid per sample while the budget
+> is granted per second — `real_time_budget(2048, rate)` scales the budget
+> 1-for-1 with rate while per-frame decode work barely moves. Proposal
+> (rate-parameterized encode → ROM tooling + a cross-rate profiling sweep,
+> with measured encoder/mixer readiness facts and a projection table):
+> [Sample-rate reduction — tooling and profiling proposal
+> (2026-10-11)](#sample-rate-reduction--tooling-and-profiling-proposal-2026-10-11).
+> Ordering call (Sam, 2026-10-11): rate reduction is the more realistic
+> near-term path than E10's hand-written ARM loop — but E10 stays open,
+> still gated on E8. **E8 (sub-stage attribution) still leads the
+> decoder-side menu**; the rate track is orthogonal (it grows the
+> denominator, every E-lever shrinks the numerator) and runs alongside.
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -2480,7 +2495,10 @@ see its entry). ~~E6 next~~ — E6 was measured 2026-09-26 and demoted:
 pinning is slower on both arms and code placement joins the ruled-out
 list (see its result). **E8 leads** — run it next to replace inference
 with attribution before choosing between E2b and further levers; E9
-before PR 5's verdict; E10 last, gated on E8's numbers.
+before PR 5's verdict; E10 last, gated on E8's numbers. Amended
+2026-10-11: the playback-rate lever is tracked as its own proposal
+([rate track](#sample-rate-reduction--tooling-and-profiling-proposal-2026-10-11)),
+expected to outrank E10 in realism but not closing it.
 
 ## E1 result — ROM→RAM staging: cartridge reads are not the story (2026-09-22)
 
@@ -3044,3 +3062,139 @@ tempered. The ordering note above is amended.
 `main`'s spike sources. The `perf/flac-spike-e6-iwram-code` branch
 (`bd48b04`, never pushed) is superseded by the sample and is deleted
 after this docs PR merges, per convention.
+
+## Sample-rate reduction — tooling and profiling proposal (2026-10-11)
+
+**Proposal, not a finding.** Opened on Sam's call 2026-10-11: lowering the
+encode/playback sample rate is the more realistic path to a real-time FLAC
+ROM than E10's hand-written ARM loop — but E10 stays open, still gated on
+E8. Everything below that is not marked *measured* is a menu-grade
+hypothesis: measure before believing.
+
+**Why the rate is a lever at all (derived).** The E-menu holds the playback
+rate fixed; none of E1–E10 touches the number of samples arriving per
+second. The budget is granted *per second* (`real_time_budget(blocksize,
+rate)` = blocksize × 16,780,000 / rate, the spike's const fn), while decode
+cost is paid *per sample* and is largely rate-independent: the decoder
+walks the same Rice codewords and runs the same integrator whatever the
+samples represent. Lowering the rate therefore multiplies the budget
+1-for-1 while the per-frame cost barely moves. Projections from the
+measured per-sample figures (FIXED ≈1,113 c/s PR-4 control; LPC ≈1,770
+c/s post-E4), each rate's own budget derived, never recalled:
+
+| rate (Hz) | c/sample budget | budget/frame (2048) | FIXED | LPC post-E4 |
+|---|---|---|---|---|
+| 32,768 | 512.08 | 1,048,750 | 217.4 % | 345.6 % |
+| 18,157 | 924.16 | 1,892,682 | 120.4 % | 191.5 % |
+| 10,512 | 1,596.27 | 3,269,162 | 69.7 % | 110.9 % |
+
+Second-order effect, hypothesis with favorable direction: lower rate ⇒
+narrower content bandwidth ⇒ stronger sample-to-sample correlation ⇒
+fewer Rice bits per sample (the sweep measures this, not assumed).
+Secondary wins scale the same way: ROM bytes per minute of audio and the
+mixer/DMA load per second. The honest cost: fidelity — Nyquist tops out at
+5,256 / 9,078 / 16,384 Hz respectively (voice/AM / dulled-for-music /
+near-hi-fi). This is a product-scope decision dressed as a perf lever; the
+decision rule's step-3 fallback ("FIXED-only misses → offline
+pre-processing or scope reduction") never contemplated it, and rate is the
+third branch.
+
+**Readiness facts (measured 2026-10-11 on this host, not recalled).**
+
+- **The mixer domain is exactly three rates.** agb 0.25.0's `Frequency`
+  enum is `Hz10512` / `Hz18157` / `Hz32768` (buffer sizes 176 / 304 / 560)
+  — registry `src/sound/mixer/mod.rs:138–167`. Arbitrary rates are
+  unplayable until Goal #5's custom mixer exists; the tooling's rate
+  parameter is fail-closed to these three at build time.
+- **libFLAC 1.5.0 encodes all three rates without `--lax`.** Measured:
+  2 s stereo tone WAVs at 10,512 / 18,157 / 32,768 Hz through the profile
+  flags (`flac -1 -l 0 -b 2048 -m`), then walked with the repo's own strict
+  parser (`scripts/frame_vectors.py::find_frames`): every frame carries the
+  uncommon rate code `0b1101` (16-bit Hz) — **including 32,768 Hz**: the
+  table has 32,000 but no 32,768. The current spike clips encode at 32,000
+  (code `0b1000`) while the mixer plays at 32,768 — the rate tool must pin
+  *encode rate == playback rate*, and every playback-rate-exact encode
+  travels on the uncommon-`0b1101` path.
+- **The decoder seam already parses those frames.** flac-lite's
+  `SampleRate::from_flac_code` rejects `0b1100..=0b1110` only as a *domain*
+  boundary; `FrameHeader::parse` reads the appended 16-bit Hz value at the
+  right cursor position and constructs `Explicit` directly
+  (`crates/flac-lite/src/format.rs`). The generator's strict header walk
+  handles the §9.1.7 tail fields too. No decoder work is needed to read
+  these streams; the encode-profile validation just has to accept the code
+  instead of assuming table rates only.
+- **Existing tooling gaps.** `scripts/convert_stereo.sh` emits `pcm_u8`
+  (8-bit — outside the 16-bit profile); `scripts/pack_flac.sh` is a stub;
+  the spike hardcodes `BUDGET_CYCLES_PER_FRAME = real_time_budget(2048,
+  32_768)` (`examples/flac_spike/src/main.rs`) and pins its assets at 32,000 Hz.
+
+### Part 1 — the tooling ladder (four steps, each independently gated)
+
+1. **Per-rate encode tool** — `scripts/encode_gba_flac.sh INPUT OUTPUT
+   RATE`: ffmpeg-normalize to **16-bit** PCM (`pcm_s16le`) at the exact
+   target rate, mono/stereo per flag, then the profile encode, then a
+   fail-closed strict census over the output bytes before accepting it:
+   every frame's resolved rate equals the requested target (all three
+   mixer rates travel on `0b1101` — see the measurement above), predictor
+   order within the arm's cap, 16-bit, fixed blocksize, channel mode in
+   profile. Refuse to write a non-conforming blob — the generator
+   discipline of `gen_spike_assets.sh` / `gen_opus_assets.sh`. When the
+   `pack_flac.sh` GAFP stub lands, its normalize-and-verify steps (1–2)
+   are exactly this tool.
+2. **Rate-parameterized ROM build.** The chosen rate flows into asset
+   generation (`assets.rs` pins `sample_rate_hz` at the encode rate),
+   `BUDGET_CYCLES_PER_FRAME` derives via `real_time_budget(2048, RATE)` —
+   the existing const fn, keeping the budget derived — and the playback/
+   cadence path selects the matching `Frequency` variant. The build fails
+   closed on any rate outside {10512, 18157, 32768}. Decode-proof and
+   timing passes are untouched machinery.
+3. **One entry point** — `make rate-rom RATE=… INPUT=clip.wav`: runs step
+   1 then step 2; records rate + input sha256 in `assets.rs` (the
+   regeneration tripwire convention). Correctness-before-speed is
+   unchanged: the host witness (bit-exact decode of the *embedded* bytes
+   vs `flac -d`) gates every cycle number at every rate.
+4. **Multi-clip single ROM** — the same target taking multiple wav inputs:
+   encode each at the one rate, embed all with a clip table (offset,
+   length, samples per clip) and per-clip goldens. This is deliberately
+   *not* the GAFP container — it proves the multi-region layout and the
+   pack-time ROM-size guard (total embedded must fit the cart budget, fail
+   at build) without pre-empting GAFP's manifest design.
+
+### Part 2 — the cross-rate profiling sweep (opens when Part 1 steps 1+2 land)
+
+1. **Representative material**: deterministic synthesized PCM via
+   `frame_vectors.py::synth_pcm` — byte-reproducible anywhere, same
+   discipline as the spike clips — constructed to span the full profile
+   (tone partials + noise floor + transposition). Real material may join
+   later, but only the synthetic sample can be pinned byte-exact; the
+   tone ratios measured today (0.26–0.60 of raw on 2 s synthetic tones)
+   do **not** generalize — compression is content-dependent, which is
+   precisely what the sweep must measure.
+2. **Encode + ROM per rate**, correctness gates per rate first (host
+   witness, on-target decode proof) before any timing.
+3. **Measure per rate with the existing cycle harness** (calibration,
+   IRQ-off windows, min/max/sum/worst, two-run `cmp` determinism):
+   **ROM bytes per minute of audio** and **mean c/sample + % of that
+   rate's own budget**, worst frame next to mean.
+4. **Guidelines are derived from the sweep, never from prose.** Given a
+   desired audio length and cart budget, two constraints bound the
+   feasible window: the **size constraint** (compressed bytes/minute ×
+   length ≤ cart) and the **real-time constraint** (mean *and* worst
+   frame within the rate's budget). Motivating arithmetic, derived: a
+   60-minute album is 151.4 MB of raw stereo at 10,512 Hz alone
+   (3600 × 10512 × 4 B ≈ 144 MiB) — beyond any practical GBA cart
+   (≤32 MB class) **before compression**, so album-scale content forces
+   mono and/or the measured compression ratio, and the guideline table
+   ("album fits ⇒ rate must be ≤ X") cites the sweep's measured
+   bytes/minute, not an assumed ratio.
+
+**Reading rules.** If FIXED clears its own budget (mean *and* worst) at
+18,157 or 10,512, rate stops being a feasibility question and becomes the
+fidelity decision — that is Part 2's product. This lever grows the
+denominator while every E-lever shrinks the numerator: orthogonal, runs
+alongside, and needs none of E8's outputs to start Part 1. The ruled-out
+list (data reads E1, reader shape E2a, integrator width on FIXED E4, the
+flag E7, fetch placement E6) does not constrain it — none of them touched
+the sample count arriving per second. E5 (hardware arbitration) extends
+per rate: PR 5's on-cart run executes once per candidate rate. **E8 still
+leads the decoder-side menu.**
