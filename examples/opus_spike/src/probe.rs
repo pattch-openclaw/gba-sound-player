@@ -172,22 +172,67 @@ pub struct WalkStats {
     pub window_addr: usize,
 }
 
-/// Walk a packet region by (offset, len) entries: a fresh decoder, packets
-/// strictly in table order, each decoded window handed to `on_window`. The
-/// Opus analogue of flac_spike's `driver::decode_clip`, with the deliberate
-/// difference OPUS.md item 3 records: Opus decode is a state machine, so the
-/// walk is sequential and the (offset, len) table witnesses the product
-/// manifest, never seek independence.
+/// Walk a packet region by (offset, len) entries with an untimed, pass-
+/// through measurement closure — the exact transcription the generator's
+/// pin discovery (`examples/dump_walk.rs`) and the host witness drive.
 ///
-/// The window callback receives exactly `frame_samples(rate)` samples at the
-/// API rate; the fold (`crate::checksum::fold_f32_window`) rides on top of
-/// this seam, never inside it, so the cycle harness can wrap [`decode_packet`]
-/// alone without fold cost leaking into the window.
+/// Kept as the plain spelling of the contract: it delegates every rule
+/// (geometry, tiling guards, decode loop, callback order) to
+/// [`walk_region_timed`], so there is exactly ONE transcription of the walk
+/// in the crate — the ROM harness and the pinned walks cannot drift apart
+/// (shared-consumer rule, flac_spike PR 2's pattern). See
+/// [`walk_region_timed`] for the full contract documentation.
+pub fn walk_region(
+    region: &[u8],
+    entries: impl Iterator<Item = (u32, u16)> + Clone,
+    sample_rate_hz: u32,
+    channels: u8,
+    mut on_window: impl FnMut(&[f32]),
+) -> Result<WalkStats, (&'static str, usize)> {
+    walk_region_timed(
+        region,
+        entries,
+        sample_rate_hz,
+        channels,
+        &mut |decode| {
+            decode();
+            0
+        },
+        |_packet, window, _raw| on_window(window),
+    )
+}
+
+/// Walk a packet region by (offset, len) entries, wrapping each packet's
+/// [`decode_packet`] call in a caller-supplied measurement window. The
+/// Opus analogue of flac_spike's `driver::decode_clip` (which the FLAC
+/// cycle harness times per frame from the ROM side), adapted to the state
+/// machine OPUS.md item 3 records: the loop, the decoder lifetime, and the
+/// tiling guards must NOT be re-transcribed on the ROM side — one lying
+/// transcription of the walk would silently measure different work than
+/// the pinned walks, so the timed walk IS `walk_region`, driven through a
+/// measurement seam.
+///
+/// `measure` receives the decode closure and must invoke it **exactly
+/// once**, returning the raw cycles the invocation consumed (the ROM's
+/// timer window; the host witness returns synthetic values). Work other
+/// than invoking `decode` inside `measure` lands inside the measured
+/// window — logging especially (OPUS.md harness rules: a serial write
+/// inside a window measures the logger, and even *between* micro-windows
+/// shifts them deterministically).
+///
+/// `on_packet` runs strictly OUTSIDE the measurement window, after the
+/// packet decoded: it receives the packet index, the decoded window
+/// (exactly `frame_samples(rate)` samples at the API rate), and the raw
+/// cycles `measure` returned. The fold
+/// (`crate::checksum::fold_f32_window`) and the stats fold ride here, so
+/// the window measures decode + the decoder's own resampler and nothing
+/// else (OPUS.md measurement plan item 5).
 ///
 /// Fails closed on manifest/region drift before touching the decoder: the
-/// entries must start at 0, ascend contiguously (no gaps, no overlaps), carry
-/// no empty packet, and tile the region exactly — every violation is a named
-/// error at the offending index, never a decoder panic or a silent skip.
+/// entries must start at 0, ascend contiguously (no gaps, no overlaps),
+/// carry no empty packet, and tile the region exactly — every violation is
+/// a named error at the offending index, never a decoder panic or a silent
+/// skip (`measure` is never reached, witnessed by tests/timed_walk.rs).
 ///
 /// What this driver deliberately does NOT try to catch: a tiling-preserving
 /// re-split of the region (entries consistent with each other but not with
@@ -202,12 +247,13 @@ pub struct WalkStats {
 /// tautological, since the slice is built from `entry.len`; it accepted
 /// every lying length inside the region (the witness's negative control
 /// caught it by returning `Ok`).
-pub fn walk_region(
+pub fn walk_region_timed(
     region: &[u8],
     entries: impl Iterator<Item = (u32, u16)> + Clone,
     sample_rate_hz: u32,
     channels: u8,
-    mut on_window: impl FnMut(&[f32]),
+    measure: &mut dyn FnMut(&mut dyn FnMut()) -> u32,
+    mut on_packet: impl FnMut(usize, &[f32], u32),
 ) -> Result<WalkStats, (&'static str, usize)> {
     let window_samples = frame_samples(sample_rate_hz);
     const WINDOW_SAMPLES: usize = 1920; // 40 ms x mono at 48 kHz — 2x the pinned frame
@@ -275,12 +321,29 @@ pub fn walk_region(
         // Slice safe: the tiling pass proved every window lies inside the region.
         let packet = &region[start..start + len as usize];
         let out = &mut window[..window_samples];
-        let decoded = decode_packet(&mut decoder, sample_rate_hz as i32, packet, out)
-            .map_err(|_| ("decode rejected packet", i))?;
+        // The measured unit: exactly one decode_packet invocation (decode +
+        // the decoder-internal resampler, OPUS.md plan item 5). The result
+        // crosses back through the capture, and the invocation count is
+        // audited: zero invocations would silently skip a packet, two would
+        // desync the state-machine decoder — both are caller contract
+        // violations named at their index, never absorbed by the walk.
+        let mut calls = 0u32;
+        let mut result: Result<usize, &'static str> = Err("unused");
+        let raw = measure(&mut || {
+            calls += 1;
+            if calls == 1 {
+                result = decode_packet(&mut decoder, sample_rate_hz as i32, packet, out);
+            }
+        });
+        if calls != 1 {
+            return Err(("measure closure must invoke decode exactly once", i));
+        }
+        let decoded = result.map_err(|_| ("decode rejected packet", i))?;
         if decoded != window_samples {
             return Err(("decoded geometry drift", i));
         }
-        on_window(out);
+        // Outside the window by construction: fold and stats ride here.
+        on_packet(i, out, raw);
         walked_packets = i + 1;
         decoded_samples += window_samples;
     }

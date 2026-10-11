@@ -14,25 +14,25 @@
 //! `scripts/gen_opus_assets.sh`, never hand-packed) — the sequential
 //! manifest walk [`probe::decode_clip`], and the host decode witness
 //! (`tests/opus_witness.rs`) proving the walk decodes the exact embedded
-//! bytes onto the ffmpeg/libopus reference. **PR 3 (this step, IN
-//! PROGRESS)** lands the **ROM decode proof** — the same walk executed
-//! on-target over the embedded bytes, its folded PCM hashed against the
-//! per-arm `fnv_walk_fold` golden (the vendored walk's own deterministic
-//! output; the lossy codec cannot reuse flac_spike's reference-hash pin, see
-//! `assets::OpusClip::fnv_walk_fold`) — with the decode state
-//! heap-allocated in EWRAM, **plus the constructor-shape probe ROM**
-//! (`src/ctor_probe.rs`, built beside the proof by `make opus-rom`). The
-//! proof image is **red on-target with its mechanism proven**: the region
-//! FNV matches, the walk banner prints, and the first decoder construction
-//! dies — the ~178 KB by-value construction temporary puts SP at 0x02FAF610
-//! (below IWRAM's bottom) in the construction frame, wrapping the ~31 KB
-//! stack off IWRAM into mapped RAM until the corrupted return becomes a
-//! wild jump (probe ROM readings, sha `0a358968…`; OPUS.md 2026-10-04
-//! status entry). The host walk stays green — the failure is substrate-
-//! specific. **What deliberately does NOT land here:** the constructor fix
-//! (a construction path with no by-value hop — the next PR), and any cycle
-//! counting (the harness arrives only once the proof is green,
-//! correctness-before-speed, flac_spike PR 3's shape).
+//! bytes onto the ffmpeg/libopus reference. **PR 3 landed** the **ROM
+//! decode proof** — the same walk executed on-target, its folded PCM
+//! hashed against the per-arm `fnv_walk_fold` golden — and after vendor
+//! patches 2–5 (OPUS.md, 2026-10-05 → 2026-10-09) **both arms went green
+//! on-target**: silk `0x79E9DCEABA485BEE` and music `0xA781907825AB00AA`
+//! reproducing the strict host walk 501/501. **PR 4 (this step)** lands
+//! the **cycle harness** — measurement-plan step 5, flac_spike PR 3's
+//! shape: [`stats`] ports the division-free min/max/sum/worst-index fold
+//! (the Opus budget cross-pinned against an independent samples-geometry
+//! derivation — no `real_time_budget` helper here because the profile
+//! pins one geometry), [`probe::walk_region_timed`] wraps each packet's
+//! decode in a caller-supplied measurement window with an exactly-once
+//! invocation audit — the ONE transcription of the walk, since
+//! [`probe::walk_region`] delegates every rule to it — and the ROM's
+//! silent timing pass times decode + resampler per packet inside IRQ-off
+//! windows, after the decode proof passed, re-pinning the same goldens on
+//! the measured image. **What deliberately does NOT land here:** any
+//! performance work — this PR measures (Sam, 2026-10-10); the measured
+//! over-budget verdict and what follows are OPUS.md's 2026-10-10 entry.
 //!
 //! Like the FLAC spike, this library is `#![no_std]` and shared by both
 //! layers: the host tests (`make opus-test`) and the ROM entry (`src/main.rs`,
@@ -56,3 +56,4 @@ extern crate alloc;
 pub mod assets;
 pub mod checksum;
 pub mod probe;
+pub mod stats;

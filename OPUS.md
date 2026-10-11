@@ -771,3 +771,103 @@ cycle counting.
   next to mean). The strict default also becomes the perf-gate's numeric
   baseline: cycle counts measured on NEON host paths would not describe
   the class the ROM lives on.
+
+## Status (2026-10-10): PR 4 — the cycle harness lands; both arms measured, both far OVER budget (the gate's answer)
+
+- **What lands:** measurement-plan step 5 — the cycle harness, flac_spike
+  PR 3's shape ported to the state-machine walk. `stats.rs` ports the
+  division-free min/max/sum/worst-index fold (`PacketCost`), with the
+  budget cross-pinned by an **independent samples-geometry derivation**
+  (960 × 16.78 MHz / 48 000 = 335,600 exactly — the seam derives the same
+  constant from the 20 ms duration; agreement is the witness, and it is
+  why no `real_time_budget` helper was inherited: the Opus profile pins
+  one geometry). `probe::walk_region_timed` wraps each packet's
+  `decode_packet` in a caller-supplied measurement window with an
+  **exactly-once invocation audit** (zero invocations would silently skip
+  a packet; two would desync the state machine — both are named contract
+  failures); `walk_region` now DELEGATES to it, so the pinned walks, the
+  generator's dump_walk, and the timed ROM walk share one transcription
+  of the decode loop. The ROM's timing pass is silent by construction
+  (E4 recipe: fold + stats ride outside the window in `on_packet`,
+  nothing logs between windows; calibration is one byte-identical loop,
+  3 discarded cold windows + 5 stability-locked). **Per-packet hash logs
+  removed** from the decode-proof pass (Sam's call: they measure the
+  logger, and localization lives in the strict host walk dumps); every
+  correctness PIN stays.
+- **First-run findings — two harness bugs only the Opus geometry exposes,
+  both fixed before any number was recorded.** (1) *Sentinel netting
+  order*: the first pass netted the overhead BEFORE `PacketCost::observe`,
+  so the wrap sentinel arrived as `0xFFFFFFFF − 22` and the fold's
+  `== WORST_WRAPPED` check could never fire — music printed
+  `max = 4294967273` with `wrapped=false`. The sentinel now rides
+  un-netted. (2) *Composite rollover*: the free-running 32-bit pair
+  rolls every 2^32 cycles; FLAC's biggest pass summed 1.08 G < 2^32 so it
+  never mattered, but the music pass spans ~8.3 G — two windows
+  straddled the rollover and got the sentinel. Fix: `soft_reset` the
+  pair **before every window** (unconditional, outside the timed span,
+  so E4's identical-preceding-code rule holds), which restores the
+  sentinel's true meaning (end < start now means THIS window exceeded
+  2^32). Cross-check that the accounting closes: pre-fix music sum minus
+  post-fix = 8,556,776,133; the two netted sentinels were worth
+  8,589,934,502; implied true cost of the two straddling packets =
+  **33,158,369 cycles** ≈ 16.6 M each — exactly the music mean. The
+  bugs convicted the harness, not the decoder; the numbers below come
+  from the fixed image only.
+- **Measured (image sha256 `d707805b37d6c347…`, stable across same-tree
+  rebuilds; determinism witness: two headless boots, serial logs
+  `cmp`-identical). Calibration 22 cyc on both arms, raws
+  [22 22 22 | 22 22 22 22 22], IME = 0 in-window, IE/IF/IME restored.**
+
+  | arm | min | max | mean (sum/count, derived host-side) | c/sample mean | worst vs budget |
+  |---|---|---|---|---|---|
+  | silk | 2,786,161 @24 | 3,316,677 @3 | 1,410,803,212/501 = **2,815,974** | 2,933 | **988 %** |
+  | music | 15,414,723 @18 | 17,309,861 @444 | 8,312,919,752/501 = **16,592,654** | 17,284 | **5,158 %** |
+
+  Budget 335,600 cyc/packet (349.58 c/sample): means are **839 %** (silk)
+  and **4,944 %** (music) of real time — 167.8 ms and 988.8 ms per 20 ms
+  packet. For scale: flac-lite's measured FIXED arm was ~1,113 c/sample;
+  SILK-Opus soft-float runs 2.6× that, CELT music 15.5×. The screen
+  verdict is RED by construction (budget ANDs into it) with the line
+  distinguishing harness state: `measured 2/2, timed-walk hash agree
+  2/2, within budget 0/2` — a budget miss is a valid measurement, not a
+  failed harness.
+- **Witnesses.** (1) The timed walk re-folds and re-pins both arms'
+  `fnv_walk_fold` goldens on the measured image (silk `0x79E9DCEABA485BEE`
+  MATCH, music `0xA781907825AB00AA` MATCH) — the fast(ter)-wrong-decode
+  rule holds on the instrumented pass itself. (2) Host: new
+  `tests/timed_walk.rs` (5) — identity vs the pinned walk (bit-identical
+  windows + golden reproduction through the timed seam), raw passthrough
+  + `PacketCost` wiring against a second derivation, guard ORDER (tiling
+  rejections never reach `measure`; TOC-geometry mismatch rejects INSIDE
+  the window with exactly one measure call), and the exactly-once caller
+  contract. (3) Every generator pin reproduced untouched: `make opus-test`
+  **16 → 28 green** (HEAD baseline measured in a worktree, never
+  recalled). One host-side flake fixed before landing: the identity test
+  first compared `WalkStats` whole-struct, but the struct carries the
+  heap addresses of each walk's own decoder/window Box — the ~178 KB
+  state is an mmap-class allocation and parallel test load re-places it
+  (failed ~1 in 5). The contract is tallies + bit-identical samples
+  (asserted separately); addresses are a per-walk EWRAM witness on the
+  ROM, never a cross-walk invariant.
+- **Prior assumptions.** One doc claim did NOT survive: "reuse the
+  harness wholesale" held for the mechanism (counter, calibration,
+  division-free reporting, budget-vs-worst all ported) but NOT for the
+  composite's free-running lifetime — a FLAC-shaped pass that sums past
+  2^32 turns the wrap sentinel into a statistical artifact unless
+  windows are re-zeroed. The sentinel-netting order bug was latent in the
+  inherited shape (FLAC's sums never reached the sentinel so it was
+  invisible); recorded here so a third gate never inherits it. The E1/E4
+  layout rules transferred exactly: calibration stable at 22 with no
+  cold-window outlier needed (discarding 3 was cheap insurance, all 8
+  raws were equal anyway).
+- **Scoping (Sam, 2026-10-10).** Measurement only — **zero performance
+  work in this PR**, none attempted; the numbers are the deliverable.
+  The 2026-10-08/09 parked items stay parked.
+- **Next.** The gate now has its answer for the current decoder at the
+  product geometry: patched opus-rs soft-float on ARM7TDMI misses the
+  20 ms budget by 8.4× (SILK speech) to 49× (CELT music) on the mean —
+  unlike FLAC (over budget but same order of magnitude), this is not a
+  constant-factor gap. The go/no-go call (accept non-real-time uses,
+  re-profile the codec choice, or open an optimization plan) is a new
+  decision, not this PR's; the harness is the standing measuring stick
+  for anything proposed against it.
