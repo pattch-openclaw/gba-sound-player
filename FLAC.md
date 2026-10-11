@@ -2305,7 +2305,10 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > near-term path than E10's hand-written ARM loop — but E10 stays open,
 > still gated on E8. **E8 (sub-stage attribution) still leads the
 > decoder-side menu**; the rate track is orthogonal (it grows the
-> denominator, every E-lever shrinks the numerator) and runs alongside.
+> denominator, every E-lever shrinks the numerator) and runs alongside —
+> and multiplicative, not alternative: the project takes **every measured
+> gain cumulatively**, and the sweep's guidelines are derived on the
+> improved decode path, not the baseline (Sam's framing, 2026-10-11).
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -3187,14 +3190,36 @@ third branch.
    mono and/or the measured compression ratio, and the guideline table
    ("album fits ⇒ rate must be ≤ X") cites the sweep's measured
    bytes/minute, not an assumed ratio.
+5. **Cumulative close — the guidelines' final form.** Once the E-menu's
+   measured wins have landed on the decode path (E4-i32 already; E8's
+   chosen levers; E2b/E10 if they measure out — stacked per E9's
+   discipline, marginal deltas inside the stack, not just isolated
+   sums), re-run the sweep on the improved decoder. The guidelines
+   derive feasibility from the **improved** measured c/sample: the
+   question they answer is *which sampling rates become feasible after
+   improving the performance*, not what cleared at the 2026-09 baseline.
 
-**Reading rules.** If FIXED clears its own budget (mean *and* worst) at
-18,157 or 10,512, rate stops being a feasibility question and becomes the
-fidelity decision — that is Part 2's product. This lever grows the
-denominator while every E-lever shrinks the numerator: orthogonal, runs
-alongside, and needs none of E8's outputs to start Part 1. The ruled-out
-list (data reads E1, reader shape E2a, integrator width on FIXED E4, the
-flag E7, fetch placement E6) does not constrain it — none of them touched
-the sample count arriving per second. E5 (hardware arbitration) extends
-per rate: PR 5's on-cart run executes once per candidate rate. **E8 still
-leads the decoder-side menu.**
+**Reading rules — cumulative gains (the project's spirit, Sam
+2026-10-11).** No lever substitutes for another: the aim is to milk out
+as much as possible along **every** dimension, and utilisation
+composes roughly multiplicatively — a decoder lever cutting X% and a
+rate switch growing the budget by Y× combine as ≈ (1−X)·(1/Y) on the
+frame's budget share, with "roughly" reserved for E9's measured
+stacking, never assumed. Worked on measured numbers: FIXED needs total
+relief ≥ 2.174× (217.4% utilisation); the rate switch alone supplies
+3.117× at 10,512 Hz and 1.805× at 18,157 Hz — so ≈ 1.21× of cumulative
+decoder-side relief turns 18,157 Hz from short into clear, and every
+measured percent counts toward that product (E4 measured −46.9% on LPC,
+E2a −3.14% on FIXED, E1's staging −2.51% net of its copy on FIXED —
+every one small, all of them additive in the product). Relatedly, the
+menu's "ruled-out" label closed **mechanism hypotheses** (fetch
+starvation, reader implementation as cost center) — it did not zero the
+measured deltas; those stay harvestable in the composite. The baseline
+reading (FIXED clears at 10,512 ⇒ rate becomes a fidelity decision)
+therefore describes the *baseline* path only; the cumulative reading is
+what step 5 measures: which rate × decode-path combinations clear mean
+**and** worst frame together, decided by the conjunction of measurements,
+not prose. E5 (hardware arbitration) extends per rate and per path:
+PR 5's on-cart run executes once per candidate combination. **E8 still
+leads the decoder-side menu**, and Part 1 needs none of its outputs to
+start.
