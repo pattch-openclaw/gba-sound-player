@@ -2309,6 +2309,19 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > and multiplicative, not alternative: the project takes **every measured
 > gain cumulatively**, and the sweep's guidelines are derived on the
 > improved decode path, not the baseline (Sam's framing, 2026-10-11).
+>
+> **Status 2026-10-12: E8 measured — attribution table replaces inference.**
+> FIXED's cost sits almost entirely in the Rice per-sample loop:
+> **unary 56.2% + rest 38.5% = 94.6%** of the instrumented gross; every
+> bucket outside the loop totals 5.4%. The LPC arm's cost center is the
+> **i64 integrator (49.5%)** — E4's measured i32 variant (−46.9% on LPC,
+> −3.7% on FIXED) is exactly the asymmetry this table draws. The span
+> data names the mechanism inside FIXED's loop: `rest` is arm-invariant
+> (≈358 c/sample both arms) while `unary` scales with residual magnitude
+> (525 vs 665 c/sample) — per-bit iteration cost, which is what E2b
+> counts and E10 folds. Full result + method + the floor arithmetic:
+> [E8 result](#e8-result--sub-stage-attribution-names-the-cost-centers-2026-10-12).
+> ~~E8 leads~~ — **E2b leads** (see the amended ordering).
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -2440,7 +2453,7 @@ necessarily differs; `make spike-test` green, full stats per fold).
 Cheapest probe on the menu; if any panic/debug path in the harness needs
 the flag, record that and close the item.
 
-### E8 — Sub-stage attribution (measurement, not a variant; proposed 2026-09-25; unmeasured)
+### E8 — Sub-stage attribution (measurement, not a variant; proposed 2026-09-25) — **measured 2026-10-12: FIXED's cost center is the Rice per-sample loop (unary 56.2% + rest 38.5% of gross); LPC's is the i64 integrator (49.5%); [see result](#e8-result--sub-stage-attribution-names-the-cost-centers-2026-10-12)**
 
 Every lever so far measured whole-frame cost and *inferred* the cost
 center from arm asymmetries (E4's FIXED inertness, E2a's LPC regression —
@@ -2496,12 +2509,18 @@ as long as each run changes one variable and reports the full stats line.
 first~~ — E7 closed inert the same day (flag is a no-op on this target;
 see its entry). ~~E6 next~~ — E6 was measured 2026-09-26 and demoted:
 pinning is slower on both arms and code placement joins the ruled-out
-list (see its result). **E8 leads** — run it next to replace inference
-with attribution before choosing between E2b and further levers; E9
-before PR 5's verdict; E10 last, gated on E8's numbers. Amended
+list (see its result). ~~E8 leads~~ — E8 was measured 2026-10-12
+([result](#e8-result--sub-stage-attribution-names-the-cost-centers-2026-10-12)):
+the table prices FIXED's prize — a zero-cost unary loop leaves `rest` +
+non-loop ≈ 43.8% of the frame, i.e. FIXED ≈ 95% of budget (upper-bound
+floor; the result entry's arithmetic), so **E2b leads** the decoder-side
+menu, E10 stays gated on E2b underdelivering (its first gate — a large
+codeword-loop share — is now met), E9 (composite arms) before PR 5's
+verdict. Amended
 2026-10-11: the playback-rate lever is tracked as its own proposal
 ([rate track](#sample-rate-reduction--tooling-and-profiling-proposal-2026-10-11)),
-expected to outrank E10 in realism but not closing it.
+expected to outrank E10 in realism but not closing it — and E8's table
+now names exactly which decode levers feed that track's step-5 re-run.
 
 ## E1 result — ROM→RAM staging: cartridge reads are not the story (2026-09-22)
 
@@ -3066,6 +3085,173 @@ tempered. The ordering note above is amended.
 (`bd48b04`, never pushed) is superseded by the sample and is deleted
 after this docs PR merges, per convention.
 
+## E8 result — sub-stage attribution names the cost centers (2026-10-12)
+
+**Prior assumptions:** none of the menu's claims needed correcting — the
+E8 build is pure instrumentation, and the control arm reproduced the
+recorded baseline shape exactly (below). The menu's "~1,078 c/sample" for
+FIXED is the PR-3-shape figure; this image's control printed 1,113
+(357,989,569 / 157 / 2,048) — the same code-layout offset E2a and E6
+recorded on their images, not a new fact. The burden was carried by the
+measurement itself, whose premise — the cost center sits *inside* the
+per-sample loop, not in the stage plumbing around it — the table below
+confirms directly for the first time.
+
+**Sample, not integrated.** As with E1/E2a/E4/E6/E7, the probe never lands
+on the live spike sources: it is preserved as a reappliable sample under
+`examples/flac_spike/experiments/e8-substage-attribution/` (README +
+`e8-substage-attribution.patch` — the diff against main @ `eadb7ed`,
+byte-identical to the measurement commit `c9a7e77`'s diff, verified `git
+apply --check` clean at that base). Nothing in `crates/flac-lite/`
+changed. Measured ROM `flac-spike.gba` sha256
+`f940ac5ea372437d2fbcbce09f9fde249c799317c8e32bbf037ea4f7ac4dbc0a`; mGBA
+0.10.5 `mgba-test-runner` runs 2026-10-12 on the same host runner as PR 3
+/ E1 / E2a / E4 / E6 / E7 (Rust nightly 1.100.0-nightly a69a63265
+2026-09-03); two headless runs byte-identical (`cmp`, 703 lines); rebuild
+from the measurement commit in the same tree `cmp`-identical to the
+measured image. Gates green on the patched tree: `make spike-test` (host
+tests 23 → 28: lib 15 + 2 `e8.rs` unit + 3 `tests/e8_witness.rs` +
+`spike_witness` 8), `make flac-test` (115 passed, 1 ignored — unchanged),
+`make check`, `make native-spike-rom`.
+
+**Harness shape (measurement, not a variant — one pass per arm, one
+image).** Per frame: the verbatim PR 3 `driver::decode_one` in a `timed()`
+window (the same-run control), then the vendored instrumented decode
+inside one **gross** window — `agb::critical_section::acquire` held across
+the whole frame with the token carried between `open`/`close` (IME = 0
+read inside as witness), so the stage windows nest inside without
+re-acquiring. Stage windows (`Meter::timed`) at header / subframe prefix /
+residual-header + parameter reads / escape bodies / integrator / wasted-
+bit pad / decorrelate (live shared call) / footer / misc. **Inside the
+Rice loop no windows** — a `timed()` costs 22–35 cyc and two per sample
+would inflate the loop under measurement by ~96 cyc/sample; the cheap
+instrument is the raw 16-bit low half: two boundary reads per sample
+(after the unary quotient loop; at sample end) with wrapping deltas,
+back-to-back pair measured 4 cyc. Three instrument shapes, three
+calibrations, each with its own E4-shape stability witness (3 discarded +
+5 reported, byte-identical iterations): stage window **35**, gross open/
+close **37**, boundary pair **4** — a window nested inside an open gross
+costs more than the plain-path 22–24, so nothing was carried over from
+earlier images. Every calibration stable on both arms, IME = 0 in every
+window. Tripwires: near-wrap deltas (≥ 60,000 of the 65,536 period)
+**0**; closure fold `gross − (Σ windows + Σ spans)` positive every frame
+(min 4,884 FIXED / 5,897 LPC — the unattributed plumbing), underflows
+**0**; the per-frame e8-vs-control **sample-equality** witness (outside
+the windows) clean — no `FAIL` lines, 157/157 frames both arms — and the
+asset + PCM-pin decode proof (`0x54C7B356621B6E15` `[MATCH]` both arms)
+ran before any timing. Host witness (`tests/e8_witness.rs`, under
+`make spike-test`): the vendored path bit-exact vs `flac -d` on the
+embedded bytes, twin-agreement with the live driver, and `NullMeter`
+bookkeeping (bucket occurrence counts; `integ + misc` witnessed only as a
+total per the shape-determined rule).
+
+**Numbers (bucket sums net of each shape's own calibration; share of the
+same-image netted gross; 157 frames, 320,000 samples/channel, resid
+samples 640,000 FIXED / 638,746 LPC = 640,000 − 4 × 314 order-4 warm-ups
+— the tally's own arithmetic witness):**
+
+| bucket | FIXED sum | FIXED share | LPC sum | LPC share |
+|---|---:|---:|---:|---:|
+| unary (quotient loop) | 336,179,902 | **56.2%** | 424,518,364 | 31.2% |
+| rest (rem. read + fold + unmap + store) | 230,166,712 | **38.5%** | 228,346,862 | 16.8% |
+| integ (FIXED/LPC integrators) | 23,864 | 0.004% | 673,676,420 | **49.5%** |
+| decorr (live shared call) | 24,974,758 | 4.2% | 24,974,758 | 1.8% |
+| resid head + params | 271,547 | 0.05% | 906,968 | 0.07% |
+| subframe prefix | 430,690 | 0.07% | 858,738 | 0.06% |
+| header parse | 539,657 | 0.09% | 539,657 | 0.04% |
+| footer (align + CRC reads) | 21,980 | 0.004% | 21,980 | 0.002% |
+| wasted-bit pad | 6,908 | 0.001% | 6,908 | 0.001% |
+| escape / misc | 0 (count 0) | — | 0 (count 0) | — |
+| closure (unattributed) | 768,912 | 0.13% | 925,917 | 0.07% |
+| **gross (netted)** | **598,570,556** | | **1,359,963,156** | |
+
+`escape`/`misc` never fired: these clips encode no escape partitions and
+no CONSTANT/VERBATIM bodies, so the attribution covers every path the
+profile produces. `decorr` and `hdr` are byte-identical sums/min/max
+across the two arms — the same live shared calls, a free cross-arm
+witness that the two passes really did decode the same thing.
+
+**Control reproduces the recorded baseline:** FIXED sum 357,989,569
+max 2,294,595@60 min 580,783@156; LPC sum 1,074,091,932 max 6,881,652@
+136 min 1,502,291@156 — worst-frame and min indices **exact** against the
+recorded baseline (FIXED @60, LPC @136, min @156 both arms); sums
++0.023%/+0.010% over the E6 image's control (+514/+657 cyc/frame —
+code-layout offset, the same phenomenon E2a/E6 recorded, this image's
+larger because the vendored instrumented module sits in the same LTO
+codegen unit and reshuffles more: `nm` sizes `e8::decode_subframe_e8`
+`0xe2c` vs `flac_lite::subframe::decode_subframe` `0x388`,
+`e8::decode_residual_e8` `0xba4` vs `0x574`). The instrumented gross
+sits above the control frame (+67% FIXED / +27% LPC — meter bookkeeping +
+layout): **the reading is per-bucket shares of the same-image gross, not
+c/sample taken from the instrumented path** (the menu's E6-confound rule,
+stated with its bound: the shares name where cost sits, they do not
+restate its magnitude).
+
+**Reading (the menu's rule executed — name the cost center from the
+table, not inference):**
+
+1. **FIXED's cost center is the Rice per-sample loop: 94.6% of gross**
+   (unary 56.2% + rest 38.5%); every bucket outside the loop totals 5.4%.
+   The stage plumbing (header, prefix, resid head, footer, pad) is noise
+   (≤ 0.1% each). E2a's non-collapse now has a mechanism reading: the
+   reader feeds the whole loop, but the loop's cost is per-**bit**
+   iteration and per-sample plumbing, neither of which the accumulator
+   swap touched.
+2. **The span data separates the two loop halves by mechanism:** `rest`
+   is arm-invariant (359.6 vs 357.5 c/resid-sample — magnitude-independent
+   plumbing: remainder read + fold + guard + unmap + store), while
+   `unary` scales with residual magnitude (525.3 FIXED-0 clip vs 664.6
+   LPC clip) — quotient-length-dependent iteration, exactly the cost E2b
+   counts another way and E10 folds. E2b's addressable share is real:
+   56.2% of FIXED's gross.
+3. **The prize is bounded, and the bound is arithmetic:** zero-cost
+   `unary` (unrealizable — E2b's point is to shrink it, not delete it)
+   leaves `rest` + non-loop = 43.8% of gross; applied to the control's
+   217.4% mean that is **≈ 95.3% of budget** — FIXED reaches real-time
+   only in the free-loop limit, so no codeword-loop lever alone closes
+   FIXED. E2b cutting `unary` in half lands ≈ 217.4 × 0.719 ≈ 156%; and
+   clearing the *mean* alone needs `unary` down ≈ 96% (the worst frame
+   sits ≈ 0.6% above the mean, so mean-and-worst together is beyond any
+   single lever). Per the
+   cumulative-gains rule (2026-10-11), this is a numerator lever for the
+   product with the rate track, not a standalone fix.
+4. **LPC's cost center is the i64 integrator: 49.5%.** E4's i32 variant
+   measured −46.9% on LPC / −3.7% on FIXED — exactly the asymmetry this
+   table draws (integrator ≈ 0 on FIXED-0's early-returning integration;
+   half the LPC frame otherwise). The table predicts E4-i32's magnitude
+   without E4 having been run for it — the attribution is load-bearing.
+
+**Legacy-pass quirk on this image (deterministic, harmless):** the legacy
+whole-frame calibration pass printed first-window-cold raws (33, 24, 24,
+24, 24) on both arms and voided *itself* (`FAIL calibration unstable` →
+the PR-3 verdict line reads FAILED, `measured 0/2`). That is the recorded
+cold-first-window bus property (E1: raws 31/33/33/33/33 byte-identical
+across runs) re-triggered by this build's code layout; it voids only the
+legacy pass's own numbers, which nothing here reads. The E8 pass carries
+its own three stable calibrations and its own control; the E8 summary
+lines read `COMPLETED` on both arms in both runs. A re-run that wants the
+legacy pass green needs the E8 module out of the image — not worth a
+second build; the attribution method is self-contained by design.
+
+**Consequences:** E2b (count the quotient without a per-bit loop —
+masked-ones / run-length table, no CLZ in ARMv4T) **leads the decoder-
+side menu**, its ceiling now priced (56.2% of FIXED's gross; floor
+arithmetic above). E10's first gate ("E8 attributes a large share to the
+codeword loop") is **met**, its second ("E2b underdelivers") still
+pending. E9 (composite arms) runs before PR 5's verdict, now with its
+minimum stack pre-argued by the table (E4-i32 + E2b target different
+buckets — 49.5% LPC vs 56.2% FIXED — the orthogonality argument it
+measures). Nothing joins the ruled-out list: E8 measured where cost
+sits, not what moves it. The rate track's step-5 sweep re-run gains its
+named decode levers from this table (integrator-i32 already landed;
+loop-shape levers pending E2b).
+
+**Preservation:** probe code lives in the sample dir above, never on
+`main`'s spike sources. The `perf/e8-substage-attribution` branch
+(`c9a7e77`, never pushed) is superseded by the sample and is deleted
+after this docs PR merges, per convention (content-based proof: the
+committed patch byte-identical to `git diff eadb7ed c9a7e77`).
+
 ## Sample-rate reduction — tooling and profiling proposal (2026-10-11)
 
 **Proposal, not a finding.** Opened on Sam's call 2026-10-11: lowering the
@@ -3220,6 +3406,7 @@ therefore describes the *baseline* path only; the cumulative reading is
 what step 5 measures: which rate × decode-path combinations clear mean
 **and** worst frame together, decided by the conjunction of measurements,
 not prose. E5 (hardware arbitration) extends per rate and per path:
-PR 5's on-cart run executes once per candidate combination. **E8 still
-leads the decoder-side menu**, and Part 1 needs none of its outputs to
-start.
+PR 5's on-cart run executes once per candidate combination. ~~E8 still
+leads the decoder-side menu~~ — E8 was measured 2026-10-12 and its table
+now picks the decode levers ([E8 result](#e8-result--sub-stage-attribution-names-the-cost-centers-2026-10-12));
+Part 1 needs none of its outputs to start.
