@@ -1,0 +1,1517 @@
+diff --git a/examples/flac_spike/src/e8.rs b/examples/flac_spike/src/e8.rs
+new file mode 100644
+index 0000000..827e1ce
+--- /dev/null
++++ b/examples/flac_spike/src/e8.rs
+@@ -0,0 +1,927 @@
++//! E8 probe module — sub-stage attribution (FLAC.md experiment menu, E8).
++//!
++//! Measurement, not a variant: the decode math is a verbatim copy of the
++//! live `flac-lite` path (frame/subframe/residual composition, integrators,
++//! padding, unmap) built on the live shared primitives (reader, header
++//! parse, subframe-type parse, warm-up `fill`, `decorrelate`). The ONLY
++//! structural difference is instrumentation:
++//!
++//! - **Stage windows** (`Meter::timed`, the same IME-off window shape as
++//!   PR 3's harness) at the stage boundaries: header parse, subframe
++//!   prefix, residual header + per-partition parameter reads, escape
++//!   bodies, integrator, pad, decorrelate, footer, plus a misc bucket for
++//!   CONSTANT/VERBATIM bodies.
++//! - **Boundary reads** (`Meter::now`, raw 16-bit low half) at two points
++//!   per Rice *sample*: after the unary quotient loop, and at sample end —
++//!   splitting the per-sample hot loop into `unary` (E2b's addressable
++//!   share, per the E2a result: "the Rice unary loop as a shape") and
++//!   `rest` (remainder read + fold + guard + unmap + store).
++//!
++//! Why raw reads and not windows inside the hot loop: a `timed()` window
++//! costs ~22–24 cycles; two per sample would inflate the very loop under
++//! measurement by ~96 cycles/sample (≈9% of the FIXED arm's ~1,078
++//! c/sample — a material perturbation). A raw low-half read + wrapping
++//! delta costs one I/O read plus a few arithmetic cycles per boundary;
++//! the boundary op is calibrated in its own unified loop shape (a
++//! back-to-back read pair) and netted once per span. Determinism holds:
++//! IME is off for the whole gross window, and the 16-bit wrapping delta
++//! is exact for any per-sample span below 65,536 cycles —
++//! [`boundary_delta`] counts near-wrap deltas as a tripwire, and the
++//! per-frame closure check brackets every bucket under the gross window.
++//!
++//! Span attribution conventions (stated, not hidden): the per-sample loop
++//! bookkeeping (iterator advance, branch) falls inside the `unary` span;
++//! the store and loop-exit bookkeeping fall inside the `rest` span; each
++//! span ends with its own `now()` read, whose cost the boundary
++//! calibration nets (each span ends with exactly one read, each span is
++//! netted exactly once). The vendored copy also moves inlining layout
++//! along with the instrumentation (the menu's E6 confound) — the reading
++//! is the per-bucket *shares* of the same-image gross, stated with that
++//! caveat in the FLAC.md entry.
++//!
++//! Vendor boundary (the menu's rule): exactly the functions the
++//! instrumentation touches are re-implemented here — [`decode_one_e8`]
++//! (driver-seam copy), [`decode_frame_e8`], `decode_subframe_e8`,
++//! `decode_residual_e8`, and the Rice loop. Everything else is a live
++//! shared call or a verbatim copy of a private function
++//! ([`integrate_fixed_e8`], [`integrate_lpc_e8`], [`pad_block_e8`],
++//! [`rice_unmap_e8`], [`decode_escape_partition_e8`]).
++
++use crate::assets::SpikeClip;
++use crate::driver::DriverError;
++use crate::stats::FrameCost;
++use flac_lite::bits::BitReader;
++use flac_lite::format::ChannelConfig;
++use flac_lite::frame::{FrameHeader, StreamDefaults};
++use flac_lite::residual::PartitionHeader;
++use flac_lite::stereo::decorrelate;
++use flac_lite::subframe::{PredictorState, SubframeType};
++
++/// Timed-window bucket: `FrameHeader::parse`.
++pub const W_HDR: usize = 0;
++/// Timed-window bucket: subframe prefix — type parse + wasted bits + bps
++/// gate + warm-up `fill` + warm-up copy into `out`.
++pub const W_PREFIX: usize = 1;
++/// Timed-window bucket: residual header (method + partition order + MUST
++/// checks) and per-partition parameter/escape-width reads; LPC body
++/// fields (precision/shift/coefficients) ride here too.
++pub const W_RESID_HEAD: usize = 2;
++/// Timed-window bucket: escape-partition raw-sample loops.
++pub const W_ESCAPE: usize = 3;
++/// Timed-window bucket: FIXED/LPC integrators.
++pub const W_INTEG: usize = 4;
++/// Timed-window bucket: wasted-bit block padding.
++pub const W_PAD: usize = 5;
++/// Timed-window bucket: channel decorrelation (live shared call).
++pub const W_DECORR: usize = 6;
++/// Timed-window bucket: frame footer (byte-align + CRC-16 reads).
++pub const W_FOOTER: usize = 7;
++/// Timed-window bucket: bodies with no bucket of their own (CONSTANT /
++/// VERBATIM).
++pub const W_MISC: usize = 8;
++/// Boundary bucket: the unary quotient loop — exactly E2b's addressable
++/// share (plus per-sample loop bookkeeping; see module docs).
++pub const W_UNARY: usize = 9;
++/// Boundary bucket: remainder read + fold + guard + unmap + store.
++pub const W_REST: usize = 10;
++/// The per-frame gross window (one open/close around the whole
++/// instrumented frame decode).
++pub const W_GROSS: usize = 11;
++/// Number of buckets.
++pub const N_BUCKETS: usize = 12;
++
++/// Bucket names for the serial log (index == bucket id).
++pub const BUCKET_NAMES: [&str; N_BUCKETS] = [
++    "hdr",
++    "prefix",
++    "resid_head",
++    "escape",
++    "integ",
++    "pad",
++    "decorr",
++    "footer",
++    "misc",
++    "unary",
++    "rest",
++    "gross",
++];
++
++/// The measurement seam the vendored decode calls. Implemented on target
++/// by the ROM harness (timer pair + agb critical section); on host by
++/// [`NullMeter`] for the witness tests.
++pub trait Meter {
++    /// Raw read of the counter's low half (16-bit, wraps every 65,536
++    /// cycles). Called inside the gross window only, where IME is off.
++    fn now(&mut self) -> u16;
++
++    /// Run `work(args)` inside one IRQ-off measurement window (IME
++    /// save/disable/restore + composite counter read pair). The work
++    /// arrives as an argument (not a capture) so stage windows nest
++    /// inside the gross window's open/close without borrow conflicts. All
++    /// logging happens outside the window.
++    fn timed<A, T>(&mut self, args: A, work: impl FnOnce(A) -> T) -> (T, u32);
++
++    /// Open the gross window: save + disable IME, read the composite.
++    fn open(&mut self);
++
++    /// Close the gross window: read the composite, restore IME, return
++    /// the raw cycle delta.
++    fn close(&mut self) -> u32;
++}
++
++/// Host stub: zero-cost meter for the witness tests (raws are all 0 —
++/// only decode correctness and fold bookkeeping are witnessed on host,
++/// never timing).
++#[derive(Debug, Default)]
++pub struct NullMeter;
++
++impl Meter for NullMeter {
++    fn now(&mut self) -> u16 {
++        0
++    }
++    fn timed<A, T>(&mut self, args: A, work: impl FnOnce(A) -> T) -> (T, u32) {
++        (work(args), 0)
++    }
++    fn open(&mut self) {}
++    fn close(&mut self) -> u32 {
++        0
++    }
++}
++
++/// Near-wrap tripwire threshold for [`boundary_delta`] (60,000 of the
++/// 65,536 wrap period: the worst per-sample span in these clips is a few
++/// thousand cycles, so anything ≥ 60k means the span approached the wrap
++/// point and its delta may have wrapped).
++pub const BIG_DELTA_WARN: u32 = 60_000;
++
++/// Wrapping low-half delta between two boundary reads.
++///
++/// Exact for any true span < 65,536 cycles. A delta ≥ [`BIG_DELTA_WARN`]
++/// increments `big_deltas` — a tripwire count, not a rejection: the span
++/// itself is legal.
++#[must_use]
++pub fn boundary_delta(start: u16, end: u16, big_deltas: &mut u32) -> u32 {
++    let d = end.wrapping_sub(start) as u32;
++    if d >= BIG_DELTA_WARN {
++        *big_deltas += 1;
++    }
++    d
++}
++
++/// Per-sample accumulation for one frame's instrumented decode (the raw
++/// boundary spans and the raw window sum feeding the closure check).
++#[derive(Debug, Default)]
++pub struct FrameAcc {
++    /// Raw span cycles in the unary bucket this frame.
++    pub unary_raw: u32,
++    /// Raw span cycles in the rest bucket this frame.
++    pub rest_raw: u32,
++    /// Rice samples seen (Σ blocksize − order over Rice subframes).
++    pub samples: u32,
++    /// Raw cycles of every nested stage window this frame.
++    pub windows_raw: u64,
++    /// Raw cycles of this frame's gross window (echoed for the ROM's
++    /// per-frame closure log; the fold uses the same value).
++    pub gross_raw: u32,
++}
++
++/// Per-arm bucket folds for an instrumented pass.
++#[derive(Debug)]
++pub struct BucketStats {
++    /// One fold per bucket (index by the `W_*` constants). Window buckets
++    /// observe per window occurrence; `unary`/`rest` observe per frame
++    /// (that frame's netted span total); `gross` per frame.
++    pub buckets: [FrameCost; N_BUCKETS],
++    /// Frames folded.
++    pub frames: usize,
++    /// Cross-frame sum of gross − parts (raw; positive == unattributed
++    /// cost, negative == double-counting).
++    pub closure_sum: i64,
++    /// Smallest per-frame gross − parts across the pass.
++    pub closure_min: i64,
++    /// Largest per-frame gross − parts across the pass.
++    pub closure_max: i64,
++    /// Frames where the parts sum exceeded the gross window (impossible
++    /// unless a window double-counted).
++    pub closure_underflows: u32,
++    /// Rice samples through the boundary buckets (cross-frame).
++    pub resid_samples: u64,
++    /// Near-wrap boundary-delta tripwire count.
++    pub big_deltas: u32,
++    /// Nested stage windows opened (cross-frame, excludes gross).
++    pub windows: u64,
++}
++
++impl Default for BucketStats {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
++impl BucketStats {
++    /// An empty fold set.
++    #[must_use]
++    pub fn new() -> Self {
++        Self {
++            buckets: core::array::from_fn(|_| FrameCost::new()),
++            frames: 0,
++            closure_sum: 0,
++            closure_min: i64::MAX,
++            closure_max: i64::MIN,
++            closure_underflows: 0,
++            resid_samples: 0,
++            big_deltas: 0,
++            windows: 0,
++        }
++    }
++
++    /// Fold one nested stage window: net `raw − overhead` into `bucket`,
++    /// count the window, and add its raw to the frame accumulator.
++    pub fn observe_window(
++        &mut self,
++        acc: &mut FrameAcc,
++        bucket: usize,
++        frame: usize,
++        raw: u32,
++        overhead: u32,
++    ) {
++        self.buckets[bucket].observe(frame, raw.saturating_sub(overhead));
++        acc.windows_raw += u64::from(raw);
++        self.windows += 1;
++    }
++}
++
++fn sat_u32(v: u64) -> u32 {
++    u32::try_from(v).unwrap_or(u32::MAX)
++}
++
++/// Decode exactly one frame at its seek-table offset, attributing cycles
++/// into `st`. A copy of `driver::decode_one`'s contract checks verbatim
++/// (unbucketed — they land in the closure), then the instrumented frame
++/// inside one gross open/close.
++///
++/// `frame` is the fold's frame index (the seek-table index here).
++/// `w_overhead` / `b_overhead` / `g_overhead` are the arm's own
++/// calibration constants: subtracted per stage window / per boundary span
++/// / for the gross window respectively.
++pub fn decode_one_e8<M: Meter>(
++    clip: &SpikeClip,
++    frame: usize,
++    left: &mut [i32],
++    right: &mut [i32],
++    state: &mut [PredictorState; 2],
++    m: &mut M,
++    st: &mut BucketStats,
++    w_overhead: u32,
++    b_overhead: u32,
++    g_overhead: u32,
++) -> (Result<usize, DriverError>, FrameAcc) {
++    let mut acc = FrameAcc::default();
++    m.open();
++    let result = (|m: &mut M| -> Result<usize, DriverError> {
++        let meta = &clip.frames[frame];
++        let max = usize::from(clip.max_blocksize);
++        if left.len() < max {
++            return Err(DriverError::BufferTooSmall {
++                need: max,
++                have: left.len(),
++            });
++        }
++        if clip.channels == 2 && right.len() < max {
++            return Err(DriverError::BufferTooSmall {
++                need: max,
++                have: right.len(),
++            });
++        }
++        let offset = match usize::try_from(meta.offset) {
++            Ok(offset) => offset,
++            Err(_) => {
++                return Err(DriverError::FrameOffsetOutOfRange {
++                    frame,
++                    offset: usize::MAX,
++                    len: clip.region.len(),
++                });
++            }
++        };
++        let region = clip
++            .region
++            .get(offset..)
++            .ok_or(DriverError::FrameOffsetOutOfRange {
++                frame,
++                offset,
++                len: clip.region.len(),
++            })?;
++
++        let defaults = StreamDefaults {
++            sample_rate_hz: clip.sample_rate_hz,
++            bits_per_sample: clip.bits_per_sample,
++        };
++        let mut reader = BitReader::new(region);
++        let (hdr_res, hdr_raw) = m.timed((&mut reader, &defaults), |(reader, defaults)| {
++            FrameHeader::parse(reader, defaults)
++        });
++        st.observe_window(&mut acc, W_HDR, frame, hdr_raw, w_overhead);
++        let header = hdr_res.map_err(DriverError::Decode)?;
++        if header.blocksize != usize::from(meta.blocksize) {
++            return Err(DriverError::MetadataMismatch {
++                frame,
++                table: usize::from(meta.blocksize),
++                header: header.blocksize,
++            });
++        }
++        decode_frame_e8(
++            m,
++            &mut reader,
++            &header,
++            left,
++            right,
++            state,
++            st,
++            &mut acc,
++            frame,
++            w_overhead,
++        )
++        .map_err(DriverError::Decode)
++    })(m);
++    let gross_raw = m.close();
++    acc.gross_raw = gross_raw;
++
++    // Frame-exit folding: boundary buckets (netted per span), gross, and
++    // the closure fold. All outside any window.
++    st.frames += 1;
++    if acc.samples > 0 {
++        let n = u64::from(acc.samples);
++        st.resid_samples += n;
++        let un_net = u64::from(acc.unary_raw).saturating_sub(u64::from(b_overhead) * n);
++        let re_net = u64::from(acc.rest_raw).saturating_sub(u64::from(b_overhead) * n);
++        st.buckets[W_UNARY].observe(frame, sat_u32(un_net));
++        st.buckets[W_REST].observe(frame, sat_u32(re_net));
++    }
++    st.buckets[W_GROSS].observe(frame, gross_raw.saturating_sub(g_overhead));
++    let parts = acc.windows_raw + u64::from(acc.unary_raw) + u64::from(acc.rest_raw);
++    let closure = i64::from(gross_raw) - i64::try_from(parts).unwrap_or(i64::MAX);
++    st.closure_sum += closure;
++    st.closure_min = st.closure_min.min(closure);
++    st.closure_max = st.closure_max.max(closure);
++    if closure < 0 {
++        st.closure_underflows += 1;
++    }
++
++    (result, acc)
++}
++
++/// Copy of `flac_lite::frame::decode_frame` with stage windows. Body
++/// order, contracts, and error mapping verbatim from the live function;
++/// `decorrelate` stays a live shared call inside its own window.
++fn decode_frame_e8<M: Meter>(
++    m: &mut M,
++    reader: &mut BitReader<'_>,
++    header: &FrameHeader,
++    left: &mut [i32],
++    right: &mut [i32],
++    state: &mut [PredictorState; 2],
++    st: &mut BucketStats,
++    acc: &mut FrameAcc,
++    frame: usize,
++    w_overhead: u32,
++) -> Result<usize, flac_lite::Error> {
++    let blocksize = header.blocksize;
++    let slots = usize::from(header.channels.subframe_count());
++
++    // Caller contract before the first bit (live, verbatim). Unbucketed:
++    // these compares land in the closure.
++    if left.len() < blocksize || (slots == 2 && right.len() < blocksize) {
++        return Err(flac_lite::Error::InvalidField);
++    }
++
++    let side_slot = match header.channels {
++        ChannelConfig::RightSide => Some(0),
++        ChannelConfig::LeftSide | ChannelConfig::MidSide => Some(1),
++        ChannelConfig::Independent { .. } => None,
++    };
++    let slot_bits = |slot: usize| -> u8 {
++        (u32::from(header.bits_per_sample) + u32::from(side_slot == Some(slot))) as u8
++    };
++
++    decode_subframe_e8(
++        m,
++        reader,
++        blocksize,
++        slot_bits(0),
++        &mut state[0],
++        &mut left[..blocksize],
++        st,
++        acc,
++        frame,
++        w_overhead,
++    )?;
++    if slots == 2 {
++        decode_subframe_e8(
++            m,
++            reader,
++            blocksize,
++            slot_bits(1),
++            &mut state[1],
++            &mut right[..blocksize],
++            st,
++            acc,
++            frame,
++            w_overhead,
++        )?;
++    }
++
++    let right_span = if slots == 2 { blocksize } else { 0 };
++    let (dec_res, dec_raw) = m.timed(
++        (
++            header.channels,
++            blocksize,
++            &mut left[..blocksize],
++            &mut right[..right_span],
++        ),
++        |(channels, blocksize, left, right)| decorrelate(channels, blocksize, left, right),
++    );
++    st.observe_window(acc, W_DECORR, frame, dec_raw, w_overhead);
++    dec_res?;
++
++    let (foot_res, foot_raw) = m.timed(&mut *reader, |reader| -> Result<(), flac_lite::Error> {
++        reader.byte_align();
++        let crc16_hi = reader.read_u8()?;
++        let crc16_lo = reader.read_u8()?;
++        let _ = (crc16_hi, crc16_lo);
++        Ok(())
++    });
++    st.observe_window(acc, W_FOOTER, frame, foot_raw, w_overhead);
++    foot_res?;
++
++    Ok(blocksize)
++}
++
++/// Copy of `flac_lite::subframe::decode_subframe` with stage windows:
++/// prefix (type + wasted + bps gate + fill + warm-up copy), residual (its
++/// own buckets), integrator, pad. Body order verbatim from the live
++/// function.
++fn decode_subframe_e8<M: Meter>(
++    m: &mut M,
++    reader: &mut BitReader<'_>,
++    blocksize: usize,
++    sample_bits: u8,
++    state: &mut PredictorState,
++    out: &mut [i32],
++    st: &mut BucketStats,
++    acc: &mut FrameAcc,
++    frame: usize,
++    w_overhead: u32,
++) -> Result<SubframeType, flac_lite::Error> {
++    if out.len() != blocksize {
++        return Err(flac_lite::Error::InvalidField);
++    }
++
++    // --- prefix window: type parse, wasted bits, bps gate, fill, warm-up
++    // copy into out. Live order.
++    let (prefix_res, prefix_raw) = m.timed(
++        (&mut *reader, &mut *out, &mut *state),
++        |(reader, out, state)| -> Result<(SubframeType, usize, u8, u32), flac_lite::Error> {
++            let kind = SubframeType::parse(reader)?;
++            let order = kind.order();
++            if order > blocksize {
++                return Err(flac_lite::Error::InvalidField);
++            }
++            let wasted = reader.read_wasted_bits()?;
++            let sub_bits = u32::from(sample_bits)
++                .checked_sub(wasted)
++                .filter(|&b| b > 0 && b <= 32)
++                .ok_or(flac_lite::Error::InvalidField)?;
++            let subframe_bits = sub_bits as u8;
++            // wasted = 0 on purpose (live): prediction runs at the
++            // stripped scale; pad_block applies §9.2.2's multiply at block
++            // exit.
++            state.fill(reader, order, subframe_bits, 0)?;
++            for (i, slot) in state.warm_up[..order].iter().rev().enumerate() {
++                out[i] = *slot;
++            }
++            Ok((kind, order, subframe_bits, wasted))
++        },
++    );
++    st.observe_window(acc, W_PREFIX, frame, prefix_raw, w_overhead);
++    let (kind, order, subframe_bits, wasted) = prefix_res?;
++
++    // --- body dispatch (live order).
++    match kind {
++        SubframeType::Constant => {
++            let (res, raw) = m.timed(
++                (&mut *reader, &mut *out),
++                |(reader, out)| -> Result<(), flac_lite::Error> {
++                    let v = reader.read_signed(u32::from(subframe_bits))?;
++                    out.fill(v);
++                    Ok(())
++                },
++            );
++            st.observe_window(acc, W_MISC, frame, raw, w_overhead);
++            res?;
++        }
++        SubframeType::Verbatim => {
++            let (res, raw) = m.timed(
++                (&mut *reader, &mut *out),
++                |(reader, out)| -> Result<(), flac_lite::Error> {
++                    for sample in out.iter_mut() {
++                        *sample = reader.read_signed(u32::from(subframe_bits))?;
++                    }
++                    Ok(())
++                },
++            );
++            st.observe_window(acc, W_MISC, frame, raw, w_overhead);
++            res?;
++        }
++        SubframeType::Fixed(order_u8) => {
++            decode_residual_e8(
++                m,
++                reader,
++                blocksize,
++                order,
++                &mut out[order..],
++                st,
++                acc,
++                frame,
++                w_overhead,
++            )?;
++            let (int_res, int_raw) = m.timed(
++                (order_u8, &mut *state, &mut out[order..]),
++                |(order, state, residual)| integrate_fixed_e8(order, state, residual),
++            );
++            st.observe_window(acc, W_INTEG, frame, int_raw, w_overhead);
++            int_res?;
++        }
++        SubframeType::Lpc { order: _order_u8 } => {
++            // §9.2.6 body fields — live order, bucketed with the residual
++            // head (both are fixed-shape per-subframe field reads).
++            let (head_res, head_raw) = m.timed(
++                &mut *reader,
++                |reader| -> Result<([i32; flac_lite::MAX_LPC_ORDER], i32), flac_lite::Error> {
++                    let precision_minus_one = reader.read_bits(4)?;
++                    if precision_minus_one == 0b1111 {
++                        return Err(flac_lite::Error::InvalidField);
++                    }
++                    let precision = precision_minus_one + 1;
++                    let shift = reader.read_signed(5)?;
++                    if shift < 0 {
++                        return Err(flac_lite::Error::InvalidField);
++                    }
++                    let mut coeffs = [0i32; flac_lite::MAX_LPC_ORDER];
++                    for c in coeffs.iter_mut().take(order) {
++                        *c = reader.read_signed(precision)?;
++                    }
++                    Ok((coeffs, shift))
++                },
++            );
++            st.observe_window(acc, W_RESID_HEAD, frame, head_raw, w_overhead);
++            let (coeffs, shift) = head_res?;
++
++            decode_residual_e8(
++                m,
++                reader,
++                blocksize,
++                order,
++                &mut out[order..],
++                st,
++                acc,
++                frame,
++                w_overhead,
++            )?;
++            let (int_res, int_raw) = m.timed(
++                (
++                    &coeffs[..order],
++                    shift as i8,
++                    &mut *state,
++                    &mut out[order..],
++                ),
++                |(coeffs, shift, state, residual)| integrate_lpc_e8(coeffs, shift, state, residual),
++            );
++            st.observe_window(acc, W_INTEG, frame, int_raw, w_overhead);
++            int_res?;
++        }
++    }
++    let (pad_res, pad_raw) = m.timed(&mut *out, |out| pad_block_e8(out, wasted));
++    st.observe_window(acc, W_PAD, frame, pad_raw, w_overhead);
++    pad_res?;
++    Ok(kind)
++}
++
++/// Copy of `flac_lite::residual::decode_residual` (live order and stream
++/// MUSTs verbatim). The residual header and every per-partition
++/// parameter/escape-width read fold into `W_RESID_HEAD`; escape bodies get
++/// a window (`W_ESCAPE`); Rice bodies run the boundary-read loop (no
++/// window — that is the point of the probe).
++fn decode_residual_e8<M: Meter>(
++    m: &mut M,
++    reader: &mut BitReader<'_>,
++    blocksize: usize,
++    predictor_order: usize,
++    out: &mut [i32],
++    st: &mut BucketStats,
++    acc: &mut FrameAcc,
++    frame: usize,
++    w_overhead: u32,
++) -> Result<(), flac_lite::Error> {
++    // Caller contract (live, verbatim; unbucketed → closure).
++    let Some(total) = blocksize.checked_sub(predictor_order) else {
++        return Err(flac_lite::Error::InvalidField);
++    };
++    if out.len() != total {
++        return Err(flac_lite::Error::InvalidField);
++    }
++    let (head_res, head_raw) = m.timed(
++        (&mut *reader, blocksize, predictor_order),
++        |(reader, blocksize, predictor_order)| -> Result<(u32, u32, usize, usize), flac_lite::Error> {
++            let (plen, escape) = match reader.read_bits(2)? {
++                0b00 => (4u32, 15u32),
++                0b01 => (5, 31),
++                _ => return Err(flac_lite::Error::InvalidField),
++            };
++            let partition_order = reader.read_bits(4)? as usize;
++            let partitions = 1usize << partition_order;
++            if blocksize & (partitions - 1) != 0 {
++                return Err(flac_lite::Error::InvalidField);
++            }
++            let partition_samples = blocksize >> partition_order;
++            if predictor_order >= partition_samples {
++                return Err(flac_lite::Error::InvalidField);
++            }
++            Ok((plen, escape, partitions, partition_samples))
++        },
++    );
++    st.observe_window(acc, W_RESID_HEAD, frame, head_raw, w_overhead);
++    let (plen, escape, partitions, partition_samples) = head_res?;
++
++    let mut rest = out;
++    for partition in 0..partitions {
++        let count = if partition == 0 {
++            partition_samples - predictor_order
++        } else {
++            partition_samples
++        };
++        // Per-partition header reads (param + optional escape width).
++        let (param_res, param_raw) = m.timed(
++            (&mut *reader, plen, escape, count),
++            |(reader, plen, escape, count)| -> Result<PartitionHeader, flac_lite::Error> {
++                let param = reader.read_bits(plen)?;
++                Ok(if param == escape {
++                    let raw_bits = reader.read_bits(5)? as u8;
++                    PartitionHeader {
++                        order: 0,
++                        is_escape: true,
++                        raw_bits,
++                        sample_count: count as u16,
++                    }
++                } else {
++                    PartitionHeader {
++                        order: param as u8,
++                        is_escape: false,
++                        raw_bits: 0,
++                        sample_count: count as u16,
++                    }
++                })
++            },
++        );
++        st.observe_window(acc, W_RESID_HEAD, frame, param_raw, w_overhead);
++        let header = param_res?;
++
++        let (head_slice, tail) = rest.split_at_mut(count);
++        if header.is_escape {
++            let (res, raw) = m.timed(
++                (&mut *reader, header, head_slice),
++                |(reader, header, out)| decode_escape_partition_e8(reader, &header, out),
++            );
++            st.observe_window(acc, W_ESCAPE, frame, raw, w_overhead);
++            res?;
++        } else {
++            decode_rice_partition_e8(m, reader, &header, head_slice, st, acc)?;
++        }
++        rest = tail;
++    }
++    Ok(())
++}
++
++/// Copy of `residual.rs`'s private `decode_rice_partition` with the E8
++/// boundary split. Span structure per sample (module docs for the
++/// conventions): `now()` → unary loop → `now()` → remainder + fold +
++/// guard + unmap + store → `now()`, and that final read doubles as the
++/// next sample's unary-span start.
++fn decode_rice_partition_e8<M: Meter>(
++    m: &mut M,
++    reader: &mut BitReader<'_>,
++    header: &PartitionHeader,
++    out: &mut [i32],
++    st: &mut BucketStats,
++    acc: &mut FrameAcc,
++) -> Result<(), flac_lite::Error> {
++    if out.len() != usize::from(header.sample_count) {
++        // Caller contract violation (slice length must track the header).
++        return Err(flac_lite::Error::InvalidField);
++    }
++    let order = u32::from(header.order);
++    let mut unary_acc: u32 = 0;
++    let mut rest_acc: u32 = 0;
++    let mut t = m.now();
++    for sample in out.iter_mut() {
++        // Unary quotient: count zeros until the terminating one (live).
++        let mut quotient: u32 = 0;
++        while reader.read_bits(1)? == 0 {
++            quotient += 1;
++        }
++        let t1 = m.now();
++        unary_acc += boundary_delta(t, t1, &mut st.big_deltas);
++        // Binary remainder — only when the parameter says so (live).
++        let remainder = if order == 0 {
++            0
++        } else {
++            reader.read_bits(order)?
++        };
++        // §9.2.7.3 value-limit guards (live, verbatim).
++        if order >= 32 || quotient > (u32::MAX >> order) {
++            return Err(flac_lite::Error::InvalidField);
++        }
++        let folded = (quotient << order) | remainder;
++        if folded == u32::MAX {
++            return Err(flac_lite::Error::InvalidField);
++        }
++        *sample = rice_unmap_e8(folded);
++        let t2 = m.now();
++        rest_acc += boundary_delta(t1, t2, &mut st.big_deltas);
++        t = t2;
++    }
++    acc.unary_raw = acc.unary_raw.saturating_add(unary_acc);
++    acc.rest_raw = acc.rest_raw.saturating_add(rest_acc);
++    acc.samples += out.len() as u32;
++    Ok(())
++}
++
++/// Verbatim copy of `residual.rs`'s private escape-partition loop.
++fn decode_escape_partition_e8(
++    reader: &mut BitReader<'_>,
++    header: &PartitionHeader,
++    out: &mut [i32],
++) -> Result<(), flac_lite::Error> {
++    if out.len() != usize::from(header.sample_count) {
++        return Err(flac_lite::Error::InvalidField);
++    }
++    for sample in out.iter_mut() {
++        *sample = if header.raw_bits == 0 {
++            0
++        } else {
++            reader.read_signed(u32::from(header.raw_bits))?
++        };
++    }
++    Ok(())
++}
++
++/// Verbatim copy of `subframe.rs`'s private `pad_block`.
++fn pad_block_e8(out: &mut [i32], wasted: u32) -> Result<(), flac_lite::Error> {
++    if wasted == 0 {
++        return Ok(());
++    }
++    for s in out.iter_mut() {
++        *s = ((i64::from(*s)) << wasted) as i32;
++    }
++    Ok(())
++}
++
++/// Verbatim copy of `subframe.rs`'s private `integrate_fixed`.
++fn integrate_fixed_e8(
++    order: u8,
++    warm_up: &PredictorState,
++    residual: &mut [i32],
++) -> Result<(), flac_lite::Error> {
++    let order = usize::from(order);
++    if order > flac_lite::MAX_FIXED_ORDER {
++        return Err(flac_lite::Error::UnsupportedPredictorOrder);
++    }
++    if warm_up.len < order {
++        return Err(flac_lite::Error::InvalidField);
++    }
++    let w = &warm_up.warm_up;
++    let mut d1;
++    let mut d2 = 0i64;
++    let mut d3 = 0i64;
++    let mut out = 0i64;
++    match order {
++        0 => return Ok(()),
++        1 => {
++            d1 = i64::from(w[0]);
++        }
++        2 => {
++            d1 = i64::from(w[0]) - i64::from(w[1]);
++            out = i64::from(w[0]);
++        }
++        3 => {
++            d2 = i64::from(w[0]) - 2 * i64::from(w[1]) + i64::from(w[2]);
++            d1 = i64::from(w[0]) - i64::from(w[1]);
++            out = i64::from(w[0]);
++        }
++        _ => {
++            d3 = i64::from(w[0]) - 3 * i64::from(w[1]) + 3 * i64::from(w[2]) - i64::from(w[3]);
++            d2 = i64::from(w[0]) - 2 * i64::from(w[1]) + i64::from(w[2]);
++            d1 = i64::from(w[0]) - i64::from(w[1]);
++            out = i64::from(w[0]);
++        }
++    }
++    for sample in residual.iter_mut() {
++        let r = i64::from(*sample);
++        match order {
++            1 => {
++                d1 += r;
++                out = d1;
++            }
++            2 => {
++                d1 += r;
++                out += d1;
++            }
++            3 => {
++                d2 += r;
++                d1 += d2;
++                out += d1;
++            }
++            _ => {
++                d3 += r;
++                d2 += d3;
++                d1 += d2;
++                out += d1;
++            }
++        }
++        *sample = out as i32;
++    }
++    Ok(())
++}
++
++/// Verbatim copy of `subframe.rs`'s private `integrate_lpc`.
++fn integrate_lpc_e8(
++    coefficients: &[i32],
++    shift: i8,
++    warm_up: &PredictorState,
++    residual: &mut [i32],
++) -> Result<(), flac_lite::Error> {
++    if shift < 0 {
++        return Err(flac_lite::Error::InvalidField);
++    }
++    let order = coefficients.len();
++    if order > flac_lite::MAX_LPC_ORDER {
++        return Err(flac_lite::Error::UnsupportedPredictorOrder);
++    }
++    if warm_up.len < order {
++        return Err(flac_lite::Error::InvalidField);
++    }
++    let shift = u32::from(shift as u8);
++    if shift >= 64 {
++        return Err(flac_lite::Error::InvalidField);
++    }
++    let w = &warm_up.warm_up;
++    for i in 0..residual.len() {
++        let mut acc = 0i64;
++        for (j, &c) in coefficients.iter().enumerate() {
++            let past = if j < i {
++                i64::from(residual[i - 1 - j])
++            } else {
++                i64::from(w[j - i])
++            };
++            acc += i64::from(c) * past;
++        }
++        residual[i] = ((acc >> shift) + i64::from(residual[i])) as i32;
++    }
++    Ok(())
++}
++
++/// Verbatim copy of `residual.rs`'s private `rice_unmap`.
++fn rice_unmap_e8(n: u32) -> i32 {
++    if n & 1 == 0 {
++        (n >> 1) as i32
++    } else {
++        (!(n >> 1)) as i32
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn boundary_delta_exact_and_wrapping() {
++        let mut big = 0u32;
++        assert_eq!(boundary_delta(10, 42, &mut big), 32);
++        assert_eq!(boundary_delta(0xFFFF, 0x0004, &mut big), 5, "wraps exactly");
++        assert_eq!(boundary_delta(7, 7, &mut big), 0);
++        assert_eq!(big, 0, "no tripwires yet");
++    }
++
++    #[test]
++    fn boundary_delta_near_wrap_tripwire() {
++        let mut big = 0u32;
++        // 65,535 cycles is a legal-but-suspicious span; the delta is still
++        // reported, the counter is what fires.
++        assert_eq!(boundary_delta(1, 0, &mut big), 65_535);
++        assert_eq!(big, 1);
++        assert_eq!(
++            boundary_delta(0, BIG_DELTA_WARN as u16, &mut big),
++            BIG_DELTA_WARN
++        );
++        assert_eq!(big, 2, "threshold is inclusive");
++    }
++}
+diff --git a/examples/flac_spike/src/lib.rs b/examples/flac_spike/src/lib.rs
+index dd05974..58189da 100644
+--- a/examples/flac_spike/src/lib.rs
++++ b/examples/flac_spike/src/lib.rs
+@@ -38,4 +38,5 @@
+ pub mod assets;
+ pub mod checksum;
+ pub mod driver;
++pub mod e8;
+ pub mod stats;
+diff --git a/examples/flac_spike/src/main.rs b/examples/flac_spike/src/main.rs
+index c6025fa..8210249 100644
+--- a/examples/flac_spike/src/main.rs
++++ b/examples/flac_spike/src/main.rs
+@@ -82,6 +82,7 @@ mod rom {
+     use flac_spike::assets::{CLIPS, SpikeClip};
+     use flac_spike::checksum::{Fnv1a64, fnv1a64, fold_i16le_stereo};
+     use flac_spike::driver::{self, DriverError};
++    use flac_spike::e8::{self, Meter};
+     use flac_spike::stats::{FrameCost, WORST_WRAPPED, cycles_between, real_time_budget};
+ 
+     const COLOR_PENDING: agb::display::Rgb15 = Rgb::new(128, 0, 255).to_rgb15();
+@@ -430,6 +431,81 @@ mod rom {
+             low = self.low.value();
+             (u32::from(high) << 16) | u32::from(low)
+         }
++
++        /// E8 boundary read: the low half alone (16-bit, wraps every
++        /// 65,536 cycles). One atomic register read — the cheapest
++        /// instrument the counter offers, which is why the per-sample
++        /// spans use it with wrapping deltas instead of composite reads.
++        fn low_now(&self) -> u16 {
++            self.low.value()
++        }
++    }
++
++    /// E8 probe meter (`flac_spike::e8::Meter` on real hardware): the
++    /// gross window holds agb's critical section open across a whole
++    /// frame (IME off for the frame, witnesses identical to PR 3's),
++    /// stage windows nest inside it via the same `timed` shape, and
++    /// `now` is the bare low-half read.
++    ///
++    /// The critical-section token rides between `open` and `close` as
++    /// opaque `RestoreState` (Copy); pairing is by construction — every
++    /// open is closed by the pass harness in the same task, and a frame
++    /// that rejects still flows through `close` before the fold.
++    struct RomMeter<'a, 'c> {
++        counter: &'c Counter<'a>,
++        gross_token: Option<agb::external::critical_section::RestoreState>,
++        gross_start: u32,
++        /// IME witness: read inside the gross right after the acquire
++        /// (must be 0). The gross calibration's empty open/close runs the
++        /// same probe, so its cost rides in the gross overhead.
++        ime_inside: u16,
++    }
++
++    impl<'a, 'c> RomMeter<'a, 'c> {
++        fn new(counter: &'c Counter<'a>) -> Self {
++            Self {
++                counter,
++                gross_token: None,
++                gross_start: 0,
++                ime_inside: 0xFFFF,
++            }
++        }
++    }
++
++    impl Meter for RomMeter<'_, '_> {
++        fn now(&mut self) -> u16 {
++            self.counter.low_now()
++        }
++
++        fn timed<A, T>(&mut self, args: A, work: impl FnOnce(A) -> T) -> (T, u32) {
++            let mut raw = 0u32;
++            let out = agb::external::critical_section::with(|_cs| {
++                let start = self.counter.read();
++                let out = work(args);
++                let end = self.counter.read();
++                raw = cycles_between(start, end);
++                out
++            });
++            (out, raw)
++        }
++
++        fn open(&mut self) {
++            let token = unsafe { agb::external::critical_section::acquire() };
++            let start = self.counter.read();
++            // SAFETY: REG_IME is an even address in the I/O region.
++            self.ime_inside = unsafe { io_read_u16(REG_IME) };
++            self.gross_start = start;
++            self.gross_token = Some(token);
++        }
++
++        fn close(&mut self) -> u32 {
++            let end = self.counter.read();
++            let raw = cycles_between(self.gross_start, end);
++            if let Some(token) = self.gross_token.take() {
++                unsafe { agb::external::critical_section::release(token) };
++            }
++            raw
++        }
+     }
+ 
+     /// Run `work` inside one measurement window: IME off (agb's critical
+@@ -438,7 +514,7 @@ mod rom {
+     /// = saturating difference via the shared fold rule in
+     /// `stats::cycles_between`. All logging happens OUTSIDE the window — a
+     /// serial write inside would measure the logger, not the decode.
+-    fn timed<T>(counter: &mut Counter<'_>, work: impl FnOnce() -> T) -> (T, u32) {
++    fn timed<T>(counter: &Counter<'_>, work: impl FnOnce() -> T) -> (T, u32) {
+         let mut raw = 0u32;
+         let out = agb::external::critical_section::with(|_cs| {
+             let start = counter.read();
+@@ -617,6 +693,269 @@ mod rom {
+         }
+     }
+ 
++    /// E8 probe pass (sample code): the vendored instrumented decode
++    /// (`e8::decode_one_e8`) measured next to the verbatim PR 3 control
++    /// (`driver::decode_one` in a `timed` window), one image. The control
++    /// is the same-run baseline witness (its stats must reproduce the
++    /// recorded PR 3/4 numbers — the reading that makes cross-session
++    /// comparison honest), and every frame carries a per-frame
++    /// e8-vs-control sample-equality witness OUTSIDE the windows: the
++    /// attribution numbers only count on frames decoded bit-identically
++    /// to the proven-correct control.
++    ///
++    /// Calibration (E4's verified shape — ONE byte-identical loop over 3
++    /// discarded + 5 reported windows, unconditional stores, nothing
++    /// logged between windows) runs once per instrument shape, each with
++    /// its own stability witness:
++    /// 1. `w_overhead` — the nested stage-window shape: an empty `timed()`
++    ///    with an IME probe inside (also the IME == 0 in-window witness).
++    /// 2. `g_overhead` — the gross shape: an empty `RomMeter` open/close
++    ///    (IME acquire/probe/restore + composite read pair).
++    /// 3. `b_overhead` — the boundary shape: a back-to-back `now()` pair
++    ///    inside an open gross (one I/O read + wrapping delta), netted
++    ///    once per measured span. Runs inside the gross so the IME-off
++    ///    bus state matches the real spans.
++    ///
++    /// Reports per-arm: control stats, gross stats, every bucket's
++    /// (count/min@/max@/sum — net of its own calibration), the closure
++    /// fold (gross − attributed parts, raw), and the tripwires
++    /// (near-wrap boundary deltas, closure underflows, residual-sample
++    /// tally). Returns `Some(())` only when every witness passed; each
++    /// failure names itself on serial and voids the arm's numbers.
++    fn e8_probe_pass(clip: &SpikeClip, counter: &Counter<'_>) -> Option<(u32, u32, u32)> {
++        let name = clip.name;
++        let max = usize::from(clip.max_blocksize);
++        let mut ctrl_l: alloc::vec::Vec<i32> = alloc::vec![0; max];
++        let mut ctrl_r: alloc::vec::Vec<i32> = alloc::vec![0; max];
++        let mut e8_l: alloc::vec::Vec<i32> = alloc::vec![0; max];
++        let mut e8_r: alloc::vec::Vec<i32> = alloc::vec![0; max];
++        let mut state_c = [PredictorState::new(), PredictorState::new()];
++        let mut state_e = [PredictorState::new(), PredictorState::new()];
++
++        // --- calibration 1: the stage-window shape (PR 3 / E2a's verified
++        // unified loop; 3 discarded + 5 reported, one IME probe inside).
++        const CALIB_TOTAL: usize = 3 + CALIBRATION_SAMPLES;
++        let mut wcal = [0u32; CALIB_TOTAL];
++        let mut wprobes = [0xFFFFu16; CALIB_TOTAL];
++        for i in 0..CALIB_TOTAL {
++            let (probe, raw) = timed(counter, || {
++                // SAFETY: REG_IME is an even address in the I/O region.
++                unsafe { io_read_u16(REG_IME) }
++            });
++            wprobes[i] = probe;
++            wcal[i] = raw;
++        }
++        let w_overhead = wcal[CALIB_TOTAL - CALIBRATION_SAMPLES];
++        let w_stable = wcal[CALIB_TOTAL - CALIBRATION_SAMPLES..]
++            .iter()
++            .all(|r| *r == w_overhead);
++
++        // --- calibrations 2 + 3: gross and boundary shapes, one unified
++        // loop each (byte-identical iterations, unconditional stores).
++        let mut meter = RomMeter::new(counter);
++        let mut gcal = [0u32; CALIB_TOTAL];
++        let mut gprobes = [0xFFFFu16; CALIB_TOTAL];
++        for i in 0..CALIB_TOTAL {
++            meter.open();
++            let graw = meter.close();
++            gprobes[i] = meter.ime_inside;
++            gcal[i] = graw;
++        }
++        let g_overhead = gcal[CALIB_TOTAL - CALIBRATION_SAMPLES];
++        let g_stable = gcal[CALIB_TOTAL - CALIBRATION_SAMPLES..]
++            .iter()
++            .all(|r| *r == g_overhead);
++
++        let mut bcal = [0u32; CALIB_TOTAL];
++        for i in 0..CALIB_TOTAL {
++            meter.open();
++            let t0 = meter.now();
++            let t1 = meter.now();
++            let pair = u32::from(t1.wrapping_sub(t0));
++            let _ = meter.close();
++            bcal[i] = pair;
++        }
++        let b_overhead = bcal[CALIB_TOTAL - CALIBRATION_SAMPLES];
++        let b_stable = bcal[CALIB_TOTAL - CALIBRATION_SAMPLES..]
++            .iter()
++            .all(|r| *r == b_overhead);
++
++        agb::println!(
++            "*** {} e8 calibration: w={} stable={} ime={} | g={} stable={} ime={} | b={} stable={}",
++            name,
++            w_overhead,
++            w_stable,
++            wprobes[CALIB_TOTAL - CALIBRATION_SAMPLES],
++            g_overhead,
++            g_stable,
++            gprobes[CALIB_TOTAL - CALIBRATION_SAMPLES],
++            b_overhead,
++            b_stable
++        );
++        if !(w_stable && g_stable && b_stable) {
++            agb::println!(
++                "*** {} e8 FAIL calibration unstable — harness noise, numbers void",
++                name
++            );
++            return None;
++        }
++        if wprobes[CALIB_TOTAL - CALIBRATION_SAMPLES] != 0
++            || gprobes[CALIB_TOTAL - CALIBRATION_SAMPLES] != 0
++        {
++            agb::println!("*** {} e8 FAIL IME != 0 inside calibration windows", name);
++            return None;
++        }
++
++        let mut st = e8::BucketStats::new();
++        let mut ctrl_cost = FrameCost::new();
++        let mut ime_ok = true;
++        let mut pass = true;
++
++        for frame_index in 0..clip.frames.len() {
++            // Control: verbatim PR 3 window. Same-run baseline witness.
++            let (ctrl_res, ctrl_raw) = timed(counter, || {
++                driver::decode_one(clip, frame_index, &mut ctrl_l, &mut ctrl_r, &mut state_c)
++            });
++            let ctrl_written = match ctrl_res {
++                Ok(w) => w,
++                Err(err) => {
++                    agb::println!("*** {} e8 FAIL ctrl frame {}: {:?}", name, frame_index, err);
++                    return None;
++                }
++            };
++            ctrl_cost.observe(frame_index, ctrl_raw.saturating_sub(w_overhead));
++
++            // Instrumented decode (vendored path, own windows + spans).
++            let (e8_res, acc) = e8::decode_one_e8(
++                clip,
++                frame_index,
++                &mut e8_l,
++                &mut e8_r,
++                &mut state_e,
++                &mut meter,
++                &mut st,
++                w_overhead,
++                b_overhead,
++                g_overhead,
++            );
++            let written = match e8_res {
++                Ok(w) => w,
++                Err(err) => {
++                    agb::println!("*** {} e8 FAIL e8 frame {}: {:?}", name, frame_index, err);
++                    return None;
++                }
++            };
++            ime_ok &= meter.ime_inside == 0;
++
++            // Equality witness OUTSIDE the windows: the vendored decode
++            // must produce bit-identical samples to the proven control.
++            let eq = written == ctrl_written
++                && e8_l[..written] == ctrl_l[..written]
++                && (clip.channels != 2 || e8_r[..written] == ctrl_r[..written]);
++            if !eq {
++                agb::println!(
++                    "*** {} e8 FAIL equality at frame {} (first offender) — vendored decode diverged, numbers void",
++                    name,
++                    frame_index
++                );
++                pass = false;
++                break;
++            }
++
++            let parts = acc.windows_raw + u64::from(acc.unary_raw) + u64::from(acc.rest_raw);
++            let closure = i64::from(acc.gross_raw) - i64::try_from(parts).unwrap_or(i64::MAX);
++            agb::println!(
++                "*** {} e8 frame {:>3}/{} bs={} ctrl_net={} gross_raw={} parts={} closure={} unary_raw={} rest_raw={} samples={} windows={}",
++                name,
++                frame_index,
++                clip.frames.len(),
++                written,
++                ctrl_raw.saturating_sub(w_overhead),
++                acc.gross_raw,
++                parts,
++                closure,
++                acc.unary_raw,
++                acc.rest_raw,
++                acc.samples,
++                acc.windows_raw
++            );
++        }
++
++        pass &= ime_ok;
++        if !pass {
++            return None;
++        }
++        pass &= st.frames == clip.frames.len();
++        if !pass {
++            agb::println!(
++                "*** {} e8 FAIL folded frames={} expected={}",
++                name,
++                st.frames,
++                clip.frames.len()
++            );
++            return None;
++        }
++        if ctrl_cost.wrapped || st.buckets[e8::W_GROSS].wrapped {
++            agb::println!(
++                "*** {} e8 FAIL a gross/control window wrapped the composite",
++                name
++            );
++            return None;
++        }
++        if st.closure_underflows > 0 {
++            agb::println!(
++                "*** {} e8 FAIL closure underflows={} (parts exceeded gross — double-counted window)",
++                name,
++                st.closure_underflows
++            );
++            return None;
++        }
++
++        // --- the attribution table.
++        agb::println!(
++            "*** {} e8 ctrl stats: count={} min={}@{} max={}@{} sum={}",
++            name,
++            ctrl_cost.count,
++            ctrl_cost.min,
++            ctrl_cost.min_frame,
++            ctrl_cost.max,
++            ctrl_cost.max_frame,
++            ctrl_cost.sum
++        );
++        for (bucket, cost) in st.buckets.iter().enumerate() {
++            agb::println!(
++                "*** {} e8 bucket {:>10}: count={} min={}@{} max={}@{} sum={}",
++                name,
++                e8::BUCKET_NAMES[bucket],
++                cost.count,
++                cost.min,
++                cost.min_frame,
++                cost.max,
++                cost.max_frame,
++                cost.sum
++            );
++        }
++        agb::println!(
++            "*** {} e8 closure: sum={} min={} max={} underflows={} | resid_samples={} big_deltas={} windows={}",
++            name,
++            st.closure_sum,
++            st.closure_min,
++            st.closure_max,
++            st.closure_underflows,
++            st.resid_samples,
++            st.big_deltas,
++            st.windows
++        );
++        agb::println!(
++            "*** {} e8 summary: COMPLETED (calib w={} g={} b={})",
++            name,
++            w_overhead,
++            g_overhead,
++            b_overhead
++        );
++        Some((w_overhead, b_overhead, g_overhead))
++    }
++
+     #[agb::entry]
+     fn main(mut gba: agb::Gba) -> ! {
+         agb::eprintln!(
+@@ -712,6 +1051,20 @@ mod rom {
+             );
+         }
+ 
++        // E8 probe section (sample code): sub-stage attribution on the
++        // vendored decode, control alongside, one image. Runs only on
++        // proven images (correctness-before-speed). It does NOT change
++        // the PR 3 verdict semantics — the probe prints its own stats and
++        // summary lines; any harness failure voids the e8 numbers loudly.
++        if proofs_pass {
++            let mut timers = gba.timers.timers();
++            let counter = Counter::start(&mut timers);
++            for clip in CLIPS.iter() {
++                agb::println!("[spike] e8 probe: {} sub-stage attribution", clip.name);
++                let _ = e8_probe_pass(clip, &counter);
++            }
++        }
++
+         let (color, label) = if pass {
+             (COLOR_PASS, "BLUE")
+         } else {
+diff --git a/examples/flac_spike/tests/e8_witness.rs b/examples/flac_spike/tests/e8_witness.rs
+new file mode 100644
+index 0000000..bd8fc78
+--- /dev/null
++++ b/examples/flac_spike/tests/e8_witness.rs
+@@ -0,0 +1,174 @@
++//! E8 host witness: the vendored, instrumented decode path reproduces the
++//! reference PCM **bit-exactly** on the exact embedded bytes.
++//!
++//! Correctness-before-speed (FLAC.md): no E8 attribution number counts from
++//! an image whose instrumented decode is not proven. This suite proves the
++//! *what* for the vendored copy (`flac_spike::e8`, NullMeter — timing
++//! inert on host); the ROM carries the per-frame variant-vs-control
++//! sample-equality witness proving the measured image decoded identically.
++//!
++//! Layers:
++//! 1. **Bit-exact decode** — vendored per-frame walk, whole clip,
++//!    interleaved i16-LE equal to the `flac -d` reference blob.
++//! 2. **Twin agreement** — vendored output equals the live driver's output
++//!    frame-for-frame (a shared misreading of the assets would still be
++//!    caught by layer 1's external witness).
++//! 3. **Bookkeeping** — gross/window bucket counts fold one observation
++//!    per window occurrence; residual-sample tally equals the decoded
++//!    samples minus the non-Rice subframe bodies (sanity: > 0, ≤ total);
++//!    `NullMeter`'s zero raws leave closure exactly balanced.
++
++use flac_lite::subframe::PredictorState;
++use flac_spike::assets::{CLIPS, L0_FIXED, L4_LPC};
++use flac_spike::driver;
++use flac_spike::e8::{self, BucketStats, NullMeter};
++
++const L0_PCM: &[u8] = include_bytes!("../assets/spike_l0_pcm.bin");
++const L4_PCM: &[u8] = include_bytes!("../assets/spike_l4_pcm.bin");
++
++/// Expected byte length of a clip's reference PCM (interleaved stereo
++/// i16) — same helper shape as `spike_witness.rs` (test-local by
++/// convention; the two suites stay independent).
++trait PcmLen {
++    fn pcm_expected_len(&self) -> usize;
++}
++
++impl PcmLen for flac_spike::assets::SpikeClip {
++    fn pcm_expected_len(&self) -> usize {
++        usize::try_from(self.total_samples).unwrap() * usize::from(self.channels) * 2
++    }
++}
++
++fn pcm_for(name: &str) -> &'static [u8] {
++    if name == L0_FIXED.name {
++        L0_PCM
++    } else if name == L4_LPC.name {
++        L4_PCM
++    } else {
++        panic!("witness suite does not know a blob for arm {name:?}")
++    }
++}
++
++/// Walk a clip through the vendored instrumented decode (NullMeter:
++/// every window raw is 0; only decode correctness + fold bookkeeping are
++/// exercised on host).
++fn decode_clip_e8(clip: &flac_spike::assets::SpikeClip) -> (Vec<u8>, BucketStats) {
++    let max = usize::from(clip.max_blocksize);
++    let mut left = vec![0i32; max];
++    let mut right = vec![0i32; max];
++    let mut state = [PredictorState::new(), PredictorState::new()];
++    let mut st = BucketStats::new();
++    let mut meter = NullMeter;
++    let mut got: Vec<u8> = Vec::with_capacity(clip.pcm_expected_len());
++    for frame in 0..clip.frames.len() {
++        let (result, _acc) = e8::decode_one_e8(
++            clip, frame, &mut left, &mut right, &mut state, &mut meter, &mut st, 0, 0, 0,
++        );
++        let written = result
++            .unwrap_or_else(|e| panic!("{}: e8 walk failed at frame {frame}: {e:?}", clip.name));
++        for i in 0..written {
++            let l = i16::try_from(left[i]).expect("decoded left fits i16 (16-bit profile)");
++            got.extend_from_slice(&l.to_le_bytes());
++            if clip.channels == 2 {
++                let r = i16::try_from(right[i]).expect("decoded right fits i16");
++                got.extend_from_slice(&r.to_le_bytes());
++            }
++        }
++    }
++    (got, st)
++}
++
++#[test]
++fn vendored_decode_is_bit_exact_against_the_reference_pcm() {
++    for clip in CLIPS {
++        let (got, _st) = decode_clip_e8(clip);
++        assert_eq!(
++            got,
++            pcm_for(clip.name),
++            "{}: vendored e8 decode diverged from the flac -d reference",
++            clip.name
++        );
++    }
++}
++
++#[test]
++fn vendored_decode_matches_the_live_driver() {
++    for clip in CLIPS {
++        let (got_e8, _st) = decode_clip_e8(clip);
++        let max = usize::from(clip.max_blocksize);
++        let mut left = vec![0i32; max];
++        let mut right = vec![0i32; max];
++        let mut state = Default::default();
++        let mut got_live: Vec<u8> = Vec::with_capacity(clip.pcm_expected_len());
++        driver::decode_clip(clip, &mut left, &mut right, &mut state, |_f, l, r| {
++            for (a, b) in l.iter().zip(r.iter()) {
++                let (a, b) = (
++                    i16::try_from(*a).expect("decoded left fits i16 (16-bit profile)"),
++                    i16::try_from(*b).expect("decoded right fits i16 (16-bit profile)"),
++                );
++                got_live.extend_from_slice(&a.to_le_bytes());
++                got_live.extend_from_slice(&b.to_le_bytes());
++            }
++        })
++        .unwrap_or_else(|e| panic!("{}: live driver walk failed: {e:?}", clip.name));
++        assert_eq!(
++            got_e8, got_live,
++            "{}: vendored e8 decode diverged from the live driver",
++            clip.name
++        );
++    }
++}
++
++#[test]
++fn fold_bookkeeping_counts_every_window() {
++    for clip in CLIPS {
++        let (_got, st) = decode_clip_e8(clip);
++        let frames = clip.frames.len();
++        // Gross: exactly one observation per frame.
++        assert_eq!(st.frames, frames);
++        assert_eq!(st.buckets[e8::W_GROSS].count, frames);
++        // Header: exactly one parse window per frame.
++        assert_eq!(st.buckets[e8::W_HDR].count, frames);
++        // Two subframes per frame (stereo clips) for prefix / pad.
++        assert_eq!(st.buckets[e8::W_PREFIX].count, 2 * frames);
++        assert_eq!(st.buckets[e8::W_PAD].count, 2 * frames);
++        // One decorrelate + one footer per frame.
++        assert_eq!(st.buckets[e8::W_DECORR].count, frames);
++        assert_eq!(st.buckets[e8::W_FOOTER].count, frames);
++        // Body dispatch: every subframe takes exactly one path —
++        // Fixed/Lpc through the integrator window, Constant/Verbatim
++        // through misc — so integ + misc == 2 per frame (the split between
++        // them is content-dependent; only the total is shape-determined).
++        assert_eq!(
++            st.buckets[e8::W_INTEG].count + st.buckets[e8::W_MISC].count,
++            2 * frames,
++            "{}: subframe body dispatch accounting",
++            clip.name
++        );
++        // Residual samples: positive, and never more than total samples.
++        let total = usize::try_from(clip.total_samples).unwrap();
++        assert!(
++            st.resid_samples > 0,
++            "{}: no residual samples seen",
++            clip.name
++        );
++        assert!(
++            st.resid_samples <= 2 * total as u64,
++            "{}: residual tally exceeds decoded samples",
++            clip.name
++        );
++        // Boundary buckets: observed once per frame that carried Rice
++        // samples (at most every frame).
++        assert!(st.buckets[e8::W_UNARY].count <= frames);
++        assert_eq!(
++            st.buckets[e8::W_UNARY].count,
++            st.buckets[e8::W_REST].count,
++            "{}: unary/rest buckets must observe the same frames",
++            clip.name
++        );
++        // NullMeter: zero raws balance the closure exactly, no tripwires.
++        assert_eq!(st.closure_sum, 0);
++        assert_eq!(st.closure_underflows, 0);
++        assert_eq!(st.big_deltas, 0);
++    }
++}
