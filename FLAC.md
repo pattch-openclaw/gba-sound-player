@@ -2322,6 +2322,27 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > counts and E10 folds. Full result + method + the floor arithmetic:
 > [E8 result](#e8-result--sub-stage-attribution-names-the-cost-centers-2026-10-12).
 > ~~E8 leads~~ — **E2b leads** (see the amended ordering).
+>
+> **Status 2026-10-13: E2b measured — the biggest decoder-side win the
+> menu has produced.** The run-length-table unary count (256 B
+> leading-ones table pinned to `.iwram`, riding the E2a accumulator
+> reader): FIXED mean **−19.17% marginal** against the same-image
+> accumulator arm (−21.71% vs the live control), 217.4% → **170.2%** of
+> budget; LPC −10.89% marginal, 652.3% → 589.5%. The implied cut to the
+> E8 `unary` bucket agrees across the arms — FIXED removes 34.1% of its
+> 56.2% share, LPC 34.9% of its 31.2%: two clips, two different shares,
+> one mechanism taking roughly a third of the unary cost.
+> Not a collapse — FIXED stays 1.7× budget, exactly as E8's floor
+> arithmetic bounded (clearing the mean needs `unary` down ≈96%; one
+> count shape could not — and E8's illustrative *halving* overshoots
+> the measured depth of ≈⅓). Full result + method:
+> [E2b result](#e2b-result--run-length-table-count-lands-the-biggest-decoder-side-win-on-the-menu-so-far-2026-10-13).
+> ~~E2b leads~~ — **E9 (composite arms) leads** (see the amended
+> ordering). E10's first gate (a large codeword-loop share) is met; its
+> second ("E2b underdelivers") is not literally met — E2b delivered —
+> but ≈⅔ of the unary bucket (≈37% of FIXED's gross) remains standing,
+> which is E10's newly priced headroom; E10 alone still cannot close
+> mean-and-worst (the 95.3% floor is the zero-*all*-unary limit).
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -2366,7 +2387,7 @@ timing is not the story and E3/E4 move up. Regions are 865,340 / 835,884 B
 (PR 1 serial) — stage per frame (avg ≈5.3 KB/frame; a 16 KB static is
 ample), not whole-clip.
 
-### E2 — Bit-reader refill accumulator (`bits.rs`) — **measured 2026-09-24 (E2a): no collapse (FIXED −3.1%, LPC +1.4%); [see result](#e2-result--the-accumulator-reader-does-not-collapse-the-fixed-arm-2026-09-24)**
+### E2 — Bit-reader refill accumulator (`bits.rs`) — **measured 2026-09-24 (E2a): no collapse (FIXED −3.1%, LPC +1.4%); [see result](#e2-result--the-accumulator-reader-does-not-collapse-the-fixed-arm-2026-09-24)** — and **measured 2026-10-13 (E2b): the run-length-table unary count, FIXED −21.7% / LPC −9.6% vs the live control — the menu's biggest win; [see E2b result](#e2b-result--run-length-table-count-lands-the-biggest-decoder-side-win-on-the-menu-so-far-2026-10-13)**
 
 The reader is position-only: every `read_bits` recomputes from `bit_pos`,
 re-fetching from the backing slice (up to 5 byte loads worst case at
@@ -2377,8 +2398,10 @@ reader hot, a buffer can be added behind the same API without touching
 callers."* Shape: a 32- or 64-bit big-endian accumulator + refill, with
 `clz` for the unary quotient (`residual.rs`'s `while read_bits(1)? == 0`
 becomes one masked `clz`). The API is unchanged, so the whole witness suite
-carries correctness for free. ARMv4T has CLZ and no divide — the design
-fits the target.
+carries correctness for free. ~~ARMv4T has CLZ and no divide — the design
+fits the target.~~ (Corrected by the E2 result: ARMv4T has **no** CLZ —
+CLZ arrived with ARMv5T — and E2b therefore counted the quotient with a
+run-length table instead; that measured count is the menu's biggest win.)
 
 ### E3 — Decode scratch to IWRAM
 
@@ -2521,6 +2544,17 @@ verdict. Amended
 ([rate track](#sample-rate-reduction--tooling-and-profiling-proposal-2026-10-11)),
 expected to outrank E10 in realism but not closing it — and E8's table
 now names exactly which decode levers feed that track's step-5 re-run.
+Amended
+2026-10-13: ~~E2b leads~~ — E2b was measured 2026-10-13
+([E2b result](#e2b-result--run-length-table-count-lands-the-biggest-decoder-side-win-on-the-menu-so-far-2026-10-13)):
+the menu's biggest decoder-side win (FIXED −21.7% vs the live control,
+mean 170.2% of budget), so **E9 (composite arms: E4-i32 + E2b-table,
+reporting each component's marginal inside the stack) leads** ahead of
+PR 5's verdict — E6 is ruled out and drops from its minimum stack; E10
+stays open with its gates re-read per the E2b entry (≈⅔ of the unary
+bucket still standing). The rate track's step-5 re-run gains its first
+landed decoder-side relief factor from this measurement (≈1.28× on
+FIXED's mean, derived).
 
 ## E1 result — ROM→RAM staging: cartridge reads are not the story (2026-09-22)
 
@@ -3251,6 +3285,153 @@ loop-shape levers pending E2b).
 (`c9a7e77`, never pushed) is superseded by the sample and is deleted
 after this docs PR merges, per convention (content-based proof: the
 committed patch byte-identical to `git diff eadb7ed c9a7e77`).
+
+## E2b result — run-length table count lands the biggest decoder-side win on the menu so far (2026-10-13)
+
+**Sample, not integrated.** As with E1/E2a/E4/E6/E7/E8, the probe never
+lands on the live spike sources: its code is preserved as a reappliable
+sample under `examples/flac_spike/experiments/e2b-rice-quotient-table/`
+(README + `e2b-rice-quotient-table.patch` — the diff against main @
+`14538c4`, byte-identical to the measurement commit `fba1bc5`'s diff,
+verified `git apply --check` clean at that base). The plan of record —
+PR 4 cadence, PR 5 verdict — is untouched, and no decoder file in
+`crates/flac-lite/` changed. Measured ROM `flac-spike.gba` sha256
+`ba1e8a34b2f1531a68a7991946c7c87f1b33a95d44751a5200bfbf2dd24fd7a9`
+(rebuild sha-stable); mGBA 0.10.5 `mgba-test-runner` runs 2026-10-13 on
+the same host runner as PR 3 / E1 / E2a / E4 / E6 / E7 / E8 (Rust nightly
+1.100.0-nightly a69a63265 2026-09-03); two headless runs byte-identical
+(`cmp`, 1,010 lines). Gates green on the patched tree: `make spike-test`
+(host tests 23 → 35: lib 15 → 24 (+3 `e2.rs`, +6 `e2b.rs`),
+`tests/e2_witness.rs` 1, `tests/e2b_witness.rs` 2, `spike_witness` 8
+unchanged), `make flac-test` (115 passed, 1 ignored — unchanged;
+`crates/flac-lite/` untouched by the patch), `make check`, `make
+native-spike-rom`.
+
+**Harness shape (three IRQ-off windows per frame, one image — the E2a
+two-window pattern, one arm extended):**
+
+1. **ctrl** — PR 3's `driver::decode_one`, the verbatim live path, the
+   same-run control;
+2. **acc** — `e2::decode_one_accumulator`, the **E2a sample carried
+   verbatim**: the accumulator reader with the unary loop still per-bit.
+   This arm is not a new variable — it prices **the count change alone**
+   (`tab − acc` is same-reader, same-vendored-body, only the loop
+   swapped) and doubles as a cross-session witness (below);
+3. **tab** — `e2b::decode_one_rice_table`: the same accumulator reader,
+   unary loop replaced by the run-length-table count — `LEADING_ONES[
+   !(top byte of window)]` answers quotients 0..=7 in one zero-wait
+   `ldrb`, 8 means "whole byte of zeros, keep counting **per byte**";
+   the slice tail folds to the top of the inverted byte with a stopper
+   bit so the same table answers short tails; remainder extraction rides
+   the same window (one shift pair consumes `q + 1`, no `peek_at`
+   round-trip). The 256 B `u8` table is `#[link_section = ".iwram")]`
+   (plain `.iwram`, the E6-verified pin target, never `.text_iwram`),
+   copied ROM→IWRAM at boot by agb's `CommonInit` CPUSet.
+
+Calibration: E4's verified unified-loop shape, overhead **24**, stable,
+nets 0, all passes; IME = 0 in-window. Decode proof matched the PCM pin
+(`0x54C7B356621B6E15`, cross-arm agree) before any timing. The legacy
+PR-3-shape pass completed on this image (no E8-style cold-first-window
+void): FIXED sum 357,909,970 / LPC 1,073,989,945, worst indices @60/
+@136 — the e2b ctrl arms sit a constant −1,413 below (≈ −9 cyc/frame,
+code layout), and ctrl's worst-frame indices are **exact** against the
+recorded baseline (FIXED @60, LPC @136, min @156 both arms).
+
+**Witnesses before any number counted:** host (`tests/e2b_witness.rs`):
+the variant decodes the exact embedded clips bit-exactly vs `flac -d`
+**and** differentially frame-by-frame against the production driver.
+Host unit tests (`e2b.rs`): the table exhaustively checked against a
+naive leading-ones oracle; quotient lengths 0..=40 swept at every bit
+offset 0..7 against a per-bit oracle; EOF (unterminated run) restores
+reader state; tail/edge bytes. ROM: per-frame variant-vs-control
+**sample-equality for both variant arms — 314/314 frame-windows equal**,
+first offender named, divergence voids. Link witness: `nm` —
+`LEADING_ONES` at `0x0300022c`; the `.iwram` section grew **exactly
+256 B** (0x22c → 0x32c, `objdump -h`); the boot log echoes
+`table=0x0300022C` as the same-image runtime witness. Vendor-boundary
+size evidence: `e2::decode_subframe` and `e2b::decode_subframe` are the
+same size (`0x378` each), `decode_residual` `0x27c` vs `0x254` — the two
+vendored bodies differ only by the loop replaced by the count, so
+layout moved least between the arms that the marginal reading compares.
+One deliberate divergence, scope-stated: on an unterminated unary run
+the table count restores the reader to the word start where the live
+loop leaves the cursor after the consumed zeros — observable only on a
+corrupt stream (frame dead on both paths), and never reached on the
+committed clips (bit-exact witness).
+
+**Numbers (net of this image's own calibration; 157 frames / 320,000
+samples per arm; budget 1,048,750 cycles/frame ≈ 512 c/sample):**
+
+| arm | ctrl sum | acc sum | tab sum | ctrl worst | tab worst |
+|---|---:|---:|---:|---|---|
+| FIXED (`l0_stereo`) | 357,908,557 | 346,674,620 | **280,207,045** | 2,294,079 @60 | 1,793,645 @136 |
+| LPC (`l4_stereo`) | 1,073,988,532 | 1,089,159,694 | **970,588,755** | 6,880,990 @136 | 6,213,965 @145 |
+
+- **FIXED:** tab −21.71% vs ctrl (77,701,512 cycles; 494,914/frame),
+  **−19.17% marginal vs acc** (66,467,575; 423,360/frame). Mean
+  217.4% → **170.2%** of budget (2,279,672 → 1,784,758; 1,113.1 →
+  871.5 c/sample). Tab's worst index moves @60 → @136 — frame 136 is a
+  ctrl near-max (2,292,954 ctrl_net) and the top frames shuffle order
+  under layout like E2a's; deterministic across both runs; the mean is
+  the reading.
+- **LPC:** tab −9.63% vs ctrl (103,399,777; 658,597/frame), **−10.89%
+  marginal vs acc** (118,570,939; 755,229/frame). Mean 652.3% →
+  **589.5%** (3,340.2 → 3,018.6 c/sample).
+- **The acc arm reproduces E2a's recorded result exactly** (−3.14%
+  FIXED / +1.41% LPC vs ctrl; sums within 0.0004% of E2a's own image) —
+  the cross-session witness that this image's reader arm *is* the E2a
+  arm.
+- Worst frames stay **OVER BUDGET in every arm** (tab worsts 171.0% /
+  592.5%). Screen verdict RED = measurement completed, budget missed —
+  harness completed 2/2.
+
+**Reading (the menu's rule, executed — E2b was to "count the quotient
+without a per-bit loop"; does it collapse the FIXED arm?):** the
+biggest decoder-side movement the menu has produced, and E8's table is
+load-bearing a second time. Expressed as the implied cut to the E8
+`unary` bucket (marginal reading, same-reader basis): FIXED removes
+34.1% of its 56.2% share (19.17/56.2), LPC 34.9% of its 31.2% share
+(10.89/31.2) — **two clips with different bucket shares, one mechanism,
+the same ≈⅓ depth**. E8's floor arithmetic frames the win honestly: it
+priced *halving* unary at ≈156% — the measured depth is ≈⅓, landing
+170.2%, between the arithmetic's illustrative points and nowhere near
+the zero-unary 95.3% limit. Clearing the mean still needs unary down
+≈96%; the table took a third of it. So the count *shape* was the cost,
+confirmed — and the remaining ≈⅔ of the unary bucket (≈37% of FIXED's
+gross) is now the best-priced standing cost on the decoder side.
+Nothing joins the ruled-out list: E2a's ruling was about the reader
+*implementation*; this is the loop *shape*, and it moved.
+
+**Placement (the one placement Sam scoped, 2026-10-13):** the table's
+IWRAM pin is baked into the single measured tab arm (ROM-vs-EWRAM-vs-
+IWRAM placement was deliberately not varied — stated, not silently
+assumed: the arm's number is "table in IWRAM", and E6's code-pinning
+regression did not transfer to 256 B of hot *data* — the win is large
+and positive where code pinning was negative; if the pin ever cost
+anything here it would have to hide inside a −19.17% marginal).
+
+**Consequences:** **E9 (composite arms) leads** — run before PR 5's
+verdict with the stack now concrete: E4-i32 + E2b-table (different
+buckets by E8's table: 49.5% LPC integrator vs the unary loop; E2b's
+arm measured on i64 live arithmetic, so orthogonality is now argued
+across two independently-measured levers and E9 measures the product);
+E6 drops from the minimum stack (ruled-out lever, don't stack it). E10
+stays open with its gates re-read (first gate met; second gate not
+literally met — E2b *delivered* — but ≈⅔ of the bucket standing *is*
+E10's headroom, and its own ceiling is bounded by the same 95.3%
+zero-all-unary floor). The rate track's step-5 re-run gains its first
+landed decoder-side relief factor: ≈1.28× on FIXED's mean (217.4 →
+170.2), which under the cumulative-gains rule multiplies with the rate
+switch (18,157 Hz needs ≈1.21× decoder relief — E2b's measured marginal
+alone already exceeds it, pending E9's in-stack confirmation). Per the
+cumulative rule the E2b delta is harvestable regardless of who leads:
+it is a measured numerator cut on the decode path.
+
+**Preservation:** probe code lives in the sample dir above, never on
+`main`'s spike sources. The `perf/flac-spike-e2b-rl-table` branch
+(`fba1bc5`, never pushed) is superseded by the sample and is deleted
+after this docs PR merges, per convention (content-based proof: the
+committed patch byte-identical to `git diff 14538c4 fba1bc5`).
 
 ## Sample-rate reduction — tooling and profiling proposal (2026-10-11)
 
