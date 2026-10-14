@@ -2343,6 +2343,17 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > but ≈⅔ of the unary bucket (≈37% of FIXED's gross) remains standing,
 > which is E10's newly priced headroom; E10 alone still cannot close
 > mean-and-worst (the 95.3% floor is the zero-*all*-unary limit).
+>
+> **Status 2026-10-14: E10 algorithm plan recorded (docs-only — no new
+> measurement).** The hand-written ARM codeword loop now carries concrete
+> shapes: four no-CLZ quotient-count candidates (De Bruijn multiply index,
+> word-wide continuation skip, predicated SWAR binary search, flipped-ones
+> SWAR popcount), each with its high-level algorithm and the specific
+> ARM7TDMI capability it leverages, plus the hybrid pick, probe shape, and
+> reading rule:
+> [E10 algorithm plan](#e10--arm-mode-codeword-loop-algorithm-plan-of-action-2026-10-14).
+> E10's gates are unchanged — first met, second pending — and E9 still
+> leads ahead of PR 5's verdict.
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -2516,6 +2527,15 @@ if E8 attributes a large share to the codeword loop *and* E2b's
 no-CLZ count (masked-ones / run-length table) underdelivers — measure
 E2b first.
 
+**Plan of action recorded 2026-10-14** (docs-only): the four concrete
+ARM-mode quotient-count shapes — De Bruijn multiply index, word-wide
+continuation skip, predicated SWAR binary search, flipped-ones SWAR
+popcount — each documented with its high-level algorithm and the specific
+ARM7TDMI capability it leverages, with the hybrid pick, probe shape, and
+reading rule at
+[E10 algorithm plan](#e10--arm-mode-codeword-loop-algorithm-plan-of-action-2026-10-14).
+The gates above are unchanged.
+
 **Ruled out by inspection, no probe needed (2026-09-25):** flac-lite's
 own `[profile.release] opt-level = "z"` is *not* how the measured ROM was
 built — flac-lite is a path dependency of the spike workspace, and cargo
@@ -2554,7 +2574,11 @@ PR 5's verdict — E6 is ruled out and drops from its minimum stack; E10
 stays open with its gates re-read per the E2b entry (≈⅔ of the unary
 bucket still standing). The rate track's step-5 re-run gains its first
 landed decoder-side relief factor from this measurement (≈1.28× on
-FIXED's mean, derived).
+FIXED's mean, derived). Amended
+2026-10-14: E10's algorithm shapes recorded as a plan of action
+([E10 algorithm plan](#e10--arm-mode-codeword-loop-algorithm-plan-of-action-2026-10-14))
+— docs-only, no gate changes; E9 still leads and PR 5's verdict is
+unchanged.
 
 ## E1 result — ROM→RAM staging: cartridge reads are not the story (2026-09-22)
 
@@ -3432,6 +3456,161 @@ it is a measured numerator cut on the decode path.
 (`fba1bc5`, never pushed) is superseded by the sample and is deleted
 after this docs PR merges, per convention (content-based proof: the
 committed patch byte-identical to `git diff 14538c4 fba1bc5`).
+
+## E10 — ARM-mode codeword loop: algorithm plan of action (2026-10-14)
+
+**Proposal, not a measurement.** Opened on Sam's call 2026-10-14: document
+the concrete algorithm shapes for E10's hand-written ARM codeword loop —
+four no-CLZ quotient-count candidates, the ARM7TDMI capability each one
+leans on, and the probe shape a run would take. E10's gates stand unchanged
+(first met — E8 priced the codeword loop at 94.6% of FIXED's gross; second
+pending — E2b delivered ≈⅓ of the unary bucket, leaving the standing ≈⅔
+(≈37% of FIXED's gross) as this loop's headroom). Every cycle attribution
+below is **derived prediction** from ARM7TDMI instruction semantics —
+menu-grade, measure before believing. No shape escapes the floor: a perfect
+zero-cost unary loop still leaves FIXED ≈95.3% of budget on the mean (E8's
+arithmetic), so E10 claims cumulative numerator relief — the multiplicative
+product with the rate track (rule of 2026-10-11), never a standalone close.
+
+**Substrate facts (verified 2026-10-14 — repo/registry inspection and host
+arithmetic; *measured* as marked).**
+
+- **ARM mode is reachable in this crate with the shipped toolchain**
+  (*measured*, agb 0.25.0 registry sources): `src/global_asm.rs` compiles
+  `.arm` assembly through `core::arch::global_asm!` (`asm_include.s:3`
+  carries the `.arm` directive; `entrypoint.s`, `interrupt_handler.s`, and
+  the shipping ARM sample mixer `sound/mixer/mixer.s` ride it). E10 would
+  use the same seam — an `.arm` module in the spike crate, interworking via
+  `BX` under `thumbv4t-none-eabi`; the gba.ld `.text > rom` placement is
+  mode-agnostic. No toolchain or linker work is a precondition.
+- **ARMv4's rotated-immediate encoding constrains where constants live**
+  (*measured* today, all 32 even rotates tried): the De Bruijn constant
+  `0x077CB531` is **not** rotatable — the `MUL` takes it from a dedicated
+  register staged once outside the sample loop (PC-relative literal `ldr`
+  as the fallback); likewise the SWAR masks `0x01010101`, `0x0F0F0F0F`,
+  `0xCCCCCCCC`, `0xAAAAAAAA`, `0x11111111`, `0x21082108`. The ladder step
+  constants *are* rotatable (`#0`, `#1`, `#2`, `#4`, `#8`, `#16`,
+  `0x80000000`).
+- **The De Bruijn index is exact on ARM's multiply** (*measured* today,
+  exhaustive over all `1 << i` plus 200,000 random words): `lowest_set_bit(x)
+  × 0x077CB531`, low 32 bits, `>> 27`, indexes a 32-entry table with all
+  entries distinct and `ctz(x)` exact — matching `MUL`'s low-word result on
+  ARM7TDMI.
+- **The unmap fold is register-cheap in ARM mode** (*measured* identity,
+  against the repo's corrected §9.2.7.2 rule — even → `n>>1`, odd →
+  `!(n>>1)`): `(n>>1) ^ (-(n&1))` — `AND`/`RSB`/`LSR`/`EOR`, no branch, no
+  table. The remainder mask `(1<<p)-1` is `MOV r, #1, LSL p` + `RSBS`: a
+  *register-value* barrel shift — one cycle in ARM mode, where Thumb (v4)
+  has no register shift at all; and since `p` is constant within a
+  partition, the mask hoists out of the per-sample loop entirely.
+- **Register budget is tight** (recorded, E7): the target forces `r7` as
+  frame pointer in every build, so constant staging competes with the
+  loop's working set — literal pools are the escape hatch, and `nm` /
+  objdump evidence decides which side won.
+
+**C1 — De Bruijn multiply-index count (the CLZ-as-a-MUL shape).** Converts
+the absent `CLZ` into the one ARM7TDMI capability this hot loop has never
+touched: the documented single-cycle hardware `MUL` (32×32 → low word).
+Window shape: bit-reversed accumulator — the codeword sits at the LSB end,
+so the unary run reads as *trailing zeros* and `ctz(window) = q`. Per
+sample:
+
+1. `RSBS t, w, #0` + `AND t, w, t` — isolate the lowest set bit, flags set
+   (2 cyc; `w == 0` is the run-past-window signal → C2 continuation);
+2. `MUL t, t, rB` — `rB` = `0x077CB531` parked in a register (1 cyc);
+3. `LSR t, t, #27` + `LDRB q, [rT, t]` — 32-entry `ctz` table in `.iwram`
+   (zero-wait).
+
+Flat ≈5 cyc for **any** q ≤ 31 (derived), against the E2b shape: one ldrb
+for q ≤ 7, then ≈5 cyc per 8-bit continuation past that — the win is the
+tail's flatness, not the fast path. Consume: remainder
+`(w >> (q+1)) & ((1<<p)-1)` and drain `w >> (q+1+p)` ride register-value
+shifts (C1 substrate fact above). Refill tax: bytes must enter
+*bit-reversed* — `LDRB rev, [rREV, byte]` (256 B IWRAM rev8 table) +
+`ORR w, w, rev, LSL #24` — the barrel-shifter `LSL` places the byte in the
+same cycle; amortized one extra ldrb per 8 bits, and E2b's tail fold
+already flips bytes, so bit-reversal is precedented inside the reader.
+ARM support leveraged: single-cycle `MUL`, base+register `LDRB`, barrel
+`LSL` inside `ORR`, flag-setting `RSBS`, register-value shifts. Cost to
+price in the probe: the reversal lands in the refill path shared with the
+remainder reads — E8's `rest` bucket (≈358 c/sample) must stay flat; if it
+moves, the reversal tax ate the count win.
+
+**C2 — Word-wide continuation skip (orthogonal; stacks under any count).**
+The standing ≈⅔ of the E2b bucket is dominated by continuation past 8 bits
+counting per byte (~5 cyc per 8). ARM's full-word rotate-immediates test an
+*entire* accumulated word at once (`TEQS w, #0` / `ORRS` fold), adding 32
+to q per empty word (~2 cyc) — continuation becomes O(q/32), not O(q/8),
+and long runs stop touching the table or the masks. The Thumb sibling is
+starved: 8-bit (3-bit-shift) comparison immediates force exactly the
+per-byte walk E2b measures. Stacks under C1 (De Bruijn answers q ≤ 31;
+beyond that the window drains to zero → word-skip) and is also a
+standalone upgrade of the shipped tab arm (swap per-byte continuation for
+per-word skip, table untouched). ARM support leveraged: rotate-immediate
+word compares, S-flag chaining (`TEQS`) keeping the skip branchless until
+the word ends. Derived: prices the long-run tail only — E8's span data
+(525 → 665 c/sample across clips) says run-length scaling is real, but the
+per-clip quotient distribution decides how much; measure it in the probe,
+not in prose.
+
+**C3 — Predicated SWAR binary-search LZC (no memory).** Every ARMv4
+instruction is conditional, so the classic halving ladder runs branchless:
+5 steps (16/8/4/2/1 — all rotatable immediates), each `TST` of the low half
++ predicated `ADD` of the step + predicated `LSR`, ~2–3 ops a step ≈10 cyc
+constant (derived) — no table load, no IWRAM budget, and q > 31 extends the
+ladder instead of looping. The masks are not rotatable (*measured*) → six
+registers staged outside the sample loop; this is the one candidate whose
+cost model is register allocation against the E7-forced `r7` — literal
+pools trade registers for per-iteration `ldr`s, and the objdump witness
+decides. Its claim is memory-free: it competes only if the hybrid's register
+budget collapses or the IWRAM pin budget (below) grows past its welcome.
+
+**C4 — Flipped-ones SWAR popcount (the ARM-mode form of the menu's
+"masked-ones counting").** The E2 correction's sanctioned alternative,
+rebased for ARM: `q = popcount(w ^ (w − 1)) − 1` (*measured* identity
+today — `w ^ (w−1)` is the run plus its terminating one as a block of
+ones), counted by the replicated-bits SWAR tree (`0x55555555`/
+`0x33333333`/`0x0F0F0F0F` pairs), final byte-sum `MUL` by `0x01010101` +
+`LSR #24` — so it harvests the `MUL` like C1. ≈13 ops, ≈12 cyc constant
+(derived). No window-shape change (works on the MSB-first E2b window); it
+competes with C3 on the same register budget and with C1 on the same
+multiply, and it is the fallback if the C1 reversal tax measures hot.
+
+**The pick (hybrid).** Tiered count, one magnitude branch per sample: the
+existing `LEADING_ONES` ldrb fast path for q ≤ 7 (E2b measured the table
+shape; keep its exact fast path — 1 cyc), **C1 De Bruijn for 8 ≤ q ≤ 31**
+(flat), **C2 word-skip beyond 31**. Each tier maps to a distinct ARM7TDMI
+capability — zero-wait IWRAM data, the single-cycle `MUL`, rotate-immediate
+word compares — and the tier boundaries are provable by the host sweep
+(e2b.rs's shape: quotient lengths 0..=63 at every bit offset 0..7).
+C3/C4 stay *alternatives*, not arms: armed only if register pressure kills
+the hybrid or the reversal tax measures hot, never measured first.
+
+**Probe shape (when E10 runs — menu discipline).** Vendored seam in the
+spike crate (`e10.rs` + `global_asm!` `.arm` module); three arms per the
+stacking rule: **ctrl** (live), **tab** (E2b verbatim — the cross-session
+witness *and* the baseline, since E10 replaces the count implementation,
+not the strategy: `arm − tab` is this probe's marginal), **arm** (the
+hybrid). Witnesses before any number counts: host bit-exact vs `flac -d`
++ differential sweeps; ROM per-frame sample-equality; ONE picked
+unterminated-run cursor contract (E2b diverged deliberately here — the ARM
+shape copies either the live loop or the tab arm; state it, witness it);
+IWRAM budget witness `nm` + `objdump -h` — `LEADING_ONES` 256 B + rev8
+256 B + bruijn 32 B = **544 B pinned**; E4's unified-loop calibration; two
+headless runs `cmp`-identical; full stats net of the variant's own
+calibration.
+
+**Reading rule.** The marginal `arm − tab` is the reading (the E2b
+precedent; E10 subsumes the table rather than stacking with it). Priced
+per the standing bucket (derived, same style as the floor arithmetic):
+every 10% of the remaining unary bucket ≈ 6 budget points on FIXED's mean;
+full elimination of the *remaining* unary lands ≈ 170.2 × (1 − 0.37) ≈
+107.2% of budget — above the 95.3% zero-*all*-unary floor by exactly the
+`rest` bucket, and still over budget on worst frames. Demote if the
+marginal sits inside layout noise (the recorded control-offset constants on
+these images are ~9–13 cyc/frame); carry to PR 5's discussion table if it
+moves the mean ≥ ~10%. Nothing here closes mean-and-worst (E8), and nothing
+here substitutes for the rate track — the product rule holds.
 
 ## Sample-rate reduction — tooling and profiling proposal (2026-10-11)
 
