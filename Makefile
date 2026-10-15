@@ -385,7 +385,7 @@ clean:
 	cd crates/flac-lite && $(CARGO) clean
 	cd $(FLAC_CRATE_DIR) && $(CARGO) clean
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) clean
-	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM)
+	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM) $(OPUS_ROM) $(OPUS_PROBE_ROM)
 # mGBA drops a .sav beside each ROM on local runs — emulator state,
 # remove it with the ROMs it belongs to.
 	@rm -f $(ROM:.gba=.sav) $(FLAC_ROM:.gba=.sav) *.sav
