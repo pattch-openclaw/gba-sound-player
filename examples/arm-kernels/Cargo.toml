@@ -1,0 +1,53 @@
+[package]
+name = "arm-kernels"
+version = "0.1.0"
+edition = "2024"
+
+# E10 groundwork (FLAC.md "E10 — ARM-mode codeword loop"): standalone,
+# isolated ARM-mode kernel crate. Each kernel is a pure word-in/word-out
+# function with (a) a Rust twin unit-tested on the host, and (b) an ARM
+# assembly implementation that the kernel-check ROM sweeps over the SAME
+# committed vector table on real ARM7TDMI semantics (mGBA). Nothing here
+# is integrated into the decode path and nothing is timed — integration
+# and measurement stay gated on the E10 probe plan (FLAC.md).
+#
+# First kernel: C1 — De Bruijn multiply-index ctz (the CLZ-as-a-MUL shape,
+# the hybrid's flat 8 ≤ q ≤ 31 tier in FLAC.md's plan of action 2026-10-14).
+#
+# Standalone workspace (own Cargo.toml + [workspace]), config INHERITED from
+# the repo root — do NOT add a local .cargo/config.toml (cargo concatenates
+# target.<triple>.rustflags across config layers; a local re-declaration
+# links `-Tgba.ld` twice — FLAC.md "Second leak variant"). Same pattern as
+# examples/flac_spike/.
+#
+#   make native-kernel-rom   build + fix the kernel-check ROM (this host)
+#   make kernel-test         host twin witness tests (out-of-tree gate)
+
+[dependencies]
+
+# agb exists only for the GBA target (the kernel-check ROM); it cannot build
+# for the host triple. Gate by architecture exactly like examples/flac_spike/:
+# thumbv4t-none-eabi reports target_arch = "arm"; hosts are aarch64/x86_64.
+[target.'cfg(target_arch = "arm")'.dependencies]
+agb = "0.25.0"
+
+[[bin]]
+name = "arm-kernels"
+path = "src/main.rs"
+# `cargo test` must not build the ROM bin: it is a no_main GBA binary whose
+# entry exists only under agb. The host tests link against the lib alone.
+test = false
+bench = false
+
+[workspace]
+
+# ROM-side optimization must match what the probe builds will ship with
+# (same choices as examples/flac_spike/); the asm kernel itself is
+# immune to opt-level — the Rust wrapper and twin are not.
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true
