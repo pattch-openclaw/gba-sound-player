@@ -1,7 +1,8 @@
 .PHONY: format build rom native-rom podman-rom flac-rom native-flac-rom podman-flac-rom \
         spike-rom native-spike-rom podman-spike-rom \
         opus-rom native-opus-rom podman-opus-rom \
-        test test-rom flac-test spike-test opus-test podman-test podman-test-rom podman-flac-test podman-opus-test \
+        kernel-rom native-kernel-rom podman-kernel-rom \
+        test test-rom flac-test spike-test opus-test kernel-test podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test \
         clean clean-cache check podman-check help toolchain-check
 
 # ---------------------------------------------------------------------------
@@ -56,11 +57,13 @@ FLAC_CACHE    ?= gba-flac-lite-target
 FLACROM_CACHE ?= gba-flac-integration-target
 SPIKE_CACHE   ?= gba-flac-spike-target
 OPUS_CACHE    ?= gba-opus-spike-target
+KERNEL_CACHE ?= gba-arm-kernels-target
 CACHE_MOUNTS := -v $(CARGO_CACHE):/app/target:Z \
                 -v $(FLAC_CACHE):/app/crates/flac-lite/target:Z \
                 -v $(FLACROM_CACHE):/app/examples/flac_integration/target:Z \
                 -v $(SPIKE_CACHE):/app/examples/flac_spike/target:Z \
-                -v $(OPUS_CACHE):/app/examples/opus_spike/target:Z
+                -v $(OPUS_CACHE):/app/examples/opus_spike/target:Z \
+                -v $(KERNEL_CACHE):/app/examples/arm-kernels/target:Z
 # GBA test harness (ROM tests boot headlessly in mGBA). Override to point
 # elsewhere, or set empty to see the raw cargo command.
 GBA_TEST_RUNNER ?= mgba-test-runner
@@ -110,6 +113,16 @@ OPUS_CRATE_DIR := examples/opus_spike
 OPUS_CRATE_MANIFEST := $(abspath examples/opus_spike/Cargo.toml)
 OPUS_CRATE_BIN := target/$(TARGET)/release/opus-spike
 
+# The E10 ARM-kernels crate (examples/arm-kernels/) — FLAC.md E10 groundwork:
+# isolated ARM-mode kernels, each with a host twin and an on-target sweep of
+# one committed golden table (no decode-path integration, no timing).
+# Standalone workspace, same inherited-config pattern as the spikes; its host
+# gate runs out-of-tree the same way (cargo config leak; FLAC.md).
+KERNEL_ROM := arm-kernels.gba
+KERNEL_CRATE_DIR := examples/arm-kernels
+KERNEL_CRATE_MANIFEST := $(abspath examples/arm-kernels/Cargo.toml)
+KERNEL_CRATE_BIN := target/$(TARGET)/release/arm-kernels
+
 # `rom` is the command run INSIDE the container (where agb-gbafix lives); the
 # *-rom targets above it are the host-facing entrypoints. Keep `rom` = the
 # native ROM build so containerized and native builds produce the same artifact.
@@ -132,6 +145,7 @@ format:
 	cd $(FLAC_CRATE_DIR) && $(CARGO) fmt
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) fmt
 	cd $(OPUS_CRATE_DIR) && $(CARGO) fmt
+	cd $(KERNEL_CRATE_DIR) && $(CARGO) fmt
 else
 format:
 	@echo "format: skipping — no rustfmt for '$(TOOLCHAIN)' (build continues)."
@@ -240,6 +254,33 @@ podman-opus-rom:
 	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make opus-rom
 
 # ---------------------------------------------------------------------------
+# E10 GROUNDWORK: ARM kernel-check ROM (FLAC.md "E10 — ARM-mode codeword
+# loop"; examples/arm-kernels/).
+#
+#   kernel-rom          build + fix the kernel-check ROM (bare name: runs anywhere)
+#   native-kernel-rom   build it here
+#   podman-kernel-rom   build it in the container
+#
+# Isolated ARM-mode kernels, unit-testable in isolation: the ROM sweeps the
+# assembly over the committed golden table on the emulator's ARM7TDMI — the
+# execution oracle, since the host has no ARM executor. No decode-path
+# integration and no cycle windows: correctness groundwork only; measurement
+# stays gated on the E10 probe plan (FLAC.md).
+# ---------------------------------------------------------------------------
+
+kernel-rom: format
+	cd $(KERNEL_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
+	agb-gbafix $(KERNEL_CRATE_DIR)/$(KERNEL_CRATE_BIN) -o $(KERNEL_ROM)
+	@echo "Kernel-check ROM built: $(KERNEL_ROM)"
+
+native-kernel-rom: kernel-rom
+	@echo "native-kernel-rom done: $(KERNEL_ROM)"
+
+podman-kernel-rom:
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make kernel-rom
+
+# ---------------------------------------------------------------------------
 # Containerized testing.
 #
 # Same convention as the ROM builds: the BARE names (`rom`, `flac-rom`, `test`,
@@ -322,6 +363,20 @@ podman-opus-test:
 	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
 	$(CONTAINER) run --rm -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make opus-test
 
+# Host witness for the E10 ARM kernels: kernel twins vs the naive bit-walk
+# oracle and the committed golden table. Same out-of-tree --manifest-path
+# pattern (cargo config leak). The thumbv4t half of the compile gate is
+# `make kernel-rom` itself (the real link, not a bare check).
+kernel-test: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(KERNEL_CRATE_MANIFEST) --target $(HOST_TRIPLE)
+	@echo "kernel-test passed: E10 kernel twins match the oracle and the committed table"
+
+podman-kernel-test:
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make kernel-test
+
 # Cargo's runner env var is the upper-cased target triple with dashes replaced
 # by underscores: CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER.
 TARGET_ENV := $(shell echo $(TARGET) | tr 'a-z-' 'A-Z_')
@@ -385,7 +440,8 @@ clean:
 	cd crates/flac-lite && $(CARGO) clean
 	cd $(FLAC_CRATE_DIR) && $(CARGO) clean
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) clean
-	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM)
+	cd $(KERNEL_CRATE_DIR) && $(CARGO) clean
+	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM) $(KERNEL_ROM)
 # mGBA drops a .sav beside each ROM on local runs — emulator state,
 # remove it with the ROMs it belongs to.
 	@rm -f $(ROM:.gba=.sav) $(FLAC_ROM:.gba=.sav) *.sav
@@ -403,6 +459,7 @@ check:
 	cd $(FLAC_CRATE_DIR) && $(CARGO) fmt --check
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) fmt --check
 	cd $(OPUS_CRATE_DIR) && $(CARGO) fmt --check
+	cd $(KERNEL_CRATE_DIR) && $(CARGO) fmt --check
 
 # Fail early and legibly when the pinned toolchain isn't reachable, instead of
 # half-running a gate (e.g. `--target ''` when the host triple can't be probed).
@@ -437,6 +494,11 @@ help:
 	@echo "    podman-opus-rom   build $(OPUS_ROM) in the container"
 	@echo "    opus-test         opus spike host gate (scaffold pins; step-2 witness grows in)"
 	@echo ""
+	@echo "  E10 ARM KERNELS (FLAC.md — isolated-kernel groundwork):"
+	@echo "    native-kernel-rom build $(KERNEL_ROM) natively (on-target kernel sweep ROM)"
+	@echo "    podman-kernel-rom build $(KERNEL_ROM) in the container"
+	@echo "    kernel-test       kernel twins vs oracle + committed table (host)"
+	@echo ""
 	@echo "  Tests — native gates (need nightly + agb-gbafix + mgba-test-runner locally):"
 	@echo "    test              test-rom + flac-test (verify-only: no reformat)"
 	@echo "    test-rom          ROM #[test_case] suite in mGBA"
@@ -446,6 +508,7 @@ help:
 	@echo "    podman-test       test-rom + flac-test in the $(CONTAINER) image"
 	@echo "    podman-test-rom   ROM #[test_case] suite in the container"
 	@echo "    podman-flac-test  flac-lite alone in the container"
+	@echo "    podman-kernel-test E10 kernel host gate in the container"
 	@echo "    podman-check      cargo fmt --check in the container"
 	@echo ""
 	@echo "  Formatting:"

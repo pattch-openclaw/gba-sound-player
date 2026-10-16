@@ -3,6 +3,7 @@
 /flac-integration.gba
 /flac-spike.gba
 /opus-spike.gba
+/arm-kernels.gba
 /ctor-probe.gba
 *.d
 
@@ -41,6 +42,12 @@
 # so it builds a target/ of its own; ignore both build dirs.
 /examples/opus_spike/target/
 /examples/opus_spike/vendor/opus-rs/target/
+
+# The E10 ARM-kernels crate (examples/arm-kernels/ — own workspace, same
+# pattern; builds for the GBA target AND the host triple, so the paths vary;
+# ignore the whole dir. Its committed golden table src/vectors.rs is source,
+# not build output — tracked).
+/examples/arm-kernels/target/
 
 # The vendored decoder's committed lockfile pins the exact dependency graph
 # the thumbv4t gate builds with (flac_spike tracks its Cargo.lock — same rule).

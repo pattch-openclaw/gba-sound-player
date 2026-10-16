@@ -2354,6 +2354,16 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > [E10 algorithm plan](#e10--arm-mode-codeword-loop-algorithm-plan-of-action-2026-10-14).
 > E10's gates are unchanged — first met, second pending — and E9 still
 > leads ahead of PR 5's verdict.
+>
+> **Status 2026-10-15: E10 groundwork landed (isolated ARM-kernel crate —
+> correctness only, no measurement).** The first ARM kernel (C1 De Bruijn
+> `ctz32`) now exists and is proven correct by a dual witness — host twin
+> + on-target mGBA sweep over one committed golden table — in
+> `examples/arm-kernels/`, deliberately outside the decode path and the
+> cycle harness. The hybrid, its three-arm probe, and every cycle number
+> stay gated on the algorithm plan above; this only retires "the shapes
+> don't run yet" from E10's open questions. Strategy + witnesses:
+> [E10 groundwork](#e10-groundwork--isolated-arm-kernel-crate-and-testing-strategy-2026-10-15).
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -3611,6 +3621,66 @@ marginal sits inside layout noise (the recorded control-offset constants on
 these images are ~9–13 cyc/frame); carry to PR 5's discussion table if it
 moves the mean ≥ ~10%. Nothing here closes mean-and-worst (E8), and nothing
 here substitutes for the rate track — the product rule holds.
+
+## E10 groundwork — isolated ARM-kernel crate and testing strategy (2026-10-15)
+
+**Correctness groundwork, not a probe.** Opened on Sam's call 2026-10-14:
+E10 is complex enough to split — implement the ARM algorithms as units
+that are testable in isolation, *aside from* ROM integration and *aside
+from* measurement. `examples/arm-kernels/` is that crate: standalone
+workspace, same inherited-config pattern as the spikes. Nothing here is
+integrated into `flac-lite`/`flac_spike` and nothing is timed; the hybrid
+pick, the three-arm probe (ctrl / tab / arm), and every cycle claim stay
+exactly where the
+[E10 algorithm plan](#e10--arm-mode-codeword-loop-algorithm-plan-of-action-2026-10-14)
+left them. This section retires only the "no working ARM algorithm yet"
+half of E10's open questions.
+
+**Testing strategy (the new pattern):** every kernel is a pure
+word-in/word-out function with one **committed golden table**
+(`src/vectors.rs`, generation recipe in its header — the shared-consumer
+rule: host and ROM judge the SAME bytes) and two independent witnesses:
+
+1. **Host twin** — `make kernel-test` (out-of-tree `--manifest-path`, the
+   cargo-config-leak pattern): the same algorithm as plain-Rust, judged
+   against the table, a naive bit-walk oracle, *and* the builtin
+   (`trailing_zeros`) — three formulations, pinned over exhaustive and
+   deterministic sweeps. The twin is what unit tests can reach without an
+   ARM executor.
+2. **On-target sweep** — `make native-kernel-rom` boots a kernel-check ROM
+   in mGBA that sweeps the assembly over the same table; blue = every
+   vector exact. **mGBA's ARM7TDMI is the execution oracle because the
+   host has no ARM executor** (aarch64 machine; `qemu-system-arm` 11.1.2
+   here offers no `arm7tdmi` CPU — *measured* 2026-10-15, `-cpu help`).
+   The sweep's mode-agnostic blind spot (a Thumb build of the same
+   algorithm would also pass) is closed **offline**: `objdump -d` of the
+   built ELF shows the kernel body as 4-byte ARM encodings — ARM-mode-ness
+   is an ELF fact, not an emulator claim.
+
+**First kernel — C1 De Bruijn `ctz32`** (the hybrid's flat 8 ≤ q ≤ 31
+tier): `rsbs`/`ands` isolate the lowest set bit, one `MUL`, `>> 27`,
+`LDRB` table. `ctz32(0) = 32` is the sentinel ("run past the window"),
+asserted separately on-target. Witness counts: 346 committed vectors
+(census: no duplicate inputs, all 33 outcomes covered incl. the
+sentinel); `kernel-test` 5 host tests; ROM sweep 346/346 clean with the
+sentinel line OK, ROM sha256 `9d2e1093…` (full:
+`9d2e10937c7197a020dced2568f49472f73cad5f32a9a24bee8bb59803a6ba43`), two
+headless runs `cmp`-identical.
+
+**Prior assumptions that did not survive:** (1) `MUL Rd, Rm, Rs` with
+`Rd == Rm` is UNPREDICTABLE on ARMv4 and **clang assembles it silently** —
+the kernel keeps Rd/Rm/Rs all distinct (`w` is dead in `r0` by the `MUL`,
+so it reuses `r0`); (2) in edition 2024 `global_asm!` is an **unsafe op**
+and an `#[allow(unsafe_code)]` on the macro-item is ignored (unused-attribute
+warning) — the one reviewed exception lives on a wrapping `mod`; (3) QEMU
+was assumed a viable ARM oracle — it is not on this host (above).
+
+**Deliberate scope cuts:** no `.iwram` pinning (pin budgets belong to the
+probe's `nm`/`objdump` witness), no `rice_unmap` fold, no reader/window
+integration, no C2/C3/C4, no cycle windows. Gates per kernel: `make
+kernel-test` + `make native-kernel-rom` + `make check` (the crate joins
+`format`/`check`/`clean`); container variants `podman-kernel-test` /
+`podman-kernel-rom`.
 
 ## Sample-rate reduction — tooling and profiling proposal (2026-10-11)
 
