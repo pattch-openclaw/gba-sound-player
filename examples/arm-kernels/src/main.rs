@@ -1,10 +1,11 @@
-//! Kernel-check ROM — the on-target witness of the E10 C1 kernel.
+//! Kernel-check ROM — the on-target witness of the E10 ARM kernels.
 //!
 //! PURPOSE (see ../../../FLAC.md → "E10 groundwork"): the ARM-mode
-//! assembly kernel cannot run on the host (aarch64 machine, no ARM
+//! assembly kernels cannot run on the host (aarch64 machine, no ARM
 //! executor — see the crate docs), so mGBA's ARM7TDMI is the execution
-//! oracle: this ROM sweeps `arm_ctz32` over the SAME committed vector
-//! table the host twin witnesses (`arm_kernels::vectors::VECTORS`), then
+//! oracle: this ROM sweeps `arm_ctz32` over `arm_kernels::vectors::VECTORS`
+//! and `arm_rice_unmap` over `arm_kernels::unmap_vectors::UNMAP_VECTORS` —
+//! the SAME committed tables the host twins witness — then
 //! reports per the repo's screen convention: **blue = every vector
 //! matched, red = mismatch, purple = never completed**. Works on cart as
 //! well as emulator.
@@ -32,17 +33,19 @@ fn main() {}
 mod rom {
     use agb::display::Rgb;
     use arm_kernels::ctz32::ctz32_asm;
+    use arm_kernels::rice_unmap::rice_unmap_asm;
+    use arm_kernels::unmap_vectors::UNMAP_VECTORS;
     use arm_kernels::vectors::VECTORS;
 
     const COLOR_PENDING: agb::display::Rgb15 = Rgb::new(128, 0, 255).to_rgb15();
     const COLOR_PASS: agb::display::Rgb15 = Rgb::new(0, 0, 255).to_rgb15();
     const COLOR_FAIL: agb::display::Rgb15 = Rgb::new(255, 0, 0).to_rgb15();
 
-    /// Sweep the committed table through the ARM kernel. Only mismatches
+    /// Sweep the C1 committed table through the ARM kernel. Only mismatches
     /// and a summary go to serial (a clean sweep is one line, not 346).
-    fn sweep() -> bool {
+    fn sweep_ctz32() -> bool {
         agb::println!(
-            "[kernels] sweep start: {} vectors vs committed table",
+            "[kernels] ctz32 sweep start: {} vectors vs committed table",
             VECTORS.len()
         );
         let mut mismatches = 0usize;
@@ -64,14 +67,56 @@ mod rom {
         }
         if mismatches == 0 {
             agb::println!(
-                "[kernels] sweep clean: {}/{} vectors exact",
+                "[kernels] ctz32 sweep clean: {}/{} vectors exact",
                 VECTORS.len(),
                 VECTORS.len()
             );
             true
         } else {
             agb::println!(
-                "[kernels] sweep FAILED: {} mismatches, first at vector {}",
+                "[kernels] ctz32 sweep FAILED: {} mismatches, first at vector {}",
+                mismatches,
+                first_offender.unwrap_or(0)
+            );
+            false
+        }
+    }
+
+    /// Sweep the PR A fold's committed table through the ARM kernel — same
+    /// shape as the C1 sweep, judged against the SAME bytes the host twin
+    /// judges (shared-consumer rule).
+    fn sweep_rice_unmap() -> bool {
+        agb::println!(
+            "[kernels] rice_unmap sweep start: {} vectors vs committed table",
+            UNMAP_VECTORS.len()
+        );
+        let mut mismatches = 0usize;
+        let mut first_offender: Option<usize> = None;
+        for (i, (n, expected)) in UNMAP_VECTORS.iter().enumerate() {
+            let got = rice_unmap_asm(*n);
+            if got != *expected {
+                mismatches += 1;
+                if first_offender.is_none() {
+                    first_offender = Some(i);
+                    agb::println!(
+                        "[kernels] FIRST MISMATCH vector {i}: n=0x{:08X} expected={} got={}",
+                        n,
+                        expected,
+                        got
+                    );
+                }
+            }
+        }
+        if mismatches == 0 {
+            agb::println!(
+                "[kernels] rice_unmap sweep clean: {}/{} vectors exact",
+                UNMAP_VECTORS.len(),
+                UNMAP_VECTORS.len()
+            );
+            true
+        } else {
+            agb::println!(
+                "[kernels] rice_unmap sweep FAILED: {} mismatches, first at vector {}",
                 mismatches,
                 first_offender.unwrap_or(0)
             );
@@ -81,7 +126,7 @@ mod rom {
 
     #[agb::entry]
     fn main(mut gba: agb::Gba) -> ! {
-        agb::eprintln!("[kernels] entry started — E10 C1 kernel-check ROM (no timing, no decode)");
+        agb::eprintln!("[kernels] entry started — E10 kernel-check ROM (no timing, no decode)");
 
         let mut gfx = gba.graphics.get();
         gfx.set_background_palette_colour(0, 0, COLOR_PENDING);
@@ -97,8 +142,29 @@ mod rom {
             if sentinel_ok { "OK" } else { "FAIL" }
         );
 
-        let sweep_pass = sweep();
-        let pass = sweep_pass && sentinel_ok;
+        // The fold's convention anchor gets the same explicit treatment:
+        // the RFC §9.2.7.2 worked example (folded 38 → +19) is the exact
+        // assertion that convicted step 3a's sign-flipped scaffold doc, so
+        // it is called out on-target, not left inside the sweep. The
+        // total-fold extreme (0xFFFFFFFF → i32::MIN, the §9.2.7.3-forbidden
+        // value this fold maps but never rejects) is the other pinned seam.
+        let rfc = rice_unmap_asm(38);
+        let rfc_ok = rfc == 19;
+        agb::println!(
+            "[kernels] rfc-example: rice_unmap(38) = {} [{}]",
+            rfc,
+            if rfc_ok { "OK" } else { "FAIL" }
+        );
+        let extreme = rice_unmap_asm(0xFFFF_FFFF);
+        let extreme_ok = extreme == i32::MIN;
+        agb::println!(
+            "[kernels] total-fold-extreme: rice_unmap(0xFFFFFFFF) = {} [{}]",
+            extreme,
+            if extreme_ok { "OK" } else { "FAIL" }
+        );
+
+        let sweep_pass = sweep_ctz32() && sweep_rice_unmap();
+        let pass = sweep_pass && sentinel_ok && rfc_ok && extreme_ok;
 
         let (color, label) = if pass {
             (COLOR_PASS, "BLUE")
