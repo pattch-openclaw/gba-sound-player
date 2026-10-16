@@ -2382,6 +2382,21 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > decisions:
 > [E10 unit-test kernel track](#e10-unit-test-kernel-track--design-of-record-2026-10-16).
 > E10's gates and the probe's shape are unchanged.
+>
+> **Status 2026-10-16: E10 PR A landed (`rice_unmap` fold kernel —
+> correctness only, no measurement).** The split's independent leaf is
+> done: the §9.2.7.2 fold now exists in `examples/arm-kernels/` as four
+> straight-line ARM-mode instructions (`AND`/`RSB`/`LSR`/`EOR`) — no table,
+> no branch, and **no flag writes** (unlike C1, it is invisible to
+> condition-code state, the property that lets the composite carry live
+> flags across the fold). Dual witness over one committed golden table
+> (839 vectors): host twin (`kernel-test` 5 → 9 tests, with the sign
+> convention anchored against the encoder-side fold) + on-target mGBA sweep
+> (839/839, plus explicit on-target lines for the RFC worked example 38 →
+> 19 and the total-fold extreme). The optional `rev8` step rides to PR B
+> with its consumer. The hybrid, its three-arm probe, and every cycle
+> number stay gated on the algorithm plan. Witness + cuts:
+> [E10 PR A landed](#e10-pr-a-landed--rice_unmap-fold-kernel-2026-10-16).
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -3894,6 +3909,75 @@ evidence list are unchanged from the
 7. **C3/C4 arming triggers** — contingencies, not work items: C3 arms
    only if register pressure collapses the hybrid (E7's forced `r7`),
    C4 only if the refill tax measures hot. Never measured first.
+
+## E10 PR A landed — rice_unmap fold kernel (2026-10-16)
+
+**Correctness, not a probe.** Lands PR A of the
+[E10 unit-test kernel track](#e10-unit-test-kernel-track--design-of-record-2026-10-16):
+the §9.2.7.2 folded-residual sign map as an isolated ARM-mode kernel in
+`examples/arm-kernels/` (`src/rice_unmap.rs`). Four straight-line
+instructions — `AND`/`RSB`/`LSR`/`EOR` for the *measured* identity
+`(n >> 1) ^ (-(n & 1))`, the corrected convention (even → `n >> 1`, odd →
+`!(n >> 1)`; step 3a's sign-flip correction, RFC worked example: folded
+38 → +19). No table, no branch — zero design decisions, exactly what the
+split promised for this leaf. A property the split did not ask for but
+which the kernel documents: it writes **no flags** (no `S` bit anywhere),
+so unlike C1 (`rsbs`/`ands`) it is invisible to condition-code state —
+what lets PR B's composite carry live flags across the fold.
+
+**Witnesses (the groundwork's dual pattern over one committed table).**
+`src/unmap_vectors.rs`: 839 vectors, deterministic recipe in the header
+(seed 20261016; dense `0..=255`, dense `0xFFFFFF00..=0xFFFFFFFF`,
+`[1 << k, (1 << k) − 1, (1 << k) + 1]` for every `k` in `0..32`, 256
+uniform `rand32` draws; 25 duplicate-input skips, all in the single-bit
+stage; the fail-closed census re-asserted by the host test). Expectations
+derive from the spec's branch form; `tests/unmap_twin.rs` judges four
+layers: oracle re-derivation, the twin (the assembly's SWAR shape), a
+negate-and-subtract fourth mechanism, and the **mechanism anchor** —
+composing every table entry with the **encoder-side** fold from §9.2.7.2
+(`x ≥ 0 → 2x`, `x < 0 → −2x − 1`, computed in i64 with an explicit
+domain): a step-3a-style sign-convention misreading cannot survive
+composition with the encoder's rule. Host: `make kernel-test` 5 → 9 tests
+green (new suite `tests/unmap_twin.rs`, 4 tests).
+
+**On-target.** `make native-kernel-rom` sweeps the assembly over the same
+committed table on mGBA's ARM7TDMI: 839/839 exact, plus two explicit
+assertion lines — the RFC worked example `rice_unmap(38) = 19` (the exact
+assertion that convicted the scaffold doc in step 3a, so called out on
+TARGET, not left inside the sweep) and the total-fold extreme
+`rice_unmap(0xFFFFFFFF) = −2147483648` (the §9.2.7.3-forbidden value:
+this total fold maps it, rejecting stays upstream in
+`decode_rice_partition`). The untouched C1 sweep rides along clean
+(346/346, sentinel OK) — the unchanged control reproducing its own record
+in the same image is what keeps the comparison honest across sessions.
+ROM sha256 `2df0daac…` (full:
+`2df0daac07f1f46365e96fd93065cd64c31716cb94e02a7cb31d7190b2a63bec`), two
+headless runs `cmp`-identical, verdict BLUE. ARM-mode-ness witnessed
+offline: `objdump -d` of the built ELF shows the body as 4-byte ARM
+encodings (`e2001001 and` / `e2611000 rsb` / `e1a000a0 lsr` / `e0200001
+eor`; the `bx lr` prints `<unknown>` on Apple's disassembler — the
+groundwork's note: word width and ARM-only instructions are the evidence).
+
+**Prior assumptions that did not survive:** none about the kernel — the
+split's "trivial: four instructions (`AND`/`RSB`/`LSR`/`EOR`), no table,
+no branch; zero design decisions" held exactly, and the encoder-fold
+anchor, not a correction pass, carried the convention's burden. One
+host-harness fact earned its keep: an open-ended `0xFFFF_F000u32..` sweep
+range panics "attempt to add with overflow" incrementing past `u32::MAX`
+in the test build — the dense-top sweep needs `..=u32::MAX`.
+
+**Deliberate scope cuts:** the **optional `rev8` refill step does not
+ride** — this PR stays the zero-decision leaf, and `rev8` is a table
+lookup plus placement whose consumer is PR B's composite; it lands there,
+where decision 6's `.include` sharing between the fold's two call sites
+also becomes real (until then the fold ships as one standalone global
+symbol). No `.iwram` pinning (pin budgets belong to the probe's `nm`/
+`objdump` witness), no reader/window integration, no decode-path wiring,
+no cycle windows — the hybrid, the three-arm probe, and every cycle claim
+stay gated on the algorithm plan. Gates per kernel unchanged: `make
+kernel-test` + `make native-kernel-rom` + `make check` (all green; the
+crate's Makefile wiring needed no changes — new kernels ride the existing
+targets).
 
 ## Sample-rate reduction — tooling and profiling proposal (2026-10-11)
 

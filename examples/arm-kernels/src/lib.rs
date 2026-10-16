@@ -40,6 +40,12 @@
 //!   constant, index a 32-entry table. Answers `ctz(w)` for any `w`, with
 //!   the sentinel `32` for `w == 0` ("run past the window" in the probe's
 //!   bit-reversed-window shape).
+//! - [`rice_unmap`] — **PR A, the folded-residual sign fold** (§9.2.7.2):
+//!   the sample-step's independent leaf — four straight-line instructions
+//!   (`AND`/`RSB`/`LSR`/`EOR`, no table, no branch, no flag writes) for the
+//!   measured identity `(n >> 1) ^ (-(n & 1))`. The host witness additionally
+//!   anchors the sign convention against the encoder-side fold, so a
+//!   step-3a-style sign misreading cannot survive the composition.
 //!
 //! Standalone workspace; cargo config is **inherited** from the repo root —
 //! a local `.cargo/config.toml` here would double `-Tgba.ld` at link time
@@ -50,4 +56,6 @@
 #![warn(missing_docs)]
 
 pub mod ctz32;
+pub mod rice_unmap;
+pub mod unmap_vectors;
 pub mod vectors;
