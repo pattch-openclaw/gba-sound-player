@@ -2364,6 +2364,24 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > stay gated on the algorithm plan above; this only retires "the shapes
 > don't run yet" from E10's open questions. Strategy + witnesses:
 > [E10 groundwork](#e10-groundwork--isolated-arm-kernel-crate-and-testing-strategy-2026-10-15).
+>
+> **Status 2026-10-16: E10 unit-test kernel track split and design of
+> record (docs-only — no new measurement).** Sam scoped the hybrid effort
+> to unit-test-only kernels until comprehensively proven correct (nothing
+> integrated or timed until then). The remaining kernel work is split into
+> **PR A** (the `rice_unmap` fold — no design decisions) and **PR B** (C2
+> word-skip + the composite sample-step kernel carrying the tier dispatch
+> and the q 0..=63 boundary sweep — the comprehensive demonstration), and
+> eight decisions settle the groundwork's open seams: C2 standalone, C2
+> counts total-from-bit-0 (caller never adds), unterminated runs are
+> status data with no state-saving affordance, budget = slice length (no
+> hard cap), bit-reversed window convention with a new `ctz8` tier-1
+> table, the fold shared by textual `.include`, the composite's I/O, and
+> the golden-table recipe conventions. C3/C4 stay benched (their triggers
+> are measurement outcomes, deferred with the measurement). Strategy +
+> decisions:
+> [E10 unit-test kernel track](#e10-unit-test-kernel-track--design-of-record-2026-10-16).
+> E10's gates and the probe's shape are unchanged.
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -2588,7 +2606,14 @@ FIXED's mean, derived). Amended
 2026-10-14: E10's algorithm shapes recorded as a plan of action
 ([E10 algorithm plan](#e10--arm-mode-codeword-loop-algorithm-plan-of-action-2026-10-14))
 — docs-only, no gate changes; E9 still leads and PR 5's verdict is
-unchanged.
+unchanged. Amended
+2026-10-16: the hybrid effort is scoped to the unit-test kernel track
+until comprehensively proven correct — the remaining kernels land as
+PR A (fold) + PR B (C2 + composite), with the handoff/window/contract
+ambiguities settled as decisions of record
+([E10 unit-test kernel track](#e10-unit-test-kernel-track--design-of-record-2026-10-16))
+— docs-only, no gate changes; the probe stays gated per the algorithm
+plan.
 
 ## E1 result — ROM→RAM staging: cartridge reads are not the story (2026-09-22)
 
@@ -3681,6 +3706,154 @@ integration, no C2/C3/C4, no cycle windows. Gates per kernel: `make
 kernel-test` + `make native-kernel-rom` + `make check` (the crate joins
 `format`/`check`/`clean`); container variants `podman-kernel-test` /
 `podman-kernel-rom`.
+
+## E10 unit-test kernel track — design of record (2026-10-16)
+
+**Plan of record, no new measurement.** Opened on Sam's call 2026-10-16:
+the hybrid effort proceeds only through the unit-test-focused kernels —
+nothing is integrated into the decode path or timed until the kernels are
+comprehensively demonstrated correct. This section splits the remaining
+kernel work into two PRs and settles the design ambiguities the
+[E10 groundwork](#e10-groundwork--isolated-arm-kernel-crate-and-testing-strategy-2026-10-15)
+deliberate scope cuts left open, so future runs start from decisions,
+not re-derivation. E10's gates, the hybrid pick, the three-arm probe, and
+every cycle claim are unchanged — the probe stays gated per the
+[E10 algorithm plan](#e10--arm-mode-codeword-loop-algorithm-plan-of-action-2026-10-14).
+Everything below is decision (Sam, 2026-10-16) or derivation; nothing is
+measured.
+
+**Track scope until comprehensive (decided).** The remaining unit-test
+kernels are: the `rice_unmap` fold, the C2 word-skip, and a **composite
+sample-step** kernel carrying the tier dispatch and the tier-boundary
+sweep (the `rev8` refill step optional — a table lookup plus placement,
+trivially table-witnessable). The composite is the comprehensive
+demonstration: the plan's sweep (quotient lengths 0..=63 at every bit
+offset — see decision 7 for the offset cut) runs against the composite
+before any reader exists. C3/C4 stay benched — both arming triggers
+(register-pressure collapse of the hybrid, hot reversal tax) are
+measurement outcomes, and measurement is deferred with this scoping.
+
+### The PR split
+
+**PR A — the independent leaf: `rice_unmap` fold** (optionally the `rev8`
+step too). Trivial: four instructions (`AND`/`RSB`/`LSR`/`EOR` for the
+*measured* identity `(n>>1) ^ (-(n&1))`), no table, no branch; the oracle
+is the corrected §9.2.7.2 rule itself (even → `n>>1`, odd → `!(n>>1)`).
+Zero design decisions.
+
+**PR B — C2 word-skip + the composite sample-step with the
+tier-boundary sweep.** C2 is the only kernel with real design content
+(the handoff contract below); the composite is larger but mechanical once
+contracts are settled — its bulk is golden-vector generation. The split
+exists so the design-decision kernel (C2's contract) never fuses with its
+consumer (the composite's golden table): if the contract churns in
+review, the composite's whole table regenerates with it.
+Witness-first discipline — settle a contract in a PR before a table bakes
+it in.
+
+### Design decisions (settled 2026-10-16)
+
+1. **C2 is standalone** — `word_skip(words, budget_words) → (q,
+   words_consumed, status)`, slice-in/slice-out, implemented separately
+   from C1. Rationale (decided): implementation isolation — easier to
+   reason about when anything goes wrong, cleaner performance attribution
+   in later analysis — and standalone puts the interesting part (the
+   `TEQS`/`ORRS` S-flag chain, the O(q/32) skip claim) under the dual
+   witness itself instead of deferring it to the composite.
+
+2. **Count authority: C2 answers the total run from bit 0 of its
+   input slice; the caller never adds.** The rationale is witness-side,
+   zero-cycle: the table's expectation is simply "run length from bit 0"
+   and the oracle a naive bit-walk over the concatenated words, so no
+   "+32" agreement between consumer and generator can hide an off-by-32
+   (the shared-misreading rule). Sentinel ambiguity recorded: C1's `32`
+   for `w == 0` is also the legitimate count of an all-zero window — the
+   run is ≥ 32 either way, indistinguishable by design and correct; the
+   handoff signal is *`w == 0`*, never the answer's value. Tier dispatch
+   (tier-1 table q ≤ 7 → C1 8–31 → C2 > 31) lives **only** in the
+   composite; the standalone kernels stay single-tier.
+
+3. **Unterminated-run contract: report as status, save no state.** A
+   unary run without a terminating 1 is reachable only on a corrupt or
+   truncated stream — outside the happy path; the ROM content is ours at
+   encode time, the bit-exact witness proves the committed clips never
+   reach it, and the frame is dead either way, whatever the cursor does.
+   So the kernels return `unterminated` as status data with **no**
+   pre-run state save (the save an earlier draft of this design proposed
+   is dropped — it buys atomicity nobody needs for a dead frame, and it
+   is not free; bias decided 2026-10-16: performance over code
+   simplicity). Consequence, recorded so it is not lost at probe time:
+   the algorithm plan's "ONE picked unterminated-run cursor contract"
+   stays open for the probe — the ARM arm's choice becomes *report
+   unterminated, restore nothing fancy*, a stated E2b-style divergence
+   (from the live atomic restore), witnessed at probe time.
+
+4. **Budget = the input slice length; no hard-coded cap.** The error
+   avoided: the live loop counts until the terminating 1 (on real
+   streams the codeword's 1; on corrupt streams only EOF), so an ARM
+   count hard-stopped at a fixed cap would answer a *different thing*
+   than the live path on a long run — wrong `q`, or a walk past the
+   input. The kernel is correct for any budget (the loop is bounded by
+   the slice anyway) and returns `unterminated` when the slice ends
+   before the terminating 1, never a cap artifact. Boundary vectors
+   pinned: q ∈ {31, 32, 63, 64}, a bit-31 and a bit-32 one, an all-zero
+   word run, and one over-budget slice.
+
+5. **Window convention: bit-reversed, pinned in the table header; tier 1
+   is a new `ctz8[w & 0xFF]` table.** PR #69's convention: C1 counts
+   trailing zeros of a bit-reversed window (the unary run sits at the
+   LSB end). E2b's `LEADING_ONES` (inverted-top-byte leading-ones, an
+   MSB-first window) exists only in the experiment patch — never in the
+   kernel crate. The two conventions are functionally equivalent at
+   1-`ldrb` cost and the choice is convention-neutral (decided
+   2026-10-16: performance-equivalent conventions don't matter);
+   bit-reversed is chosen because it composes with C1 as shipped. Tier 1
+   is therefore a fresh 256 B exhaustive byte→ctz table whose `8` means
+   "run past the byte" → dispatch to C1. The probe's 544 B pin-budget
+   arithmetic is unchanged in shape (tier-1 256 B + `rev8` 256 B +
+   bruijn 32 B); the probe's `nm`/`objdump` witness measures what
+   actually pins.
+
+6. **The fold is shared by textual `.include`, not duplicated.** The
+   assembler's `.include` pastes source at each use site, so both call
+   sites assemble identical copies and the built binary contains the
+   fold's instructions twice either way — zero runtime difference versus
+   hand-duplication (a per-site macro *specialization* would change the
+   code per site; that's a probe-stage optimization to fork from this,
+   not a cost now). `.include` buys the no-drift property that keeps the
+   offline `objdump` witness ("the shipped fold is the tested fold")
+   honest.
+
+7. **Composite sample-step: in (word slice, `p`) → out `(q, remainder,
+   words_consumed, status)`.** It owns the tier dispatch (decision 2),
+   the remainder `(terminating_word >> (q+1)) & ((1<<p) - 1)`, the drain
+   *count* `q+1+p` (bit-level retirement is the probe's reader, not this
+   kernel), and the fold (via `.include`, decision 6). Bit offset is
+   **not** an input: the kernel sees a pre-assembled window, so the
+   plan's sweep over bit offsets 0..7 is explicitly **cut to the
+   probe's vendored seam** — PR B claims no offset correctness. The
+   register-value shifts (`LSL p` mask, drain) carry ARMv4's defined
+   shift-by-32 semantics (result zero, carry involved) — pinned as
+   boundary vectors at q = 31 and mask edges.
+
+8. **Golden tables follow the C1 recipe conventions.** One committed
+   golden table per kernel; seeded-deterministic generation, dedup with
+   skip counts recorded, fail-closed census enforced at generation and
+   re-asserted by a host test (PR #69's pattern). Composite grid: q
+   0..=63 × p set (exhaustive 0..=4, plus 8 and 14, deterministic-random
+   fill) × the boundary/status vectors of decision 4. Expectations derive
+   from independent naive formulations — bit-walk over the concatenated
+   words, spec-formula remainder, the corrected §9.2.7.2 unmap — never
+   from the twin.
+
+### Left open (probe-side, unchanged)
+
+Reader/refill integration of the bit-reversed window (`rev8` refill +
+`ORR ..., LSL #24` placement), `.iwram` pinning and its budget witness,
+the unterminated-run cursor pick, the bit-offset sweep, the three-arm
+probe (ctrl / tab / arm) with the `arm − tab` marginal reading, and the
+C3/C4 fallback triggers — all exactly where the algorithm plan left them,
+gates unchanged.
 
 ## Sample-rate reduction — tooling and profiling proposal (2026-10-11)
 
