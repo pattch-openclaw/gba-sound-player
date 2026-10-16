@@ -3846,14 +3846,54 @@ it in.
    words, spec-formula remainder, the corrected §9.2.7.2 unmap — never
    from the twin.
 
-### Left open (probe-side, unchanged)
+### Left open (probe-side) — ratified vs left to measure
 
-Reader/refill integration of the bit-reversed window (`rev8` refill +
-`ORR ..., LSL #24` placement), `.iwram` pinning and its budget witness,
-the unterminated-run cursor pick, the bit-offset sweep, the three-arm
-probe (ctrl / tab / arm) with the `arm − tab` marginal reading, and the
-C3/C4 fallback triggers — all exactly where the algorithm plan left them,
-gates unchanged.
+**Amended 2026-10-16 (Sam):** the terse list is split below — what is
+already decided, and what only the probe can settle. The probe executes
+these decisions; it does not re-litigate them. Gates and the probe's
+evidence list are unchanged from the
+[E10 algorithm plan](#e10--arm-mode-codeword-loop-algorithm-plan-of-action-2026-10-14).
+
+**Ratified — decided; probe-side work only carries them out:**
+
+1. **Unterminated-run cursor: report `unterminated`, restore nothing**
+   (decision 3, ratified — the ROM content is ours at encode time, and
+   the frame is dead on any corrupt stream whatever the cursor does).
+   The residue is procedural, not a decision: the probe states the
+   divergence from the live loop's atomic restore and witnesses it
+   once, E2b-precedent style. No state-save affordance.
+2. **Hot *data* tables always pin `.iwram` while the budget affords**
+   (ratified). E2b's tab win was measured with the pin baked in — the
+   arm's number *is* "table in IWRAM" — and E6's regression is
+   code-fetch only: data pins, never code pins. The 544 B of tables
+   (ctz8 + rev8 + bruijn) is trivial against the 32 KB budget; the
+   shared-budget fight is E3's scratch, not the tables. `nm` /
+   `objdump -h` confirms placement at probe time; it decides nothing.
+3. **Refill shape stands as decided: the bit-reversed window** —
+   `rev8` refill + `ORR ..., LSL #24` merge (the barrel shifter places
+   the byte in the merge cycle). Correction recorded: this is
+   decision 5's choice, *not* E2b's measured shape — the tab arm
+   counted an MSB-first window (`LEADING_ONES[!(top byte)]`) with no
+   per-byte reversal at refill. Shape closed; its cost is unpriced
+   (below).
+
+**Left to measure (probe only):**
+
+4. **The `rev8` refill tax** — roughly one extra `ldrb` per 8 bits,
+   landing in the refill path *shared* with the remainder reads (E8
+   `rest` ≈358 c/sample). The headline risk of the whole probe: if
+   `rest` moves, the reversal ate the count win. Fallback pre-scoped:
+   C4 counts on the MSB-first window with no refill change.
+5. **The bit-offset sweep** — quotient lengths 0..=63 at every reader
+   alignment 0..7 (decision 7 cut it from the kernels; only a vendored
+   reader seam can run it).
+6. **The three-arm probe** — ctrl / tab (E2b verbatim — cross-session
+   witness *and* baseline) / arm; the reading is `arm − tab` because
+   E10 replaces the count rather than stacking on it. Demote inside
+   layout noise (~9–13 cyc/frame); carry at mean ≥ ~10%.
+7. **C3/C4 arming triggers** — contingencies, not work items: C3 arms
+   only if register pressure collapses the hybrid (E7's forced `r7`),
+   C4 only if the refill tax measures hot. Never measured first.
 
 ## Sample-rate reduction — tooling and profiling proposal (2026-10-11)
 
