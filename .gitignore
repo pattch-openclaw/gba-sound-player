@@ -36,6 +36,15 @@
 # generator output, the witness the spike measures.
 /examples/flac_spike/target/
 
+# The sample-rate ROM flow (FLAC.md "Sample-rate reduction"): its generated
+# clips + modules are TEMPORARY like ROMs — regenerate with
+# `make rate-assets INPUT=… RATE=…`, removed by `make clean`. The committed
+# spike assets above stay tracked; these never are.
+/flac-rate-spike.gba
+/examples/flac_spike/assets/rate_*.bin
+/examples/flac_spike/src/rate_assets.rs
+/examples/flac_spike/src/rate_pcm.rs
+
 # The Opus spike crate (examples/opus_spike/ — own workspace, same pattern).
 # Its vendored decoder is its OWN workspace root (vendor/opus-rs/Cargo.toml
 # carries [workspace] — OPUS.md's standalone probe recipe runs from there),
