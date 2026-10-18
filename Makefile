@@ -1,5 +1,6 @@
 .PHONY: format build rom native-rom podman-rom flac-rom native-flac-rom podman-flac-rom \
         spike-rom native-spike-rom podman-spike-rom \
+        rate-assets rate-test rate-rom native-rate-rom podman-rate-rom \
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
         test test-rom flac-test spike-test opus-test kernel-test podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test \
@@ -229,6 +230,58 @@ podman-spike-rom:
 	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make spike-rom
 
 # ---------------------------------------------------------------------------
+# SAMPLE-RATE ROM (FLAC.md "Sample-rate reduction — tooling and profiling
+# proposal (2026-10-11)", Part 1 steps 1+2+3): real audio normalized to a
+# mixer-domain rate, embedded TEMPORARILY, decode measured against the
+# budget derived at that rate.
+#
+#   make rate-assets INPUT=path/to.wav RATE=10512   stage the clips (host tools:
+#                                                   ffmpeg + flac + python3)
+#   make rate-test                                  host witness on the staged
+#                                                   bytes (bit-exact vs flac -d)
+#   make native-rate-rom                            build $(RATE_ROM)
+#
+# COEXISTENCE: the committed spike assets (assets/spike_*.bin, src/assets.rs)
+# and the default flac-spike ROM are the E-menu's calibration anchor and are
+# NEVER touched by this flow — the rate bin/test are `required-features =
+# ["rate-assets"]` targets, invisible to spike-rom/spike-test. Everything the
+# rate flow writes is generated + gitignored + removed by `make clean`.
+# ---------------------------------------------------------------------------
+
+RATE_ROM := flac-rate-spike.gba
+# The generated module whose presence means `make rate-assets` has run.
+RATE_CRATE_ASSETS := $(SPIKE_CRATE_DIR)/src/rate_assets.rs
+RATE_BIN := $(SPIKE_CRATE_DIR)/target/$(TARGET)/release/flac-rate-spike
+
+rate-assets:
+	@test -n "$(INPUT)" || { echo "usage: make rate-assets INPUT=path/to.wav RATE={10512|18157|32768}"; exit 1; }
+	@test -n "$(RATE)" || { echo "usage: make rate-assets INPUT=path/to.wav RATE={10512|18157|32768}"; exit 1; }
+	bash scripts/gen_rate_assets.sh "$(INPUT)" "$(RATE)"
+
+# The rate flow's host gate: same out-of-tree --manifest-path pattern as
+# spike-test (cargo config leak), plus --features rate-assets. Fails closed
+# when the generated modules are absent — stage them first.
+rate-test: toolchain-check
+	@test -f $(RATE_CRATE_ASSETS) || { echo "rate-test: no generated rate assets — run 'make rate-assets INPUT=… RATE=…' first"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(SPIKE_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features rate-assets
+	@echo "rate-test passed: the staged rate clips decode bit-exactly on the host"
+
+rate-rom: format
+	@test -f $(RATE_CRATE_ASSETS) || { echo "rate-rom: no generated rate assets — run 'make rate-assets INPUT=… RATE=…' first"; exit 1; }
+	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --features rate-assets
+	agb-gbafix $(RATE_BIN) -o $(RATE_ROM)
+	@echo "Rate ROM built: $(RATE_ROM)"
+
+native-rate-rom: rate-rom
+	@echo "native-rate-rom done: $(RATE_ROM)"
+
+podman-rate-rom:
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make rate-rom
+
+# ---------------------------------------------------------------------------
 # OPUS PERF-GATE SPIKE ROM (OPUS.md "Measurement plan — start here").
 #
 #   opus-rom            build + fix the scaffold ROM (bare name: runs anywhere)
@@ -441,7 +494,12 @@ clean:
 	cd $(FLAC_CRATE_DIR) && $(CARGO) clean
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) clean
 	cd $(KERNEL_CRATE_DIR) && $(CARGO) clean
-	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM) $(OPUS_ROM) $(OPUS_PROBE_ROM) $(KERNEL_ROM)
+	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM) $(OPUS_ROM) $(OPUS_PROBE_ROM) $(KERNEL_ROM) $(RATE_ROM)
+# The rate flow's generated assets are TEMPORARY (gitignored, like ROMs —
+# FLAC.md "Sample-rate reduction"); they regenerate from
+# `make rate-assets INPUT=… RATE=…`, so they leave with `make clean`.
+	@rm -f $(SPIKE_CRATE_DIR)/src/rate_assets.rs $(SPIKE_CRATE_DIR)/src/rate_pcm.rs
+	@rm -f $(SPIKE_CRATE_DIR)/assets/rate_*.bin
 # mGBA drops a .sav beside each ROM on local runs — emulator state,
 # remove it with the ROMs it belongs to.
 	@rm -f $(ROM:.gba=.sav) $(FLAC_ROM:.gba=.sav) *.sav
@@ -488,6 +546,13 @@ help:
 	@echo "    native-spike-rom  build $(SPIKE_ROM) natively"
 	@echo "    podman-spike-rom  build $(SPIKE_ROM) in the container"
 	@echo "    spike-test        spike asset witness tests (host, bit-exact)"
+	@echo ""
+	@echo "  SAMPLE-RATE ROM (FLAC.md 'Sample-rate reduction', Part 1):"
+	@echo "    rate-assets       stage TEMPORARY clips from a real WAV (INPUT=… RATE={10512|18157|32768})"
+	@echo "    rate-test         host witness on the staged bytes (bit-exact vs flac -d)"
+	@echo "    native-rate-rom   build $(RATE_ROM) from the staged assets"
+	@echo "    podman-rate-rom   build it in the container (assets must be staged on the host)"
+	@echo "    flow: make rate-assets INPUT=clip.wav RATE=10512 && make rate-test && make native-rate-rom"
 	@echo ""
 	@echo "  OPUS PERF-GATE SPIKE (OPUS.md):"
 	@echo "    native-opus-rom   build $(OPUS_ROM) + $(OPUS_PROBE_ROM) natively (vendored opus-rs link gate)"

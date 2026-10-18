@@ -4137,3 +4137,137 @@ PR 5's on-cart run executes once per candidate combination. ~~E8 still
 leads the decoder-side menu~~ — E8 was measured 2026-10-12 and its table
 now picks the decode levers ([E8 result](#e8-result--sub-stage-attribution-names-the-cost-centers-2026-10-12));
 Part 1 needs none of its outputs to start.
+
+**Amended 2026-10-17 (Sam, scope call + Lobster, landing):** Part 1 steps 1–3
+landed as the spike crate's gated rate flow —
+[Completed: rate ROM flow](#completed-rate-rom-flow--real-audio-at-10512-hz-measured-2026-10-17).
+Two deltas from the text above, each decided rather than drifted:
+
+- **The coexistence contract step 2 left implicit is now explicit and
+  witnessed:** the rate flow generates only into *new temporary* modules
+  (`src/rate_assets.rs`, `src/rate_pcm.rs`, `assets/rate_*.bin` —
+  gitignored, `make clean` removes) and its bin/witness are
+  `required-features = ["rate-assets"]` targets, invisible to
+  `make native-spike-rom` / `make spike-test`. The witness that the
+  E-menu's calibration anchor survived: with the flow's changes in the
+  working tree, `make native-spike-rom` rebuilds **byte-identical** to the
+  recorded baseline (sha `0d976591…` reproduced — measured pre-commit),
+  `spike-test` counts unchanged, and the committed surface
+  (`assets.rs`, `assets/spike_*.bin`, `main.rs`, `crates/`) diffs zero
+  lines against `origin/main`. The harness in `src/rate_main.rs` is a
+  deliberate **duplication** of main.rs's measurement plumbing, not a
+  refactor into shared code — micro-windows are code-layout sensitive,
+  and refactoring main.rs would move the measured image the whole E-menu
+  compares against. What is shared is exactly what carries pins: driver,
+  fold, stats, budget.
+- **Step 2's playback half is deferred, not dropped** (Sam 2026-10-17):
+  the `Frequency` selection / mixer / double-buffer cadence path belongs
+  with Phase 2 step 9 (the integration ROM); the landed rate ROM measures
+  decode cost IRQ-off — the same mode every E-probe measures — and
+  answers the *budget* question without the mixer seam. Step 3's one
+  entry point landed as the chain `make rate-assets INPUT=… RATE=… &&
+  make rate-test && make native-rate-rom` (staging split from build so
+  the container build needs no host tools; the fail-closed census runs
+  where ffmpeg + flac live). The `0b1101` frame path and the three-rate
+  domain behaved exactly as the measured readiness facts predicted.
+
+## Completed: rate ROM flow — real audio at 10,512 Hz, measured (2026-10-17)
+
+**What landed.** The proposal's Part 1 steps 1–3 in the spike crate: a
+`rate-assets`-feature-gated ROM bin (`src/rate_main.rs`, its own `[[bin]]`
++ `[[test]]` entries), a staging generator (`scripts/gen_rate_assets.sh` →
+`frame_vectors.py rate_assets`), a host witness (`tests/rate_witness.rs`,
+8 tests), Makefile targets `rate-assets` / `rate-test` / `rate-rom` /
+`native-rate-rom` / `podman-rate-rom`, and `make clean` + `.gitignore`
+coverage for everything temporary the flow writes. Real audio —
+`assets/sound/bioluminescent.wav` (the known-good 96 kHz / 24-bit master,
+258.6 s), ffmpeg-normalized to 16-bit stereo `pcm_s16le` at exactly
+10,512 Hz — replaces synthesized tones for this gate: reference tracks are
+listenable, which synthesized material never was (Sam's call).
+
+**Witness strategy.** Same correctness-before-speed layering as the
+committed spike, one input: the generator fail-closes before writing
+(mixer-domain rate; per-FRAME resolved rate == requested rate on the
+`0b1101` path; 16-bit/2048 profile; `check_stream` exactness; region
+tiling; a full two-slot subframe walk with the footer-gap rule — and a
+`-l 4` majority-LPC rule measured on THIS input's bytes, not the
+synthesized clip's); the host witness (`make rate-test`) proves the
+embedded bytes decode bit-exactly vs `flac -d` and that the ROM's shared
+fold reaches the PCM pins; the ROM re-proves decode on its own bytes
+(both arms FNV `0xD20880D6D6D89E03` = generator pin, cross-arm agree);
+timing only engages on a proven image. Determinism: two headless mGBA
+runs of sha `35314e1e…` (2026-10-17) `cmp`-byte-identical; the sha is
+stable across same-tree rebuilds.
+
+**Prior assumptions that did not survive.**
+
+1. **The `-l 0` FIXED-only census is false for real material.** The
+   committed `spike_census` demands FIXED-only for `-l 0` — true of the
+   synthesized tones, wrong for a song: silence encodes CONSTANT.
+   Measured: the real `-l 0` arm emitted `constant0 x10` on slot 0 (and
+   `fixed0 x3` + `fixed1/2` on slot 1). The rate flow therefore census-
+   checks the *profile* (kinds inside constant/fixed/lpc, `-l 4` majority
+   LPC), which is what Correction 3 always said was enforceable: max
+   predictor order + flags, never a kind census.
+2. **The proposal's "LPC post-E4 ≈ 1,770 c/s" was a variant measurement,
+   not the live path.** E4's i32 integrators were measured as a vendored
+   spike variant and never landed in `flac-lite` (the module's own note:
+   accumulate in `i64`; the perf spike *decides* whether i32 is provably
+   safe). This ROM measures the live i64 path — see the result table; the
+   projection's error was assuming a landed lever.
+3. **The committed calibration shape does not port unchanged.** First
+   build's calibration came back 26/22/22/22/22 on both arms —
+   deterministic, not noise: the first micro-window after the decode-
+   proof log burst carries the cold-window artifact (+4), the same
+   sensitivity E1 and the first PR-3 draft recorded. Adopting the E4
+   unified loop (3 discarded + 5 reported, byte-identical iterations,
+   nothing logged between windows) made all 8 windows read 20; overhead
+   is netted per this image's own shape (20, not the committed 22).
+
+**Deliberate scope cuts.** No mixer, no cadence alternation, no double
+buffer (Phase 2 step 9's, per Sam's scope call — see the amendment); no
+multi-clip ROM (step 4); no Part 2 sweep (this is its first data point);
+`podman-rate-rom` added per pattern, not yet exercised (native path
+verified). The screen verdict ANDs both arms, so the rate ROM runs RED
+when only the LPC arm misses — red here means "measured, over budget",
+not harness failure (the log separates the two).
+
+**Gates.** `make spike-test` 15+8 counts unchanged; default spike ROM
+sha `0d976591…` reproduced byte-for-byte; `make rate-test` 8 green; `make
+check` clean; `make native-spike-rom` and `make native-rate-rom` build.
+Committed surface (`assets.rs`, committed blobs, `main.rs`, `crates/`,
+`spike_witness.rs`) diffs zero lines against `origin/main`.
+
+**The measurement — does bioluminescent decode inside the budget at
+10,512 Hz? FIXED yes, LPC no (live i64 path).** ROM sha `35314e1e…`,
+input sha256 `8f35fa88…`, flac 1.5.0, ffmpeg 9.0.1, mGBA (this host),
+2026-10-17. Budget (derived): 2048 / 10,512 Hz × 16.78 MHz = **3,269,162
+cycles/frame** (1,596.27 c/sample). Calibration overhead 20 c net, IME 0
+in-window, per-window counter reset (this pass spans > 2^32: the LPC arm
+sums 7.98 G — the Opus port's rollover rule applied pre-emptively; no
+window ever hit the sentinel). Means derived host-side (division-free ROM
+rule):
+
+| arm (1,328 frames) | min c/f | mean c/f | mean c/s | mean % budget | worst c/f @ frame | worst % budget | verdict |
+|---|---|---|---|---|---|---|---|
+| FIXED `-l 0` | 28,082 @ 1327 | 2,417,429 | 1,180.4 | **73.9 %** | 2,559,507 @ 505 | **78.3 %** | **FITS** |
+| LPC `-l 4` | 28,082 @ 1327 | 6,010,517 | 2,934.8 | **183.9 %** | 6,916,436 @ 413 | **211.6 %** | OVER |
+
+(min = the legitimately short final frame, 842 samples — consistent
+across both arms.)
+
+**Reading.** The proposal's baseline reading is confirmed on real music:
+the FIXED arm's mean AND worst fit at the baseline decode path — the
+tone-based projection (69.7 % mean) was 4.2 points optimistic (real audio
+73.9 %), close enough that the margin's sign held; per-sample cost is
+~6 % above the 32 kHz tone figure (1,180 vs ≈1,113 c/s) — content, not
+rate. The LPC arm lands at the live-i64 scale (2,934.8 c/s ≈ 0.88 × the
+live LPC figure — E6's same-run control, 3,340.2 c/sample; mixed orders
+1–4 + real mid/side), not the projected post-E4 scale: **E4's i32 landing
+is now the named next lever for LPC-at-10,512** — projecting E4's
+measured −46.9 % onto this mean lands ≈ 97.6 % mean / ≈ 112 % worst, i.e.
+mean inside, worst out; the stacking question is E9's, measured not
+assumed (PR-3's own mean figure was ≈ 3,350 c/sample). Size facts for the Part
+2 sweep (measured, this material): ≈ 1.91 MB/min compressed per arm
+(SI, 10,512 Hz stereo) — a 4:18 track embeds 8.2 MB/arm; the two-arm ROM
+is 16,522,992 B, inside a 32 MB-class cart with one arm to spare.

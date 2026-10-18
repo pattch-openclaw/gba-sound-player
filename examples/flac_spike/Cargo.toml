@@ -26,6 +26,17 @@ edition = "2024"
 [dependencies]
 flac-lite = { path = "../../crates/flac-lite" }
 
+# The sample-rate ROM flow (FLAC.md "Sample-rate reduction" Part 1). The
+# feature exists to gate the rate bin + rate witness so the default spike
+# build NEVER sees them: `make native-spike-rom` / `make spike-test` compile
+# without it (required-features targets are excluded when the feature is
+# off — verified: a required-features [[bin]] with a missing path file does
+# not break default `cargo build` / `cargo test` / `cargo fmt`). The flow's
+# generated modules (src/rate_assets.rs, src/rate_pcm.rs) are TEMPORARY
+# (gitignored, `make clean` removes): build `make rate-assets` first.
+[features]
+rate-assets = []
+
 # agb exists only for the GBA target, and it cannot build for the host triple
 # — while the host witness tests (make spike-test) compile this crate's lib
 # + tests natively. Gate by architecture: thumbv4t-none-eabi reports
@@ -42,6 +53,25 @@ path = "src/main.rs"
 # entry exists only under agb. The witness tests link against the lib alone.
 test = false
 bench = false
+
+# The rate ROM (make native-rate-rom): real audio at a mixer-domain rate,
+# measured. Gated by `rate-assets` so the committed spike ROM build is
+# byte-identical to the E-menu's calibration image (coexistence contract,
+# FLAC.md rate-proposal amendment).
+[[bin]]
+name = "flac-rate-spike"
+path = "src/rate_main.rs"
+required-features = ["rate-assets"]
+test = false
+bench = false
+
+# The rate flow's host witness — same correctness-before-speed gate at the
+# generated rate: bit-exact decode of the embedded bytes vs `flac -d` before
+# any ROM number counts. Skipped (not failed) when rate-assets is off.
+[[test]]
+name = "rate_witness"
+path = "tests/rate_witness.rs"
+required-features = ["rate-assets"]
 
 [workspace]
 

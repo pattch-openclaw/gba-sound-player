@@ -11,6 +11,11 @@ Subcommands:
   spike_assets SRC_DIR DIR stage the perf-gate spike's embedded clips (raw
                           frame regions, reference PCM, generated manifest;
                           arm censuses fail closed — FLAC.md "Perf gate spike")
+  rate_assets SRC_DIR DIR RATE INPUT_SHA INPUT ffmpeg_version
+                          stage the rate ROM's TEMPORARY clips from a real
+                          input WAV normalized to RATE (gitignored, `make
+                          clean` removes; FLAC.md "Sample-rate reduction"
+                          Part 1 steps 1+2)
 
 Why this exists: the frame-header golden vectors must not be hand-packed.
 Hand-packing is exactly how the "fixed fields are 31 bits / channels is 3 bits"
@@ -1798,6 +1803,311 @@ def spike_assets(src, crate_dir):
     print("   wrote %s (%d clips)" % (out_path, len(clips)))
 
 
+def rate_census(filename, frames, data, info):
+    """Walk EVERY subframe slot of EVERY frame of a rate-ROM stereo stream;
+    return a census string like spike_census's, but fail closed on the
+    *measured encode profile*, not the synthesized arms' arm rules.
+
+    Why not reuse spike_census: its `-l 0` arm census demands FIXED-only,
+    which held for the synthesized tones but is wrong for real material —
+    silence in a real song encodes CONSTANT. Measured on bioluminescent
+    @ 10,512 Hz: `-l 0` emitted constant x10 + fixed1/2/3 on slot 0, and
+    libFLAC's `-l 0` is an LPC switch, not a fixed0 pin (FLAC.md Correction
+    3: the enforceable constraint is max predictor order + a flag, never a
+    census of one synthesized encode). The rules here are the profile's:
+    every kind must be one decode_frame implements (constant/verbatim/
+    fixed/lpc), and the `-l 4` arm must stay majority LPC — below that the
+    FIXED-vs-LPC arm comparison has degenerated and the ROM would measure
+    one arm twice (the same rule spike_census enforces, measured on THIS
+    input's bytes instead of the synthesized clip's).
+
+    The two-slot walk with the measured footer-gap rule (exit -> pad ->
+    16-bit CRC lands exactly on the next frame's offset) doubles as the
+    region-slicing witness, exactly as in spike_census — including the
+    side-slot bps+1 seam (left-side/side-right/mid-side orientation).
+    """
+    tally = []
+    for i, header in enumerate(frames):
+        bps = header["bps"] or info["bits-per-sample"]
+        assert header["subframes"] == 2, \
+            "%s frame %d: expected stereo, got %d subframes" % (
+                filename, i, header["subframes"])
+        bits = Bits(data, header["offset"] * 8 + header["header_bits"])
+        side_slot = {0b1000: 1, 0b1001: 0, 0b1010: 1}.get(header["chan_code"])
+        kinds = []
+        for slot in range(2):
+            slot_bps = bps + 1 if slot == side_slot else bps
+            walk = walk_subframe(bits, header["blocksize"], slot_bps)
+            kinds.append("%s%d" % (walk["kind"], walk["order"]))
+        tally.append(kinds)
+        exit_bit = bits.pos
+        padded = exit_bit + ((8 - exit_bit % 8) % 8)
+        end_bit = (frames[i + 1]["offset"] * 8 if i + 1 < len(frames)
+                   else len(data) * 8)
+        assert padded + 16 == end_bit, \
+            ("%s frame %d: subframe exit %d + footer gap does not land on the "
+             "next frame (expected end bit %d) — census walk or region "
+             "slicing is wrong" % (filename, i, exit_bit, end_bit))
+    per_slot = []
+    for slot in range(2):
+        slot_tally = {}
+        for kinds in tally:
+            slot_tally[kinds[slot]] = slot_tally.get(kinds[slot], 0) + 1
+        per_slot.append(", ".join("%s x%d" % kv
+                                  for kv in sorted(slot_tally.items())))
+    census = "slot 0: %s | slot 1: %s" % (per_slot[0], per_slot[1])
+
+    # Profile census, fail closed (measured facts about real material).
+    flat = [k for kinds in tally for k in kinds]
+    assert all(k.startswith(("constant", "verbatim", "fixed", "lpc"))
+               for k in flat), \
+        "%s: kinds outside the decode profile (%s) — decode_frame would " \
+        "reject these frames" % (filename, census)
+    # Arm-degeneracy rule from spike_census, applied to this input's own
+    # encode: a `-l 4` that stopped being majority LPC turns the two-arm
+    # comparison into measuring one arm twice.
+    if os.path.basename(filename).find("l4") != -1:
+        lpc = sum(1 for k in flat if k.startswith("lpc"))
+        assert lpc * 2 >= len(flat), \
+            "%s: the -l 4 encode is no longer majority LPC (%d/%d, %s) — " \
+            "the FIXED-vs-LPC comparison would measure one arm twice. " \
+            "Re-measure first." % (filename, lpc, len(flat), census)
+    return census
+
+
+def rate_assets(src, crate_dir, rate, input_sha, input_name, ffmpeg_version):
+    """Stage the rate ROM's clips from a normalized real input (FLAC.md
+    "Sample-rate reduction" Part 1 steps 1+2, one entry point).
+
+    TEMPORARY outputs — gitignored, `make clean` removes them, like ROM
+    files. This NEVER touches the committed spike_assets outputs
+    (assets/spike_*.bin, src/assets.rs): those are the E-menu's calibration
+    anchor, and the default spike ROM must keep reproducing them.
+
+    Writes under the spike crate:
+      assets/rate_<stem>_l0_frames.bin   raw frame region, the -l 0 encode
+      assets/rate_<stem>_l0_pcm.bin      reference PCM (flac -d), host ground truth
+      assets/rate_<stem>_l4_frames.bin   raw frame region, the -l 4 encode
+      assets/rate_<stem>_l4_pcm.bin      reference PCM likewise
+      src/rate_assets.rs                 generated module: RATE_CLIPS, derived
+                                         budget const, input sha — included by
+                                         src/rate_main.rs (required-features)
+      src/rate_pcm.rs                    PCM include_bytes! for the witness
+                                         test ONLY — the ROM module above never
+                                         carries reference bytes (same rule as
+                                         committed assets.rs)
+
+    Fail-closed before writing anything: rate in the mixer domain; per
+    encode: streaminfo == (2 ch, 16 bit, RATE, 2048), check_stream exactness,
+    EVERY frame's resolved rate == the requested RATE (the 0b1101 path —
+    encode rate == playback rate, the rate proposal's measured rule), the
+    region tiling/blocksize invariants, and rate_census's profile walk.
+    Everything derives from the strict frame finder; nothing hand-packed."""
+    import hashlib
+    import json
+    assert rate in (10512, 18157, 32768), \
+        "rate %d outside the mixer domain {10512, 18157, 32768} " \
+        "(agb 0.25.0 Frequency) — refuse to build" % rate
+    version = subprocess.run(["flac", "--version"], capture_output=True,
+                             text=True).stdout.strip().splitlines()[0]
+
+    def qstr(text):
+        # Rust-safe string literal; ensure_ascii=False is load-bearing for
+        # non-ASCII names (see spike_assets's comment — same generated-file
+        # bug, same fix).
+        return json.dumps(text, ensure_ascii=False)
+
+    stem = "".join(c if c.isalnum() else "_"
+                   for c in os.path.splitext(os.path.basename(input_name))[0]
+                   ).lower().strip("_")
+    assert stem, "input name sanitizes to nothing: %s" % input_name
+    upper = stem.upper()
+
+    arms = (
+        # (stream, const, blob suffix, why this arm exists)
+        ("rate_l0.flac", upper + "_FIXED", "l0",
+         "FIXED-limited arm (flac -1 -l 0 -b 2048 -m): the rate gate's "
+         "conservative predictor cost on real material"),
+        ("rate_l4.flac", upper + "_LPC", "l4",
+         "LPC arm (flac -1 -l 4 -b 2048 -m): the rate gate's full-profile "
+         "cost on real material"),
+    )
+    assets_dir = os.path.join(crate_dir, "assets")
+    os.makedirs(assets_dir, exist_ok=True)
+    clips = []
+    for filename, const, suffix, why in arms:
+        path = os.path.join(src, filename)
+        with open(path, "rb") as handle:
+            data = handle.read()
+        info = streaminfo(path)
+        frames = find_frames(data)
+        check_stream(os.path.basename(filename), frames, info)
+        assert (info["channels"], info["bits-per-sample"],
+                info["sample_rate"], info["maximum blocksize"]) == \
+            (2, 16, rate, 2048), \
+            "%s: expected 16-bit stereo %d Hz blocksize 2048, got %s" % (
+                filename, rate, info)
+        # Encode rate == playback rate, frame by frame (not just STREAMINFO:
+        # the frames are what the decoder parses, and every mixer rate
+        # travels on the uncommon 0b1101 path — FLAC.md rate proposal).
+        off_rates = sorted({h["rate_hz"] for h in frames} - {rate})
+        assert not off_rates, \
+            "%s: frames resolving to %s, not the requested %d Hz" % (
+                filename, off_rates, rate)
+        census = rate_census(filename, frames, data, info)
+        start = first_frame_offset(data)
+        assert frames[0]["offset"] == start, \
+            "%s: first found frame is not the region start" % filename
+        region = data[start:]
+        offsets = [h["offset"] - start for h in frames]
+        assert offsets[0] == 0, "%s: first frame not at region start" % filename
+        assert offsets == sorted(set(offsets)), \
+            "%s: frame offsets not strictly ascending" % filename
+        ends = offsets[1:] + [len(region)]
+        assert all(e > o for e, o in zip(ends, offsets)), \
+            "%s: degenerate frame span" % filename
+        assert sum(e - o for e, o in zip(ends, offsets)) == len(region), \
+            "%s: frame table does not tile the region exactly" % filename
+        assert sum(h["blocksize"] for h in frames) == info["total samples"], \
+            "%s: per-frame blocksizes do not cover total samples" % filename
+        pcm = reference_pcm(path)
+        pcm_bytes = struct.pack("<%dh" % len(pcm), *pcm)
+        assert len(pcm_bytes) == info["total samples"] * 2 * 2, \
+            "%s: reference PCM size mismatch" % filename
+        blob = "rate_%s_%s_frames.bin" % (stem, suffix)
+        region_path = os.path.join(assets_dir, blob)
+        pcm_path = os.path.join(assets_dir, "rate_%s_%s_pcm.bin" % (stem, suffix))
+        with open(region_path, "wb") as handle:
+            handle.write(region)
+        with open(pcm_path, "wb") as handle:
+            handle.write(pcm_bytes)
+        clips.append(dict(
+            filename=filename, const=const, suffix=suffix, why=why, stem=stem,
+            blob=blob, region_path=region_path, frames=frames, offsets=offsets,
+            census=census, info=info, region_len=len(region),
+            fnv_frames=fnv1a64(region), fnv_pcm=fnv1a64(pcm_bytes),
+            sha_region=hashlib.sha256(region).hexdigest(),
+            sha_pcm=hashlib.sha256(pcm_bytes).hexdigest(),
+        ))
+
+    lines = []
+    w = lines.append
+    w("//  flac_spike rate ROM clips — GENERATED, TEMPORARY (gitignored;")
+    w("//  `make clean` removes). DO NOT EDIT BY HAND.")
+    w("//  Regenerate:  scripts/gen_rate_assets.sh INPUT RATE")
+    w("//  Generator: scripts/frame_vectors.py rate_assets (strict frame finder,")
+    w("//  fail-closed rate/profile censuses; FLAC.md 'Sample-rate reduction'")
+    w("//  Part 1 steps 1+2). The committed assets.rs is deliberately NOT")
+    w("//  touched by this flow — it is the E-menu's calibration anchor.")
+    w("// ")
+    w("//  input: %s" % qstr(input_name))
+    w("//  input sha256: %s" % input_sha)
+    w("//  input tool: %s" % qstr(ffmpeg_version))
+    w("//  encoder: %s" % version)
+    # Each %d formats against ITS OWN line's string — an unformatted %d
+    # would emit literally, and a tuple spanning two w() calls formats only
+    # the second one (caught by the run: "not all arguments converted").
+    w("//  rate: %d Hz (encode == playback, pinned frame-by-frame by the" % rate)
+    w("//  generator: every frame resolves %d Hz on the 0b1101 path)" % rate)
+    w("// ")
+    w("//  sha256 pins (regeneration tripwires; the witness test carries the")
+    w("//  FNV pins in code, these are for humans):")
+    for clip in clips:
+        w("//    %-28s region %s" % (os.path.basename(clip["region_path"]),
+                                     clip["sha_region"]))
+        w("//    %-28s pcm    %s" % ("rate_%s_%s_pcm.bin" % (stem, clip["suffix"]),
+                                     clip["sha_pcm"]))
+        w("//    census(%s): %s" % (clip["blob"], clip["census"]))
+    w("")
+    w("/// Playback/encode rate pinned by the generator (fail-closed")
+    w("/// domain check + frame-by-frame census above).")
+    w("#[allow(dead_code)]")
+    w("pub const RATE_HZ: u32 = %d;" % rate)
+    w("/// Real-time decode budget per frame, DERIVED through the shared")
+    w("/// `stats::real_time_budget` const fn at the pinned rate (never")
+    w("/// recalled): 2048 samples / %d Hz x 16,780,000 Hz." % rate)
+    w("#[allow(dead_code)]")
+    w("pub const BUDGET_CYCLES_PER_FRAME: u32 =")
+    w("    flac_spike::stats::real_time_budget(2048, RATE_HZ);")
+    w("/// Input provenance (logged at ROM boot; the measured image carries")
+    w("/// the sha of the file it was built from — FLAC.md rate proposal")
+    w("/// step 3's tripwire).")
+    w("#[allow(dead_code)]")
+    w("pub const INPUT_SHA256: &str = %s;" % qstr(input_sha))
+    w("#[allow(dead_code)]")
+    w("pub const INPUT_NAME: &str = %s;" % qstr(os.path.basename(input_name)))
+    for clip in clips:
+        w("")
+        w("/// %s" % clip["why"])
+        # const, not static — the witness's corrupted-offset control does
+        # struct-update (..*clip) like the committed suite, and moving Copy
+        # fields out of a static is E0507; a const inlines to a temporary
+        # (the committed assets.rs shape: pub const L0_FIXED: SpikeClip).
+        w("#[allow(dead_code)]")
+        w("pub const %s: flac_spike::assets::SpikeClip = "
+          "flac_spike::assets::SpikeClip {" % clip["const"])
+        w("    name: %s," % qstr("%s_%s" % (stem, clip["suffix"])))
+        w("    why: %s," % qstr(clip["why"]))
+        w("    census: %s," % qstr(clip["census"]))
+        w("    sample_rate_hz: %d," % clip["info"]["sample_rate"])
+        w("    bits_per_sample: %d," % clip["info"]["bits-per-sample"])
+        w("    channels: %d," % clip["info"]["channels"])
+        w("    total_samples: %d," % clip["info"]["total samples"])
+        w("    max_blocksize: %d," % max(h["blocksize"] for h in clip["frames"]))
+        w("    frames: &[")
+        # Qualify the type and root the blob path at CARGO_MANIFEST_DIR:
+        # this module is include!'d into the rate bin and the witness, so it
+        # must be self-contained regardless of which file's context expands
+        # it (the committed assets.rs is a plain module and needs neither).
+        for h, off in zip(clip["frames"], clip["offsets"]):
+            w("        flac_spike::assets::FrameMeta { offset: %d, "
+              "blocksize: %d }," % (off, h["blocksize"]))
+        w("    ],")
+        w("    region: include_bytes!(concat!("
+          "env!(\"CARGO_MANIFEST_DIR\"), %s))," % qstr("/assets/" + clip["blob"]))
+        w("    pcm_file: %s," % qstr("rate_%s_%s_pcm.bin" % (stem, clip["suffix"])))
+        w("    fnv_frames: 0x%016X," % clip["fnv_frames"])
+        w("    fnv_pcm: 0x%016X," % clip["fnv_pcm"])
+        # `};` (not `}`) — same generated-file rule spike_assets records: a
+        # const/static item's brace must close as an item, or the NEXT doc
+        # comment is "unexpected token".
+        w("};")
+        print("   %-14s %9d frame bytes, %6d frames, census: %s"
+              % (clip["blob"], clip["region_len"], len(clip["frames"]),
+                 clip["census"]))
+    w("")
+    w("/// Both arms, in gate order (FIXED first — the arm a decision defaults to).")
+    w("#[allow(dead_code)]")
+    w("pub const RATE_CLIPS: [&flac_spike::assets::SpikeClip; 2] =")
+    w("    [&%s, &%s];" % (clips[0]["const"], clips[1]["const"]))
+    out_path = os.path.join(crate_dir, "src", "rate_assets.rs")
+    with open(out_path, "w") as handle:
+        handle.write("\n".join(lines) + "\n")
+    print("   wrote %s (%d clips)" % (out_path, len(clips)))
+
+    # The witness's PCM module: reference bytes are host ground truth ONLY —
+    # the ROM's module above pins them by hash, never embeds them (same
+    # discipline as committed assets.rs; a single module would put ~10 MB of
+    # reference PCM into the ROM's .rodata via include_bytes!).
+    plines = []
+    p = plines.append
+    p("//  flac_spike rate ROM reference PCM — GENERATED, TEMPORARY")
+    p("//  (gitignored). Host witness ground truth ONLY — never included by")
+    p("//  the ROM. Regenerate:  scripts/gen_rate_assets.sh INPUT RATE")
+    for clip in clips:
+        p("#[allow(dead_code)]")
+        # Exactly two closes: env!( ) + concat!( ) + include_bytes!( ) —
+        # a third ) here is a parse error the compiler names exactly.
+        p("pub static %s_PCM: &[u8] = include_bytes!(concat!("
+          "env!(\"CARGO_MANIFEST_DIR\"), %s));" % (
+            clip["suffix"].upper(),
+            qstr("/assets/rate_%s_%s_pcm.bin" % (stem, clip["suffix"]))))
+    pcm_out = os.path.join(crate_dir, "src", "rate_pcm.rs")
+    with open(pcm_out, "w") as handle:
+        handle.write("\n".join(plines) + "\n")
+    print("   wrote %s" % pcm_out)
+
+
 def main():
     if len(sys.argv) < 3:
         raise SystemExit(__doc__)
@@ -1812,6 +2122,9 @@ def main():
         emit_runs(sys.argv[2], sys.argv[3])
     elif what == "spike_assets":
         spike_assets(sys.argv[2], sys.argv[3])
+    elif what == "rate_assets":
+        rate_assets(sys.argv[2], sys.argv[3], int(sys.argv[4]),
+                    sys.argv[5], sys.argv[6], sys.argv[7])
     elif what == "measure":
         measure(sys.argv[2])
     else:
