@@ -38,4 +38,5 @@
 pub mod assets;
 pub mod checksum;
 pub mod driver;
+pub mod playback;
 pub mod stats;

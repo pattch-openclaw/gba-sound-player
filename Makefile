@@ -1,6 +1,7 @@
 .PHONY: format build rom native-rom podman-rom flac-rom native-flac-rom podman-flac-rom \
         spike-rom native-spike-rom podman-spike-rom \
         rate-assets rate-test rate-rom native-rate-rom podman-rate-rom \
+        rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
         test test-rom flac-test spike-test opus-test kernel-test podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test \
@@ -249,9 +250,13 @@ podman-spike-rom:
 # ---------------------------------------------------------------------------
 
 RATE_ROM := flac-rate-spike.gba
+# The rate-PLAY ROM (decode into audible playback via the custom IRQ
+# feeder, FLAC.md rate-flow playback entry) — same assets, same gate.
+RATE_PLAY_ROM := flac-rate-play.gba
 # The generated module whose presence means `make rate-assets` has run.
 RATE_CRATE_ASSETS := $(SPIKE_CRATE_DIR)/src/rate_assets.rs
 RATE_BIN := $(SPIKE_CRATE_DIR)/target/$(TARGET)/release/flac-rate-spike
+RATE_PLAY_BIN := $(SPIKE_CRATE_DIR)/target/$(TARGET)/release/flac-rate-play
 
 rate-assets:
 	@test -n "$(INPUT)" || { echo "usage: make rate-assets INPUT=path/to.wav RATE={10512|18157|32768}"; exit 1; }
@@ -276,6 +281,16 @@ rate-rom: format
 
 native-rate-rom: rate-rom
 	@echo "native-rate-rom done: $(RATE_ROM)"
+
+# The playback ROM: identical gate to rate-rom (staged assets required).
+rate-play-rom: format
+	@test -f $(RATE_CRATE_ASSETS) || { echo "rate-play-rom: no generated rate assets — run 'make rate-assets INPUT=… RATE=…' first"; exit 1; }
+	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --features rate-assets --bin flac-rate-play
+	agb-gbafix $(RATE_PLAY_BIN) -o $(RATE_PLAY_ROM)
+	@echo "Rate-play ROM built: $(RATE_PLAY_ROM)"
+
+native-rate-play-rom: rate-play-rom
+	@echo "native-rate-play-rom done: $(RATE_PLAY_ROM)"
 
 podman-rate-rom:
 	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
@@ -494,7 +509,7 @@ clean:
 	cd $(FLAC_CRATE_DIR) && $(CARGO) clean
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) clean
 	cd $(KERNEL_CRATE_DIR) && $(CARGO) clean
-	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM) $(OPUS_ROM) $(OPUS_PROBE_ROM) $(KERNEL_ROM) $(RATE_ROM)
+	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM) $(OPUS_ROM) $(OPUS_PROBE_ROM) $(KERNEL_ROM) $(RATE_ROM) $(RATE_PLAY_ROM)
 # The rate flow's generated assets are TEMPORARY (gitignored, like ROMs —
 # FLAC.md "Sample-rate reduction"); they regenerate from
 # `make rate-assets INPUT=… RATE=…`, so they leave with `make clean`.
@@ -551,6 +566,7 @@ help:
 	@echo "    rate-assets       stage TEMPORARY clips from a real WAV (INPUT=… RATE={10512|18157|32768})"
 	@echo "    rate-test         host witness on the staged bytes (bit-exact vs flac -d)"
 	@echo "    native-rate-rom   build $(RATE_ROM) from the staged assets"
+	@echo "    native-rate-play-rom build $(RATE_PLAY_ROM) — decode→playback via the custom timer-IRQ feeder"
 	@echo "    podman-rate-rom   build it in the container (assets must be staged on the host)"
 	@echo "    flow: make rate-assets INPUT=clip.wav RATE=10512 && make rate-test && make native-rate-rom"
 	@echo ""

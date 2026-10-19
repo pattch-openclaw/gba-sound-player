@@ -4160,7 +4160,10 @@ Two deltas from the text above, each decided rather than drifted:
   and refactoring main.rs would move the measured image the whole E-menu
   compares against. What is shared is exactly what carries pins: driver,
   fold, stats, budget.
-- **Step 2's playback half is deferred, not dropped** (Sam 2026-10-17):
+- **Step 2's playback half is deferred, not dropped** (Sam 2026-10-17;
+  landed its baseline 2026-10-19 as the
+  [rate-play ROM](#completed-rate-play-rom--audible-fifo-playback-at-10512-hz-measured-2026-10-19)
+  — the mixer seam is still Phase 2 step 9's):
   the `Frequency` selection / mixer / double-buffer cadence path belongs
   with Phase 2 step 9 (the integration ROM); the landed rate ROM measures
   decode cost IRQ-off — the same mode every E-probe measures — and
@@ -4271,3 +4274,93 @@ assumed (PR-3's own mean figure was ≈ 3,350 c/sample). Size facts for the Part
 2 sweep (measured, this material): ≈ 1.91 MB/min compressed per arm
 (SI, 10,512 Hz stereo) — a 4:18 track embeds 8.2 MB/arm; the two-arm ROM
 is 16,522,992 B, inside a 32 MB-class cart with one arm to spare.
+
+## Completed: rate-play ROM — audible FIFO playback at 10,512 Hz, measured (2026-10-19)
+
+**What landed.** `examples/flac_spike/src/playback.rs` (the ring-buffer +
+FIFO-fold library, host-testable) and `src/rate_play_main.rs` (bin
+`flac-rate-play`, `required-features = ["rate-assets"]` — invisible to the
+committed spike build, same coexistence contract as the rate ROM), built by
+`make rate-play-rom` / `make native-rate-play-rom` behind the same
+fail-closed staged-assets gate. Playback is a **custom IRQ feeder, not
+agb's Mixer**: timer0 ticks at the sample rate (overflow 1,596 @ 2^24 Hz =
+1/10,512 s), timer1 cascades and interrupts once per mixer-domain hardware
+buffer (176 samples @ 10,512 Hz — the measured `Frequency::buffer_size`
+readiness fact); each tick copies the next ring chunk into the idle
+ping-pong word-aligned buffer and re-arms both sound DMAs with agb
+`hw.rs`'s control word (dest-fixed | repeat | words | sound-FIFO start |
+enable). `enable_sound` transcribes the `pub(super)` hw.rs enable sequence
+(FIFO resets, A→left / B→right at 100 %, bias 8-bit/65,536 Hz). The ring is
+36 × 176 samples ≈ 603 ms; 16 chunks prefill before the feeder arms, so
+the lead starts above the measured worst-frame drain. The producer's
+flow-control spin never holds the ring borrow across an iteration (the
+feeder needs it in IRQ context — single-core deadlock, caught in review).
+
+**Ledger semantics — a decision the debug gate caught.** A starved period
+zero-fills the DMA destinations, the feeder still re-arms (the DMA moves),
+and the consume ledger advances by `real` — the bytes actually taken; zeros
+are not ring data. The first design advanced the ledger by CHUNK every
+period, and the debug run caught the consequence: `ready = pushed −
+consumed` subtract-overflows once the consumer runs ahead, and at recovery
+the producer writes next while the cursor has already passed those slots —
+samples silently skipped, and the witness claim ("the bytes that reached
+the sound hardware are proven") breaks, because the pins fold at push
+time. Pinning the ledger at the producer realigns the cursor exactly where
+the producer writes next: nothing skipped, invariant `pushed ≥ consumed`,
+and drain termination holds (finished ⇒ the residue lands as Tail; a
+Starved at the pin means done). The rewritten
+`underflow_and_tail_are_classified_apart` witnesses it: a starved period
+leaves the cursor at 0 and the tail is the whole residue in FIFO order.
+
+**FIFO8 pins — the three-way witness.** The generator grows per-arm
+`FIFO8_L/R` pins (a Python `>>8` fold over the `flac -d` PCM, mirroring
+what the hardware does to each byte); the host witness
+`fifo8_pins_meet_generator_library_and_rom_path` folds the same embedded
+bytes through the library path and checks the ROM's aliases; the ROM folds
+at push time and its serial asserts MATCH against the embedded pins.
+Generator == library == what the ROM handed its DMA registers — one fold
+lower than the PCM chain-of-custody. The pins fold at push time: the last
+hop, DMA→paired FIFO, is witnessed by the audible check, not the hash (see
+the routing fix below — and above, why the headless run could not see it).
+
+**Review fix — DMA routing off-by-one (2026-10-19, post-opening).** The
+first commit transcribed agb's DMA intent but not its base arithmetic
+(`0x0400_00B0 + 0x0C·n` — hw DMA1 starts at `0x0BC`, not `0xB0`): both
+sound DMAs were programmed one channel low — hw DMA0→FIFO A, illegal
+sound-FIFO scheduling (mGBA discards it; left silent), and hw DMA1→FIFO B,
+mis-paired (right glitchy). Headless runs passed blind — pins fold at push
+time, and the runner has no audio device and ignores the scheduling
+warning; Sam's ears caught it. Fixed by routing hw DMA1→FIFO A, DMA2→FIFO
+B. Re-verified on the fixed image (sha `7d58e0cd…`): verdict unchanged —
+PASSED/BLUE, underflows = 0, FIFO8 pins MATCH, two runs `cmp`
+byte-identical; lead 4,528–4,752 (a chunk higher than the pre-fix range —
+DMA1's FIFO A refills now actually steal bus cycles).
+
+**Gates** (all pre-commit, 2026-10-19). `make spike-test` counts unchanged
+(15+8); `make native-spike-rom` rebuilds **byte-identical** to the
+calibration anchor `0d976591…`; `make rate-test` 9 green; `make check`
+clean; committed surface (`crates/`, `assets.rs`, blobs, `main.rs`,
+`spike_witness.rs`) diffs zero lines against `origin/main`. Two headless
+mGBA runs of `flac-rate-play.gba` (sha256 `79be6d60…`) `cmp`
+byte-identical, verdict line PASSED (screen BLUE).
+
+**The run** — same material as the rate ROM entry (input sha256
+`8f35fa88…`; 1,328 frames, 2,718,538 samples, stereo @ 10,512 Hz; the
+FIXED arm plays, the LPC arm is skipped — 2× over its own budget at this
+rate, measured, and no feeder fixes that). The feeder took 15,447 chunks:
+**underflows = 0**; pushed = consumed = 2,718,538 exactly; FIFO8 L
+`0x1189676B…` MATCH, R `0xFEC71BF5…` MATCH. Producer lead at the frame
+checkpoints: **4,448–4,752 samples**, everywhere above the worst-frame
+drain (2,559,507 cyc ≈ 152.6 ms ≈ 1,604 samples @ 10,512 Hz). IRQ-on:
+unlike every E-probe's IME-off windows, this ROM runs with timer interrupts
+live — the first measurement of the decode path coexisting with the
+feeder, and the 26.1 % mean-frame headroom (rate ROM entry) shows up as
+ring lead, not starvation.
+
+**Reading.** The deferred playback half now has its baseline: real music
+streamed end-to-end through the GBA sound FIFO at the reduced rate, every
+byte pinned. The mixer seam (double-buffer cadence, volume, `Sound` API)
+remains Phase 2 step 9's; what is proven here is the shape — decode +
+prefill + ring + ping-pong + DMA re-arm keeps up with IRQ live at the
+baseline decode path. Next levers unchanged (E4's i32 landing for LPC at
+10,512; the stacking question stays E9's, measured not assumed).
