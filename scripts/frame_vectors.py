@@ -1974,6 +1974,15 @@ def rate_assets(src, crate_dir, rate, input_sha, input_name, ffmpeg_version):
         pcm_bytes = struct.pack("<%dh" % len(pcm), *pcm)
         assert len(pcm_bytes) == info["total samples"] * 2 * 2, \
             "%s: reference PCM size mismatch" % filename
+        # Playback data-path pins: the 8-bit FIFO byte streams the GBA
+        # sound hardware consumes. Conversion mirrors agb's own 16->8-bit
+        # path exactly (agb_sound_converter: `(sample >> reduction) as u8`,
+        # reduction = bits - 8 = 8; the mixer asm reads samples back with
+        # ldrsb, i.e. two's-complement truncation). Python's >> on a signed
+        # int is arithmetic, matching Rust's i32 >>. The library fold
+        # (src/playback.rs) is the independent Rust twin, host-witnessed.
+        l_fifo = bytes((s >> 8) & 0xFF for s in pcm[0::2])
+        r_fifo = bytes((s >> 8) & 0xFF for s in pcm[1::2])
         blob = "rate_%s_%s_frames.bin" % (stem, suffix)
         region_path = os.path.join(assets_dir, blob)
         pcm_path = os.path.join(assets_dir, "rate_%s_%s_pcm.bin" % (stem, suffix))
@@ -1986,6 +1995,7 @@ def rate_assets(src, crate_dir, rate, input_sha, input_name, ffmpeg_version):
             blob=blob, region_path=region_path, frames=frames, offsets=offsets,
             census=census, info=info, region_len=len(region),
             fnv_frames=fnv1a64(region), fnv_pcm=fnv1a64(pcm_bytes),
+            fnv8_l=fnv1a64(l_fifo), fnv8_r=fnv1a64(r_fifo),
             sha_region=hashlib.sha256(region).hexdigest(),
             sha_pcm=hashlib.sha256(pcm_bytes).hexdigest(),
         ))
@@ -2070,11 +2080,40 @@ def rate_assets(src, crate_dir, rate, input_sha, input_name, ffmpeg_version):
         w("    fnv_pcm: 0x%016X," % clip["fnv_pcm"])
         # `};` (not `}`) — same generated-file rule spike_assets records: a
         # const/static item's brace must close as an item, or the NEXT doc
-        # comment is "unexpected token".
+        # comment is "unexpected token". (And the FIFO8 consts below are
+        # ITEMs: they must follow the closed literal — emitting them before
+        # `};` parses as struct fields: "expected identifier, found pub".)
         w("};")
+        # Playback data-path pins: FNV-1a-64 over the 8-bit FIFO byte
+        # streams (L and R separately, playback order) — the bytes the
+        # DMA-to-FIFO feeder plays, derived from the reference PCM by
+        # >>8 truncation. The ROM's playback pass re-derives them through
+        # the library fold on the measured image (FLAC.md rate flow).
+        w("#[allow(dead_code)]")
+        w("pub const %s_FIFO8_L: u64 = 0x%016X;" % (clip["const"], clip["fnv8_l"]))
+        w("#[allow(dead_code)]")
+        w("pub const %s_FIFO8_R: u64 = 0x%016X;" % (clip["const"], clip["fnv8_r"]))
         print("   %-14s %9d frame bytes, %6d frames, census: %s"
               % (clip["blob"], clip["region_len"], len(clip["frames"]),
                  clip["census"]))
+    w("")
+    # Stable aliases for the playback ROM + its witness: arm 0's FIFO8
+    # pins under an input-independent name (the per-arm const names carry
+    # the input stem; bin and witness must compile for any input).
+    w("/// Playback aliases: arm 0's FIFO8 pins (the ROM plays arm 0; the")
+    w("/// LPC arm is over budget at this rate — FLAC.md rate ROM entry).")
+    w("#[allow(dead_code)]")
+    w("pub const PLAYBACK_FIFO8_L: u64 = 0x%016X;" % clips[0]["fnv8_l"])
+    w("#[allow(dead_code)]")
+    w("pub const PLAYBACK_FIFO8_R: u64 = 0x%016X;" % clips[0]["fnv8_r"])
+    w("")
+    w("/// Per-arm FIFO8 pin pairs (L, R) in gate order — lets the witness")
+    w("/// loop over arms without naming input stems.")
+    w("#[allow(dead_code)]")
+    w("pub const FIFO8_PINS: [(u64, u64); %d] = [" % len(clips))
+    for clip in clips:
+        w("    (0x%016X, 0x%016X)," % (clip["fnv8_l"], clip["fnv8_r"]))
+    w("];")
     w("")
     w("/// Both arms, in gate order (FIXED first — the arm a decision defaults to).")
     w("#[allow(dead_code)]")

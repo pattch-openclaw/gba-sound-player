@@ -41,6 +41,7 @@
 # `make rate-assets INPUT=… RATE=…`, removed by `make clean`. The committed
 # spike assets above stay tracked; these never are.
 /flac-rate-spike.gba
+/flac-rate-play.gba
 /examples/flac_spike/assets/rate_*.bin
 /examples/flac_spike/src/rate_assets.rs
 /examples/flac_spike/src/rate_pcm.rs

@@ -65,6 +65,17 @@ required-features = ["rate-assets"]
 test = false
 bench = false
 
+# The rate-play ROM (make native-rate-play-rom): FLAC decode INTO audible
+# playback at the mixer-domain rate via the custom IRQ feeder (FLAC.md rate
+# flow playback entry). Same `rate-assets` gate as the rate ROM — invisible
+# to the committed spike build.
+[[bin]]
+name = "flac-rate-play"
+path = "src/rate_play_main.rs"
+required-features = ["rate-assets"]
+test = false
+bench = false
+
 # The rate flow's host witness — same correctness-before-speed gate at the
 # generated rate: bit-exact decode of the embedded bytes vs `flac -d` before
 # any ROM number counts. Skipped (not failed) when rate-assets is off.

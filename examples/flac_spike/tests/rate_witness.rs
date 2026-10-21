@@ -19,9 +19,14 @@
 //! 4. cross-arm agreement — both arms encode the same normalized source.
 //! 5. seek-table structure + corrupted-offset negative control (with the
 //!    pristine-frame control decode).
+//! 6. FIFO8 playback pins — the generator's Python `>>8` fold and the
+//!    library's Rust fold meet on the reference PCM, and the ROM's own
+//!    data path (`playback::fold_fifo8` through the driver) reaches the
+//!    same pins from the embedded region bytes.
 
 use flac_spike::checksum::{Fnv1a64, fnv1a64, fold_i16le_stereo};
 use flac_spike::driver;
+use flac_spike::playback::{fifo_byte, fold_fifo8};
 use flac_spike::stats::real_time_budget;
 
 /// The generated clip module — the very file the rate ROM `include!`s.
@@ -237,6 +242,80 @@ fn seek_table_structural_invariants_hold() {
             );
         }
     }
+}
+
+#[test]
+fn fifo8_pins_meet_generator_library_and_rom_path() {
+    // Three implementations of the playback data path must agree:
+    // (a) the generator's Python fold that emitted the pins,
+    // (b) the library's `fifo_byte` applied to the reference PCM,
+    // (c) the ROM's exact sequence: driver decode -> `fold_fifo8`.
+    // (b) vs the pins is the Python-vs-Rust differential (arithmetic-shift
+    // semantics included); (c) vs the pins proves the bytes the DMA feeder
+    // will play are the reference bytes, through the shared library code.
+    for (clip, (pin_l, pin_r)) in rate::RATE_CLIPS.iter().zip(rate::FIFO8_PINS) {
+        let reference = if clip.name.ends_with("_l0") {
+            pcm::L0_PCM
+        } else {
+            pcm::L4_PCM
+        };
+        // (b) Library fold over the reference PCM, per channel.
+        let l_bytes: Vec<u8> = reference
+            .chunks_exact(4)
+            .map(|p| fifo_byte(i16::from_le_bytes([p[0], p[1]]) as i32))
+            .collect();
+        let r_bytes: Vec<u8> = reference
+            .chunks_exact(4)
+            .map(|p| fifo_byte(i16::from_le_bytes([p[2], p[3]]) as i32))
+            .collect();
+        assert_eq!(
+            l_bytes.len(),
+            usize::try_from(clip.total_samples).unwrap(),
+            "{}: L FIFO8 length",
+            clip.name
+        );
+        assert_eq!(
+            fnv1a64(&l_bytes),
+            pin_l,
+            "{}: Python generator vs library `fifo_byte` on the reference PCM",
+            clip.name
+        );
+        assert_eq!(
+            fnv1a64(&r_bytes),
+            pin_r,
+            "{}: Python generator vs library `fifo_byte` on the reference PCM (R)",
+            clip.name
+        );
+
+        // (c) The ROM's exact sequence on the embedded region bytes.
+        let max = usize::from(clip.max_blocksize);
+        let mut left = vec![0i32; max];
+        let mut right = vec![0i32; max];
+        let mut state = Default::default();
+        let mut hl = Fnv1a64::new();
+        let mut hr = Fnv1a64::new();
+        let stats = driver::decode_clip(clip, &mut left, &mut right, &mut state, |_frame, l, r| {
+            fold_fifo8(&mut hl, &mut hr, l, r)
+                .expect("bit-exact decode of a 16-bit stream always fits i16")
+        })
+        .unwrap_or_else(|e| panic!("{}: clip walk failed: {e:?}", clip.name));
+        assert_eq!(stats.samples, usize::try_from(clip.total_samples).unwrap());
+        assert_eq!(
+            hl.finish(),
+            pin_l,
+            "{}: ROM fold path must reach the generator's FIFO8 L pin",
+            clip.name
+        );
+        assert_eq!(
+            hr.finish(),
+            pin_r,
+            "{}: ROM fold path must reach the generator's FIFO8 R pin",
+            clip.name
+        );
+    }
+    // The playback aliases name arm 0 — the ROM's single judgement.
+    assert_eq!(rate::PLAYBACK_FIFO8_L, rate::FIFO8_PINS[0].0);
+    assert_eq!(rate::PLAYBACK_FIFO8_R, rate::FIFO8_PINS[0].1);
 }
 
 #[test]
