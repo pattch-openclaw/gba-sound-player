@@ -35,20 +35,22 @@
 //! derived) — at that rate the decoder, not the feeder, is what fails
 //! first. The FLAC.md playback entry derives both.)
 //!
-//! CORRECTNESS-BEFORE-SPEED (unchanged layering): a decode proof on the
-//! embedded bytes vs the generator's `fnv_pcm` pin runs BEFORE the sound
-//! hardware enables. Then the playback pass decodes the whole track again
-//! while feeding, folding every byte it hands the DMA into two FIFO8
-//! hashes — judged against the generator's pins (derived from `flac -d`
-//! reference PCM by the >>8 truncation agb itself applies;
+//! CORRECTNESS (amended 2026-10-20, Sam: start audio immediately on load):
+//! the full-track decode proof that previously ran BEFORE the sound
+//! hardware enabled is removed from this ROM — it re-decoded the whole
+//! track silently (minutes of decode-only before any sound) for a pin the
+//! playback pass re-derives anyway. Boot now runs only the cheap asset
+//! check (region FNV vs the generator pin), then arms the feeder and plays.
+//! Correctness of the audible byte stream is still judged on the measured
+//! image: the playback pass folds every byte it hands the DMA into two
+//! FIFO8 hashes — judged against the generator's pins (derived from
+//! `flac -d` reference PCM by the >>8 truncation agb itself applies;
 //! `playback::fold_fifo8` is host-witnessed, generator-vs-library
-//! differential). The bytes handed to the sound hardware's DMA registers
-//! are therefore proven equal to the reference decode, on the measured
-//! image — the pins fold at push time, so the last hop (DMA actually
-//! feeding the paired FIFO) is witnessed by the audible check, not the
-//! hash. Headless runs have no audio device and ignore DMA scheduling
-//! warnings: routing bugs pass blind there (Sam's ears caught one,
-//! 2026-10-19 — see the register-map note below).
+//! differential). The pins fold at push time, so the last hop (DMA
+//! actually feeding the paired FIFO) is witnessed by the audible check,
+//! not the hash. Headless runs have no audio device and ignore DMA
+//! scheduling warnings: routing bugs pass blind there (Sam's ears caught
+//! one, 2026-10-19 — see the register-map note below).
 //!
 //! SCOPE CUTS (deliberate): only the FIXED (`-l 0`) arm plays — the LPC
 //! arm measured 183.9% mean / 211.6% worst of its own budget at 10,512 Hz
@@ -74,7 +76,7 @@ mod rom {
     use core::cell::RefCell;
 
     use flac_lite::subframe::PredictorState;
-    use flac_spike::checksum::{Fnv1a64, fnv1a64, fold_i16le_stereo};
+    use flac_spike::checksum::{Fnv1a64, fnv1a64};
     use flac_spike::driver;
     use flac_spike::playback::{Chunk, RingFeed};
 
@@ -395,42 +397,6 @@ mod rom {
         pass && ok
     }
 
-    /// Decode proof before the sound hardware enables (correctness-before-
-    /// speed, unchanged): full walk via the shared driver, i16 fold vs the
-    /// generator's PCM pin.
-    fn decode_proof(clip: &flac_spike::assets::SpikeClip) -> bool {
-        let max = usize::from(clip.max_blocksize);
-        let mut left: alloc::vec::Vec<i32> = alloc::vec![0; max];
-        let mut right: alloc::vec::Vec<i32> = alloc::vec![0; max];
-        let mut state = [PredictorState::new(), PredictorState::new()];
-        let mut hash = Fnv1a64::new();
-        let mut fold_ok = true;
-        let walk = driver::decode_clip(clip, &mut left, &mut right, &mut state, |_, l, r| {
-            if fold_i16le_stereo(&mut hash, l, r).is_err() {
-                fold_ok = false;
-            }
-        });
-        let pass = match walk {
-            Ok(stats) => {
-                fold_ok
-                    && stats.frames == clip.frames.len()
-                    && stats.samples == usize::try_from(clip.total_samples).unwrap_or(usize::MAX)
-                    && hash.finish() == clip.fnv_pcm
-            }
-            Err(err) => {
-                agb::println!("[rateplay] FAIL decode proof: {:?}", err);
-                false
-            }
-        };
-        agb::println!(
-            "[rateplay] decode proof {}: pcm fnv expected 0x{:016X} [{}]",
-            clip.name,
-            clip.fnv_pcm,
-            if pass { "MATCH" } else { "MISMATCH" }
-        );
-        pass
-    }
-
     /// Arm the sound hardware: FIFO routes (A=left, B=right, 100%), master
     /// enable, bias PWM 8-bit/65536 Hz — agb `hw.rs`'s enable sequence,
     /// transcribed because those functions are `pub(super)`.
@@ -517,7 +483,7 @@ mod rom {
                 Ok(written) => written,
                 Err(err) => {
                     agb::println!(
-                        "[rateplay] FAIL frame {}: driver rejected after proof passed: {:?}",
+                        "[rateplay] FAIL frame {}: driver rejected mid-playback: {:?}",
                         frame_index,
                         err
                     );
@@ -677,8 +643,7 @@ mod rom {
         );
 
         let assets_pass = check_clip(clip);
-        let proof_pass = decode_proof(clip);
-        let mut pass = assets_pass && proof_pass;
+        let mut pass = assets_pass;
 
         if pass {
             // SAFETY: the handler never allocates and only touches the
@@ -797,7 +762,7 @@ mod rom {
             }
         } else {
             agb::println!(
-                "[rateplay] playback SKIPPED — correctness-before-speed (assets/proof failed)"
+                "[rateplay] playback SKIPPED — asset check failed, bytes not the generator's"
             );
         }
 
@@ -808,11 +773,10 @@ mod rom {
         };
         gfx.set_background_palette_colour(0, 0, color);
         agb::eprintln!(
-            "[rateplay] verdict {} — screen {} (assets={}, proof={}, playback={})",
+            "[rateplay] verdict {} — screen {} (assets={}, playback={})",
             if pass { "PASSED" } else { "FAILED" },
             label,
             assets_pass,
-            proof_pass,
             pass
         );
 
