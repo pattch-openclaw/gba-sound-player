@@ -140,6 +140,22 @@ mod rom {
     const REG_IE: usize = 0x0400_0200;
     const REG_IF: usize = 0x0400_0202;
     const REG_IME: usize = 0x0400_0208;
+    // Timer data registers live at 0x0400_0100 + 4·n (agb `timer.rs`'s own
+    // arithmetic): timer1 = 0x104, timer2 = 0x108.
+    const REG_TM1_DATA: usize = 0x0400_0104;
+    const REG_TM2_DATA: usize = 0x0400_0108;
+
+    /// timer1's reload value at arming (`set_overflow_amount(CHUNK)` writes
+    /// `0 − CHUNK`), so `TM1_DATA − TM1_RELOAD` at handler entry is the
+    /// number of samples (timer0 ticks) since the LAST timer1 overflow.
+    const TM1_RELOAD: u16 = 0u16.wrapping_sub(CHUNK as u16);
+    /// Rearm grace in timer0 ticks: the sound DMA refills the 32-byte FIFO
+    /// when it falls to half (16 samples), so a handler that rearms within
+    /// ~16 samples of the buffer boundary replaces the DMA source before
+    /// the repeat controller reloads the old one. Beyond this grace the DMA
+    /// reloads the latched source — the old buffer's tail plays again
+    /// (inserted samples) and the late swap splices mid-waveform (pop).
+    const REARM_GRACE_TICKS: u16 = 16;
 
     /// agb `hw.rs`'s sound-DMA control word, transcribed verbatim in
     /// meaning: dest fixed (2<<5) | repeat (1<<9) | transfer words (1<<10)
@@ -181,16 +197,49 @@ mod rom {
     /// runs in IRQ context (interrupts already off) and the producer wraps
     /// every access in `critical_section::with` — one core, so no
     /// read-modify-write can interleave.
+    ///
+    /// The period-audit fields (added 2026-10-20) witness the feeder→DMA
+    /// seam the FIFO8 pins cannot reach. Timer2 cascades from timer1 and so
+    /// counts hardware periods even while IME is off; TM1_DATA times how
+    /// long each IRQ sat pending past its overflow.
+    ///  - `coalesced`: Σ(gap−1) over feeder entries (gap from the timer2
+    ///    delta) — overflows latched into IF and coalesced into one later
+    ///    IRQ: full-buffer replays, guaranteed (the rearm was a whole
+    ///    period late).
+    ///  - `late_servicings`: feeder entries whose TM1_DATA says the IRQ sat
+    ///    more than `REARM_GRACE_TICKS` past the overflow — the DMA had
+    ///    already reloaded the old source, so these serviced periods replay
+    ///    a tail and splice mid-waveform (the pop + inserted samples).
+    ///    A late rearm *within* the grace is harmless (source swapped
+    ///    before the repeat reload) and is not counted.
+    ///  - `push_swallowed`: overflow events counted by reading the period
+    ///    counter across each push critical section — the attribution
+    ///    channel: push_swallowed ≈ coalesced + late_servicings convicts
+    ///    the push window itself; a large gap points elsewhere.
     #[derive(Default)]
     struct Stats {
         finished: bool,
         underflows: u32,
         chunks_taken: u32,
+        coalesced: u32,
+        max_period_gap: u16,
+        last_period: u16,
+        late_servicings: u32,
+        max_delay_ticks: u16,
+        push_swallowed: u32,
+        pushes_with_swallow: u32,
     }
     static STATS: Mutex<RefCell<Stats>> = Mutex::new(RefCell::new(Stats {
         finished: false,
         underflows: 0,
         chunks_taken: 0,
+        coalesced: 0,
+        max_period_gap: 0,
+        last_period: 0,
+        late_servicings: 0,
+        max_delay_ticks: 0,
+        push_swallowed: 0,
+        pushes_with_swallow: 0,
     }));
 
     /// Snapshot of the feeder's underflow count (producer-side read).
@@ -246,8 +295,41 @@ mod rom {
     /// push/spin only touches the ring inside a critical section (IME
     /// off), so feeder and producer never interleave mid-copy.
     fn feeder(cs: critical_section::CriticalSection<'_>) {
+        // Period audit, read at entry before anything else can delay it:
+        //  - timer2 (cascade from timer1, hardware-counted even with IME
+        //    off) gives the number of overflows this IRQ delivered: gap 1
+        //    = one overflow, gap N>1 = N−1 coalesced replays.
+        //  - TM1_DATA (also counting under IME-off) times how long the IRQ
+        //    sat pending past its overflow: delay > grace ⇒ the repeat DMA
+        //    had already reloaded the old buffer — this servicing is a late
+        //    splice, the pop/insertion event, even at gap 1.
+        //  (agb's asm prologue + this read cost ~10² cycles ≈ <1 tick at
+        //  10,512 ticks/s, far under the 16-tick grace it measures.)
+        let (now, delay) = unsafe {
+            (
+                io_read_u16(REG_TM2_DATA),
+                io_read_u16(REG_TM1_DATA).wrapping_sub(TM1_RELOAD),
+            )
+        }; // SAFETY: fixed I/O addresses.
         let finished = {
             let mut stats = STATS.borrow_ref_mut(cs);
+            let gap = now.wrapping_sub(stats.last_period);
+            stats.last_period = now;
+            if gap > 1 {
+                stats.coalesced += u32::from(gap - 1);
+                if gap > stats.max_period_gap {
+                    stats.max_period_gap = gap;
+                }
+            }
+            // gap > 1 ⇒ the last overflow was ≥ one full period ago and
+            // TM1_DATA has re-wrapped; the coalesced count already owns
+            // that case — only gap-1 entries time a sub-period delay.
+            if gap == 1 && delay > REARM_GRACE_TICKS {
+                stats.late_servicings += 1;
+                if delay > stats.max_delay_ticks {
+                    stats.max_delay_ticks = delay;
+                }
+            }
             stats.chunks_taken += 1;
             stats.finished
         };
@@ -369,12 +451,29 @@ mod rom {
 
     /// Push one decoded frame window into the ring (feeder briefly off —
     /// the ring borrow is held inside a critical section on both sides).
+    ///
+    /// Period audit: the fold+copy runs with IME off, so any timer1
+    /// overflow inside this window is a swallowed period (IF latched, the
+    /// handler delivered late, the DMA replaying the old buffer meanwhile).
+    /// Reading the hardware period counter around the critical section
+    /// attributes exactly those overflows to this window. Prefill pushes
+    /// run before the counter is armed (delta 0 — nothing to swallow yet).
     fn push(left: &[i32], right: &[i32], hl: &mut Fnv1a64, hr: &mut Fnv1a64) -> bool {
-        critical_section::with(|cs| {
+        let before = unsafe { io_read_u16(REG_TM2_DATA) }; // SAFETY: fixed I/O address.
+        let ok = critical_section::with(|cs| {
             FEED.borrow_ref_mut(cs)
                 .push_frame(left, right, hl, hr)
                 .is_ok()
-        })
+        });
+        let swallowed = unsafe { io_read_u16(REG_TM2_DATA) }.wrapping_sub(before); // SAFETY: fixed I/O address.
+        if swallowed > 0 {
+            critical_section::with(|cs| {
+                let mut stats = STATS.borrow_ref_mut(cs);
+                stats.push_swallowed += u32::from(swallowed);
+                stats.pushes_with_swallow += 1;
+            });
+        }
+        ok
     }
 
     /// The producer's flow-control spin: wait until the feeder has drained
@@ -499,12 +598,41 @@ mod rom {
             hr.finish(),
             if r_ok { "MATCH" } else { "MISMATCH" }
         );
+        let chunks = critical_section::with(|cs| STATS.borrow_ref(cs).chunks_taken);
         agb::println!(
             "[rateplay] feed: pushed={} consumed={} chunks={} underflows={}",
             pushed,
             consumed,
-            critical_section::with(|cs| STATS.borrow_ref(cs).chunks_taken),
+            chunks,
             underflows
+        );
+        // Period audit (diagnostic, 2026-10-20): the timer2 witness keeps
+        // counting while IME is off, so elapsed − serviced is periods the
+        // hardware played but the feeder never swapped — the DMA replayed
+        // the old buffer. late = gap-1 services rearmed past the DMA
+        // grace; push_swallowed attributes the swallowed overflows to the
+        // push critical section (theory: fold+copy with IME off collides
+        // with the period boundary).
+        let (coalesced, max_gap, late, max_delay, swallowed, pushes_sw) =
+            critical_section::with(|cs| {
+                let s = STATS.borrow_ref(cs);
+                (
+                    s.coalesced,
+                    s.max_period_gap,
+                    s.late_servicings,
+                    s.max_delay_ticks,
+                    s.push_swallowed,
+                    s.pushes_with_swallow,
+                )
+            });
+        let elapsed = unsafe { io_read_u16(REG_TM2_DATA) }; // SAFETY: fixed I/O address.
+        agb::println!(
+            "[rateplay] period audit: hw_elapsed={elapsed} serviced={chunks} coalesced={coalesced} max_gap={max_gap} late={late} max_delay_ticks={max_delay} grace={REARM_GRACE_TICKS} push_swallowed={swallowed} pushes_with_swallow={pushes_sw}"
+        );
+        let replays = coalesced + late;
+        let attributed = swallowed >= replays;
+        agb::println!(
+            "[rateplay] audit verdict: replays={replays} (coalesced={coalesced} late={late}) of {chunks} serviced periods; attributed_to_push_window={attributed} (swallowed={swallowed} in {pushes_sw} pushes)"
         );
         let samples_ok = pushed == usize::try_from(clip.total_samples).unwrap_or(usize::MAX);
         agb::println!(
@@ -610,7 +738,17 @@ mod rom {
                 // Arm: timer0 ticks once per sample (overflow 65536−1596 →
                 // 1596 ticks @ 2^24 = 1/10512 s), timer1 cascades and
                 // interrupts once per CHUNK.
-                let mut timers = unsafe { gba.timers.all_timers() }; // SAFETY: agb's Mixer is never instantiated in this ROM — timer0/1 are unowned.
+                let mut timers = unsafe { gba.timers.all_timers() }; // SAFETY: agb's Mixer is never instantiated in this ROM — timer0/1/2 are unowned.
+                // Period-audit witness FIRST (armed before timer1 can
+                // overflow): timer2 cascades from timer1, counting every
+                // period in hardware — IRQ delivery cannot stall it, so it
+                // is ground truth for periods elapsed vs serviced.
+                timers
+                    .timer2
+                    .set_cascade(true)
+                    .set_interrupt(false)
+                    .set_overflow_amount(0)
+                    .set_enabled(true);
                 timers
                     .timer0
                     .set_divider(Divider::Divider1)
@@ -643,6 +781,7 @@ mod rom {
                 // Silence + teardown.
                 timers.timer1.set_interrupt(false).set_enabled(false);
                 timers.timer0.set_enabled(false);
+                timers.timer2.set_enabled(false);
                 // SAFETY: fixed I/O addresses.
                 unsafe {
                     io_write_u16(REG_DMA1_CONTROL, 0);
