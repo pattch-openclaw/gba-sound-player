@@ -4364,3 +4364,23 @@ remains Phase 2 step 9's; what is proven here is the shape — decode +
 prefill + ring + ping-pong + DMA re-arm keeps up with IRQ live at the
 baseline decode path. Next levers unchanged (E4's i32 landing for LPC at
 10,512; the stacking question stays E9's, measured not assumed).
+
+**Amended 2026-10-20 (Sam): decode-only boot pass removed — audio starts
+on load.** The full-track `decode_proof` that ran before the sound hardware
+enabled (a silent re-decode of the whole song for the `fnv_pcm` pin) is
+gone from this ROM only: it put minutes of decode-only silence before any
+audio, and the playback pass re-derives the same bytes into the FIFO8 pins
+anyway. Boot now runs the cheap region-FNV asset check, prefills 16 chunks
+(2 frames), arms the feeder — audible within a second of load. The
+rate ROM's own decode proof (`rate_main.rs`) is untouched; the playback
+verdict still judges the FIFO8 pins, the sample ledger, and the period
+audit on the measured image. Re-measured after the removal (rebuilt ROM
+sha256 `fb7a2fc2…`, two headless runs `cmp`-identical): verdict
+PASSED/BLUE, FIFO8 L/R pins MATCH, pushed = consumed = 2,718,538,
+underflows = 0, and the period audit reproduces the `a4f7560` numbers
+exactly (hw_elapsed 19,170 vs serviced 15,447, coalesced 3,724,
+push_swallowed 5,049 across 1,326/1,326) — as expected: the removal
+touches boot order only, not the feeder or the push window, and the glitch
+fix remains the next step. Gates: `make rate-test` green, `make check`
+clean, calibration anchor `flac-spike.gba` rebuilds byte-identical
+(`0d976591…` — coexistence held), pre-commit hook full suite green.
