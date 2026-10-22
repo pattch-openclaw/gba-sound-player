@@ -4384,3 +4384,35 @@ touches boot order only, not the feeder or the push window, and the glitch
 fix remains the next step. Gates: `make rate-test` green, `make check`
 clean, calibration anchor `flac-spike.gba` rebuilds byte-identical
 (`0d976591…` — coexistence held), pre-commit hook full suite green.
+
+**Amended 2026-10-22 (Sam): witness work removed from this ROM — no fold,
+no boot asset check; audio hot path only.** Product-shape scope call: this
+ROM plays sound; nothing that contributes no audio runs in it. Removed:
+the FIFO8 fold from the producer (per-byte FNV-1a-64 on ARM7TDMI is an
+emulated 64-bit multiply per byte on the producer wall) with its pin
+judgment, and the boot region-FNV asset check — the staged bytes are
+verified at generation time: the fail-closed census and the host witness
+(`make rate-test`) still fold the embedded bytes through the library path
+against the FIFO8 pins as a *build-time* gate; the ROM trusts the assets.
+Correctness of the byte stream now rests on the gates plus the audible
+check, not on in-ROM hashing. Kept (they measure what it plays): the
+underflow count, the sample ledger with the pushed==total_samples
+judgment, and the period audit as regression witness. The spike ROM and
+the rate ROM (`rate_main.rs`) keep their decode proofs and pin folds —
+research instruments; this ROM is the thing researched. Library
+(`playback.rs`) keeps `fold_fifo8`/`fold_bytes` for the host witness.
+`push()` is now convert (IRQ-live) → ring copy + credit (CS), hashes
+gone. Measured on the stripped image (ROM sha256 `8f620d2d…`, stable
+across rebuild; two headless runs `cmp` byte-identical; input
+`8f35fa88…`): **underflows 5,752 → 2,399**; hw periods 17,846 (coalesced
+0, late 904, push_swallowed 1,032 in 1,032 pushes — the ~1-period
+swallow persists); ledger balanced at 2,718,538, samples OK. Verdict
+still FAILED/RED: producer wall ≈ 225 ms/frame (17,846 × 16.74 ms ÷
+1,328, was ≈ 267 ms) against the 195 ms budget — the fold was ≈ 40 ms/
+frame of the debt, near the 10–20 ms/frame derived estimate's upper half
+plus per-call overhead, leaving ≈ 30 ms to attribute across decode
+(unpinned E2b table in question), convert, and the push swallow. Gates:
+`make rate-test` 8 green, `make check` clean, `make native-rate-play-rom`
+builds; committed surface unchanged (the edit touches only the
+`rate-assets`-gated bin, so the calibration anchor is untouched by
+construction).
