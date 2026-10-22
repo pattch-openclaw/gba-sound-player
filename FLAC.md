@@ -4416,3 +4416,33 @@ plus per-call overhead, leaving ≈ 30 ms to attribute across decode
 builds; committed surface unchanged (the edit touches only the
 `rate-assets`-gated bin, so the calibration anchor is untouched by
 construction).
+
+**Amended 2026-10-22 (Sam): E2b table pinned to `.iwram` — re-measured,
+worth ≈1%, not the missing 30 ms.** The landing's stated re-measurement,
+run on this ROM. Policy exception ratified with it: flac-lite
+`#![forbid(unsafe_code)]` → `#![deny(unsafe_code)]` with one named
+exception — `unsafe(link_section = ".iwram")` on `bits::LEADING_ONES`
+(cfg-gated `target_arch = "arm"`, item-scoped `#[allow(unsafe_code)]`; a
+placement attribute on an immutable const table, no unsafe code). Built-ELF
+placement witness (`lto = "fat"` survived): `nm` puts the symbol at
+`0x0300022c`, `.iwram` 0x22c → 0x32c — exactly +256 B, matching the probe's
+record; agb `CommonInit` CPUSet copies at boot. Measured (ROM sha256
+`410d5f8b…`, stable across rebuild; two headless runs `cmp`-identical;
+input `8f35fa88…`): **underflows 2,399 → 2,263**, hw periods
+17,846 → 17,710, producer wall ≈ **223 ms/frame** (was ≈ 225), replays
+stay 0 (coalesced 0; late 910, push_swallowed 1,039 in 1,039 pushes),
+ledger balanced at 2,718,538. **Verdict still FAILED/RED.** Reading: the
+pin is worth ≤1.7 ms/frame (~0.8%) — the E2b table win was already banked
+unpinned (a `.rodata` *data* table costs a few cycles per 8-bit window, not
+per bit; E6's cartridge-fetch lesson does not replicate at 256 B data
+scale), and the pin stacks as a small cumulative gain (levers-compose —
+small harvestable percents count). The remaining ≈28 ms/frame is therefore
+**not** the pin question: convert cost and the push-swallow window are
+unattributed, and the decode side needs live-ROM attribution before it is
+blamed — 144 ms is the rate ROM's IME-off figure; the live path runs with
+feeder IRQs on. Gates: `make flac-test` green (thumbv4t compile gate proves
+the attribute; counts unchanged — placement-only change), `make rate-test`
+green, `make check` clean, `make native-rate-play-rom` builds; the
+calibration anchor moves by construction (this diff touches
+`crates/flac-lite` — decoder-landing rule, anchor baselines re-recorded by
+the next E probe, not chased here).

@@ -95,7 +95,13 @@
 // Bare-metal by construction. `core` only — not even `alloc` is required by the
 // decode path (buffers are caller-provided; the manifest is borrowed).
 #![no_std]
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`, since 2026-10-22: one named exception — the E2b
+// run-length table's `.iwram` placement attribute in `bits::LEADING_ONES`
+// (an unsafe *attribute* on an immutable table; no unsafe code exists).
+// Sam ratified the exception when the rate-play producer-wall measurement
+// put the unpinned landing back on the table (FLAC.md, E2b pinning).
+// Everything else still fails the build.
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 // SCAFFOLD-ONLY: silence dead-code/unused noise while bodies are `todo!()`.
 // REMOVE this allow once implementations land.

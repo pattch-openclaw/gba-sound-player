@@ -434,18 +434,24 @@ pub fn crc16(data: &[u8]) -> u16 {
 /// Run-length table ([`BitReader::rice_quotient`], E2b landed): `LEADING_ONES[b]`
 /// = number of leading one-bits of `b` (0..=8, all-ones answers 8).
 ///
-/// **Landed unpinned — a stated variant vs the probe.** E2b measured the
-/// table pinned to plain `.iwram` via `#[link_section]`; `link_section` is
-/// an unsafe attribute and this crate `#![forbid(unsafe_code)]`, so the pin
-/// cannot land here without breaking the crate's safety guarantee (a
-/// crate-policy decision, not a mechanical one — FLAC.md's E2b-landing
-/// entry carries it). Unpinned, the table rides `.rodata` → ROM: one
-/// cartridge-read penalty (~few cycles) per 8-bit counting window,
-/// against the ~15–30 cycles per *bit* the per-bit loop it replaced cost.
-/// The landing is re-measured where it counts — the rate-play ROM's period
-/// audit (FLAC.md entry); if pinning ever shows measurable value there,
-/// it returns as a separate decision with a named owner for the forbid
-/// exception.
+/// **Pinned to plain `.iwram` (Sam's exception, 2026-10-22).** The probe
+/// measured the table count with the table pinned; the first landing rode
+/// `.rodata` → ROM instead (cartridge-read penalty per 8-bit counting
+/// window) because `link_section` is an unsafe attribute and the crate was
+/// `#![forbid(unsafe_code)]`. The rate-play ROM's producer-wall
+/// measurement reopened the question and the exception was ratified —
+/// crate root is now `deny` with this one item `allow`ed. `> iwram
+/// AT>rom`: agb's `CommonInit` copies the section ROM→IWRAM at boot (BIOS
+/// `CPUSet`), so each window is a zero-wait `ldrb`. Plain `.iwram`, never
+/// `.text_iwram` (E6: `.text*(.text*)` captures that name back into ROM).
+/// The `cfg` gate keeps the attribute off host builds entirely; the
+/// Built-ELF witness is `nm` — the symbol at `0x0300xxxx` proves the pin
+/// survives `lto = "fat"`.
+#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
+#[allow(unsafe_code)] // The crate-root exception: a placement attribute on
+// an immutable compile-time table is not unsafe
+// code (edition-2024 lints it as an unsafe
+// attribute); decision recorded in lib.rs + FLAC.md.
 static LEADING_ONES: [u8; 256] = build_leading_ones();
 
 const fn build_leading_ones() -> [u8; 256] {
