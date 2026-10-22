@@ -78,7 +78,7 @@ mod rom {
     use flac_lite::subframe::PredictorState;
     use flac_spike::checksum::{Fnv1a64, fnv1a64};
     use flac_spike::driver;
-    use flac_spike::playback::{Chunk, RingFeed};
+    use flac_spike::playback::{Chunk, RingFeed, convert_frame, fold_bytes};
 
     // Generated, temporary module — the same one the rate ROM and its host
     // witness include (make rate-assets).
@@ -415,20 +415,46 @@ mod rom {
         }
     }
 
-    /// Push one decoded frame window into the ring (feeder briefly off —
-    /// the ring borrow is held inside a critical section on both sides).
+    /// Push one decoded frame window into the ring.
     ///
-    /// Period audit: the fold+copy runs with IME off, so any timer1
-    /// overflow inside this window is a swallowed period (IF latched, the
-    /// handler delivered late, the DMA replaying the old buffer meanwhile).
-    /// Reading the hardware period counter around the critical section
-    /// attributes exactly those overflows to this window. Prefill pushes
-    /// run before the counter is armed (delta 0 — nothing to swallow yet).
-    fn push(left: &[i32], right: &[i32], hl: &mut Fnv1a64, hr: &mut Fnv1a64) -> bool {
+    /// **Push-window fix (2026-10-21):** the fit check, FIFO conversion, and
+    /// the byte fold run with IRQs LIVE — producer-private pure work over
+    /// producer-private buffers (locals + scratch), no period can be
+    /// swallowed. The fold commits only if the append succeeds
+    /// (`push_frame`'s commit-only-on-success contract, preserved). Only
+    /// the ring byte copy + credit runs inside the critical section —
+    /// ~2·n byte stores (µs). The old shape folded inside the CS: the
+    /// audit (`a4f7560`) measured ~64 ms IME-off per push swallowing
+    /// ~3.8 feeder periods (3,724 replays, dragged tempo + pops).
+    ///
+    /// Period audit (kept as the regression witness): reading the hardware
+    /// period counter around the CS attributes any remaining swallowed
+    /// overflows to this (now µs-scale) window — it must read 0. Prefill
+    /// pushes run before the counter is armed (delta 0 regardless).
+    fn push(
+        left: &[i32],
+        right: &[i32],
+        hl: &mut Fnv1a64,
+        hr: &mut Fnv1a64,
+        scratch_l: &mut [u8],
+        scratch_r: &mut [u8],
+    ) -> bool {
+        let n = left.len();
+        let stereo = !right.is_empty();
+        // IRQ-live half: check fit + convert (rejections write nothing).
+        let dst_r: &mut [u8] = if stereo { &mut scratch_r[..n] } else { &mut [] };
+        if convert_frame(left, right, &mut scratch_l[..n], dst_r).is_err() {
+            return false;
+        }
+        let mut hl_try = *hl;
+        let mut hr_try = *hr;
+        let src_r: &[u8] = if stereo { &scratch_r[..n] } else { &[] };
+        fold_bytes(&mut hl_try, &mut hr_try, &scratch_l[..n], src_r);
+        // IRQ-off half: ring copy + credit only.
         let before = unsafe { io_read_u16(REG_TM2_DATA) }; // SAFETY: fixed I/O address.
         let ok = critical_section::with(|cs| {
             FEED.borrow_ref_mut(cs)
-                .push_frame(left, right, hl, hr)
+                .push_bytes(&scratch_l[..n], src_r)
                 .is_ok()
         });
         let swallowed = unsafe { io_read_u16(REG_TM2_DATA) }.wrapping_sub(before); // SAFETY: fixed I/O address.
@@ -438,6 +464,10 @@ mod rom {
                 stats.push_swallowed += u32::from(swallowed);
                 stats.pushes_with_swallow += 1;
             });
+        }
+        if ok {
+            *hl = hl_try;
+            *hr = hr_try;
         }
         ok
     }
@@ -463,12 +493,15 @@ mod rom {
 
     /// Continue the fed decode from `start_frame` (prefill consumed the
     /// head), then drain and judge the FIFO8 pins against the generator.
+    #[allow(clippy::too_many_arguments)]
     fn play_rest(
         clip: &flac_spike::assets::SpikeClip,
         start_frame: usize,
         state: &mut [PredictorState; 2],
         hl: &mut Fnv1a64,
         hr: &mut Fnv1a64,
+        scratch_l: &mut [u8],
+        scratch_r: &mut [u8],
     ) -> (usize, usize, u32) {
         let max = usize::from(clip.max_blocksize);
         let mut left: alloc::vec::Vec<i32> = alloc::vec![0; max];
@@ -495,7 +528,7 @@ mod rom {
             } else {
                 &[]
             };
-            if !push(&left[..written], right_window, hl, hr) {
+            if !push(&left[..written], right_window, hl, hr, scratch_l, scratch_r) {
                 agb::println!(
                     "[rateplay] FAIL frame {}: push rejected (out of profile?)",
                     frame_index
@@ -659,6 +692,11 @@ mod rom {
             let mut state = [PredictorState::new(), PredictorState::new()];
             let mut hl = Fnv1a64::new();
             let mut hr = Fnv1a64::new();
+            // Producer-private conversion scratch (one frame per channel,
+            // FIFO bytes): written/folded with IRQs live, only the bytes
+            // cross into the ring inside the CS.
+            let mut scratch_l: alloc::vec::Vec<u8> = alloc::vec![0; max];
+            let mut scratch_r: alloc::vec::Vec<u8> = alloc::vec![0; max];
             let prefill_target = PREFILL_CHUNKS * CHUNK;
             let mut prefilled = 0usize;
             let mut next_frame = 0usize;
@@ -681,7 +719,14 @@ mod rom {
                 } else {
                     &[]
                 };
-                if !push(&left[..written], right_window, &mut hl, &mut hr) {
+                if !push(
+                    &left[..written],
+                    right_window,
+                    &mut hl,
+                    &mut hr,
+                    &mut scratch_l,
+                    &mut scratch_r,
+                ) {
                     agb::println!(
                         "[rateplay] FAIL prefill push rejected at frame {}",
                         next_frame
@@ -732,8 +777,15 @@ mod rom {
                     unsafe { io_read_u16(REG_IME) }
                 );
 
-                let (frames, samples, underflows) =
-                    play_rest(clip, next_frame, &mut state, &mut hl, &mut hr);
+                let (frames, samples, underflows) = play_rest(
+                    clip,
+                    next_frame,
+                    &mut state,
+                    &mut hl,
+                    &mut hr,
+                    &mut scratch_l,
+                    &mut scratch_r,
+                );
                 agb::println!(
                     "[rateplay] playback verdict: frames={}/{} samples={} underflows={}",
                     frames,

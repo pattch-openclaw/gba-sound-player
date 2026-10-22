@@ -134,6 +134,61 @@ pub enum Chunk {
     Starved,
 }
 
+/// Convert one decoded frame (i32, i16-range) into its 8-bit FIFO byte
+/// form, writing into caller-provided destinations.
+///
+/// The whole-frame i16 fit check runs BEFORE any destination byte is
+/// written (rejections write nothing, the crate-wide rule): a sample
+/// outside the profile returns it as `Err` with the destinations untouched.
+/// Mono windows (`right` empty) convert the left channel alone and leave
+/// `dst_r` untouched. This is the pure producer-side half of a push — no
+/// ring, no hashes, no IRQ-off window needed (the playback push-window fix
+/// hoists conversion+fit out of the critical section; [`RingFeed::push_bytes`]
+/// is the only part that needs protecting).
+pub fn convert_frame(
+    left: &[i32],
+    right: &[i32],
+    dst_l: &mut [u8],
+    dst_r: &mut [u8],
+) -> Result<(), i32> {
+    let n = left.len();
+    let stereo = !right.is_empty();
+    debug_assert_eq!(dst_l.len(), n);
+    debug_assert!(!stereo || (dst_r.len() == n && right.len() == n));
+    if stereo {
+        for (&l, &r) in left.iter().zip(right.iter()) {
+            i16::try_from(l).map_err(|_| l)?;
+            i16::try_from(r).map_err(|_| r)?;
+        }
+        for (d, &s) in dst_r.iter_mut().zip(right.iter()) {
+            *d = fifo_byte(s);
+        }
+    } else {
+        for &l in left {
+            i16::try_from(l).map_err(|_| l)?;
+        }
+    }
+    for (d, &s) in dst_l.iter_mut().zip(left.iter()) {
+        *d = fifo_byte(s);
+    }
+    Ok(())
+}
+
+/// Fold pre-converted FIFO bytes into the two channel hashes: left bytes
+/// into `hl`, right bytes (when present) into `hr`.
+///
+/// The bytes-level twin of [`fold_fifo8`] — same fold, minus the fit check
+/// (bytes are already truncated). The host witness
+/// [`mod@tests`] proves byte-for-byte agreement with [`fold_fifo8`] over
+/// the same frame, so the ROM's hoisted fold path and the pinned
+/// sample-fold path cannot drift.
+pub fn fold_bytes(hl: &mut Fnv1a64, hr: &mut Fnv1a64, bytes_l: &[u8], bytes_r: &[u8]) {
+    hl.update(bytes_l);
+    if !bytes_r.is_empty() {
+        hr.update(bytes_r);
+    }
+}
+
 /// A byte-slip ring of 8-bit FIFO samples, planar L/R, chunk-granular
 /// consumer. `RING` is the per-channel ring size in samples (= bytes).
 ///
@@ -254,6 +309,56 @@ impl<const RING: usize> RingFeed<RING> {
         self.pushed += n;
         *hl = hl_try;
         *hr = hr_try;
+        Ok(())
+    }
+
+    /// Append pre-converted FIFO bytes (one decoded frame, planar L/R):
+    /// free-capacity check, ring copy, credit last.
+    ///
+    /// This is the ONLY part of a push that needs the ROM's critical
+    /// section: the conversion and fold ([`convert_frame`],
+    /// [`fold_bytes`]) are producer-private pure work and run with IRQs
+    /// live (the 2026-10-21 push-window fix — audit `a4f7560` measured a
+    /// ~64 ms IME-off fold+copy swallowing 3,724 feeder periods; the
+    /// byte copy alone is ~0.5 ms). Rejections write nothing and credit
+    /// nothing; mono windows (`bytes_r` empty) slip the left ring only,
+    /// same as [`Self::push_frame`]. The free check reads the live
+    /// `consumed` — under the CS it is exact, and outside one a stale read
+    /// only ever UNDERstates free (`consumed` only grows), so a passing
+    /// check can never overestimate capacity.
+    pub fn push_bytes(&mut self, bytes_l: &[u8], bytes_r: &[u8]) -> Result<(), PushError> {
+        let n = bytes_l.len();
+        let stereo = !bytes_r.is_empty();
+        let free = self.free_samples();
+        if n > free || (stereo && bytes_r.len() != n) {
+            return Err(PushError::OutOfSpace {
+                need: n,
+                have: free,
+            });
+        }
+        // Both slips start at the same residue (channels advance in
+        // lockstep); the mono push never touches the right ring. Same
+        // walk as push_frame — witnessed byte-equal in the suite.
+        let mut at = self.pushed % RING;
+        for &b in bytes_l {
+            self.left[at] = b;
+            at += 1;
+            if at == RING {
+                at = 0;
+            }
+        }
+        if stereo {
+            let mut at_r = self.pushed % RING;
+            for &b in bytes_r {
+                self.right[at_r] = b;
+                at_r += 1;
+                if at_r == RING {
+                    at_r = 0;
+                }
+            }
+        }
+        // Credit last, same contract as push_frame.
+        self.pushed += n;
         Ok(())
     }
 
@@ -424,6 +529,96 @@ mod tests {
         );
         assert_eq!(&dl[..3], &[1u8, 2, 3]);
         assert!(dl[3..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn convert_rejects_out_of_profile_and_writes_nothing() {
+        let mut dl = [0xABu8; 2];
+        let mut dr = [0xABu8; 2];
+        let err = convert_frame(&[0, 40_000], &[0, 0], &mut dl, &mut dr)
+            .expect_err("out-of-profile must reject");
+        assert_eq!(err, 40_000);
+        assert_eq!(dl, [0xAB; 2]);
+        assert_eq!(dr, [0xAB; 2]);
+    }
+
+    #[test]
+    fn push_bytes_path_matches_push_frame_byte_for_byte() {
+        // The ROM's hoisted three-step push (convert → fold_bytes →
+        // push_bytes) must be indistinguishable from the pinned push_frame:
+        // same drained stream, same hashes, same ledger — stereo and mono,
+        // across a ring wrap.
+        // Ring holds the whole scripted sequence (5×3 stereo + 4 mono = 19
+        // ≤ 24) so both rings see identical push sequences before the
+        // drain comparison starts.
+        let mut a = RingFeed::<24>::new();
+        let mut b = RingFeed::<24>::new();
+        let (mut hl_a, mut hr_a) = (Fnv1a64::new(), Fnv1a64::new());
+        let (mut hl_b, mut hr_b) = (Fnv1a64::new(), Fnv1a64::new());
+        for f in 0..5u32 {
+            let left: Vec<i32> = (0..3).map(|i| ((f * 3 + i) as i32 - 5) * 777).collect();
+            let right: Vec<i32> = (0..3).map(|i| (7i32 - (f * 3 + i) as i32) * 511).collect();
+            a.push_frame(&left, &right, &mut hl_a, &mut hr_a).unwrap();
+            let mut dl = [0u8; 3];
+            let mut dr = [0u8; 3];
+            convert_frame(&left, &right, &mut dl, &mut dr).unwrap();
+            fold_bytes(&mut hl_b, &mut hr_b, &dl, &dr);
+            b.push_bytes(&dl, &dr).unwrap();
+        }
+        // Mono frame rides the same equality.
+        let mono: Vec<i32> = (0..4).map(|i| (i - 2) * 1024).collect();
+        a.push_frame(&mono, &[], &mut hl_a, &mut hr_a).unwrap();
+        let mut dl = [0u8; 4];
+        let mut dr = [0u8; 4];
+        convert_frame(&mono, &[], &mut dl, &mut dr).unwrap();
+        fold_bytes(&mut hl_b, &mut hr_b, &dl[..4], &[]);
+        b.push_bytes(&dl[..4], &[]).unwrap();
+
+        assert_eq!((a.pushed(), a.consumed()), (b.pushed(), b.consumed()));
+        let mut got_a: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        let mut got_b: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        loop {
+            // Each ring is taken exactly once per iteration: one take per
+            // ring per period, or the comparison desyncs.
+            let mut al = [0u8; 4];
+            let mut ar = [0u8; 4];
+            let mut bl = [0u8; 4];
+            let mut br = [0u8; 4];
+            let va = a.take_chunk(&mut al, &mut ar, 4, true);
+            let vb = b.take_chunk(&mut bl, &mut br, 4, true);
+            assert_eq!(va, vb, "classification must agree");
+            match va {
+                Chunk::Full => {
+                    got_a.push((al.to_vec(), ar.to_vec()));
+                    got_b.push((bl.to_vec(), br.to_vec()));
+                }
+                Chunk::Tail { real } => {
+                    got_a.push((al[..real].to_vec(), ar[..real].to_vec()));
+                    got_b.push((bl[..real].to_vec(), br[..real].to_vec()));
+                    break;
+                }
+                Chunk::Starved => break,
+            }
+        }
+        assert_eq!(got_a, got_b, "drained streams diverged");
+        assert_eq!(hl_a.finish(), hl_b.finish(), "left hash diverged");
+        assert_eq!(hr_a.finish(), hr_b.finish(), "right hash diverged");
+    }
+
+    #[test]
+    fn push_bytes_rejects_oversized_frame_and_credits_nothing() {
+        let mut ring = RingFeed::<4>::new();
+        let err = ring
+            .push_bytes(&[1, 2, 3, 4, 5], &[1, 2, 3, 4, 5])
+            .expect_err("5 > 4 free must reject");
+        assert_eq!(err, PushError::OutOfSpace { need: 5, have: 4 });
+        assert_eq!(ring.pushed(), 0);
+        // Length mismatch on the right channel is rejected too.
+        let err = ring
+            .push_bytes(&[1, 2], &[3])
+            .expect_err("mismatch must reject");
+        assert_eq!(err, PushError::OutOfSpace { need: 2, have: 4 });
+        assert_eq!(ring.pushed(), 0);
     }
 
     #[test]
