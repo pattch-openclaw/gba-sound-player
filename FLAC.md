@@ -4446,3 +4446,80 @@ green, `make check` clean, `make native-rate-play-rom` builds; the
 calibration anchor moves by construction (this diff touches
 `crates/flac-lite` — decoder-landing rule, anchor baselines re-recorded by
 the next E probe, not chased here).
+
+**Amended 2026-10-22 (Sam): live-producer attribution probe — the stage
+map is measured; revised ordering recorded.** The ~28 ms the pin
+amendment left unattributed is now a budget map, measured IRQ-live on this ROM (E8's
+attribution shape re-tooled: the IME-off `timed()` window measures a bus
+state the producer never runs in, so the instrument is the armed chain
+itself — a sample-resolution position clock, `timer2` periods × 176 +
+in-period samples from `TM1_DATA`, one tick = 2^24/10512 ≈ 1,596 cycles;
+eight clock reads per frame at the stage boundaries, no logging between —
+E4's unified-loop discipline; probe code is sample-only, preserved under
+`examples/flac_spike/experiments/playback-attribution/` with the
+reappliable patch and both `cmp`-identical logs, never in the live
+sources). Witnessed on the measured image (ROM sha256 `cb682591…`, rustc
+1.100.0-nightly a69a63265, mGBA 0.10.5, input `8f35fa88…`; calibration
+pairs **0/0** sum/max — instrument cost far under one tick; `clock_retries
+= 2` over the pass; per-frame **closure underflows 0**, inter-boundary gap
+321 samples in 1,326 frames = 0.02 ms/frame):
+
+| stage | mean (samples/frame) | ms | % of budget | max |
+|---|---|---|---|---|
+| wait | 9.34 | 0.89 | 0.5 % | 1,795 @frame 1321 (single near-tail stall) |
+| decode | 2,108.6 | 200.6 | **103.0 %** | 2,146 @564 |
+| convert | 148.5 | 14.1 | 7.2 % | 150 @4 |
+| push CS | 133.6 | 12.7 | 6.5 % | 135 @73 |
+| gross | 2,400.3 | 228.3 | **117.2 %** | 2,429 @572 |
+
+Budget derived: 2,048 samples ÷ 10,512 Hz = 194.8 ms = 3,268,621 cycles.
+Cross-check: this image's audit-derived wall (hw periods 18,121 ×
+176/10,512 s = 16.74 ms ÷ 1,328 frames) = **228.3 ms — equals the measured
+gross**; there is no hidden producer phase outside the four stages.
+The probe image runs ≈ 5 ms/frame over the clean pinned image's 223.2
+(17,710 × 16.74 ÷ 1,328) — the instrument's own reads and tally stores;
+shares are read relatively, the clean image's audit stays the wall
+authority.
+
+**Three readings that change decisions.** (1) **The push CS is real debt,
+not a counter artifact**: 133.6 samples = 12.7 ms IME-off — the
+"~2·n byte stores, µs" module claim is off by three orders (≈ 52 cyc/byte
+through the per-byte wrap-checked loop under Mutex/RefCell: 133.6 × 1,596
+cyc ÷ 4,096 stereo bytes = 52.1). The swallow arithmetic closes: 133.6/176 = 75.9 % of a
+period is IME-off per push, and the observed swallow rate is 1,007/1,326 =
+75.9 % of pushes — phase coincidence at the measured window width, exactly
+as expected once the width is known. `late=871, max_delay_ticks=132` sits
+at the CS width: the late splices ARE the push window. (2) **Decode pays a
++39 % live penalty**: 2,108.6 samples = 3,365,427 cyc/frame over 2,048
+samples = **1,643 c/sample** (3,365,356 cyc ÷ 2,048, from the mean 2,108.6109
+ticks × 1,596.006 cyc) vs the rate ROM's IME-off 1,180 c/s on this
+material; +56.6 ms/frame = 200.6 − 144.0, the IME-off figure derived at
+1,180 c/s × 2,048 = 2,416,640 cyc = 144.0 ms. The obvious suspects
+account for only a fraction: the feeder handler's own work rides inside
+the producer's window (≈ 13.6 handlers/frame — 228.3 ÷ 16.74 — × a ~3·10³
+cyc estimate for the 352-byte drain copy + audit reads + DMA re-arm
+≈ 2.4 ms/frame) and the sound-DMA bursts steal bus cycles (2 × 44 words
+× ~8 cyc/word ≈ 700 cyc/period ≈ 0.6 ms/frame); together ≈ 3 ms against
++56.6 — the remaining ≈ 50 ms is unexplained and the round-2 question
+(bus contention vs mGBA's DMA-stall model vs handler stacking; a feeder-off control arm settles it, and if the penalty is
+emulator-specific the product's real-hardware decode is nearer 144 ms —
+which re-values E1 data staging from −2.5 % to potentially the biggest
+single lever, decode currently fetching from the cartridge bus while the
+sound DMAs run). (3) **Convert is 14.1 ms** ≈ 55 cyc/channel-sample —
+above the bounded estimate ("single-digit ms"), a table/word-pack fast
+path has real target.
+
+**Revised ordering (proposed after the probe; recorded 2026-10-22 on
+Sam's request — the working order until measurements move it).** ① **Word-copy push** —
+the CS's per-byte loop to u32 stores: the cheapest proven lever, cutting
+wall ≈ 10 ms and killing the swallow + late-splice clicks together.
+② **Convert fast path**, rides the same byte-path PR (combined debt
+26.8 ms; expected harvest ~13 ms, measured not assumed). ③ **Feeder-off
+control arm** on the live image — accounts the decode penalty; decides
+E1 staging's true size before kernel work is planned against a 200 ms or a
+145 ms decode. ④ **E10 PR B** (C2 word-skip + composite sample-step) —
+the structural unary harvest, unchanged in rank as the required big win:
+decode alone is 103.0 % of budget, so zeroing convert + CS + wait still
+leaves it over. Catch-up stays margin, never the fix; the rate knob stays
+the budget-growing fallback, re-derived on the improved path (levers
+compose).
