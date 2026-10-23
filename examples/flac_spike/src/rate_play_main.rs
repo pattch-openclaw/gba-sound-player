@@ -35,22 +35,25 @@
 //! derived) — at that rate the decoder, not the feeder, is what fails
 //! first. The FLAC.md playback entry derives both.)
 //!
-//! CORRECTNESS (amended 2026-10-20, Sam: start audio immediately on load):
-//! the full-track decode proof that previously ran BEFORE the sound
-//! hardware enabled is removed from this ROM — it re-decoded the whole
-//! track silently (minutes of decode-only before any sound) for a pin the
-//! playback pass re-derives anyway. Boot now runs only the cheap asset
-//! check (region FNV vs the generator pin), then arms the feeder and plays.
-//! Correctness of the audible byte stream is still judged on the measured
-//! image: the playback pass folds every byte it hands the DMA into two
-//! FIFO8 hashes — judged against the generator's pins (derived from
-//! `flac -d` reference PCM by the >>8 truncation agb itself applies;
-//! `playback::fold_fifo8` is host-witnessed, generator-vs-library
-//! differential). The pins fold at push time, so the last hop (DMA
-//! actually feeding the paired FIFO) is witnessed by the audible check,
-//! not the hash. Headless runs have no audio device and ignore DMA
-//! scheduling warnings: routing bugs pass blind there (Sam's ears caught
-//! one, 2026-10-19 — see the register-map note below).
+//! CORRECTNESS (amended 2026-10-22, Sam: audio hot path only). This is a
+//! product-shape ROM: nothing that does not contribute to sound runs here.
+//! The full-track decode proof (removed 2026-10-20) and the FIFO8 fold +
+//! boot region-FNV asset check (removed 2026-10-22) were witness work —
+//! the fold paid an emulated 64-bit multiply per byte (ARM7TDMI has no
+//! 64-bit MUL) on the producer wall, and the asset bytes are verified
+//! before the ROM is built, not at boot. The chain of custody for the
+//! staged bytes now lives entirely in the gates: the generator's
+//! fail-closed census (`make rate-assets`) and the host witness
+//! (`make rate-test`), which folds the embedded bytes through the library
+//! path against the generator's FIFO8 pins. This ROM trusts the staged
+//! assets and only measures what it plays: the underflow count, the
+//! period audit, and the sample ledger still judge the verdict; the last
+//! hop (DMA actually feeding the paired FIFO) is witnessed by the audible
+//! check. Headless runs have no audio device and ignore DMA scheduling
+//! warnings: routing bugs pass blind there (Sam's ears caught one,
+//! 2026-10-19 — see the register-map note below). The spike ROM and the
+//! rate ROM (`rate_main.rs`) keep their decode proofs and pin folds —
+//! they are the research instruments; this ROM is the thing researched.
 //!
 //! SCOPE CUTS (deliberate): only the FIXED (`-l 0`) arm plays — the LPC
 //! arm measured 183.9% mean / 211.6% worst of its own budget at 10,512 Hz
@@ -76,9 +79,8 @@ mod rom {
     use core::cell::RefCell;
 
     use flac_lite::subframe::PredictorState;
-    use flac_spike::checksum::{Fnv1a64, fnv1a64};
     use flac_spike::driver;
-    use flac_spike::playback::{Chunk, RingFeed};
+    use flac_spike::playback::{Chunk, RingFeed, convert_frame};
 
     // Generated, temporary module — the same one the rate ROM and its host
     // witness include (make rate-assets).
@@ -369,34 +371,6 @@ mod rom {
         }
     }
 
-    /// Asset verification (rate ROM shape): seek-table structure + the
-    /// region pin — the bytes about to be decoded and heard are the
-    /// generator's bytes.
-    fn check_clip(clip: &flac_spike::assets::SpikeClip) -> bool {
-        let mut pass = !clip.frames.is_empty();
-        pass &= clip.frames.first().is_some_and(|f| f.offset == 0);
-        let mut ascending = true;
-        let mut prev = clip.frames.first().map_or(0, |f| f.offset);
-        for frame in clip.frames.iter().skip(1) {
-            ascending &= frame.offset > prev;
-            prev = frame.offset;
-        }
-        pass &= ascending;
-        pass &= clip.sample_rate_hz == rate::RATE_HZ;
-        let actual = fnv1a64(clip.region);
-        let ok = actual == clip.fnv_frames;
-        agb::println!(
-            "[rateplay] {} region fnv: frames={} region={}B expected 0x{:016X} actual 0x{:016X} [{}]",
-            clip.name,
-            clip.frames.len(),
-            clip.region.len(),
-            clip.fnv_frames,
-            actual,
-            if ok { "OK" } else { "MISMATCH" }
-        );
-        pass && ok
-    }
-
     /// Arm the sound hardware: FIFO routes (A=left, B=right, 100%), master
     /// enable, bias PWM 8-bit/65536 Hz — agb `hw.rs`'s enable sequence,
     /// transcribed because those functions are `pub(super)`.
@@ -415,20 +389,37 @@ mod rom {
         }
     }
 
-    /// Push one decoded frame window into the ring (feeder briefly off —
-    /// the ring borrow is held inside a critical section on both sides).
+    /// Push one decoded frame window into the ring.
     ///
-    /// Period audit: the fold+copy runs with IME off, so any timer1
-    /// overflow inside this window is a swallowed period (IF latched, the
-    /// handler delivered late, the DMA replaying the old buffer meanwhile).
-    /// Reading the hardware period counter around the critical section
-    /// attributes exactly those overflows to this window. Prefill pushes
-    /// run before the counter is armed (delta 0 — nothing to swallow yet).
-    fn push(left: &[i32], right: &[i32], hl: &mut Fnv1a64, hr: &mut Fnv1a64) -> bool {
+    /// **2026-10-22 (Sam): the FIFO8 fold is gone from this ROM.** What
+    /// remains is only what produces sound: the fit check + FIFO conversion
+    /// run IRQ-live (producer-private pure work over locals + scratch),
+    /// then the ring byte copy + credit runs inside the critical section
+    /// (~2·n byte stores, µs). History: the fold first rode inside the CS
+    /// (the audit `a4f7560` measured ~64 ms IME-off per push swallowing
+    /// ~3.8 feeder periods), was hoisted IRQ-live 2026-10-21, and is now
+    /// removed entirely — per-byte FNV-64 on the ARM7TDMI is an emulated
+    /// 64-bit multiply on the producer wall for witness work that
+    /// contributes no audio (module docs).
+    ///
+    /// Period audit (kept as the regression witness): reading the hardware
+    /// period counter around the CS attributes any remaining swallowed
+    /// overflows to this (now µs-scale) window — it must read 0. Prefill
+    /// pushes run before the counter is armed (delta 0 regardless).
+    fn push(left: &[i32], right: &[i32], scratch_l: &mut [u8], scratch_r: &mut [u8]) -> bool {
+        let n = left.len();
+        let stereo = !right.is_empty();
+        // IRQ-live half: check fit + convert (rejections write nothing).
+        let dst_r: &mut [u8] = if stereo { &mut scratch_r[..n] } else { &mut [] };
+        if convert_frame(left, right, &mut scratch_l[..n], dst_r).is_err() {
+            return false;
+        }
+        let src_r: &[u8] = if stereo { &scratch_r[..n] } else { &[] };
+        // IRQ-off half: ring copy + credit only.
         let before = unsafe { io_read_u16(REG_TM2_DATA) }; // SAFETY: fixed I/O address.
         let ok = critical_section::with(|cs| {
             FEED.borrow_ref_mut(cs)
-                .push_frame(left, right, hl, hr)
+                .push_bytes(&scratch_l[..n], src_r)
                 .is_ok()
         });
         let swallowed = unsafe { io_read_u16(REG_TM2_DATA) }.wrapping_sub(before); // SAFETY: fixed I/O address.
@@ -462,13 +453,13 @@ mod rom {
     }
 
     /// Continue the fed decode from `start_frame` (prefill consumed the
-    /// head), then drain and judge the FIFO8 pins against the generator.
+    /// head), then drain and judge the sample ledger.
     fn play_rest(
         clip: &flac_spike::assets::SpikeClip,
         start_frame: usize,
         state: &mut [PredictorState; 2],
-        hl: &mut Fnv1a64,
-        hr: &mut Fnv1a64,
+        scratch_l: &mut [u8],
+        scratch_r: &mut [u8],
     ) -> (usize, usize, u32) {
         let max = usize::from(clip.max_blocksize);
         let mut left: alloc::vec::Vec<i32> = alloc::vec![0; max];
@@ -495,7 +486,7 @@ mod rom {
             } else {
                 &[]
             };
-            if !push(&left[..written], right_window, hl, hr) {
+            if !push(&left[..written], right_window, scratch_l, scratch_r) {
                 agb::println!(
                     "[rateplay] FAIL frame {}: push rejected (out of profile?)",
                     frame_index
@@ -543,8 +534,6 @@ mod rom {
             }
         }
 
-        let l_ok = hl.finish() == rate::PLAYBACK_FIFO8_L;
-        let r_ok = hr.finish() == rate::PLAYBACK_FIFO8_R;
         let underflows = underflows();
         let (pushed, consumed) = critical_section::with(|cs| {
             let feed = FEED.borrow_ref(cs);
@@ -552,18 +541,6 @@ mod rom {
             drop(feed);
             pair
         });
-        agb::println!(
-            "[rateplay] fifo8 L expected 0x{:016X} actual 0x{:016X} [{}]",
-            rate::PLAYBACK_FIFO8_L,
-            hl.finish(),
-            if l_ok { "MATCH" } else { "MISMATCH" }
-        );
-        agb::println!(
-            "[rateplay] fifo8 R expected 0x{:016X} actual 0x{:016X} [{}]",
-            rate::PLAYBACK_FIFO8_R,
-            hr.finish(),
-            if r_ok { "MATCH" } else { "MISMATCH" }
-        );
         let chunks = critical_section::with(|cs| STATS.borrow_ref(cs).chunks_taken);
         agb::println!(
             "[rateplay] feed: pushed={} consumed={} chunks={} underflows={}",
@@ -607,7 +584,7 @@ mod rom {
             clip.total_samples,
             if samples_ok { "OK" } else { "MISMATCH" }
         );
-        if !(l_ok && r_ok && samples_ok) {
+        if !samples_ok {
             // Judge the verdict through the underflow channel (force nonzero).
             return (frames_done, pushed, underflows.max(1));
         }
@@ -642,10 +619,12 @@ mod rom {
             rate::RATE_HZ
         );
 
-        let assets_pass = check_clip(clip);
-        let mut pass = assets_pass;
+        // 2026-10-22: no boot asset check — the staged bytes are verified
+        // at generation time (fail-closed census + host witness); this ROM
+        // trusts them and measures only what it plays.
+        let mut pass = true;
 
-        if pass {
+        {
             // SAFETY: the handler never allocates and only touches the
             // statics above (agb's interrupt-handler contract).
             let _handler = unsafe { add_interrupt_handler(Interrupt::Timer1, feeder) };
@@ -657,8 +636,11 @@ mod rom {
             let mut left: alloc::vec::Vec<i32> = alloc::vec![0; max];
             let mut right: alloc::vec::Vec<i32> = alloc::vec![0; max];
             let mut state = [PredictorState::new(), PredictorState::new()];
-            let mut hl = Fnv1a64::new();
-            let mut hr = Fnv1a64::new();
+            // Producer-private conversion scratch (one frame per channel,
+            // FIFO bytes): written/folded with IRQs live, only the bytes
+            // cross into the ring inside the CS.
+            let mut scratch_l: alloc::vec::Vec<u8> = alloc::vec![0; max];
+            let mut scratch_r: alloc::vec::Vec<u8> = alloc::vec![0; max];
             let prefill_target = PREFILL_CHUNKS * CHUNK;
             let mut prefilled = 0usize;
             let mut next_frame = 0usize;
@@ -681,7 +663,12 @@ mod rom {
                 } else {
                     &[]
                 };
-                if !push(&left[..written], right_window, &mut hl, &mut hr) {
+                if !push(
+                    &left[..written],
+                    right_window,
+                    &mut scratch_l,
+                    &mut scratch_r,
+                ) {
                     agb::println!(
                         "[rateplay] FAIL prefill push rejected at frame {}",
                         next_frame
@@ -733,7 +720,7 @@ mod rom {
                 );
 
                 let (frames, samples, underflows) =
-                    play_rest(clip, next_frame, &mut state, &mut hl, &mut hr);
+                    play_rest(clip, next_frame, &mut state, &mut scratch_l, &mut scratch_r);
                 agb::println!(
                     "[rateplay] playback verdict: frames={}/{} samples={} underflows={}",
                     frames,
@@ -760,10 +747,6 @@ mod rom {
                     unsafe { io_read_u16(REG_IME) }
                 );
             }
-        } else {
-            agb::println!(
-                "[rateplay] playback SKIPPED — asset check failed, bytes not the generator's"
-            );
         }
 
         let (color, label) = if pass {
@@ -773,11 +756,9 @@ mod rom {
         };
         gfx.set_background_palette_colour(0, 0, color);
         agb::eprintln!(
-            "[rateplay] verdict {} — screen {} (assets={}, playback={})",
+            "[rateplay] verdict {} — screen {}",
             if pass { "PASSED" } else { "FAILED" },
-            label,
-            assets_pass,
-            pass
+            label
         );
 
         loop {

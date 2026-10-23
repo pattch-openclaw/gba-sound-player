@@ -12,11 +12,14 @@
 //! perf spike's cycle counts will concentrate. Implementation notes:
 //!
 //! - **Rice decoding is unary + folded magnitude, branch-free where
-//!   possible:** count zeros until the terminating one (the quotient), read the
-//!   `order`-bit remainder, combine `(quotient << order) | remainder` into the
-//!   folded value, then unfold it with [`rice_unmap`]. (The module previously
-//!   sketched a `negative ? !sample : sample` sign-bit mapping here — that is
-//!   not FLAC's residual mapping; see [`rice_unmap`]'s correction note.)
+//!   possible:** count zeros until the terminating one (the quotient —
+//!   [`BitReader::rice_quotient`], the E2b table count landed 2026-10-21:
+//!   one table lookup per 8-bit window instead of one loop iteration per
+//!   zero), read the `order`-bit remainder, combine
+//!   `(quotient << order) | remainder` into the folded value, then unfold it
+//!   with [`rice_unmap`]. (The module previously sketched a
+//!   `negative ? !sample : sample` sign-bit mapping here — that is not
+//!   FLAC's residual mapping; see [`rice_unmap`]'s correction note.)
 //! - **No division.** Partition counts are shift/mask (`blocksize >> order`,
 //!   divisibility via `& (partitions - 1)`); the escaped-partition mapping is
 //!   plain two's-complement reads.
@@ -213,7 +216,11 @@ pub fn decode_residual(
 /// Cursor: on success it sits exactly past the partition body. On error it
 /// stays where the failing read left it (per-read atomicity only, the same
 /// rule as the header parses — an errored frame is discarded wholesale, so
-/// partially written `out` samples are undefined).
+/// partially written `out` samples are undefined). One refinement since the
+/// E2b landing: an unterminated unary quotient restores the cursor to that
+/// codeword's start ([`BitReader::rice_quotient`]'s atomicity) rather than
+/// leaving it after the consumed zeros — observable only on a dead frame,
+/// which the caller discards wholesale anyway.
 fn decode_rice_partition(
     reader: &mut BitReader<'_>,
     header: &PartitionHeader,
@@ -238,11 +245,12 @@ fn decode_rice_partition(
     }
     let order = u32::from(header.order);
     for sample in out.iter_mut() {
-        // Unary quotient: count zeros until the terminating one.
-        let mut quotient: u32 = 0;
-        while reader.read_bits(1)? == 0 {
-            quotient += 1;
-        }
+        // Unary quotient: count zeros until the terminating one — the E2b
+        // table count (BitReader::rice_quotient), landed 2026-10-21: this
+        // per-sample loop was E8's measured cost center for FIXED (unary
+        // 56.2% of gross); E2b priced the table count at −21.7% on the
+        // whole FIXED arm. Bit-exact replacement, atomic on EOF.
+        let quotient = reader.rice_quotient()?;
         // Binary remainder — only when the parameter says so. `order == 0`
         // is unary-only words; there is nothing to read.
         let remainder = if order == 0 {

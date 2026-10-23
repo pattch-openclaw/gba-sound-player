@@ -240,12 +240,84 @@ impl<'a> BitReader<'a> {
         }
         // Flag set: count the unary zeros; the terminating one is consumed.
         // Failure inside the loop propagates through the atomic wrapper.
+        // Deliberately still per-bit: the wasted-bits run is one field per
+        // subframe, not the per-sample hot loop E2b measured — do not
+        // "optimize" it without a probe of its own.
         let mut zeros: u32 = 0;
         loop {
             if self.read_bits(1)? == 1 {
                 return Ok(zeros + 1);
             }
             zeros += 1;
+        }
+    }
+
+    /// Read a Rice unary quotient (§9.2.7.2): count the zero bits until the
+    /// terminating one (consumed), return the count.
+    ///
+    /// **Table count — E2b landed 2026-10-21.** The live hot loop this
+    /// replaces (`while read_bits(1)? == 0` in
+    /// [`crate::residual::decode_rice_partition`]) was E8's measured cost
+    /// center for FIXED (unary 56.2% of gross); the E2b probe measured the
+    /// table count −21.7% on the whole FIXED arm (FLAC.md "E2b result").
+    /// Each 8-bit window of the run is answered by one `ldrb` from
+    /// [`LEADING_ONES`] on the inverted window (runs 0..=7 terminate inside,
+    /// 8 means a whole window of zeros — keep counting per window, ~5 cyc
+    /// per 8 bits instead of per bit). Unlike the probe, this rides the
+    /// position-only reader: each window is one `peek_at` gather at the
+    /// cursor, so E2a's accumulator reader is *not* part of this landing
+    /// (its −3.14% is a separate harvestable, E9's stacking question).
+    ///
+    /// Cursor: **atomic** like [`Self::read_utf8_coded`] — an unterminated
+    /// run (bits run out before the terminator) restores the cursor to the
+    /// codeword start and returns [`Error::EndOfStream`]. The per-bit loop
+    /// it replaced left the cursor after the consumed zeros; the difference
+    /// is observable only on a dead frame (the stream rule forbids
+    /// unbounded runs and `decode_rice_partition`'s caller discards errored
+    /// frames wholesale), and atomic is the stronger contract. This is the
+    /// E2b sample's one deliberate divergence, carried with its scope note.
+    pub fn rice_quotient(&mut self) -> Result<u32> {
+        let start = self.bit_pos;
+        let total = self.data.len() << 3;
+        let mut quotient: u32 = 0;
+        loop {
+            let remaining = total - self.bit_pos;
+            if remaining >= 8 {
+                // A full window at the cursor (peek_at cannot fail here:
+                // remaining >= 8; the `?` keeps the error path uniform).
+                let win = self.peek_at(self.bit_pos, 8)? as u8;
+                let run = u32::from(LEADING_ONES[usize::from(!win)]);
+                if run < 8 {
+                    // Terminator inside this window: consume the run and it.
+                    self.bit_pos += run as usize + 1;
+                    return Ok(quotient + run);
+                }
+                // Whole window of unary zeros: account it, keep counting.
+                quotient += 8;
+                self.bit_pos += 8;
+            } else {
+                // Slice tail: 0 < remaining < 8 bits. Invert the tail in
+                // place, then top-align it inside the byte: the table counts
+                // the run from bit 7, and the forced zero below the tail
+                // (the `& mask` keeps inverted junk out) makes an
+                // unterminated tail read as exactly `v` — EOF.
+                if remaining == 0 {
+                    self.bit_pos = start;
+                    return Err(Error::EndOfStream);
+                }
+                let v = remaining as u32;
+                let win = self.peek_at(self.bit_pos, v)? as u32; // low v bits
+                let inv = ((!win) & ((1u32 << v) - 1)) as u8;
+                let run = u32::from(LEADING_ONES[usize::from(inv << (8 - v))]);
+                if run >= v {
+                    // The run consumed every remaining bit with no real
+                    // terminator (masking guarantees run <= v).
+                    self.bit_pos = start;
+                    return Err(Error::EndOfStream);
+                }
+                self.bit_pos += run as usize + 1;
+                return Ok(quotient + run);
+            }
         }
     }
 
@@ -359,6 +431,46 @@ pub fn crc16(data: &[u8]) -> u16 {
 // Unit tests compile as part of the lib under the host test harness (Gate 2,
 // run from *outside* the repo — see README "Cargo config leak"). Keep these
 // `core`-only: no `std`, and no dependency on any not-yet-implemented method.
+/// Run-length table ([`BitReader::rice_quotient`], E2b landed): `LEADING_ONES[b]`
+/// = number of leading one-bits of `b` (0..=8, all-ones answers 8).
+///
+/// **Pinned to plain `.iwram` (Sam's exception, 2026-10-22).** The probe
+/// measured the table count with the table pinned; the first landing rode
+/// `.rodata` → ROM instead (cartridge-read penalty per 8-bit counting
+/// window) because `link_section` is an unsafe attribute and the crate was
+/// `#![forbid(unsafe_code)]`. The rate-play ROM's producer-wall
+/// measurement reopened the question and the exception was ratified —
+/// crate root is now `deny` with this one item `allow`ed. `> iwram
+/// AT>rom`: agb's `CommonInit` copies the section ROM→IWRAM at boot (BIOS
+/// `CPUSet`), so each window is a zero-wait `ldrb`. Plain `.iwram`, never
+/// `.text_iwram` (E6: `.text*(.text*)` captures that name back into ROM).
+/// The `cfg` gate keeps the attribute off host builds entirely; the
+/// Built-ELF witness is `nm` — the symbol at `0x0300xxxx` proves the pin
+/// survives `lto = "fat"`.
+#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
+#[allow(unsafe_code)] // The crate-root exception: a placement attribute on
+// an immutable compile-time table is not unsafe
+// code (edition-2024 lints it as an unsafe
+// attribute); decision recorded in lib.rs + FLAC.md.
+static LEADING_ONES: [u8; 256] = build_leading_ones();
+
+const fn build_leading_ones() -> [u8; 256] {
+    let mut table = [0u8; 256];
+    let mut byte = 0usize;
+    while byte < 256 {
+        let b = byte as u8;
+        let mut count = 0u8;
+        let mut mask = 0x80u8;
+        while mask != 0 && (b & mask) != 0 {
+            count += 1;
+            mask >>= 1;
+        }
+        table[byte] = count;
+        byte += 1;
+    }
+    table
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +488,124 @@ mod tests {
             self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             (self.0 >> 24) as u8
         }
+    }
+
+    // ---- rice_quotient (E2b landed 2026-10-21) -----------------------------
+
+    #[test]
+    fn leading_ones_table_matches_naive_oracle_exhaustively() {
+        for b in 0..=255usize {
+            let mut oracle = 0u8;
+            let mut mask = 0x80u8;
+            while mask != 0 && (b as u8 & mask) != 0 {
+                oracle += 1;
+                mask >>= 1;
+            }
+            assert_eq!(LEADING_ONES[b], oracle, "byte {b:#04X}");
+        }
+    }
+
+    /// The differential witness: quotients 0..=40 at every bit offset 0..7,
+    /// judged against the *old production primitive* — the per-bit
+    /// `read_bits(1)` loop the table replaces (different mechanism, same
+    /// reader), plus an explicit quotient expectation.
+    #[test]
+    fn rice_quotient_matches_per_bit_loop_at_every_offset() {
+        for off in 0..8usize {
+            for q in 0..=40usize {
+                // off arbitrary bits, q zeros, terminator, then ones padding.
+                let mut bits = [0u8; 96];
+                let mut n = 0usize;
+                for _ in 0..off {
+                    bits[n] = 1;
+                    n += 1;
+                }
+                n += q; // zeros: the array starts zeroed
+                bits[n] = 1;
+                n += 1;
+                while n < bits.len() {
+                    bits[n] = 1;
+                    n += 1;
+                }
+                let bytes: [u8; 12] = pack_bits(&bits[..n]);
+
+                // Oracle: the per-bit loop exactly as decode_rice_partition
+                // ran it before this landing.
+                let mut oracle = BitReader::new(&bytes);
+                skip(&mut oracle, off as u32);
+                let mut counted = 0u32;
+                while oracle.read_bits(1).unwrap() == 0 {
+                    counted += 1;
+                }
+
+                let mut r = BitReader::new(&bytes);
+                skip(&mut r, off as u32);
+                let at = r.bit_position();
+                let got = r.rice_quotient().expect("terminated run");
+                assert_eq!(got, q as u32, "off {off} q {q}");
+                assert_eq!(got, counted, "oracle disagreement off {off} q {q}");
+                // Cursor sits just past the terminator, like the old loop.
+                assert_eq!(r.bit_position(), at + q + 1, "cursor off {off} q {q}");
+            }
+        }
+    }
+
+    #[test]
+    fn rice_quotient_eof_is_atomic_across_the_tail() {
+        // One-byte slices so the run reaches the true end of data: prefix
+        // ones then zeros to the last bit. off = 0 exercises the full-window
+        // path walking off the end; off 1..7 exercise the sub-byte tail
+        // (remaining < 8 at entry). Unterminated: Err, cursor restored.
+        for off in 0..8usize {
+            let byte = [((0xFFu16 << (8 - off)) & 0xFF) as u8]; // off ones, rest zeros
+            let mut r = BitReader::new(&byte);
+            skip(&mut r, off as u32);
+            let at = r.bit_position();
+            assert_eq!(r.rice_quotient(), Err(Error::EndOfStream), "off {off}");
+            assert_eq!(r.bit_position(), at, "atomic restore off {off}");
+        }
+        // Empty remainder at entry: EOF, cursor untouched.
+        let mut r = BitReader::new(&[0x00]);
+        r.read_bits(8).unwrap();
+        assert_eq!(r.rice_quotient(), Err(Error::EndOfStream));
+        assert_eq!(r.bit_position(), 8);
+    }
+
+    #[test]
+    fn rice_quotient_terminator_as_the_very_last_bit() {
+        // The tightest tail: v = 8 − off bits remain and the run is v − 1
+        // zeros with the terminator as the final bit of the slice. off = 0
+        // is the full-window case (win = 0x01); off 1..7 the sub-byte tail.
+        for off in 0..8usize {
+            let byte = [(((0xFFu16 << (8 - off)) & 0xFF) | 1) as u8];
+            let mut r = BitReader::new(&byte);
+            skip(&mut r, off as u32);
+            let got = r.rice_quotient().expect("terminator on last bit");
+            assert_eq!(got, 7 - off as u32, "off {off}");
+            assert_eq!(r.bits_remaining(), 0, "consumed to the last bit off {off}");
+        }
+    }
+
+    /// Advance past `n` bits; `read_bits(0)` is a caller-bug rejection, so
+    /// a zero-length skip must not call it.
+    fn skip(r: &mut BitReader<'_>, n: u32) {
+        if n > 0 {
+            r.read_bits(n).unwrap();
+        }
+    }
+
+    /// Pack an MSB-first bit vector (naive, one bit at a time — the same
+    /// independent-packer discipline as the residual suite). Fixed-size
+    /// output keeps the suite allocation-free like the crate itself; zero
+    /// padding past the bit vector never reaches a terminated read.
+    fn pack_bits<const N: usize>(bits: &[u8]) -> [u8; N] {
+        let mut out = [0u8; N];
+        for (i, &b) in bits.iter().enumerate() {
+            if b == 1 {
+                out[i >> 3] |= 1 << (7 - (i & 7));
+            }
+        }
+        out
     }
 
     // ---- width validation -------------------------------------------------

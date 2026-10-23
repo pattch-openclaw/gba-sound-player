@@ -1,0 +1,30 @@
+[rateplay] entry — FLAC decode -> FIFO playback baseline
+[rateplay] input=bioluminescent.wav sha256=8f35fa88b3859e669b597f50c5360378811e02111b6ce50cadbe4f50b8145442 rate=10512 Hz chunk=176 ring=36x176 prefill=16x176
+[rateplay] playing arm bioluminescent_l0 (FIXED-limited arm (flac -1 -l 0 -b 2048 -m): the rate gate's conservative predictor cost on real material); LPC arm skipped — measured over budget at 10512 Hz
+[rateplay] prefilled 4096 samples in 2 frames (target 2816), feeder armed
+[rateplay] irq armed: IE=0x0011 IME=1 (witness: timer1 bit set / IME 1)
+[rateplay] frame  128/1328 bs=2048 lead=1952
+[rateplay] frame  256/1328 bs=2048 lead=2208
+[rateplay] frame  384/1328 bs=2048 lead=1936
+[rateplay] frame  512/1328 bs=2048 lead=2192
+[rateplay] frame  640/1328 bs=2048 lead=1920
+[rateplay] frame  768/1328 bs=2048 lead=2000
+[rateplay] frame  896/1328 bs=2048 lead=1904
+[rateplay] frame 1024/1328 bs=2048 lead=1984
+[rateplay] frame 1152/1328 bs=2048 lead=1888
+[rateplay] frame 1280/1328 bs=2048 lead=1968
+[rateplay] producer finished (all 1328 frames decoded)
+[rateplay] feed: pushed=2718538 consumed=2718538 chunks=18121 underflows=2674
+[rateplay] period audit: hw_elapsed=18121 serviced=18121 coalesced=0 max_gap=0 late=871 max_delay_ticks=132 grace=16 push_swallowed=1007 pushes_with_swallow=1007
+[rateplay] audit verdict: replays=871 (coalesced=0 late=871) of 18121 serviced periods; attributed_to_push_window=true (swallowed=1007 in 1007 pushes)
+[rateplay] probe: frames=1326 cal=0/0 clock_retries=2
+[rateplay] probe wait: sum=12390 max=1795 max_idx=1321
+[rateplay] probe decode: sum=2796018 max=2146 max_idx=564
+[rateplay] probe convert: sum=196874 max=150 max_idx=4
+[rateplay] probe push_cs: sum=177148 max=135 max_idx=73
+[rateplay] probe gross: sum=3182751 max=2429 max_idx=572
+[rateplay] probe closure: sum=321 underflows=0
+[rateplay] samples pushed=2718538 expected=2718538 [OK]
+[rateplay] playback verdict: frames=1328/1328 samples=2718538 underflows=2674
+[rateplay] teardown: IE=0x0011 IF=0x0000 IME=1
+[rateplay] verdict FAILED — screen RED

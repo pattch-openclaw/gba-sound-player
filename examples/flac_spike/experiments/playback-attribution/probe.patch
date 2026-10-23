@@ -1,0 +1,278 @@
+diff --git a/examples/flac_spike/src/rate_play_main.rs b/examples/flac_spike/src/rate_play_main.rs
+index 4237699..018067b 100644
+--- a/examples/flac_spike/src/rate_play_main.rs
++++ b/examples/flac_spike/src/rate_play_main.rs
+@@ -251,6 +251,104 @@ mod rom {
+         critical_section::with(|cs| STATS.borrow_ref(cs).underflows)
+     }
+ 
++    // --- Probe: producer sub-stage attribution (2026-10-22, E8 shape) -----
++    // The 2026-10-22 amendments left ~28 ms/frame unattributed across
++    // decode / convert / the push-CS swallow. This probe answers *where*
++    // the live producer wall goes, under IRQ-live conditions (the 144 ms
++    // decode figure is the rate ROM's IME-off window — never comparable
++    // to this path). Instrument: the sample-resolution position clock
++    // below (one 16-bit read pair per boundary, no `timed()` windows, no
++    // logging between boundaries — the E4 unified-loop discipline holds
++    // across all measured frames, and the 1596-cycle tick dwarfs the
++    // micro-layout sensitivity that matters at cycle resolution).
++
++    /// Sample-resolution position clock: timer2 counts timer1 overflows
++    /// (= hardware periods) in hardware even with IME off, and TM1_DATA
++    /// times samples into the current period (same read as the audit).
++    /// Position = tm2 × CHUNK + in-period samples, wrapping u32 (the
++    /// full-track pass spans ~3.1 M samples << 2^32). The tm2–tm1–tm2
++    /// latch re-reads when a period boundary lands between the reads;
++    /// `retries` witnesses the race never (or rarely) fires. Tick = one
++    /// timer0 overflow = 1596 cycles = 1/10,512 s.
++    ///
++    /// # Safety
++    /// Callers pass fixed I/O addresses (REG_* constants).
++    fn sample_clock(retries: &mut u32) -> u32 {
++        loop {
++            let t2a = unsafe { io_read_u16(REG_TM2_DATA) }; // SAFETY: fixed I/O address.
++            let s = unsafe { io_read_u16(REG_TM1_DATA) }.wrapping_sub(TM1_RELOAD); // SAFETY: fixed I/O address.
++            let t2b = unsafe { io_read_u16(REG_TM2_DATA) }; // SAFETY: fixed I/O address.
++            if t2a == t2b {
++                return u32::from(t2a) * (CHUNK as u32) + u32::from(s);
++            }
++            *retries += 1;
++        }
++    }
++
++    /// One stage's distribution in clock ticks (division-free reporting:
++    /// sum + max + worst index; means derived host-side as arithmetic).
++    #[derive(Default, Clone, Copy)]
++    struct StageStat {
++        sum: u32,
++        max: u32,
++        max_idx: u32,
++    }
++
++    impl StageStat {
++        fn observe(&mut self, delta: u32, idx: usize) {
++            self.sum += delta;
++            if delta > self.max {
++                self.max = delta;
++                self.max_idx = idx as u32;
++            }
++        }
++    }
++
++    /// Per-frame sub-stage tally. The four stages telescope: `gross` is
++    /// the frame's t_last − t_first, and `wait + decode` is exact by
++    /// telescoping (consecutive shared boundaries), so `closure = gross −
++    /// (wait + decode + convert + cs)` is the inter-boundary instrument
++    /// gap — nonnegative by monotonicity, and any underflow means the
++    /// clock raced (witnessed, never silently clamped).
++    #[derive(Default)]
++    struct Probe {
++        wait: StageStat,
++        decode: StageStat,
++        convert: StageStat,
++        push_cs: StageStat,
++        gross: StageStat,
++        closure_sum: u32,
++        closure_underflows: u32,
++        frames: u32,
++        clock_retries: u32,
++        cal_sum: u32,
++        cal_max: u32,
++    }
++
++    impl Probe {
++        fn observe_frame(
++            &mut self,
++            idx: usize,
++            wait: u32,
++            decode: u32,
++            convert: u32,
++            cs: u32,
++            gross: u32,
++        ) {
++            self.wait.observe(wait, idx);
++            self.decode.observe(decode, idx);
++            self.convert.observe(convert, idx);
++            self.push_cs.observe(cs, idx);
++            self.gross.observe(gross, idx);
++            let parts = wait + decode + convert + cs;
++            match gross.checked_sub(parts) {
++                Some(gap) => self.closure_sum += gap,
++                None => self.closure_underflows += 1,
++            }
++            self.frames += 1;
++        }
++    }
++
+     /// # Safety
+     /// `addr` must be an even address in the I/O region (callers pass REG_*).
+     unsafe fn io_write_u16(addr: usize, value: u16) {
+@@ -406,16 +504,31 @@ mod rom {
+     /// period counter around the CS attributes any remaining swallowed
+     /// overflows to this (now µs-scale) window — it must read 0. Prefill
+     /// pushes run before the counter is armed (delta 0 regardless).
+-    fn push(left: &[i32], right: &[i32], scratch_l: &mut [u8], scratch_r: &mut [u8]) -> bool {
++    ///
++    /// `probe` (attribution, 2026-10-22): when `Some`, the convert span and
++    /// the push-CS span are clocked at sample resolution and returned with
++    /// the verdict for the frame-level closure. Prefill passes `None` —
++    /// the clock reads 0 until the timers are armed, and prefill work is
++    /// not part of the steady-state attribution.
++    fn push(
++        left: &[i32],
++        right: &[i32],
++        scratch_l: &mut [u8],
++        scratch_r: &mut [u8],
++        mut probe: Option<&mut Probe>,
++    ) -> (bool, u32, u32) {
+         let n = left.len();
+         let stereo = !right.is_empty();
+         // IRQ-live half: check fit + convert (rejections write nothing).
++        let tc0 = probe.as_mut().map(|p| sample_clock(&mut p.clock_retries));
+         let dst_r: &mut [u8] = if stereo { &mut scratch_r[..n] } else { &mut [] };
+         if convert_frame(left, right, &mut scratch_l[..n], dst_r).is_err() {
+-            return false;
++            return (false, 0, 0);
+         }
++        let tc1 = probe.as_mut().map(|p| sample_clock(&mut p.clock_retries));
+         let src_r: &[u8] = if stereo { &scratch_r[..n] } else { &[] };
+         // IRQ-off half: ring copy + credit only.
++        let tcs0 = probe.as_mut().map(|p| sample_clock(&mut p.clock_retries));
+         let before = unsafe { io_read_u16(REG_TM2_DATA) }; // SAFETY: fixed I/O address.
+         let ok = critical_section::with(|cs| {
+             FEED.borrow_ref_mut(cs)
+@@ -423,6 +536,7 @@ mod rom {
+                 .is_ok()
+         });
+         let swallowed = unsafe { io_read_u16(REG_TM2_DATA) }.wrapping_sub(before); // SAFETY: fixed I/O address.
++        let tcs1 = probe.as_mut().map(|p| sample_clock(&mut p.clock_retries));
+         if swallowed > 0 {
+             critical_section::with(|cs| {
+                 let mut stats = STATS.borrow_ref_mut(cs);
+@@ -430,7 +544,11 @@ mod rom {
+                 stats.pushes_with_swallow += 1;
+             });
+         }
+-        ok
++        let (convert_ticks, cs_ticks) = match (probe, tc0, tc1, tcs0, tcs1) {
++            (Some(_), Some(a), Some(b), Some(c), Some(d)) => (b.wrapping_sub(a), d.wrapping_sub(c)),
++            _ => (0, 0),
++        };
++        (ok, convert_ticks, cs_ticks)
+     }
+ 
+     /// The producer's flow-control spin: wait until the feeder has drained
+@@ -466,9 +584,31 @@ mod rom {
+         let mut right: alloc::vec::Vec<i32> = alloc::vec![0; max];
+         let mut frames_done = start_frame;
+ 
++        // Probe calibration (E4 unified-loop shape): byte-identical
++        // back-to-back clock pairs, 3 discarded + 5 reported, nothing
++        // logged between (log after the loop, at the end). Every delta
++        // must read 0 samples — the witness that the instrument's own
++        // cost is far under one 1596-cycle tick.
++        let mut probe = Probe::default();
++        for _ in 0..3 {
++            let _ = sample_clock(&mut probe.clock_retries);
++            let _ = sample_clock(&mut probe.clock_retries);
++        }
++        for _ in 0..5 {
++            let a = sample_clock(&mut probe.clock_retries);
++            let b = sample_clock(&mut probe.clock_retries);
++            let d = b.wrapping_sub(a);
++            probe.cal_sum += d;
++            if d > probe.cal_max {
++                probe.cal_max = d;
++            }
++        }
++
+         for frame_index in start_frame..clip.frames.len() {
+             let blocksize = usize::from(clip.frames[frame_index].blocksize);
++            let t0 = sample_clock(&mut probe.clock_retries);
+             wait_for_space(blocksize);
++            let t1 = sample_clock(&mut probe.clock_retries);
+             let written = match driver::decode_one(clip, frame_index, &mut left, &mut right, state)
+             {
+                 Ok(written) => written,
+@@ -481,18 +621,31 @@ mod rom {
+                     return (frames_done, 0, underflows());
+                 }
+             };
++            let t2 = sample_clock(&mut probe.clock_retries);
+             let right_window = if clip.channels == 2 {
+                 &right[..written]
+             } else {
+                 &[]
+             };
+-            if !push(&left[..written], right_window, scratch_l, scratch_r) {
++            let (ok, convert_ticks, cs_ticks) = push(
++                &left[..written],
++                right_window,
++                scratch_l,
++                scratch_r,
++                Some(&mut probe),
++            );
++            let t3 = sample_clock(&mut probe.clock_retries);
++            if !ok {
+                 agb::println!(
+                     "[rateplay] FAIL frame {}: push rejected (out of profile?)",
+                     frame_index
+                 );
+                 return (frames_done, 0, underflows());
+             }
++            let wait = t1.wrapping_sub(t0);
++            let decode = t2.wrapping_sub(t1);
++            let gross = t3.wrapping_sub(t0);
++            probe.observe_frame(frame_index, wait, decode, convert_ticks, cs_ticks, gross);
+             frames_done += 1;
+             if frame_index % 128 == 0 {
+                 let lead = critical_section::with(|cs| {
+@@ -577,6 +730,36 @@ mod rom {
+         agb::println!(
+             "[rateplay] audit verdict: replays={replays} (coalesced={coalesced} late={late}) of {chunks} serviced periods; attributed_to_push_window={attributed} (swallowed={swallowed} in {pushes_sw} pushes)"
+         );
++        // Probe report (attribution, 2026-10-22): division-free — sum +
++        // max + worst index per stage in sample ticks (1596 cycles each);
++        // means derived host-side. cal pair must read 0/0 (instrument
++        // cost << one tick); closure underflows must be 0 (clock race).
++        agb::println!(
++            "[rateplay] probe: frames={} cal={}/{} clock_retries={}",
++            probe.frames,
++            probe.cal_sum,
++            probe.cal_max,
++            probe.clock_retries
++        );
++        for (name, s) in [
++            ("wait", &probe.wait),
++            ("decode", &probe.decode),
++            ("convert", &probe.convert),
++            ("push_cs", &probe.push_cs),
++            ("gross", &probe.gross),
++        ] {
++            agb::println!(
++                "[rateplay] probe {name}: sum={} max={} max_idx={}",
++                s.sum,
++                s.max,
++                s.max_idx
++            );
++        }
++        agb::println!(
++            "[rateplay] probe closure: sum={} underflows={}",
++            probe.closure_sum,
++            probe.closure_underflows
++        );
+         let samples_ok = pushed == usize::try_from(clip.total_samples).unwrap_or(usize::MAX);
+         agb::println!(
+             "[rateplay] samples pushed={} expected={} [{}]",
+@@ -668,7 +851,10 @@ mod rom {
+                     right_window,
+                     &mut scratch_l,
+                     &mut scratch_r,
+-                ) {
++                    None,
++                )
++                .0
++                {
+                     agb::println!(
+                         "[rateplay] FAIL prefill push rejected at frame {}",
+                         next_frame
