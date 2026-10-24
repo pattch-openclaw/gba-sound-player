@@ -319,13 +319,25 @@ impl<const RING: usize> RingFeed<RING> {
     /// section: the conversion and fold ([`convert_frame`],
     /// [`fold_bytes`]) are producer-private pure work and run with IRQs
     /// live (the 2026-10-21 push-window fix — audit `a4f7560` measured a
-    /// ~64 ms IME-off fold+copy swallowing 3,724 feeder periods; the
-    /// byte copy alone is ~0.5 ms). Rejections write nothing and credit
-    /// nothing; mono windows (`bytes_r` empty) slip the left ring only,
-    /// same as [`Self::push_frame`]. The free check reads the live
-    /// `consumed` — under the CS it is exact, and outside one a stale read
-    /// only ever UNDERstates free (`consumed` only grows), so a passing
-    /// check can never overestimate capacity.
+    /// ~64 ms IME-off fold+copy swallowing 3,724 feeder periods). The copy
+    /// itself was measured too: the 2026-10-22 position-clock probe timed
+    /// the per-byte slip walk at ~52 cyc/byte (12.7 ms per push, 75.9 % of
+    /// a period IME-off per frame — exactly the observed swallow ratio).
+    /// The 2026-10-23 rewrite hands each contiguous span to one
+    /// `copy_from_slice`: the target's memcpy moves word-wide wherever the
+    /// span alignment admits it (this crate is `#![forbid(unsafe_code)]`,
+    /// so no slice reinterpretation — the word path is the memcpy
+    /// dispatch, not hand-written word loads), replacing the hand-rolled
+    /// per-byte walk inside the IME-off window. [`Self::push_frame`]'s
+    /// per-byte loop stays as the pinned reference the suite witnesses
+    /// byte-for-byte equality against.
+    ///
+    /// Rejections write nothing and credit nothing; mono windows
+    /// (`bytes_r` empty) slip the left ring only, same as
+    /// [`Self::push_frame`]. The free check reads the live `consumed` —
+    /// under the CS it is exact, and outside one a stale read only ever
+    /// UNDERstates free (`consumed` only grows), so a passing check can
+    /// never overestimate capacity.
     pub fn push_bytes(&mut self, bytes_l: &[u8], bytes_r: &[u8]) -> Result<(), PushError> {
         let n = bytes_l.len();
         let stereo = !bytes_r.is_empty();
@@ -336,26 +348,20 @@ impl<const RING: usize> RingFeed<RING> {
                 have: free,
             });
         }
-        // Both slips start at the same residue (channels advance in
-        // lockstep); the mono push never touches the right ring. Same
-        // walk as push_frame — witnessed byte-equal in the suite.
-        let mut at = self.pushed % RING;
-        for &b in bytes_l {
-            self.left[at] = b;
-            at += 1;
-            if at == RING {
-                at = 0;
-            }
-        }
+        // Both channels start at the same residue (they advance in
+        // lockstep), so one wrap split serves both: `[at, RING)` then
+        // `[0, rem)`, each span copied whole. The split is a pure
+        // relocation of the same bytes — witnessed byte-equal against
+        // push_frame's per-byte walk in the suite.
+        let at = self.pushed % RING;
+        let head = (RING - at).min(n);
+        let (l_head, l_tail) = bytes_l.split_at(head);
+        self.left[at..at + head].copy_from_slice(l_head);
+        self.left[..n - head].copy_from_slice(l_tail);
         if stereo {
-            let mut at_r = self.pushed % RING;
-            for &b in bytes_r {
-                self.right[at_r] = b;
-                at_r += 1;
-                if at_r == RING {
-                    at_r = 0;
-                }
-            }
+            let (r_head, r_tail) = bytes_r.split_at(head);
+            self.right[at..at + head].copy_from_slice(r_head);
+            self.right[..n - head].copy_from_slice(r_tail);
         }
         // Credit last, same contract as push_frame.
         self.pushed += n;
@@ -603,6 +609,114 @@ mod tests {
         assert_eq!(got_a, got_b, "drained streams diverged");
         assert_eq!(hl_a.finish(), hl_b.finish(), "left hash diverged");
         assert_eq!(hr_a.finish(), hr_b.finish(), "right hash diverged");
+    }
+
+    #[test]
+    fn push_bytes_word_copy_matches_byte_walk_across_residues() {
+        // The span-copy push (2026-10-23: whole-span copy_from_slice — the
+        // target memcpy's word path where alignment admits it) must be
+        // byte-indistinguishable from the pinned per-byte walk in
+        // push_frame for every residue pairing the ROM can hit. src slices start at offsets 0..=3 of a
+        // pattern buffer while the dst residue cycles with `pushed % 12`
+        // (odd frame sizes) — covering both the residue-matched (word
+        // bulk) and mismatched (byte-fallback) paths — and sizes 1..=5 on
+        // a 12-byte ring force wraps on both channels. Reference path:
+        // push_frame over samples b << 8 (fifo_byte(b << 8) == b for every
+        // u8), so its drained bytes must equal the pattern bytes the word
+        // path was handed — a three-way meet: word walk, byte walk,
+        // intent.
+        let mut byte_ring = RingFeed::<12>::new();
+        let mut word_ring = RingFeed::<12>::new();
+        let mut hl = Fnv1a64::new();
+        let mut hr = Fnv1a64::new();
+        let pattern: Vec<u8> = (0..64u32).map(|i| (i * 37 + 11) as u8).collect();
+        let mut want_l: Vec<u8> = Vec::new();
+        let mut want_r: Vec<u8> = Vec::new();
+
+        // Drain one 3-sample period from both rings in lockstep; the
+        // classification must agree and the bytes must match.
+        let mut got_l: Vec<u8> = Vec::new();
+        let mut got_r: Vec<u8> = Vec::new();
+        let mut drain = |a: &mut RingFeed<12>, b: &mut RingFeed<12>, tag: &str| {
+            let mut al = [0u8; 3];
+            let mut ar = [0u8; 3];
+            let mut bl = [0u8; 3];
+            let mut br = [0u8; 3];
+            let va = a.take_chunk(&mut al, &mut ar, 3, false);
+            let vb = b.take_chunk(&mut bl, &mut br, 3, false);
+            assert_eq!(va, vb, "classification diverged ({tag})");
+            if va == Chunk::Full {
+                assert_eq!(al, bl, "left bytes diverged ({tag})");
+                assert_eq!(ar, br, "right bytes diverged ({tag})");
+                got_l.extend_from_slice(&al);
+                got_r.extend_from_slice(&ar);
+            }
+        };
+
+        let mut push_no = 0u32;
+        for _ in 0..3u32 {
+            for off in 0..4usize {
+                for n in 1..=5usize {
+                    let l = &pattern[off..off + n];
+                    let r = &pattern[off + 7..off + 7 + n];
+                    want_l.extend_from_slice(l);
+                    want_r.extend_from_slice(r);
+                    // fifo_byte((b as i8) << 8) == b for every u8: the i8
+                    // read keeps the i32 in the i16 profile (the fit check
+                    // would reject bytes >= 0x80 as u8 << 8) and the
+                    // arithmetic >> 8 then ldrsb's back to the exact byte.
+                    let left: Vec<i32> = l.iter().map(|&b| i32::from(b as i8) << 8).collect();
+                    let right: Vec<i32> = r.iter().map(|&b| i32::from(b as i8) << 8).collect();
+                    byte_ring
+                        .push_frame(&left, &right, &mut hl, &mut hr)
+                        .unwrap();
+                    word_ring.push_bytes(l, r).unwrap();
+                    push_no += 1;
+                    // Keep both rings room for the next push, draining in
+                    // lockstep so nothing but the push path is under test.
+                    while word_ring.ready() >= 6 {
+                        drain(&mut byte_ring, &mut word_ring, "steady drain");
+                    }
+                }
+            }
+        }
+        assert_eq!(push_no, 60);
+        // Producer finished: drain the residue from both rings (Tail then
+        // stop) and compare the complete streams against the intent.
+        loop {
+            let mut al = [0u8; 3];
+            let mut ar = [0u8; 3];
+            let mut bl = [0u8; 3];
+            let mut br = [0u8; 3];
+            let va = byte_ring.take_chunk(&mut al, &mut ar, 3, true);
+            let vb = word_ring.take_chunk(&mut bl, &mut br, 3, true);
+            assert_eq!(va, vb, "classification must agree");
+            match va {
+                Chunk::Full => {
+                    assert_eq!(al, bl, "left residue diverged (word vs byte)");
+                    assert_eq!(ar, br, "right residue diverged (word vs byte)");
+                    got_l.extend_from_slice(&al);
+                    got_r.extend_from_slice(&ar);
+                }
+                Chunk::Tail { real } => {
+                    assert_eq!(&al[..real], &bl[..real], "left tail diverged");
+                    assert_eq!(&ar[..real], &br[..real], "right tail diverged");
+                    got_l.extend_from_slice(&al[..real]);
+                    got_r.extend_from_slice(&ar[..real]);
+                    break;
+                }
+                Chunk::Starved => break,
+            }
+        }
+        assert_eq!(byte_ring.pushed(), word_ring.pushed(), "ledgers diverged");
+        assert_eq!(
+            got_l, want_l,
+            "left stream diverged (word vs byte vs intent)"
+        );
+        assert_eq!(
+            got_r, want_r,
+            "right stream diverged (word vs byte vs intent)"
+        );
     }
 
     #[test]
