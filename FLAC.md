@@ -4590,3 +4590,70 @@ logs, never the sha); `crates/flac-lite` untouched, committed surface diffs
 zero lines. **Ordering:** ① banked; ② convert fast path becomes its own
 byte-path PR next (14.1 ms stage); ③ feeder-off control arm; ④ E10 PR B —
 ranks unchanged, decode still dominates the budget on its own.
+
+**Amended 2026-10-24 (Sam): convert fast path lands — the safe shape
+harvests 1.8 ms of the probe's 14.1 ms; the word-store remainder needs
+asm.** The revised ordering's ②, on Sam's request, as its own byte-path
+PR. Two jobs get fast paths in `playback.rs`, both safe (`#![forbid(unsafe_code)]`
+held — the pinned nightly offers no safe reinterpret route, measured:
+`align_to_mut` is an *unsafe* fn (E0133) and `align_chunks_mut` does not
+exist (E0599)). The fit gate becomes `fit_gate`: branch-free
+OR-accumulate — a sample fits the i16 profile iff `(s as u32) + 0x8000`
+fits in `u16`, so `acc >> 16 == 0` decides the whole frame in one branch;
+on failure (stream desync — cold) a second pass walks the pinned
+interleaved order (l0, r0, l1, …) so the `Err` value keeps its exact
+first-offender identity. The pack becomes `pack_fifo`:
+`chunks_exact_mut(4)` with a fixed-4 `copy_from_slice` per group and the
+sub-word tail on the pinned per-sample walk; the earlier index-window draft
+left four `panic_bounds_check` sites in the disassembly, the iterator
+shape removes them (and measures identically — see below).
+
+**Witness (byte stream and error cannot drift).** Lib suite 25 → 27:
+`convert_fast_path_matches_byte_walk_across_residues` — dst offsets 0..=3 ×
+lens 1..=17, stereo and mono, guard bytes before/after the slice must never
+move, three-way meet against the per-sample intent (`fifo_byte` per
+sample); `convert_error_identity_first_offender_interleaved_order` — the
+Err is the first offender in *interleaved* order (right[0] = 50 000 wins
+over left[1] = 40 000, as the pinned scalar path decided), destinations
+untouched, mono leaves `dst_r` alone. ROM side unchanged: ledger `pushed ==
+consumed == 2,718,538` [OK] + `make rate-test`'s FIFO8-pin fold.
+
+**Measured** (ROM sha256 `9205084f…`, input `8f35fa88…`, rustc
+1.100.0-nightly `a69a63265`, mGBA 0.10.5; two headless runs `cmp`-identical;
+a comment-only rebuild `012b50c8…` → `9205084f…` prints `cmp`-identical
+logs — the harness rule judges logs, never sha):
+
+| witness | before (`29ba6e23…`, PR #77) | after |
+|---|---|---|
+| producer wall (audit-derived) | 211.4 ms/frame (108.5 %) | **209.5 ms/frame (107.5 %)** |
+| hw elapsed / serviced | 16,764 = 16,764 | 16,618 = 16,618 (replays 0) |
+| late / max_delay_ticks | 0 / 0 | 0 / 0 |
+| push_swallowed / pushes | 68 / 68 | 71 / 71 |
+| underflows | 1,317 | 1,171 |
+| ledger | OK | 2,718,538 OK |
+
+Harvest **1.8 ms** (Δperiods 146 × 16.74 ms ÷ 1,328) — **not the ~13 ms the
+ordering's estimate hoped for**, and the honest reading is the point:
+expected ≠ measured, the stage map's book stays open. Disassembly explains:
+even the checkless 4-window emits four constant-offset `strb` per group on
+thumbv4t (LLVM does not merge them), and the two safe drafts — index-window
+with bounds checks vs `chunks_exact` without — measure the *same*
+16,618 periods. The residual ≈ 12 ms of convert is per-byte-store cost
+under IRQ-live bus state; killing it means packing four FIFO bytes in a
+register and one `str` — asm (the E10 kernel track: `pack_fifo` is a pure
+fn, golden-table-able, a natural candidate kernel) or an unsafe-reinterpret
+policy change on the spike crate (a product-shape call, not this PR's).
+The safe 1.8 ms banks anyway (levers-compose) with zero drift risk.
+
+**Gates.** `make rate-test` 27 lib + 9 rate_witness + 8 spike_witness
+green; `make spike-test` counts unchanged (15 + 8); `make check` clean;
+`make native-rate-play-rom` builds. Anchor witness: `flac-spike.gba` builds
+**byte-identical** with and without the diff (sha `4ac0c33a…` both trees) —
+`playback.rs` is invisible on the anchor surface (zero playback symbols in
+that ELF); `crates/flac-lite` untouched, committed surface diffs zero
+lines. Verdict still FAILED/RED — expected; debt now **14.7 ms**.
+**Ordering:** ② partially banked (1.8 of 14.1); the convert word-store
+remainder moves onto the E10 asm-kernel track as a candidate. ③ feeder-off
+control arm is next — it sizes the decode live penalty before kernel
+planning; ④ E10 PR B stays the required structural harvest: decode alone
+is 103 % of budget, and 107.5 % total says every remaining ms is decode's.
