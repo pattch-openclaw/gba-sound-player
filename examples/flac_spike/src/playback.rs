@@ -134,6 +134,94 @@ pub enum Chunk {
     Starved,
 }
 
+/// Pack i16-range-checked samples into their FIFO byte form, four samples
+/// per iteration (2026-10-24 convert fast path, the ordering's step ②
+/// after the word-copy push).
+///
+/// The probe measured the per-byte pack at ≈ 55 cyc/channel-sample — the
+/// same per-byte-loop overhead shape the push CS carried at 52 cyc/byte.
+/// The safe shape cuts iterations by four: `chunks_exact_mut(4)` over the
+/// word-multiple head (fixed-4 `copy_from_slice` — constant offsets, and
+/// no per-element bounds checks; the index-window draft left four
+/// `panic_bounds_check` sites visible in the disassembly), the sub-word
+/// tail rides the pinned per-sample walk.
+///
+/// This crate is `#![forbid(unsafe_code)]` and the pinned nightly has no
+/// safe reinterpret path: `align_to_mut` is an *unsafe* fn on this
+/// toolchain (measured, E0133) and the safe `align_chunks_mut` does not
+/// exist yet (measured, E0599) — so no hand-written `u32`-store shape is
+/// available. Measured on the rate-play ROM 2026-10-24: harvest ≈ 1.8 ms
+/// of the probe's 14.1 ms stage — the safe-loop ceiling; the word-store
+/// remainder needs the asm kernel track (FLAC.md rate-play entry,
+/// 2026-10-24 amendment).
+///
+/// Length mismatch rides the old `zip` semantics: writes
+/// `min(src.len(), dst.len())` bytes, nothing beyond.
+fn pack_fifo(src: &[i32], dst: &mut [u8]) {
+    let n = src.len().min(dst.len());
+    let (src, _) = src.split_at(n);
+    let (dst, _) = dst.split_at_mut(n);
+    let full = (n >> 2) << 2;
+    let (sm, st) = src.split_at(full);
+    let (dm, dt) = dst.split_at_mut(full);
+    let mut words = dm.chunks_exact_mut(4);
+    let mut s4 = sm.chunks_exact(4);
+    for (w, four) in words.by_ref().zip(&mut s4) {
+        // Fixed-4 copy: from_ne_bytes lays the bytes in destination-memory
+        // order on any target endianness; the iterator shape removes the
+        // per-element bounds checks the index-window left behind.
+        w.copy_from_slice(&[
+            fifo_byte(four[0]),
+            fifo_byte(four[1]),
+            fifo_byte(four[2]),
+            fifo_byte(four[3]),
+        ]);
+    }
+    for (d, &s) in dt.iter_mut().zip(st) {
+        *d = fifo_byte(s);
+    }
+}
+
+/// Whole-frame i16 profile gate with the pinned error identity.
+///
+/// Fast path is branch-free: a sample fits the i16 profile iff
+/// `(s as u32) + 0x8000` fits in `u16`, so OR-ing every sample's shifted
+/// value and testing `acc >> 16` decides the whole frame with one branch.
+/// On failure (stream desync — cold), a second pass walks the pinned
+/// interleaved order (l0, r0, l1, r1, …; mono: left alone, `zip`-truncated
+/// like the original) and returns the first offender, so the `Err` value
+/// is identical to the per-sample scalar check's.
+fn fit_gate(left: &[i32], right: &[i32]) -> Result<(), i32> {
+    let mut acc: u32 = 0;
+    if right.is_empty() {
+        for &s in left {
+            acc |= (s as u32).wrapping_add(0x8000);
+        }
+    } else {
+        for (&l, &r) in left.iter().zip(right.iter()) {
+            acc |= (l as u32).wrapping_add(0x8000);
+            acc |= (r as u32).wrapping_add(0x8000);
+        }
+    }
+    if acc >> 16 == 0 {
+        return Ok(());
+    }
+    // Cold path: reproduce the pinned check order to pick the first
+    // offender (the value the caller sees; arithmetic above only proves
+    // one exists).
+    if right.is_empty() {
+        for &l in left {
+            i16::try_from(l).map_err(|_| l)?;
+        }
+    } else {
+        for (&l, &r) in left.iter().zip(right.iter()) {
+            i16::try_from(l).map_err(|_| l)?;
+            i16::try_from(r).map_err(|_| r)?;
+        }
+    }
+    Ok(())
+}
+
 /// Convert one decoded frame (i32, i16-range) into its 8-bit FIFO byte
 /// form, writing into caller-provided destinations.
 ///
@@ -145,6 +233,13 @@ pub enum Chunk {
 /// ring, no hashes, no IRQ-off window needed (the playback push-window fix
 /// hoists conversion+fit out of the critical section; [`RingFeed::push_bytes`]
 /// is the only part that needs protecting).
+///
+/// 2026-10-24 fast path (the ordering's step ②): the fit gate is
+/// [`fit_gate`] (branch-free OR-accumulate, pinned error identity on the
+/// cold path) and the packs go through [`pack_fifo`] (four samples per
+/// iteration). Byte-for-byte equality against the pinned scalar shape —
+/// including `Err`-value identity and the write-nothing rule — is
+/// witnessed in the suite.
 pub fn convert_frame(
     left: &[i32],
     right: &[i32],
@@ -155,22 +250,11 @@ pub fn convert_frame(
     let stereo = !right.is_empty();
     debug_assert_eq!(dst_l.len(), n);
     debug_assert!(!stereo || (dst_r.len() == n && right.len() == n));
+    fit_gate(left, right)?;
     if stereo {
-        for (&l, &r) in left.iter().zip(right.iter()) {
-            i16::try_from(l).map_err(|_| l)?;
-            i16::try_from(r).map_err(|_| r)?;
-        }
-        for (d, &s) in dst_r.iter_mut().zip(right.iter()) {
-            *d = fifo_byte(s);
-        }
-    } else {
-        for &l in left {
-            i16::try_from(l).map_err(|_| l)?;
-        }
+        pack_fifo(right, dst_r);
     }
-    for (d, &s) in dst_l.iter_mut().zip(left.iter()) {
-        *d = fifo_byte(s);
-    }
+    pack_fifo(left, dst_l);
     Ok(())
 }
 
@@ -546,6 +630,98 @@ mod tests {
         assert_eq!(err, 40_000);
         assert_eq!(dl, [0xAB; 2]);
         assert_eq!(dr, [0xAB; 2]);
+    }
+
+    #[test]
+    fn convert_error_identity_first_offender_interleaved_order() {
+        // The fit pass keeps the pinned check order (l, r, l, r, ...): the
+        // Err value is the FIRST offender in interleaved stream order,
+        // with destinations untouched. Here left[1] = 40 000 is out, but
+        // right[0] = 50 000 comes first in the interleave — the old scalar
+        // path rejects 50 000, so the fast path must too.
+        let mut dl = [0xCDu8; 2];
+        let mut dr = [0xCDu8; 2];
+        let err = convert_frame(&[0, 40_000], &[50_000, 0], &mut dl, &mut dr)
+            .expect_err("out-of-profile must reject");
+        assert_eq!(err, 50_000);
+        assert_eq!(dl, [0xCD; 2]);
+        assert_eq!(dr, [0xCD; 2]);
+        // Mono windows leave dst_r alone even for word-multiple lengths.
+        let mut dl = [0xEFu8; 8];
+        let mut dr = [0xEFu8; 8];
+        convert_frame(
+            &[256, -256, 256, -256, 256, -256, 256, -256],
+            &[],
+            &mut dl,
+            &mut dr,
+        )
+        .unwrap();
+        assert_eq!(dr, [0xEF; 8], "mono must not touch dst_r");
+        assert_eq!(dl, [1, 0xFF, 1, 0xFF, 1, 0xFF, 1, 0xFF]);
+    }
+
+    #[test]
+    fn convert_fast_path_matches_byte_walk_across_residues() {
+        // The convert fast path (2026-10-24: branch-free fit gate +
+        // four-sample pack window) must be byte-indistinguishable from the
+        // per-byte shape for every dst residue and length. Same meet as
+        // the push word-copy test: fast path vs the per-byte intent
+        // (fifo_byte per sample — exactly what the pinned push_frame walk
+        // stores) vs nothing beyond the slice written.
+        // dst slices start at offsets 0..=3 of the destination buffers
+        // (word-matched and mismatched middles) and lengths 1..=17 cross
+        // word boundaries in every head/tail pairing, stereo and mono.
+        // Pattern goes negative and crosses i8 boundaries on purpose.
+        let lpat: Vec<i32> = (0..64)
+            .map(|i| ((i * 137) % 65_536) as i32 - 32_768)
+            .collect();
+        let rpat: Vec<i32> = (0..64)
+            .map(|i| ((i * 311 + 977) % 65_536) as i32 - 32_768)
+            .collect();
+        let mut dl = [0u8; 96];
+        let mut dr = [0u8; 96];
+        for off in 0..4usize {
+            for n in 1..=17usize {
+                let left = &lpat[off..off + n];
+                let right = &rpat[off..off + n];
+                // Guard bytes: one byte before and after the slice must
+                // never move.
+                dl[off + n] = 0xA5;
+                dr[off + n] = 0xA5;
+                if off > 0 {
+                    dl[off - 1] = 0x5A;
+                    dr[off - 1] = 0x5A;
+                }
+                convert_frame(left, right, &mut dl[off..off + n], &mut dr[off..off + n]).unwrap();
+                let want_l: Vec<u8> = left.iter().map(|&s| fifo_byte(s)).collect();
+                let want_r: Vec<u8> = right.iter().map(|&s| fifo_byte(s)).collect();
+                assert_eq!(&dl[off..off + n], want_l.as_slice(), "left off={off} n={n}");
+                assert_eq!(
+                    &dr[off..off + n],
+                    want_r.as_slice(),
+                    "right off={off} n={n}"
+                );
+                assert_eq!(dl[off + n], 0xA5, "left wrote past dst off={off} n={n}");
+                assert_eq!(dr[off + n], 0xA5, "right wrote past dst off={off} n={n}");
+                if off > 0 {
+                    assert_eq!(dl[off - 1], 0x5A, "left wrote before dst off={off} n={n}");
+                    assert_eq!(dr[off - 1], 0x5A, "right wrote before dst off={off} n={n}");
+                }
+            }
+        }
+        // Mono across residues: dst_r untouched, left word-packed.
+        for off in 0..4usize {
+            let n = 11usize;
+            let mut dl = [0u8; 96];
+            let mut dr = [0x77u8; 96];
+            convert_frame(&lpat[off..off + n], &[], &mut dl[off..off + n], &mut dr).unwrap();
+            let want_l: Vec<u8> = lpat[off..off + n].iter().map(|&s| fifo_byte(s)).collect();
+            assert_eq!(&dl[off..off + n], want_l.as_slice(), "mono off={off}");
+            assert!(
+                dr.iter().all(|&b| b == 0x77),
+                "mono touched dst_r off={off}"
+            );
+        }
     }
 
     #[test]
