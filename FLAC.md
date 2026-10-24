@@ -4523,3 +4523,70 @@ decode alone is 103.0 % of budget, so zeroing convert + CS + wait still
 leaves it over. Catch-up stays margin, never the fix; the rate knob stays
 the budget-growing fallback, re-derived on the improved path (levers
 compose).
+
+**Amended 2026-10-23 (Sam): word-copy push lands — CS window 12.7 → ≈0.9 ms,
+producer wall 223.2 → 211.4 ms, seam artifacts structurally gone.** The
+revised ordering's ①, on Sam's request. `push_bytes`' per-byte slip walk (the
+probe's 52.1 cyc/byte) becomes a whole-span `copy_from_slice` per wrap span:
+the target's memcpy dispatch (agb `agbabi`'s `__aeabi_memcpy`, `.iwram`-resident,
+word-copying when the span is 4-byte aligned) moves the steady-state 2·2,048-byte
+pushes in words. No unsafe and no reinterpretation — the crate stays
+`#![forbid(unsafe_code)]`-clean, the word path is the memcpy dispatch, not
+hand-written `u32` stores (a shape cut from the ordering's "to u32 stores";
+the effect is measured equal-or-better, see below). Built-ELF witness:
+`objdump` of the measured ELF shows `rom::push` calling `__aeabi_memcpy` ×4 —
+two wrap spans × two channels. Steady-state alignment holds by arithmetic:
+`pushed` advances by 2,048-divisible blocksizes, the chunk (176) and ring
+(36·176) are 4-divisible, the ring is an aligned static and the scratch a
+word-aligned heap buffer; odd-sized tail frames ride memcpy's own byte path —
+exactly the pre-word shape, no special case needed.
+
+**Witness (byte stream cannot drift).** Host suite grows 24 → 25 lib tests:
+the existing `push_bytes_path_matches_push_frame_byte_for_byte` plus a new
+`push_bytes_word_copy_matches_byte_walk_across_residues` — every dst×src
+residue pairing (offsets 0..3 × cycling push residues), sizes 1..=5 on a
+12-byte ring forcing wraps on both channels, three-way meet: word path vs the
+pinned per-byte walk (`push_frame`) vs intent (the pattern bytes). ROM side:
+the ledger (`pushed == consumed == 2,718,538` `[OK]`) and `make rate-test`'s
+FIFO8-pin fold over the embedded bytes judge the stream the copy path moves.
+
+**Measured** (ROM sha256 `29ba6e23…`, input `8f35fa88…`, rustc 1.100.0-nightly
+`a69a63265`, mGBA 0.10.5; two headless runs `cmp`-identical):
+
+| witness | before (pinned, `1ee3033` era) | after |
+|---|---|---|
+| producer wall (audit-derived) | 223.2 ms/frame | **211.4 ms/frame** |
+| hw periods elapsed / serviced | 17,710 / 16,764-era split | **16,764 = 16,764** (blind replays 0) |
+| late / max_delay_ticks | 910 / 132 | **0 / 0** |
+| push_swallowed / pushes | 1,039 / 1,039 | 68 / 68 |
+| underflows | 2,263 | 1,317 |
+| ledger | 2,718,538 OK | 2,718,538 OK |
+
+Wall derived: 16,764 × 16.74 ms ÷ 1,328 = 211.4 ms/frame — 108.5 % of the
+194.8 ms budget (was 114.6 %). Harvest 11.9 ms — the stage map's 12.7 ms CS
+minus a ≈0.9 ms residual window: swallow ratio 68/1,326 = 5.1 % of a period
+= 9.0 samples = 0.86 ms ≈ 3.5 cyc/byte (was 52.1). The ordering predicted
+≈10 ms for ①; measured 11.9, within the estimate's shape — measured, not
+assumed, and the wall and the window move by the same number, so the map's
+book closes.
+
+**The reading that changes decisions: window < grace closes the seam.** The
+residual 9-sample window is *narrower than the DMA's 16-tick rearm grace*, so
+every overflow swallowed inside the CS is serviced within the grace — the
+repeat controller never reloads the old source. That is exactly what
+`late=0` + `elapsed == serviced` alongside 68 nonzero swallows says: the
+remaining swallows are harmless phase coincidences, not events, with 7 samples
+of margin. The pop + dragged-tempo channel (~1 period/push across the whole
+era) is closed structurally, not statistically. What remains is pure speed
+debt: 16.6 ms/frame, verdict still FAILED/RED — expected, decode alone is
+200.6 ms.
+
+**Gates.** `make rate-test` 25 lib + 9 rate_witness + 8 spike_witness green;
+`make spike-test` counts unchanged (15 + 8); `make check` clean;
+`make native-rate-play-rom` builds. Anchor witness: a clean-main (`e4ac78a`)
+build and this branch's `flac-spike.gba` print `cmp`-identical serial logs
+(cross-tree rebuild sha drift is pre-existing — the harness rule judges the
+logs, never the sha); `crates/flac-lite` untouched, committed surface diffs
+zero lines. **Ordering:** ① banked; ② convert fast path becomes its own
+byte-path PR next (14.1 ms stage); ③ feeder-off control arm; ④ E10 PR B —
+ranks unchanged, decode still dominates the budget on its own.

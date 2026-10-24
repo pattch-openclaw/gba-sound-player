@@ -11,8 +11,9 @@
 //! handler copies the next ring chunk into a ping-pong pair and re-arms
 //! DMA1/DMA2 into FIFO A/B (repeat, fixed destination, FIFO start — agb
 //! `hw.rs`'s exact control word). No CPU mixing: the decode burst and the
-//! audio drain never contend except for the ring push (µs, IRQs briefly
-//! off) — the gapless property stock agb lacks at current decode speeds.
+//! audio drain never contend except for the ring push (IME off for a
+//! sub-millisecond window — width measured 2026-10-23, see `push()`) —
+//! the gapless property stock agb lacks at current decode speeds.
 //! Deliberately NOT `agb::Mixer`: the mixer would own timer0/1 and pay
 //! per-sample mixing a single stream does not need. This is the shape
 //! Phase 2 step 9's "mixer/DMA double-buffer playback" line describes,
@@ -394,8 +395,14 @@ mod rom {
     /// **2026-10-22 (Sam): the FIFO8 fold is gone from this ROM.** What
     /// remains is only what produces sound: the fit check + FIFO conversion
     /// run IRQ-live (producer-private pure work over locals + scratch),
-    /// then the ring byte copy + credit runs inside the critical section
-    /// (~2·n byte stores, µs). History: the fold first rode inside the CS
+    /// then the ring copy + credit runs inside the critical section as
+    /// whole-span `copy_from_slice`s — the target memcpy's word path where
+    /// alignment admits it (2026-10-23 word-copy push). The window width
+    /// is measured, never sized from arithmetic: 12.7 ms while the
+    /// per-byte slip walk ran (position-clock probe, 2026-10-22), ≈ 0.9 ms
+    /// after the word copy (swallow ratio 68/1,328 pushes ≈ 5 % × 176-
+    /// sample period ≈ 9 samples ≈ 0.86 ms). History: the fold first rode
+    /// inside the CS
     /// (the audit `a4f7560` measured ~64 ms IME-off per push swallowing
     /// ~3.8 feeder periods), was hoisted IRQ-live 2026-10-21, and is now
     /// removed entirely — per-byte FNV-64 on the ARM7TDMI is an emulated
@@ -404,7 +411,9 @@ mod rom {
     ///
     /// Period audit (kept as the regression witness): reading the hardware
     /// period counter around the CS attributes any remaining swallowed
-    /// overflows to this (now µs-scale) window — it must read 0. Prefill
+    /// overflows to this window — the 2026-10-23 word-copy image reads 68
+    /// (5 % of pushes, one period each: phase coincidence at the measured
+    /// width) with replays 0. Prefill
     /// pushes run before the counter is armed (delta 0 regardless).
     fn push(left: &[i32], right: &[i32], scratch_l: &mut [u8], scratch_r: &mut [u8]) -> bool {
         let n = left.len();
