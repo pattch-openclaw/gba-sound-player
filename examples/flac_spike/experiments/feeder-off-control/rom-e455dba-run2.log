@@ -1,0 +1,138 @@
+[rate] entry started — rate ROM: real audio, derived budget
+[rate] input=bioluminescent.wav sha256=8f35fa88b3859e669b597f50c5360378811e02111b6ce50cadbe4f50b8145442 rate=10512 Hz budget/frame=3269162
+[rate] arm=bioluminescent_l0 frames=1328 region=8225487B samples=2718538 rate=10512 bps=16 ch=2 max_blocksize=2048
+[rate] census(bioluminescent_l0): slot 0: constant0 x10, fixed1 x998, fixed2 x306, fixed3 x14 | slot 1: constant0 x10, fixed0 x3, fixed1 x1136, fixed2 x179
+[rate] bioluminescent_l0 seek table: ascending=true within_max=true within_region=true
+[rate] bioluminescent_l0 region fnv: expected 0x8D5573919132E9CA actual 0x8D5573919132E9CA [OK]
+[rate] arm=bioluminescent_l4 frames=1328 region=8101690B samples=2718538 rate=10512 bps=16 ch=2 max_blocksize=2048
+[rate] census(bioluminescent_l4): slot 0: constant0 x10, fixed1 x83, fixed2 x28, lpc1 x27, lpc2 x273, lpc3 x361, lpc4 x546 | slot 1: constant0 x10, fixed1 x17, fixed2 x6, lpc1 x15, lpc2 x179, lpc3 x147, lpc4 x954
+[rate] bioluminescent_l4 seek table: ascending=true within_max=true within_region=true
+[rate] bioluminescent_l4 region fnv: expected 0x4559F9AA3A9B5D93 actual 0x4559F9AA3A9B5D93 [OK]
+[rate] checkpoint: asset verification PASSED (region pins — decode below runs on these bytes)
+[rate] bioluminescent_l0 checkpoint: decode buffers ready (2048 samples × 4B each; left=0x02000610 right=0x02002610)
+[rate] bioluminescent_l0 decode proof: walking 1328 frames via seek table
+[rate] bioluminescent_l0 frame    0/1328 off=0 bs=2048 running=0x86C1AFE9B12204B7
+[rate] bioluminescent_l0 frame   64/1328 off=360406 bs=2048 running=0x6159992BE53F2B84
+[rate] bioluminescent_l0 frame  128/1328 off=733205 bs=2048 running=0x3EEF16735E553760
+[rate] bioluminescent_l0 frame  192/1328 off=1123705 bs=2048 running=0xB83525BE2851A76B
+[rate] bioluminescent_l0 frame  256/1328 off=1518609 bs=2048 running=0x417792ABA2D5EC87
+[rate] bioluminescent_l0 frame  320/1328 off=1920778 bs=2048 running=0xE09CEEE10FF45598
+[rate] bioluminescent_l0 frame  384/1328 off=2328708 bs=2048 running=0x11023A66B3DF94DF
+[rate] bioluminescent_l0 frame  448/1328 off=2739530 bs=2048 running=0xBE5CC9C3C8F0F5D7
+[rate] bioluminescent_l0 frame  512/1328 off=3156212 bs=2048 running=0x5AB32A136083E611
+[rate] bioluminescent_l0 frame  576/1328 off=3582133 bs=2048 running=0x822EE09C88AEA6D2
+[rate] bioluminescent_l0 frame  640/1328 off=3988440 bs=2048 running=0x10FB8E5EF31E70D0
+[rate] bioluminescent_l0 frame  704/1328 off=4383249 bs=2048 running=0xD5CE89F6ADE575D5
+[rate] bioluminescent_l0 frame  768/1328 off=4801100 bs=2048 running=0x69F81715544B2DE1
+[rate] bioluminescent_l0 frame  832/1328 off=5216368 bs=2048 running=0xB4937E786012FB6A
+[rate] bioluminescent_l0 frame  896/1328 off=5634863 bs=2048 running=0xD29B9D68347E0622
+[rate] bioluminescent_l0 frame  960/1328 off=6045557 bs=2048 running=0x45301907FA8C5418
+[rate] bioluminescent_l0 frame 1024/1328 off=6432310 bs=2048 running=0xCF867A14BA4250C4
+[rate] bioluminescent_l0 frame 1088/1328 off=6835623 bs=2048 running=0xBCFE4E0591664298
+[rate] bioluminescent_l0 frame 1152/1328 off=7227050 bs=2048 running=0xD1643D0A01A79DCC
+[rate] bioluminescent_l0 frame 1216/1328 off=7614642 bs=2048 running=0x5DE8EB9B229A4085
+[rate] bioluminescent_l0 frame 1280/1328 off=8020109 bs=2048 running=0xC837CBA5F282A97D
+[rate] bioluminescent_l0 frame 1327/1328 off=8225468 bs=842 running=0xD20880D6D6D89E03
+[rate] bioluminescent_l0 totals: frames=1328 (want 1328) samples=2718538 (want 2718538) [OK]
+[rate] bioluminescent_l0 pcm fnv: expected 0xD20880D6D6D89E03 actual 0xD20880D6D6D89E03 [MATCH]
+[rate] bioluminescent_l4 checkpoint: decode buffers ready (2048 samples × 4B each; left=0x02000610 right=0x02002610)
+[rate] bioluminescent_l4 decode proof: walking 1328 frames via seek table
+[rate] bioluminescent_l4 frame    0/1328 off=0 bs=2048 running=0x86C1AFE9B12204B7
+[rate] bioluminescent_l4 frame   64/1328 off=353185 bs=2048 running=0x6159992BE53F2B84
+[rate] bioluminescent_l4 frame  128/1328 off=720665 bs=2048 running=0x3EEF16735E553760
+[rate] bioluminescent_l4 frame  192/1328 off=1105955 bs=2048 running=0xB83525BE2851A76B
+[rate] bioluminescent_l4 frame  256/1328 off=1495514 bs=2048 running=0x417792ABA2D5EC87
+[rate] bioluminescent_l4 frame  320/1328 off=1891967 bs=2048 running=0xE09CEEE10FF45598
+[rate] bioluminescent_l4 frame  384/1328 off=2294033 bs=2048 running=0x11023A66B3DF94DF
+[rate] bioluminescent_l4 frame  448/1328 off=2699242 bs=2048 running=0xBE5CC9C3C8F0F5D7
+[rate] bioluminescent_l4 frame  512/1328 off=3111407 bs=2048 running=0x5AB32A136083E611
+[rate] bioluminescent_l4 frame  576/1328 off=3533024 bs=2048 running=0x822EE09C88AEA6D2
+[rate] bioluminescent_l4 frame  640/1328 off=3932021 bs=2048 running=0x10FB8E5EF31E70D0
+[rate] bioluminescent_l4 frame  704/1328 off=4316742 bs=2048 running=0xD5CE89F6ADE575D5
+[rate] bioluminescent_l4 frame  768/1328 off=4728777 bs=2048 running=0x69F81715544B2DE1
+[rate] bioluminescent_l4 frame  832/1328 off=5138019 bs=2048 running=0xB4937E786012FB6A
+[rate] bioluminescent_l4 frame  896/1328 off=5550002 bs=2048 running=0xD29B9D68347E0622
+[rate] bioluminescent_l4 frame  960/1328 off=5955499 bs=2048 running=0x45301907FA8C5418
+[rate] bioluminescent_l4 frame 1024/1328 off=6335576 bs=2048 running=0xCF867A14BA4250C4
+[rate] bioluminescent_l4 frame 1088/1328 off=6734658 bs=2048 running=0xBCFE4E0591664298
+[rate] bioluminescent_l4 frame 1152/1328 off=7119941 bs=2048 running=0xD1643D0A01A79DCC
+[rate] bioluminescent_l4 frame 1216/1328 off=7500900 bs=2048 running=0x5DE8EB9B229A4085
+[rate] bioluminescent_l4 frame 1280/1328 off=7900402 bs=2048 running=0xC837CBA5F282A97D
+[rate] bioluminescent_l4 frame 1327/1328 off=8101671 bs=842 running=0xD20880D6D6D89E03
+[rate] bioluminescent_l4 totals: frames=1328 (want 1328) samples=2718538 (want 2718538) [OK]
+[rate] bioluminescent_l4 pcm fnv: expected 0xD20880D6D6D89E03 actual 0xD20880D6D6D89E03 [MATCH]
+[rate] cross-arm pcm: l0=0xD20880D6D6D89E03 l4=0xD20880D6D6D89E03 agree=true [OK]
+[rate] checkpoint: decode proof PASSED — timing pass engaged
+[rate] irq state before timing: IE=0x0001 IF=0x0000 IME=1
+*** bioluminescent_l0 calib 1/8 raw=20 (discarded warm-up)
+*** bioluminescent_l0 calib 2/8 raw=20 (discarded warm-up)
+*** bioluminescent_l0 calib 3/8 raw=20 (discarded warm-up)
+*** bioluminescent_l0 calib 4/8 raw=20 (reported)
+*** bioluminescent_l0 calib 5/8 raw=20 (reported)
+*** bioluminescent_l0 calib 6/8 raw=20 (reported)
+*** bioluminescent_l0 calib 7/8 raw=20 (reported)
+*** bioluminescent_l0 calib 8/8 raw=20 (reported)
+*** bioluminescent_l0 calibration: overhead_estimate=20 stable=true (≈0 witness: reported raws all == estimate; discarded = cold-window warm-up)
+*** bioluminescent_l0 timing pass: walking 1328 frames via seek table (IRQ-off windows, per-window counter reset)
+*** bioluminescent_l0 frame    0/1328 bs=2048 raw=56346 net=56326
+*** bioluminescent_l0 frame   64/1328 bs=2048 raw=3369133 net=3369113
+*** bioluminescent_l0 frame  128/1328 bs=2048 raw=3367805 net=3367785
+*** bioluminescent_l0 frame  192/1328 bs=2048 raw=3363677 net=3363657
+*** bioluminescent_l0 frame  256/1328 bs=2048 raw=3374824 net=3374804
+*** bioluminescent_l0 frame  320/1328 bs=2048 raw=3382206 net=3382186
+*** bioluminescent_l0 frame  384/1328 bs=2048 raw=3381228 net=3381208
+*** bioluminescent_l0 frame  448/1328 bs=2048 raw=3379644 net=3379624
+*** bioluminescent_l0 frame  512/1328 bs=2048 raw=3385642 net=3385622
+*** bioluminescent_l0 frame  576/1328 bs=2048 raw=3386251 net=3386231
+*** bioluminescent_l0 frame  640/1328 bs=2048 raw=3384696 net=3384676
+*** bioluminescent_l0 frame  704/1328 bs=2048 raw=3389806 net=3389786
+*** bioluminescent_l0 frame  768/1328 bs=2048 raw=3385752 net=3385732
+*** bioluminescent_l0 frame  832/1328 bs=2048 raw=3385857 net=3385837
+*** bioluminescent_l0 frame  896/1328 bs=2048 raw=3391400 net=3391380
+*** bioluminescent_l0 frame  960/1328 bs=2048 raw=3381632 net=3381612
+*** bioluminescent_l0 frame 1024/1328 bs=2048 raw=3374108 net=3374088
+*** bioluminescent_l0 frame 1088/1328 bs=2048 raw=3377208 net=3377188
+*** bioluminescent_l0 frame 1152/1328 bs=2048 raw=3383632 net=3383612
+*** bioluminescent_l0 frame 1216/1328 bs=2048 raw=3382839 net=3382819
+*** bioluminescent_l0 frame 1280/1328 bs=2048 raw=3382584 net=3382564
+*** bioluminescent_l0 frame 1327/1328 bs=842 raw=28102 net=28082
+*** bioluminescent_l0 stats: count=1328 min=28082@1327 max=3397012@572 sum=4429012975 wrapped=false
+*** bioluminescent_l0 mean = sum/count = 4429012975/1328 — derived host-side (ROM division-free)
+*** bioluminescent_l0 budget: worst_frame=572 worst_net=3397012 vs budget=3269162 (10512 Hz, derived) [OVER BUDGET]
+*** bioluminescent_l4 calib 1/8 raw=20 (discarded warm-up)
+*** bioluminescent_l4 calib 2/8 raw=20 (discarded warm-up)
+*** bioluminescent_l4 calib 3/8 raw=20 (discarded warm-up)
+*** bioluminescent_l4 calib 4/8 raw=20 (reported)
+*** bioluminescent_l4 calib 5/8 raw=20 (reported)
+*** bioluminescent_l4 calib 6/8 raw=20 (reported)
+*** bioluminescent_l4 calib 7/8 raw=20 (reported)
+*** bioluminescent_l4 calib 8/8 raw=20 (reported)
+*** bioluminescent_l4 calibration: overhead_estimate=20 stable=true (≈0 witness: reported raws all == estimate; discarded = cold-window warm-up)
+*** bioluminescent_l4 timing pass: walking 1328 frames via seek table (IRQ-off windows, per-window counter reset)
+*** bioluminescent_l4 frame    0/1328 bs=2048 raw=56346 net=56326
+*** bioluminescent_l4 frame   64/1328 bs=2048 raw=7729721 net=7729701
+*** bioluminescent_l4 frame  128/1328 bs=2048 raw=7715532 net=7715512
+*** bioluminescent_l4 frame  192/1328 bs=2048 raw=7729686 net=7729666
+*** bioluminescent_l4 frame  256/1328 bs=2048 raw=6834594 net=6834574
+*** bioluminescent_l4 frame  320/1328 bs=2048 raw=7743270 net=7743250
+*** bioluminescent_l4 frame  384/1328 bs=2048 raw=7743913 net=7743893
+*** bioluminescent_l4 frame  448/1328 bs=2048 raw=7745805 net=7745785
+*** bioluminescent_l4 frame  512/1328 bs=2048 raw=7297439 net=7297419
+*** bioluminescent_l4 frame  576/1328 bs=2048 raw=7298338 net=7298318
+*** bioluminescent_l4 frame  640/1328 bs=2048 raw=7737862 net=7737842
+*** bioluminescent_l4 frame  704/1328 bs=2048 raw=7750948 net=7750928
+*** bioluminescent_l4 frame  768/1328 bs=2048 raw=7749575 net=7749555
+*** bioluminescent_l4 frame  832/1328 bs=2048 raw=7302026 net=7302006
+*** bioluminescent_l4 frame  896/1328 bs=2048 raw=7308484 net=7308464
+*** bioluminescent_l4 frame  960/1328 bs=2048 raw=7739781 net=7739761
+*** bioluminescent_l4 frame 1024/1328 bs=2048 raw=7735396 net=7735376
+*** bioluminescent_l4 frame 1088/1328 bs=2048 raw=7271544 net=7271524
+*** bioluminescent_l4 frame 1152/1328 bs=2048 raw=6832773 net=6832753
+*** bioluminescent_l4 frame 1216/1328 bs=2048 raw=6395404 net=6395384
+*** bioluminescent_l4 frame 1280/1328 bs=2048 raw=7292579 net=7292559
+*** bioluminescent_l4 frame 1327/1328 bs=842 raw=28102 net=28082
+*** bioluminescent_l4 stats: count=1328 min=28082@1327 max=7761681@548 sum=9197565092 wrapped=false
+*** bioluminescent_l4 mean = sum/count = 9197565092/1328 — derived host-side (ROM division-free)
+*** bioluminescent_l4 budget: worst_frame=548 worst_net=7761681 vs budget=3269162 (10512 Hz, derived) [OVER BUDGET]
+[rate] irq state after timing: IE=0x0001 IF=0x0000 IME=1 (IME=1 means the harness restored it)
+[rate] verdict FAILED — screen RED (assets=true, decode proof=true, measured 2/2, within budget 0/2)

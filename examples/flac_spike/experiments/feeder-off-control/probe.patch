@@ -1,0 +1,848 @@
+diff --git a/examples/flac_spike/src/rate_play_main.rs b/examples/flac_spike/src/rate_play_main.rs
+index 4840a2b..67d1df3 100644
+--- a/examples/flac_spike/src/rate_play_main.rs
++++ b/examples/flac_spike/src/rate_play_main.rs
+@@ -252,6 +252,176 @@ mod rom {
+         critical_section::with(|cs| STATS.borrow_ref(cs).underflows)
+     }
+ 
++    // --- Probe: A/B/C feeder-off control (2026-10-25, FLAC.md ordering ③) --
++    // Question (rate-play entry, 2026-10-22 attribution amendment): live
++    // decode costs +39 % over the rate ROM's IME-off figure on this material
++    // (1,643 vs 1,180 c/sample); handler work + DMA-burst steals account for
++    // only ~3 ms of the +56.6 ms/frame. Three arms in ONE image, one
++    // variable (sound activity), identical code layout across arms:
++    //   A live — feeder armed exactly as shipped (timer IRQ + sound DMA).
++    //   B off  — timer chain armed as clock only (timer1 IRQ masked), no
++    //            sound DMA; the producer drains the ring between frames
++    //            (outside every measured window) so flow control never
++    //            spins and no IRQ consumer exists.
++    //   C dma  — like B plus the sound DMAs armed against the ping-pong in
++    //            repeat mode: the FIFO fetches keep hammering the bus with
++    //            zero handler CPU.
++    // decode(B) is the in-image floor; decode(C)−decode(B) is sound-DMA bus
++    // contention; decode(A)−decode(C) is handler CPU (+ interaction).
++    // Instrument: the 2026-10-22 sample-resolution position clock — method
++    // ported from experiments/playback-attribution (push/convert changed
++    // since via #77/#78, so the hunks do not carry; the window discipline
++    // does).
++
++    /// Sample-resolution position clock: timer2 counts timer1 overflows
++    /// (= hardware periods) in hardware even with IME/IE off, and TM1_DATA
++    /// times samples into the current period (same read as the audit).
++    /// Position = tm2 × CHUNK + in-period samples, wrapping u32. The
++    /// tm2–tm1–tm2 latch re-reads when a period boundary lands between the
++    /// reads; `retries` witnesses the race never (or rarely) fires. Tick =
++    /// one timer0 overflow = 1596 cycles = 1/10,512 s.
++    ///
++    /// # Safety
++    /// Callers pass fixed I/O addresses (REG_* constants).
++    fn sample_clock(retries: &mut u32) -> u32 {
++        loop {
++            let t2a = unsafe { io_read_u16(REG_TM2_DATA) }; // SAFETY: fixed I/O address.
++            let s = unsafe { io_read_u16(REG_TM1_DATA) }.wrapping_sub(TM1_RELOAD); // SAFETY: fixed I/O address.
++            let t2b = unsafe { io_read_u16(REG_TM2_DATA) }; // SAFETY: fixed I/O address.
++            if t2a == t2b {
++                return u32::from(t2a) * (CHUNK as u32) + u32::from(s);
++            }
++            *retries += 1;
++        }
++    }
++
++    /// One stage's distribution in clock ticks (division-free reporting:
++    /// sum + max + worst index; means derived host-side as arithmetic).
++    #[derive(Default, Clone, Copy)]
++    struct StageStat {
++        sum: u32,
++        max: u32,
++        max_idx: u32,
++    }
++
++    impl StageStat {
++        fn observe(&mut self, delta: u32, idx: usize) {
++            self.sum += delta;
++            if delta > self.max {
++                self.max = delta;
++                self.max_idx = idx as u32;
++            }
++        }
++    }
++
++    /// Per-frame sub-stage tally for one arm. The four stages telescope:
++    /// `gross` is the frame's t_last − t_first and `closure = gross −
++    /// (wait + decode + convert + cs)` is the inter-boundary instrument gap
++    /// — nonnegative by monotonicity, and any underflow means the clock
++    /// raced (witnessed, never silently clamped). `hash` folds every
++    /// decoded window (sample-level FNV-1a 32) OUTSIDE the measured spans:
++    /// the three arms must print the same hash, witnessing that varying
++    /// only the sound activity varied nothing about *what* decoded.
++    #[derive(Default)]
++    struct Probe {
++        wait: StageStat,
++        decode: StageStat,
++        convert: StageStat,
++        push_cs: StageStat,
++        gross: StageStat,
++        closure_sum: u32,
++        closure_underflows: u32,
++        frames: u32,
++        clock_retries: u32,
++        cal_sum: u32,
++        cal_max: u32,
++        hash: u32,
++        samples: u64,
++        drain_chunks: u32,
++    }
++
++    impl Probe {
++        /// FNV-1a 32 offset basis seeds the arm-equality fold (a
++        /// `Default::default()` zero-hash would make the first fold an
++        /// identity multiply — still injective here, but the standard
++        /// basis keeps the fold comparable to published FNV vectors).
++        fn new() -> Self {
++            Self {
++                hash: 0x811C_9DC5,
++                ..Default::default()
++            }
++        }
++    }
++
++    impl Probe {
++        fn observe_frame(
++            &mut self,
++            idx: usize,
++            wait: u32,
++            decode: u32,
++            convert: u32,
++            cs: u32,
++            gross: u32,
++        ) {
++            self.wait.observe(wait, idx);
++            self.decode.observe(decode, idx);
++            self.convert.observe(convert, idx);
++            self.push_cs.observe(cs, idx);
++            self.gross.observe(gross, idx);
++            let parts = wait + decode + convert + cs;
++            match gross.checked_sub(parts) {
++                Some(gap) => self.closure_sum += gap,
++                None => self.closure_underflows += 1,
++            }
++            self.frames += 1;
++        }
++
++        /// Arm-equality fold (outside the measured windows): one XOR + one
++        /// MUL per decoded sample, planar L then R — the arms' outputs
++        /// cannot diverge silently while the stage numbers compare.
++        fn fold(&mut self, left: &[i32], right: &[i32]) {
++            for &s in left.iter().chain(right.iter()) {
++                self.hash ^= s as u32;
++                self.hash = self.hash.wrapping_mul(16_777_619);
++            }
++            self.samples += (left.len() + right.len()) as u64;
++        }
++    }
++
++    /// Wipe the ring + audit stats between arms (each phase re-runs the
++    /// whole track from frame 0 on a fresh ledger).
++    fn reset_state() {
++        critical_section::with(|cs| {
++            *FEED.borrow_ref_mut(cs) = RingFeed::new();
++            *STATS.borrow_ref_mut(cs) = Stats::default();
++        });
++    }
++
++    /// B/C arms only: drain the ring between frames into producer scratch
++    /// (finished=true so a residue classifies as Tail, never Starved).
++    /// Runs strictly OUTSIDE every measured window — it replaces the IRQ
++    /// consumer's flow-control effect without an IRQ, a DMA, or a single
++    /// cycle inside t0..t3. Returns whole chunks taken.
++    fn drain_ring(drain_l: &mut [u8], drain_r: &mut [u8]) -> u32 {
++        let mut chunks = 0u32;
++        loop {
++            let remaining = critical_section::with(|cs| {
++                let mut feed = FEED.borrow_ref_mut(cs);
++                if feed.ready() == 0 {
++                    0usize
++                } else {
++                    let _ =
++                        feed.take_chunk(&mut drain_l[..CHUNK], &mut drain_r[..CHUNK], CHUNK, true);
++                    chunks += 1;
++                    feed.ready()
++                }
++            });
++            if remaining == 0 {
++                return chunks;
++            }
++        }
++    }
++
+     /// # Safety
+     /// `addr` must be an even address in the I/O region (callers pass REG_*).
+     unsafe fn io_write_u16(addr: usize, value: u16) {
+@@ -415,16 +585,31 @@ mod rom {
+     /// (5 % of pushes, one period each: phase coincidence at the measured
+     /// width) with replays 0. Prefill
+     /// pushes run before the counter is armed (delta 0 regardless).
+-    fn push(left: &[i32], right: &[i32], scratch_l: &mut [u8], scratch_r: &mut [u8]) -> bool {
++    ///
++    /// `probe` (A/B/C attribution, 2026-10-25): when `Some`, the convert
++    /// span and the push-CS span are clocked at sample resolution and
++    /// returned with the verdict for the frame-level closure. Prefill
++    /// passes `None` — the clock reads 0 until the timers are armed, and
++    /// prefill work is not part of the steady-state attribution.
++    fn push(
++        left: &[i32],
++        right: &[i32],
++        scratch_l: &mut [u8],
++        scratch_r: &mut [u8],
++        mut probe: Option<&mut Probe>,
++    ) -> (bool, u32, u32) {
+         let n = left.len();
+         let stereo = !right.is_empty();
+         // IRQ-live half: check fit + convert (rejections write nothing).
++        let tc0 = probe.as_mut().map(|p| sample_clock(&mut p.clock_retries));
+         let dst_r: &mut [u8] = if stereo { &mut scratch_r[..n] } else { &mut [] };
+         if convert_frame(left, right, &mut scratch_l[..n], dst_r).is_err() {
+-            return false;
++            return (false, 0, 0);
+         }
++        let tc1 = probe.as_mut().map(|p| sample_clock(&mut p.clock_retries));
+         let src_r: &[u8] = if stereo { &scratch_r[..n] } else { &[] };
+         // IRQ-off half: ring copy + credit only.
++        let tcs0 = probe.as_mut().map(|p| sample_clock(&mut p.clock_retries));
+         let before = unsafe { io_read_u16(REG_TM2_DATA) }; // SAFETY: fixed I/O address.
+         let ok = critical_section::with(|cs| {
+             FEED.borrow_ref_mut(cs)
+@@ -432,6 +617,7 @@ mod rom {
+                 .is_ok()
+         });
+         let swallowed = unsafe { io_read_u16(REG_TM2_DATA) }.wrapping_sub(before); // SAFETY: fixed I/O address.
++        let tcs1 = probe.as_mut().map(|p| sample_clock(&mut p.clock_retries));
+         if swallowed > 0 {
+             critical_section::with(|cs| {
+                 let mut stats = STATS.borrow_ref_mut(cs);
+@@ -439,7 +625,11 @@ mod rom {
+                 stats.pushes_with_swallow += 1;
+             });
+         }
+-        ok
++        let (convert_ticks, cs_ticks) = match (probe, tc0, tc1, tcs0, tcs1) {
++            (Some(_), Some(a), Some(b), Some(c), Some(d)) => (b.wrapping_sub(a), d.wrapping_sub(c)),
++            _ => (0, 0),
++        };
++        (ok, convert_ticks, cs_ticks)
+     }
+ 
+     /// The producer's flow-control spin: wait until the feeder has drained
+@@ -461,48 +651,120 @@ mod rom {
+         }
+     }
+ 
+-    /// Continue the fed decode from `start_frame` (prefill consumed the
+-    /// head), then drain and judge the sample ledger.
+-    fn play_rest(
++    /// What one arm's ledger ended at (verdict input).
++    struct ArmOutcome {
++        frames_done: usize,
++        underflows: u32,
++        pushed: usize,
++        ledger_ok: bool,
++    }
++
++    /// Calibration (E4 unified-loop shape): byte-identical back-to-back
++    /// clock pairs, 3 discarded + 5 reported, nothing logged between.
++    /// Every delta must read 0 samples — the witness that the
++    /// instrument's own cost is far under one 1596-cycle tick.
++    fn calibrate(probe: &mut Probe) {
++        for _ in 0..3 {
++            let _ = sample_clock(&mut probe.clock_retries);
++            let _ = sample_clock(&mut probe.clock_retries);
++        }
++        for _ in 0..5 {
++            let a = sample_clock(&mut probe.clock_retries);
++            let b = sample_clock(&mut probe.clock_retries);
++            let d = b.wrapping_sub(a);
++            probe.cal_sum += d;
++            if d > probe.cal_max {
++                probe.cal_max = d;
++            }
++        }
++    }
++
++    /// One arm's producer pass over frames `start_frame..`. THE SAME LOOP
++    /// with THE SAME windows for all three arms — what varies is only what
++    /// the caller has armed (A: feeder IRQ + sound DMA; B: clock only, the
++    /// ring drained synchronously between frames; C: B + the sound DMAs
++    /// self-sustaining off FIFO requests). `fold` and `drain_ring` run
++    /// strictly outside t0..t3, so the stage stats compare across arms;
++    /// the uniform `if drain` check inside the loop is a layout constant
++    /// shared by all three.
++    fn run_arm(
++        arm: &str,
+         clip: &flac_spike::assets::SpikeClip,
+         start_frame: usize,
+         state: &mut [PredictorState; 2],
++        left: &mut [i32],
++        right: &mut [i32],
+         scratch_l: &mut [u8],
+         scratch_r: &mut [u8],
+-    ) -> (usize, usize, u32) {
+-        let max = usize::from(clip.max_blocksize);
+-        let mut left: alloc::vec::Vec<i32> = alloc::vec![0; max];
+-        let mut right: alloc::vec::Vec<i32> = alloc::vec![0; max];
++        drain_l: &mut [u8],
++        drain_r: &mut [u8],
++        drain: bool,
++        probe: &mut Probe,
++    ) -> ArmOutcome {
+         let mut frames_done = start_frame;
+-
+         for frame_index in start_frame..clip.frames.len() {
+             let blocksize = usize::from(clip.frames[frame_index].blocksize);
++            let t0 = sample_clock(&mut probe.clock_retries);
+             wait_for_space(blocksize);
+-            let written = match driver::decode_one(clip, frame_index, &mut left, &mut right, state)
+-            {
++            let t1 = sample_clock(&mut probe.clock_retries);
++            let written = match driver::decode_one(clip, frame_index, left, right, state) {
+                 Ok(written) => written,
+                 Err(err) => {
+                     agb::println!(
+-                        "[rateplay] FAIL frame {}: driver rejected mid-playback: {:?}",
++                        "[rateplay] {arm} FAIL frame {}: driver rejected mid-playback: {:?}",
+                         frame_index,
+                         err
+                     );
+-                    return (frames_done, 0, underflows());
++                    return ArmOutcome {
++                        frames_done,
++                        underflows: underflows(),
++                        pushed: 0,
++                        ledger_ok: false,
++                    };
+                 }
+             };
++            let t2 = sample_clock(&mut probe.clock_retries);
+             let right_window = if clip.channels == 2 {
+                 &right[..written]
+             } else {
+                 &[]
+             };
+-            if !push(&left[..written], right_window, scratch_l, scratch_r) {
++            let (ok, convert_ticks, cs_ticks) = push(
++                &left[..written],
++                right_window,
++                scratch_l,
++                scratch_r,
++                Some(probe),
++            );
++            let t3 = sample_clock(&mut probe.clock_retries);
++            if !ok {
+                 agb::println!(
+-                    "[rateplay] FAIL frame {}: push rejected (out of profile?)",
++                    "[rateplay] {arm} FAIL frame {}: push rejected (out of profile?)",
+                     frame_index
+                 );
+-                return (frames_done, 0, underflows());
++                return ArmOutcome {
++                    frames_done,
++                    underflows: underflows(),
++                    pushed: 0,
++                    ledger_ok: false,
++                };
+             }
++            probe.observe_frame(
++                frame_index,
++                t1.wrapping_sub(t0),
++                t2.wrapping_sub(t1),
++                convert_ticks,
++                cs_ticks,
++                t3.wrapping_sub(t0),
++            );
++            // Arm-equality fold, OUTSIDE every measured window (same slot
++            // for all three arms): the decoded windows must be identical
++            // across arms while the stage numbers differ.
++            probe.fold(&left[..written], right_window);
+             frames_done += 1;
++            if drain {
++                probe.drain_chunks += drain_ring(drain_l, drain_r);
++            }
+             if frame_index % 128 == 0 {
+                 let lead = critical_section::with(|cs| {
+                     let feed = FEED.borrow_ref(cs);
+@@ -511,7 +773,7 @@ mod rom {
+                     lead
+                 });
+                 agb::println!(
+-                    "[rateplay] frame {:>4}/{} bs={} lead={}",
++                    "[rateplay] {arm} frame {:>4}/{} bs={} lead={}",
+                     frame_index,
+                     clip.frames.len(),
+                     written,
+@@ -520,17 +782,12 @@ mod rom {
+             }
+         }
+         agb::println!(
+-            "[rateplay] producer finished (all {} frames decoded)",
++            "[rateplay] {arm} producer finished (all {} frames decoded)",
+             clip.frames.len()
+         );
+         critical_section::with(|cs| STATS.borrow_ref_mut(cs).finished = true);
+-
+-        // Drain to the end: whole periods take Full chunks, the residue
+-        // lands as one zero-padded Tail — the ledger advances by real
+-        // bytes only, so consumed reaches pushed exactly when the last
+-        // real sample has been handed to the DMA. (A Starved period
+-        // consumes nothing; the producer is still running until FINISHED,
+-        // and the verdict demands zero underflows anyway.)
++        // Drain to the end (arm A: the feeder consumes; B/C drained per
++        // frame, this exits immediately — same code path for all arms).
+         loop {
+             let done = critical_section::with(|cs| {
+                 let feed = FEED.borrow_ref(cs);
+@@ -542,62 +799,59 @@ mod rom {
+                 break;
+             }
+         }
+-
+-        let underflows = underflows();
+         let (pushed, consumed) = critical_section::with(|cs| {
+             let feed = FEED.borrow_ref(cs);
+             let pair = (feed.pushed(), feed.consumed());
+             drop(feed);
+             pair
+         });
+-        let chunks = critical_section::with(|cs| STATS.borrow_ref(cs).chunks_taken);
+-        agb::println!(
+-            "[rateplay] feed: pushed={} consumed={} chunks={} underflows={}",
+-            pushed,
+-            consumed,
+-            chunks,
+-            underflows
+-        );
+-        // Period audit (diagnostic, 2026-10-20): the timer2 witness keeps
+-        // counting while IME is off, so elapsed − serviced is periods the
+-        // hardware played but the feeder never swapped — the DMA replayed
+-        // the old buffer. late = gap-1 services rearmed past the DMA
+-        // grace; push_swallowed attributes the swallowed overflows to the
+-        // push critical section (theory: fold+copy with IME off collides
+-        // with the period boundary).
+-        let (coalesced, max_gap, late, max_delay, swallowed, pushes_sw) =
+-            critical_section::with(|cs| {
+-                let s = STATS.borrow_ref(cs);
+-                (
+-                    s.coalesced,
+-                    s.max_period_gap,
+-                    s.late_servicings,
+-                    s.max_delay_ticks,
+-                    s.push_swallowed,
+-                    s.pushes_with_swallow,
+-                )
+-            });
+-        let elapsed = unsafe { io_read_u16(REG_TM2_DATA) }; // SAFETY: fixed I/O address.
++        let underflows = underflows();
++        let ledger_ok = pushed == usize::try_from(clip.total_samples).unwrap_or(usize::MAX)
++            && consumed == pushed;
+         agb::println!(
+-            "[rateplay] period audit: hw_elapsed={elapsed} serviced={chunks} coalesced={coalesced} max_gap={max_gap} late={late} max_delay_ticks={max_delay} grace={REARM_GRACE_TICKS} push_swallowed={swallowed} pushes_with_swallow={pushes_sw}"
++            "[rateplay] {arm} feed: pushed={pushed} consumed={consumed} underflows={underflows} ledger [{}]",
++            if ledger_ok { "OK" } else { "MISMATCH" }
+         );
+-        let replays = coalesced + late;
+-        let attributed = swallowed >= replays;
++        ArmOutcome {
++            frames_done,
++            underflows,
++            pushed,
++            ledger_ok,
++        }
++    }
++
++    /// Division-free probe report for one arm: sums/max/max_idx in sample
++    /// ticks (1596 cycles each), means derived host-side.
++    fn report_probe(arm: &str, probe: &Probe) {
+         agb::println!(
+-            "[rateplay] audit verdict: replays={replays} (coalesced={coalesced} late={late}) of {chunks} serviced periods; attributed_to_push_window={attributed} (swallowed={swallowed} in {pushes_sw} pushes)"
++            "[rateplay] probe {arm}: frames={} cal={}/{} clock_retries={} drains={} hash={:08X} samples={}",
++            probe.frames,
++            probe.cal_sum,
++            probe.cal_max,
++            probe.clock_retries,
++            probe.drain_chunks,
++            probe.hash,
++            probe.samples
+         );
+-        let samples_ok = pushed == usize::try_from(clip.total_samples).unwrap_or(usize::MAX);
++        for (name, s) in [
++            ("wait", &probe.wait),
++            ("decode", &probe.decode),
++            ("convert", &probe.convert),
++            ("push_cs", &probe.push_cs),
++            ("gross", &probe.gross),
++        ] {
++            agb::println!(
++                "[rateplay] probe {arm} {name}: sum={} max={} max_idx={}",
++                s.sum,
++                s.max,
++                s.max_idx
++            );
++        }
+         agb::println!(
+-            "[rateplay] samples pushed={} expected={} [{}]",
+-            pushed,
+-            clip.total_samples,
+-            if samples_ok { "OK" } else { "MISMATCH" }
++            "[rateplay] probe {arm} closure: sum={} underflows={}",
++            probe.closure_sum,
++            probe.closure_underflows
+         );
+-        if !samples_ok {
+-            // Judge the verdict through the underflow channel (force nonzero).
+-            return (frames_done, pushed, underflows.max(1));
+-        }
+-        (frames_done, pushed, underflows)
+     }
+ 
+     #[agb::entry]
+@@ -639,27 +893,60 @@ mod rom {
+             let _handler = unsafe { add_interrupt_handler(Interrupt::Timer1, feeder) };
+             enable_sound();
+ 
+-            // Prefill BEFORE arming the timers: decode + push with the
+-            // feeder off until the lead exceeds the worst-frame drain.
++            // Producer buffers allocated ONCE and shared by all three arms
++            // (uniform layout, uniform memory traffic; ~34 KB heap total).
+             let max = usize::from(clip.max_blocksize);
+             let mut left: alloc::vec::Vec<i32> = alloc::vec![0; max];
+             let mut right: alloc::vec::Vec<i32> = alloc::vec![0; max];
+-            let mut state = [PredictorState::new(), PredictorState::new()];
+             // Producer-private conversion scratch (one frame per channel,
+-            // FIFO bytes): written/folded with IRQs live, only the bytes
+-            // cross into the ring inside the CS.
++            // FIFO bytes): written with IRQs live, only the bytes cross
++            // into the ring inside the CS.
+             let mut scratch_l: alloc::vec::Vec<u8> = alloc::vec![0; max];
+             let mut scratch_r: alloc::vec::Vec<u8> = alloc::vec![0; max];
++            // B/C synchronous drain target (one mixer buffer per channel).
++            let mut drain_l: alloc::vec::Vec<u8> = alloc::vec![0; CHUNK];
++            let mut drain_r: alloc::vec::Vec<u8> = alloc::vec![0; CHUNK];
++
++            let mut timers = unsafe { gba.timers.all_timers() }; // SAFETY: agb's Mixer is never instantiated in this ROM — timer0/1/2 are unowned.
++            // Clock backbone armed once for the WHOLE probe: timer0 ticks
++            // per sample, timer1 cascades per mixer period, timer2 counts
++            // periods in hardware (IRQ delivery cannot stall it). Arms
++            // differ only in timer1's IRQ latch bit and the sound DMAs.
++            timers
++                .timer2
++                .set_cascade(true)
++                .set_interrupt(false)
++                .set_overflow_amount(0)
++                .set_enabled(true);
++            timers
++                .timer0
++                .set_divider(Divider::Divider1)
++                .set_interrupt(false)
++                .set_overflow_amount((MIXER_TICK_HZ / rate::RATE_HZ) as u16)
++                .set_enabled(true);
++
++            // ============ Arm A: LIVE — shipped shape (feeder IRQ + DMA) ============
++            agb::println!(
++                "[rateplay] === probe arm A: live baseline (timer1 IRQ feeder + sound DMA) ==="
++            );
++            let mut probe_a = Probe::new();
++            let mut state_a = [PredictorState::new(), PredictorState::new()];
++
++            // Prefill BEFORE arming timer1 (shipped shape): decode + push
++            // with no consumer until the lead exceeds the worst-frame
++            // drain. Folded into A's hash so all arms fold frames 0..N
++            // exactly once.
+             let prefill_target = PREFILL_CHUNKS * CHUNK;
+             let mut prefilled = 0usize;
+             let mut next_frame = 0usize;
+             while prefilled < prefill_target && next_frame < clip.frames.len() {
+                 let written =
+-                    match driver::decode_one(clip, next_frame, &mut left, &mut right, &mut state) {
++                    match driver::decode_one(clip, next_frame, &mut left, &mut right, &mut state_a)
++                    {
+                         Ok(written) => written,
+                         Err(err) => {
+                             agb::println!(
+-                                "[rateplay] FAIL prefill frame {}: {:?}",
++                                "[rateplay] A FAIL prefill frame {}: {:?}",
+                                 next_frame,
+                                 err
+                             );
+@@ -672,14 +959,18 @@ mod rom {
+                 } else {
+                     &[]
+                 };
++                probe_a.fold(&left[..written], right_window);
+                 if !push(
+                     &left[..written],
+                     right_window,
+                     &mut scratch_l,
+                     &mut scratch_r,
+-                ) {
++                    None,
++                )
++                .0
++                {
+                     agb::println!(
+-                        "[rateplay] FAIL prefill push rejected at frame {}",
++                        "[rateplay] A FAIL prefill push rejected at frame {}",
+                         next_frame
+                     );
+                     pass = false;
+@@ -689,33 +980,14 @@ mod rom {
+                 next_frame += 1;
+             }
+             agb::println!(
+-                "[rateplay] prefilled {} samples in {} frames (target {}), feeder armed",
++                "[rateplay] A prefilled {} samples in {} frames (target {})",
+                 prefilled,
+                 next_frame,
+                 prefill_target
+             );
+ 
+             if pass {
+-                // Arm: timer0 ticks once per sample (overflow 65536−1596 →
+-                // 1596 ticks @ 2^24 = 1/10512 s), timer1 cascades and
+-                // interrupts once per CHUNK.
+-                let mut timers = unsafe { gba.timers.all_timers() }; // SAFETY: agb's Mixer is never instantiated in this ROM — timer0/1/2 are unowned.
+-                // Period-audit witness FIRST (armed before timer1 can
+-                // overflow): timer2 cascades from timer1, counting every
+-                // period in hardware — IRQ delivery cannot stall it, so it
+-                // is ground truth for periods elapsed vs serviced.
+-                timers
+-                    .timer2
+-                    .set_cascade(true)
+-                    .set_interrupt(false)
+-                    .set_overflow_amount(0)
+-                    .set_enabled(true);
+-                timers
+-                    .timer0
+-                    .set_divider(Divider::Divider1)
+-                    .set_interrupt(false)
+-                    .set_overflow_amount((MIXER_TICK_HZ / rate::RATE_HZ) as u16)
+-                    .set_enabled(true);
++                // Arm A: timer1 latches the Timer1 IRQ once per CHUNK.
+                 timers
+                     .timer1
+                     .set_cascade(true)
+@@ -723,39 +995,197 @@ mod rom {
+                     .set_overflow_amount(CHUNK as u16)
+                     .set_enabled(true);
+                 agb::println!(
+-                    "[rateplay] irq armed: IE=0x{:04X} IME={} (witness: timer1 bit set / IME 1)",
++                    "[rateplay] A irq armed: IE=0x{:04X} IME={} (witness: timer1 bit set / IME 1)",
+                     unsafe { io_read_u16(REG_IE) },
+                     unsafe { io_read_u16(REG_IME) }
+                 );
+-
+-                let (frames, samples, underflows) =
+-                    play_rest(clip, next_frame, &mut state, &mut scratch_l, &mut scratch_r);
++                calibrate(&mut probe_a);
++                let out_a = run_arm(
++                    "A",
++                    clip,
++                    next_frame,
++                    &mut state_a,
++                    &mut left,
++                    &mut right,
++                    &mut scratch_l,
++                    &mut scratch_r,
++                    &mut drain_l,
++                    &mut drain_r,
++                    false,
++                    &mut probe_a,
++                );
++                // Period audit (shipped regression witness, valid for A —
++                // STATS was reset at boot, and B/C have not started yet).
++                let (coalesced, max_gap, late, max_delay, swallowed, pushes_sw, chunks) =
++                    critical_section::with(|cs| {
++                        let s = STATS.borrow_ref(cs);
++                        (
++                            s.coalesced,
++                            s.max_period_gap,
++                            s.late_servicings,
++                            s.max_delay_ticks,
++                            s.push_swallowed,
++                            s.pushes_with_swallow,
++                            s.chunks_taken,
++                        )
++                    });
++                let elapsed = unsafe { io_read_u16(REG_TM2_DATA) }; // SAFETY: fixed I/O address.
++                agb::println!(
++                    "[rateplay] A period audit: hw_elapsed={elapsed} serviced={chunks} coalesced={coalesced} max_gap={max_gap} late={late} max_delay_ticks={max_delay} grace={REARM_GRACE_TICKS} push_swallowed={swallowed} pushes_with_swallow={pushes_sw}"
++                );
+                 agb::println!(
+-                    "[rateplay] playback verdict: frames={}/{} samples={} underflows={}",
+-                    frames,
++                    "[rateplay] A audit verdict: replays={} (coalesced={coalesced} late={late}) of {chunks} serviced periods; attributed_to_push_window={} (swallowed={swallowed} in {pushes_sw} pushes)",
++                    coalesced + late,
++                    swallowed >= coalesced + late
++                );
++                agb::println!(
++                    "[rateplay] A playback verdict: frames={}/{} samples={} underflows={}",
++                    out_a.frames_done,
+                     clip.frames.len(),
+-                    samples,
+-                    underflows
++                    out_a.pushed,
++                    out_a.underflows
+                 );
+-                pass &= underflows == 0 && frames == clip.frames.len() && samples != 0;
++                // FAILED/RED is the EXPECTED outcome (14.7 ms/frame debt);
++                // the pass line below is the probe's witness set, not this.
++                pass &= out_a.ledger_ok && out_a.underflows == 0;
+ 
+-                // Silence + teardown.
+-                timers.timer1.set_interrupt(false).set_enabled(false);
+-                timers.timer0.set_enabled(false);
+-                timers.timer2.set_enabled(false);
+-                // SAFETY: fixed I/O addresses.
++                // ---- Quiesce A before B: mask the latch bit, CLEAR any
++                // pending Timer1 IF, stop both sound DMAs. Timer1 keeps
++                // running (it is the clock); without the IF clear a single
++                // late handler dispatch would re-arm the DMAs and bleed
++                // sound activity into arm B.
++                timers.timer1.set_interrupt(false);
++                unsafe { io_write_u16(REG_IF, 1 << 4) }; // SAFETY: fixed I/O address; write-1-clears the Timer1 IF bit (bit 4).
+                 unsafe {
+-                    io_write_u16(REG_DMA1_CONTROL, 0);
++                    io_write_u16(REG_DMA1_CONTROL, 0); // SAFETY: fixed I/O addresses.
+                     io_write_u16(REG_DMA2_CONTROL, 0);
+-                    io_write_u16(SOUNDCNT_X, 0);
+                 }
+                 agb::println!(
+-                    "[rateplay] teardown: IE=0x{:04X} IF=0x{:04X} IME={}",
++                    "[rateplay] A quiesced: IE=0x{:04X} IF=0x{:04X} (IF cleared, DMA stopped, timer1 keeps clocking)",
+                     unsafe { io_read_u16(REG_IE) },
+-                    unsafe { io_read_u16(REG_IF) },
+-                    unsafe { io_read_u16(REG_IME) }
++                    unsafe { io_read_u16(REG_IF) }
++                );
++                report_probe("A", &probe_a);
++
++                // ============ Arm B: CLOCK ONLY — no IRQ, no sound DMA ============
++                // Timer chain keeps running as the position clock; the
++                // Timer1 latch bit is masked (agb set_bits on T1CNT bit 6,
++                // verified 0.25.0 — no latch, no delivery, IE bit moot), so
++                // no IRQ consumer exists. The producer drains the ring
++                // synchronously between frames (outside every window), so
++                // flow control never spins and wait ≈ 0 by construction.
++                agb::println!(
++                    "[rateplay] === probe arm B: feeder off (no IRQ, no sound DMA), ring drained in-loop ==="
++                );
++                reset_state();
++                let mut state_b = [PredictorState::new(), PredictorState::new()];
++                let mut probe_b = Probe::new();
++                calibrate(&mut probe_b);
++                let out_b = run_arm(
++                    "B",
++                    clip,
++                    0,
++                    &mut state_b,
++                    &mut left,
++                    &mut right,
++                    &mut scratch_l,
++                    &mut scratch_r,
++                    &mut drain_l,
++                    &mut drain_r,
++                    true,
++                    &mut probe_b,
++                );
++                pass &= out_b.ledger_ok;
++                report_probe("B", &probe_b);
++
++                // ============ Arm C: CLOCK + SOUND DMA — bus noise, no IRQ ============
++                // Same as B, plus both sound DMAs armed against the static
++                // ping-pong in repeat mode: the paired FIFOs drain at the
++                // sample rate, and every half-empty request re-triggers a
++                // 44-word burst from the SAME latched source (the
++                // rearm-grace behavior the period audit documents) — DMA
++                // bus activity with ZERO handler CPU. Contents are
++                // whatever arm A left; this arm's job is the fetches.
++                agb::println!(
++                    "[rateplay] === probe arm C: sound DMA armed (repeat, FIFO-requested), no IRQ ==="
++                );
++                reset_state();
++                let mut state_c = [PredictorState::new(), PredictorState::new()];
++                let mut probe_c = Probe::new();
++                let (lp, rp) = critical_section::with(|cs| {
++                    let bufs = BUFS.borrow_ref(cs);
++                    (bufs.l0.as_ptr(), bufs.r0.as_ptr())
++                });
++                // SAFETY: aligned static-array pointers; same call shape as the feeder.
++                unsafe { rearm_dma(lp, rp) };
++                calibrate(&mut probe_c);
++                let out_c = run_arm(
++                    "C",
++                    clip,
++                    0,
++                    &mut state_c,
++                    &mut left,
++                    &mut right,
++                    &mut scratch_l,
++                    &mut scratch_r,
++                    &mut drain_l,
++                    &mut drain_r,
++                    true,
++                    &mut probe_c,
+                 );
++                unsafe {
++                    io_write_u16(REG_DMA1_CONTROL, 0); // SAFETY: fixed I/O addresses.
++                    io_write_u16(REG_DMA2_CONTROL, 0);
++                }
++                pass &= out_c.ledger_ok;
++                report_probe("C", &probe_c);
++
++                // ---- Arm-equality witness: varying sound activity varied
++                // WHAT decoded not at all. The hash folds every decoded
++                // window (frames 0..N once per arm, FNV-1a 32 over the
++                // planar i32 windows); samples counts the folded windows.
++                let eq = probe_a.hash == probe_b.hash
++                    && probe_b.hash == probe_c.hash
++                    && probe_a.samples == probe_b.samples
++                    && probe_b.samples == probe_c.samples;
++                agb::println!(
++                    "[rateplay] probe equality: hash A={:08X} B={:08X} C={:08X} samples {}/{}/{} [{}]",
++                    probe_a.hash,
++                    probe_b.hash,
++                    probe_c.hash,
++                    probe_a.samples,
++                    probe_b.samples,
++                    probe_c.samples,
++                    if eq { "OK" } else { "MISMATCH" }
++                );
++                pass &= eq;
++                pass &= probe_a.closure_underflows == 0
++                    && probe_b.closure_underflows == 0
++                    && probe_c.closure_underflows == 0;
++                pass &= probe_a.cal_sum == 0
++                    && probe_b.cal_sum == 0
++                    && probe_c.cal_sum == 0
++                    && probe_a.cal_max == 0
++                    && probe_b.cal_max == 0
++                    && probe_c.cal_max == 0;
+             }
++
++            // Silence + teardown.
++            timers.timer1.set_enabled(false);
++            timers.timer0.set_enabled(false);
++            timers.timer2.set_enabled(false);
++            // SAFETY: fixed I/O addresses.
++            unsafe {
++                io_write_u16(REG_DMA1_CONTROL, 0);
++                io_write_u16(REG_DMA2_CONTROL, 0);
++                io_write_u16(SOUNDCNT_X, 0);
++            }
++            agb::println!(
++                "[rateplay] teardown: IE=0x{:04X} IF=0x{:04X} IME={}",
++                unsafe { io_read_u16(REG_IE) },
++                unsafe { io_read_u16(REG_IF) },
++                unsafe { io_read_u16(REG_IME) }
++            );
+         }
+ 
+         let (color, label) = if pass {

@@ -3501,6 +3501,27 @@ alone already exceeds it, pending E9's in-stack confirmation). Per the
 cumulative rule the E2b delta is harvestable regardless of who leads:
 it is a measured numerator cut on the decode path.
 
+**Amended 2026-10-26 (Sam): the landing did not reproduce the win —
+resolved 2026-10-27 by landing the missing E2a refill-accumulator.**
+`e455dba` landed this table in the live `flac-lite` decode path; a
+same-host rate-ROM bisect (two `cmp`-identical runs per point, staged
+assets census-identical, PCM pins MATCH) measured that first landing at
+**+37.96 % FIXED / +15.2 % LPC** decode vs the pre-landing tree — the
+landing's own era printed producer walls consistent with that (≈267 ms).
+**Root cause:** the E2b probe measured `rice_quotient` riding E2a's `u32`
+refill-accumulator (`AccumulatorReader`), where the next 8-bit window sits
+pre-shifted at `self.acc >> 24` and the subsequent `read_bits(order)`
+remainder extract shares the same buffered register window. `e455dba`
+instead bolted the 8-bit table lookup onto the stateless position-only
+`BitReader`, calling `peek_at(self.bit_pos, 8)` per window (a 2-byte
+`u64` gather at 7/8 of bit offsets) and then calling `peek_at` a second
+time over the same bytes for the remainder. **Fix (2026-10-27):** E2a's
+`u32` refill-accumulator (`pos`, `acc`, `valid`, `refill`, `consume`)
+is now landed inside `flac_lite::bits::BitReader` alongside E2b, restoring
+the probe's register-window shape (`!(self.acc >> 24) as u8`) and
+achieving real-time audible playback at correct tempo and pitch on
+`flac-rate-play.gba` — see the rate-play entry's 2026-10-27 amendment.
+
 **Preservation:** probe code lives in the sample dir above, never on
 `main`'s spike sources. The `perf/flac-spike-e2b-rl-table` branch
 (`fba1bc5`, never pushed) is superseded by the sample and is deleted
@@ -4509,6 +4530,16 @@ sound DMAs run). (3) **Convert is 14.1 ms** ≈ 55 cyc/channel-sample —
 above the bounded estimate ("single-digit ms"), a table/word-pack fast
 path has real target.
 
+**Corrected 2026-10-26 (Sam): reading (2) is void — the comparator went
+stale.** The 1,180 c/s figure is the pre-E2b rate ROM; the committed
+tree's IME-off decode on this material is 1,614.6 c/s (same host,
+this session). Live coexistence costs ≈ +1.5 %, not +39 %; the ≈ 50 ms
+never existed as live-path cost (the bisect convicts the E2b landing —
+rate-play entry, 2026-10-26 feeder-off amendment), and the E1 staging
+re-valuation is not supported (sound-DMA marginal contention measured
++0.22 %). The decode mean itself (2,108.6 t/frame) was and remains
+correct — the stage map stands; only its comparison baseline moved.
+
 **Revised ordering (proposed after the probe; recorded 2026-10-22 on
 Sam's request — the working order until measurements move it).** ① **Word-copy push** —
 the CS's per-byte loop to u32 stores: the cheapest proven lever, cutting
@@ -4657,3 +4688,132 @@ remainder moves onto the E10 asm-kernel track as a candidate. ③ feeder-off
 control arm is next — it sizes the decode live penalty before kernel
 planning; ④ E10 PR B stays the required structural harvest: decode alone
 is 103 % of budget, and 107.5 % total says every remaining ms is decode's.
+
+**Amended 2026-10-26 (Sam): feeder-off control probe (ordering ③) — the
+live penalty is ≈ +1.5 %, and the bisect convicts the E2b landing (+38 %).**
+The round-2 question from the attribution amendment (what is the +50 ms?)
+is settled, and the answer rewrites the entry's cost story. Three arms in
+ONE image (`feat/playback-feeder-off-probe`, measurement commit `acf42be`,
+sample preserved under `examples/flac_spike/experiments/feeder-off-control/`
+with the reappliable patch + every run log), one producer loop, one
+variable (sound activity): **A** live baseline (shipped feeder IRQ + sound
+DMA, period audit intact); **B** feeder off — timer chain keeps running as
+the position clock, timer1's IRQ latch bit masked, no sound DMA, ring
+drained synchronously between frames (outside every window — the flow-
+control detail the plan left open: in-loop draining, not ring over-read,
+keeps the ledger real and wait ≈ 0 by construction); **C** B plus both
+sound DMAs armed against the ping-pong in repeat mode — FIFO drains keep
+re-triggering 44-word bursts from the latched source with zero handler
+CPU. Position clock per the 2026-10-22 method (port, not the old hunks —
+#77/#78 moved `push`/convert): calibration pairs **0/0** all arms,
+closure underflows **0** all arms, `clock_retries=0`; arm-equality witness
+(FNV-32 fold of every decoded window outside the windows) prints
+`hash A=B=C=3E765D9D samples 5,437,076/5,437,076/5,437,076 [OK]` — the
+arms decoded identical samples while their clocks differed. A's decode
+mean reproduces the 2026-10-22 map (2,108.72 vs 2,108.61 t, +0.006 %);
+A gross 2,199.7 t = 209.26 ms meets #78's clean-image 209.5 ms audit wall
+within 0.2 %. ROM sha256 `8ccb3dde…`, input `8f35fa88…`, rustc
+1.100.0-nightly `a69a63265`, mGBA 0.10.5, two runs `cmp`-identical.
+
+| stage (ticks/frame) | A live | B off | C dma |
+|---|---|---|---|
+| wait | 9.90 | 0.10 | 0.09 |
+| decode | **2,108.72** | **2,077.28** | **2,081.89** |
+| convert | 71.78 | 70.87 | 71.05 |
+| push CS | 9.11 | 8.98 | 9.00 |
+| gross | 2,199.71 | 2,157.47 | 2,162.24 |
+
+**decode A−B = +31.4 t = +2.99 ms = +1.51 %** (frame-composition bias
+≤ ~1.5 t: A skips the two prefilled constant frames; the delta is
+≈ +2.9 ms either way). Of it: **C−B = +4.6 t = +0.22 %** is the marginal
+sound-DMA bus cost; **A−C = +26.8 t = +2.55 ms** is handler CPU + IRQ
+delivery. Handler estimate vs handler measurement: the ~3 ms theory lands
+— on an honest baseline. A's audit stays healthy (replays 0, `late=0`,
+`push_swallowed=71`); A's underflows 2,107 are the probe image's ~11.8
+ms/frame instrument+fold weight (17,554 hw periods vs the clean 16,618),
+not a seam failure. Convert reads 6.83 ms on the instrument across all
+arms — the stage-window authority now, replacing the wall-derived ~12 ms
+remainder arithmetic.
+
+**The comparator was stale — same-session rate-ROM bisect** (two
+`cmp`-identical runs per point, censuses identical, PCM pins MATCH; logs
+in the sample dir): `e6577e0` FIXED mean **2,417,429 c/f reproduces the
+recorded baseline exactly** (sum, mean, worst 2,559,507 @505, min 28,082
+@1327); `e455dba` (the E2b `rice_quotient` landing + fold hoist) prints
+**3,335,100 c/f = +37.96 %**; `1ee3033` (`.iwram` pin) 3,306,661 (pin
+recovers 0.85 %); current `main` = 3,306,661 (playback-only PRs invisible
+by construction). LPC: +15.2 % at `e455dba`, +14.8 % now. So the +39 %
+"live penalty" was never live-path cost — **the committed reader is
+slower than the per-bit loop it replaced**, on the ROM's own link, for
+this material. The E2b result section carries the landing-correction;
+the probe's vendored-arm numbers stand as facts about that arm (the E6
+inlining-layout confound is the plausible shape), but the landed harvest
+did not survive contact with the live path. The hardware delays Sam
+heard are fully explained by the 209.5-vs-194.8 ms debt — no contention
+term needed. E1 staging is **not** re-valued: adding all sound-DMA
+traffic to a read-heavy decode moves it +0.22 % on this emulator, and a
+staged arm was cut before running on exactly that measurement.
+
+**Revised ordering (re-cut after ③; supersedes 2026-10-22's ③④ ranks).**
+① **E2b fix-or-revert** — the project's biggest measured lever: the
+regression is +38 % of FIXED decode (≈ 48 ms/frame); restoring `e6577e0`'s
+reader live-adjusted lands decode ≈ 146 ms, producer gross ≈ 155 ms ≈
+**80 % of budget with ~20 % headroom** (derived from two measured legs —
+the fix PR measures it). Shape first: `nm`/`objdump` the landed
+`rice_quotient` inner loop for why the table count lost (inlining, the
+`peek_at` bounds path, or `LEADING_ONES` addressing through `.rodata`
+under `lto = "fat"`), revert if no cheap fix. ② E10 PR B (C2 word-skip +
+composite sample-step) stays the structural harvest, sized against
+**~146 ms** decode, not 200; the convert word-store remainder stays on
+the same track. ③ E4 i32 for LPC unchanged in kind; its LPC projection
+must now be re-derived against the post-fix tree. The rate knob remains
+the fallback. Levers-compose holds: ①'s harvest and everything after it
+stack multiplicatively, each measured.
+
+**Amended 2026-10-27 (Sam): E2a refill-accumulator landed alongside E2b —
+root cause of the +38 % regression fixed; real-time playback confirmed at
+correct tempo and pitch.** Inspection of `crates/flac-lite/src/bits.rs`
+identified why `e455dba` regressed by +37.96 % on FIXED where the E2b
+probe measured −21.71 %: the probe's `rice_quotient` rode **E2a's `u32`
+refill-accumulator (`AccumulatorReader`)**, whereas `e455dba` landed the
+8-bit `LEADING_ONES` lookup onto the stateless position-only `BitReader`
+without E2a (`self.peek_at(self.bit_pos, 8)`). Without the accumulator,
+every 8-bit window at an unaligned bit offset (7/8 of positions) ran
+`peek_at`'s 2-byte slice loop into a 64-bit `u64` accumulator, shifted and
+masked it to 8 bits, discarded the unused bits (most Rice quotients are
+0–2 bits), and then `decode_rice_partition`'s `reader.read_bits(order)`
+called `peek_at` a *second* time across the exact same bytes to read the
+remainder.
+
+**The fix (`crates/flac-lite/src/bits.rs`):** `BitReader` now carries
+E2a's left-aligned, MSB-first `u32` refill window (`pos: usize`,
+`acc: u32`, `valid: u32`; invariant `logical cursor = pos * 8 − valid`,
+byte-at-a-time `refill()` while `valid <= 24`, register-shift fast path
+for `read_bits(1..=31)`, `peek_bits(1..=32)`, and `byte_align()`).
+`BitReader::rice_quotient` now refills `self.acc` when `self.valid < 8`,
+indexes `LEADING_ONES[usize::from(!(self.acc >> 24) as u8)]` directly from
+the top byte of the `u32` register, consumes `run + 1` via
+`self.consume(run + 1)`, and leaves the buffered window hot in `self.acc`
+for the immediately following `reader.read_bits(order)` remainder extract.
+
+**Toolchain pin note (`agb_hashmap v0.25.0`):** `agb v0.25.0` enables
+`agb_hashmap/allocator_api` (`#![feature(allocator_api)]` under
+`-Zbuild-std=core,alloc`). Newer Rust nightlies (e.g. `1.101.0-nightly
+2026-10-26`) split `core::alloc::Allocator` by adding an unstable
+`AllocatorNightly` bound on `Vec::drain(..)` and moving `const fn
+Vec::new_in` behind `#![feature(allocator_ext)]`, failing to compile
+`agb_hashmap v0.25.0` with `E0277: the trait bound ALLOCATOR:
+AllocatorNightly is not satisfied`. Pinning the host `nightly` toolchain
+to the recorded **`nightly-2026-09-04`** (`rustc 1.100.0-nightly
+(a69a63265 2026-09-03)`, LLVM 23.1.1) resolves the build and matches the
+comparator toolchain across the entire measurement history.
+
+**Gates & on-target result:** `make flac-test` (96 unit + 24 integration
+tests, including `accumulator_window_invariants_hold_on_mixed_width_sweeps`),
+`make spike-test` (15 + 8), `make rate-test` (27 + 9 + 8), and
+`make check` all green. Built ELF witness: `LEADING_ONES` at `0x0300022c`
+(`.iwram`); ROMs built: `flac-rate-play.gba` sha256 `2102c2a0…`,
+`flac-rate-spike.gba` sha256 `67d0e2b0…`, `flac-spike.gba` sha256
+`1f51ac8d…`. **Audible verification (Sam):** `flac-rate-play.gba` plays
+`bioluminescent.wav` at 10,512 Hz at the **correct tempo and correct pitch
+in real time** for the first time.

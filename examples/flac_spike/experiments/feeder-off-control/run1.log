@@ -1,0 +1,74 @@
+[rateplay] entry — FLAC decode -> FIFO playback baseline
+[rateplay] input=bioluminescent.wav sha256=8f35fa88b3859e669b597f50c5360378811e02111b6ce50cadbe4f50b8145442 rate=10512 Hz chunk=176 ring=36x176 prefill=16x176
+[rateplay] playing arm bioluminescent_l0 (FIXED-limited arm (flac -1 -l 0 -b 2048 -m): the rate gate's conservative predictor cost on real material); LPC arm skipped — measured over budget at 10512 Hz
+[rateplay] === probe arm A: live baseline (timer1 IRQ feeder + sound DMA) ===
+[rateplay] A prefilled 4096 samples in 2 frames (target 2816)
+[rateplay] A irq armed: IE=0x0011 IME=1 (witness: timer1 bit set / IME 1)
+[rateplay] A frame  128/1328 bs=2048 lead=1952
+[rateplay] A frame  256/1328 bs=2048 lead=2208
+[rateplay] A frame  384/1328 bs=2048 lead=1936
+[rateplay] A frame  512/1328 bs=2048 lead=2016
+[rateplay] A frame  640/1328 bs=2048 lead=2096
+[rateplay] A frame  768/1328 bs=2048 lead=2176
+[rateplay] A frame  896/1328 bs=2048 lead=1904
+[rateplay] A frame 1024/1328 bs=2048 lead=1984
+[rateplay] A frame 1152/1328 bs=2048 lead=1888
+[rateplay] A frame 1280/1328 bs=2048 lead=1968
+[rateplay] A producer finished (all 1328 frames decoded)
+[rateplay] A feed: pushed=2718538 consumed=2718538 underflows=2107 ledger [OK]
+[rateplay] A period audit: hw_elapsed=17554 serviced=17554 coalesced=0 max_gap=0 late=0 max_delay_ticks=0 grace=16 push_swallowed=71 pushes_with_swallow=71
+[rateplay] A audit verdict: replays=0 (coalesced=0 late=0) of 17554 serviced periods; attributed_to_push_window=true (swallowed=71 in 71 pushes)
+[rateplay] A playback verdict: frames=1328/1328 samples=2718538 underflows=2107
+[rateplay] A quiesced: IE=0x0011 IF=0x0000 (IF cleared, DMA stopped, timer1 keeps clocking)
+[rateplay] probe A: frames=1326 cal=0/0 clock_retries=0 drains=0 hash=3E765D9D samples=5437076
+[rateplay] probe A wait: sum=13125 max=1871 max_idx=1321
+[rateplay] probe A decode: sum=2796166 max=2147 max_idx=572
+[rateplay] probe A convert: sum=95182 max=74 max_idx=183
+[rateplay] probe A push_cs: sum=12081 max=12 max_idx=957
+[rateplay] probe A gross: sum=2916819 max=2229 max_idx=572
+[rateplay] probe A closure: sum=265 underflows=0
+[rateplay] === probe arm B: feeder off (no IRQ, no sound DMA), ring drained in-loop ===
+[rateplay] B frame    0/1328 bs=2048 lead=0
+[rateplay] B frame  128/1328 bs=2048 lead=0
+[rateplay] B frame  256/1328 bs=2048 lead=0
+[rateplay] B frame  384/1328 bs=2048 lead=0
+[rateplay] B frame  512/1328 bs=2048 lead=0
+[rateplay] B frame  640/1328 bs=2048 lead=0
+[rateplay] B frame  768/1328 bs=2048 lead=0
+[rateplay] B frame  896/1328 bs=2048 lead=0
+[rateplay] B frame 1024/1328 bs=2048 lead=0
+[rateplay] B frame 1152/1328 bs=2048 lead=0
+[rateplay] B frame 1280/1328 bs=2048 lead=0
+[rateplay] B producer finished (all 1328 frames decoded)
+[rateplay] B feed: pushed=2718538 consumed=2718538 underflows=0 ledger [OK]
+[rateplay] probe B: frames=1328 cal=0/0 clock_retries=0 drains=15929 hash=3E765D9D samples=5437076
+[rateplay] probe B wait: sum=132 max=1 max_idx=2
+[rateplay] probe B decode: sum=2758630 max=2116 max_idx=572
+[rateplay] probe B convert: sum=94117 max=72 max_idx=10
+[rateplay] probe B push_cs: sum=11926 max=10 max_idx=5
+[rateplay] probe B gross: sum=2865120 max=2196 max_idx=473
+[rateplay] probe B closure: sum=315 underflows=0
+[rateplay] === probe arm C: sound DMA armed (repeat, FIFO-requested), no IRQ ===
+[rateplay] C frame    0/1328 bs=2048 lead=0
+[rateplay] C frame  128/1328 bs=2048 lead=0
+[rateplay] C frame  256/1328 bs=2048 lead=0
+[rateplay] C frame  384/1328 bs=2048 lead=0
+[rateplay] C frame  512/1328 bs=2048 lead=0
+[rateplay] C frame  640/1328 bs=2048 lead=0
+[rateplay] C frame  768/1328 bs=2048 lead=0
+[rateplay] C frame  896/1328 bs=2048 lead=0
+[rateplay] C frame 1024/1328 bs=2048 lead=0
+[rateplay] C frame 1152/1328 bs=2048 lead=0
+[rateplay] C frame 1280/1328 bs=2048 lead=0
+[rateplay] C producer finished (all 1328 frames decoded)
+[rateplay] C feed: pushed=2718538 consumed=2718538 underflows=0 ledger [OK]
+[rateplay] probe C: frames=1328 cal=0/0 clock_retries=0 drains=15929 hash=3E765D9D samples=5437076
+[rateplay] probe C wait: sum=126 max=1 max_idx=18
+[rateplay] probe C decode: sum=2764749 max=2121 max_idx=572
+[rateplay] probe C convert: sum=94349 max=72 max_idx=0
+[rateplay] probe C push_cs: sum=11958 max=10 max_idx=9
+[rateplay] probe C gross: sum=2871455 max=2202 max_idx=572
+[rateplay] probe C closure: sum=273 underflows=0
+[rateplay] probe equality: hash A=3E765D9D B=3E765D9D C=3E765D9D samples 5437076/5437076/5437076 [OK]
+[rateplay] teardown: IE=0x0011 IF=0x0000 IME=1
+[rateplay] verdict FAILED — screen RED
