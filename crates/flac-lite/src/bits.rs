@@ -12,13 +12,14 @@
 //! FLAC packs its fields MSB-first across byte boundaries, so the whole decoder
 //! is built on this one primitive. Design notes for the implementation:
 //!
-//! - **Position-only design** (chosen 2026-09-04): the cursor is a plain bit
-//!   offset into the backing slice; every read recomputes what it needs from
-//!   `bit_pos`. No refill accumulator — the naive read is a handful of shifts,
-//!   and ARMv4T (ARM7TDMI) has no hardware divide anyway, so byte-wise loads
-//!   dominate regardless. If the perf spike (FLAC.md) ever shows the bit reader
-//!   hot, a buffer can be added *behind the same API* without touching callers.
-//! - ARMv4T (ARM7TDMI) has **CLZ** but **no hardware divide** — prefer
+//! - **Refill-accumulator design (E2a, landed alongside E2b):** `acc` is a
+//!   left-aligned, MSB-first `u32` window (next bit = bit 31) with invariant
+//!   `logical cursor = pos * 8 − valid`. Refill is byte-at-a-time (`ldrb`, no
+//!   alignment assumptions) while `valid <= 24`. Fast-path reads (1..=31 bits
+//!   when `valid >= n`) and `rice_quotient`'s 8-bit table lookups operate
+//!   directly on `acc` in registers; 32-bit reads and cold-path reads fall back
+//!   to `peek_at` at the derived logical cursor and resync the window.
+//! - ARMv4T (ARM7TDMI) has **no CLZ and no hardware divide** — prefer
 //!   shift/add and `& 7` masks over anything multiplicative. Nothing here
 //!   divides or modulo-divides by a variable.
 //! - Signed fields (LP coefficients, residuals, verbatim samples) are
@@ -36,16 +37,47 @@ use crate::{Error, Result};
 pub struct BitReader<'a> {
     /// Backing bytes (normally a subslice of a `&'static` ROM blob).
     data: &'a [u8],
-    /// Read cursor, in bits from the start of `data`. Invariant:
-    /// `bit_pos <= data.len() * 8` (the cursor never advances past the end —
-    /// failed reads leave it untouched).
-    bit_pos: usize,
+    /// Bytes consumed — the byte just past the last fully buffered bit.
+    /// Invariant: `pos <= data.len()`.
+    pos: usize,
+    /// Bits buffered, MSB-first: the next bit to consume is bit 31. The
+    /// low `32 − valid` bits of `acc` are always zero.
+    /// Invariant: `logical cursor = pos * 8 − valid`.
+    acc: u32,
+    /// Valid bits in `acc` (0..=32).
+    valid: u32,
 }
 
 impl<'a> BitReader<'a> {
     /// Wrap a byte slice for bit-level reading.
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, bit_pos: 0 }
+        Self {
+            data,
+            pos: 0,
+            acc: 0,
+            valid: 0,
+        }
+    }
+
+    /// Refill **byte-at-a-time** while `valid <= 24` (after one byte
+    /// `valid` lands in 25..=32, so at most one byte load feeds one fast
+    /// read). The append at bit `24 − valid` (shift 0..=24) moves `pos`
+    /// and `valid` together: cursor-neutral by construction.
+    #[inline]
+    fn refill(&mut self) {
+        while self.valid <= 24 && self.pos < self.data.len() {
+            let byte = u32::from(self.data[self.pos]);
+            self.acc |= byte << (24 - self.valid);
+            self.pos += 1;
+            self.valid += 8;
+        }
+    }
+
+    /// Consume `n` buffered bits (`n <= valid`, caller-guaranteed).
+    #[inline]
+    fn consume(&mut self, n: u32) {
+        self.acc <<= n;
+        self.valid -= n;
     }
 
     /// Read `n` bits (1..=32) as an unsigned value, MSB-first.
@@ -53,23 +85,43 @@ impl<'a> BitReader<'a> {
     /// Returns [`Error::EndOfStream`] if fewer than `n` bits remain (cursor
     /// unchanged), and [`Error::InvalidField`] for `n == 0` or `n > 32`, which
     /// are caller bugs rather than stream conditions.
+    #[inline]
     pub fn read_bits(&mut self, n: u32) -> Result<u32> {
-        let val = self.peek_at(self.bit_pos, n)?;
-        // `peek_at` only succeeds when `bit_pos + n` fits in the slice, so the
-        // invariant `bit_pos <= total_bits` is preserved.
-        self.bit_pos += n as usize;
+        self.refill();
+        if n >= 1 && n <= 31 && self.valid >= n {
+            // acc is zero below bit (32 − valid) ≤ (32 − n), so the
+            // extract takes exactly the next n bits, MSB-first.
+            let val = self.acc >> (32 - n);
+            self.acc <<= n;
+            self.valid -= n;
+            return Ok(val);
+        }
+        let val = self.peek_at(self.bit_position(), n)?;
+        // Resync the window to sit just past the consumed field. Validated
+        // (peek_at succeeded), so the cursor arithmetic stays in range.
+        let take = n - self.valid; // n > valid guaranteed by the guard above
+        self.valid = 0;
+        self.acc = 0;
+        self.pos += (take >> 3) as usize;
+        let rem = take & 7;
+        if rem != 0 {
+            let partial = u32::from(self.data.get(self.pos).copied().unwrap_or(0)) << (24 + rem);
+            self.acc = partial;
+            self.valid = 8 - rem;
+            self.pos += 1;
+        }
         Ok(val)
     }
 
     /// Peek at the next `n` bits (1..=32) without advancing the cursor.
     ///
     /// Same width and end-of-stream semantics as [`Self::read_bits`] — same
-    /// error variants, cursor untouched on success *and* failure. This is
-    /// exactly what `peek_at` already guarantees, so peek is a direct wrap;
-    /// the caller-visible difference vs `read_bits` is purely the missing
-    /// `bit_pos += n`.
+    /// error variants, cursor untouched on success *and* failure.
     pub fn peek_bits(&self, n: u32) -> Result<u32> {
-        self.peek_at(self.bit_pos, n)
+        if n >= 1 && n <= 32 && self.valid >= n {
+            return Ok(self.acc >> (32 - n));
+        }
+        self.peek_at(self.bit_position(), n)
     }
 
     /// Read `n` bits (1..=32) as a two's-complement signed value.
@@ -130,14 +182,16 @@ impl<'a> BitReader<'a> {
     /// bad continuation, EOF) restores the cursor exactly as it was — the
     /// composite of several `read_bits` calls, rolled back on error.
     pub fn read_utf8_coded(&mut self) -> Result<u64> {
-        let start = self.bit_pos;
+        let start = (self.pos, self.acc, self.valid);
         match self.coded_number_inner() {
             Ok(v) => Ok(v),
             Err(e) => {
-                // Atomicity across the whole composite read; `bit_pos` only
-                // ever moves forward, and a failed number read never moves it
-                // at all.
-                self.bit_pos = start;
+                // Atomicity across the whole composite read; the logical cursor
+                // only ever moves forward, and a failed number read never moves
+                // it at all.
+                self.pos = start.0;
+                self.acc = start.1;
+                self.valid = start.2;
                 Err(e)
             }
         }
@@ -175,9 +229,10 @@ impl<'a> BitReader<'a> {
     /// distance to the next boundary with no modulo — an aligned position puts
     /// 8 in the subtraction and the mask folds it back to 0.
     pub fn byte_align(&mut self) -> u32 {
-        let drop = (8 - (self.bit_pos & 7)) & 7;
-        self.bit_pos += drop;
-        drop as u32
+        let drop = self.valid & 7;
+        self.acc <<= drop;
+        self.valid &= !7;
+        drop
     }
 
     /// Read a `u8` (8 bits) — the frame header's CRC-8 byte, the two bytes of a
@@ -224,11 +279,13 @@ impl<'a> BitReader<'a> {
     /// length cap is imposed — an unbounded unary is exactly what EOF
     /// rejects.
     pub fn read_wasted_bits(&mut self) -> Result<u32> {
-        let start = self.bit_pos;
+        let start = (self.pos, self.acc, self.valid);
         match self.wasted_inner() {
             Ok(k) => Ok(k),
             Err(e) => {
-                self.bit_pos = start;
+                self.pos = start.0;
+                self.acc = start.1;
+                self.valid = start.2;
                 Err(e)
             }
         }
@@ -255,18 +312,18 @@ impl<'a> BitReader<'a> {
     /// Read a Rice unary quotient (§9.2.7.2): count the zero bits until the
     /// terminating one (consumed), return the count.
     ///
-    /// **Table count — E2b landed 2026-10-21.** The live hot loop this
+    /// **Table count — E2b + E2a refill-accumulator.** The live hot loop this
     /// replaces (`while read_bits(1)? == 0` in
     /// [`crate::residual::decode_rice_partition`]) was E8's measured cost
     /// center for FIXED (unary 56.2% of gross); the E2b probe measured the
-    /// table count −21.7% on the whole FIXED arm (FLAC.md "E2b result").
-    /// Each 8-bit window of the run is answered by one `ldrb` from
-    /// [`LEADING_ONES`] on the inverted window (runs 0..=7 terminate inside,
-    /// 8 means a whole window of zeros — keep counting per window, ~5 cyc
-    /// per 8 bits instead of per bit). Unlike the probe, this rides the
-    /// position-only reader: each window is one `peek_at` gather at the
-    /// cursor, so E2a's accumulator reader is *not* part of this landing
-    /// (its −3.14% is a separate harvestable, E9's stacking question).
+    /// table count riding E2a's `u32` refill-accumulator reader at −21.7% on
+    /// the whole FIXED arm (FLAC.md "E2b result"). Each 8-bit window of the
+    /// run is answered by one `ldrb` from [`LEADING_ONES`] on the inverted top
+    /// byte of `self.acc` (`!(self.acc >> 24) as u8`; runs 0..=7 terminate
+    /// inside, 8 means a whole byte of zeros — keep counting per byte, ~5 cyc
+    /// per 8 bits instead of per bit), and the subsequent `read_bits(order)`
+    /// remainder extract consumes directly from the same buffered `self.acc`
+    /// window without re-gathering bytes via `peek_at`.
     ///
     /// Cursor: **atomic** like [`Self::read_utf8_coded`] — an unterminated
     /// run (bits run out before the terminator) restores the cursor to the
@@ -277,59 +334,67 @@ impl<'a> BitReader<'a> {
     /// frames wholesale), and atomic is the stronger contract. This is the
     /// E2b sample's one deliberate divergence, carried with its scope note.
     pub fn rice_quotient(&mut self) -> Result<u32> {
-        let start = self.bit_pos;
-        let total = self.data.len() << 3;
+        let snap = (self.pos, self.acc, self.valid);
         let mut quotient: u32 = 0;
         loop {
-            let remaining = total - self.bit_pos;
-            if remaining >= 8 {
-                // A full window at the cursor (peek_at cannot fail here:
-                // remaining >= 8; the `?` keeps the error path uniform).
-                let win = self.peek_at(self.bit_pos, 8)? as u8;
-                let run = u32::from(LEADING_ONES[usize::from(!win)]);
+            if self.valid < 8 {
+                self.refill();
+            }
+            if self.valid >= 8 {
+                let inv8 = !(self.acc >> 24) as u8;
+                let run = u32::from(LEADING_ONES[usize::from(inv8)]);
                 if run < 8 {
-                    // Terminator inside this window: consume the run and it.
-                    self.bit_pos += run as usize + 1;
+                    // Terminating one inside this byte: consume run + 1.
+                    self.consume(run + 1);
                     return Ok(quotient + run);
                 }
-                // Whole window of unary zeros: account it, keep counting.
+                // Whole byte of unary zeros: account it, keep counting.
                 quotient += 8;
-                self.bit_pos += 8;
+                self.consume(8);
             } else {
-                // Slice tail: 0 < remaining < 8 bits. Invert the tail in
-                // place, then top-align it inside the byte: the table counts
-                // the run from bit 7, and the forced zero below the tail
-                // (the `& mask` keeps inverted junk out) makes an
-                // unterminated tail read as exactly `v` — EOF.
-                if remaining == 0 {
-                    self.bit_pos = start;
+                // Slice tail: 0 < valid < 8 bits remain (valid == 0 is
+                // immediate EOF). The valid bits already sit at the top of
+                // `acc` (left-aligned window); `!acc >> 24` inverts them in
+                // place (bits 7..8−v) with inverted-zeros junk below, so
+                // masking everything from bit 7−v down leaves exactly
+                // [inverted valid bits][0 stopper][zeros]: the table count
+                // is the real run when it terminates inside the tail, and
+                // exactly `valid` when the run reaches end-of-slice — EOF.
+                let v = self.valid;
+                if v == 0 {
+                    self.pos = snap.0;
+                    self.acc = snap.1;
+                    self.valid = snap.2;
                     return Err(Error::EndOfStream);
                 }
-                let v = remaining as u32;
-                let win = self.peek_at(self.bit_pos, v)? as u32; // low v bits
-                let inv = ((!win) & ((1u32 << v) - 1)) as u8;
-                let run = u32::from(LEADING_ONES[usize::from(inv << (8 - v))]);
+                let inv8 = (!(self.acc >> 24) as u8) & (0xFFu8 << (8 - v));
+                let run = u32::from(LEADING_ONES[usize::from(inv8)]);
                 if run >= v {
                     // The run consumed every remaining bit with no real
-                    // terminator (masking guarantees run <= v).
-                    self.bit_pos = start;
+                    // terminator: unterminated unary (masking guarantees
+                    // run <= v, so this is run == v exactly).
+                    self.pos = snap.0;
+                    self.acc = snap.1;
+                    self.valid = snap.2;
                     return Err(Error::EndOfStream);
                 }
-                self.bit_pos += run as usize + 1;
+                self.consume(run + 1);
                 return Ok(quotient + run);
             }
         }
     }
 
     /// Bits remaining in the backing slice from the current cursor.
+    #[inline]
     pub fn bits_remaining(&self) -> usize {
-        (self.data.len() << 3) - self.bit_pos
+        (self.data.len() << 3) - self.bit_position()
     }
 
     /// Current cursor position in bits (useful for frame-boundary assertions
     /// and for the CRC-8-over-header check, which needs the raw header bytes).
+    #[inline]
     pub fn bit_position(&self) -> usize {
-        self.bit_pos
+        self.pos * 8 - self.valid as usize
     }
 
     /// Read `n` bits (1..=32, MSB-first) starting at absolute bit position
@@ -1641,7 +1706,12 @@ mod tests {
                 }
             }
             let mut r = BitReader::new(&data);
-            r.bit_pos = start;
+            let mut left = start;
+            while left > 0 {
+                let chunk = left.min(31);
+                let _ = r.read_bits(chunk as u32).unwrap();
+                left -= chunk;
+            }
             match (want, r.read_wasted_bits()) {
                 (Some(k), Ok(got)) => {
                     assert_eq!(got, k, "start {start}");
@@ -1658,6 +1728,48 @@ mod tests {
                     );
                 }
                 (want, got) => panic!("start {start}: oracle says {want:?}, reader {got:?}"),
+            }
+        }
+    }
+
+    // ---- E2a accumulator window invariants ---------------------------------
+
+    fn assert_window(r: &BitReader<'_>, where_: &str) {
+        assert!(r.pos <= r.data.len(), "{where_}: pos past slice");
+        assert!(
+            (r.valid as usize) <= r.pos * 8,
+            "{where_}: valid exceeds consumed bits"
+        );
+        assert!(r.valid <= 32, "{where_}: valid > 32");
+        let low_mask = match r.valid {
+            0 => u32::MAX,
+            32.. => 0u32,
+            v => (1u32 << (32 - v)) - 1,
+        };
+        assert_eq!(r.acc & low_mask, 0, "{where_}: acc dirty below valid");
+    }
+
+    #[test]
+    fn accumulator_window_invariants_hold_on_mixed_width_sweeps() {
+        let widths: [u32; 18] = [
+            1, 1, 1, 2, 3, 5, 7, 8, 9, 12, 16, 20, 24, 25, 31, 32, 33, 11,
+        ];
+        for seed in [0x1234_5678u32, 0xDEAD_BEEF, 0x0F0F_F0F0, 0x88C7_7A3B] {
+            let mut rng = Lcg(seed);
+            let mut data = [0u8; 40];
+            for b in data.iter_mut() {
+                *b = rng.next_u8();
+            }
+            let mut r = BitReader::new(&data);
+            assert_window(&r, "fresh");
+            for round in 0..250usize {
+                let n = widths[(round * 7 + data[round % data.len()] as usize) % widths.len()];
+                let _ = r.read_bits(n);
+                assert_window(&r, "sweep-read");
+                for pn in [1u32, 7, 32] {
+                    let _ = r.peek_bits(pn);
+                    assert_window(&r, "sweep-peek");
+                }
             }
         }
     }

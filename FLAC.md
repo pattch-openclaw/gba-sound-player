@@ -3501,18 +3501,26 @@ alone already exceeds it, pending E9's in-stack confirmation). Per the
 cumulative rule the E2b delta is harvestable regardless of who leads:
 it is a measured numerator cut on the decode path.
 
-**Amended 2026-10-26 (Sam): the landing did not reproduce the win.**
+**Amended 2026-10-26 (Sam): the landing did not reproduce the win —
+resolved 2026-10-27 by landing the missing E2a refill-accumulator.**
 `e455dba` landed this table in the live `flac-lite` decode path; a
 same-host rate-ROM bisect (two `cmp`-identical runs per point, staged
-assets census-identical, PCM pins MATCH) measures the committed reader at
+assets census-identical, PCM pins MATCH) measured that first landing at
 **+37.96 % FIXED / +15.2 % LPC** decode vs the pre-landing tree — the
 landing's own era printed producer walls consistent with that (≈267 ms).
-The probe's vendored-arm numbers stand as measured facts about that arm
-(the E6 inlining-layout confound is the plausible shape); the harvest
-claim above did not survive landing. Fix-or-revert is the ordering's new
-first step — see the rate-play entry's 2026-10-26 feeder-off amendment
-(`examples/flac_spike/experiments/feeder-off-control/` carries the
-bisect logs).
+**Root cause:** the E2b probe measured `rice_quotient` riding E2a's `u32`
+refill-accumulator (`AccumulatorReader`), where the next 8-bit window sits
+pre-shifted at `self.acc >> 24` and the subsequent `read_bits(order)`
+remainder extract shares the same buffered register window. `e455dba`
+instead bolted the 8-bit table lookup onto the stateless position-only
+`BitReader`, calling `peek_at(self.bit_pos, 8)` per window (a 2-byte
+`u64` gather at 7/8 of bit offsets) and then calling `peek_at` a second
+time over the same bytes for the remainder. **Fix (2026-10-27):** E2a's
+`u32` refill-accumulator (`pos`, `acc`, `valid`, `refill`, `consume`)
+is now landed inside `flac_lite::bits::BitReader` alongside E2b, restoring
+the probe's register-window shape (`!(self.acc >> 24) as u8`) and
+achieving real-time audible playback at correct tempo and pitch on
+`flac-rate-play.gba` — see the rate-play entry's 2026-10-27 amendment.
 
 **Preservation:** probe code lives in the sample dir above, never on
 `main`'s spike sources. The `perf/flac-spike-e2b-rl-table` branch
@@ -4761,3 +4769,51 @@ the same track. ③ E4 i32 for LPC unchanged in kind; its LPC projection
 must now be re-derived against the post-fix tree. The rate knob remains
 the fallback. Levers-compose holds: ①'s harvest and everything after it
 stack multiplicatively, each measured.
+
+**Amended 2026-10-27 (Sam): E2a refill-accumulator landed alongside E2b —
+root cause of the +38 % regression fixed; real-time playback confirmed at
+correct tempo and pitch.** Inspection of `crates/flac-lite/src/bits.rs`
+identified why `e455dba` regressed by +37.96 % on FIXED where the E2b
+probe measured −21.71 %: the probe's `rice_quotient` rode **E2a's `u32`
+refill-accumulator (`AccumulatorReader`)**, whereas `e455dba` landed the
+8-bit `LEADING_ONES` lookup onto the stateless position-only `BitReader`
+without E2a (`self.peek_at(self.bit_pos, 8)`). Without the accumulator,
+every 8-bit window at an unaligned bit offset (7/8 of positions) ran
+`peek_at`'s 2-byte slice loop into a 64-bit `u64` accumulator, shifted and
+masked it to 8 bits, discarded the unused bits (most Rice quotients are
+0–2 bits), and then `decode_rice_partition`'s `reader.read_bits(order)`
+called `peek_at` a *second* time across the exact same bytes to read the
+remainder.
+
+**The fix (`crates/flac-lite/src/bits.rs`):** `BitReader` now carries
+E2a's left-aligned, MSB-first `u32` refill window (`pos: usize`,
+`acc: u32`, `valid: u32`; invariant `logical cursor = pos * 8 − valid`,
+byte-at-a-time `refill()` while `valid <= 24`, register-shift fast path
+for `read_bits(1..=31)`, `peek_bits(1..=32)`, and `byte_align()`).
+`BitReader::rice_quotient` now refills `self.acc` when `self.valid < 8`,
+indexes `LEADING_ONES[usize::from(!(self.acc >> 24) as u8)]` directly from
+the top byte of the `u32` register, consumes `run + 1` via
+`self.consume(run + 1)`, and leaves the buffered window hot in `self.acc`
+for the immediately following `reader.read_bits(order)` remainder extract.
+
+**Toolchain pin note (`agb_hashmap v0.25.0`):** `agb v0.25.0` enables
+`agb_hashmap/allocator_api` (`#![feature(allocator_api)]` under
+`-Zbuild-std=core,alloc`). Newer Rust nightlies (e.g. `1.101.0-nightly
+2026-10-26`) split `core::alloc::Allocator` by adding an unstable
+`AllocatorNightly` bound on `Vec::drain(..)` and moving `const fn
+Vec::new_in` behind `#![feature(allocator_ext)]`, failing to compile
+`agb_hashmap v0.25.0` with `E0277: the trait bound ALLOCATOR:
+AllocatorNightly is not satisfied`. Pinning the host `nightly` toolchain
+to the recorded **`nightly-2026-09-04`** (`rustc 1.100.0-nightly
+(a69a63265 2026-09-03)`, LLVM 23.1.1) resolves the build and matches the
+comparator toolchain across the entire measurement history.
+
+**Gates & on-target result:** `make flac-test` (96 unit + 24 integration
+tests, including `accumulator_window_invariants_hold_on_mixed_width_sweeps`),
+`make spike-test` (15 + 8), `make rate-test` (27 + 9 + 8), and
+`make check` all green. Built ELF witness: `LEADING_ONES` at `0x0300022c`
+(`.iwram`); ROMs built: `flac-rate-play.gba` sha256 `2102c2a0…`,
+`flac-rate-spike.gba` sha256 `67d0e2b0…`, `flac-spike.gba` sha256
+`1f51ac8d…`. **Audible verification (Sam):** `flac-rate-play.gba` plays
+`bioluminescent.wav` at 10,512 Hz at the **correct tempo and correct pitch
+in real time** for the first time.

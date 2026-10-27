@@ -139,3 +139,17 @@ MATCH in every bisect log.
   project's biggest lever: e6577e0 decode live-adjusted ≈ 146 ms/frame ⇒
   derived producer gross ≈ 155 ms ≈ 80 % of budget (**derived, not
   measured** — the fix PR measures it).
+- **Resolved 2026-10-27 (E2a + E2b):** `e455dba` had landed E2b's 8-bit
+  `LEADING_ONES` table lookup onto the stateless position-only `BitReader`
+  (`peek_at(self.bit_pos, 8)` doing a `u64` multi-byte gather per window
+  and re-gathering bytes via `peek_at` for the remainder) *without* the
+  E2a `u32` refill-accumulator (`pos`, `acc`, `valid`) that the E2b probe
+  was built on. Adding E2a's `u32` refill-accumulator into
+  `flac_lite::bits::BitReader` alongside E2b (so `rice_quotient` indexes
+  `LEADING_ONES[!(self.acc >> 24) as u8]` directly from the register
+  window and `read_bits(order)` extracts the remainder from the same
+  buffered window) resolves the regression; `flac-rate-play.gba` (sha256
+  `2102c2a0…`, built on the pinned `nightly-2026-09-04` / `rustc
+  1.100.0-nightly a69a63265`) is confirmed playing `bioluminescent.wav` at
+  10,512 Hz at the **correct tempo and correct pitch in real time** for
+  the first time.
