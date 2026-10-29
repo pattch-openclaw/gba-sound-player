@@ -46,6 +46,16 @@
 //!   measured identity `(n >> 1) ^ (-(n & 1))`. The host witness additionally
 //!   anchors the sign convention against the encoder-side fold, so a
 //!   step-3a-style sign misreading cannot survive the composition.
+//! - [`word_skip`] — **PR B, C2 word-wide continuation skip**: whole-word
+//!   rotate-immediate zero tests make the past-8-bit unary continuation
+//!   O(q/32) (total run from bit 0 — the caller never adds; unterminated
+//!   as status; budget = slice length).
+//! - [`sample_step`] — **PR B, the composite sample-step**: owns the
+//!   hybrid's tier dispatch (tier-1 `ctz8` → C1 De Bruijn → C2), the
+//!   pinned remainder extract, the drain count q+1+p, and the fold — the
+//!   comprehensive correctness demonstration of the kernel track.
+//! - [`refill_merge`] — **PR B, the `rev8` refill merge** (the ratified
+//!   shape witness; its cost is the probe's left-to-measure question).
 //!
 //! Standalone workspace; cargo config is **inherited** from the repo root —
 //! a local `.cargo/config.toml` here would double `-Tgba.ld` at link time
@@ -55,7 +65,15 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod asm;
 pub mod ctz32;
+pub mod refill_merge;
 pub mod rice_unmap;
+pub mod rm_vectors;
+pub mod sample_step;
+pub mod ss_vectors;
+pub mod tables;
 pub mod unmap_vectors;
 pub mod vectors;
+pub mod word_skip;
+pub mod ws_vectors;
