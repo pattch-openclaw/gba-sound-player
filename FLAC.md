@@ -2397,6 +2397,21 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > with its consumer. The hybrid, its three-arm probe, and every cycle
 > number stay gated on the algorithm plan. Witness + cuts:
 > [E10 PR A landed](#e10-pr-a-landed--rice_unmap-fold-kernel-2026-10-16).
+>
+> **Status 2026-10-28: E10 PR B landed (C2 `word_skip` + the composite
+> `sample_step` + the `rev8` refill merge — correctness only, no
+> measurement).** The unit-test kernel track is complete: every kernel the
+> design of record scoped now exists with its dual witness (one committed
+> golden table per kernel — 241 / 456 / 470 vectors — host twin + on-target
+> mGBA sweep; `kernel-test` 9 → 20). The composite is the track's
+> comprehensive demonstration: tier dispatch (tier-1 `ctz8` → C1 De Bruijn
+> → C2), the q 0..=63 sweep, the pinned remainder extract, and the fold.
+> Decision 6's `.include` sharing is real: one `asm/fold_body.s` source
+> pasted at both fold call sites, and PR A's recorded encodings survive the
+> move (the no-drift check ran on the built ELF). No decode-path
+> integration, no timing — the hybrid, its three-arm probe, and every
+> cycle number stay gated on the algorithm plan. Witness + cuts:
+> [E10 PR B landed](#e10-pr-b-landed--c2-word-skip-composite-sample-step-and-rev8-refill-2026-10-28).
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -3999,6 +4014,148 @@ stay gated on the algorithm plan. Gates per kernel unchanged: `make
 kernel-test` + `make native-kernel-rom` + `make check` (all green; the
 crate's Makefile wiring needed no changes — new kernels ride the existing
 targets).
+
+## E10 PR B landed — C2 word-skip, composite sample-step, and rev8 refill (2026-10-28)
+
+**Correctness, not a probe.** Lands PR B of the
+[E10 unit-test kernel track](#e10-unit-test-kernel-track--design-of-record-2026-10-16):
+the three kernels the split scoped for it, in `examples/arm-kernels/`,
+completing the kernel track. Nothing here is integrated into the decode
+path and nothing is timed — the hybrid's three-arm probe and every cycle
+claim stay exactly where the
+[E10 algorithm plan](#e10--arm-mode-codeword-loop-algorithm-plan-of-action-2026-10-14)
+left them.
+
+**The kernels** (assembly under `asm/`, Rust twin + naive oracle per
+kernel under `src/`):
+
+- `word_skip` (`arm_word_skip`) — **C2**, the design's only kernel with
+  real design content: whole-word rotate-immediate zero comparisons
+  (`teq`/`addeq`/`beq`, ~2 cyc per 32 run-bits — Thumb v4 cannot compare a
+  full word against zero, which is exactly what starves the shipped loop
+  into its per-byte walk), the terminating word's tail counted by the
+  committed `ctz8` byte table (≤ 4 lookups). Carries decisions 1–4 as
+  written: standalone (mechanically separate from C1's De Bruijn), the
+  TOTAL run from bit 0 (the caller never adds), unterminated = status
+  data with no state save, budget = slice length with no cap (the answer
+  on a spent budget is the walk's `32 × consumed`, never a cap artifact).
+- `sample_step` (`arm_sample_step`) — the **composite**, the track's
+  comprehensive demonstration. Owns the tier dispatch (decision 2: lives
+  ONLY here — tier 1 `ctz8[byte0]` for q ≤ 7, C1's De Bruijn for 8–31 via
+  the committed index table, C2 beyond 31 through `bl arm_word_skip`; the
+  handoff signal is `w == 0`, never an answer value), the remainder
+  EXACTLY as decision 7 pins it — `(terminating_word >> (q+1)) &
+  ((1<<p) − 1)` with ARMv4's defined shift-by-32 settling the q = 31
+  boundary — the drain count q+1+p, the coded number `(q << p) | rem`,
+  and the fold through the shared source. Six-word output struct
+  {q, remainder, residual, drain_bits, words_consumed, status}: every
+  output the kernel owns is table-judgeable.
+- `refill_merge` (`arm_refill_merge`) — the optional `rev8` step, landing
+  at its consumer's PR per PR A's scope cut. The ratified merge shape
+  (ratified item 3): `window | (REV8[byte] << 24)`, the barrel shifter
+  placing the byte in the merge cycle, plus a defensive `0xff` mask on
+  the byte (AAPCS leaves upper bits of a u8 argument unspecified). Its
+  *cost* remains left-to-measure item 4 — the probe's question.
+
+**Decision 6's sharing, realized.** `asm/fold_body.s` is the single
+committed source for the fold's four instructions (include-guarded,
+destination-parameterized macro), pasted into one `global_asm!` unit at
+both use sites via `include_str!`/`concat!` (`src/asm.rs`) — the
+assembler-level `.include` made cargo-cwd-safe (rustc hands the assembler
+a temp file with no reliable search path). Each use assembles its own
+copy; the built ELF carries the fold twice, and the **no-drift witness**
+holds: `arm_rice_unmap` keeps PR A's recorded encodings
+(`e2001001`/`e2611000`/`e1a000a0`/`e0200001`), the composite's site shows
+the same sequence in its own registers (`e2028001`/`e2688000`/
+`e1a020a2`/`e0222008`).
+
+**Witnesses (the dual pattern, one committed table per kernel).** Three
+golden tables (seed 20261028, recipes in headers, regeneration-tripwire
+convention): `WS_VECTORS` 241 — decision-4 boundary pins first (q ∈ {0,
+31, 32, 63, 64, 65, 96, 127}, the bit-31 and bit-32 ones, the all-zero
+run, an over-budget slice, budget 0), then every terminated q 0..=127,
+100 uniform slices at varied budget, the unterminated family;
+`SS_VECTORS` 456 — the decision-8 grid (q 0..=63 × p ∈ {0..4, 8, 14}),
+the q = 31 shift-by-32 **sentinel** (remainder-domain bits live in
+words 1..3 with expectation `rem = 0` — the vector that convicts any
+merge-or-reversal reading of the window), the p = 0 order-0 skip, the
+unterminated family; `RM_VECTORS` 470 — every byte value 0..=255 pinned,
+top-byte-zero window contract asserted. The committed `CTZ8`/`REV8`
+tables are re-derived entry-by-entry from bit-loop oracles (`REV8`'s
+involution checked). Host twin (`make kernel-test` 9 → 20): twins mirror
+the assembly step-for-step against naive oracles **and** third
+formulations — C2's answer re-derived by `trailing_zeros` over the four
+words concatenated into a u128; the composite's residual round-tripped
+through the **encoder-side** fold (PR A's convention anchor re-deployed,
+so a sign misreading cannot survive) — plus fail-closed censuses
+re-asserted as tests. On-target: the kernel-check ROM sweeps all five
+kernels over the same tables — `word_skip` 241/241, `sample_step`
+456/456, `refill_merge` 470/470 — with the untouched C1 (346/346) and PR
+A (839/839) reproducing their own records in the same image (the
+control), nine contract lines OK (the three existing plus
+`ws-budget-zero`, `ws-total-from-bit0`, `ws-unterminated`,
+`ss-shift32-sentinel`, `ss-tier-boundaries` at q 7/8/32, `rm-placement`),
+verdict PASSED/BLUE. ROM sha256 `b324cdf3…` (full:
+`b324cdf39dedf72d36a88fa291f280cf80f46ae3fe32f780e0fb6ed41ca5139b`), two
+headless runs `cmp`-identical. ARM-mode-ness witnessed offline: 4-byte
+ARM encodings, ARM-only base+register `ldrb` addressing,
+register-value shifts.
+
+**Prior assumptions that did not survive** (all measured on this
+host/core while landing this PR):
+
+1. **`teqs` does not exist under `.syntax unified`** — clang rejects the
+   suffixed spelling outright ("'teq' can not set flags"): ARM's TEQ
+   *always* writes flags, the pre-UAL mnemonic is the S-flag form. The
+   design prose's `TEQS`/`ORRS` chain names needed the correction; the
+   landed shape is `teq`/`addeq`/`beq` per zero word and no `orr` at all
+   (the tail is the bounded `ctz8` walk, decision 1's isolation).
+2. **ARMv4T does not interwork through `LDM pc`** — the first ROM image
+   printed the three PR A control lines, then died on the very first C2
+   call: both new kernels returned `pop {{…, pc}}`, and a Thumb caller's
+   `bl` with an ARM `pop`-to-PC tail loops silently between the linker
+   thunk's literal and the kernel entry (the kernel's `bx lr` re-enters
+   the thunk, the thunk's `ldr pc` re-enters the kernel — forever, no
+   output). Only `BX`/`BLX` switch state on this core; the tails are now
+   `pop {{…, lr}}; bx lr`. C1 and PR A survived because they were
+   straight-line and ended `bx lr`. The same alignment audit caught an
+   AAPCS entry-alignment misread in an earlier draft (SP % 8 == 0 at
+   entry, not 4) — fixed in the frame before any measurement ran.
+3. **Edition-2024 `global_asm!` treats `{`/`}` as template placeholders —
+   in comments too.** The landed kernels carry no braces and never met
+   this; the new sources escape `{{`/`}}` (rustc unescapes before handing
+   bytes to the assembler, so the assembled output — and PR A's
+   encodings — are untouched).
+4. **The assembler-level `.include` needs a search path rustc does not
+   provide** — decision 6's paste belongs in the shipping Rust source
+   (`include_str!`/`concat!`), verified with host clang at the same
+   concatenation order before crate wiring.
+5. A **wiring correction, not a design one**: an early draft of the
+   composite read the remainder with a `rev8` reversal + `w_{t+1}` merge
+   (the tier loop sketched at chat level). Decision 7's pin is the
+   authority — the shipped composite implements the *literal* extract
+   over the terminating word only, and stitching the reversed-window
+   domain to spec-order streams stays the probe's vendored seam (the
+   design's left-to-measure items). The sentinel vector is what keeps it
+   honest at every gate.
+
+**Deliberate scope cuts:** no `.iwram` pinning (pin budgets belong to the
+probe's `nm`/`objdump` witness — the plan's 544 B table arithmetic stays
+its pricing, the probe measures what actually pins); no decode-path
+wiring, no cycle windows — the three-arm probe (ctrl / tab / arm, read as
+`arm − tab`), the bit-offset sweep only a vendored reader seam can run,
+the `rev8` refill *tax*, and every cycle claim stay gated on the
+algorithm plan; C3/C4 stay benched (arming triggers are measurement
+outcomes, deferred with the measurement); the composite claims no
+bit-offset correctness (decision 7's cut).
+
+**Gates** (all green 2026-10-28, toolchain `nightly` = rustc
+1.100.0-nightly `a69a63265`, mGBA 0.10.5): `make kernel-test` **9 → 20**
+(old count measured at HEAD before branching); `make check` clean (fmt
+included); `make native-kernel-rom` links and fixes; two headless runs
+`cmp`-identical, verdict PASSED/BLUE; pre-commit hook full suite green.
+The crate's Makefile wiring needed no changes — new kernels ride the
+existing targets (PR A's verification holds a third time).
 
 ## Sample-rate reduction — tooling and profiling proposal (2026-10-11)
 

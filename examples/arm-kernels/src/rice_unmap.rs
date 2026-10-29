@@ -16,8 +16,15 @@
 //! convention against the **encoder-side** fold (`x ≥ 0 → 2x`,
 //! `x < 0 → −2x − 1`) so no shared misreading of §9.2.7.2 can survive the
 //! composition. Nothing here is integrated into the decode path and
-//! nothing is timed; the `.include` sharing of the fold between the
-//! composite's two call sites (decision 6) arrives with PR B's composite.
+//! nothing is timed.
+//!
+//! **PR B changed the assembly's shipping form, not its bytes**
+//! (decision 6): the fold's four instructions now live in the single
+//! shared source `asm/fold_body.s`, pasted into the PR B assembly unit
+//! ([`crate::asm`]) at both use sites — this standalone kernel and the
+//! composite sample-step. The no-drift witness: `objdump` of the built
+//! ELF keeps PR A's recorded encodings here (`e2001001`/`e2611000`/
+//! `e1a000a0`/`e0200001`).
 
 /// `rice_unmap(n)` — the corrected §9.2.7.2 unmap **as a definition**:
 /// even → `n >> 1`, odd → `!(n >> 1)`, reinterpreted as `i32`.
@@ -46,46 +53,6 @@ pub fn oracle_rice_unmap(n: u32) -> i32 {
 pub fn rice_unmap_twin(n: u32) -> i32 {
     let mask = (n & 1).wrapping_neg(); // -(n & 1): 0 (even) or 0xFFFF_FFFF (odd)
     ((n >> 1) ^ mask) as i32
-}
-
-/// The assembly body lives in a module so the crate's `deny(unsafe_code)`
-/// gets exactly one reviewed exception per asm kernel (edition-2024
-/// `global_asm!` is an unsafe op and a macro-item `#[allow]` is ignored —
-/// the module attribute is what binds; see `ctz32`'s same-shape note).
-/// The exception covers only the kernel contract documented below (r0–r1,
-/// no flag writes, no memory, `BX lr` interwork return); both witnesses —
-/// host twin + on-target sweep — judge exactly these bytes.
-#[cfg(target_arch = "arm")]
-#[allow(unsafe_code)]
-mod asm {
-    core::arch::global_asm!(
-        r#"
-    .syntax unified
-    .arm
-    .text
-    .code 32
-    .global arm_rice_unmap
-    .type arm_rice_unmap, %function
-@ --------------------------------------------------------------------------
-@ PR A rice_unmap fold — ARM mode (mode-ness witnessed offline from the
-@ built ELF: `objdump -d` shows 4-byte ARM encodings; a passing sweep alone
-@ cannot tell the two modes apart).
-@
-@ r0 = n (the folded residual value). Returns the unmapped i32 in r0.
-@ Clobbers r1 only — and writes NO flags (no S bit anywhere): unlike C1,
-@ this kernel is invisible to the condition-code state around it, which is
-@ what lets the probe's composite keep live flags across the fold.
-@ Straight-line: AND / RSB / LSR / EOR — no branch, no table, no memory.
-@ Interwork-safe return (`BX lr`).
-@ --------------------------------------------------------------------------
-arm_rice_unmap:
-    and     r1, r0, #1          @ r1 = n & 1 (parity)
-    rsb     r1, r1, #0          @ r1 = -(n & 1): 0 or 0xFFFFFFFF mask
-    lsr     r0, r0, #1          @ r0 = n >> 1 (strip the folded LSB)
-    eor     r0, r0, r1          @ even: unchanged; odd: bitwise-not
-    bx      lr
-"#
-    );
 }
 
 /// The ARM-mode assembly kernel, called through the C ABI (the argument
