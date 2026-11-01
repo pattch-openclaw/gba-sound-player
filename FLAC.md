@@ -2427,6 +2427,25 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > discussion table; E9's composite now runs `arm` as the FIXED-side arm.
 > Method, findings, numbers:
 > [E10 result](#e10-result--the-arm-mode-hybrid-codeword-loop-lands-the-menus-biggest-fixed-side-win-2026-10-30).
+>
+> **Status 2026-10-31: E9 measured — the stack composes additively; the
+> arm+i32 FIXED decode FITS the full-rate budget mean-and-worst.**
+> Four-arm composite on one image (ctrl / arm / arm+i32 / +IWRAM scratch),
+> all witnesses green (host bit-exact vs `flac -d`, 628/628 frame-window
+> equality on the measured image, ctrl reproducing its recorded sums at
+> −2 cyc/frame): E4's i32 width rides the ARM kernel **additively in
+> absolute cycles** — the stacked LPC saving reproduces **99.78%** of E4's
+> isolated saving (FIXED 92.0%); the stacked *percentages* are amplified
+> only because the frame shrank (`i32 − arm` **−58.53% LPC / −7.35%
+> FIXED**). The stacked FIXED decode **fits 32,768 Hz mean and worst**
+> (94.47% / 94.95%) — the first in-budget FIXED arm in menu history
+> (mGBA decode-window scope; landing + E5 arbitration pending).
+> LPC lands 216.3% — fits 10,512 Hz (69.4%), misses 18,157 Hz (119.9%).
+> E3's IWRAM scratch pin is **inert** (+20 cyc/frame, an identical layout
+> constant on both clips). E1 stayed out by design: its relief was the
+> position-only reader's re-fetch premium, which the kernel's windowed
+> refill already absorbed — stacking would double-count. Full result +
+> method: [E9 result](#e9-result--stacking-arm-and-i32-lands-the-first-in-budget-fixed-decode-2026-10-31).
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -2575,7 +2594,7 @@ where FIXED's ~1,078 c/sample actually sits instead of narrowing to it by
 elimination — run it before investing further in E2b/E10 shapes so the
 next lever is chosen from a table, not an inference.
 
-### E9 — Composite arms: stacked variants vs isolated gains (proposed 2026-09-25; unmeasured)
+### E9 — Composite arms: stacked variants vs isolated gains (proposed 2026-09-25) — **measured 2026-10-31: additive composition; arm+i32 FIXED FITS 32,768 Hz mean+worst (94.47%/94.95%); E3 inert; [see result](#e9-result--stacking-arm-and-i32-lands-the-first-in-budget-fixed-decode-2026-10-31)**
 
 E1/E2a/E4 each measured one variable against the *live i64/position*
 baseline; nobody has measured the levers stacked. The gains are argued
@@ -2669,6 +2688,28 @@ FIXED-arm path clears 18,157 Hz mean **and** worst (56.5% / 56.8% of that
 rate's budget); that reading is what the rate track's step-5 sweep
 ([rate track](#sample-rate-reduction--tooling-and-profiling-proposal-2026-10-11))
 re-measures on the improved decoder, not asserts.
+Amended
+2026-10-31: **E9 measured** ([E9 result](#e9-result--stacking-arm-and-i32-lands-the-first-in-budget-fixed-decode-2026-10-31))
+— ~~E9 remains the next unmeasured decoder-side lever~~: the stack
+(E10 kernel + E4 i32) is the best-known decode path, its levers compose
+**additively in absolute cycles** (stacked LPC saving = 99.78% of E4's
+isolated saving), and its FIXED arm **fits 32,768 Hz mean-and-worst on
+mGBA** (94.47% / 94.95%; 2.30× total relief over the menu's 217.4%
+recorded baseline). The decoder-side menu holds no remaining unmeasured
+lever expected above the noise band: E3 measured inert in-stack, E1 is a
+double-count of relief the kernel already carries, E6/E7 are closed. The
+levers ahead are **landing and product work, in order**: (i) land the ARM
+kernel + i32 width into `crates/flac-lite` — the E2b lesson (a −21.7%
+sample that landed +38%) makes the landing, witnessed on the live link by
+same-image arms, the real gate on every number here; (ii) re-run the rate
+track's step-5 sweep on the stacked path (FIXED derives to 52.3%/52.6% of
+the 18,157 Hz budget — derived, to be re-measured; LPC at 216.3% needs
+the denominator: fits 10,512, misses 18,157 by ~17% decode-only, and the
+live-producer convert/push stages decide real-time at 32,768 — the
+convert word-store asm-kernel candidate is now on the critical path for
+full-rate *playback*); (iii) E5's hardware arbitration now decides
+whether the FIXED full-rate FITS holds on cart. PR 5's verdict stands
+unchanged.
 
 ## E1 result — ROM→RAM staging: cartridge reads are not the story (2026-09-22)
 
@@ -5181,3 +5222,159 @@ worktree), `make flac-test` 120 passed + 1 ignored (unchanged by
 construction — the patch touches no `crates/` file), `make check` clean,
 `make native-spike-rom` builds; pre-commit hook full suite green. The
 arm-kernels crate is untouched — `kernel-test` records stand.
+
+## E9 result — stacking ARM and i32 lands the first in-budget FIXED decode (2026-10-31)
+
+**Sample, not integrated.** As with E1/E2a/E2b/E4/E6/E7/E8/E10, the probe
+never lands on the live spike sources: its code is preserved as a
+reappliable sample under `examples/flac_spike/experiments/e9-composite/`
+(README + `e9-composite.patch` — the diff against `main` @ `a70174a`,
+verified `git apply --check` clean at that base and byte-identical to the
+measurement commit `2089854`'s diff). The plan of record — PR 4 cadence,
+PR 5 verdict — is untouched, and no decoder file in `crates/flac-lite/`
+changed. Measured ROM `flac-spike.gba` sha256
+`d95fe9ccbbf004d08154f3174acad0f5c4cc6a7711e922487a2de2d4d0cd5611`
+(stable across the measured runs and the post-commit re-hash; sha is
+provenance, the log `cmp` is the witness); mGBA `mgba-test-runner` runs
+2026-10-31 on the same host binary and pinned nightly (rustc
+1.100.0-nightly `a69a63265`) as every recorded entry; two headless runs
+byte-identical (`cmp`, 1,357 lines).
+
+**The composite, re-scoped to what the menu had become.** E9 as proposed
+(2026-09-25) asked for "E4-i32 + E2b + E6, reporting each component's
+marginal inside the stack". Since then E2a + E2b moved *inside* the E10
+`arm` (the e2b vendored body with the kernel swap), and E6 was ruled out
+(pinning slower on both arms). The measured stack therefore adds the only
+two levers still outside it: **E4-i32** — the unstacked lever with a
+measured effect — and **E3** (IWRAM decode scratch), riding the run as
+the renormalization question (its "sub-1% ceiling" was priced against a
+frame 2× slower than the stacked one). **E1 was excluded by design** and
+is recorded here so the decision is not re-litigated: staging relieves the
+position-only reader's per-byte ROM re-fetch premium, which the ARM
+kernel's windowed `rev8` refill already absorbed; shipping decode reads
+ROM regardless (E1's production-mitigation ruling), so a staged arm would
+double-count the same relief and read at or below the layout-noise band.
+
+**Harness shape (four IRQ-off windows per frame, one image).** **ctrl** —
+`driver::decode_one` verbatim (same-run control, cross-session anchor);
+**arm** — `e10::decode_one_arm` carried verbatim from its sample (the
+cross-session witness that the image carries the arm E9 stacks on);
+**i32** — `e9::decode_one_arm_i32`: the e10 vendored body with E4's i32
+layer swapped at exactly E4's vendor boundary (`integrate_fixed_i32`,
+`integrate_lpc_i32`, `pad_block_i32`, `decorrelate_i32` — verbatim from
+the E4 sample; the shared `decorrelate` call becomes a vendored copy —
+side arms are width sites; the reader and ARM kernel are **shared** with
+`e10.rs`, not re-vendored; `fill_state`'s cold i64 pad untouched by E4
+and by this stack alike); **iw** — the same `decode_one_arm_i32` decoding
+into two 8 KiB `.iwram` static buffers (`nm`: `scratch::LEFT`
+@`0x0300064c`, `RIGHT` @`0x0300264c`; `objdump -h`: `.iwram` **0x64c →
+0x464c**, exactly +16 KiB over the E10 image; boot-log echo as the
+same-image witness). The image also carries the E10-era e2b four-arm pass
+unchanged — it runs before the e9 pass and cross-checks `arm` inside the
+same boot (+7 cyc/frame between the two passes' arm arms — the passes'
+own micro-layout, well inside the noise band). Windows use `timed_reset`
+per window (the pass spans ≈ 7 G cycles — the Opus rollover rule applied
+pre-emptively; zero sentinel events).
+
+**Witnesses before any number counted:** host (`tests/e9_witness.rs` under
+`make spike-test`): the stacked path decodes the exact embedded clips
+**bit-exactly** vs `flac -d` **and** differentially frame-by-frame against
+the production driver. ROM: per-frame variant-vs-control sample-equality
+for all three variant arms — **628/628 frame-windows equal** (e2b + e9
+passes × 2 clips × 157 frames, `eq=1`), first offender named, divergence
+voids. Decode proof PASSED before timing (region pins; cross-arm PCM
+`0x54C7B356621B6E15` agree); calibration overhead **35** stable, IME = 0
+in-window (the E10 timed_reset shape).
+
+**Numbers (net of this image's own calibration; 157 frames per arm;
+budget 1,048,750 cycles/frame ≈ 512 c/sample):**
+
+| arm | FIXED sum | LPC sum | FIXED worst | LPC worst |
+|---|---:|---:|---|---|
+| ctrl | 280,206,417 | 970,588,127 | 1,793,641 @136 | 6,213,961 @145 |
+| arm | 167,877,039 | 858,836,678 | 1,074,727 @147 | 5,498,927 @145 |
+| **i32** | **155,546,078** | **356,168,695** | **995,812 @147** | 2,280,770 @145 |
+| iw | 155,549,218 | 356,171,835 | 995,832 @147 | 2,280,790 @145 |
+
+- **FIXED:** `i32 − arm` **−7.35%** (12,330,961 saved ≈ 38.4 c/sample);
+  mean 101.96% → **94.47%** of budget (483.8 c/sample), worst **94.95%**
+  @147 — **FITS mean-and-worst at 32,768 Hz**: the first in-budget FIXED
+  arm in the menu's history (every earlier arm, E10's included, sat at
+  ≥ 102.4% worst).
+- **LPC:** `i32 − arm` **−58.53%** (502,667,983 ≈ 1,563 c/sample); mean
+  521.60% → **216.31%** (worst 217.48% @145). Over at 32,768 and still
+  over at 18,157 Hz (119.9% mean — closing it needs a further ≈17%
+  numerator cut, derived 1 − 1,892,682/2,268,590); **fits 10,512 Hz**
+  (69.4% mean / 69.8% worst).
+- **E3 (`iw − i32`):** **+3,140 total = +20 cyc/frame, the identical
+  constant on both clips** — different content, same delta: a code-layout
+  artifact, not memory timing. **Inert**; scratch placement joins the
+  ruled-out list (output-buffer traffic pays no wait-state premium at
+  this scale — consistent with E1's data-staging and E6's code-fetch
+  results).
+
+**The composite answer (E9's actual question): levers compose additively
+in absolute cycles.** Stacked saving vs E4's isolated saving: **LPC
+99.78%** (502,667,983 of 503,768,257), FIXED 92.0% (12,330,961 of
+13,399,651). E8's table had priced the buckets as disjoint (i64
+integrator vs codeword loop); the measurement agrees — no super-linear
+compounding to chase, no sub-linear collision. The stacked *percentages*
+are amplified (−46.9% → −58.53% LPC; −3.74% → −7.35% FIXED) purely
+because the denominator shrank under an unchanged absolute saving. The
+menu's super/sub-linear framing is an answered question: the answer is
+addition, so the cumulative-product arithmetic on measured absolutes is
+the right composition rule.
+
+**Cross-session witnesses.** ctrl reproduces the E10-recorded sums at
+exactly **−314 total** (−2 cyc/frame both clips; worst indices
+@136/@145, min @156 exact). `arm` sits **−34,069** (−217 cyc/frame, the
+same constant on both clips — this image's vendored-layout offset,
+≈0.02% of the sums; the E6 confound, stated and bounded: far under every
+reading-rule threshold), means 101.96% / 521.60% vs E10's recorded
+101.98% / 521.62%; the carried e2b pass reproduces the e9 pass's `arm` to
++7 cyc/frame within the same boot. The image carries the arms it claims.
+
+**Reading (the menu's rule).** The `i32` arm carries to PR 5's discussion
+table as the best-known decode path: **FIXED fits the full-rate budget
+mean-and-worst on the emulator**; LPC at 216.3% remains the rate track's
+denominator question. Three standing caveats, none settleable by this
+probe: **(1) Landing** — E2b's −21.7% sample landed at +38%; these
+numbers describe the probe's vendored link, and the kernel + i32 landing
+into `crates/flac-lite` must re-witness them on the live link before any
+product claim. **(2) E5** — mGBA's gamepak model is unarbitrated
+hardware. **(3) Producer scope** — the windows are IME-off decode alone.
+At 32,768 Hz the decode FIT (worst 995,812 cyc = 59.3 ms of the 62.5 ms
+frame) leaves ≈3.2 ms of margin while the live producer's convert (~6.8
+ms, the feeder-off probe's instrument reading) + push (~0.9 ms, the
+word-copy era) stages measure ≈7.7 ms — so **full-rate playback** needs
+the convert word-store asm-kernel candidate too; decode-side, the gate
+closed here. At 18,157 Hz the stacked FIXED decode plus producer stages
+derive to ≈59% of budget with room; LPC fits 10,512 with the stages
+included (≈73% derived) and misses 18,157. A rate-play ROM re-run at the
+target rate is what converts these derived figures into audible claims.
+
+**Prior assumptions that did not survive:** (1) the pre-run
+renormalization prediction that E3's "sub-1%" ceiling would read 1–3% of
+the stacked frame — it read +0.002%: renormalization amplifies a *real*
+absolute cost, and E3 had none to amplify; (2) the pre-run FIXED stack
+projection (arm × E4's isolated −3.74% ⇒ ≈98% mean) under-called it —
+composition is absolute addition, not percentage-on-percentage, and the
+measured saving (12.33M ≈ 7.35% of the arm) landed the mean at 94.47%.
+Both corrections point the same way: E9's discipline (measure the marginal
+inside the stack) was worth running precisely because the isolation-era
+projections were the wrong composition rule.
+
+**Deliberate scope cuts:** E1 staging (double-count rationale above);
+E6 code pinning (ruled-out negative — re-measuring it in-stack would
+re-measure a known regression); escape partitions and p > 14 inherit the
+kernel's loud rejection (census-asserted absent on the clips); no
+decode-path wiring; no rate change — the E-menu's fixed 32 kHz embedded
+clips; no live-producer measurement (the 32,768 Hz rate-play re-run and
+the convert kernel are follow-ups, not this probe).
+
+**Gates** (all green 2026-10-31): `make spike-test` host tests **45 → 47**
+(new `tests/e9_witness.rs` 2; carried lib 30, e10 4, e2 1, e2b 2,
+spike_witness 8), `make flac-test` 120 passed + 1 ignored (unchanged —
+the patch touches no `crates/` file), `make check` clean, `make
+native-spike-rom` builds; pre-commit hook full suite green on the
+measurement commit `2089854`.
