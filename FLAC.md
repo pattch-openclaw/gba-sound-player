@@ -2446,6 +2446,17 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > position-only reader's re-fetch premium, which the kernel's windowed
 > refill already absorbed — stacking would double-count. Full result +
 > method: [E9 result](#e9-result--stacking-arm-and-i32-lands-the-first-in-budget-fixed-decode-2026-10-31).
+>
+> **Status 2026-11-01: split proposal opened (docs-only; no measurement).**
+> The E9 ordering's landing item (i) ("land the ARM kernel + i32 into
+> `crates/flac-lite`") is reorganized as a two-crate split: a portable
+> pure-Rust core (`flac-lite` — the E2a+E2b reader already lives there,
+> `deny(unsafe_code)` held) and a GBA overlay (`flac-lite-gba` — the E10
+> asm kernels, the guarded i32 path, the pin) meeting at a witnessed
+> kernel seam:
+> [flac-lite and flac-lite-gba — portable core split proposal (2026-11-01)](#flac-lite-and-flac-lite-gba--portable-core-split-proposal-2026-11-01).
+> No menu item changes status — the proposal reorganizes landing work, not
+> measurement.
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -2710,6 +2721,13 @@ convert word-store asm-kernel candidate is now on the critical path for
 full-rate *playback*); (iii) E5's hardware arbitration now decides
 whether the FIXED full-rate FITS holds on cart. PR 5's verdict stands
 unchanged.
+Amended
+2026-11-01: item (i) is reorganized as the
+[flac-lite and flac-lite-gba split proposal](#flac-lite-and-flac-lite-gba--portable-core-split-proposal-2026-11-01)
+— the ARM kernel + guarded i32 land in the **overlay**, not in the core,
+over a seam whose default is the portable Rust twin; the same-image
+live-link witness that item (i) demanded is carried unchanged into the
+seam PR's gate. Items (ii) and (iii) stand as written.
 
 ## E1 result — ROM→RAM staging: cartridge reads are not the story (2026-09-22)
 
@@ -5378,3 +5396,155 @@ spike_witness 8), `make flac-test` 120 passed + 1 ignored (unchanged —
 the patch touches no `crates/` file), `make check` clean, `make
 native-spike-rom` builds; pre-commit hook full suite green on the
 measurement commit `2089854`.
+
+## flac-lite and flac-lite-gba — portable core split proposal (2026-11-01)
+
+**Proposal, not measurement.** Reorganizes the E9 ordering's landing work
+(item (i)) into a two-crate architecture with value outside this project:
+the decode core as a reusable portable crate. Readiness facts below are
+either **measured** (verified in the repo tree, commit-cited) or labeled
+**hypothesis** (to be settled by the named PR's gate — same rule as the
+menu itself).
+
+**Why.** The crate exists because no portable no-std FLAC decoder
+compiled for this target (§Rust FLAC Landscape: symphonia's failure was
+structural, not dependency-tree-only). What it became is a bit-exact,
+zero-dependency, zero-allocation `#![no_std]` frame decoder whose entire
+unsafe surface is one cfg-gated placement attribute — a shape that is
+useful far beyond the GBA. Meanwhile the menu's levers split cleanly:
+the *portable* ones can live in the core, and the *platform-bound* ones
+(hand-written ARM-mode asm) must not contaminate it.
+
+**What is already portable (measured).**
+
+- `crates/flac-lite`: zero deps, zero-alloc decode path,
+  `#![deny(unsafe_code)]` with the single named exception ratified
+  2026-10-22 — `unsafe(link_section = ".iwram")` on the immutable
+  `LEADING_ONES` table, carried under
+  `cfg_attr(target_arch = "arm", …)`, so host builds compile with zero
+  unsafe surface. Phase 1 decode through `decode_frame` is complete and
+  `make flac-test` (120 passed + 1 ignored) runs the crate's unit tests
+  on the **host** (macOS aarch64) — the existing host suite is itself
+  evidence the crate is not thumbv4t-bound.
+- **E2a + E2b are already in the core, pure Rust** (`abb8d7e`): the `u32`
+  refill-accumulator reader and the `LEADING_ONES` table-count
+  `rice_quotient` are the live implementation in `bits.rs`. Their −3.1% /
+  −21.7% readings are GBA measurements; the mechanism (table count per
+  8 bits beats per-bit iteration) is argued, not measured, on other
+  targets.
+- The core's only GBA residue: the `.iwram` **section name** — a GBA
+  link-script contract other ARM bare-metal targets do not define (a
+  link failure there, loud not silent) — and the crate metadata ("for
+  GBA (thumbv4t-none-eabi)").
+
+**So: is E2a + E2b an option for the portable core?** It is not an
+option, it is the present state — landed, pure Rust, no unsafe. What
+remains portable-performance-wise is smaller than the menu's headline
+numbers suggest, and honesty requires saying what does *not* travel:
+
+- **E4 i32 does not travel as landed.** Its safety is profile-bound
+  (measured precision ≤ 11 / |coeff| ≤ 751 ⇒ dot ≤ 2²²; profile
+  precision 15 is *not* safe — E4 result's pack-time guard), and its
+  −46.9% LPC win is an **ARMv4T artifact**: 64-bit arithmetic is
+  software-emulated there. **Hypothesis (derive, then measure once):**
+  on 64-bit hosts `i64` is native and the variant buys little; the
+  portable core keeps the i64-accumulate / truncate-at-store rule and
+  ships no width fork. The i32 path belongs to the overlay, armed by a
+  per-frame parse-time bound (precision + coefficient census), with
+  i64 fallback when the bound fails.
+- **E10 does not travel.** ARM-mode encodings are thumbv4t-only (and
+  asm/unsafe by construction; the interwork findings — no `LDM pc`
+  interworking, `pop {lr}` + `bx lr` returns — are platform lessons).
+  Overlay material.
+- E1/E3/E6/E7 are closed, inert, or measured-negative; nothing portable
+  to extract.
+
+The answer to "most performant portable no-std no-unsafe core" is
+therefore: **the E2a+E2b reader (already in), clean i64 plumbing, and
+LLVM-friendly structure** — the menu's remaining wins are platform-bound
+by nature, which is exactly what this split isolates instead of hiding.
+
+**Portability ladder for the core** (each PR: zero behavior change to
+decode output, all existing gates green, `flac-test` count never
+regresses):
+
+1. **Metadata + docs** — description/keywords/README reframed: portable
+   no-std FLAC frame decoder; GBA is the founding platform, not the
+   boundary. Docs-only.
+2. **Pin gate** — move the `.iwram` attribute behind an off-by-default
+   `iwram-pin` feature that only the GBA overlay enables (keeps the
+   ratified exception count at one; removes the missing-section failure
+   mode for other ARM bare-metal targets). Decision belongs to this PR;
+   the feature gate is recommended over documenting the link-script
+   contract.
+3. **Second-target build witness** — a Makefile line building
+   `flac-lite` for one non-thumbv4t bare-metal triple (e.g.
+   `thumbv7em-none-eabi`) alongside thumbv4t + host. **Hypothesis: it
+   already builds once 2 lands**; the gate records portability as a
+   fact with no performance claim attached.
+4. **Phase 2 items promoted to the portable roadmap** — `crc8`/`crc16`
+   (step 5: pure Rust, cheap, makes verification available on every
+   target); the `Decoder::decode_next` per-frame loop with the
+   composition witness already designed for it (layout suite over the
+   committed frame-run table first, then the production driver); and a
+   **stream-scan cursor** — the measured frame-sync filtering (§Frame
+   sync scanning: what actually filters) as the portable frame source,
+   so the core consumes a plain `&[u8]`. The GAFP `Manifest` scaffold
+   stays product-side container work: a manifest is *one* frame source,
+   not the decoder's contract.
+5. **Full-profile correctness** (steps 7–8) — LPC ≤ 32, escaped
+   partitions, wasted bits stay correct in the core for arbitrary FLAC;
+   the constrained encode profile is enforced at the product's pack
+   time, never needed as a core precondition. (This is also what lets
+   the core stay honest where the overlay's kernels loud-reject
+   escape partitions and p > 14.)
+
+**The overlay (`crates/flac-lite-gba`).** Depends on `flac-lite`; carries
+(a) the E10 kernels — oracle + Rust twin + asm over committed golden
+tables already exist in `examples/arm-kernels/` (dual-witnessed, PR #80);
+**the twins become the core's default Rust path** and the asm becomes
+the overlay's implementation; (b) the guarded i32 integrator path;
+(c) `iwram-pin` enablement; (d) the convert word-store kernel when it
+lands. The overlay owns no decode semantics of its own — correctness
+remains the core's witnesses (same golden tables, same `flac -d`
+bit-exactness).
+
+**The seam is the real engineering cost.** The kernels replace the
+per-sample codeword step inside `residual::decode_rice_partition`, so
+the core needs a hook shaped exactly like the composite's measured I/O
+(word window + budget + rice order in; value/consumed/state out —
+`sample_step`'s existing signature): a small generic `RiceKernel` trait
+whose default implementation is the portable twin, monomorphized (never
+`dyn`) — because the E2b lesson is that landing codegen coupling is
+where measured samples go to die. Seam PR gate: same-image live-link
+arms — the default path sample-equal **and timing-neutral** vs the
+pre-seam core on thumbv4t; overlay path reproducing the E9 stack numbers
+on the same image. If the generic seam regresses (the +38% shape), the
+named fallback is the vendored-loop overlay — the probe-era vendoring
+discipline with drift witnesses — recorded as a measured negative for
+the generic seam, not silently abandoned.
+
+**PR ladder (replaces E9 ordering item (i)):**
+
+1. Core: metadata + `iwram-pin` feature gate (no behavior change).
+2. Core: second-target build witness.
+3. Core: `crc8` + `crc16` (Phase 2 step 5).
+4. Core: `Decoder` loop + stream-scan cursor (composition witness).
+5. Core: `RiceKernel` seam + portable-twin default (thumbv4t-neutral
+   witness above).
+6. `flac-lite-gba`: asm kernels over the seam + guarded i32 + pin;
+   live-link same-image witness vs the E9 stack; then the rate-play
+   rewire — the spike `driver` + generated offset table (GAFP stand-in)
+   retires toward the real manifest (Phase 2 step 6).
+
+Ordering items (ii) (rate sweep re-run on the stacked path) and (iii)
+(E5 hardware arbitration) follow step 6 unchanged.
+
+**Reading rules.** The core claims: bit-exact FLAC frame decode, no_std,
+zero-alloc, zero unsafe except the pin attribute where a feature opts
+in, builds across bare-metal targets — and **never** a 32 kHz GBA
+real-time claim. That claim belongs to the overlay, measured on mGBA,
+pending E5 arbitration. The overlay never claims correctness independent
+of the core's witnesses. The split may not slow the product below
+whatever the overlay does not recover: every core PR's thumbv4t gate is
+the live-link witness, per the E2b lesson.
