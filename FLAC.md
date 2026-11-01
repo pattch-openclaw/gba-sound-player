@@ -2412,6 +2412,21 @@ identical (asset regions untouched). `make check` clean (fmt included).
 > integration, no timing — the hybrid, its three-arm probe, and every
 > cycle number stay gated on the algorithm plan. Witness + cuts:
 > [E10 PR B landed](#e10-pr-b-landed--c2-word-skip-composite-sample-step-and-rev8-refill-2026-10-28).
+>
+> **Status 2026-10-30: E10 measured — the hybrid ARM codeword loop is the
+> menu's biggest FIXED-side win (arm − tab −40.08% FIXED / −11.51% LPC,
+> both past the carry bar).** Three-arm probe (ctrl / tab / arm) on one
+> image, all witnesses green: host bit-exact vs `flac -d`, ROM 314/314
+> frame sample-equality, tables pinned `.iwram` at exactly the plan's
+> 544 B, two `cmp`-identical runs. FIXED mean 170.2% → **101.98%** of
+> budget (worst 102.50% — over, never closed by one lever); LPC mean
+> 589.5% → 521.6%. Tier census: t3 (C2 word-skip) never fires on this
+> content — the win is ARM mode across the per-sample loop, not the
+> long-run tail — and the `rev8` stitch carries a remainder un-reversal
+> the plan had priced only as refill cost. Both marginals carry to PR 5's
+> discussion table; E9's composite now runs `arm` as the FIXED-side arm.
+> Method, findings, numbers:
+> [E10 result](#e10-result--the-arm-mode-hybrid-codeword-loop-lands-the-menus-biggest-fixed-side-win-2026-10-30).
 
 **Explorations, not the plan.** PR 3 measured both arms far over the derived
 budget (FIXED mean ≈221%, LPC ≈658%; ~1,128 cycles/sample vs the budget's
@@ -2573,7 +2588,7 @@ E6 — reporting each component's **marginal** delta inside the stack, not
 just the composite total. Run before PR 5's verdict so the verdict table
 reflects the best-known decode path, not the baseline-plus-one.
 
-### E10 — ARM-mode hand-written codeword loop (E2b's ceiling; proposed 2026-09-25; last resort)
+### E10 — ARM-mode hand-written codeword loop (E2b's ceiling; proposed 2026-09-25; last resort) — **measured 2026-10-30: arm − tab −40.08% FIXED / −11.51% LPC — the menu's biggest FIXED-side win; [see result](#e10-result--the-arm-mode-hybrid-codeword-loop-lands-the-menus-biggest-fixed-side-win-2026-10-30)**
 
 The Rust target `thumbv4t-none-eabi` compiles Thumb only; ARM32 mode buys
 three-operand arithmetic and barrel-shifter operand modifiers that fold
@@ -2643,7 +2658,17 @@ PR A (fold) + PR B (C2 + composite), with the handoff/window/contract
 ambiguities settled as decisions of record
 ([E10 unit-test kernel track](#e10-unit-test-kernel-track--design-of-record-2026-10-16))
 — docs-only, no gate changes; the probe stays gated per the algorithm
-plan.
+plan. Amended
+2026-10-30: **E10 measured** ([E10 result](#e10-result--the-arm-mode-hybrid-codeword-loop-lands-the-menus-biggest-fixed-side-win-2026-10-30))
+— both marginals past the carry bar, carried to PR 5's table; the
+FIXED-side path now has 1.669× relief over the landed count (2.13× over
+the PR 3 baseline). **E9 remains the next unmeasured decoder-side lever**
+— its composite now takes the ARM `arm` as the FIXED-side arm — and PR
+5's verdict stands unchanged. By the cumulative product the measured
+FIXED-arm path clears 18,157 Hz mean **and** worst (56.5% / 56.8% of that
+rate's budget); that reading is what the rate track's step-5 sweep
+([rate track](#sample-rate-reduction--tooling-and-profiling-proposal-2026-10-11))
+re-measures on the improved decoder, not asserts.
 
 ## E1 result — ROM→RAM staging: cartridge reads are not the story (2026-09-22)
 
@@ -4974,3 +4999,185 @@ tests, including `accumulator_window_invariants_hold_on_mixed_width_sweeps`),
 `1f51ac8d…`. **Audible verification (Sam):** `flac-rate-play.gba` plays
 `bioluminescent.wav` at 10,512 Hz at the **correct tempo and correct pitch
 in real time** for the first time.
+
+## E10 result — the ARM-mode hybrid codeword loop lands the menu's biggest FIXED-side win (2026-10-30)
+
+**Sample, not integrated.** As with E1/E2a/E2b/E4/E6/E7/E8, the probe never
+lands on the live spike sources: its code is preserved as a reappliable
+sample under `examples/flac_spike/experiments/e10-three-arm-probe/`
+(README + `e10-three-arm-probe.patch` — the diff against main @ `c3ebd3b`,
+byte-identical to the measurement commit `5525336`'s diff, verified
+`git apply --check` clean at that base). The plan of record — PR 4 cadence,
+PR 5 verdict — is untouched, and no decoder file in `crates/flac-lite/`
+changed. Measured ROM `flac-spike.gba` sha256
+`87c80fa54e208e5940b9c1c4dc3a7dc55a0ac6f5c8fa51347e45137343c093db` (the
+image that printed the quoted log; a clean-worktree rebuild of the
+measurement commit printed a **different** sha `2aba8dcf…` — the recorded
+rebuild drift — while reproducing the **whole serial log byte-identically**
+(`diff` clean, 1,017 lines): the log is the witness, the sha provenance);
+mGBA `mgba-test-runner` runs 2026-10-30 on the same host binary as every
+recorded entry (toolchain `nightly` = rustc 1.100.0-nightly `a69a63265`);
+two headless runs byte-identical (`cmp`).
+
+**Harness shape (four IRQ-off windows per frame, one image — the E2b
+three-window pattern, one arm added):** **ctrl** — `driver::decode_one`
+(verbatim live path); **acc** — E2a's sample carried verbatim (cross-session
+witness); **tab** — E2b's sample carried **verbatim**: the plan's baseline,
+because E10 *replaces* the count rather than stacking on it (left-to-measure
+item 6's reading `arm − tab`); **arm** — `e10::decode_one_arm`: the e2b
+vendored body verbatim except `decode_rice_partition`, which hands the whole
+non-escape sample loop to the ARM kernel `arm_rice_partition`
+(`asm/rice_partition.s`; the fold rides the committed `asm/fold_body.s`
+paste, pinned byte-identical to the kernel crate's copy by a host test).
+One realization note: the probe composes the hybrid as a single whole-
+partition kernel rather than calling the track's word-in/word-out kernels —
+the seam needs the byte-window ABI, so `arm_rice_partition` re-embodies the
+tier map (tier-1 `ctz8` q ≤ 7 → C1 De Bruijn 8..=31 → C2 word-skip, handoff
+on `w == 0`, decisions 2/5) around the reader; the strict full-window tier-
+boundary test re-witnesses the boundaries. The E2b table count has meanwhile
+**landed** in `crates/flac-lite` (visible in `nm`: `bits::LEADING_ONES` at
+`0x0300022c`), so ctrl ≈ tab on this image (sums within −2 cyc/frame,
+worst indices exact) — `tab` is carried verbatim so the plan's marginal
+stands as written.
+
+**The arm's tables pin `.iwram` (ratified item 2): `nm`** — `BRUIJN_INDEX`
+@`0x0300032c`, `CTZ8` @`0x0300034c`, `REV8` @`0x0300044c`; `objdump -h` —
+`.iwram` grew **exactly 544 B** over the e2b layout (the plan's budget:
+256 + 256 + 32); the boot log echoes the three runtime addresses as the
+same-image echo. ARM-mode-ness is an ELF fact: 4-byte encodings throughout,
+`pop {…, lr}` + `bx lr` tail (never an LDM-to-PC, PR B's measured rule).
+Calibration: the `timed_reset` window shape (below), overhead **35** stable,
+nets 0, IME = 0 in-window.
+
+**Witnesses before any number counted:** host (`tests/e10_witness.rs`, under
+`make spike-test`): the variant decodes the exact embedded clips
+**bit-exactly** vs `flac -d` **and** differentially frame-by-frame against
+the production driver; lib unit tests (+6): tables exhaustive vs naive
+oracles (incl. rev32 bit-mapping, 200k-word De Bruijn agreement), the
+**bit-offset sweep** — quotients 0..=70 at every reader alignment 0..7 ×
+p ∈ {0,1,2,4,8,14} against a naive per-bit oracle (decision 7's cut,
+left-to-measure item 5, discharged at the seam), random multi-sample streams
+× p 0..=14 vs the per-bit oracle with tier identity
+(`samples == t1+t2+t3+slow`), strict tier boundaries on a full window, the
+unterminated/short-remainder **restore-nothing** contract (ratified item 1,
+witnessed naming the stopped state), and the cold slice-tail leg. ROM:
+per-frame variant-vs-control **sample-equality, 314/314 frame-windows
+equal** across both variant arms, first offender named, divergence voids.
+
+**Harness port — the Opus rollover rule, convicted mid-run.** The four-arm
+pass's windows alone sum ≈ 1.1 G (FIXED clip) + ≈ 3.9 G (LPC clip) — past
+2³² = 4.295 G cumulatively, window time only (the inter-window serial
+logging rides the same free-running span): the inherited free-running
+counter wrapped mid-pass, and the calibration netting turned the wrap
+sentinel into `4,294,967,271` printed with `wrapped=false` (LPC frame 125,
+where cumulative window time first crosses the roll — exactly the two
+failure modes the Opus port documented; the E-menu probes had always
+spanned < 2³², so the shape looked safe). The closure arithmetic
+convicted the harness before any re-run: run-1 sum − sentinel + neighbour-
+frame estimate = 858,864,716 vs the fixed image's 858,870,747 (Δ 0.0007%).
+Fix per the recorded recipe: `timed_reset` zeroes the timer pair before
+**every** window (reset outside the start→end span — every window still
+enters with byte-identical preceding code) and `net_sentinel` lets the
+sentinel ride the netting un-subtracted. The first-build image (sha
+`b8f11923…`) is cited as the harness-failure image only; every number below
+comes from the fixed image.
+
+**Probe-time findings (each witnessed).**
+
+1. **The stitch the plan left to the probe.** The algorithm plan's C1
+   consume formula `(w >> (q+1)) & ((1<<p)-1)` is **window-domain**: FLAC's
+   Rice remainder is MSB-first natural binary (§9.2.7.2), so the bits the
+   reversed window hands over are bit-reversed against the coded number.
+   The kernel un-reverses them (`rev16` via two `REV8` lookups + `>> (16−p)`,
+   ≈ 8 cyc/sample when p > 0; p == 0 rides the same path for free). This is
+   a **second** reversal cost beyond the plan's "one extra ldrb per 8 bits"
+   refill tax — the plan priced the refill; the remainder reversal belongs
+   to it too. Bit-exactness vs `flac -d` (host) and 314/314 ROM equality are
+   the witnesses: no reversal misreading survives them.
+2. **C2 is dormant on this content.** Tier census of the twin over the exact
+   embedded bytes: FIXED t1 **100.00%**; LPC t1 99.21% / t2 0.79% / t3
+   **0.00%** (`unterm` 0, `escapes` 0, max p 10 ≤ 14). The plan's
+   "per-clip quotient distribution decides how much" answers **zero** for
+   these clips: the win rides ARM across the whole per-sample loop, not
+   run-length continuation — the per-sample saving vs tab is the same
+   constant on both clips (≈349 FIXED / ≈348 LPC c/sample).
+3. **The `rev8` refill tax pays for itself (left-to-measure item 4).**
+   The measured saving is a per-sample *constant* across clips with
+   different residual densities — if the reversal tax ate the count win,
+   `arm − tab` would not sit at the same per-sample constant everywhere;
+   the headline risk ("if `rest` moves, the reversal ate the win") did not
+   materialize on this shape.
+4. Recorded, not attributed by this probe: ARM7TDMI prices register-value
+   shifts at 1 + ceil(n/8) — the plan's "one cycle" substrate claim is
+   optimistic — and the measured −40% subsumes it. The measured totals are
+   the authority.
+
+**Numbers (net of this image's own calibration; 157 frames per arm; budget
+1,048,750 cycles/frame ≈ 512 c/sample):**
+
+| arm | FIXED sum | LPC sum | FIXED worst | LPC worst |
+|---|---:|---:|---|---|
+| ctrl | 280,206,731 | 970,588,441 | 1,793,643 @136 | 6,213,963 @145 |
+| acc | 346,674,306 | 1,089,159,380 | 2,222,575 @4 | 6,979,748 @145 |
+| tab | 280,212,854 | 970,594,564 | 1,793,682 @136 | 6,214,002 @145 |
+| arm | **167,911,108** | **858,870,747** | 1,074,944 @147 | 5,499,144 @145 |
+
+- **FIXED:** `arm − tab` **−40.08%** (112,301,746 saved ≈ 349 c/sample at
+  the house mean/blocksize convention). Mean 170.18% → **101.98%** of
+  budget (1,784,795 → 1,069,498; 871.5 → 522.2 c/sample); worst
+  **102.50%** @147 (frames 136/147 tie at ctrl 1,793,643 — the top-frame
+  shuffle like E2a/E2b; the mean is the reading).
+- **LPC:** `arm − tab` **−11.51%** (111,723,817 ≈ 348 c/sample). Mean
+  589.48% → **521.62%** (3,018.6 → 2,671.1 c/sample); worst 524.35% @145.
+- **Cross-session witnesses:** ctrl reproduces the tab sums recorded in E2b
+  (−2 cyc/frame, worst indices @136/@145 and min @156 exact), and `acc`
+  reproduces E2b's marginals through the landed ctrl: acc/ctrl = 1.23721
+  FIXED / 1.12216 LPC vs 1/(1−0.1917)/1/(1−0.1089) = 1.23716/1.12221
+  predicted (agreement to ~5·10⁻⁵ both) — the image carries the arms it
+  claims.
+- Worst frames stay **OVER BUDGET in every arm**. Screen verdict RED =
+  measurement completed, budget missed — harness completed 2/2.
+
+**Reading (the menu's rule, executed).** Both marginals sit far past the
+demote band (~9–13 cyc/frame layout noise) and past the ≥ ~10% carry bar —
+**carry both arms to PR 5's discussion table**. Relief factors on this
+image: `tab/arm` = **1.669×** FIXED, **1.130×** LPC; against the PR 3
+baseline the FIXED mean has moved 217.4% → 101.98% (2.13× total relief,
+E2b's landed count plus this). The measured relief **exceeds** the plan's
+"full elimination of the remaining unary ≈ 107.2%" estimate because the
+kernel subsumes the whole per-sample loop — fold, remainder, drain, refill —
+not just the count the estimate priced; the plan's floor arithmetic
+(`rest` + non-loop ≈ 43.8% of frame) was a count-only ceiling and holds
+only for that shape. Nothing here closes mean-and-worst (worst 102.50%):
+E10 is numerator relief, and per the cumulative rule (2026-10-11) it
+multiplies with the rate track rather than substituting — arithmetic on the
+measured mean: the FIXED arm path clears **18,157 Hz mean-and-worst**
+(56.5%/56.8% of that rate's budget) and 10,512 Hz by ~3×; LPC clears
+neither rate on this path alone (167% of budget even at 10,512) and still
+needs the E9 stack question. Stacked combinations stay argued, not measured
+(E9's discipline; its table now takes `arm` as the FIXED-side arm).
+
+**Prior assumptions that did not survive:** (1) the plan's C1 consume
+formula as a literal remainder extract (finding 1 — window-domain vs
+spec-order); (2) the free-running counter shape as portable to a four-arm
+pass (the Opus rule had to be convicted by an artifact first — **estimate
+the pass span before reusing the inherited shape**: mean × frames > 2³² ⇒
+per-window reset); (3) otherwise the plan's gates, hybrid, probe shape, and
+reading rule survived contact unchanged.
+
+**Deliberate scope cuts:** escape partitions and p > 14 are rejected loudly
+(`InvalidField`) — off-profile, census-asserted absent on the clips; the
+kernel's cold per-bit tail is kept as defensive code (witnessed directly,
+unreachable at the seam by the reader's ≥ 8-bit invariant); the folded-value
+overflow guard wraps instead (dead-frame divergence, module docs); no
+decode-path wiring; no rate change — the E-menu's fixed 32 kHz embedded
+clips, budget `real_time_budget(2048, 32_768)`; no IWRAM budget beyond the
+plan's 544 B.
+
+**Gates** (all green 2026-10-30): `make spike-test` host tests **23 → 45**
+(lib 15 → 30 (+6 `e10`), `tests/e10_witness.rs` 4, carried `e2` 1 +
+`e2b` 2, `spike_witness` 8; old count measured at `c3ebd3b` in a clean
+worktree), `make flac-test` 120 passed + 1 ignored (unchanged by
+construction — the patch touches no `crates/` file), `make check` clean,
+`make native-spike-rom` builds; pre-commit hook full suite green. The
+arm-kernels crate is untouched — `kernel-test` records stand.
