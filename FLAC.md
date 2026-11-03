@@ -5565,6 +5565,36 @@ never reaches `rice_quotient`, so fat LTO discards the unreferenced table
 assets are gitignored); the anchor's decode baselines re-record at the
 next E probe per the coexistence contract.
 
+**Landed 2026-11-02: step 3 — second-target build witness** (PR-ladder
+item 2). New gate `make flac-portable-check`: compiles `flac-lite` for
+`thumbv7em-none-eabi` (Cortex-M4F — a canonical non-thumbv4t bare-metal ARM
+triple; overridable via `SECOND_TARGET=`) with the same in-tree compile-gate
+shape as `flac-test`'s thumbv4t half, default features (pin OFF). Zero crate
+source changes — the proposal's hypothesis (*"it already builds once 2
+lands"*) is **confirmed**: the check is green against the tree as stepped.
+Witness strategy: the gate itself records the portability fact with **no
+performance claim attached** (reading rules). Two measured readiness facts:
+(a) container-portability — verified with the `rust-std` component for the
+triple **removed** and a clean `target/thumbv7em-none-eabi`:
+core/alloc/compiler_builtins compile from `rust-src` via
+`-Zbuild-std=core,alloc`, exactly the builder image's shape (nightly +
+rust-src), so no Dockerfile change rides along; (b) gate scope —
+`--features iwram-pin` on thumbv7em **also** compiles (rlib level), because
+the missing-`.iwram` failure mode step 2 removed is a **final-binary link**
+event, not a compile one; the gate therefore judges the default pin-OFF
+shape (no `.iwram` reference compiles on portable targets), and the link-
+level guarantee remains step 2's, witnessed on the GBA Built-ELF side.
+Prior assumptions: the proposal's "a Makefile line" — implemented as a named
+target so the witness is discoverable and gate-invocable like every other
+(`help` lists it); no other claim in the proposal turned out false.
+Deliberate scope cuts: no second triple beyond the named one (the gate is
+overridable, not multi-target); no CI wiring (repo has no workflows);
+`flac-test` stays the decoder gate — this adds a compile fact, not a test.
+Gates: `flac-portable-check` green; `flac-test` 120 passed + 1 ignored
+unchanged (measured at HEAD before the change and after); `make check`
+clean; no crate source, ROM path, or decode-output change, so the ROM
+builds and the calibration anchor are unaffected by construction.
+
 Ordering items (ii) (rate sweep re-run on the stacked path) and (iii)
 (E5 hardware arbitration) follow step 6 unchanged.
 
