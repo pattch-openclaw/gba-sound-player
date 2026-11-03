@@ -5537,6 +5537,15 @@ the generic seam, not silently abandoned.
    rewire — the spike `driver` + generated offset table (GAFP stand-in)
    retires toward the real manifest (Phase 2 step 6).
 
+**Landed 2026-11-02 (Sam-scoped split of step 1):** the metadata + docs
+reframe landed as a docs-only PR — Cargo description/keywords, `README.md`,
+and the crate docs now present a portable no-std FLAC frame decoder with the
+GBA as founding platform, not boundary (the stale `forbid(unsafe_code)` README
+claim corrected to the ratified `deny` + named pin exception). Step 1's
+`iwram-pin` feature gate was held back to its own core PR so this one carries
+zero attribute or gate changes. Zero decode-output change; `flac-test` count
+unchanged (120 passed + 1 ignored).
+
 Ordering items (ii) (rate sweep re-run on the stacked path) and (iii)
 (E5 hardware arbitration) follow step 6 unchanged.
 

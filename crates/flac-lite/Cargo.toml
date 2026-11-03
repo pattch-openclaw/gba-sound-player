@@ -2,13 +2,15 @@
 name = "flac-lite"
 version = "0.1.0"
 edition = "2024"
-description = "Minimal no_std, zero-dependency, zero-allocation FLAC frame decoder for GBA (thumbv4t-none-eabi). SCAFFOLD ONLY — see ../../FLAC.md"
+description = "Minimal no_std, zero-dependency, zero-allocation FLAC frame decoder — portable pure Rust; the GBA (thumbv4t-none-eabi) is the founding platform, not the boundary"
 license = "MIT"
-keywords = ["flac", "audio", "no_std", "gba", "decoder"]
+keywords = ["flac", "audio", "no_std", "decoder", "bare-metal"]
 categories = ["multimedia::audio", "no-std"]
 
-# SCAFFOLD STATE (2026-08-30): type/signature skeleton with todo!() bodies.
-# No decoding logic implemented yet. See ../../FLAC.md "Scaffold status".
+# STATE (2026-11-02): the Phase 1 decode path is complete through
+# frame::decode_frame; todo!() remains for decoder (the per-frame loop) and
+# format::Manifest. Authoritative state: src/lib.rs crate docs.
+# Roadmap: ../../FLAC.md "Phased plan".
 
 [dependencies]
 # Intentionally EMPTY. Zero dependencies is the entire point: the GBA target
