@@ -24,7 +24,10 @@ edition = "2024"
 # The root ROM crate stays FLAC-free; the baseline .gba never sees this code.
 
 [dependencies]
-flac-lite = { path = "../../crates/flac-lite" }
+# `iwram-pin`: keep the E2b LEADING_ONES table pinned to .iwram in this live
+# GBA image (the pin is off by default in the core since the split-proposal
+# ladder step 2, 2026-11-02 — GBA ROM crates opt in).
+flac-lite = { path = "../../crates/flac-lite", features = ["iwram-pin"] }
 
 # The sample-rate ROM flow (FLAC.md "Sample-rate reduction" Part 1). The
 # feature exists to gate the rate bin + rate witness so the default spike

@@ -5546,6 +5546,25 @@ claim corrected to the ratified `deny` + named pin exception). Step 1's
 zero attribute or gate changes. Zero decode-output change; `flac-test` count
 unchanged (120 passed + 1 ignored).
 
+**Landed 2026-11-02: step 2 — `iwram-pin` feature gate.** The core's
+`.iwram` placement attribute moved behind
+`all(target_arch = "arm", feature = "iwram-pin")` — off by default, so
+portable consumers and ARM targets with no `.iwram` link-script definition
+carry zero pin surface (the missing-section failure mode is gone). The
+repo's two GBA ROM consumers (`flac_spike`, `flac_integration`) opt in on
+their `flac-lite` dependency, so live images keep the measured zero-wait
+table read; the ratified exception count is unchanged (one item, same
+`allow`). Witness: `native-spike-rom` Built-ELF `nm` — `LEADING_ONES` at
+`0x0300022c` (`.iwram`, reproducing the landing witness exactly) — pin
+survives the dependency edge under `lto = "fat"`. Gates: `flac-test` 120
+passed + 1 ignored unchanged; `spike-test` green (15 + 8);
+`native-spike-rom` + `native-flac-rom` build; `check` clean. The
+integration ROM's ELF carries no `LEADING_ONES` symbol (its link anchor
+never reaches `rice_quotient`, so fat LTO discards the unreferenced table
+— expected, pin-independent). `rate-test` not runnable here (generated
+assets are gitignored); the anchor's decode baselines re-record at the
+next E probe per the coexistence contract.
+
 Ordering items (ii) (rate sweep re-run on the stacked path) and (iii)
 (E5 hardware arbitration) follow step 6 unchanged.
 

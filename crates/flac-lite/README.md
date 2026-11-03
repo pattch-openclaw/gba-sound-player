@@ -4,12 +4,14 @@ Minimal FLAC frame decoder: `#![no_std]`, **zero dependencies**, **zero
 allocation** on the decode path — portable pure Rust. The GBA
 (thumbv4t-none-eabi) is the founding platform, not the boundary: the decode
 path imports nothing platform-specific, and the crate's sole unsafe surface is
-one cfg-gated placement attribute (`target_arch = "arm"`, so host builds
-compile with zero unsafe). The GAFP container and encode-profile sections
-below are product-side container work — a manifest is *one* frame source, not
-the decoder's contract — and the build-gate/config-leak notes are this repo's
-build setup. Next on the portability ladder: the `.iwram` pin behind an
-opt-in feature, then a second-target build witness
+one placement attribute behind `all(target_arch = "arm", feature = "iwram-pin")`
+— off by default, so host builds and ARM targets without a `.iwram` link-script
+definition compile with zero unsafe and zero pin surface. GBA ROM crates opt in
+to the pin (`flac_spike` / `flac_integration` do). The GAFP container and
+encode-profile sections below are product-side container work — a manifest is
+*one* frame source, not the decoder's contract — and the build-gate/config-leak
+notes are this repo's build setup. Next on the portability ladder: a
+second-target build witness
 ([FLAC.md → split proposal](../../FLAC.md#flac-lite-and-flac-lite-gba--portable-core-split-proposal-2026-11-01)).
 
 Implemented: the full Phase 1 decode path through `frame::decode_frame` —

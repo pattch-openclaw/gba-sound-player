@@ -24,6 +24,14 @@ categories = ["multimedia::audio", "no-std"]
 
 [features]
 default = []
+# Pin the E2b `LEADING_ONES` table to `.iwram` (GBA link-script contract, see
+# `bits.rs`). OFF by default: portable consumers and other ARM bare-metal
+# targets build with zero pin surface (no missing-section link failure where
+# `.iwram` is undefined). GBA ROM crates opt in to keep the measured
+# zero-wait table read (flac_spike / flac_integration do; the ratified
+# exception count is unchanged either way). Split-proposal ladder step 2,
+# 2026-11-02.
+iwram-pin = []
 # Decode-profile escape hatch: when enabled, frames that violate the constrained
 # encode profile (full-LPC predictors, unsupported block sizes) are rejected with
 # `Error::ProfileViolation` instead of being decoded. See README.md.

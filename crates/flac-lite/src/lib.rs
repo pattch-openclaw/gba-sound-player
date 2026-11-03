@@ -4,8 +4,10 @@
 //! allocation on the decode path — portable pure Rust. The Game Boy Advance
 //! (thumbv4t-none-eabi) is the founding platform, not the boundary: the
 //! decode path imports nothing platform-specific, and the sole unsafe
-//! surface is one `target_arch = "arm"`-gated placement attribute (see the
-//! `deny(unsafe_code)` note below), so host builds compile with zero unsafe.
+//! surface is one placement attribute behind
+//! `all(target_arch = "arm", feature = "iwram-pin")` — off by default (see
+//! the `deny(unsafe_code)` note below), so host builds compile with zero
+//! unsafe and non-GBA ARM targets link without a `.iwram` section.
 //! The GAFP manifest and encode-profile material in `README.md` are
 //! product-side container work — a manifest is *one* frame source, not the
 //! decoder's contract.
