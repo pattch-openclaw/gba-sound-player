@@ -1,7 +1,14 @@
 //! # flac-lite
 //!
-//! A minimal FLAC **frame** decoder for the Game Boy Advance: `#![no_std]`,
-//! zero dependencies, zero allocation on the decode path.
+//! A minimal FLAC **frame** decoder: `#![no_std]`, zero dependencies, zero
+//! allocation on the decode path — portable pure Rust. The Game Boy Advance
+//! (thumbv4t-none-eabi) is the founding platform, not the boundary: the
+//! decode path imports nothing platform-specific, and the sole unsafe
+//! surface is one `target_arch = "arm"`-gated placement attribute (see the
+//! `deny(unsafe_code)` note below), so host builds compile with zero unsafe.
+//! The GAFP manifest and encode-profile material in `README.md` are
+//! product-side container work — a manifest is *one* frame source, not the
+//! decoder's contract.
 //!
 //! **IMPLEMENTATION STATE (2026-09-18):** `bits::BitReader` is complete for
 //! the decode path (PRs #25–#32 plus step 3a's `read_wasted_bits`; only

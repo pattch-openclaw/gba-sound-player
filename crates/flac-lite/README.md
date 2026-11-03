@@ -1,11 +1,24 @@
 # flac-lite
 
-Minimal FLAC frame decoder for GBA: `#![no_std]`, **zero dependencies**, **zero
-allocation** on the decode path. Implemented so far: `bits::BitReader` (45 host
-unit tests) and `FrameHeader::parse` — Phase 1 step 2 — validated against real
-libFLAC bytes in `tests/`. Everything past the header (`subframe`, `residual`,
-`stereo`, `decoder`, `format::Manifest`) is still `todo!()` scaffold against real
-signatures. Roadmap: [`../../FLAC.md`](../../FLAC.md) → "Phased plan".
+Minimal FLAC frame decoder: `#![no_std]`, **zero dependencies**, **zero
+allocation** on the decode path — portable pure Rust. The GBA
+(thumbv4t-none-eabi) is the founding platform, not the boundary: the decode
+path imports nothing platform-specific, and the crate's sole unsafe surface is
+one cfg-gated placement attribute (`target_arch = "arm"`, so host builds
+compile with zero unsafe). The GAFP container and encode-profile sections
+below are product-side container work — a manifest is *one* frame source, not
+the decoder's contract — and the build-gate/config-leak notes are this repo's
+build setup. Next on the portability ladder: the `.iwram` pin behind an
+opt-in feature, then a second-target build witness
+([FLAC.md → split proposal](../../FLAC.md#flac-lite-and-flac-lite-gba--portable-core-split-proposal-2026-11-01)).
+
+Implemented: the full Phase 1 decode path through `frame::decode_frame` —
+header, subframe types, partitioned Rice residual + escape, integrators,
+stereo decorrelation — bit-exact against `flac -d` on the committed libFLAC
+vector tables in `tests/`. Remaining `todo!()`: `decoder` (the per-frame loop
+above the frame layer) and `format::Manifest`. `src/lib.rs` carries the
+authoritative implementation state.
+Roadmap: [`../../FLAC.md`](../../FLAC.md) → "Phased plan".
 
 ```
 crates/flac-lite/
@@ -17,7 +30,7 @@ crates/flac-lite/
 ├── src/residual.rs   partitioned Rice / Rice2 / escape
 ├── src/stereo.rs     mid-side, left-side, right-side decorrelation
 ├── src/decoder.rs    top-level cursor API (what a ROM actually calls)
-└── tests/README.md   fixture plan (no fixtures yet)
+└── tests/README.md   committed libFLAC vector tables + layout/decode suites
 ```
 
 ## Build gates
@@ -76,7 +89,7 @@ Zero dependencies is not cosmetic. On this target any dependency that references
 `std` breaks the build — precisely the symphonia failure documented in FLAC.md.
 Adding a dependency requires re-verifying gate #1.
 
-## GAFP container format (contract)
+## GAFP container format (contract — product-side container work)
 
 `GAFP` = **G**BA **F**LAC **P**ack. One blob per track, `include_bytes!`-able as a
 `&'static [u8]`, produced offline by `scripts/pack_flac.sh`. All integers
@@ -149,7 +162,9 @@ needs forcing.
 ## Design rules that must survive implementation
 
 1. **No `alloc` in the decode path.** Scratch is caller-provided and borrowed;
-   the manifest is borrowed. That is what lets the crate stay `#![forbid(unsafe_code)]`.
+   the manifest is borrowed. That is what keeps the decode path free of unsafe
+   code (`#![deny(unsafe_code)]` since 2026-10-22, one named cfg-gated pin
+   attribute — see `src/lib.rs`).
 2. **No I/O traits.** `&[u8]` + cursor, forward only.
 3. **No division, ever** — ARM7TDMI has no hardware divide. Shifts and adds only.
 4. **Fixed-size predictor state** (`[i32; MAX_LPC_ORDER]`), never a growable buffer.
@@ -166,5 +181,7 @@ can be revisited for `i16` later if we need the space.
 ## Next steps
 
 The roadmap is a single list in **FLAC.md → "Phased plan"** (the only source of
-truth for outstanding work). `bits::BitReader` is complete for the decode path
-(PR #32); the next item is Phase 1 step 2, the minimal `frame` header parse.
+truth for outstanding work). Phase 1's decode path through `frame::decode_frame`
+is complete (`src/lib.rs` carries the per-module state); outstanding: the
+`decoder` per-frame loop and `format::Manifest`, plus the portability ladder in
+[FLAC.md → split proposal](../../FLAC.md#flac-lite-and-flac-lite-gba--portable-core-split-proposal-2026-11-01).
