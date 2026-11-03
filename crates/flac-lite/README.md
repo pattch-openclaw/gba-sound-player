@@ -10,8 +10,10 @@ definition compile with zero unsafe and zero pin surface. GBA ROM crates opt in
 to the pin (`flac_spike` / `flac_integration` do). The GAFP container and
 encode-profile sections below are product-side container work — a manifest is
 *one* frame source, not the decoder's contract — and the build-gate/config-leak
-notes are this repo's build setup. Next on the portability ladder: a
-second-target build witness
+notes are this repo's build setup. A second bare-metal target is a build
+witness, not an aspiration: `make flac-portable-check` compiles this crate for
+`thumbv7em-none-eabi` alongside thumbv4t + host (portability fact, no perf
+claim — landed 2026-11-02).
 ([FLAC.md → split proposal](../../FLAC.md#flac-lite-and-flac-lite-gba--portable-core-split-proposal-2026-11-01)).
 
 Implemented: the full Phase 1 decode path through `frame::decode_frame` —
@@ -37,8 +39,9 @@ crates/flac-lite/
 
 ## Build gates
 
-Two gates, run from this directory. **Both need explicit flags — this is not
-optional verbosity**, see the config-leak note below.
+Three gates, run from this directory (or `make flac-test` /
+`make flac-portable-check` from the repo root). **All need explicit flags —
+this is not optional verbosity**, see the config-leak note below.
 
 ```sh
 # GATE 1 — the GBA target. The real gate: the build symphonia could never pass.
@@ -47,6 +50,12 @@ cargo +nightly check --release --target thumbv4t-none-eabi -Zbuild-std=core,allo
 # GATE 2 — host tests (correctness: bit-exactness vs reference `flac`).
 HOST=$(rustc -vV | sed -n 's|host: ||p')
 cargo +nightly test -Zbuild-std= --target "$HOST"
+
+# GATE 3 — second bare-metal target (portability witness, no perf claim).
+# Default features: pin OFF compiles no `.iwram` reference. Verified
+# container-portable: builds with NO prebuilt rust-std for the triple
+# (core/alloc come from rust-src via -Zbuild-std, same as gate 1).
+cargo +nightly check --release --target thumbv7em-none-eabi -Zbuild-std=core,alloc
 ```
 
 ### ⚠️ The `.cargo/config.toml` leak (verified 2026-08-30)

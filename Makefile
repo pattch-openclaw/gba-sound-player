@@ -4,7 +4,7 @@
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
-        test test-rom flac-test spike-test opus-test kernel-test podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test \
+        test test-rom flac-test flac-portable-check spike-test opus-test kernel-test podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test \
         clean clean-cache check podman-check help toolchain-check
 
 # ---------------------------------------------------------------------------
@@ -84,6 +84,10 @@ HOST_TRIPLE := $(shell $(RUSTC) -vV 2>/dev/null | sed -n 's|host: ||p')
 HAS_RUSTFMT := $(shell $(CARGO) fmt --version >/dev/null 2>&1 && echo 1)
 
 TARGET := thumbv4t-none-eabi
+# Second bare-metal target for the portability witness (`flac-portable-check`,
+# FLAC.md split-proposal ladder step 3, 2026-11-02). Cortex-M4F: a canonical
+# non-thumbv4t bare-metal ARM triple. Override with `SECOND_TARGET=<triple>`.
+SECOND_TARGET ?= thumbv7em-none-eabi
 ROM := gba-sound-player.gba
 FLAC_ROM := flac-integration.gba
 # Standalone crate that bundles flac-lite into a ROM (the FLAC sanity build).
@@ -404,6 +408,22 @@ flac-test: toolchain-check
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE)
 	@echo "flac-test passed: flac-lite compiles for $(TARGET) and passes host tests"
 
+# Second-target build witness (FLAC.md split-proposal ladder step 3, 2026-11-02):
+# records the PORTABILITY claim — flac-lite compiles for a non-thumbv4t
+# bare-metal ARM target — as a build fact, with NO performance claim attached
+# (the split's reading rules). Same in-tree compile-gate shape as flac-test's
+# thumbv4t half: `-Zbuild-std=core,alloc` compiles core/alloc from rust-src, so
+# the triple needs no prebuilt `rustup` rust-std — verified with the component
+# REMOVED, which is the container image's shape (nightly + rust-src only;
+# no Dockerfile change). Scope: rlib compile, not final link — a link wants a
+# board link script, same boundary as the thumbv4t `check` half (whose real
+# link is `make flac-rom`). Default features only: pin OFF means no `.iwram`
+# reference compiles in on non-GBA targets (step 2's gate made that the shape).
+flac-portable-check: toolchain-check
+	cd crates/flac-lite && \
+	  $(CARGO) check --release --target $(SECOND_TARGET) -Zbuild-std=core,alloc
+	@echo "flac-portable-check passed: flac-lite compiles for $(SECOND_TARGET) (portability witness, no perf claim)"
+
 # The spike's assets witness: the host tests (examples/flac_spike/tests/) decode
 # the EXACT embedded clips bit-exactly against flac -d reference PCM. Same
 # out-of-tree pattern as flac-test's host half — the spike crate inherits the
@@ -584,6 +604,7 @@ help:
 	@echo "    test              test-rom + flac-test (verify-only: no reformat)"
 	@echo "    test-rom          ROM #[test_case] suite in mGBA"
 	@echo "    flac-test         flac-lite alone (target compile gate + host tests)"
+	@echo "    flac-portable-check  flac-lite second-target build witness ($(SECOND_TARGET); portability fact, no perf claim)"
 	@echo ""
 	@echo "  Tests — containerized (same gates, no host tooling needed):"
 	@echo "    podman-test       test-rom + flac-test in the $(CONTAINER) image"
