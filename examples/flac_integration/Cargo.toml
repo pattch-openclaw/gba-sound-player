@@ -24,7 +24,9 @@ edition = "2024"
 
 [dependencies]
 agb = "0.25.0"
-flac-lite = { path = "../../crates/flac-lite" }
+# `iwram-pin`: this GBA ROM opts in to the core's .iwram pin (off by default
+# in the core since 2026-11-02; split-proposal ladder step 2).
+flac-lite = { path = "../../crates/flac-lite", features = ["iwram-pin"] }
 
 [workspace]
 

@@ -512,7 +512,18 @@ pub fn crc16(data: &[u8]) -> u16 {
 /// The `cfg` gate keeps the attribute off host builds entirely; the
 /// Built-ELF witness is `nm` — the symbol at `0x0300xxxx` proves the pin
 /// survives `lto = "fat"`.
-#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
+///
+/// **Feature-gated since 2026-11-02** (FLAC.md → split proposal ladder,
+/// the gate held back from the metadata reframe PR): the attribute rides
+/// `all(target_arch = "arm", feature = "iwram-pin")` — off by default, so
+/// portable consumers and other ARM bare-metal targets build without the
+/// GBA link-script contract (no missing-section failure mode). GBA ROM
+/// crates opt in to keep the measured zero-wait read. The ratified
+/// exception count is unchanged: same single item.
+#[cfg_attr(
+    all(target_arch = "arm", feature = "iwram-pin"),
+    unsafe(link_section = ".iwram")
+)]
 #[allow(unsafe_code)] // The crate-root exception: a placement attribute on
 // an immutable compile-time table is not unsafe
 // code (edition-2024 lints it as an unsafe
