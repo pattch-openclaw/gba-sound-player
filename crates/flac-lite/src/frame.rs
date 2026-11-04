@@ -169,9 +169,11 @@ pub struct FrameHeader {
     /// cursor lands on the subframe data; our seek never uses the value (the
     /// manifest's offset table is authoritative).
     pub number: u64,
-    /// Bit length of this header as consumed by [`FrameHeader::parse`]
-    /// (48–72 bits). The `crc-check` footer coverage anchors the frame's
-    /// start bit on it (module docs); zero effect on decode output.
+    /// Bit length of this header as consumed by [`FrameHeader::parse`] —
+    /// 48–72 bits for the headers this encode profile produces (RFC 9639
+    /// allows wider; see the follow-up note inside [`FrameHeader::parse`]).
+    /// The `crc-check` footer coverage anchors the frame's start bit on it
+    /// (module docs); zero effect on decode output.
     pub header_bits: usize,
 }
 
@@ -283,10 +285,11 @@ impl FrameHeader {
     /// stream" codes; see [`StreamDefaults`].
     ///
     /// Validates every field, and rejects *values* outside the encode profile
-    /// — the subset lives in what is accepted, never in what is parsed. A
-    /// header is 6–9 bytes; skipping a field saves nothing measurable, while a
-    /// partial parse mispositions the cursor and surfaces as corrupt samples
-    /// three modules away. On success the cursor sits exactly on the first
+    /// — the subset lives in what is accepted, never in what is parsed. The
+    /// headers this profile produces are 6–9 bytes (the format allows more —
+    /// see the follow-up note at the width assert below); skipping a field
+    /// saves nothing measurable, while a partial parse mispositions the
+    /// cursor and surfaces as corrupt samples three modules away. On success the cursor sits exactly on the first
     /// subframe bit; on `Err` it may sit part-way through the header, and the
     /// caller must treat the frame as undecodable (the manifest's offsets stay
     /// authoritative — re-seek, do not continue).
@@ -373,7 +376,27 @@ impl FrameHeader {
         let _ = stored_crc8;
 
         let header_bits = reader.bit_position() - start_bit;
-        debug_assert!((48..=72).contains(&header_bits), "header is 6–9 bytes");
+        // Profile witness, NOT a format bound. 48–72 bits is what the
+        // encoders we pack with produce (the header-vector census records
+        // exactly that range). The format allows more: a coded number is up
+        // to 7 octets (RFC 9639 §9.1.5) and the uncommon block-size and
+        // sample-rate codes each append 16 bits (§9.1.6/§9.1.7), so the
+        // widest header this function will actually accept is 32+56+16+16+8
+        // = 128 bits — libFLAC sizes its raw header buffer the same way
+        // (`raw_header[16]`, "MAGIC NUMBER based on the maximum frame header
+        // size, including CRC").
+        // FOLLOW-UP (recorded 2026-11-03 review; see FLAC.md's Phase 2
+        // step-5 entry): a plain `flac -b 16` encode of a 170 s / 8 kHz
+        // stream reaches a 4-octet frame number and hits this assert with an
+        // 80-bit header. We control what gets encoded for ROMs, so this is
+        // left as a known-limitation TODO rather than widened here. When it
+        // is picked up, the fix is a *stated* supported-width bound that
+        // fails with a clear `Error`, not a debug-only panic — and the
+        // witness should be real encoder output, not a hand-built header.
+        debug_assert!(
+            (48..=72).contains(&header_bits),
+            "outside this profile's 6–9 byte headers (see the follow-up note in FrameHeader::parse)"
+        );
 
         Ok(FrameHeader {
             blocksize,

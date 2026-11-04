@@ -148,6 +148,17 @@ The decoder only needs to handle what our encoder is allowed to produce:
 - 16-bit PCM, 32 kHz (65,536 Hz later), mono or stereo
 - block size fixed per track: 1024 or 2048 samples
 - fixed block size (no blocking strategy / variable frames)
+- **frame headers inside the profile's 6–9 bytes (48–72 bits)** — the widths the
+  reference command below actually produces, and what `FrameHeader::parse`
+  asserts in debug builds. ⚠️ Follow-up recorded 2026-11-03 (FLAC.md → Phase 2
+  step-5 entry): this is a profile bound, not a format one. §9.1.5's coded
+  number is up to 7 octets and §9.1.6/§9.1.7 append 16 bits each for the
+  uncommon block-size/rate codes, so a legal header may be 16 bytes — and a
+  plain `flac -b 16` encode of a long, low-rate stream reaches an 80-bit header
+  (a 4-octet frame number) that trips the assert. We pack with the reference
+  command, so it is a known limitation rather than a live failure; the follow-up
+  turns it into a stated width bound that fails with a clear `Error`, not a
+  debug-only panic.
 - **max predictor order ≤ 4** — encode with `-l 4`; higher orders stay *parsed*
   but rejected under `strict-profile`, pending the perf spike.
   ⚠️ Corrected 2026-09-07: this previously said "predictors capped at **FIXED

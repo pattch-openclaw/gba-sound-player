@@ -47,9 +47,11 @@
 //! `decode_frame` on the same table, both bit-exact against `flac -d`
 //! PCM (FLAC.md → step 3f part 2). Phase 1's decode path through
 //! `decode_frame` is complete. What remains `todo!()`: `decoder` (the
-//! per-frame loop above this layer) and `format::Manifest` (whose
-//! metadata-block CRC-8 coverage question is owned by that step — see
-//! FLAC.md's step-5 entry) —
+//! per-frame loop above this layer) and `format::Manifest` — there is no
+//! metadata-block CRC to own there: RFC 9639 §8.1 defines a metadata block as
+//! a 4-byte header plus exactly `length` bytes, with no CRC trailer, and the
+//! format's only CRCs are the frame header (§9.1.8) and frame footer (§9.3)
+//! — both implemented above.
 //! the module layout, types, and signatures are the contract the
 //! implementation fills in (FLAC.md → phased plan, step 4 onward).
 //! Design rationale and the decision to write this at all live in

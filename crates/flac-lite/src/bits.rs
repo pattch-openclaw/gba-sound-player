@@ -501,11 +501,14 @@ impl<'a> BitReader<'a> {
 /// Used for the frame header (RFC 9639 §9.1.8). The *verification* is gated
 /// behind `crc-check` (release consumes the CRC byte unchecked by design);
 /// the function itself is always compiled — the planned stream-scan cursor
-/// (split-proposal ladder step 4) needs strict-field-plus-CRC-8 filtering
-/// regardless of feature flags.
+/// needs strict-field-plus-CRC-8 filtering regardless of feature flags.
 ///
-/// Table-free by design (the scaffold's rule stands): verification never runs
-/// in the release path, so the 256-byte table trades nothing worth trading.
+/// Table-free by design, scoped to *that* gated use: verification under
+/// `crc-check` never runs in a release build, so a 256-byte table trades
+/// nothing there. The scan-cursor use is the opposite shape — it would run
+/// CRC-8 in the default path, on-target, once per candidate header — so a
+/// table becomes worth an E-menu measurement only against *that* use, not
+/// against `crc-check`.
 /// Witnessed by all 15 real libFLAC 1.5.0 headers in
 /// `tests/frame_header_vectors.txt` (generator census fail-closed), the
 /// published CRC-8 check value `"123456789" → 0xF4`, and a naive bit-serial
@@ -525,8 +528,10 @@ pub fn crc8(data: &[u8]) -> u8 {
     crc
 }
 
-/// CRC-16 with FLAC's frame polynomial: x¹⁶+x¹⁵+x²+1 — RFC 9639 §9.1.8
-/// names it `0x05` (the low bits below x¹⁶); shift-register form `0x8005`.
+/// CRC-16 with FLAC's frame polynomial: x¹⁶+x¹⁵+x²+1 — RFC 9639 §9.3 (Frame
+/// Footer) states it as a polynomial; `0x05` is the truncated coefficient
+/// listing below x¹⁶, shift-register form `0x8005`. (§9.1.8 is the frame
+/// *header* CRC-8 — a different CRC, cited here once to keep them apart.)
 /// No reflection, **init `0x0000`**, no final xor — over a whole-byte range.
 ///
 /// **Measured correction (2026-11-03, Phase 2 step 5):** this scaffold
@@ -538,8 +543,11 @@ pub fn crc8(data: &[u8]) -> u8 {
 /// full 0..=0xFFFF sweep fits). The derived check value for
 /// `"123456789"` is `0xFEE8`.
 ///
-/// Coverage is frame-wide (sync code through padding, CRC bytes excluded) —
-/// see [`crate::frame`], where `crc-check` wires it.
+/// Coverage is frame-wide, which §9.3 states as plainly as the polynomial:
+/// "a 16-bit CRC, initialized with 0 … covers the whole frame, excluding the
+/// 16-bit CRC but including the sync code" — sync code through the padding
+/// bits, CRC bytes excluded. The committed real-frame footers above measure
+/// the same window; [`crate::frame`] is where `crc-check` wires it.
 pub fn crc16(data: &[u8]) -> u16 {
     let mut crc = 0u16;
     for &byte in data {

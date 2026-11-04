@@ -1,4 +1,4 @@
-//! Phase 2 step 5 (split ladder item 3, 2026-11-03) — the `crc-check`
+//! Phase 2 step 5 (2026-11-03) — the `crc-check`
 //! witness suite. Runs only with `--features crc-check` (`required-features`
 //! in Cargo.toml); the gate is `make flac-test-crc`.
 //!
@@ -97,7 +97,7 @@ fn load_run_vectors() -> Vec<RunVector> {
         let number = || {
             value
                 .parse::<u64>()
-                .unwrap_or_else(|e| panic!("{}: not a number {value:?}", v.label))
+                .unwrap_or_else(|e| panic!("{}: not a number {value:?}: {e}", v.label))
         };
         match key {
             "frame_hex" => {

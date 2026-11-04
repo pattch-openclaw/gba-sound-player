@@ -84,13 +84,15 @@ HOST_TRIPLE := $(shell $(RUSTC) -vV 2>/dev/null | sed -n 's|host: ||p')
 HAS_RUSTFMT := $(shell $(CARGO) fmt --version >/dev/null 2>&1 && echo 1)
 
 TARGET := thumbv4t-none-eabi
-# The `crc-check` witness (FLAC.md Phase 2 step 5 / split-ladder item 3,
-# 2026-11-03): the same flac-test shape with the feature ON — thumbv4t compile
+# The `crc-check` witness (FLAC.md Phase 2 step 5, 2026-11-03): the same
+# flac-test shape with the feature ON — thumbv4t compile
 # half plus the full host suite, which under the feature also runs
 # tests/crc_check.rs (pass witness on the committed real frames + CRC
 # mutations). Verification is OFF in the default build by design (release
 # consumes the CRCs unchecked; "checked in debug, skippable in release"), so
 # this gate exists precisely to keep the OFF default honest about the ON arm.
+# It is invoked by hand: `test`/`podman-test` do not include it — see the
+# gate-aggregation TODO in README.md.
 flac-test-crc: toolchain-check
 	cd crates/flac-lite && \
 	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check
@@ -620,11 +622,11 @@ help:
 	@echo "    test-rom          ROM #[test_case] suite in mGBA"
 	@echo "    flac-test         flac-lite alone (target compile gate + host tests)"
 	@echo "    flac-portable-check  flac-lite second-target build witness ($(SECOND_TARGET); portability fact, no perf claim)"
+	@echo "    flac-test-crc     flac-lite host suite + thumbv4t compile with crc-check ON (hand-invoked; see README gate-aggregation TODO)"
 	@echo ""
 	@echo "  Tests — containerized (same gates, no host tooling needed):"
 	@echo "    podman-test       test-rom + flac-test in the $(CONTAINER) image"
 	@echo "    podman-test-rom   ROM #[test_case] suite in the container"
-	@echo "    flac-test-crc     flac-lite host suite + thumbv4t compile with crc-check ON"
 	@echo "    podman-flac-test  flac-lite alone in the container"
 	@echo "    podman-kernel-test E10 kernel host gate in the container"
 	@echo "    podman-check      cargo fmt --check in the container"
