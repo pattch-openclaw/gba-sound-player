@@ -681,8 +681,11 @@ gets built later for the shipping path regardless.
 
 **Phase 2 — production pipeline (starts only after the gate resolves):**
 
-5. [ ] `crc8` + `crc16` implementations; wire debug-only frame CRC-8 /
-     footer CRC-16 verification into `frame`.
+5. [x] `crc8` + `crc16` implementations; wire frame CRC-8 / footer CRC-16
+     verification into `frame`, gated behind the `crc-check` feature (off by
+     default — the design's "checked in debug, skippable in release", now
+     enforced rather than asserted). **Done 2026-11-03** — see
+     [split proposal → Landed 2026-11-03](#flac-lite-and-flac-lite-gba--portable-core-split-proposal-2026-11-01).
 6. [ ] `format::Manifest` (GAFP) parser + `scripts/pack_flac.sh` real
      implementation — the shippable container: O(1) seek table, profile
      validation at pack time, replaces the spike's scan-based harness.
@@ -5537,6 +5540,17 @@ the generic seam, not silently abandoned.
    rewire — the spike `driver` + generated offset table (GAFP stand-in)
    retires toward the real manifest (Phase 2 step 6).
 
+**How these entries are labeled (convention set 2026-11-03).** The two
+ladders above are ordered checklists, not a step counter: the portability
+ladder numbers five themes, the PR ladder numbers six PRs, and the Phased plan
+has its own Phase-1/Phase-2 numbering. The "step 1/2/3" in the headings below
+means *landing order in this series* — which is how one change ended up called
+"step 3", "PR-ladder item 2", and "split-proposal ladder step 3" in
+adjacent text. Entries from the frame-CRC one onward are titled by date and
+content, use the Phased plan's numbering only ("Phase 2 step N"), and refer to
+other rungs by name ("the stream-scan cursor", "the Manifest step"). Earlier
+entries are kept as landed.
+
 **Landed 2026-11-02 (Sam-scoped split of step 1):** the metadata + docs
 reframe landed as a docs-only PR — Cargo description/keywords, `README.md`,
 and the crate docs now present a portable no-std FLAC frame decoder with the
@@ -5594,6 +5608,141 @@ Gates: `flac-portable-check` green; `flac-test` 120 passed + 1 ignored
 unchanged (measured at HEAD before the change and after); `make check`
 clean; no crate source, ROM path, or decode-output change, so the ROM
 builds and the calibration anchor are unaffected by construction.
+
+**Landed 2026-11-03: frame CRC verification behind `crc-check`** (Phase 2
+step 5). `bits::crc8` / `bits::crc16` implemented (table-free plain Rust,
+always compiled — the stream-scan cursor named in the PR ladder above needs
+`crc8` regardless of feature flags); verification wired into
+`FrameHeader::parse` (header CRC-8 → `Error::HeaderCrc`) and `decode_frame`
+(footer CRC-16 → `Error::FrameCrc`) under `crc-check`, off by default — the
+default build consumes both CRC bytes exactly as before. New named gate
+`make flac-test-crc`: the full flac-test shape (thumbv4t compile + host
+suite) with the feature ON, so the OFF default cannot rot the ON arm.
+
+Measured facts — the step's whole content is two polynomials, two inits, two
+coverage windows, every one measured, none recalled:
+
+* **CRC-16 init is `0x0000`, not the scaffold's "0xFFFF".** A sweep over all
+  `0..=0xFFFF` inits against the committed real-frame footers finds exactly
+  one init consistent across all 10 frames; the reflected family admits none
+  (the "FLAC variant = reflected" reading is excluded outright, not
+  unfavored). The derived check value `crc16("123456789") = 0xFEE8` is pinned
+  as *derived*: three mechanisms (byte-fed LFSR, bit-serial, GF(2) bigint
+  polynomial remainder) agree on it and on the footers. The witness session's
+  first draft asserted *recalled* published check constants that failed the
+  mechanisms — exactly this file's recorded FNV failure mode — so no recalled
+  constant ships anywhere in this step except the CRC-8
+  `"123456789" → 0xF4` anchor, which the implementation reproduces.
+* **Coverage windows (measured).** Header CRC-8: sync code through the byte
+  before the CRC byte (the header vectors' fail-closed census already pinned
+  the encoder agrees). Footer CRC-16: frame-wide — sync code through the
+  footer padding, both CRC bytes excluded. Because a zero-init CRC over a
+  whole-byte window equals the bitwise definition at frame boundaries (both
+  windows are byte ranges: the CRC-8 is structurally byte-aligned, the CRC-16
+  ends at the padding boundary), `BitReader::bytes_between` (new,
+  cursor-neutral, never a read) hands the checks plain slices. The stored
+  values come from libFLAC, never from our code — so the real frames passing
+  *is* the coverage witness.
+* `FrameHeader` gains `header_bits` (consumed width; also asserted against
+  the oracle table in the layout suite) — the footer check's frame-start
+  anchor. A mispaired header/cursor shifts the window and self-condemns at
+  the compare; the existing pairing contract ("`header` parsed at this exact
+  cursor position") is now load-bearing, documented as such.
+
+Witness (`tests/crc_check.rs`, `required-features = ["crc-check"]`, runs
+under `flac-test-crc`): (1) **pass** — every committed run vector parses and
+decodes bit-exactly with verification ON, chaining unchanged; (2) **CRC-8
+mutation** — one covered byte of a real header flipped to another *valid*
+field value (coded number `0 → 1`, so no field check can pre-empt the
+compare) → `HeaderCrc`, unmutated identity control `Ok`; (3) **CRC-16
+mutation** — the stored footer word flipped high byte, then low byte →
+`FrameCrc`, body decoding untouched, control `Ok`. The unit layer adds
+differential sweeps of both CRCs against a naive bit-serial oracle (13
+lengths, pseudo-random), the check values, and `bytes_between`
+alignment/bounds/cursor-atomicity.
+
+**The gate convicted before the code shipped:** with `crc-check` ON, two
+pre-existing layout-suite accept paths failed — the blocksize-table probe
+and the from-stream-depth mutation flip covered bytes to *valid* values and
+expect `Ok`, so their stale CRCs were correctly condemned. Fix: re-seal the
+CRC after the mutation (suite helper `reseal`), so each case mutates exactly
+one field. Verification that never bites a stale CRC is the vacuous-check
+failure mode; the first ON run proved this one bites.
+
+Prior assumptions: (1) the scaffold's CRC-16 "init 0xFFFF" — **false**,
+corrected above, the doc comment carries the correction; (2) the CRC-16
+polynomial was cited to §9.1.8 — **wrong section**: §9.1.8 is the frame
+*header* CRC-8, while the frame footer CRC-16 is §9.3, and §9.3 states both
+the polynomial (`x^16 + x^15 + x^2 + x^0` — the `0x05` coefficient listing
+below x¹⁶, shift-register form `0x8005`) and the coverage window verbatim
+("initialized with 0", "covers the whole frame, excluding the 16-bit CRC but
+including the sync code"). The measured window and that sentence agree word
+for word; the doc comment now cites §9.3 for both; (3) **there is no
+metadata-block CRC in native FLAC** — the probe found nothing to reproduce
+because there is nothing to reproduce. RFC 9639 §8.1 defines a metadata block
+as a 4-byte header (last-block bit, 7 type bits, 24-bit length) plus exactly
+`length` bytes, its size coded "excluding the 4 header bytes", with no CRC
+trailer; and the format's only two CRCs are §9.1.8 and §9.3, both
+frame-level. libFLAC agrees from both sides: its metadata layer contains no
+CRC path at all (`metadata_iterators.c`, zero `crc8`/`crc16` references), and
+its own writer shows the layout — `metaflac --add-padding=1000` inserts
+`81 00 03 e8` + 1000 bytes and the very next byte begins the first frame
+(`ff f8`). Structural walks of libFLAC- and ffmpeg-written files match §8.1
+exactly (STREAMINFO length 34 with every field decoding in place per §8.2,
+SEEKTABLE length 72 = 4 × 18-byte seek points per §8.5.1, VORBIS_COMMENT
+length 40 = 4+32+4, the next block header immediately after). So the Manifest
+step inherits **no** metadata-CRC work and the question needs no re-probe;
+`crc8` is a coverage-agnostic byte-range function and the frame witness is
+independent of it either way. No other split-proposal claim turned out false.
+
+**Known limitation, recorded as a follow-up — deliberately not fixed in this
+PR.** The width `debug_assert` in `FrameHeader::parse` (48–72 bits) is a
+*profile* fact, not a format bound: it is the range the header-vector census
+records for the encoders we pack with, whereas §9.1.5 permits a coded number
+of up to 7 octets and §9.1.6/§9.1.7 append 16 bits each for the uncommon
+block-size and sample-rate codes — so the widest header the parse path
+actually accepts is 128 bits, the same bound libFLAC sizes its buffer by
+(`raw_header[16]`, "MAGIC NUMBER based on the maximum frame header size,
+including CRC"). Review witness (2026-11-03): a plain `flac -8 -b 16 --lax`
+encode of a 170 s / 8 kHz stream (85,000 frames) drives production
+`FrameHeader::parse` into that assert at the first frame whose number reaches
+the 4-octet form — an 80-bit header — and with debug assertions compiled out
+the same shape parses from Table 14/18 bytes alone
+(`number=0x10000 blocksize=16 header_bits=80`). We control what gets encoded
+for ROMs, so this stays a TODO rather than widening the PR: the follow-up is
+to state a supported-width bound that fails with a clear `Error` (or a profile
+rejection) instead of a debug-only panic, witnessed with real encoder output.
+Nothing in this step depends on it — `header_bits` is computed correctly at
+any width; only the assert's range is too narrow.
+
+Deliberate scope cuts: frame CRCs only — native FLAC defines no metadata-block
+CRC (§8.1, above), so there is nothing beyond the frame to verify; no table
+variant (table-free is right *for the gated use*: `crc-check` never runs in a
+release build, so 256/512-byte tables buy nothing there — a table becomes an
+E-menu probe only against the stream-scan cursor's default-path use, where
+CRC-8 does run on-target once per candidate header; that measurement belongs
+to that work, not to this step); no stream-scan cursor (the next core PR in
+the ladder above); no `Decoder` changes.
+
+Review follow-ups applied the same day (docs and a warning only, zero behavior
+change): the §9.3/§9.1.8 citation fix; the metadata-CRC finding above, which
+closes rather than parks a question that had no subject; the width-assert
+follow-up above, recorded in the code and here; the table-free rationale in
+`bits::crc8`'s docs scoped to the gated use; an `unused variable` warning
+fixed in the witness suite; the `flac-test-crc` help line moved to the
+host-gates section of `make help`; and a gate-aggregation TODO in README.md
+(both this gate and `flac-portable-check` are hand-invoked — the caveat the
+PR body already carries). Test counts are unchanged by these edits.
+
+Gates: `flac-test` **120 → 123 passed + 1 ignored** (unit 96 → 99: three
+CRC/`bytes_between` unit tests; integration suites unchanged — the default
+build's decode output is bit-identical, and the run suites say so);
+`flac-test-crc` green — 126 passed + 1 ignored (123 + the 3-test crc_check
+suite); `flac-portable-check` green (default features); `spike-test` green
+(15 + 8); `native-spike-rom` + `native-flac-rom` build; `make check` clean.
+`rate-test` not runnable here (generated assets gitignored). Decoder-landing
+rule: this touches `crates/flac-lite`, so the E-anchor decode baselines
+re-record at the next E probe, not chased mid-landing.
 
 Ordering items (ii) (rate sweep re-run on the stacked path) and (iii)
 (E5 hardware arbitration) follow step 6 unchanged.

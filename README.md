@@ -242,6 +242,26 @@ the result is gate-green. If `rustfmt` is missing for the pinned toolchain,
 `format` prints a notice and the build continues — formatting is a convenience,
 never a hard dependency of building.
 
+#### TODO: one aggregate for the non-default-configuration gates
+
+`make test` runs `test-rom` + `flac-test`, and the repo has no CI workflows. The
+gates that exercise a **non-default build configuration** are therefore manual by
+omission: `flac-test-crc` (frame CRC verification ON) and `flac-portable-check`
+(second bare-metal target) run only when someone remembers them — and an un-run
+gate is an un-witnessed gate, which is exactly the risk a by-default-OFF feature
+like `crc-check` creates. Tracked here so it is not forgotten; deliberately not
+part of any feature PR, since each gate lands with its own PR's gate work.
+
+- A single `flac-gates` aggregate: `flac-test` + `flac-test-crc` +
+  `flac-portable-check` — one command covering every `crates/flac-lite`
+  configuration. Measured on the `crc-check` landing tree with warm caches: the
+  extra thumbv4t `cargo check` and host test run complete in hundredths of a
+  second; cold caches pay the usual `-Zbuild-std` cost, once.
+- Something to *invoke* it: with no CI, the cheap honest hook is local (a
+  pre-commit/pre-push hook, or a documented rule that any commit touching
+  `crates/flac-lite` runs `make flac-gates` first). `FLAC.md` already names the
+  gate for each landed feature — only the automation is missing.
+
 ### Containerized testing
 
 Tests follow the same convention as ROM builds, and for the same reason: the

@@ -36,13 +36,22 @@ iwram-pin = []
 # encode profile (full-LPC predictors, unsupported block sizes) are rejected with
 # `Error::ProfileViolation` instead of being decoded. See README.md.
 strict-profile = []
-# Verify frame CRC-8 / stream CRC-16. Off in release for CPU reasons; the
-# perf spike will tell us whether it can stay on.
+# Verify the frame header CRC-8 (in `FrameHeader::parse`) and the frame
+# footer CRC-16 (in `decode_frame`). Off by default: the release decode path
+# consumes both CRC bytes unchecked — the design's "checked in debug, skippable
+# in release" shape (Phase 2 step 5 landed 2026-11-03; gate `flac-test-crc`).
+# The `bits::crc8`/`bits::crc16` functions themselves are always compiled.
 crc-check = []
 
 [lib]
 name = "flac_lite"
 path = "src/lib.rs"
+
+# The crc-check witness suite exists only with the feature on; without
+# required-features it would compile (and pass vacuously) in the default run.
+[[test]]
+name = "crc_check"
+required-features = ["crc-check"]
 
 # No workspace membership: this crate is standalone (like examples/symphonia_flac_probe/)
 # so the root ROM crate's `[build] target = thumbv4t-none-eabi` config never leaks
