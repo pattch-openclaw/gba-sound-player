@@ -29,6 +29,31 @@
 //! - **Incremental by frame.** One call produces one frame's PCM and returns,
 //!   so the caller controls scheduling against the DMA IRQ (real-time budget is
 //!   per frame, ≈64ms of audio at 2048/32kHz).
+//!
+//! ## What implementing this means now (2026-11-04)
+//!
+//! The per-frame loop itself has landed — in [`crate::driver`], as a narrow
+//! copy of the perf spike's proven driver. So these bodies are a **shell**, not
+//! a second loop: parse a `Manifest`, build a [`crate::driver::FrameSource`]
+//! from its frame index, region, and stream defaults, and call
+//! [`crate::driver::decode_one`] (or [`crate::driver::decode_all`] for a
+//! whole-index walk). `FrameBuffers` becomes the borrow-side wrapper that hands
+//! `driver` its `&mut [i32]` pair, and `DecodedFrame` is the view of the
+//! window `decode_one` just wrote.
+//!
+//! Two questions stay with this facade, and neither is decided by `driver`:
+//!
+//! - **End of stream.** `driver`'s iteration domain is a caller-supplied index,
+//!   so the index's length *is* its end. `decode_next`'s `Ok(None)` needs a
+//!   rule of its own — the `Error::EndOfStream` / `Error::FrameSync`
+//!   distinction pinned in `tests/frame_run_loop.rs` is the boundary that rule
+//!   will rest on ("no bytes left" vs "bytes left, not a frame start"), and the
+//!   stream-scan rung is where that gets settled.
+//! - **Error shape.** `driver::Error` carries payloads (index/region/caller
+//!   contract facts whose diagnosis *is* the numbers); this module's `Result`
+//!   uses the crate's flat `Error`. Whether the flat enum grows payloads, or
+//!   those conditions become source-level rejections before decode, is an API
+//!   decision for here — see FLAC.md → split proposal.
 
 use crate::format::Manifest;
 use crate::frame::FrameHeader;

@@ -7,10 +7,12 @@ license = "MIT"
 keywords = ["flac", "audio", "no_std", "decoder", "bare-metal"]
 categories = ["multimedia::audio", "no-std"]
 
-# STATE (2026-11-02): the Phase 1 decode path is complete through
-# frame::decode_frame; todo!() remains for decoder (the per-frame loop) and
-# format::Manifest. Authoritative state: src/lib.rs crate docs.
-# Roadmap: ../../FLAC.md "Phased plan".
+# STATE (2026-11-04): the Phase 1 decode path is complete through
+# frame::decode_frame, and the per-frame loop over a borrowed frame index
+# landed as src/driver.rs (narrow copy of the spike's proven driver, split
+# PR-ladder item 4); todo!() remains for the manifest-driven decoder facade
+# and format::Manifest. Authoritative state: src/lib.rs crate docs.
+# Roadmap: ../../FLAC.md "Phased plan" + "split proposal".
 
 [dependencies]
 # Intentionally EMPTY. Zero dependencies is the entire point: the GBA target

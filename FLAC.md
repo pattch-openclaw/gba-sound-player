@@ -5747,6 +5747,126 @@ re-record at the next E probe, not chased mid-landing.
 Ordering items (ii) (rate sweep re-run on the stacked path) and (iii)
 (E5 hardware arbitration) follow step 6 unchanged.
 
+**Landed 2026-11-04: the frame loop — copied, not moved** (PR-ladder item 4,
+its "loop" half). New module `crates/flac-lite/src/driver.rs`: borrowed
+`FrameSource` + `FrameMeta` (the frame index), `decode_one` (one frame, at its
+index offset, through a fresh cursor), `decode_all` (whole-index walk with a
+per-frame callback), `Stats`, and a module-local payload-carrying `Error`.
+The loop is a **narrow copy** of `examples/flac_spike/src/driver.rs` — the
+decode semantics carried across verbatim, every required difference listed in
+that module's "What the copy changed" list so a reviewer can diff the two files
+against a checklist instead of rediscovering it: source type `&SpikeClip` →
+borrowed `FrameSource<'a>` (field set = the E1 `ClipView`'s — the shape already
+measured decoding ROM bytes and RAM-staged bytes through one code path; the
+asset's witness-only fields `name`/`why`/`census`/`total_samples`/`pcm_file`/
+FNV pins stay product-side), `StreamDefaults` stored on the source instead of
+rebuilt inside the timed call, `MetadataMismatch` → `IndexMismatch` ("metadata"
+is a loaded term in this crate — §8.1 blocks, `format::Manifest`), the
+error-carrying shape kept rather than flattened into the crate's `Copy` enum,
+`decode_clip` → `decode_all` ("clip" is product vocabulary).
+
+**The decision the rung actually turns on: copy, not move.** The obvious
+implementation — "the core should just own the loop and the spike should call
+it" — was rejected deliberately. The spike's `driver::decode_one` *is the
+measurement instrument*: it is the `ctrl` arm of every recorded E entry, and
+the cross-session anchors hold only because that call shape is unchanged (E9:
+"ctrl reproduces the E10-recorded sums at exactly −314 total"). Moving it would
+put the fixture on the moving side of the split, which is exactly where E2b
+said measured numbers die (a −21.7% sample landing at +38% on the live link).
+So: lift the loop's semantics into the core, leave the instrument where it is,
+and make drift observable by witness instead of pretending to a shared
+dependency edge. Item 6's rate-play rewire is where the two paths deliberately
+meet. Cost of copying, paid up front (below): two drift witnesses.
+
+**Findings this rung produced** (none of them recalled, all pinned in tests):
+
+* **`EndOfStream` and `FrameSync` are different signals, and only one of them
+  ends a stream.** `bits::BitReader::read_bits` reports `EndOfStream` when
+  fewer bits remain than requested, while `read_u` reports `FrameSync` — and
+  `FrameHeader::parse`'s first read is a `read_bits`, so a frame that starts at
+  the end of a region is rejected as *end of stream*, not as a bad sync. That
+  distinction is what a future table-less end-of-stream rule can rest on
+  ("no bytes left" vs "bytes left, not a frame start"), and the suite asserts
+  both sides of the boundary (`offset == region.len()` → a legal empty slice →
+  `EndOfStream`; `offset > region.len()` → index/region pair mismatch →
+  `FrameOffsetOutOfRange`). It also corrects a design assumption carried in
+  from the split's earlier analysis, which expected `FrameSync` there.
+* **The index cross-check needs both directions witnessed.** Mutating the check
+  to `claimed > header` left the *whole* suite green: the over-claim case is
+  still rejected, and nothing tests an index claiming 100 for a 256-sample
+  frame — which decodes, reports the header's 256, and desynchronises every
+  total the loop returns. The suite now induces the under-claim too (a fixture
+  claim smaller than the frame's own header).
+* **Gate-mechanics trap (changed how mutation checks are run here).** The host
+  gates build into a shared target dir; reverting a mutation by restoring a
+  saved copy leaves the restored file with an **older mtime** than the mutated
+  build, cargo treats it as fresh, and the *next* run silently executes the
+  mutated binary. One "expected failure, got Ok" reading was the stale build,
+  not the test. Mutation checks in this entry were all run with an explicit
+  `touch` after restore, and re-confirmed after revert.
+
+**Witnesses.** Three layers, because a copied loop can fail in three different
+ways (wrong output, wrong loop bounds, silent drift between the copies):
+
+* unit (crate, `driver::tests`): index arithmetic and the caller-contract gate
+  only — offset-past-region, buffer-before-offset ordering, the
+  `channels == 2` arm, the out-of-range-index caller panic. Hand-written
+  regions, deliberately claiming **nothing** about encoder bytes (the
+  hand-packed-vector rule applies to negative controls too).
+* `tests/frame_run_loop.rs` (new, 9 tests): the same committed libFLAC run
+  table `frame_run_decode.rs` walks with one chained `BitReader`, driven
+  instead by an index whose offsets come from the table's own per-frame row
+  framing. Index tiling; bit-exact whole-run walk vs `flac -d`; **per-frame
+  independence in reverse order** through one reused `[PredictorState; 2]`
+  (the seek claim where it actually matters — a seek's walk-order predecessor
+  is the frame after it); the reused-buffer tail contract at loop level (slots
+  past a short frame keep what the *previous* frame wrote); rejection
+  evidence + write-nothing for over-claim, under-claim, offset-past-region,
+  and short caller buffers, each with a same-source control; mono end-to-end
+  with a zero-length `right`.
+* drift (`examples/flac_spike/tests/spike_witness.rs`, 8 → 10 tests): the
+  crate's copy walked through the ROM's own shared fold must reach the
+  generator's **PCM pins** on the embedded clip bytes (so it is not merely
+  "the same as the spike", which would inherit a shared mistake); and both
+  copies must agree **frame window by frame window**, with separate buffers and
+  separate predictor state so one side's scratch cannot hide the other's
+  divergence, plus equal totals from the two whole-index walkers.
+  Mutation checks: flipping the index check to `>` fires the under-claim case;
+  dropping the `channels == 2` guard fires the mono unit test and the
+  real-mono-frame integration test (6 of 9). The drift witnesses stayed green
+  under that second mutation — an honest limit, stated rather than smoothed
+  over: drift witnesses compare decode behaviour on well-formed inputs, not
+  rejection paths. The pin-reaching test is what covers rejection paths on
+  embedded bytes (the corrupted-seek-entry control already on the spike side).
+
+Gates: `flac-test` **123 → 136 passed + 1 ignored** (unit 99 → 103; new
+9-test `frame_run_loop` suite); `flac-test-crc` green — **139 passed + 1
+ignored** (the loop also chains correctly with CRC verification ON, which is
+where the footer consume and the fresh-cursor framing meet);
+`flac-portable-check` green (the new module compiles for
+`thumbv7em-none-eabi`, default features — no `std`, no `unsafe`, second-target
+portability fact and no perf claim); `spike-test` green (15 + 10);
+`flac-rom` (the integration ROM) builds; `make check` clean (fmt). No
+on-target measurement in this rung: the measured Rice inner loop is untouched,
+the loop is new *entry* code around it, and per the decoder-landing rule the
+E-anchor decode baselines re-record at the next E probe rather than being
+chased mid-landing.
+
+Deliberate scope cuts: no stream-scan cursor and no end-of-stream rule (the
+boundary above is now *bounded*, not answered — the frame-number
+monotonicity rule that made the frame finder exact on real streams is a
+table-backed-source property, and the scan rung has to replace it with
+something defensible); no `RiceKernel` seam; no `decoder`/`format::Manifest`
+changes (the facade is now explicitly a shell over this loop, not a second
+loop); no merge of the two error models (whether the crate's flat `Error`
+grows payloads, or these conditions become source-level rejections before
+decode, is a facade-step API decision and stays there); no header-width
+`Error` work — but note the consequence for ordering: the width-assert
+follow-up recorded above stops being a parked TODO at the scan-cursor rung,
+because table-less scanning feeds the parse *arbitrary* bytes, so an
+out-of-profile width becomes reachable from data we did not choose; and no
+rewiring of the spike driver (item 6).
+
 **Reading rules.** The core claims: bit-exact FLAC frame decode, no_std,
 zero-alloc, zero unsafe except the pin attribute where a feature opts
 in, builds across bare-metal targets — and **never** a 32 kHz GBA
