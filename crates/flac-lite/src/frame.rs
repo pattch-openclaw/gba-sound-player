@@ -118,11 +118,61 @@ use crate::subframe::{PredictorState, decode_subframe};
 /// docs: RFC 9639 §9.1 — 15-bit sync `0b111111111111100` + strategy bit).
 const SYNC_14: u32 = 0x3FFE;
 
+/// Narrowest possible frame header: the 32 fixed bits, a one-octet coded number
+/// (§9.1.5 Table 18's first row), no appended value forms, and the CRC-8. A
+/// header shorter than this is not a header — the fixed fields alone are 32 bits
+/// and the footer is 8 — so it doubles as the low end of [`FrameHeader`]'s
+/// width invariant.
+pub const MIN_HEADER_BITS: usize = 32 + 8 + 8;
+
+/// The widest header *spelling* the format has: 32 fixed bits, a 7-octet coded
+/// number (§9.1.5: "extended to a maximum of 36 bits unencoded or 7 bytes
+/// encoded"), both appended value forms (§9.1.6 + §9.1.7, 16 bits each), and
+/// the CRC-8. libFLAC sizes its own scratch buffer by the same arithmetic
+/// (`raw_header[16]`, "MAGIC NUMBER based on the maximum frame header size,
+/// including CRC") — derived here rather than copied, and arrived at
+/// independently.
+///
+/// This is *not* what [`FrameHeader::parse`] can return — see
+/// [`MAX_ACCEPTED_HEADER_BITS`] — but it is the bound a *scanner* has to
+/// respect: item 4b's recovery path reads a bounded window when testing a
+/// candidate sync position, and "at most this many bytes" is what makes that
+/// window finite without a magic number in the code.
+pub const MAX_HEADER_BITS: usize = 32 + 7 * 8 + 16 + 16 + 8;
+
+/// [`MAX_HEADER_BITS`] in whole bytes: every field a header can append is
+/// byte-aligned after the fixed fields, and the coded number is whole octets by
+/// construction, so no header needs a partial trailing byte.
+pub const MAX_HEADER_BYTES: usize = MAX_HEADER_BITS / 8;
+
+/// The widest header this crate's parser can actually *accept*: eight bits
+/// narrower than the format's widest spelling, because the widest spelling needs
+/// a seven-octet coded number and that form cannot occur here. §9.1.5 caps a
+/// *frame* number at "31 bits unencoded or 6 bytes encoded", and the seven-octet
+/// form starts at 2^31 (§9.1.5 Table 18) — so with non-minimal number forms
+/// refused ([`crate::bits`], `read_utf8_coded`), a number this parser accepts is
+/// at most six octets. A seven-octet number *is* legal for a
+/// variable-blocksize stream, whose coded number is a *sample* number — but
+/// `parse` rejects variable blocking before reading a number
+/// ([`Error::ProfileViolation`]), so that case never reaches the width question.
+///
+/// This is the invariant `parse` asserts on its own arithmetic, and both ends of
+/// the range are witnessed on real encoder bytes, not by the assert itself:
+/// 48 bits is `s2_seekable_96k_stereo.flac`'s and the frame-header corpus's
+/// narrowest header, 80 bits is `s3_wide_48001hz_b3000.flac`'s (a real encode
+/// whose sample rate and block size both need the appended 16-bit forms — see
+/// `tests/stream_vectors.txt`), and the 120-bit top is a computed header in
+/// `stream`'s unit tests. The 48–72-bit range that used to be asserted here is
+/// nothing more than what *our packer* emits; the generated census in
+/// `tests/stream_vectors.txt` keeps that claim measured per fixture.
+pub const MAX_ACCEPTED_HEADER_BITS: usize = MAX_HEADER_BITS - 8;
+
 /// Stream-level facts a frame header cannot carry by itself.
 ///
 /// FLAC deliberately omits values from frames when they match the stream
 /// default: sample-rate code `0b000` and sample-size code `0b000` both mean
-/// "look it up in STREAMINFO". Our container has no STREAMINFO (the GAFP
+/// "look it up in STREAMINFO". A stream that carries its own streaminfo gets
+/// them from [`crate::stream`]; a packed blob has no streaminfo (the GAFP
 /// manifest replaces it), so [`FrameHeader::parse`] needs these two values
 /// handed in.
 ///
@@ -133,9 +183,12 @@ const SYNC_14: u32 = 0x3FFE;
 /// streamable subset), so it is a path we will be on for as long as we chase
 /// that sample rate.
 ///
-/// Callers: Phase 2's `Decoder` passes values from the parsed `Manifest`; the
-/// Phase 1 perf spike passes hand-written constants — which is what lets the
-/// spike decode real frames with no manifest at all.
+/// Callers: `stream::StreamInfo::as_defaults` produces these from a real
+/// stream's streaminfo block (the ordinary `.flac` path); Phase 2's `Decoder`
+/// will pass values from the parsed GAFP `Manifest` instead, which carries the
+/// same two facts for a blob the packer wrote; the perf spike passes
+/// hand-written constants — which is what lets it decode real frames with no
+/// metadata at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamDefaults {
     /// Stream sample rate in Hz, used for sample-rate code `0b000`.
@@ -169,9 +222,10 @@ pub struct FrameHeader {
     /// cursor lands on the subframe data; our seek never uses the value (the
     /// manifest's offset table is authoritative).
     pub number: u64,
-    /// Bit length of this header as consumed by [`FrameHeader::parse`] —
-    /// 48–72 bits for the headers this encode profile produces (RFC 9639
-    /// allows wider; see the follow-up note inside [`FrameHeader::parse`]).
+    /// Bit length of this header as consumed by [`FrameHeader::parse`]. Always
+    /// within [`MIN_HEADER_BITS`]..=[`MAX_ACCEPTED_HEADER_BITS`]; a real encode
+    /// can exceed what our packer emits (80 bits on `s3_wide_48001hz_b3000.flac`),
+    /// and nothing downstream assumes the narrower range.
     /// The `crc-check` footer coverage anchors the frame's start bit on it
     /// (module docs); zero effect on decode output.
     pub header_bits: usize,
@@ -239,39 +293,71 @@ fn bits_per_sample(code: u8, defaults: &StreamDefaults) -> crate::Result<u8> {
     }
 }
 
-/// Sample rate bits → resolved [`SampleRate`], RFC 9639 Table 15. The three
-/// uncommon codes carry their value *after the coded number* (§9.1.7) in
-/// specific units — kHz (8-bit), Hz (16-bit), Hz÷10 (16-bit) — so they resolve
-/// here, not in `SampleRate::from_flac_code`. The multipliers are cheap:
-/// ARM7TDMI has a hardware `MUL` (the no-divide rule is about `SDIV`-less
-/// division), and this runs once per header. A value of 0 means "no audio"
-/// (§9.1.7) and is refused — every stream we pack is audio.
-fn sample_rate(code: u8, reader: &mut BitReader<'_>) -> crate::Result<SampleRate> {
-    let hz = match code {
-        0b1100 => {
+/// What a sample-rate *code* promises, RFC 9639 Table 15, classified in the
+/// same two-phase shape as [`blocksize_code`]: the code sits in the fixed
+/// fields, so it is classified there, and only the value of the three uncommon
+/// codes — which §9.1.7 places after the coded number — is read later.
+///
+/// Classifying late would make a reserved code cost a frame scanner (item 4b)
+/// the coded number and the appended block size before it could say "not a
+/// frame" — the over-match cost measurement said the reserved-bit check alone
+/// did not cover.
+enum RateCode {
+    /// Self-contained: `0b0000` (get it from the stream) or one of the eleven
+    /// table rates. Resolved already, via [`SampleRate::from_flac_code`] — the
+    /// frame layer deliberately does not carry a second copy of Table 15.
+    SelfContained(SampleRate),
+    /// `0b1100`: an 8-bit kHz value follows the coded number (§9.1.7).
+    UncommonKhz,
+    /// `0b1101`: a 16-bit Hz value follows the coded number (§9.1.7). This is
+    /// the only way to name a rate the 4-bit table cannot — 48001 Hz, the real
+    /// `s3_wide_48001hz_b3000.flac` header in the stream vectors, is one.
+    UncommonHz,
+    /// `0b1110`: a 16-bit Hz÷10 value follows the coded number (§9.1.7).
+    UncommonHzPer10,
+}
+
+fn rate_code(code: u8) -> crate::Result<RateCode> {
+    match code {
+        0b0000 | 0b0001..=0b1011 | 0b1111 => {
+            SampleRate::from_flac_code(code).map(RateCode::SelfContained)
+        }
+        0b1100 => Ok(RateCode::UncommonKhz),
+        0b1101 => Ok(RateCode::UncommonHz),
+        0b1110 => Ok(RateCode::UncommonHzPer10),
+        _ => Err(Error::InvalidField), // unreachable for 4-bit input
+    }
+}
+
+/// The value side of Table 15: the appended fields §9.1.7 places after the
+/// coded number and after any uncommon block size. A value of 0 means "no
+/// audio" (§9.1.7) and is refused — every stream this crate packs is audio.
+/// The multipliers are cheap: ARMv4T has a hardware `MUL` (the no-division rule
+/// is about `SDIV`), and this runs once per header.
+fn resolve_sample_rate(kind: RateCode, reader: &mut BitReader<'_>) -> crate::Result<SampleRate> {
+    let hz = match kind {
+        RateCode::SelfContained(rate) => return Ok(rate),
+        RateCode::UncommonKhz => {
             let khz = reader.read_u8()? as u32;
             if khz == 0 {
                 return Err(Error::InvalidField);
             }
             khz * 1000
         }
-        0b1101 => {
+        RateCode::UncommonHz => {
             let hz = reader.read_bits(16)?;
             if hz == 0 {
                 return Err(Error::InvalidField);
             }
             return Ok(SampleRate::Explicit(hz));
         }
-        0b1110 => {
+        RateCode::UncommonHzPer10 => {
             let hz10 = reader.read_bits(16)?;
             if hz10 == 0 {
                 return Err(Error::InvalidField);
             }
             hz10 * 10
         }
-        // Self-contained codes: 0b0000 → FromStreamDefault, the eleven table
-        // rates → Explicit, 0b1111 (forbidden) → InvalidField.
-        _ => return SampleRate::from_flac_code(code),
     };
     Ok(SampleRate::Explicit(hz))
 }
@@ -285,14 +371,13 @@ impl FrameHeader {
     /// stream" codes; see [`StreamDefaults`].
     ///
     /// Validates every field, and rejects *values* outside the encode profile
-    /// — the subset lives in what is accepted, never in what is parsed. The
-    /// headers this profile produces are 6–9 bytes (the format allows more —
-    /// see the follow-up note at the width assert below); skipping a field
-    /// saves nothing measurable, while a partial parse mispositions the
-    /// cursor and surfaces as corrupt samples three modules away. On success the cursor sits exactly on the first
-    /// subframe bit; on `Err` it may sit part-way through the header, and the
-    /// caller must treat the frame as undecodable (the manifest's offsets stay
-    /// authoritative — re-seek, do not continue).
+    /// — the subset lives in what is accepted, never in what is parsed. A header
+    /// is 6–15 bytes; see [`MAX_ACCEPTED_HEADER_BITS`]. Skipping a field saves
+    /// nothing measurable, while a partial parse mispositions the cursor and
+    /// surfaces as corrupt samples three modules away. On success the cursor
+    /// sits exactly on the first subframe bit; on `Err` it may sit part-way
+    /// through the header, and the caller must treat the frame as undecodable
+    /// (the manifest's offsets stay authoritative — re-seek, do not continue).
     ///
     /// Field order walks RFC §9.1.1–9.1.8 exactly; the two-phase blocksize
     /// resolution (code now, uncommon value after the coded number) is the
@@ -315,7 +400,7 @@ impl FrameHeader {
             return Err(Error::ProfileViolation); // variable blocksize: off-profile
         }
         let bs_bits = reader.read_bits(4)? as u8;
-        let rate_code = reader.read_bits(4)? as u8;
+        let rate_bits = reader.read_bits(4)? as u8;
         let channels_code = reader.read_bits(4)? as u8;
         let size_code = reader.read_bits(3)? as u8;
         if reader.read_bits(1)? != 0 {
@@ -326,10 +411,16 @@ impl FrameHeader {
         // Validate what is fully determined by the fixed fields. Doing this
         // before consuming the post-number bytes keeps garbage headers cheap
         // to reject; it does not change any cursor outcome the caller can act
-        // on (errors end the frame either way).
+        // on (errors end the frame either way). A frame scanner (item 4b) is
+        // the caller that cares: a fixed-field refusal lands inside 32 bits,
+        // which is what bounds the cost of a false sync match. The sample-rate
+        // code is classified in this same place even though its *value*
+        // (§9.1.7) comes later — for exactly that reason. Asserted by
+        // `stream::tests::header_width_bounds::a_wide_header_is_refused_inside_its_fixed_prefix`.
         let channels = channel_config(channels_code)?;
         let bits_per_sample = bits_per_sample(size_code, defaults)?;
         let bs_code = blocksize_code(bs_bits)?;
+        let rate_kind = rate_code(rate_bits)?;
 
         // --- coded frame number: whole octets, cursor stays byte-aligned ----
         let number = reader.read_utf8_coded()?;
@@ -356,7 +447,7 @@ impl FrameHeader {
         };
 
         // --- uncommon sample rate, after the uncommon blocksize (§9.1.7) ----
-        let sample_rate = sample_rate(rate_code, reader)?;
+        let sample_rate = resolve_sample_rate(rate_kind, reader)?;
 
         // --- CRC-8: consumed here; verified when `crc-check` is on ----------
         // Always byte-aligned (module docs); `read_u8` is bit-level anyway, so
@@ -376,26 +467,27 @@ impl FrameHeader {
         let _ = stored_crc8;
 
         let header_bits = reader.bit_position() - start_bit;
-        // Profile witness, NOT a format bound. 48–72 bits is what the
-        // encoders we pack with produce (the header-vector census records
-        // exactly that range). The format allows more: a coded number is up
-        // to 7 octets (RFC 9639 §9.1.5) and the uncommon block-size and
-        // sample-rate codes each append 16 bits (§9.1.6/§9.1.7), so the
-        // widest header this function will actually accept is 32+56+16+16+8
-        // = 128 bits — libFLAC sizes its raw header buffer the same way
-        // (`raw_header[16]`, "MAGIC NUMBER based on the maximum frame header
-        // size, including CRC").
-        // FOLLOW-UP (recorded 2026-11-03 review; see FLAC.md's Phase 2
-        // step-5 entry): a plain `flac -b 16` encode of a 170 s / 8 kHz
-        // stream reaches a 4-octet frame number and hits this assert with an
-        // 80-bit header. We control what gets encoded for ROMs, so this is
-        // left as a known-limitation TODO rather than widened here. When it
-        // is picked up, the fix is a *stated* supported-width bound that
-        // fails with a clear `Error`, not a debug-only panic — and the
-        // witness should be real encoder output, not a hand-built header.
+        // An internal invariant, not a profile claim: given the field widths
+        // this function has now read, `header_bits` cannot land outside this
+        // range, and the two ends are derived in the constants' docs
+        // ([`MIN_HEADER_BITS`], [`MAX_ACCEPTED_HEADER_BITS`]). Anything
+        // outside is a bug in this function's own arithmetic.
+        //
+        // What used to be asserted here — `48..=72` — was an *encoder*
+        // observation masquerading as a bound, and a real stream broke it: a
+        // `flac -b 16` encode of a 170 s / 8 kHz stream reaches a 4-octet
+        // frame number and hits an 80-bit header (2026-11-03 review), as does
+        // any encode needing the appended block-size/sample-rate forms
+        // (`s3_wide_48001hz_b3000.flac`, parsed at 80 bits by
+        // `tests/stream_metadata_layout.rs`). There is no width *rejection*
+        // here because none is due: every field value that could push a header
+        // past the accepted ceiling is already refused for its own reason
+        // (frame-number cap, variable blocking, non-minimal number form), so
+        // widening the assert to the format's real bound costs nothing and
+        // stops a debug-only panic from standing in for a decoder limit.
         debug_assert!(
-            (48..=72).contains(&header_bits),
-            "outside this profile's 6–9 byte headers (see the follow-up note in FrameHeader::parse)"
+            (MIN_HEADER_BITS..=MAX_ACCEPTED_HEADER_BITS).contains(&header_bits),
+            "header width outside the derived bounds — a bug in parse's arithmetic, not a stream problem"
         );
 
         Ok(FrameHeader {

@@ -30,6 +30,62 @@
 
 use crate::{Error, Result};
 
+/// Octet count of the coded-number form a lead octet starts, per
+/// RFC 9639 §9.1.5 Table 18 — or `None` when the byte cannot *start* a coded
+/// number (`0x80..=0xBF` are continuation octets; `0xFF` is the single
+/// all-ones lead the extended UTF-8 coding never uses).
+///
+/// This is the *lead* half of Table 18. The other half — the value range each
+/// form carries — is enforced inside [`BitReader::coded_number_inner`] (a value
+/// below its form's minimum is a non-minimal form, rejected there).
+///
+/// Public because header width has to be *computable*, not only read:
+///
+/// * [`crate::frame`]'s header parse cross-checks its own consumed length
+///   against this table (see that module's docs) instead of trusting the
+///   cursor alone.
+/// * A frame-scan candidate filter needs the form width *before* committing to
+///   a read: with the worst case known (7 octets — Table 18's own cap) the
+///   widest possible frame header is a stated number of bytes, which is both
+///   the scan window bound and the `crc-check` coverage bound.
+pub fn coded_number_octets(lead: u8) -> Option<usize> {
+    match lead {
+        0x00..=0x7F => Some(1), // 0xxxxxxx — single octet, whole value
+        0x80..=0xBF => None,    // 10xxxxxx — continuation, cannot lead
+        0xC0..=0xDF => Some(2), // 110xxxxx
+        0xE0..=0xEF => Some(3), // 1110xxxx
+        0xF0..=0xF7 => Some(4), // 11110xxx
+        0xF8..=0xFB => Some(5), // 111110xx
+        0xFC..=0xFD => Some(6), // 1111110x
+        0xFE => Some(7),        // 11111110 — zero payload bits in the lead
+        0xFF => None,           // 11111111 — unused by the coding
+    }
+}
+
+/// Smallest value whose **minimal** coded-number form has N octets, indexed by
+/// [`coded_number_octets`]'s result — RFC 9639 Table 18's left column, i.e. one
+/// past the previous form's maximum (`0x80 = 2^7`, `0x800 = 2^11`,
+/// `0x1_0000 = 2^16`, `0x20_0000 = 2^21`, …).
+///
+/// Only the *lower* bound is checked, and that is complete rather than
+/// unfinished: each form's maximum is exactly what its own payload bits can
+/// hold — the widths in the code block on [`BitReader::read_utf8_coded`] are
+/// Table 18's right column — so the accumulation in
+/// [`BitReader::coded_number_inner`] cannot exceed it. Rows 6 and 7 carry the
+/// RFC's one real asymmetry: the 6-octet form tops out at 31 bits while the
+/// 7-octet form *starts* at 32, so no value can want both, and row 7 is
+/// reachable at all only because a 32-bit value does not fit in 6 octets.
+const CODED_NUMBER_FORM_MIN: [u32; 8] = [
+    0, // row 0 is unreachable: no form has zero octets
+    0,
+    0x80,
+    0x800,
+    0x1_0000,
+    0x20_0000,
+    0x400_0000,
+    0x8000_0000,
+];
+
 /// A cursor-based, borrow-only bit reader.
 ///
 /// Zero-cost to construct, zero allocation, `Copy`-ish for cheap save/restore in
@@ -173,11 +229,56 @@ impl<'a> BitReader<'a> {
     /// warning applied to `0xFE`, which RFC 9639 legalizes as the 7-byte
     /// lead — only `0xFF` remains invalid.)
     ///
-    /// This is a *bit-level* decoder: it does not enforce canonical (shortest)
-    /// form — non-canonical leads like `0xC0 0x80` decode to small values by
-    /// design, exactly as libFLAC's decoder accepts them. Stream semantics
-    /// (numbers must match the frame count / be strictly increasing) belong
-    /// to the frame layer, where those invariants are actually checkable.
+    /// This is a *bit-level* decoder: it enforces neither canonical (shortest)
+    /// form nor stream-level meaning. It **does** reject the non-minimal forms
+    /// ([`Error::InvalidField`]) — a value that would fit in a shorter form but
+    /// is written in a longer one, i.e. UTF-8's overlongs (`C0 80` for 0,
+    /// `C1 BF` for 0x7F) and, in Table 18's terms, a value below its form's
+    /// minimum.
+    ///
+    /// This rule has been documented wrong here once and then *measured*
+    /// wrong once more, so the whole trace is kept.
+    ///
+    /// The first version of this doc said the reference decoder accepts
+    /// overlongs. A follow-up "measurement" reported the opposite: a real
+    /// stream whose frame number `0` was rewritten from `00` to `C0 80`, its
+    /// header CRC-8 recomputed, failing `flac -d` with `BAD_HEADER` at 0
+    /// samples. The command was real; what it measured was not the form. The
+    /// frame footer's CRC-16 covers the frame HEADER too, not just the body
+    /// (measured per fixture by the vector generator: `crc16(header+body)`
+    /// equals the stored footer, `crc16(body)` does not), so *any* change to a
+    /// header's bytes breaks its frame — and a stale header CRC is what yields
+    /// `BAD_HEADER`.
+    ///
+    /// With **both** CRCs recomputed over the widened header, the reference
+    /// decoder accepts the form: `flac -d` 1.5.0 decodes a real stream whose
+    /// frame number 0 is spelled `C0 80`, `E0 80 80`, or `F0 80 80 80`, MD5
+    /// check included. Those streams are generated, not hand-written, and their
+    /// exit statuses are pinned as the `mutation number-form-overlong` rows of
+    /// `tests/stream_vectors.txt` (`scripts/gen_stream_vectors.sh`). A malformed
+    /// continuation sequence — `C0 80 80`, a 2-octet lead with a stray third
+    /// byte — *is* rejected by the reference decoder as `BAD_HEADER`; the
+    /// structural rules above are shared, minimality is not.
+    ///
+    /// So the rule here is a deliberate divergence, and a cheap one: libFLAC
+    /// never *writes* a non-minimal form (the generator asserts that census per
+    /// fixture — `frame_number_forms_all_minimal`), and keeping it preserves the
+    /// one-to-one relation between a value and its form width, which is what
+    /// `frame::MAX_ACCEPTED_HEADER_BITS` is derived from (a seven-octet lead can
+    /// only be a frame number if overlongs are admitted).
+    ///
+    /// What it is NOT, measured: a reduction in false frame starts. On these
+    /// five fixtures `scan_frame_starts_strict` equals
+    /// `scan_frame_starts_all_forms_allowed` — the rule removes zero candidate
+    /// frame starts from real audio bytes. The scan safety the frame layer has
+    /// comes from the field validation and the header CRC-8, not from this
+    /// rule; the argument for the rule is canonicity (Table 18 gives each value
+    /// exactly one row), consistent with reading the rest of §9.1 by its
+    /// structural rules rather than by the reference decoder's tolerance.
+    ///
+    /// Stream semantics (numbers must match the frame count / be strictly
+    /// increasing) still belong to the frame layer, where those invariants are
+    /// actually checkable.
     ///
     /// Cursor is **atomic**: a multi-byte read that fails partway (bad lead,
     /// bad continuation, EOF) restores the cursor exactly as it was — the
@@ -460,36 +561,42 @@ impl<'a> BitReader<'a> {
     /// cursor as it goes. [`Self::read_utf8_coded`] wraps this to make the
     /// composite read atomic — every failure path here returns through the
     /// wrapper, which restores the cursor.
+    ///
+    /// The form's width comes from [`coded_number_octets`] — Table 18's lead
+    /// column written as data, instead of a prefix-counting loop that has to
+    /// re-derive it from bit patterns. Shifts and masks throughout, per the
+    /// module's no-divide ARMv4T rule.
     fn coded_number_inner(&mut self) -> Result<u64> {
         let lead = self.read_bits(8)? as u8;
-        // Count leading ones of the lead byte: shift/mask only, at most 8
-        // iterations (`mask` reaching 0 ends the loop for every input, per
-        // the module's no-divide ARMv4T rule).
-        let mut prefix: u32 = 0;
-        let mut mask = 0x80u8;
-        while lead & mask != 0 {
-            prefix += 1;
-            mask >>= 1;
+        let octets = match coded_number_octets(lead) {
+            Some(n) => n,
+            // 10xxxxxx cannot lead a number; 0xFF is the one all-ones lead RFC
+            // 9639 leaves invalid (0xFE is the legal 7-byte lead, and the
+            // pre-RFC "doubled prefix" warning concerned *it*, not 0xFF).
+            None => return Err(Error::InvalidField),
+        };
+        if octets == 1 {
+            // 0xxxxxxx → single octet, value is the low 7 bits.
+            return Ok(u64::from(lead & 0x7F));
         }
-        // prefix == 1: stray continuation byte (10xxxxxx cannot lead).
-        // prefix == 8: 0xFF, the one all-ones lead RFC 9639 leaves invalid
-        // (0xFE is the legal 7-byte lead; the pre-RFC "doubled prefix"
-        // warning concerned it, not 0xFF).
-        if prefix == 1 || prefix == 8 {
-            return Err(Error::InvalidField);
-        }
-        // prefix == 0 → single byte; otherwise the prefix counts ALL octets.
-        let total = if prefix == 0 { 1 } else { prefix };
-        // Lead-byte payload width is 7 - prefix (zero for the 7-byte lead).
-        // `0xFFu32 >> (prefix + 1)` is that width's mask with no subtraction
-        // edge case: prefix == 7 shifts a u32 by 8 → 0, which is defined.
-        let mut value = u64::from(u32::from(lead) & (0xFFu32 >> (prefix + 1)));
-        for _ in 1..total {
+        // Lead-byte payload width is 7 - octets (zero for the 7-byte lead).
+        // `0xFFu32 >> (octets + 1)` is that width's mask with no subtraction
+        // edge case: octets == 7 shifts a u32 by 8 → 0, which is defined.
+        let mut value = u64::from(u32::from(lead) & (0xFFu32 >> (octets + 1)));
+        for _ in 1..octets {
             let cont = self.read_bits(8)? as u8;
             if cont & 0xC0 != 0x80 {
                 return Err(Error::InvalidField);
             }
             value = (value << 6) | u64::from(cont & 0x3F);
+        }
+        // Non-minimal form: below what this form exists to carry (see
+        // CODED_NUMBER_FORM_MIN). No upper-bound test is needed, and that is a
+        // proof rather than an omission: a form's maximum IS its payload
+        // capacity, the widest form (7 octets) carries 0 + 6×6 = 36 bits which
+        // is exactly the RFC's 36-bit cap, and 36 bits cannot overflow a u64.
+        if value < u64::from(CODED_NUMBER_FORM_MIN[octets]) {
+            return Err(Error::InvalidField);
         }
         Ok(value)
     }
@@ -1168,8 +1275,11 @@ mod tests {
             (&[0xFB, 0xBF, 0xBF, 0xBF, 0xBF], 0x3_FFFF_FF), // 26-bit max of the 5-byte form
             (&[0xFC, 0x84, 0x80, 0x80, 0x80, 0x80], 0x400_0000),
             (&[0xFD, 0xBF, 0xBF, 0xBF, 0xBF, 0xBF], 0x7F_FF_FF_FF),
-            // 7-byte lead carries ZERO payload bits:
-            (&[0xFE, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80], 0), // non-canonical zero
+            // 7-byte lead carries ZERO payload bits, so its minimum value
+            // comes from the first continuation: 0b10 << 30 = 2^31. (The all
+            // `-0x80` form of the same lead would decode to 0 — below row 7's
+            // minimum, i.e. the non-canonical zero, rejected. That case lives
+            // in `read_utf8_coded_rejects_non_minimal_forms`.)
             (&[0xFE, 0x82, 0x80, 0x80, 0x80, 0x80, 0x80], 0x8000_0000), // 2^31, table minimum
             (&[0xFE, 0xBF, 0xBF, 0xBF, 0xBF, 0xBF, 0xBF], 0xF_FFFF_FFFF), // 36-bit max
             (&[0xFE, 0xAF, 0x9F, 0xB5, 0xA3, 0xB8, 0x80], 51_000_000_000), // RFC worked example
@@ -1217,6 +1327,124 @@ mod tests {
     }
 
     #[test]
+    fn read_utf8_coded_rejects_non_minimal_forms() {
+        // A value written in a longer form than it needs is
+        // `[Error::InvalidField]`, and the cursor is untouched (the read is
+        // atomic, like every other rejection). The rule is Table 18's left
+        // column, i.e. CODED_NUMBER_FORM_MIN.
+        //
+        // The reference decoder, by contrast, accepts these forms — but only
+        // once *both* CRCs are recomputed over the widened header, which is
+        // what the `mutation number-form-overlong` rows of
+        // tests/stream_vectors.txt pin (`mutation_formN_reference_exit 0` for
+        // the 2-, 3- and 4-octet spellings). Leaving the frame footer covering
+        // the original header bytes gives FRAME_CRC_MISMATCH, and leaving the
+        // header CRC-8 stale gives BAD_HEADER; neither says anything about the
+        // form. Being strict here is therefore safe (no real encode is
+        // rejected — the generator asserts every frame number in every fixture
+        // is minimal) and cheap, and it is a recorded divergence rather than a
+        // restatement of FLAC behaviour. See `read_utf8_coded`'s docs for the
+        // full trace.
+        let cases: &[&[u8]] = &[
+            &[0xC0, 0x80],       // 0, the UTF-8 overlong by name
+            &[0xE0, 0x80, 0x80], // 0 in 3 octets
+            &[0xF0, 0x80, 0x80, 0x80],
+            &[0xF8, 0x80, 0x80, 0x80, 0x80],
+            &[0xFC, 0x80, 0x80, 0x80, 0x80, 0x80],
+            // The all-`0x80` 7-octet form: zero everywhere, including the lead,
+            // which carries NO payload bits -- so this is "0 written in 7
+            // octets", and it is also what proves the lead contributes nothing.
+            &[0xFE, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80],
+        ];
+        for &bytes in cases {
+            let mut r = BitReader::new(bytes);
+            assert_eq!(
+                r.read_utf8_coded(),
+                Err(Error::InvalidField),
+                "{bytes:02X?}"
+            );
+            assert_eq!(r.bit_position(), 0, "atomic: {bytes:02X?}");
+        }
+
+        // Exhaustive for the two-byte form: every 0xC0/0xC1 lead pair carries a
+        // value below 0x80, so every one of them is non-minimal.
+        for lead in 0xC0u8..0xC2 {
+            for cont in 0x80u8..0xC0 {
+                let data = [lead, cont];
+                let value = (u64::from(lead & 0x1F) << 6) | u64::from(cont & 0x3F);
+                let mut r = BitReader::new(&data);
+                assert_eq!(
+                    r.read_utf8_coded(),
+                    Err(Error::InvalidField),
+                    "{lead:02X} {cont:02X} carries {value:#x}"
+                );
+                assert_eq!(r.bit_position(), 0, "atomic: {lead:02X} {cont:02X}");
+            }
+        }
+
+        // The boundary itself, per form: for each form width N the value
+        // CODED_NUMBER_FORM_MIN[N] - 1 is exactly the previous form's maximum,
+        // so it has BOTH an N-octet spelling (rejected) and an (N-1)-octet one
+        // (accepted, and accepted at its own minimum). Same value, two
+        // spellings, opposite verdicts -- that is the whole rule in one table.
+        // The boundary itself, per form: for each form width N the value
+        // CODED_NUMBER_FORM_MIN[N] - 1 is exactly the previous form's maximum,
+        // so it has BOTH an N-octet spelling (rejected) and an (N-1)-octet one
+        // (accepted). Same value, two spellings, opposite verdicts — that is the
+        // whole rule in one table. Every byte pair here was produced and then
+        // re-parsed by an independent Python encoder/decoder before being
+        // written into this test (the habit behind every byte vector in this
+        // repo), not written out by hand.
+        let boundaries: &[(&[u8], &[u8], u64, usize)] = &[
+            (&[0x7F], &[0xC1, 0xBF], 0x7F, 2),
+            (&[0xDF, 0xBF], &[0xE0, 0x9F, 0xBF], 0x7FF, 3),
+            (&[0xEF, 0xBF, 0xBF], &[0xF0, 0x8F, 0xBF, 0xBF], 0xFF_FF, 4),
+            (
+                &[0xF7, 0xBF, 0xBF, 0xBF],
+                &[0xF8, 0x87, 0xBF, 0xBF, 0xBF],
+                0x1F_FF_FF,
+                5,
+            ),
+            (
+                &[0xFB, 0xBF, 0xBF, 0xBF, 0xBF],
+                &[0xFC, 0x83, 0xBF, 0xBF, 0xBF, 0xBF],
+                0x3FF_FFFF, // 26-bit top: 2^26 - 1
+                6,
+            ),
+            (
+                &[0xFD, 0xBF, 0xBF, 0xBF, 0xBF, 0xBF],
+                &[0xFE, 0x81, 0xBF, 0xBF, 0xBF, 0xBF, 0xBF],
+                0x7F_FF_FF_FF,
+                7,
+            ),
+        ];
+        for &(minimal, non_minimal, value, octets) in boundaries {
+            assert_eq!(
+                u64::from(CODED_NUMBER_FORM_MIN[octets]),
+                value + 1,
+                "row {octets}'s minimum must be the previous row's maximum + 1"
+            );
+
+            let mut r = BitReader::new(non_minimal);
+            assert_eq!(
+                r.read_utf8_coded(),
+                Err(Error::InvalidField),
+                "{value:#x} spelled in {octets} octets"
+            );
+            assert_eq!(r.bit_position(), 0, "atomic");
+
+            let mut r = BitReader::new(minimal);
+            assert_eq!(r.read_utf8_coded().unwrap(), value, "{minimal:02X?}");
+            assert_eq!(r.bit_position(), minimal.len() * 8);
+
+            // (The accepted spelling is the *shorter* form at its maximum —
+            // `value == CODED_NUMBER_FORM_MIN[octets] - 1` above says exactly
+            // that. Each row's minimum is witnessed at its own minimum by
+            // `read_utf8_coded_rfc_table_vectors`.)
+        }
+    }
+
+    #[test]
     fn read_utf8_coded_truncation_restores_cursor() {
         // Mid-number EOF is the case atomicity exists for: a 6-byte form cut
         // to 5 octets must leave the cursor exactly where it started.
@@ -1241,9 +1469,12 @@ mod tests {
 
     #[test]
     fn read_utf8_coded_two_byte_form_exhaustive() {
-        // All 32×64 legal two-byte pairs against the by-definition value
+        // All 30×64 *minimal* two-byte pairs against the by-definition value
         // ((lead & 0x1F) << 6) | (cont & 0x3F) — no table lookup involved.
-        for lead in 0xC0u8..0xE0 {
+        // Leads 0xC0/0xC1 are the same arithmetic but land below 0x80, i.e.
+        // outside the form's range; they are swept as rejections in
+        // `read_utf8_coded_rejects_non_minimal_forms`.
+        for lead in 0xC2u8..0xE0 {
             for cont in 0x80u8..0xC0 {
                 let data = [lead, cont];
                 let mut r = BitReader::new(&data);
@@ -1545,22 +1776,26 @@ mod tests {
         //
         // Bytes re-derived with an independent Python bit packer (the habit
         // that earlier caught sync 0x3FF8 being no sync code at all, and
-        // blocksize code 9 being 512 rather than 2048):
-        //   1011_1000 0001_0111 1011_0110 1100_0000
+        // blocksize code 9 being 512 rather than 2048). The composition is
+        // arbitrary but the coded number must be written in its MINIMAL form,
+        // because the reader rejects the others (see `read_utf8_coded`) — an
+        // earlier version of these bytes spelled 61 in two octets, which was
+        // silently non-minimal and stopped decoding once the rule landed:
+        //   10111001 01110100 10110110 11011010
         //   ^^^ lead-in = 0b101, cursor now at bit 3
-        //       ^^^^^ 11000000 = 2-octet lead at bit 3, payload 0b00001
-        //                ^^^^^^ 10111101 continuation, payload 0b111101
-        //                       -> coded number 0b00001_111101 = 61, bit 19
+        //      ^^^^^^^^ 11001011 = 2-octet lead at bit 3, payload 0b01011
+        //               ^^^^^^^^ 10100101 continuation, payload 0b100101
+        //                       -> coded number 0b01011_100101 = 0x2E5, bit 19
         //                          ^^^^^^^^ bits [19..27) = 0b10110110 = 0xB6,
         //                                   straddling data[2] and data[3]
-        let data = [0xB8, 0x17, 0xB6, 0xC0];
+        let data = [0xB9, 0x74, 0xB6, 0xDA];
         let mut r = BitReader::new(&data);
 
         assert_eq!(r.read_bits(3).unwrap(), 0b101, "synthetic lead-in");
         assert_eq!(r.bit_position(), 3);
         assert_ne!(r.bit_position() % 8, 0, "setup must be unaligned");
 
-        assert_eq!(r.read_utf8_coded().unwrap(), 61, "coded number");
+        assert_eq!(r.read_utf8_coded().unwrap(), 0x2E5, "coded number");
         assert_eq!(r.bit_position(), 19, "3 + 16 bits of coded number");
         assert_ne!(r.bit_position() % 8, 0, "still unaligned");
 
@@ -1903,8 +2138,10 @@ mod tests {
         assert_eq!(r.bytes_between(0, 41), None, "unaligned end");
         assert_eq!(r.bytes_between(24, 8), None, "reversed bounds");
         assert_eq!(r.bytes_between(0, 48), None, "out of range");
-        // A view is not a read: the cursor never moves.
-        let mut r2 = BitReader::new(&data);
+        // A view is not a read: the cursor never moves. `r2` is deliberately
+        // not `mut` — `bit_position` is `&self`, so this test would not
+        // compile if a view ever started advancing the cursor.
+        let r2 = BitReader::new(&data);
         let _ = r2.bytes_between(0, 16);
         assert_eq!(r2.bit_position(), 0);
     }
