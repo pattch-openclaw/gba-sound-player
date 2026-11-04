@@ -40,6 +40,87 @@
 # the reference decoder ACCEPTS those forms (it just never writes
 # them), so our refusal is a policy divergence, recorded here rather
 # than argued.
+#
+# `scan_frame_starts_sync_shape_only` and `scan_frame_starts_fields_only`
+# complete that pair into a LADDER over the same region, measured with
+# the same second reading of section 9.1: sync shape alone (0xFF plus
+# the rest of the 14-bit sync — the test a player is tempted to call
+# "find the next frame"), then field validation without the CRC-8,
+# then full strict validation, then strict validation with the
+# minimal-form rule lifted. Generation refuses to write unless each
+# count contains the next and the strict count equals the frame count.
+# On THESE fixtures every leg gives the frame count: the regions are
+# 1-16 kB and a false sync-shaped offset costs about one per 8 kB of
+# material (0xFF x 1/32), so none is expected or found. The false
+# starts live in LONGER material — measured in scripts/frame_vectors.py's
+# `measure`, sync shape over-matches by 1.3x to 12x (204 candidates for
+# 157 frames, up to 1568 for 313), and it is the FIELD-VALIDATION leg
+# that removes nearly all of them (a CRC-8 check without field checks
+# still admits false starts — same docstring). That asymmetry is why
+# the crate's frame walk never guesses a boundary, and why the
+# constructed garbage/truncation cases in src/scan.rs' unit tests are
+# hand-cut regions rather than fixtures (the rule in tests/README.md).
+#
+# The frame-walk rows are item 4b's ground truth: what a reader that
+# indexes nothing but advances past frames must see. `frame_bytes` is
+# every frame's own length (header + bodies + padding + CRC-16), derived
+# by walking each frame's subfields bit by bit WITHOUT looking at the
+# next frame, and cross-checked against the distance to the next frame
+# start / end of file -- two derivations of the same number. Generation
+# refuses to write unless they agree on every frame and the lengths
+# total the region's byte length exactly: the frames tile the region
+# with no gap and no overlap, which is what makes `frame_bytes` a
+# reader's clock instead of an index. `frame_footer_gaps_bits` is the
+# measured padding+CRC-16 tail of each frame (16 when the last body bit
+# already lands on a byte boundary, otherwise pad-to-byte + 16). The
+# padding half is bounded by the format at 7 bits, and generation
+# asserts 16 <= gap <= 23 for every frame instead of trusting that.
+# `footer_padding_frames` counts how many of this fixture's frames
+# carry any padding at all, and the rows after it ask what a reader
+# that treated the footer as exactly 16 bits would find where it then
+# stands: `footer_slip_positions_*` are the positions its BIT cursor
+# would land on (short by the padding), `footer_byte_truncation_*` the
+# ones its BYTE cursor would land on if it rounded a non-byte-aligned
+# end down instead of up. On these fixtures the strict filter accepts
+# none of them - a footer mistake is refused, not silently followed -
+# but some of the bit-level positions are sync-SHAPED, which is the
+# case worth knowing: shape-matching and field-refusing is exactly
+# where a player that trusted the two-byte pattern would invent a
+# frame. These are rows rather than prose because the answers are
+# fixture facts: a future fixture that changed one would fail the Rust
+# test that reads them.
+# `frame_header_bits` is the same frame's header width, per frame, from
+# the independent parser. The three rows add up: a reader holding any two
+# can reconstruct the third part (a frame's subframe-body length is
+# bytes*8 - header_bits - gap). Framing is compositional, so a decoder
+# that disagrees about one of them disagrees about where the next frame
+# begins - and a per-frame width is a cross-implementation check, not a
+# restatement of the census rows above.
+# `frame_blocksizes` is the per-frame sample count, whose sum is
+# total_samples where the stream declares one -- and where it does not
+# (the unseekable fixture) is still what the reference decoder returns.
+# `frame_exact_count_from_declarations` is the frame count a reader
+# can derive from the stream's OWN declarations -- a fixed block size
+# plus a known sample total -- and nothing else: ceil(total / block)
+# with the short tail included. It equals the frame count on the four
+# seekable fixtures and `none` on the unseekable one, which is the
+# measured form of the point item 4b exists for: three of the five
+# streams here state where their audio ends and one states nothing.
+# `pcm_interleaved_values`, `pcm_fnv1a64` and `pcm_md5` come from
+# `flac -d`'s output, not from this crate: the whole-file decode the
+# frame walk produces has a pin, and `pcm_md5` equaling
+# `streaminfo_md5` is the format's own definition of that field (the
+# MD5 of the unencoded PCM) measured on real files. No PCM rows for the
+# 24-bit fixture: this crate's decoder stops at the depth gate, though
+# its frames are walked and cross-checked like the others.
+# `frame_sample_size_codes` is each frame's 9.1.5 Table 17 sample-size
+# code: 0 = "the depth is only in STREAMINFO" (the crate resolves that
+# through StreamDefaults), 1 = 8, 2 = 12, 3 = reserved, 4 = 16, 5 = 20,
+# 6 = 24, 7 = 32. Every frame of every fixture here STATES its depth,
+# and generation refuses to write a frame whose statement contradicts
+# its own streaminfo. That is what makes the 24-bit fixture's refusal
+# unarguable: no caller-supplied default could talk a decoder into
+# reading those frames, because the frames themselves say 24.
 
 stream_vector s1_plain_8k_mono
 note two-block container: streaminfo first, a real (empty) Vorbis comment carrying the last-metadata-block flag. No padding, no seektable: --no-padding/--no-seektable are encoder options, so this is libFLAC's own output, not a hand-trimmed file. Also the host of the frame-number FORM mutation (`mutation number-form-overlong`): a frame header of this real stream rewritten with its number in each longer form, both CRCs recomputed — the only witness here that pins what the reference decoder does with a non-minimal form, as opposed to what libFLAC writes.
@@ -81,6 +162,27 @@ last_frame_number 9
 last_frame_header_bits 56
 last_frame_blocksize 48
 last_frame_bytes_to_region_end 51
+frame_region_len 1095
+frame_offsets 86 203 319 435 551 667 783 898 1014 1130
+frame_bytes 117 116 116 116 116 116 115 116 116 51
+frame_header_bits 56 56 56 56 56 56 56 56 56 56
+frame_blocksizes 128 128 128 128 128 128 128 128 128 48
+frame_footer_gaps_bits 23 17 16 16 21 21 16 16 19 22
+footer_padding_frames 6
+footer_slip_positions_sync_shape 0
+footer_slip_positions_strict_headers 0
+footer_byte_truncation_positions 9
+footer_byte_truncation_sync_shape 0
+footer_byte_truncation_strict_headers 0
+frame_numbers 0 1 2 3 4 5 6 7 8 9
+frame_sample_size_codes 4 4 4 4 4 4 4 4 4 4
+frame_exact_count_from_declarations 10
+scan_frame_starts_sync_shape_only 10
+scan_frame_starts_fields_only 10
+pcm_interleaved_values 1200
+pcm_fnv1a64 5888246922117345972
+pcm_md5 6fbeacf13af62e01b246b6fe7387590f
+pcm_bytes_len 2400
 
 mutation number-form-overlong
 mutation_at 86
@@ -136,6 +238,27 @@ last_frame_number 2
 last_frame_header_bits 64
 last_frame_blocksize 384
 last_frame_bytes_to_region_end 666
+frame_region_len 16312
+frame_offsets 176 7999 15822
+frame_bytes 7823 7823 666
+frame_header_bits 48 48 64
+frame_blocksizes 4608 4608 384
+frame_footer_gaps_bits 18 23 17
+footer_padding_frames 3
+footer_slip_positions_sync_shape 0
+footer_slip_positions_strict_headers 0
+footer_byte_truncation_positions 2
+footer_byte_truncation_sync_shape 0
+footer_byte_truncation_strict_headers 0
+frame_numbers 0 1 2
+frame_sample_size_codes 4 4 4
+frame_exact_count_from_declarations 3
+scan_frame_starts_sync_shape_only 3
+scan_frame_starts_fields_only 3
+pcm_interleaved_values 19200
+pcm_fnv1a64 17855214114877165645
+pcm_md5 5f89028d9197af68825649750823e1a2
+pcm_bytes_len 38400
 
 stream_vector s3_wide_48001hz_b3000
 note header width OUTSIDE our packer's 48..=72-bit profile at frame 0: 48001 Hz has no 4-bit sample-rate code (0b1101 appends a 16-bit Hz value, section 9.1.7) and 3000 samples has no 4-bit block-size code (0b0111 appends a 16-bit size-1, section 9.1.6). Both appended forms sit AFTER the coded frame number (Table 13's column order — the same order frame_vectors.py's parser follows), so the FIRST header is 32+8+16+16+8 = 80 bits and both frames here carry 3000/1801, i.e. the 16-bit form twice. Two frames are enough: an appended value form is not tied to frame count, and this is the widest real header this repo commits. Anything wider also needs the frame NUMBER to reach two octets (128+ frames) — measured on a 2.1M-frame synthetic stream (-b 257, 44100 Hz) a single stream contained widths of 80, 88, 96 and 104 bits; that file is not committed (multi-megabyte for a width rule). The format's own ceiling, 128 bits — a 6-octet coded number (the most the 31-bit frame-number bound allows) plus both appended forms plus the CRC — is therefore witnessed by a computed synthetic header in the Rust suite, not by a fixture. Measured: this encode needs no --lax (same as the uncommon-rate streams gen_frame_vectors.sh already encodes) — a wide header is not the same thing as an unstreamable stream. If a future libFLAC stops using the 16-bit forms here, the census below refuses to write.
@@ -177,6 +300,27 @@ last_frame_number 1
 last_frame_header_bits 80
 last_frame_blocksize 1801
 last_frame_bytes_to_region_end 1477
+frame_region_len 3927
+frame_offsets 86 2536
+frame_bytes 2450 1477
+frame_header_bits 80 80
+frame_blocksizes 3000 1801
+frame_footer_gaps_bits 20 21
+footer_padding_frames 2
+footer_slip_positions_sync_shape 0
+footer_slip_positions_strict_headers 0
+footer_byte_truncation_positions 1
+footer_byte_truncation_sync_shape 0
+footer_byte_truncation_strict_headers 0
+frame_numbers 0 1
+frame_sample_size_codes 4 4
+frame_exact_count_from_declarations 2
+scan_frame_starts_sync_shape_only 2
+scan_frame_starts_fields_only 2
+pcm_interleaved_values 4801
+pcm_fnv1a64 10239201691254625540
+pcm_md5 119b8197d3389dd486328dfbb5461fe5
+pcm_bytes_len 9602
 
 stream_vector s4_24bit_8k_mono
 note a valid 24-bit stream: the container is ordinary and the reference decoder verifies it, while this crate's decoder carries only 8/16-bit samples (frame.rs bits_per_sample). The stream layer refuses it as UnsupportedSampleSize, so the capability statement has a witness on real bytes rather than a sentence.
@@ -218,6 +362,23 @@ last_frame_number 9
 last_frame_header_bits 56
 last_frame_blocksize 48
 last_frame_bytes_to_region_end 52
+frame_region_len 1105
+frame_offsets 86 204 321 438 555 672 789 905 1022 1139
+frame_bytes 118 117 117 117 117 117 116 117 117 52
+frame_header_bits 56 56 56 56 56 56 56 56 56 56
+frame_blocksizes 128 128 128 128 128 128 128 128 128 48
+frame_footer_gaps_bits 23 17 16 16 21 21 16 16 19 22
+footer_padding_frames 6
+footer_slip_positions_sync_shape 1
+footer_slip_positions_strict_headers 0
+footer_byte_truncation_positions 9
+footer_byte_truncation_sync_shape 0
+footer_byte_truncation_strict_headers 0
+frame_numbers 0 1 2 3 4 5 6 7 8 9
+frame_sample_size_codes 6 6 6 6 6 6 6 6 6 6
+frame_exact_count_from_declarations 10
+scan_frame_starts_sync_shape_only 10
+scan_frame_starts_fields_only 10
 
 stream_vector s5_unseekable_total_unknown
 note the same audio as s1, fed as raw s16le PCM through a pipe and encoded to stdout: total samples 0 (unknown), min/max frame size 0 (unknown), MD5 all-zero (unset). `flac -t` still verifies it. This is the fixture that says a decoder may not count frames from total_samples — and the measured reason it exists: piping a WAV is NOT enough, because the WAV header states the sample count before a byte of audio is read, so a piped WAV still declares total_samples (measured, libFLAC 1.5.0). Only raw-in-pipe/pipe-out produces a stream that genuinely declares nothing.
@@ -259,3 +420,24 @@ last_frame_number 9
 last_frame_header_bits 56
 last_frame_blocksize 48
 last_frame_bytes_to_region_end 51
+frame_region_len 1095
+frame_offsets 86 203 319 435 551 667 783 898 1014 1130
+frame_bytes 117 116 116 116 116 116 115 116 116 51
+frame_header_bits 56 56 56 56 56 56 56 56 56 56
+frame_blocksizes 128 128 128 128 128 128 128 128 128 48
+frame_footer_gaps_bits 23 17 16 16 21 21 16 16 19 22
+footer_padding_frames 6
+footer_slip_positions_sync_shape 0
+footer_slip_positions_strict_headers 0
+footer_byte_truncation_positions 9
+footer_byte_truncation_sync_shape 0
+footer_byte_truncation_strict_headers 0
+frame_numbers 0 1 2 3 4 5 6 7 8 9
+frame_sample_size_codes 4 4 4 4 4 4 4 4 4 4
+frame_exact_count_from_declarations none
+scan_frame_starts_sync_shape_only 10
+scan_frame_starts_fields_only 10
+pcm_interleaved_values 1200
+pcm_fnv1a64 5888246922117345972
+pcm_md5 6fbeacf13af62e01b246b6fe7387590f
+pcm_bytes_len 2400

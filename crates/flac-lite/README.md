@@ -29,7 +29,12 @@ the perf spike's proven driver, not a shared file, and both copies are run over
 the same embedded clip bytes in the spike's own witness suite so the copy
 cannot drift silently — see [FLAC.md → split
 proposal](../../FLAC.md#flac-lite-and-flac-lite-gba--portable-core-split-proposal-2026-11-01)
-for why the instrument could not simply move. Plus frame CRC verification (Phase 2 step 5):
+for why the instrument could not simply move. **And the frame walk above that,
+`scan` (landed the same day, item 4b)**: a frame source with no index in front
+of it, where each frame's own fields tell the reader where it ends and the end
+of the bytes is the end of the stream (`stream::parse`'s file-level entry point,
+item 4a, is the half that says where the frames begin). Plus frame CRC
+verification (Phase 2 step 5):
 `bits::crc8` / `bits::crc16` are always compiled, and the `crc-check` feature
 additionally verifies the header CRC-8 and footer CRC-16 inside
 `FrameHeader::parse` / `decode_frame` (`HeaderCrc` / `FrameCrc`). Off by
@@ -52,6 +57,56 @@ exactly to record why the easy rule ("count frames from `total_samples`") is
 not available: a real stream can declare no sample count, no frame sizes and
 no MD5 and still carry ten frames. `src/lib.rs` carries the authoritative
 implementation state.
+
+**4b landed on top of it the same day** (`src/scan.rs`): `scan::Frames` walks a
+frame region with no index in front of it — `Frames::stream` over a whole file
+(starts at `frame_data_offset`, numbering anchored at 0, defaults and bounds
+from that file's own `STREAMINFO`), `Frames::region` over any slice that begins
+at a frame (a `FrameSource`-shaped slice, a hand-cut range, a blob), and
+`.anchored(n)` for a range whose real frame number is known. Each `next_frame`
+call parses one header, decodes it through the *same* `frame`-layer entry
+`driver` uses, and advances by that frame's own length: the cursor is left on
+the bit its own fields end on, one byte past the footer CRC. Hence no index, no
+sample-count claim and no fixed byte stride — the fixture table's frame lengths
+(`117 116 116 116 116 116 115 116 116 51`) admit none. What a frame's tail
+actually is, measured per frame: **zero-padding of 0–7 bits plus the 16-bit
+CRC**, recorded as a 16..23-bit gap (generation asserts the format's bound
+rather than trusting it), with non-zero padding on 23 of the 35
+frames here. The table then counts what a reader that treated the footer as
+exactly 16 bits would be standing on: `footer_slip_positions_strict_headers 0`
+over those 23 bit positions, and `footer_byte_truncation_strict_headers 0` over
+the 30 positions a byte cursor that rounded a non-byte-aligned end *down* lands
+on — so a mis-counted footer is refused rather than followed, loudly, though
+*inside* a frame that had already decoded. One of the 23 positions is
+sync-SHAPED (`footer_slip_positions_sync_shape 1`): two bytes that look like a
+frame and fields that are not, which is the case the field leg of the frame
+filter exists for, and the reason the strict filter is asked about these offsets
+in `tests/scan_frame_walk_layout.rs` rather than trusted about them. A walk that skips a constant 16 bits and re-anchors to the next byte
+boundary lands correctly (the footer ends on a byte boundary, so rounding up
+absorbs the padding) — that is `frame`'s existing contract, and it works only
+because the body's bit end came from walking the fields. `scan` measures lengths
+the same way, which is why `bit_position() / 8` is a measurement here and not a
+rounding, and why the walk reproduces the table's `frame_bytes` on every frame in
+both feature builds. `.finish()` is the end-of-stream rule: the end of the
+region is the only end every FLAC stream has, so the walk reads to it and only
+then checks the walk against what the stream declared (`total_samples`, the
+frame count 4a derives from a fixed block size) — in **that** order, sample claim
+first, because it is the one that names how much audio is missing; and the
+frame-count arm cannot fire on a self-consistent file at all (both numbers come
+from the same arithmetic), it exists for a claim handed to a region it does not
+belong to — a case only a staged test can build, and one this suite had not built
+until a mutation showed the arm was untested — one code path for seekable
+and unseekable streams, and the reason `s5`'s silence is never turned into a
+zero. `scan::next_frame_start` is **recovery only** (`resync`): sync-shape
+alone finds 1223 candidates for 979 real frames, so a search must run the whole
+field-plus-CRC filter inside the derived width bounds, which is also why this
+crate's depth limit applies to *locating* frames exactly as much as to decoding
+them (the generator's independent filter finds all 10 of the 24-bit fixture's
+frames; ours finds 0, and refuses the walk with `UnsupportedSampleSize`). Coded
+frame numbers are the third strict leg — enforced **before a frame writes any
+samples**. What is deliberately *not* here: `SEEKTABLE` interpretation (the
+walker skips it by length; random access is item 6's `format::Manifest`), any
+end-of-stream claim based on declared counts, and a rewired `Decoder` facade.
 Roadmap: [`../../FLAC.md`](../../FLAC.md) → "Phased plan".
 
 ```
@@ -67,6 +122,8 @@ crates/flac-lite/
 ├── src/stereo.rs     mid-side, left-side, right-side decorrelation
 ├── src/driver.rs     per-frame loop over a borrowed frame index (copied, not
 │                     shared, from the perf spike's proven driver)
+├── src/scan.rs       frame walk with no index: a frame ends itself, the bytes
+│                     end the stream (`Frames`, `StreamBounds`, `resync`)
 ├── src/decoder.rs    manifest-shaped facade (scaffold: todo!())
 └── tests/README.md   committed libFLAC vector tables + layout/decode suites
 ```

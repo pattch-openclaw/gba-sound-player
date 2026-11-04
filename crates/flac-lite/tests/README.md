@@ -18,14 +18,29 @@ tautology; these are not.
 | `frame_header_vectors.txt` | real frame headers: field values, widths, coded-number octets, CRC-8 | `scripts/gen_frame_vectors.sh` → `frame_vectors.py emit` | `flac` 1.5.0 + independent §9.1 reading |
 | `frame_run_vectors.txt` | whole-frame runs: offsets, lengths, PCM pins | same script → `frame_vectors.py emit_runs` | `flac` 1.5.0 + `flac -d` PCM + independent Python walk |
 | `subframe_body_vectors.txt` | subframe bodies per type (CONSTANT/VERBATIM/FIXED/LPC + wasted bits) | same script → `frame_vectors.py emit_bodies` | `flac` 1.5.0 + independent Bits walk + `flac -d` PCM |
-| `stream_vectors.txt` | per-file: the §8.1 block chain, every §8.2 `STREAMINFO` field, `frame_data_offset`, header-width census, frame-number **form** censuses, scan-frame-start counts, one number-form mutation + `flac -d` exit codes | `scripts/gen_stream_vectors.sh` | `metaflac --list` + two independent Python readings (§8 structure, §9.1 with/without the minimal-form rule) |
+| `stream_vectors.txt` | per-file: the §8.1 block chain, every §8.2 `STREAMINFO` field, `frame_data_offset`, the frame region and **every frame's own byte length / header width / block size / footer-gap bits / number / sample-size code**, where a mis-counted footer would
+land (the count of frames carrying padding, and whether the strict filter or only
+the bare sync shape matches at those positions), the header-width census, frame-number **form** censuses, the frame-start filter ladder (sync shape only → fields only → strict), what the stream's own declarations can say about its frame count, one number-form mutation + `flac -d` exit codes, and the decoded PCM's MD5/FNV-1a64 | `scripts/gen_stream_vectors.sh` | `metaflac --list` + **three** independent Python readings (§8 structure; §9.1 field/scan filtering with and without the minimal-form rule; a per-frame walk of the subframe bodies that derives each frame's length from its own fields) + `flac -d` PCM for the 16-bit fixtures |
 | `fixtures/s1…s5_*.flac` | the five streams the table describes, byte-for-byte what `flac` 1.5.0 wrote | same script (`stream_vectors.py emit`) | `flac` 1.5.0 (the encode commands live in the script next to each `encode_command` row) |
 
 Each fixture's *reason for existing* is in the table's `note` rows and in the
 module docs of the suite that reads it — `tests/stream_metadata_layout.rs`
 explains `s1…s5` (two-block container, every real block type, a real 80-bit
 header, a valid 24-bit stream, a stream that declares nothing about its own
-length).
+length). The same table is read a second way by
+`tests/scan_frame_walk_layout.rs` (item 4b's frame walk): it asks the crate to
+walk those frames with no index, and compares every frame start, byte length,
+header width, block size, frame number and every sample against the rows — plus
+the PCM hash, which came out of `flac -d`. It also takes the table's
+byte-truncation positions (where a walk that rounded a non-byte-aligned frame end
+*down* would stand) and asks this crate's own frame filter each one: it must
+refuse that position and report the real frame's start, and the count of positions
+where the table's reading accepts a header has to equal the count this crate's
+accepts. Where the two readings disagree about a *stream*, the table refuses to be
+written; where the crate disagrees with the table, a test fails. The 24-bit fixture is deliberately included in
+that suite's framing and depth-boundary tests and deliberately absent from its
+PCM comparisons: this crate declines 24-bit decode at the capability boundary,
+and the test says so by name rather than skipping quietly.
 
 ## The `.gfp` fixtures that are still planned
 
@@ -61,3 +76,19 @@ refusing a non-minimal coded number, refusing a missing leading `STREAMINFO`,
 refusing a 24-bit depth — the divergence from the reference decoder is
 recorded with a measurement, not asserted: see `bits::read_utf8_coded`'s docs
 and the `mutation*` rows of `stream_vectors.txt`.
+
+Item 4b's negative cases are **hand-cut regions of the committed fixtures**
+(a slice ending in the middle of a frame, a slice ending on a frame boundary
+holding less audio than the file declared, bytes appended after the last frame,
+a real frame spliced with one byte deleted, a real frame copied to the end of
+the region), not new fixture files: each of those is a claim about the walk's
+behaviour rather than about what encoders write, and a fixture would have
+implied the latter. The one thing a fixture *is* needed for — a stream that
+cannot tell you its own length — already exists as `s5`.
+
+The two end-of-region **claims** are staged the same way — a fixture's real frames
+handed a count that is not theirs — because a self-consistent file cannot
+contradict its own frame count while agreeing with its sample count (both numbers
+come from the same arithmetic in `STREAMINFO`), so that arm is reachable only when
+a claim and a region come from different streams. Staging it also pins which of
+the two diagnoses answers first when both are contradicted.

@@ -430,6 +430,23 @@ impl StreamInfo {
         self.total_samples != 0
     }
 
+    /// The same field as an option: `Some(count)` where the stream states one,
+    /// `None` where it does not. Kept next to [`Self::total_samples_known`] so the
+    /// sentinel and its interpretation stay together.
+    ///
+    /// The consumer is [`crate::scan`]'s end-of-stream cross-check, and the point
+    /// of the `None` arm is that it is *ordinary*: a stream encoded to a pipe
+    /// declares no total, decodes fine, and must be walked by counting frames to
+    /// the end of the bytes instead.
+    #[inline]
+    pub fn total_samples_declared(&self) -> Option<u64> {
+        if self.total_samples_known() {
+            Some(self.total_samples)
+        } else {
+            None
+        }
+    }
+
     /// Whether the MD5 field carries a checksum rather than §8.2's "not known".
     /// Nothing here verifies it — computing it needs the whole decoded PCM,
     /// which is a decoder-level concern (and an unrequested one: see FLAC.md's

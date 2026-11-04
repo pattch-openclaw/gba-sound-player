@@ -95,10 +95,84 @@
 //! — both implemented above. What still `todo!()`: the
 //! `decoder` facade — whose frame source is a `Manifest`, so it will be a
 //! thin shell over `driver`, not a second loop — and `format::Manifest`;
-//! `format::Blocksize::samples` and `EncodeProfile::validate`; and item 4b's
-//! table-less frame source (consumed-length framing, with scanning only as
-//! recovery — the derived header bounds and `bits::coded_number_octets` are its
-//! inputs).
+//! `format::Blocksize::samples` and `EncodeProfile::validate`.
+//! Item 4's **second half — the frame walk — landed as [`scan`]**, and it
+//! answers the two questions 4a left open: how a reader gets from one frame to
+//! the next with no index in front of it, and how it knows the stream is over.
+//! The format has two answers, and this module implements both and nothing else.
+//! (1) **A frame ends itself**: one frame's own fields describe every bit up to
+//! its end, so a walk that parses a header and walks the subframe bodies arrives
+//! on the next frame's first byte by construction. `scan::Frames` keeps a *bit*
+//! cursor for that reason, and the new `frame_bytes` / `frame_footer_gaps_bits`
+//! rows are the measured reason a byte-level rule is not the same thing: one
+//! stream's frame lengths are `117 116 116 116 116 116 115 116 116 51` — no
+//! stride — and a frame's tail is **zero-padding (0–7 bits) plus the 16-bit
+//! CRC**, recorded as a 16..23-bit gap (generation asserts the format's bound
+//! rather than trusting it), with non-zero padding on 23 of these 35 frames. The
+//! table then counts what a reader that treated the footer as exactly 16 bits
+//! would be standing on: `footer_slip_positions_strict_headers 0` over those 23
+//! bit positions, `footer_byte_truncation_strict_headers 0` over the 30 positions
+//! a down-rounded byte cursor lands on — the mistake is refused, loudly, though
+//! inside a frame that had already decoded. One of the 23 is sync-SHAPED
+//! (`footer_slip_positions_sync_shape 1`): two bytes that look like a frame and
+//! fields that are not, which is exactly the case the field leg of the filter
+//! exists for. (I had written in this file that a constant-16-bit footer walk
+//! "silently slips and the next header still parses"; it does neither, and those
+//! rows are what replaced the claim.) A walk that skips the 16-bit CRC and
+//! re-anchors **up** to the next byte boundary does land correctly, by arithmetic
+//! (the footer ends on a byte boundary, so rounding up absorbs the padding) —
+//! which is `frame`'s documented contract, and safe only because the body's bit
+//! end was computed by walking the fields. That is the whole difference: `scan`
+//! measures the frame's length from its fields, so `bit_position() / 8` after the
+//! footer is a measurement rather than a rounding, and it reproduces
+//! `frame_bytes` on every frame in both feature builds. Those rows are independent
+//! ground truth: the generator walks every frame's subfields with its own
+//! reference parser and cross-checks that walk against framing (and the tiling of
+//! the whole frame region) before it will write the table. (2) **The end of
+//! the bytes is the end of the stream** — §6's "last byte of the last frame, and
+//! thus of the whole stream" is the only end every FLAC stream has, while
+//! everything else the format offers (§8.2's `total_samples`, the fixed-blocksize
+//! frame count 4a derives, §8.2's MD5, §8.3's seek points, §8.2's frame-size
+//! fields) is a cross-check or does not exist for this stream; a walk reads to
+//! the end of its region and then *checks* the walk against what the stream
+//! declared, which is one code path for seekable and unseekable streams alike.
+//! Scanning ([`scan::next_frame_start`]) exists only as **recovery**, never as a
+//! frame finder — the measured record is 1223 sync-shaped candidates for 979 real
+//! frames, and ~9.4× over-counting alone on noise-like material, so the candidate
+//! rule is the two-byte shape plus the full RFC field validation plus the header
+//! CRC-8 (performed by `frame::parse` under `crc-check`, and by `scan` itself
+//! without it, so a scan result does not move with the feature), bounded per
+//! position by the derived header bounds 4a introduced ([`frame::MAX_HEADER_BYTES`],
+//! [`frame::MAX_ACCEPTED_HEADER_BITS`]). Where a walk has already lost its
+//! boundary, [`scan::Frames::resync`] applies that search to the walk's own state
+//! and re-anchors the numbering **on** the frame it lands on — the frame in
+//! progress is abandoned, which is what "a dead frame is dead" ([`frame`]) means
+//! for a player, and what the first version of that function got wrong.
+//! Coded frame numbers are the walk's third
+//! strict leg — anchored at 0 for a whole file, [`.anchored()`](scan::Frames::anchored)
+//! for a range whose position is known, and enforced **before any sample is
+//! written**. Witness: `scan`'s unit tests, which claim only the walk's state
+//! machine and caller contract over hand-cut regions, plus
+//! `tests/scan_frame_walk_layout.rs` over the same five fixtures and the extended
+//! `tests/stream_vectors.txt` (`frame_offsets`, `frame_bytes`, `frame_header_bits`,
+//! `frame_blocksizes`, `frame_footer_gaps_bits`, `footer_padding_frames` and the
+//! four `footer_*_positions_*` counts, `frame_numbers`,
+//! `frame_sample_size_codes`, `frame_region_len`,
+//! `frame_exact_count_from_declarations`, the three `scan_frame_starts_*` counts,
+//! and the reference-decoder PCM rows `pcm_md5` / `pcm_fnv1a64` for the 16-bit
+//! fixtures).
+//! **The depth boundary applies to locating frames exactly as much as to decoding
+//! them**, and that is stated rather than hidden: `s4` (a valid 24-bit encode)
+//! is refused by `stream::parse` at its entry, its first frame is refused by a
+//! walk handed its region, and the reason its frame starts are not found is the
+//! same profile check living inside `frame::parse`. The table is the counter-
+//! evidence that this is a capability limit and not a framing one: it describes
+//! those ten frames completely — lengths, header widths, sample-size codes
+//! (`0b110`: the frames themselves state 24, so no caller-supplied default can
+//! argue with the refusal), and the generator's own strict filter locates every
+//! one of them. A build that accepted 24-bit samples would need no new framing
+//! layer; `tests/scan_frame_walk_layout.rs` is where a reader finds out that the
+//! two questions are separate.
 //! the module layout, types, and signatures are the contract the
 //! implementation fills in (FLAC.md → phased plan, step 4 onward).
 //! Design rationale and the decision to write this at all live in
@@ -136,6 +210,14 @@
 //!             ├─ subframe CONSTANT | VERBATIM | FIXED(0..4) | LPC(<=32)
 //!             │    └─ residual  partitioned Rice | Rice2 | escape
 //!             └─ stereo   mid/side, left/side, right/side  (stereo only)
+//!
+//! scan (item 4b — a *second* frame source, with no index; it decodes through
+//!   the same layers below and reads the file level through stream)
+//!   └─ scan             frame walk: one frame's own fields end it (bit cursor,
+//!                       `frame_bytes` witnessed per frame against the generated
+//!                       table), and the end of the region is the end of the
+//!                       stream, cross-checked against what it declared.
+//!                       `scan::next_frame_start` is recovery only.
 //!
 //! stream (not in the decode path — it produces a frame source's inputs)
 //!   └─ stream           fLaC magic → §8.1 metadata-block walk → §8.2
@@ -193,6 +275,7 @@ pub mod driver;
 pub mod format;
 pub mod frame;
 pub mod residual;
+pub mod scan;
 pub mod stereo;
 pub mod stream;
 pub mod subframe;
