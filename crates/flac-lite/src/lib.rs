@@ -46,8 +46,21 @@
 //! replaying the committed table through the primitives, then production
 //! `decode_frame` on the same table, both bit-exact against `flac -d`
 //! PCM (FLAC.md → step 3f part 2). Phase 1's decode path through
-//! `decode_frame` is complete. What remains `todo!()`: `decoder` (the
-//! per-frame loop above this layer) and `format::Manifest` — there is no
+//! `decode_frame` is complete. The **per-frame loop above the frame layer
+//! landed 2026-11-04 as [`driver`]** — a narrow copy of this repo's proven
+//! frame-loop driver (`examples/flac_spike/src/driver.rs`), i.e. the
+//! split-proposal PR ladder's "`Decoder::decode_next` per-frame loop" rung.
+//! It decodes one frame **at its index offset** through a fresh cursor, and
+//! walks a whole index through a per-frame callback, over fully borrowed
+//! inputs ([`driver::FrameSource`] — the E1 sample's `ClipView` field set).
+//! Witness: `tests/frame_run_loop.rs` (this crate's gate, over the committed
+//! libFLAC run table) plus a differential test in the spike's own witness
+//! suite that runs **both copies** over the same embedded clip bytes, frame by
+//! frame. The spike's driver deliberately stays where it is: it is the `ctrl`
+//! arm of every recorded E measurement (FLAC.md). What still `todo!()`: the
+//! `decoder` facade — whose frame source is a `Manifest`, so it will be a
+//! thin shell over `driver`, not a second loop — and `format::Manifest`;
+//! there is no
 //! metadata-block CRC to own there: RFC 9639 §8.1 defines a metadata block as
 //! a 4-byte header plus exactly `length` bytes, with no CRC trailer, and the
 //! format's only CRCs are the frame header (§9.1.8) and frame footer (§9.3)
@@ -78,13 +91,24 @@
 //! ## Decode pipeline
 //!
 //! ```text
-//! format::Manifest        GAFP header + stream info + frame-offset index
-//!   └─ decoder::Decoder   per-frame loop, predictor warm-up across frames
-//!        └─ frame         frame header → N subframes
+//! frame source          borrowed decode inputs. Today: driver::FrameSource
+//!                       (frame index + region + stream defaults). The GAFP
+//!                       manifest and the stream-scan cursor are *other*
+//!                       sources for the same loop, not new loops.
+//!   └─ driver           per-frame loop: index offset → fresh cursor → frame.
+//!                       `decoder::Decoder` is the manifest-shaped facade over
+//!                       this — still scaffold (Phase 2 step 6).
+//!        └─ frame       frame header → N subframes
 //!             ├─ subframe CONSTANT | VERBATIM | FIXED(0..4) | LPC(<=32)
 //!             │    └─ residual  partitioned Rice | Rice2 | escape
 //!             └─ stereo   mid/side, left/side, right/side  (stereo only)
 //! ```
+//!
+//! There is no cross-frame predictor state to carry: every subframe carries
+//! its own warm-up samples (measured 64/64, 2026-09-10), so `driver`'s
+//! `[PredictorState; 2]` is reused scratch, and any frame is independently
+//! decodable from its index offset — which is what makes a seek an array
+//! lookup instead of a reconstruction.
 //!
 //! ## Build gates
 //!
@@ -125,6 +149,7 @@
 
 pub mod bits;
 pub mod decoder;
+pub mod driver;
 pub mod format;
 pub mod frame;
 pub mod residual;

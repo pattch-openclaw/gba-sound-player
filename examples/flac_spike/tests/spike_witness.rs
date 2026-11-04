@@ -25,6 +25,12 @@
 //! 5. **Negative control** — corrupt one seek entry by +1 byte and require
 //!    the walk to *fail*: proof the driver actually consumes the table, not
 //!    just the region's natural frame chaining.
+//! 6. **Copy drift (2026-11-04)** — the crate-side frame loop
+//!    (`crates/flac-lite/src/driver.rs`) is a *copy* of this file's loop, not
+//!    a shared dependency (FLAC.md → split proposal). Both run over the same
+//!    embedded bytes here: the copy must reach the same PCM pins, and the two
+//!    must agree frame window by frame window. That is the price of copying,
+//!    and this is where it is paid.
 
 use flac_spike::assets::{CLIPS, FrameMeta, L0_FIXED, L4_LPC};
 use flac_spike::checksum::{Fnv1a64, fnv1a64, fold_i16le_stereo};
@@ -359,5 +365,181 @@ fn cycle_fold_witness_on_embedded_bytes() {
             .max()
             .unwrap();
         assert_eq!(cost.max, expect_worst, "{}: worst window", clip.name);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Layer 6: copy drift (2026-11-04). `crates/flac-lite/src/driver.rs` is a
+// narrow copy of THIS file's frame loop, made deliberately: the module header
+// there explains why the instrument could not simply move (its `decode_one` is
+// the `ctrl` arm of every recorded E measurement, and the cross-session anchors
+// depend on that call shape being unchanged). Copying buys separation; the cost
+// is drift, and these two tests are how it is watched — the same discipline the
+// E-sample suites use for vendored loops ("re-verify in context", not "assume
+// the sample still behaves").
+// ---------------------------------------------------------------------------
+
+/// The spike's seek table re-expressed as the crate's index type. Field for
+/// field, because the *only* difference is the type name — which is itself the
+/// point of the copy: the crate's `FrameSource` takes borrowed decode inputs
+/// and nothing else, so the witness-only fields (`name`, `why`, `census`,
+/// `total_samples`, `pcm_file`, the FNV pins) stay on this side.
+fn core_frames(clip: &flac_spike::assets::SpikeClip) -> Vec<flac_lite::driver::FrameMeta> {
+    clip.frames
+        .iter()
+        .map(|m| flac_lite::driver::FrameMeta {
+            offset: m.offset,
+            blocksize: m.blocksize,
+        })
+        .collect()
+}
+
+/// The borrowed decode inputs the crate's loop needs, built from a clip: same
+/// table, same embedded region bytes, same stream parameters.
+fn core_source<'a>(
+    clip: &flac_spike::assets::SpikeClip,
+    frames: &'a [flac_lite::driver::FrameMeta],
+) -> flac_lite::driver::FrameSource<'a> {
+    flac_lite::driver::FrameSource {
+        frames,
+        region: clip.region,
+        max_blocksize: clip.max_blocksize,
+        channels: clip.channels,
+        defaults: flac_lite::frame::StreamDefaults {
+            sample_rate_hz: clip.sample_rate_hz,
+            bits_per_sample: clip.bits_per_sample,
+        },
+    }
+}
+
+#[test]
+fn the_crate_frame_loop_reaches_the_pcm_pins() {
+    // The copy's own correctness proof, on the ROM's exact embedded bytes: the
+    // crate's `decode_all` walked through the *same* shared fold this suite
+    // uses for the spike driver (`checksum::fold_i16le_stereo`) must reach the
+    // generator's PCM pin. Pin == hash of the reference blob is asserted in
+    // `pcm_blobs_match_their_pins_and_names`, so reaching it here means the
+    // crate's loop decodes bit-exactly against `flac -d` — not merely "the
+    // same as the spike", which would inherit a shared mistake.
+    use flac_lite::driver as core;
+    for clip in CLIPS {
+        let frames = core_frames(clip);
+        let source = core_source(clip, &frames);
+        let max = usize::from(clip.max_blocksize);
+        let mut left = vec![0i32; max];
+        let mut right = vec![0i32; max];
+        let mut state = Default::default();
+        let mut hash = Fnv1a64::new();
+
+        let stats = core::decode_all(
+            &source,
+            &mut left,
+            &mut right,
+            &mut state,
+            |_frame, l, r| {
+                fold_i16le_stereo(&mut hash, l, r)
+                    .expect("bit-exact decode of a 16-bit stream always fits i16")
+            },
+        )
+        .unwrap_or_else(|e| panic!("{}: crate frame-loop walk failed: {e:?}", clip.name));
+
+        assert_eq!(stats.frames, clip.frames.len(), "{}: frames", clip.name);
+        assert_eq!(
+            stats.samples,
+            usize::try_from(clip.total_samples).unwrap(),
+            "{}: samples per channel",
+            clip.name
+        );
+        assert_eq!(
+            hash.finish(),
+            clip.fnv_pcm,
+            "{}: the crate's copied loop must reach the generator's PCM pin",
+            clip.name
+        );
+    }
+}
+
+#[test]
+fn the_crate_frame_loop_agrees_with_this_driver_frame_by_frame() {
+    // The drift witness proper: both implementations decode the SAME frame
+    // index, over the SAME embedded region, into their OWN buffers and with
+    // their OWN predictor state (a shared array or shared buffer would let one
+    // side's scratch hide the other's divergence), and every window must be
+    // byte-identical. The two whole-index walkers are compared too — the unit
+    // both are built from agreeing does not by itself prove the loop bounds,
+    // the callback window widths, and the totals still agree.
+    use flac_lite::driver as core;
+    for clip in CLIPS {
+        let frames = core_frames(clip);
+        let source = core_source(clip, &frames);
+        let max = usize::from(clip.max_blocksize);
+
+        let mut spike_left = vec![0i32; max];
+        let mut spike_right = vec![0i32; max];
+        let mut core_left = vec![0i32; max];
+        let mut core_right = vec![0i32; max];
+        let mut spike_state = Default::default();
+        let mut core_state = Default::default();
+
+        for frame in 0..clip.frames.len() {
+            let a = driver::decode_one(
+                clip,
+                frame,
+                &mut spike_left,
+                &mut spike_right,
+                &mut spike_state,
+            )
+            .unwrap_or_else(|e| panic!("{}: spike driver frame {frame}: {e:?}", clip.name));
+            let b = core::decode_one(
+                &source,
+                frame,
+                &mut core_left,
+                &mut core_right,
+                &mut core_state,
+            )
+            .unwrap_or_else(|e| panic!("{}: crate driver frame {frame}: {e:?}", clip.name));
+            assert_eq!(a, b, "{}: frame {frame} written count", clip.name);
+            assert_eq!(
+                a,
+                usize::from(clip.frames[frame].blocksize),
+                "{}: frame {frame} blocksize vs the seek table",
+                clip.name
+            );
+            assert_eq!(
+                spike_left[..a],
+                core_left[..a],
+                "{}: frame {frame} left window drift",
+                clip.name
+            );
+            assert_eq!(
+                spike_right[..a],
+                core_right[..a],
+                "{}: frame {frame} right window drift",
+                clip.name
+            );
+        }
+
+        // And the walkers: same index, same totals.
+        let mut left = vec![0i32; max];
+        let mut right = vec![0i32; max];
+        let mut spike_state = Default::default();
+        let spike_stats =
+            driver::decode_clip(clip, &mut left, &mut right, &mut spike_state, |_, _, _| {})
+                .unwrap_or_else(|e| panic!("{}: spike walk failed: {e:?}", clip.name));
+        let mut core_state = Default::default();
+        let core_stats = core::decode_all(
+            &source,
+            &mut left,
+            &mut right,
+            &mut core_state,
+            |_, _, _| {},
+        )
+        .unwrap_or_else(|e| panic!("{}: crate walk failed: {e:?}", clip.name));
+        assert_eq!(
+            (spike_stats.frames, spike_stats.samples),
+            (core_stats.frames, core_stats.samples),
+            "{}: whole-index walk totals",
+            clip.name
+        );
     }
 }

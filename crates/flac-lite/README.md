@@ -19,15 +19,26 @@ claim — landed 2026-11-02).
 Implemented: the full Phase 1 decode path through `frame::decode_frame` —
 header, subframe types, partitioned Rice residual + escape, integrators,
 stereo decorrelation — bit-exact against `flac -d` on the committed libFLAC
-vector tables in `tests/` — plus frame CRC verification (Phase 2 step 5):
+vector tables in `tests/` — **plus the per-frame loop above it, `driver`
+(landed 2026-11-04)**: `decode_one` decodes one frame at its frame-index
+offset through a fresh cursor, `decode_all` walks a whole index through a
+per-frame callback, and both take a borrowed `FrameSource` (frame index +
+region + max blocksize + channel count + stream defaults — the E1 sample's
+`ClipView` field set, no generated-asset metadata). It is a **narrow copy** of
+the perf spike's proven driver, not a shared file, and both copies are run over
+the same embedded clip bytes in the spike's own witness suite so the copy
+cannot drift silently — see [FLAC.md → split
+proposal](../../FLAC.md#flac-lite-and-flac-lite-gba--portable-core-split-proposal-2026-11-01)
+for why the instrument could not simply move. Plus frame CRC verification (Phase 2 step 5):
 `bits::crc8` / `bits::crc16` are always compiled, and the `crc-check` feature
 additionally verifies the header CRC-8 and footer CRC-16 inside
 `FrameHeader::parse` / `decode_frame` (`HeaderCrc` / `FrameCrc`). Off by
 default — the release path consumes both CRCs unchecked, the design's "checked
 in debug, skippable in release"; gate: `make flac-test-crc`. Remaining
-`todo!()`: `decoder` (the per-frame loop above the frame layer) and
-`format::Manifest`. `src/lib.rs` carries the authoritative implementation
-state.
+`todo!()`: the manifest-driven `decoder` facade — which will be a thin shell
+over `driver`, not a second loop — and `format::Manifest`. A table-less
+stream-scan frame source is the next rung in the split ladder. `src/lib.rs`
+carries the authoritative implementation state.
 Roadmap: [`../../FLAC.md`](../../FLAC.md) → "Phased plan".
 
 ```
@@ -39,7 +50,9 @@ crates/flac-lite/
 ├── src/subframe.rs   CONSTANT / VERBATIM / FIXED / LPC + predictor state
 ├── src/residual.rs   partitioned Rice / Rice2 / escape
 ├── src/stereo.rs     mid-side, left-side, right-side decorrelation
-├── src/decoder.rs    top-level cursor API (what a ROM actually calls)
+├── src/driver.rs     per-frame loop over a borrowed frame index (copied, not
+│                     shared, from the perf spike's proven driver)
+├── src/decoder.rs    manifest-shaped facade (scaffold: todo!())
 └── tests/README.md   committed libFLAC vector tables + layout/decode suites
 ```
 
@@ -210,6 +223,8 @@ can be revisited for `i16` later if we need the space.
 
 The roadmap is a single list in **FLAC.md → "Phased plan"** (the only source of
 truth for outstanding work). Phase 1's decode path through `frame::decode_frame`
-is complete (`src/lib.rs` carries the per-module state); outstanding: the
-`decoder` per-frame loop and `format::Manifest`, plus the portability ladder in
+is complete (`src/lib.rs` carries the per-module state), and the frame loop
+landed as `driver` on 2026-11-04; outstanding: the `decoder` facade (a shell
+over `driver`) and `format::Manifest`, plus the stream-scan frame source and
+the rest of the portability ladder in
 [FLAC.md → split proposal](../../FLAC.md#flac-lite-and-flac-lite-gba--portable-core-split-proposal-2026-11-01).
