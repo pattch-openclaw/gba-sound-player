@@ -4,7 +4,7 @@
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
-        test test-rom flac-test flac-portable-check spike-test opus-test kernel-test podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test \
+        test test-rom flac-test flac-test-crc flac-portable-check spike-test opus-test kernel-test podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test \
         clean clean-cache check podman-check help toolchain-check
 
 # ---------------------------------------------------------------------------
@@ -84,6 +84,21 @@ HOST_TRIPLE := $(shell $(RUSTC) -vV 2>/dev/null | sed -n 's|host: ||p')
 HAS_RUSTFMT := $(shell $(CARGO) fmt --version >/dev/null 2>&1 && echo 1)
 
 TARGET := thumbv4t-none-eabi
+# The `crc-check` witness (FLAC.md Phase 2 step 5 / split-ladder item 3,
+# 2026-11-03): the same flac-test shape with the feature ON — thumbv4t compile
+# half plus the full host suite, which under the feature also runs
+# tests/crc_check.rs (pass witness on the committed real frames + CRC
+# mutations). Verification is OFF in the default build by design (release
+# consumes the CRCs unchecked; "checked in debug, skippable in release"), so
+# this gate exists precisely to keep the OFF default honest about the ON arm.
+flac-test-crc: toolchain-check
+	cd crates/flac-lite && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features crc-check
+	@echo "flac-test-crc passed: frame CRC verification compiles for $(TARGET) and the host witness is green with crc-check on"
+
 # Second bare-metal target for the portability witness (`flac-portable-check`,
 # FLAC.md split-proposal ladder step 3, 2026-11-02). Cortex-M4F: a canonical
 # non-thumbv4t bare-metal ARM triple. Override with `SECOND_TARGET=<triple>`.
@@ -609,6 +624,7 @@ help:
 	@echo "  Tests — containerized (same gates, no host tooling needed):"
 	@echo "    podman-test       test-rom + flac-test in the $(CONTAINER) image"
 	@echo "    podman-test-rom   ROM #[test_case] suite in the container"
+	@echo "    flac-test-crc     flac-lite host suite + thumbv4t compile with crc-check ON"
 	@echo "    podman-flac-test  flac-lite alone in the container"
 	@echo "    podman-kernel-test E10 kernel host gate in the container"
 	@echo "    podman-check      cargo fmt --check in the container"

@@ -19,9 +19,15 @@ claim — landed 2026-11-02).
 Implemented: the full Phase 1 decode path through `frame::decode_frame` —
 header, subframe types, partitioned Rice residual + escape, integrators,
 stereo decorrelation — bit-exact against `flac -d` on the committed libFLAC
-vector tables in `tests/`. Remaining `todo!()`: `decoder` (the per-frame loop
-above the frame layer) and `format::Manifest`. `src/lib.rs` carries the
-authoritative implementation state.
+vector tables in `tests/` — plus frame CRC verification (Phase 2 step 5):
+`bits::crc8` / `bits::crc16` are always compiled, and the `crc-check` feature
+additionally verifies the header CRC-8 and footer CRC-16 inside
+`FrameHeader::parse` / `decode_frame` (`HeaderCrc` / `FrameCrc`). Off by
+default — the release path consumes both CRCs unchecked, the design's "checked
+in debug, skippable in release"; gate: `make flac-test-crc`. Remaining
+`todo!()`: `decoder` (the per-frame loop above the frame layer) and
+`format::Manifest`. `src/lib.rs` carries the authoritative implementation
+state.
 Roadmap: [`../../FLAC.md`](../../FLAC.md) → "Phased plan".
 
 ```

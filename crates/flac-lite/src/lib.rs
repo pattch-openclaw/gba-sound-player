@@ -12,9 +12,12 @@
 //! product-side container work — a manifest is *one* frame source, not the
 //! decoder's contract.
 //!
-//! **IMPLEMENTATION STATE (2026-09-18):** `bits::BitReader` is complete for
-//! the decode path (PRs #25–#32 plus step 3a's `read_wasted_bits`; only
-//! `crc8`/`crc16` remain, parked in Phase 2). `frame::FrameHeader::parse`
+//! **IMPLEMENTATION STATE (2026-11-03):** `bits::BitReader` is complete for
+//! the decode path (PRs #25–#32 plus step 3a's `read_wasted_bits`), and
+//! `bits::crc8`/`bits::crc16` landed with Phase 2 step 5 (2026-11-03) —
+//! header/footer *verification* is wired into `frame` behind the `crc-check`
+//! feature; the default build consumes both CRCs unchecked as designed. The
+//! split-proposal gate is `make flac-test-crc`. `frame::FrameHeader::parse`
 //! (step 2) and `subframe::SubframeType::parse` landed against real libFLAC
 //! bytes in `tests/`; step 3a's leaves — the wasted-bits reader, the Rice
 //! residual sign map (`residual::rice_unmap`), and the `PredictorState`
@@ -44,7 +47,9 @@
 //! `decode_frame` on the same table, both bit-exact against `flac -d`
 //! PCM (FLAC.md → step 3f part 2). Phase 1's decode path through
 //! `decode_frame` is complete. What remains `todo!()`: `decoder` (the
-//! per-frame loop above this layer) and `format::Manifest` —
+//! per-frame loop above this layer) and `format::Manifest` (whose
+//! metadata-block CRC-8 coverage question is owned by that step — see
+//! FLAC.md's step-5 entry) —
 //! the module layout, types, and signatures are the contract the
 //! implementation fills in (FLAC.md → phased plan, step 4 onward).
 //! Design rationale and the decision to write this at all live in

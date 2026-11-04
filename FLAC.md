@@ -681,8 +681,12 @@ gets built later for the shipping path regardless.
 
 **Phase 2 — production pipeline (starts only after the gate resolves):**
 
-5. [ ] `crc8` + `crc16` implementations; wire debug-only frame CRC-8 /
-     footer CRC-16 verification into `frame`.
+5. [x] `crc8` + `crc16` implementations; wire frame CRC-8 / footer CRC-16
+     verification into `frame`, gated behind the `crc-check` feature (off by
+     default — the design's "checked in debug, skippable in release", now
+     enforced rather than asserted). **Done 2026-11-03** as split-ladder
+     item 3 — see
+     [split proposal → Landed 2026-11-03](#flac-lite-and-flac-lite-gba--portable-core-split-proposal-2026-11-01).
 6. [ ] `format::Manifest` (GAFP) parser + `scripts/pack_flac.sh` real
      implementation — the shippable container: O(1) seek table, profile
      validation at pack time, replaces the spike's scan-based harness.
@@ -5594,6 +5598,93 @@ Gates: `flac-portable-check` green; `flac-test` 120 passed + 1 ignored
 unchanged (measured at HEAD before the change and after); `make check`
 clean; no crate source, ROM path, or decode-output change, so the ROM
 builds and the calibration anchor are unaffected by construction.
+
+**Landed 2026-11-03: step 4 — frame CRC verification behind `crc-check`**
+(PR-ladder item 3; Phased plan step 5). `bits::crc8` / `bits::crc16`
+implemented (table-free plain Rust, always compiled — the stream-scan cursor
+of item 4 needs `crc8` regardless of feature flags); verification wired into
+`FrameHeader::parse` (header CRC-8 → `Error::HeaderCrc`) and `decode_frame`
+(footer CRC-16 → `Error::FrameCrc`) under `crc-check`, off by default — the
+default build consumes both CRC bytes exactly as before. New named gate
+`make flac-test-crc`: the full flac-test shape (thumbv4t compile + host
+suite) with the feature ON, so the OFF default cannot rot the ON arm.
+
+Measured facts — the step's whole content is two polynomials, two inits, two
+coverage windows, every one measured, none recalled:
+
+* **CRC-16 init is `0x0000`, not the scaffold's "0xFFFF".** A sweep over all
+  `0..=0xFFFF` inits against the committed real-frame footers finds exactly
+  one init consistent across all 10 frames; the reflected family admits none
+  (the "FLAC variant = reflected" reading is excluded outright, not
+  unfavored). The derived check value `crc16("123456789") = 0xFEE8` is pinned
+  as *derived*: three mechanisms (byte-fed LFSR, bit-serial, GF(2) bigint
+  polynomial remainder) agree on it and on the footers. The witness session's
+  first draft asserted *recalled* published check constants that failed the
+  mechanisms — exactly this file's recorded FNV failure mode — so no recalled
+  constant ships anywhere in this step except the CRC-8
+  `"123456789" → 0xF4` anchor, which the implementation reproduces.
+* **Coverage windows (measured).** Header CRC-8: sync code through the byte
+  before the CRC byte (the header vectors' fail-closed census already pinned
+  the encoder agrees). Footer CRC-16: frame-wide — sync code through the
+  footer padding, both CRC bytes excluded. Because a zero-init CRC over a
+  whole-byte window equals the bitwise definition at frame boundaries (both
+  windows are byte ranges: the CRC-8 is structurally byte-aligned, the CRC-16
+  ends at the padding boundary), `BitReader::bytes_between` (new,
+  cursor-neutral, never a read) hands the checks plain slices. The stored
+  values come from libFLAC, never from our code — so the real frames passing
+  *is* the coverage witness.
+* `FrameHeader` gains `header_bits` (consumed width; also asserted against
+  the oracle table in the layout suite) — the footer check's frame-start
+  anchor. A mispaired header/cursor shifts the window and self-condemns at
+  the compare; the existing pairing contract ("`header` parsed at this exact
+  cursor position") is now load-bearing, documented as such.
+
+Witness (`tests/crc_check.rs`, `required-features = ["crc-check"]`, runs
+under `flac-test-crc`): (1) **pass** — every committed run vector parses and
+decodes bit-exactly with verification ON, chaining unchanged; (2) **CRC-8
+mutation** — one covered byte of a real header flipped to another *valid*
+field value (coded number `0 → 1`, so no field check can pre-empt the
+compare) → `HeaderCrc`, unmutated identity control `Ok`; (3) **CRC-16
+mutation** — the stored footer word flipped high byte, then low byte →
+`FrameCrc`, body decoding untouched, control `Ok`. The unit layer adds
+differential sweeps of both CRCs against a naive bit-serial oracle (13
+lengths, pseudo-random), the check values, and `bytes_between`
+alignment/bounds/cursor-atomicity.
+
+**The gate convicted before the code shipped:** with `crc-check` ON, two
+pre-existing layout-suite accept paths failed — the blocksize-table probe
+and the from-stream-depth mutation flip covered bytes to *valid* values and
+expect `Ok`, so their stale CRCs were correctly condemned. Fix: re-seal the
+CRC after the mutation (suite helper `reseal`), so each case mutates exactly
+one field. Verification that never bites a stale CRC is the vacuous-check
+failure mode; the first ON run proved this one bites.
+
+Prior assumptions: (1) the scaffold's CRC-16 "init 0xFFFF" — **false**,
+corrected above, the doc comment carries the correction; (2) RFC §9.1.8's
+"polynomial 0x05" is the truncated-coefficient listing — shift-register form
+`0x8005` (x¹⁶+x¹⁵+x²+1); (3) metadata-block CRC-8 coverage did **not**
+reproduce on probe files under any plausible coverage hypothesis
+(block-header included/excluded, CRC byte in/out of the declared length) —
+parked with the Manifest step (item 6), which owns metadata blocks;
+`crc8` is a coverage-agnostic byte-range function, so nothing here depends
+on that open question, and the frame witness is independent of it. No other
+split-proposal claim turned out false.
+
+Deliberate scope cuts: frame CRCs only (no STREAMINFO/metadata verification
+— Manifest's step); no table variant (the table-free decision stands —
+verification never runs in the release build, so 256/512-byte tables buy
+nothing; a table is an E-menu probe against the ON path, not this step);
+no stream-scan cursor (item 4); no `Decoder` changes.
+
+Gates: `flac-test` **120 → 123 passed + 1 ignored** (unit 96 → 99: three
+CRC/`bytes_between` unit tests; integration suites unchanged — the default
+build's decode output is bit-identical, and the run suites say so);
+`flac-test-crc` green — 126 passed + 1 ignored (123 + the 3-test crc_check
+suite); `flac-portable-check` green (default features); `spike-test` green
+(15 + 8); `native-spike-rom` + `native-flac-rom` build; `make check` clean.
+`rate-test` not runnable here (generated assets gitignored). Decoder-landing
+rule: this touches `crates/flac-lite`, so the E-anchor decode baselines
+re-record at the next E probe, not chased mid-landing.
 
 Ordering items (ii) (rate sweep re-run on the stacked path) and (iii)
 (E5 hardware arbitration) follow step 6 unchanged.

@@ -4,8 +4,11 @@
 //! (step 3f) are both **implemented** and validated against real libFLAC
 //! 1.5.0 bytes in `tests/` — header vectors, and the frame-RUN table
 //! (`tests/frame_run_vectors.txt`) for whole-frame chaining + PCM diffs.
-//! CRC *verification* (header CRC-8, footer CRC-16) stays Phase 2 step 5:
-//! both are consumed, never checked.
+//! CRC *verification* (header CRC-8, footer CRC-16) landed as Phase 2 step 5
+//! (2026-11-03): both CRC bytes are always consumed, and when the
+//! `crc-check` feature is on they are also *verified* ([`crate::bits::crc8`],
+//! [`crate::bits::crc16`]). The default (release) build keeps the designed
+//! shape: checked in debug, skippable in release.
 //!
 //! Frame layout (RFC 9639 §9.1). Field widths below are **measured against real
 //! libFLAC output**, not transcribed from memory — see the byte-level breakdown
@@ -64,10 +67,25 @@
 //!   `0b0110` + 8-bit; 56000 Hz emits `0b1100` + 8-bit kHz, 10010 Hz
 //!   `0b1110` + 16-bit Hz÷10, 48001 Hz `0b1101` + 16-bit Hz. Golden vectors
 //!   cover all five.
-//! - **CRC-8 is consumed, not verified.** Verification is gated behind the
-//!   `crc-check` feature and Phase 2 step 5 (the `crc8` implementation); the
-//!   perf gate runs with it skipped, which the design allows (checked in
-//!   debug, skippable in release).
+//! - **CRC-8: consumed always, verified under `crc-check`.** Phase 2 step 5
+//!   wired verification behind the feature (2026-11-03): `parse` keeps the
+//!   frame's start bit, and the feature-on arm compares
+//!   [`crate::bits::crc8`] over the header bytes (sync through the last byte
+//!   before the CRC — coverage witnessed by all 15 real headers in
+//!   `tests/frame_header_vectors.txt`) against the stored byte *at* the CRC
+//!   position, after every field check (a corrupt field still reports its
+//!   own error first). Mismatch → [`crate::Error::HeaderCrc`]. The default
+//!   build consumes the byte unchecked, which is what the perf design
+//!   allows (checked in debug, skippable in release).
+//! - **Footer CRC-16: same shape in [`decode_frame`].** Coverage is
+//!   frame-wide — sync code through the padding bits, the two CRC bytes
+//!   excluded (measured: the only init/poly/coverage combination that
+//!   reproduces every committed real frame; see `crate::bits::crc16`). The
+//!   frame's start bit is recovered from [`FrameHeader::header_bits`], so
+//!   the pairing contract ("header parsed at this exact cursor position")
+//!   is also what makes the coverage arithmetic exact: a wrong `header_bits`
+//!   shifts the window and the CRC fails. Mismatch →
+//!   [`crate::Error::FrameCrc`].
 //! - **"From stream" codes resolve through [`StreamDefaults`]** — sample-rate
 //!   code `0b0000` and sample-size code `0b000` are *not* errors, and the
 //!   rate path is where the whole 65 kHz goal lives (see [`StreamDefaults`]).
@@ -151,6 +169,10 @@ pub struct FrameHeader {
     /// cursor lands on the subframe data; our seek never uses the value (the
     /// manifest's offset table is authoritative).
     pub number: u64,
+    /// Bit length of this header as consumed by [`FrameHeader::parse`]
+    /// (48–72 bits). The `crc-check` footer coverage anchors the frame's
+    /// start bit on it (module docs); zero effect on decode output.
+    pub header_bits: usize,
 }
 
 /// Which blocksize a 4-bit code denotes: a table size, or an uncommon value
@@ -276,6 +298,7 @@ impl FrameHeader {
         if reader.bit_position() % 8 != 0 {
             return Err(Error::FrameSync);
         }
+        let start_bit = reader.bit_position();
 
         // --- fixed fields: 14 + 1 + 1 + 4 + 4 + 4 + 3 + 1 = 32 bits --------
         let sync = reader.read_bits(14)?;
@@ -332,10 +355,25 @@ impl FrameHeader {
         // --- uncommon sample rate, after the uncommon blocksize (§9.1.7) ----
         let sample_rate = sample_rate(rate_code, reader)?;
 
-        // --- CRC-8: consumed here, verified never (Phase 2 step 5) ----------
+        // --- CRC-8: consumed here; verified when `crc-check` is on ----------
         // Always byte-aligned (module docs); `read_u8` is bit-level anyway, so
         // no byte_align call — writing one would assert a falsehood.
-        let _crc8 = reader.read_u8()?;
+        let crc8_bit = reader.bit_position();
+        let stored_crc8 = reader.read_u8()?;
+        #[cfg(feature = "crc-check")]
+        {
+            let covered = reader
+                .bytes_between(start_bit, crc8_bit)
+                .ok_or(Error::InvalidField)?;
+            if crate::bits::crc8(covered) != stored_crc8 {
+                return Err(Error::HeaderCrc);
+            }
+        }
+        #[cfg(not(feature = "crc-check"))]
+        let _ = stored_crc8;
+
+        let header_bits = reader.bit_position() - start_bit;
+        debug_assert!((48..=72).contains(&header_bits), "header is 6–9 bytes");
 
         Ok(FrameHeader {
             blocksize,
@@ -343,6 +381,7 @@ impl FrameHeader {
             channels,
             bits_per_sample,
             number,
+            header_bits,
         })
     }
 }
@@ -380,8 +419,11 @@ impl FrameHeader {
 /// channel code, never from a caller-supplied hint.
 ///
 /// **Footer:** after the last subframe the frame pads to a byte boundary and
-/// carries a big-endian CRC-16 (measured, libFLAC 1.5.0). Both are consumed,
-/// never verified — verification is Phase 2 step 5. The run vectors' chaining
+/// carries a big-endian CRC-16 (measured, libFLAC 1.5.0). Both CRC bytes are
+/// always consumed; under `crc-check` the footer word is also verified over
+/// the frame-wide coverage (sync through padding, CRC bytes excluded — see
+/// module docs and [`crate::bits::crc16`]), mismatch →
+/// [`crate::Error::FrameCrc`]. The run vectors' chaining
 /// (`tests/frame_run_layout.rs`) pins that this consume lands the cursor
 /// exactly on the next frame's first byte.
 ///
@@ -407,6 +449,12 @@ pub fn decode_frame(
     if left.len() < blocksize || (slots == 2 && right.len() < blocksize) {
         return Err(Error::InvalidField);
     }
+
+    // The frame's first bit, recovered from the header's own consumed width
+    // (module docs: this is what makes the crc-check coverage arithmetic
+    // exact; a mispaired header/cursor self-condemns at the CRC compare).
+    #[cfg(feature = "crc-check")]
+    let frame_start_bit = reader.bit_position().saturating_sub(header.header_bits);
 
     // Which slot carries the extra side bit (see doc note).
     let side_slot = match header.channels {
@@ -448,14 +496,38 @@ pub fn decode_frame(
         &mut right[..right_span],
     )?;
 
-    // Footer: pad to the byte boundary, consume the CRC-16. `byte_align` is
-    // the honest call here (unlike the header, where it would assert a
-    // falsehood — module docs): subframe bodies end unaligned whenever the
-    // total body bits miss a byte boundary, and the run vectors' gap rule
-    // (`exit % 8 == 0 → 16-bit gap, else pad + 16`) is witnessed per frame.
+    // Footer: pad to the byte boundary, consume the CRC-16 (verified when
+    // `crc-check` is on — module docs). `byte_align` is the honest call here
+    // (unlike the header, where it would assert a falsehood — module docs):
+    // subframe bodies end unaligned whenever the total body bits miss a byte
+    // boundary, and the run vectors' gap rule (`exit % 8 == 0 → 16-bit gap,
+    // else pad + 16`) is witnessed per frame.
     reader.byte_align();
-    let _crc16_hi = reader.read_u8()?;
-    let _crc16_lo = reader.read_u8()?;
+    #[cfg(feature = "crc-check")]
+    let crc16_bit = reader.bit_position();
+    let crc16_hi = reader.read_u8()?;
+    let crc16_lo = reader.read_u8()?;
+    #[cfg(feature = "crc-check")]
+    {
+        let stored = (u16::from(crc16_hi) << 8) | u16::from(crc16_lo);
+        // `None` here can only mean the window is not byte-aligned, i.e. the
+        // header/cursor pair is wrong (both reads above already succeeded, so
+        // the region is in range) — a caller-contract violation.
+        let covered = reader
+            .bytes_between(frame_start_bit, crc16_bit)
+            .ok_or(Error::InvalidField)?;
+        if crate::bits::crc16(covered) != stored {
+            // Frame is dead (module contract): caller re-seeks from the
+            // manifest offset. PCM written before the compare is garbage,
+            // consistent with every other past-the-first-bit stream error.
+            return Err(Error::FrameCrc);
+        }
+    }
+    #[cfg(not(feature = "crc-check"))]
+    {
+        let _ = crc16_hi;
+        let _ = crc16_lo;
+    }
 
     Ok(blocksize)
 }

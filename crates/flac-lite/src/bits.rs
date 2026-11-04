@@ -4,9 +4,10 @@
 //! `peek_bits`, `read_signed`, `read_utf8_coded`, `byte_align`, `read_u8`,
 //! `read_wasted_bits`, `bit_position`, `bits_remaining` (Phase 1 step 1,
 //! complete in PRs #25–#32; `read_wasted_bits` landed with step 3a as the
-//! subframe body's wasted-bits reader). Only the CRC helpers (`crc8`, `crc16`)
-//! remain `todo!()` scaffold: deferred to Phase 2 step 5, because the perf
-//! gate runs with CRC verification skipped.
+//! subframe body's wasted-bits reader), and the CRC helpers `crc8`/`crc16`
+//! (Phase 2 step 5, landed 2026-11-03 — table-free; *verification* is gated
+//! behind the `crc-check` feature, the release path stays check-free by
+//! design).
 //! The roadmap itself lives in FLAC.md → "Phased plan" (single source of truth).
 //!
 //! FLAC packs its fields MSB-first across byte boundaries, so the whole decoder
@@ -397,6 +398,23 @@ impl<'a> BitReader<'a> {
         self.pos * 8 - self.valid as usize
     }
 
+    /// Immutable byte view `data[start_bit / 8 .. end_bit / 8]`; both bounds
+    /// must be byte-aligned (frame boundaries always are) and in range,
+    /// `None` otherwise. Never touches the cursor — this is a *view* over the
+    /// backing slice, not a read, so `end_bit` may sit anywhere in range.
+    ///
+    /// This is the CRC-coverage view: both frame CRCs are defined over whole
+    /// bytes of the frame (measured, Phase 2 step 5 — the header CRC-8 always
+    /// lands byte-aligned, and the footer CRC-16 covers frame bytes up to the
+    /// CRC field, padding bits included), so the whole-byte formulation here
+    /// agrees with the bitwise definition for every frame boundary.
+    pub fn bytes_between(&self, start_bit: usize, end_bit: usize) -> Option<&'a [u8]> {
+        if start_bit > end_bit || start_bit % 8 != 0 || end_bit % 8 != 0 {
+            return None;
+        }
+        self.data.get(start_bit / 8..end_bit / 8)
+    }
+
     /// Read `n` bits (1..=32, MSB-first) starting at absolute bit position
     /// `pos`, without moving the cursor. This is the single place that touches
     /// the bytes; `read_bits` (and later `peek_bits`) layer on top of it.
@@ -477,20 +495,64 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// CRC-8 with FLAC's polynomial (0x07, no reflection, init 0x00).
+/// CRC-8 with FLAC's polynomial: `0x07` (x⁸+x²+x+1), no reflection, init
+/// `0x00`, no final xor — over a whole-byte range.
 ///
-/// Only used for the frame header; gated behind `crc-check`.
+/// Used for the frame header (RFC 9639 §9.1.8). The *verification* is gated
+/// behind `crc-check` (release consumes the CRC byte unchecked by design);
+/// the function itself is always compiled — the planned stream-scan cursor
+/// (split-proposal ladder step 4) needs strict-field-plus-CRC-8 filtering
+/// regardless of feature flags.
+///
+/// Table-free by design (the scaffold's rule stands): verification never runs
+/// in the release path, so the 256-byte table trades nothing worth trading.
+/// Witnessed by all 15 real libFLAC 1.5.0 headers in
+/// `tests/frame_header_vectors.txt` (generator census fail-closed), the
+/// published CRC-8 check value `"123456789" → 0xF4`, and a naive bit-serial
+/// oracle below.
 pub fn crc8(data: &[u8]) -> u8 {
-    todo!("flac-lite scaffold: crc8")
+    let mut crc = 0u8;
+    for &byte in data {
+        crc ^= byte;
+        for _ in 0..8 {
+            crc = if crc & 0x80 != 0 {
+                (crc << 1) ^ 0x07
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
 }
 
-/// CRC-16 ("FLAC" variant: polynomial 0x05, init 0xFFFF) over a byte range.
+/// CRC-16 with FLAC's frame polynomial: x¹⁶+x¹⁵+x²+1 — RFC 9639 §9.1.8
+/// names it `0x05` (the low bits below x¹⁶); shift-register form `0x8005`.
+/// No reflection, **init `0x0000`**, no final xor — over a whole-byte range.
 ///
-/// Used for the frame footer and stream metadata. Table-free by design — a
-/// 256×u16 table is 512 bytes of ROM we could spend elsewhere; decide in the
-/// perf spike whether the table pays for itself.
+/// **Measured correction (2026-11-03, Phase 2 step 5):** this scaffold
+/// comment claimed `init 0xFFFF`. It is wrong. `0x0000` is the only init
+/// that reproduces the stored footer of every committed real frame
+/// (10/10 frames in `tests/frame_run_vectors.txt`, cross-checked by three
+/// mechanisms: byte-wise LFSR, bit-serial, and a GF(2) polynomial-remainder
+/// computation; the reflected family is excluded outright — no init in the
+/// full 0..=0xFFFF sweep fits). The derived check value for
+/// `"123456789"` is `0xFEE8`.
+///
+/// Coverage is frame-wide (sync code through padding, CRC bytes excluded) —
+/// see [`crate::frame`], where `crc-check` wires it.
 pub fn crc16(data: &[u8]) -> u16 {
-    todo!("flac-lite scaffold: crc16")
+    let mut crc = 0u16;
+    for &byte in data {
+        crc ^= u16::from(byte) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x8005
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
 }
 
 // Unit tests compile as part of the lib under the host test harness (Gate 2,
@@ -1758,6 +1820,85 @@ mod tests {
             v => (1u32 << (32 - v)) - 1,
         };
         assert_eq!(r.acc & low_mask, 0, "{where_}: acc dirty below valid");
+    }
+
+    // ---- crc8 / crc16 (Phase 2 step 5 landed 2026-11-03) -------------------
+
+    /// Naive bit-serial CRC oracles (both widths): shift one bit at a time,
+    /// feedback tap XORs the incoming bit — a different mechanism from the
+    /// byte-fed LFSR in `crc8`/`crc16`, per the differential-witness rule.
+    fn crc8_serial(data: &[u8]) -> u8 {
+        let mut crc = 0u8;
+        for &byte in data {
+            for bi in (0..8).rev() {
+                let top = ((crc >> 7) & 1) ^ ((byte >> bi) & 1);
+                crc = (crc << 1) & 0xFF;
+                if top != 0 {
+                    crc ^= 0x07;
+                }
+            }
+        }
+        crc
+    }
+
+    fn crc16_serial(data: &[u8]) -> u16 {
+        let mut crc = 0u16;
+        for &byte in data {
+            for bi in (0..8).rev() {
+                let top = ((crc >> 15) & 1) ^ u16::from((byte >> bi) & 1);
+                crc = (crc << 1) & 0xFFFF;
+                if top != 0 {
+                    crc ^= 0x8005;
+                }
+            }
+        }
+        crc
+    }
+
+    #[test]
+    fn crc_helpers_match_serial_oracles_on_pseudo_random_sweeps() {
+        let mut rng = Lcg(0x5EED_C0DE);
+        let mut data = [0u8; 256];
+        for b in data.iter_mut() {
+            *b = rng.next_u8();
+        }
+        for len in [0usize, 1, 2, 3, 7, 8, 31, 32, 33, 64, 127, 200, 256] {
+            let d = &data[..len];
+            assert_eq!(crc8(d), crc8_serial(d), "crc8 len {len}");
+            assert_eq!(crc16(d), crc16_serial(d), "crc16 len {len}");
+        }
+    }
+
+    #[test]
+    fn crc_helpers_carry_the_witnessed_check_values() {
+        // crc8: the published CRC-8 (poly 0x07) check value. crc16: the
+        // landing's derived value — three independent mechanisms (byte-fed
+        // LFSR, bit-serial, GF(2) polynomial remainder) agree on it AND it
+        // reproduces the stored footer of every committed real frame
+        // (FLAC.md's step-5 entry; deliberately not a recalled constant).
+        assert_eq!(crc8(b"123456789"), 0xF4);
+        assert_eq!(crc16(b"123456789"), 0xFEE8);
+        // Both CRCs run from a zero init — the measured correction to this
+        // scaffold's "init 0xFFFF" comment. Empty input returns the init.
+        assert_eq!(crc8(&[]), 0x00);
+        assert_eq!(crc16(&[]), 0x0000);
+    }
+
+    #[test]
+    fn bytes_between_views_match_the_cursor_window() {
+        let data = [0xABu8, 0xCD, 0xEF, 0x01, 0x23];
+        let r = BitReader::new(&data);
+        assert_eq!(r.bytes_between(0, 40), Some(&data[..]));
+        assert_eq!(r.bytes_between(8, 24), Some(&data[1..3]));
+        assert_eq!(r.bytes_between(8, 8), Some(&[][..]));
+        assert_eq!(r.bytes_between(3, 24), None, "unaligned start");
+        assert_eq!(r.bytes_between(0, 41), None, "unaligned end");
+        assert_eq!(r.bytes_between(24, 8), None, "reversed bounds");
+        assert_eq!(r.bytes_between(0, 48), None, "out of range");
+        // A view is not a read: the cursor never moves.
+        let mut r2 = BitReader::new(&data);
+        let _ = r2.bytes_between(0, 16);
+        assert_eq!(r2.bit_position(), 0);
     }
 
     #[test]

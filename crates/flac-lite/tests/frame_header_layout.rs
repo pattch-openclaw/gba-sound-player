@@ -206,6 +206,10 @@ fn parse_matches_the_vector_table_on_every_field() {
 
         assert_eq!(header.blocksize, v.blocksize as usize, "{what}: blocksize");
         assert_eq!(header.number, v.coded_number, "{what}: frame number");
+        assert_eq!(
+            header.header_bits, v.header_bits,
+            "{what}: the header's consumed width must equal the oracle's header_bits"
+        );
 
         match v.samplerate_hz {
             // Code `0b0000`: the frame carries no rate; the stream default is
@@ -361,14 +365,30 @@ fn defaults_16_32k() -> StreamDefaults {
     }
 }
 
-/// Parse a mutated header; the trailing `0x00` is filler for the CRC-8 byte,
-/// which parse consumes but never verifies (Phase 2 step 5 owns verification).
+/// Parse a mutated header. The `bytes` argument is a real header INCLUDING
+/// its CRC-8 byte (the table's `bytes` rows), so the mutations below touch
+/// covered bytes and leave the stored CRC stale: with `crc-check` off the
+/// stale byte is consumed unchecked; with the feature on, every case that
+/// reaches the CRC compare would report `HeaderCrc`. The field-error cases
+/// all fail on checks that run **before** the CRC (that ordering is itself
+/// witness: a corrupt field still names itself), so they need nothing — but
+/// an ACCEPT-path case must repair the CRC first, via [`reseal`].
 fn parse_case(bytes: &[u8]) -> Result<FrameHeader, Error> {
     let mut with_crc = bytes.to_vec();
     if with_crc.len() * 8 > 40 {
-        with_crc.push(0x00);
+        with_crc.push(0x00); // trailing slack, never consumed
     }
     FrameHeader::parse(&mut BitReader::new(&with_crc), &defaults_16_32k())
+}
+
+/// Repair the stored CRC-8 of a mutated header (the last byte of `bytes`), so
+/// the mutation under test is exactly one field and the CRC can't mask it. A
+/// no-op for the default build's acceptance shape; load-bearing whenever
+/// `crc-check` is compiled in.
+fn reseal(bytes: &mut [u8]) {
+    let crc = flac_lite::bits::crc8(&bytes[..bytes.len() - 1]);
+    let last = bytes.len() - 1;
+    bytes[last] = crc;
 }
 
 #[test]
@@ -520,6 +540,7 @@ fn mutation_accepts_the_from_stream_depth_code_via_defaults() {
     // the same rule the rate path already proves on the r65k vector.
     let mut b = base_header();
     b[3] = 0xA0; // channels 0b1010, size 0b000, reserved 0
+    reseal(&mut b); // this accept path must survive crc-check; the mutation is byte 3
     let h = parse_case(&b).expect("from-stream depth must resolve via defaults");
     assert_eq!(
         h.bits_per_sample, 16,
@@ -579,6 +600,7 @@ fn blocksize_table_matches_rfc_table_14() {
     for &(code, want) in cases {
         let mut b = base_header();
         b[2] = (code << 4) | 0x8; // rate nibble stays 0b1000 (32 kHz)
+        reseal(&mut b); // accepted codes must survive crc-check; the mutation is byte 2
         let h = parse_case(&b).unwrap_or_else(|e| panic!("blocksize code {code:#06b}: {e:?}"));
         assert_eq!(h.blocksize, want, "blocksize code {code:#06b}");
     }
