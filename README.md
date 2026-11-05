@@ -201,7 +201,8 @@ requirements (nightly + `rust-src`, plus `agb-gbafix` for ROM fixing).
 | `make podman-rom` | Build the `gba-builder` image and run the same ROM build inside it; `CONTAINER=docker` works | needs podman/docker |
 | `make native-flac-rom` | **EXPERIMENTAL** — build `flac-integration.gba`: a bootable ROM that links `crates/flac-lite` in | no virtualization needed |
 | `make podman-flac-rom` | Same FLAC integration ROM, built in the container | needs podman/docker |
-| `make flac-test` | `flac-lite` **in isolation**: GBA target compile gate + host unit tests. No agb, no ROM, no emulator | native |
+| `make flac-test` | `flac-lite` **in isolation**: GBA target compile gate + host unit tests. No agb, no ROM, no emulator. Default features — the frame walk (`scan`) is **off**, so no ROM links it. `make flac-test-crc` is the same shape with `crc-check` on | native |
+| `make flac-test-scan` | The same two steps with `--features scan` on: the walk's thumbv4t compile plus its witness suite (`tests/scan_frame_walk_layout.rs` is `required-features = ["scan"]`, so it is not built at all without the feature). Deliberately **not** in `check-gba-all` — the thing that must not carry the walk yet is the ROM. `flac-portable-check` runs with `scan` **on** so the second bare-metal target keeps compiling it | native |
 | `make test-rom` | ROM `#[test_case]` suite, headless in mGBA via `mgba-test-runner` | native (needs `mgba-test-runner`) |
 | `make test` | Top-level: `test-rom` + `flac-test`. Verify-only — never reformats your tree | native |
 | `make podman-test` | **The same suite**, running inside the image (`make test` in there) — no host tooling | needs podman/docker |
@@ -246,15 +247,19 @@ never a hard dependency of building.
 
 `make test` runs `test-rom` + `flac-test`, and the repo has no CI workflows. The
 gates that exercise a **non-default build configuration** are therefore manual by
-omission: `flac-test-crc` (frame CRC verification ON) and `flac-portable-check`
-(second bare-metal target) run only when someone remembers them — and an un-run
-gate is an un-witnessed gate, which is exactly the risk a by-default-OFF feature
-like `crc-check` creates. Tracked here so it is not forgotten; deliberately not
+omission: `flac-test-crc` (frame CRC verification ON), `flac-test-scan` (the frame
+walk ON) and `flac-portable-check` (second bare-metal target) run only when someone
+remembers them — and an un-run gate is an un-witnessed gate, which is exactly the
+risk a by-default-OFF feature like `crc-check` or `scan` creates. `scan` makes the
+point twice over: a module no default build compiles is witnessed by
+`flac-test-scan` (its rules, and the GBA-target compile) and by
+`flac-portable-check`'s `--features scan` (the second target) — nothing else builds
+it at all. Tracked here so it is not forgotten; deliberately not
 part of any feature PR, since each gate lands with its own PR's gate work.
 
 - A single `flac-gates` aggregate: `flac-test` + `flac-test-crc` +
-  `flac-portable-check` — one command covering every `crates/flac-lite`
-  configuration. Measured on the `crc-check` landing tree with warm caches: the
+  `flac-test-scan` + `flac-portable-check` — one command covering every
+  `crates/flac-lite` configuration. Measured on the `crc-check` landing tree with warm caches: the
   extra thumbv4t `cargo check` and host test run complete in hundredths of a
   second; cold caches pay the usual `-Zbuild-std` cost, once.
 - Something to *invoke* it: with no CI, the cheap honest hook is local (a

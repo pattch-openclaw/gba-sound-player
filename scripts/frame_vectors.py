@@ -942,7 +942,7 @@ def walk_subframe(b, blocksize, bps):
     elif code >= 32:
         kind, order = "lpc", code - 31
     else:
-        raise AssertionError("reserved subframe code 0b%06b" % code)
+        raise AssertionError("reserved subframe code %s" % bin(code))
     wasted = 0
     if b.read(1):
         wasted = 1

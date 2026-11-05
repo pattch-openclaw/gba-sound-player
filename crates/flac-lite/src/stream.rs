@@ -430,6 +430,34 @@ impl StreamInfo {
         self.total_samples != 0
     }
 
+    /// The same field as an option: `Some(count)` where the stream states one,
+    /// `None` where it does not. Kept next to [`Self::total_samples_known`] so the
+    /// sentinel and its interpretation stay together.
+    ///
+    /// The in-crate consumer is the frame walk's end-of-stream cross-check
+    /// (`scan`, which is a feature; this accessor is not — see below), and the
+    /// point of the `None` arm is that it is *ordinary*: a stream encoded to a
+    /// pipe declares no total, decodes fine, and must be walked by counting frames
+    /// to the end of the bytes instead.
+    ///
+    /// Deliberately **not** behind `scan`, unlike its only in-crate caller. The
+    /// sentinel convention is a file-layer fact — Table 3's "0 means unknown"
+    /// lives in this struct, not in the walk — and a caller asking "does this
+    /// stream declare a total at all?" needs the answer whichever way the walk is
+    /// configured. The cost of keeping it public was measured rather than assumed:
+    /// with `scan` off, this function is not in the GBA instrument's symbol table
+    /// at all (`nm` reports no `total_samples` entry), so it is inert in a build
+    /// that does not call it, and the instrument's linked bytes are the 4a image's
+    /// either way.
+    #[inline]
+    pub fn total_samples_declared(&self) -> Option<u64> {
+        if self.total_samples_known() {
+            Some(self.total_samples)
+        } else {
+            None
+        }
+    }
+
     /// Whether the MD5 field carries a checksum rather than §8.2's "not known".
     /// Nothing here verifies it — computing it needs the whole decoded PCM,
     /// which is a decoder-level concern (and an unrequested one: see FLAC.md's

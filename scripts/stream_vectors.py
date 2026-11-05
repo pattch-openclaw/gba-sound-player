@@ -65,6 +65,32 @@ Generation-time invariants (fail-closed, `check_stream`):
     both are computed over the real frames and compared to the stored footer.
     Measured per fixture rather than recalled, because the number-form question
     below turns on it.
+  * every frame's BYTE LENGTH is derived twice, independently, and the two must
+    agree on every frame of every fixture: once by walking the frame's own
+    subfields bit by bit (`walk_frame_bytes`, which never looks at the next
+    frame) and once as the distance to the next frame start / end of file. The
+    sum of the per-frame lengths MUST equal the frame region's byte length, so
+    the frames tile the region with no gap and no overlap. That is the property
+    split-ladder item 4b's frame walk is built on — a frame ends itself — and
+    the numbers become the `frame_bytes` / `frame_footer_gaps_bits` rows.
+  * the sum of the frames' block sample counts MUST equal the declared
+    total_samples when there is one; when there is not (the unseekable
+    fixture), it is still what the reference decoder returns, and the two must
+    agree.
+  * the reference decoder's PCM is MD5'd and, wherever the stream declares an
+    MD5, MUST match it — that is the format's own definition of the streaminfo
+    MD5 field (the MD5 of the *unencoded* PCM), measured here at two bit depths
+    rather than asserted from the spec. The same bytes are FNV-1a-64'd into
+    `pcm_fnv1a64` so a whole-file decode has a compact pin.
+  * the frame-start filter is measured as a LADDER, per fixture, over the whole
+    frame region: sync shape alone (`scan_frame_starts_sync_shape_only`), field
+    validation without the CRC (`scan_frame_starts_fields_only`), full strict
+    validation (`scan_frame_starts_strict`), and strict validation without the
+    minimal-form rule (`scan_frame_starts_all_forms_allowed`). Each count MUST
+    contain the one after it and the strict count MUST equal the frame count:
+    that is what tells a reader which legs of the filter are load-bearing on
+    these bytes, and what a player gives up if it decides to "just scan for
+    0xFF".
   * a frame-number FORM mutation on the first fixture: one real frame header
     rewritten with its number in each non-minimal form 2/3/4 octets wide, with
     the header CRC-8 AND the frame CRC-16 recomputed over the widened bytes.
@@ -86,6 +112,7 @@ Stdlib only. `flac`/`metaflac` must be on PATH (run via
 scripts/gen_stream_vectors.sh).
 """
 
+import hashlib
 import os
 import struct
 import subprocess
@@ -241,11 +268,17 @@ def min_number_octets(value):
 
 # --------------------------------------------------- an independent 9.1 reader
 
-def header_at(data, pos, allow_nonminimal):
+def header_at(data, pos, allow_nonminimal, require_crc=True):
     """A second, independent reading of the RFC 9639 9.1 frame header, written
     for one question: how many byte offsets in a frame region does a header
     parse accept, with the minimal-form rule (`allow_nonminimal=False`, the
     crate's rule) and without it.
+
+    `require_crc=False` drops the header CRC-8 check while keeping every field
+    validation: that is the second leg of the filter ladder the
+    `scan_frame_starts_*` rows measure (sync shape, then field validation,
+    then CRC-8, then the minimal-form rule). It is a measurement switch, not a
+    decoding rule — the crate always verifies the CRC.
 
     It is NOT the production reader and not the vector source — `fv.parse_frame_header`
     is, and `frame_vectors.py` is the module the Rust frame suite is written
@@ -301,19 +334,116 @@ def header_at(data, pos, allow_nonminimal):
         at += 2                              # 16-bit sample rate
     elif rate_code == "1110":
         at += 3                              # 24-bit sample rate
-    if at >= len(data) or fv.crc8(data[pos:at]) != data[at]:
+    if at >= len(data):
         return None
-    return dict(octets=octets, number=value, width=at + 1 - pos)
+    crc_ok = fv.crc8(data[pos:at]) == data[at]
+    if require_crc and not crc_ok:
+        return None
+    return dict(octets=octets, number=value, width=at + 1 - pos, crc_ok=crc_ok)
 
 
-def count_frame_starts(data, start, allow_nonminimal):
+def count_frame_starts(data, start, allow_nonminimal, require_crc=True):
     """Every byte offset in the frame region that a header parse accepts."""
     found = []
     for pos in range(start, len(data)):
-        header = header_at(data, pos, allow_nonminimal)
+        header = header_at(data, pos, allow_nonminimal, require_crc)
         if header is not None:
             found.append((pos, header))
     return found
+
+
+def count_sync_shape(data, start):
+    """Every offset whose next two bytes have a fixed-blocksize frame SYNC
+    SHAPE: 0xFF, then a byte whose top five bits are 111110 — the two-byte
+    test `fv.find_frames` uses as its pre-filter, and the one a player is
+    tempted to call "find the next frame". Counted here because whether the
+    stricter legs of the filter matter is a measurement, not a mannerism."""
+    return sum(1 for pos in range(start, len(data) - 1)
+               if data[pos] == 0xFF and (data[pos + 1] & 0xF8) == 0xF8)
+
+
+def sync_shape_at(data, pos):
+    """The two-byte sync-shape test at ONE offset (see count_sync_shape)."""
+    return (pos + 1 < len(data) and data[pos] == 0xFF
+            and (data[pos + 1] & 0xF8) == 0xF8)
+
+
+def bits_at(data, bit, n):
+    """The next `n` bits at a BIT offset, MSB-first, as an integer."""
+    out = 0
+    for i in range(n):
+        byte, off = divmod(bit + i, 8)
+        out = (out << 1) | ((data[byte] >> (7 - off)) & 1)
+    return out
+
+
+def sync_shape_at_bits(data, bit):
+    """`sync_shape_at` at a bit offset (see bits_at)."""
+    return (bit + 16 <= len(data) * 8
+            and (bits_at(data, bit, 16) & 0xFFF8) == 0xFFF8)
+
+
+def strict_header_at_bit(data, bit):
+    """The SAME strict frame-start filter used for `scan_frame_starts_strict`
+    (§9.1 fields, minimal coded forms, CRC-8), asked at a BIT offset by
+    re-aligning the bytes to that bit.
+
+    A reader that mis-counted a frame's footer lands between two byte
+    boundaries, so the honest question about such a position cannot be asked of
+    a byte-rounded view of it — that would be answering a different question and
+    reporting it as this one. Returns the header dict or None, exactly as
+    `header_at` does."""
+    byte, off = divmod(bit, 8)
+    if byte + 17 > len(data):
+        return None
+    text = "".join(format(x, "08b") for x in data[byte:byte + 17])
+    text = text[off:]
+    buf = bytes(int(text[i:i + 8], 2) for i in range(0, len(text) - 7, 8))
+    return header_at(buf, 0, False)
+
+
+# Which subframe slot carries the SIDE signal, and so is one bit wider than the
+# stream's declared depth (section 9.1.3's three decorrelation codes; there is
+# no "swapped" variant). A bit-level frame walk needs this to size the slots.
+SIDE_SLOT = {"left-side": 1, "mid-side": 1, "side-right": 0}
+
+
+def walk_frame_bytes(data, frame, stream_bps):
+    """A frame's total byte length, from its header's last bit through every
+    subframe body to the footer — WITHOUT looking at where the next frame
+    starts.
+
+    This is the property the frame walk in crates/flac-lite/scan.rs depends on:
+    a frame ENDS ITSELF. The walk returns the frame's length as the number of
+    bytes its own fields occupy (plus the padding bit(s) and the 16-bit CRC-16
+    that close it), so a reader can advance by that many bytes without an index
+    and without a byte count. `check_stream` then cross-checks it against the
+    framing (next frame's offset, or end of file): two derivations of the same
+    number, one from the bits, one from the neighbour."""
+    bps = frame["bps"] or stream_bps
+    side = SIDE_SLOT.get(frame["decorrelation"])
+    # Bits is absolute over the file: the first subframe field starts at the
+    # frame's offset plus its header width, both in bits.
+    bits = fv.Bits(data, frame["offset"] * 8 + frame["header_bits"])
+    for slot in range(frame["subframes"]):
+        # A side slot is stored one bit wider than the frame's declared depth
+        # (section 9.1: the extra bit carries the range the decorrelation
+        # adds). subframe.rs' slot rule, read independently here.
+        width = bps + (1 if slot == side else 0)
+        fv.walk_subframe(bits, frame["blocksize"], width)
+    exit_bits = bits.pos
+    # The footer: zero-padding to the byte boundary, then CRC-16. Measured with
+    # the frame CRC-16 over header+body (frame_crc_covers_the_header), which is
+    # what makes the padding length determinable rather than inferred.
+    gap = 16 if exit_bits % 8 == 0 else (8 - exit_bits % 8) + 16
+    # §12's "zeros ... until the next byte boundary" bounds the padding at 7
+    # bits, so this tail can only be 16..23. Asserted, not assumed: the row is
+    # only a witness about padding if generation refuses a frame whose tail is
+    # longer than the format allows (a longer one would mean my walk stopped
+    # short of the real body end, and `frame_bytes` with it).
+    assert 16 <= gap <= 23, "frame at %d has a %d-bit footer tail" % (
+        frame["offset"], gap)
+    return (exit_bits + gap + 7) // 8 - frame["offset"], gap
 
 
 # ----------------------------------------------------------- the form mutation
@@ -633,9 +763,162 @@ def check_stream(spec, path, data):
     assert {p for p, _ in strict} <= {p for p, _ in lax}, \
         "%s: the minimal-form rule removed a real frame" % name
 
+    # The rest of the filter ladder, same region, same second reading of 9.1:
+    # what a scanner sees with the CRC-8 leg removed, and with only the sync
+    # SHAPE (no field validation at all). Each set must contain the one after
+    # it; the strict count is the frame count. If a leg stops mattering on
+    # these bytes the table says so — and if a leg starts admitting false
+    # starts, the table says that too, which is the measurement that decides
+    # whether a player may treat "scan for 0xFF" as a frame finder.
+    fields = count_frame_starts(data, off, False, require_crc=False)
+    shape = count_sync_shape(data, off)
+    assert {p for p, _ in strict} <= {p for p, _ in fields} <= \
+        {p for p in range(off, len(data))}, \
+        "%s: removing the CRC-8 leg removed a real frame" % name
+    assert shape >= len(fields), \
+        "%s: the sync-shape count (%d) is below the field-validated count " \
+        "(%d) — a validated start must have the shape" % (name, shape, len(fields))
+
     # Which bytes the frame footer's CRC-16 covers — measured on these frames
     # rather than recalled, because the number-form question below turns on it.
     frame_crc_covers_the_header(data, frames)
+
+    # A frame ENDS ITSELF: every frame's byte length derived by walking its own
+    # subfields, and cross-checked against the framing distance to the next
+    # frame. See walk_frame_bytes(). This is the property item 4b's frame walk
+    # uses instead of an index, a byte count or an offset table.
+    stream_bps = info["bits_per_sample_minus_one"] + 1
+    walked, gaps, header_bits, size_codes = [], [], [], []
+    for i, frame in enumerate(frames):
+        length, gap = walk_frame_bytes(data, frame, stream_bps)
+        framed = (frames[i + 1]["offset"] if i + 1 < len(frames)
+                  else len(data)) - frame["offset"]
+        assert length == framed, \
+            "%s: frame %d is %d bytes by its own fields, %d by the framing " \
+            "(%d %s %d) — a body field is mis-sized or the region does not " \
+            "tile" % (name, frame["number"], length, framed, frame["offset"],
+                      "->" if i + 1 < len(frames) else "-> end of file",
+                      frames[i + 1]["offset"] if i + 1 < len(frames) else len(data))
+        assert frame["offset"] + length > frame["offset"] + frame["header_bits"] // 8, \
+            "%s: frame %d's body walk ends inside its own header" % (name, i)
+        walked.append(length)
+        gaps.append(gap)
+        # The header's own width, per frame, from the independent parser. With
+        # `frame_bytes` and `frame_footer_gaps_bits` this is what lets a reader
+        # reconstruct a frame's subframe-body length by subtraction — framing is
+        # compositional, and a decoder that disagrees about any one of the three
+        # disagrees about where the next frame starts.
+        header_bits.append(frame["header_bits"])
+        # What the frame SAYS about its sample depth (§9.1.5 Table 17). Code
+        # 0b000 means "only the stream states it" and resolves through
+        # StreamDefaults in the crate; any other code is the frame's own
+        # statement, and a real encoder's statements have to agree with its
+        # streaminfo — measured here rather than assumed, because a frame walk's
+        # profile check reads the RESOLVED value, and whether that value came
+        # from the frame or from the caller changes what a caller can argue with.
+        code = frame["size_code"]
+        size_codes.append(code)
+        stated = fv.SAMPLESIZE.get(code)
+        if stated is not None:
+            assert stated == stream_bps, \
+                "%s: frame %d states %d-bit samples, its streaminfo says %d" % (
+                    name, frame["number"], stated, stream_bps)
+    assert sum(walked) == len(data) - off, \
+        "%s: the frames' own lengths total %d, the frame region is %d bytes" % (
+            name, sum(walked), len(data) - off)
+    assert frames[-1]["offset"] + walked[-1] == len(data), \
+        "%s: the last frame does not end on the file's last byte" % name
+
+    # WHERE A FOOTER MISTAKE WOULD LAND — measured, and recorded as rows.
+    # §12 closes a frame with "zero padding to the next byte boundary" and THEN
+    # the CRC-16, so a reader that treated the footer as exactly 16 bits ends
+    # short of the next frame's first byte on every frame whose padding is
+    # non-zero (`footer_padding_frames`: how many of this fixture's frames that
+    # is). At those positions this reading is asked two questions: does the
+    # STRICT filter accept them, and does the bare sync SHAPE match them. The
+    # pair is the whole argument for the field-validation leg: a position whose
+    # shape matches and whose fields do not is exactly where a player that
+    # trusted its eyes starts a phantom frame. The byte-truncation shape is
+    # asked the same two questions — `end - 1`, the position a reader lands on
+    # if it rounds a non-byte-aligned end DOWN instead of up (which is also why
+    # the crate's walk measures bit ends rather than rounding them).
+    # No asserts here: the counts are facts about these fixtures, not logical
+    # necessities. They are rows so the prose in the crate and in FLAC.md cites
+    # numbers a reader can re-run, and the Rust suite asserts the byte-level
+    # ones against its own filter — a fixture that changed an answer would fail
+    # a test rather than quietly invalidate a paragraph.
+    pad_frames = 0
+    slip_shape = slip_headers = 0
+    early_shape = early_headers = early_positions = 0
+    for i, frame in enumerate(frames):
+        end = frame["offset"] + walked[i]
+        if gaps[i] != 16:
+            pad_frames += 1
+            bit = end * 8 - (gaps[i] - 16)
+            if sync_shape_at_bits(data, bit):
+                slip_shape += 1
+            if strict_header_at_bit(data, bit) is not None:
+                slip_headers += 1
+        if i + 1 < len(frames):
+            early_positions += 1
+            if sync_shape_at(data, end - 1):
+                early_shape += 1
+            if header_at(data, end - 1, False) is not None:
+                early_headers += 1
+
+    # What the stream's own declarations buy at the END of a frame walk. The
+    # last frame's block size is the arithmetic total_samples makes possible
+    # and nothing else does: with a fixed block size and a known sample count
+    # the tail is total % max_blocksize samples (and a streaminfo with a fixed
+    # block size is what makes the frame COUNT countable at all, so an exact
+    # count is available for the fixed-blocksize fixtures and not for the
+    # unseekable one). Where total_samples is unknown, no declaration tells a
+    # reader where the audio ends — the region's end does.
+    blocksizes = [f["blocksize"] for f in frames]
+    samples = sum(blocksizes)
+    derivable = (info["total_samples"] > 0 and
+                 info["minimum_blocksize"] == info["maximum_blocksize"])
+    derived = (-(-info["total_samples"] // info["maximum_blocksize"])
+               if derivable else None)
+    if derived is not None:
+        assert derived == len(frames), \
+            "%s: the stream's own declarations say %d frames, there are %d" % (
+                name, derived, len(frames))
+        assert samples == info["total_samples"], \
+            "%s: frames carry %d interchannel samples, total_samples says %d" % (
+                name, samples, info["total_samples"])
+        assert blocksizes[-1] == info["total_samples"] % info["maximum_blocksize"] \
+            or blocksizes[-1] == info["maximum_blocksize"], \
+            "%s: tail frame is %d samples, total_samples says otherwise" % (
+                name, blocksizes[-1])
+
+    # The audio itself, from the reference DECODER, and the stream's own MD5
+    # checked against it: section 8.2's MD5 field is the MD5 of the UNENCODED
+    # PCM, so the fixture's declared value and `flac -d`'s output meeting is a
+    # fact about the format, not about this harness. Only the 16-bit fixtures
+    # get PCM rows: `reference_pcm` reads a decoded WAV, and the 24-bit fixture
+    # is refused by this crate's decoder at the depth gate anyway (its frames
+    # are still walked above, because the frame layer's framing rule has
+    # nothing to do with sample depth).
+    pcm_rows = None
+    if stream_bps == 16:
+        pcm = fv.reference_pcm(path)
+        assert len(pcm) == samples * (info["channels_minus_one"] + 1), \
+            "%s: reference decode produced %d values, the frames describe %d" % (
+                name, len(pcm), samples * (info["channels_minus_one"] + 1))
+        packed = struct.pack("<%dh" % len(pcm), *pcm)
+        digest = hashlib.md5(packed).hexdigest()
+        if info["md5"] != "0" * 32:
+            assert digest == info["md5"], \
+                "%s: MD5 of the reference-decoded PCM is %s, the stream " \
+                "declares %s" % (name, digest, info["md5"])
+        else:
+            assert digest != "0" * 32, \
+                "%s: the unseekable fixture's MD5 field is unset; the decoded " \
+                "PCM hashing to the unset sentinel would be a coincidence worth " \
+                "knowing about" % name
+        pcm_rows = dict(values=len(pcm), bytes=packed, md5=digest,
+                        pcm_fnv=fv.fnv1a64(packed))
 
     # The number-FORM witness: one real frame, its number spelled in three
     # longer forms, both CRCs recomputed. See mutate_number_form().
@@ -690,7 +973,18 @@ def check_stream(spec, path, data):
     return dict(
         blocks=blocks, frame_data_offset=off, info=info, frames=frames,
         widths=widths, metaflac=minfo, forms_checked=len(frames),
-        starts_strict=len(strict), starts_lax=len(lax), mutation=mutation,
+        starts_strict=len(strict), starts_lax=len(lax),
+        starts_fields=len(fields), starts_shape=shape,
+        frame_bytes=walked, footer_gaps=gaps, blocksizes=blocksizes,
+        header_bits=header_bits, size_codes=size_codes,
+        footer_padding_frames=pad_frames,
+        footer_slip_positions_sync_shape=slip_shape,
+        footer_slip_positions_strict_headers=slip_headers,
+        footer_early_positions=early_positions,
+        footer_early_positions_sync_shape=early_shape,
+        footer_early_positions_strict_headers=early_headers,
+        derived_frame_count=derived, exact_frame_count=derivable,
+        pcm=pcm_rows, mutation=mutation,
     )
 
 
@@ -759,6 +1053,87 @@ def emit(src, fixture_dir, out_path):
         "# the reference decoder ACCEPTS those forms (it just never writes",
         "# them), so our refusal is a policy divergence, recorded here rather",
         "# than argued.",
+        "#",
+        "# `scan_frame_starts_sync_shape_only` and `scan_frame_starts_fields_only`",
+        "# complete that pair into a LADDER over the same region, measured with",
+        "# the same second reading of section 9.1: sync shape alone (0xFF plus",
+        "# the rest of the 14-bit sync — the test a player is tempted to call",
+        "# \"find the next frame\"), then field validation without the CRC-8,",
+        "# then full strict validation, then strict validation with the",
+        "# minimal-form rule lifted. Generation refuses to write unless each",
+        "# count contains the next and the strict count equals the frame count.",
+        "# On THESE fixtures every leg gives the frame count: the regions are",
+        "# 1-16 kB and a false sync-shaped offset costs about one per 8 kB of",
+        "# material (0xFF x 1/32), so none is expected or found. The false",
+        "# starts live in LONGER material — measured in scripts/frame_vectors.py's",
+        "# `measure`, sync shape over-matches by 1.3x to 12x (204 candidates for",
+        "# 157 frames, up to 1568 for 313), and it is the FIELD-VALIDATION leg",
+        "# that removes nearly all of them (a CRC-8 check without field checks",
+        "# still admits false starts — same docstring). That asymmetry is why",
+        "# the crate's frame walk never guesses a boundary, and why the",
+        "# constructed garbage/truncation cases in src/scan.rs' unit tests are",
+        "# hand-cut regions rather than fixtures (the rule in tests/README.md).",
+        "#",
+        "# The frame-walk rows are item 4b's ground truth: what a reader that",
+        "# indexes nothing but advances past frames must see. `frame_bytes` is",
+        "# every frame's own length (header + bodies + padding + CRC-16), derived",
+        "# by walking each frame's subfields bit by bit WITHOUT looking at the",
+        "# next frame, and cross-checked against the distance to the next frame",
+        "# start / end of file -- two derivations of the same number. Generation",
+        "# refuses to write unless they agree on every frame and the lengths",
+        "# total the region's byte length exactly: the frames tile the region",
+        "# with no gap and no overlap, which is what makes `frame_bytes` a",
+        "# reader's clock instead of an index. `frame_footer_gaps_bits` is the",
+        "# measured padding+CRC-16 tail of each frame (16 when the last body bit",
+        "# already lands on a byte boundary, otherwise pad-to-byte + 16). The",
+        "# padding half is bounded by the format at 7 bits, and generation",
+        "# asserts 16 <= gap <= 23 for every frame instead of trusting that.",
+        "# `footer_padding_frames` counts how many of this fixture's frames",
+        "# carry any padding at all, and the rows after it ask what a reader",
+        "# that treated the footer as exactly 16 bits would find where it then",
+        "# stands: `footer_slip_positions_*` are the positions its BIT cursor",
+        "# would land on (short by the padding), `footer_byte_truncation_*` the",
+        "# ones its BYTE cursor would land on if it rounded a non-byte-aligned",
+        "# end down instead of up. On these fixtures the strict filter accepts",
+        "# none of them - a footer mistake is refused, not silently followed -",
+        "# but some of the bit-level positions are sync-SHAPED, which is the",
+        "# case worth knowing: shape-matching and field-refusing is exactly",
+        "# where a player that trusted the two-byte pattern would invent a",
+        "# frame. These are rows rather than prose because the answers are",
+        "# fixture facts: a future fixture that changed one would fail the Rust",
+        "# test that reads them.",
+        "# `frame_header_bits` is the same frame's header width, per frame, from",
+        "# the independent parser. The three rows add up: a reader holding any two",
+        "# can reconstruct the third part (a frame's subframe-body length is",
+        "# bytes*8 - header_bits - gap). Framing is compositional, so a decoder",
+        "# that disagrees about one of them disagrees about where the next frame",
+        "# begins - and a per-frame width is a cross-implementation check, not a",
+        "# restatement of the census rows above.",
+        "# `frame_blocksizes` is the per-frame sample count, whose sum is",
+        "# total_samples where the stream declares one -- and where it does not",
+        "# (the unseekable fixture) is still what the reference decoder returns.",
+        "# `frame_exact_count_from_declarations` is the frame count a reader",
+        "# can derive from the stream's OWN declarations -- a fixed block size",
+        "# plus a known sample total -- and nothing else: ceil(total / block)",
+        "# with the short tail included. It equals the frame count on the four",
+        "# seekable fixtures and `none` on the unseekable one, which is the",
+        "# measured form of the point item 4b exists for: three of the five",
+        "# streams here state where their audio ends and one states nothing.",
+        "# `pcm_interleaved_values`, `pcm_fnv1a64` and `pcm_md5` come from",
+        "# `flac -d`'s output, not from this crate: the whole-file decode the",
+        "# frame walk produces has a pin, and `pcm_md5` equaling",
+        "# `streaminfo_md5` is the format's own definition of that field (the",
+        "# MD5 of the unencoded PCM) measured on real files. No PCM rows for the",
+        "# 24-bit fixture: this crate's decoder stops at the depth gate, though",
+        "# its frames are walked and cross-checked like the others.",
+        "# `frame_sample_size_codes` is each frame's 9.1.5 Table 17 sample-size",
+        "# code: 0 = \"the depth is only in STREAMINFO\" (the crate resolves that",
+        "# through StreamDefaults), 1 = 8, 2 = 12, 3 = reserved, 4 = 16, 5 = 20,",
+        "# 6 = 24, 7 = 32. Every frame of every fixture here STATES its depth,",
+        "# and generation refuses to write a frame whose statement contradicts",
+        "# its own streaminfo. That is what makes the 24-bit fixture's refusal",
+        "# unarguable: no caller-supplied default could talk a decoder into",
+        "# reading those frames, because the frames themselves say 24.",
         "",
     ]
     for spec, data, checked in rows:
@@ -824,8 +1199,55 @@ def emit(src, fixture_dir, out_path):
             "last_frame_header_bits %d" % frames[-1]["header_bits"],
             "last_frame_blocksize %d" % frames[-1]["blocksize"],
             "last_frame_bytes_to_region_end %d" % (len(data) - frames[-1]["offset"]),
-            "",
+            # ---- item 4b: what a frame walk must see, per frame, in order.
+            # The rows above describe what the stream DECLARES; these describe
+            # what a reader with no index encounters, and none of them comes
+            # from the crate either (walk_frame_bytes walks each frame's own
+            # subfields; the strict filter's offsets and the reference decode's
+            # PCM are the reference tool's).
+            "frame_region_len %d" % (len(data) - checked["frame_data_offset"]),
+            "frame_offsets %s" % " ".join(str(f["offset"]) for f in frames),
+            "frame_bytes %s" % " ".join(str(n) for n in checked["frame_bytes"]),
+            "frame_header_bits %s" % " ".join(str(n)
+                                              for n in checked["header_bits"]),
+            "frame_blocksizes %s" % " ".join(str(n)
+                                             for n in checked["blocksizes"]),
+            "frame_footer_gaps_bits %s" % " ".join(str(g)
+                                                   for g in checked["footer_gaps"]),
+            "footer_padding_frames %d" % checked["footer_padding_frames"],
+            "footer_slip_positions_sync_shape %d" % checked[
+                "footer_slip_positions_sync_shape"],
+            "footer_slip_positions_strict_headers %d" % checked[
+                "footer_slip_positions_strict_headers"],
+            "footer_byte_truncation_positions %d" % checked[
+                "footer_early_positions"],
+            "footer_byte_truncation_sync_shape %d" % checked[
+                "footer_early_positions_sync_shape"],
+            "footer_byte_truncation_strict_headers %d" % checked[
+                "footer_early_positions_strict_headers"],
+            "frame_numbers %s" % " ".join(str(f["number"]) for f in frames),
+            # §9.1.5 Table 17 sample-size codes, per frame: 0b000 = "the depth
+            # is only in STREAMINFO", 0b001 = 8, 0b010 = 12, 0b011 = reserved,
+            # 0b100 = 16, 0b101 = 20, 0b110 = 24, 0b111 = 32. Generation
+            # refuses to write if a frame states a depth its streaminfo
+            # contradicts.
+            "frame_sample_size_codes %s" % " ".join(str(c) for c in
+                                                    checked["size_codes"]),
+            "frame_exact_count_from_declarations %s" % (
+                "none" if checked["derived_frame_count"] is None
+                else checked["derived_frame_count"]),
+            "scan_frame_starts_sync_shape_only %d" % checked["starts_shape"],
+            "scan_frame_starts_fields_only %d" % checked["starts_fields"],
         ]
+        if checked["pcm"]:
+            pcm = checked["pcm"]
+            lines += [
+                "pcm_interleaved_values %d" % pcm["values"],
+                "pcm_fnv1a64 %s" % pcm["pcm_fnv"],
+                "pcm_md5 %s" % pcm["md5"],
+                "pcm_bytes_len %d" % len(pcm["bytes"]),
+            ]
+        lines.append("")
         if checked["mutation"]:
             m = checked["mutation"]
             lines += [

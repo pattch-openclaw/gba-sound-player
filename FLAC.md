@@ -6008,6 +6008,331 @@ acceptance of non-minimal number forms (divergence, recorded); no
 `flac` on PATH by design — it prints the versions it used and refuses to
 write a table it cannot cross-check.
 
+**Split-ladder item 4b — the frame walk: a frame ends itself, and the bytes
+end the stream** (`crates/flac-lite/src/scan.rs`, branch
+`feat/flac-lite-scan-cursor`, 2026-11-04).
+**4a said where the frames begin; this half answers how a reader gets from one
+to the next with no index in front of it, and how it knows the stream is over.**
+The format has exactly two answers to those two questions, and this module
+implements both and nothing else.
+
+(1) **A frame ends itself.** One frame's own fields — header, subframe bodies,
+zero-padding to a byte, footer CRC — describe every bit up to its end, so a walk
+that parses a header and walks the bodies arrives on the next frame's first byte
+by construction. `scan::Frames` therefore keeps a **bit** cursor, not a byte
+cursor, and the reason the obvious byte-level rules are not the same rule is
+measured per frame in the extended table rather than asserted: `s1`'s ten frames
+are 117, 116, 116, 116, 116, 116, 115, 116, 116 and 51 bytes long, so no byte
+stride describes them (the load-bearing form of that argument is in the design
+changes below, because a two-frame region's start list *is* an arithmetic
+sequence); and a frame's tail is **zero-padding of 0–7 bits plus the
+16-bit CRC**, recorded as `frame_footer_gaps_bits` = 16..23 (generation asserts
+the format's 7-bit bound on the padding half instead of trusting it), with
+non-zero padding on **23 of the 35 frames** in these five fixtures. The table
+counts where a reader that treated the footer as exactly 16 bits would then be
+standing, in both shapes the mistake takes: at its **bit** cursor, short by the
+padding — `footer_slip_positions_strict_headers 0` over those 23 positions — and
+at its **byte** cursor if it rounded a non-byte-aligned end *down* instead of up
+— `footer_byte_truncation_strict_headers 0` over the 30 positions of that shape
+that exist (`footer_padding_frames` and `footer_byte_truncation_positions` are
+the counts they are counted over). So a mis-counted footer is refused rather than
+followed, and loudly: a sync error reported inside a frame the walk had already
+decoded correctly. The other column is the one worth reading: one of the 23
+positions is sync-SHAPED (`footer_slip_positions_sync_shape 1`) — `0xFF` followed
+by a byte whose top five bits are set, and fields that are not a frame — which is
+precisely where a player that trusted the two-byte pattern invents a frame and
+only the field leg of the filter refuses it. The rule that does land correctly
+skips the 16-bit CRC and **re-anchors up** to the next byte
+boundary — arithmetic, not luck, because the footer ends
+on a byte boundary and rounding up absorbs the padding. That second rule is
+exactly `frame`'s existing documented contract ("ends on a byte boundary after
+the footer"), and it is safe for one reason only: the body's *bit* end was
+computed by walking the fields. Nothing recovers it from byte counts. `scan`
+therefore measures the length rather than rounding to one — `bit_position()/8`
+after the footer is a measurement of a bit-exact end — and `ConsumedFrame::bytes`
+equals the table's `frame_bytes` on all 35 frames in both feature builds. The
+framing also does **not** depend on the optional footer *check*: the bit cursor
+consumes the CRC-16 bits whether or not `crc-check` verifies them, so a
+`crc-check`-off build still knows where a frame ended.
+
+(2) **The end of the bytes is the end of the stream** (§6: "the last byte of
+the last frame, and thus of the whole stream"). It is the only end every FLAC
+stream has; everything else the format offers — §8.2 `total_samples`, the
+fixed-blocksize frame count 4a derives, §8.2's MD5, §8.2's frame-size fields,
+§8.3's seek points — is a cross-check or does not exist for this stream. So
+`Frames::finish` reads **to** the end of its region and *then* compares the walk
+against what the stream declared, which is one code path for seekable and
+unseekable streams alike and turns `s5`'s zeros into what they are — "not
+known" — instead of a `Some(0)` claim of zero audio.
+
+Surface: `scan::Frames` (`stream` over a whole file, anchored at frame 0 with
+that file's own `StreamFacts`; `region` over any slice that begins at a frame —
+a `FrameSource`-shaped slice, a hand-cut range, a blob; `.anchored(n)` for a
+range whose real frame number is known, which is the seam a future seek point
+will use; `next_frame`, `resync`, `finish`, `cursor`, `at_end`, `region_len`,
+`decoded`, `expect_number`); `ConsumedFrame {offset, bytes, samples, number,
+header}` — the frame's own length, which is the same quantity the generator
+measures, from the opposite side; `Stats`; `StreamBounds {samples, frames,
+max_blocksize}` + `StreamBounds::NOTHING` + `StreamBounds::of_stream_info`,
+which is where Table 3's sentinels become `None` arms; `scan::next_frame_start`,
+recovery only; and a **scan-local `Error`** carrying numbers
+(`BufferTooSmall {need, have}` — what *this frame's own header* asked for,
+`DeclaredMaxExceedsBuffers {declared, have}` — what the **stream declares** and
+the walk has not read the frame at the cursor yet; `FrameOutOfSequence {offset, expected, found}`,
+`DeclaredSampleCountMismatch {declared, decoded, frames, region_len}`,
+`DeclaredFrameCountMismatch`, `Decode(frame-layer Error)`). The crate's flat
+`Error` is left alone: whether it grows payloads is the facade step's API
+question recorded in the loop section above, and the caller who must diagnose
+*here* is the one who needs the numbers. In `stream`, one addition:
+`StreamInfo::total_samples_declared`, so the "unknown" convention stays inside
+the module that knows Table 3.
+
+Policy, stated as policy and witnessed rather than asserted: **the buffer
+contract mirrors `driver`'s ordering** — where the stream declares a maximum
+block size the caller's buffers are refused before a single bit is read (a caller
+error must not be masked by a later stream error), where it does not the
+requirement comes from the parsed frame's own block size, and `right` is gated
+per frame by the *header's* channel code, because a stream may declare two
+channels and carry mono frames. **Those two refusals are separate variants, because
+they are different asks of the caller.** `DeclaredMaxExceedsBuffers` is a mismatch
+between the caller's buffers and a *claim about the stream* — and §8.2's own
+caveat is that a declared maximum may exceed every frame in the region; the
+committed table has the case at full-stream scale, where `s3` declares block size
+3000/3000 and its last frame carries 1801, so a caller whose buffers are 1801
+samples is refused on that frame by the **declaration**, on a frame that would
+have decoded. So the number in that refusal is not a claim that the frame at the
+cursor needs it; the
+fix is buffers that fit the stream, or handing the walk no bound and letting each
+frame's header size the requirement. `BufferTooSmall` is the requirement no
+declaration can anticipate: the frame's own block size, and the second subframe of
+a stereo frame. Same position in the walk, same "nothing read, nothing written"
+either way — the variant is the diagnosis, and a caller whose buffers come from
+somewhere else (a manifest's fixed block size is the product-shaped case) has to
+tell them apart because only one of them is fixed by making the buffers bigger.
+**A frame that is not the next one in sequence is refused before it writes any
+samples** — the coded number is the walk's third
+strict leg, and it is what makes the 24-bit fixture's walk refuse rather than
+report 0-of-0. **A mid-frame truncation is a decode error, and a clean
+frame-boundary truncation is a declared-count mismatch with the numbers in it** —
+and the same clean cut on a stream that declared nothing must be accepted, which
+is an ambiguity of the format, not of this module, and is recorded as one.
+**Trailing non-frame bytes are refused, not ignored.** `Frames::stream` and
+`Frames::region` are different entry points and the cost of confusing them is
+pinned in the suite (the wrong one slices a second time and says `FrameSync` with
+a `region_len` that gives the mistake away). And **the depth boundary applies to
+locating frames exactly as much as to decoding them**: the profile check lives
+inside `frame::parse`, which *is* the filter, so the generator's reading finds 10
+of `s4`'s frames and this crate's filter finds 0 — the test says so by name
+instead of hiding it in a skip, and the table now carries
+`frame_sample_size_codes` so the claim is the fixture's (`0b110` = 24) and not
+this crate's inference.
+
+**The generator grew a third independent reading, and it is the one the framing
+depends on.** `walk_frame_bytes` walks each frame's subframe bodies with the
+proven subframe-level Python walker from `frame_vectors.py`, sizes the wider side
+slot as stream depth + 1 (Table 5's note), consumes the padding and the footer,
+and returns the frame's length **without looking at the next frame** —
+cross-checked against framing, against the header-width census, and against the
+tiling of the whole region (`sum of the walked lengths == region length`, and the
+last frame's own length ends at EOF). Generation refuses to write the table
+unless those agree; it refused once, because the walk's bit cursor was
+initialised from the start of the file rather than from that frame's own offset —
+the same class of mistake the Rust layer is built to avoid. New rows:
+`frame_bytes`, `frame_header_bits`, `frame_sample_size_codes`,
+`frame_footer_gaps_bits`, `frame_blocksizes`, `frame_numbers`, `frame_region_len`,
+`frame_exact_count_from_declarations` (`ceil(total / fixed block size)` where the
+stream states both — which generation then proves against the real count — and
+`none` where it does not, which is `s5`), and the filter ladder
+`scan_frame_starts_sync_shape_only` / `_fields_only` / `_strict` /
+`_all_forms_allowed`. `streaminfo_md5` is now cross-checked against the MD5 of
+the *reference-decoded* PCM, and that PCM is also hashed FNV-1a-64 so the crate
+can compare it with no hash from anywhere (its own implementation of the same
+constant is in the suite, with the constants derived from the specification in
+the comment there). It also records where a footer mistake lands —
+`footer_padding_frames` (how many frames carry padding at all),
+`footer_slip_positions_sync_shape` / `footer_slip_positions_strict_headers` (what
+a bit cursor that skipped a constant 16 bits would find at the position it then
+stands at) and `footer_byte_truncation_positions` / `_sync_shape` /
+`_strict_headers` (the same questions at the positions a byte cursor that rounded
+a non-byte-aligned end *down* would stand at). Generation asserts nothing about
+those counts — they are fixture facts, not format ones — and the Rust suite asks
+this crate's own filter the byte-level version of the question and requires it to
+agree with the row.
+
+**Seven things this rung measured that changed the design as written, three of them
+claims of my own that failed.** (a) My argument for "no byte-level walk can work"
+was a *starts* argument — `offsets[i+1] - offsets[i]` not constant — and the
+suite refuted it on `s3`, whose two frames are 2450 and 1477 bytes but whose
+starts are an arithmetic sequence with stride 2450: a two-frame region cannot
+disprove a stride. The load-bearing fact is the *tiling*: frames end themselves,
+their lengths sum to the region, and `offsets[0] + n * lens[0]` does not reach
+the end. That is a weaker-sounding claim and a stronger witness. (b) On these
+five fixtures all four legs of the filter ladder give the frame count — these
+regions contain no sync-shaped false candidates — so the fixtures witness
+*exhaustiveness* (the filter finds exactly the frames, no more), while the
+measurement where the legs separate stays the one already recorded (1223
+candidates for 979 real frames, ~9.4× on noise-like material); the table carries
+both so a reader does not mistake the flat ladder for the general case. (c)
+`resync`'s first version re-anchored the frame numbering to **one past** the
+frame it had landed on, and the real-bytes suite caught it as
+`FrameOutOfSequence { offset: 115, expected: 5, found: 4 }` — a walk that went
+looking for a frame and then refused the frame it found. A unit test could not
+have caught that (hand-built headers have no real sequence to slip), and it is
+not a thing unit tests should replace: the contract is now stated in a unit test
+(`a_resync_lands_on_a_frame_and_expects_that_frames_number_next`) and the
+recovery over real audio is witnessed in the integration suite. (d) My claim that
+one deleted byte inside a frame breaks a scan *at the next header check* was too
+strong in one direction: with `crc-check` on, that frame's own footer CRC fails
+**at that frame** — and both behaviours are correct (the frame is corrupt; "a
+dead frame is dead"), so the test accepts either arm and says why, and pins which
+arm belongs to which gate: the footer-CRC arm runs under `flac-test-crc`, the
+misaligned-landing arm under `flac-test`. (e) A claim this crate's own docs had
+already written down — that a constant-16-bit footer walk *silently slips* and
+"the next header still parses at a bit-slip offset" — was wrong in both halves,
+and it was in three files before it was measured. At all 23 positions such a rule
+lands on across these fixtures **no** header parses, so the failure is loud (just
+loud inside a frame that had already decoded correctly); and the variant that
+re-anchors to the next byte boundary lands **correctly**, by arithmetic, because
+the footer ends on a byte boundary and rounding up absorbs the padding. What the
+docs now say, in `scan.rs`, `lib.rs` and the crate README: a byte rule can be
+correct here only if the body's bit end was already computed exactly — which is
+the very thing being framed — so the walk measures its frames instead of rounding
+to them. (f) The generator now records that answer as rows rather than leaving it
+in prose, and the comparison turned up a case neither version had: one of the 23
+positions is **sync-shaped but field-refusing** (`footer_slip_positions_sync_shape
+1`, in `s4_24bit`), which is where a player that trusted the two-byte pattern
+would begin a frame that does not exist and a field-checking filter would not.
+My *first* measurement of the footer question was wrong too, in the way only a
+throwaway script can be: I passed a bit offset to a byte-indexed header parser,
+swallowed the exception, and reported the resulting zero as a fact — which
+happened to agree with the prose I was trying to check. The question lives in the
+generator now, where a bit-position query re-aligns the bytes to that bit and
+calls the same strict reading the ladder uses, and where a helper that mis-reads
+its own arguments fails the run instead of agreeing with me. (g) An arm of the
+end-of-region check was implemented, documented, and **untested** — and the only
+reason that is known is a mutation: deleting the frame-count cross-check changed
+nothing across 137 unit and 11 integration tests. It is the harder arm to reach
+honestly, and worth saying why: a stream that declares one block size and a
+sample count derives *both* numbers from the same arithmetic, so no
+self-consistent file can contradict its own frame count while agreeing with its
+sample count. The arm exists for the case where a **claim** is handed a **region**
+it does not belong to — bounds from one stream and frames from another, a packed
+blob whose header is not its own — which no fixture here produces and only a
+staged test can. `the_frame_count_claim_is_checked_after_the_sample_count_claim`
+stages exactly that: a fixture's real frames with its real sample claim satisfied
+and a frame claim one short (the documented shape of the arm), then the truncated
+region with **both** claims contradicted, which pins the precedence — the sample
+deagnosis answers first, because it is the claim with a quantity attached. The
+ordering is now stated in the variant's docs, and re-running the mutation fires
+exactly that test.
+
+Witnesses: 8 unit tests in `src/scan.rs` — hand-cut regions and hand-built
+headers only, because their whole claim is the walk's **state machine and caller
+contract** (end cleanly at end-of-region; refuse a declared-count contradiction;
+leave the cursor where a refusal happened; refuse an undersized buffer before
+reading; refuse an out-of-sequence frame before decoding; map Table 3's sentinels
+to `None` arms; re-anchor on the frame `resync` landed on).
+`tests/scan_frame_walk_layout.rs` (12 tests) is where real bytes are claimed:
+every frame start, byte length, header width, block size, number and sample count
+in the table reproduced by a walk with no index, across all five fixtures; the
+PCM compared to `flac -d`'s hash; the filter's output equal to the real frame
+list (and its counts ordered against the wider legs); the declared maximum block
+size and the per-frame channel count as the sources of the caller's buffer
+contract; the short final frame writing exactly its own window; unseekable `s5`
+walked by its bytes and compared with its seekable twin whose audio it is;
+recovery off a real frame back onto a real frame; a mid-frame truncation versus a
+clean frame-boundary one; trailing bytes, a duplicated real frame at the end of a
+region, the two entry points confused, and the 24-bit refusal at both entry
+points; and where a mis-counted footer would be standing — every
+byte-truncation position in the table probed with this crate's own filter, which
+must refuse it and report the real start, with the table's count of accepted
+positions (zero) as the agreement check between the two readings; and the two
+end-of-region claim checks staged against real frames — a satisfied sample claim
+with a contradicted frame claim, and both claims contradicted at once, which is
+where the precedence gets pinned. Nothing in that file is an expectation the crate
+emitted.
+
+**Mutation checks on this rung.** (i) `resync`'s re-anchor put back to the
+one-past-the-frame version: fires exactly the unit contract test
+(`a_resync_lands_on_a_frame_and_expects_that_frames_number_next`) and the
+real-bytes recovery test — 136/1 unit, 11/1 integration. The pair the docs
+describe, both arms load-bearing. (ii) The sample-count cross-check disabled: fires
+`an_empty_region_contradicts_a_declared_sample_count` and
+`at_the_end_of_a_region_the_walk_reports_what_the_bytes_and_claims_support` — and
+also the new claim-precedence test, which depends on that arm being the one that
+answers: 136/1 unit, 10/2 integration. The unseekable fixture's test stays green
+through it, as it must — there is nothing there to check. (iii) The frame-count
+cross-check disabled: the first time it ran, nothing fired at all, which is item
+(g) above; with the staged test in place it fires that test alone (11/1).
+(iv) The mtime lesson from #88 caught me in the other direction this time: one
+run of the new claim test failed because a mutation was still in the tree — the
+tests were right and my working copy was wrong. Restores here went through
+`git checkout` plus `touch`, and everything was re-confirmed green afterwards.
+
+Gates: the walk is a feature now, so the counts split rather than move. Default
+features — `flac-test` — are **unchanged at 173 passed + 1 ignored**: that gate
+neither compiles `scan` nor builds `tests/scan_frame_walk_layout.rs`, which is
+`required-features = ["scan"]` in `Cargo.toml` (not built at all, rather than
+built and quietly passing). **`make flac-test-scan`**, new, is **193 passed + 1
+ignored** (thumbv4t compile gate + host tests with `--features scan`; unit 129 →
+137 — the eight `scan` rule tests — plus the 12-test walk suite). `flac-test-crc`
+stays **176 + 1**: `crc-check` alone does not turn the walk on; the combined
+`--features crc-check,scan` build is **196**, and that is where the misframed-frame
+witness exercises its other arm. `flac-portable-check` now runs **with**
+`--features scan`, so a second bare-metal target keeps *compiling* the walk even
+though no ROM links it (`core,alloc` — no `std`, no `unsafe`, no new pin surface,
+no perf claim); `flac-test-scan` is deliberately not in `check-gba-all`, because
+the thing that must not carry the walk yet is the ROM. `make check` (fmt) clean.
+The generated fixtures are byte-for-byte unchanged — the generator's new work
+reads them, it does not re-encode them.
+
+**The link-line measurement, because "nothing in the decode path changed" was the
+wrong sentence.** No on-target run is in this PR: `mgba-test-runner` is not on the
+host that built it, and the cycle-level re-anchor belongs to item 6 — the point at
+which the facade starts calling the walk and the walk starts *costing* cycles. What
+could be measured statically was measured, on the calibration instrument
+(`examples/flac_spike/`, the ROM the E menu re-anchors against), three arms built
+from one path with the repo's native nightly — the toolchain
+`make native-spike-rom` runs:
+
+| arm | `.text` | `.rodata` | `.iwram` | `.ewram` |
+|---|---|---|---|---|
+| 4a, `b0704b2` | 46,008 B | 1,829,648 B | 812 B | 368 B |
+| 4b as first pushed (ungated) | 49,128 B (**+3,120**) | same size, content moved with the code | 812 B | 368 B |
+| 4b with `scan` a feature, **off** | 46,008 B | 1,829,648 B | 812 B | 368 B |
+
+The third arm does not merely match 4a's section *sizes*: its `.text`, `.rodata`,
+`.iwram` and `.ewram` are the same **bytes** (sha-256 of every dumped section
+matches). With the feature **on** the image is 3,120 B bigger and contains **no
+`scan` symbol at all** — `nm` reports none, the walk is dead-stripped — and the
+growth sits in code that was linked before this PR: `residual::decode_residual`
+596 → 2,412 B, `subframe::decode_subframe` 888 → 1,576 B, a newly outlined
+`bits::BitReader::peek_at` +212 B, one extra specialised `read_bits`,
+`subframe::integrate_lpc` +20 B, the spike's own `decode_one` −4 B. Adding a
+second consumer of the decode path changes what the inliner does to the decode
+path — which is the whole reason this rung is an opt-in feature and not a judgement
+call. So the honest claim is narrower than the one this note first carried: **no
+source in the decode path changed and no cycle was measured, but the generated code
+of the decode path did, and its size is now gated rather than argued.** Nothing on
+hardware is claimed either way; the E-anchor baselines are re-recorded at the next
+E probe against the ROM the default build produces — which is the 4a image, byte for
+byte — and the walk's real-time cost is charged to the run that wires the facade
+onto it.
+
+Deliberate scope cuts: **no `SEEKTABLE` interpretation** (the block walker still
+skips it by length; `.anchored(n)` is the seam a real seek point will use in
+item 6, and `next_frame_start` is not offered as random access); **no rewiring of
+`Decoder`/`format::Manifest`** — item 6 inherits `Frames`, `StreamBounds`,
+`ConsumedFrame` and `resync` rather than inventing a third frame loop; **no pull
+source / `std::io`**: every input stays a borrowed region, because a
+reader-pullable cursor is a `no_std` question of its own and this rung does not
+ask it; no metadata-block CRC (none exists); no 24-bit decode; no acceptance of
+non-minimal number forms; no `unsafe`; no allocation in the walk — the per-frame
+predictor state is `[PredictorState; 2]`, caller-owned, exactly as `driver`
+already requires (the two shapes stay duplicated per-module, as the loop section
+records; merging them is the facade step's decision); and no GBA real-time claim,
+which this rung cannot make because it measured nothing on hardware.
+
 **Reading rules.** The core claims: bit-exact FLAC frame decode, no_std,
 zero-alloc, zero unsafe except the pin attribute where a feature opts
 in, builds across bare-metal targets — and **never** a 32 kHz GBA

@@ -44,10 +44,39 @@ strict-profile = []
 # in release" shape (Phase 2 step 5 landed 2026-11-03; gate `flac-test-crc`).
 # The `bits::crc8`/`bits::crc16` functions themselves are always compiled.
 crc-check = []
+# The frame walk (`scan::Frames`) and the recovery scan (`scan::next_frame_start`).
+# Off by default, for the same reason the two verification features are: it is
+# code a GBA ROM should not carry until item 6 rewires the facade onto it. It
+# changes nothing about what is *accepted* or *found* — it decides only whether
+# the walk exists in a build.
+#
+# Measured, not asserted. With `scan` off, the E instrument (`examples/flac_spike`,
+# the binary `make native-spike-rom` builds) comes out section-for-section
+# identical to the 4a image: `.text` 46,008 B. With it on, `.text` is 49,128 B —
+# **+3,120 B** — and **no `scan` symbol appears in the image at all** (`nm`). The
+# walk's own code is not what got linked; what changed is how LLVM inlines the
+# decode path it shares a codegen unit with: `residual::decode_residual` 596 B →
+# 2,412 B, `subframe::decode_subframe` 888 B → 1,576 B, plus a new outlined
+# `bits::BitReader::peek_at`. That is the code-layout sensitivity the E-series
+# measurements in FLAC.md already record (E2a/E6 name the same phenomenon); here it
+# is visible without an emulator. `.rodata` (the embedded samples), `.iwram` and
+# `.ewram` do not change size either way, though `.rodata`'s contents move with the
+# code. So the gate defers that cost to item 6 — where the E-anchor baselines get
+# re-recorded anyway — it does not remove it.
+scan = []
 
 [lib]
 name = "flac_lite"
 path = "src/lib.rs"
+
+# The frame-walk suite is the only test of `scan`, and both halves of it (the
+# module's own unit tests and this suite) need the feature: without
+# `required-features` the file would compile to nothing in a default build and
+# `make flac-test` would report a green it had not earned. `make flac-test-scan`
+# is the gate that runs it; `make flac-test` does not build it.
+[[test]]
+name = "scan_frame_walk_layout"
+required-features = ["scan"]
 
 # The crc-check witness suite exists only with the feature on; without
 # required-features it would compile (and pass vacuously) in the default run.
