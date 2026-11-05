@@ -12,7 +12,7 @@
 //! product-side container work — a manifest is *one* frame source, not the
 //! decoder's contract.
 //!
-//! **IMPLEMENTATION STATE (2026-11-03):** `bits::BitReader` is complete for
+//! **IMPLEMENTATION STATE (2026-11-04):** `bits::BitReader` is complete for
 //! the decode path (PRs #25–#32 plus step 3a's `read_wasted_bits`), and
 //! `bits::crc8`/`bits::crc16` landed with Phase 2 step 5 (2026-11-03) —
 //! header/footer *verification* is wired into `frame` behind the `crc-check`
@@ -57,14 +57,48 @@
 //! libFLAC run table) plus a differential test in the spike's own witness
 //! suite that runs **both copies** over the same embedded clip bytes, frame by
 //! frame. The spike's driver deliberately stays where it is: it is the `ctrl`
-//! arm of every recorded E measurement (FLAC.md). What still `todo!()`: the
-//! `decoder` facade — whose frame source is a `Manifest`, so it will be a
-//! thin shell over `driver`, not a second loop — and `format::Manifest`;
-//! there is no
-//! metadata-block CRC to own there: RFC 9639 §8.1 defines a metadata block as
+//! arm of every recorded E measurement (FLAC.md).
+//! Item 4's **other half — the stream layer — landed the same day as
+//! [`stream`]**: the file level of an ordinary `.flac` file. It reads §6's
+//! `fLaC` magic, walks §8.1's metadata-block chain (borrowed, streaming, zero
+//! allocation, reserved types skipped by length, §5's forbidden type refused),
+//! parses §8.2's streaminfo, and reports `frame_data_offset` — the byte the
+//! frames start at, the number item 4 exists to produce. It is also the first
+//! producer of `frame::StreamDefaults` ([`stream::StreamInfo::as_defaults`]),
+//! which the 65 kHz goal depends on (every frame of a 65,536 Hz encode uses
+//! sample-rate code `0b000`). Two supporting changes came with it:
+//! `bits::read_utf8_coded` now **refuses non-minimal coded-number forms** — a
+//! deliberate divergence from the reference decoder, measured rather than
+//! assumed: `flac -d` accepts a real stream whose frame number is spelled in a
+//! longer form once both CRCs are recomputed (the `mutation
+//! number-form-overlong` rows of `tests/stream_vectors.txt`), while libFLAC
+//! itself never writes one (the generator asserts that census per fixture), and
+//! keeping the rule preserves the value→form-width relation the frame layer's
+//! width bounds are derived from; and `bits::coded_number_octets`
+//! makes a header's width *computable* instead of only observable; and
+//! `frame::parse`'s `48..=72`-bit debug assertion — an encoder observation that
+//! a real stream broke — is replaced by derived bounds
+//! ([`frame::MIN_HEADER_BITS`], [`frame::MAX_ACCEPTED_HEADER_BITS`]), with 48-,
+//! 80- and 120-bit headers witnessed end to end. Witness: `stream`'s unit tests
+//! plus `tests/stream_metadata_layout.rs` over five real libFLAC fixtures in
+//! `tests/fixtures/` and the generated table `tests/stream_vectors.txt`
+//! (`scripts/gen_stream_vectors.sh`): a two-block container, a four-block
+//! seektable+padding container, a real 80-bit frame header, a real 24-bit
+//! stream (refused as `UnsupportedSampleSize`), and an unseekable encode that
+//! declares no total sample count, no frame sizes and no MD5 — which is why
+//! `stream::StreamInfo::exact_frame_count` is defined only for the
+//! fixed-blocksize/known-total case. The metadata layer also confirms what the
+//! paragraph above already assumed: there is no metadata-block CRC to own. RFC
+//! 9639 §8.1 defines a metadata block as
 //! a 4-byte header plus exactly `length` bytes, with no CRC trailer, and the
 //! format's only CRCs are the frame header (§9.1.8) and frame footer (§9.3)
-//! — both implemented above.
+//! — both implemented above. What still `todo!()`: the
+//! `decoder` facade — whose frame source is a `Manifest`, so it will be a
+//! thin shell over `driver`, not a second loop — and `format::Manifest`;
+//! `format::Blocksize::samples` and `EncodeProfile::validate`; and item 4b's
+//! table-less frame source (consumed-length framing, with scanning only as
+//! recovery — the derived header bounds and `bits::coded_number_octets` are its
+//! inputs).
 //! the module layout, types, and signatures are the contract the
 //! implementation fills in (FLAC.md → phased plan, step 4 onward).
 //! Design rationale and the decision to write this at all live in
@@ -102,6 +136,12 @@
 //!             ├─ subframe CONSTANT | VERBATIM | FIXED(0..4) | LPC(<=32)
 //!             │    └─ residual  partitioned Rice | Rice2 | escape
 //!             └─ stereo   mid/side, left/side, right/side  (stereo only)
+//!
+//! stream (not in the decode path — it produces a frame source's inputs)
+//!   └─ stream           fLaC magic → §8.1 metadata-block walk → §8.2
+//!                       streaminfo → `frame_data_offset` +
+//!                       `frame::StreamDefaults`. The other half of item 4: an
+//!                       ordinary `.flac` file becomes reachable.
 //! ```
 //!
 //! There is no cross-frame predictor state to carry: every subframe carries
@@ -154,6 +194,7 @@ pub mod format;
 pub mod frame;
 pub mod residual;
 pub mod stereo;
+pub mod stream;
 pub mod subframe;
 
 pub use decoder::{DecodedFrame, Decoder, FrameBuffers};
@@ -189,6 +230,26 @@ pub enum Error {
     Manifest,
     /// Manifest declares a stream property this decoder cannot handle.
     UnsupportedStream,
+    /// Not a FLAC stream: the `fLaC` magic (`stream::MAGIC`) is absent or
+    /// truncated ([`stream`] — RFC 9639 §6). The near miss worth naming is a
+    /// WAV header, which is what a `.wav` file actually starts with.
+    StreamMagic,
+    /// The metadata-block chain ends in the middle of a block: no block carried
+    /// §8.1's last-metadata-block flag, or a block's declared length runs past
+    /// the end of the bytes. The reference decoder reports
+    /// `FLAC__STREAM_DECODER_END_OF_STREAM` / `…_READ_METADATA` for these two
+    /// shapes respectively (measured, 2026-11-04).
+    MetadataTruncated,
+    /// No streaminfo block, or one not in first position. §8.2 requires it as
+    /// the first metadata block; libFLAC's decoder only warns and carries on
+    /// (it can take stream properties from frame headers instead), which this
+    /// crate cannot — `frame::StreamDefaults` has no other producer
+    /// ([`stream::StreamInfo::as_defaults`]).
+    StreamInfoMissing,
+    /// More than one streaminfo block: §8.2 ("There MUST be no more than one
+    /// streaminfo metadata block per FLAC stream"), and the reference decoder's
+    /// own words are "more than one STREAMINFO found".
+    DuplicateStreamInfo,
 }
 
 /// Crate-local result alias; avoids importing `std::result` anywhere.

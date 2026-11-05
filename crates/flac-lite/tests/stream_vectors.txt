@@ -1,0 +1,261 @@
+# flac-lite stream-layer (file-level metadata) golden vectors -- GENERATED
+# DO NOT EDIT BY HAND.  Regenerate with:  scripts/gen_stream_vectors.sh
+# Generator + independent container walk: scripts/stream_vectors.py
+# Frame rows: scripts/frame_vectors.py (find_frames / parse_frame_header)
+# Pins: metaflac --list (the reference tool's own block list + field values)
+# Encoder: flac 1.5.0
+#
+# Each `stream_vector` block describes ONE committed fixture in
+# tests/fixtures/, byte-for-byte what libFLAC wrote (fixture_len and
+# fixture_fnv1a64 pin it -- the same hash the Rust suite reimplements).
+# The rows are what tests/stream_metadata_layout.rs asserts
+# flac_lite::stream::parse (-> StreamFacts) reports, and none of them comes
+# from that code: block types/flags/lengths and every streaminfo field
+# are metaflac's, cross-checked at generation time against an
+# independent bit-level reading of RFC 9639 section 8 in this file, and
+# the frame rows come from the proven strict frame filter (sync shape +
+# full field validation + verifying header CRC-8) whose header_bits is
+# the same arithmetic the crate's header parser must now reach.
+#
+# `frame_data_offset` is the byte the frames start at -- the number item
+# 4a exists to produce.  `first_frame_hex` is those bytes: enough of the
+# real stream to parse its header with the crate's own frame layer, at
+# the offset the stream layer reports.  Two layers, one byte offset, no
+# hand-built container anywhere (the hand-packed-vector rule, FLAC.md).
+#
+# `frame_number_forms_*` and `scan_frame_starts_*` are the two
+# measurements behind the frame-number strictness rule: every number
+# libFLAC wrote here is minimal (so refusing the others is free), and
+# the counts say what a scanner sees with and without that rule -- the
+# strict count is the frame count, counted by a second independent
+# reading of section 9.1 in this file. `mutation*` rows are one real
+# frame header of s1 rewritten with its number in each longer form,
+# both CRCs recomputed, with the real `flac -d` exit status for each:
+# (the frame footer's CRC-16 is measured per frame here to cover the
+# frame HEADER as well as the body -- crc16(header+body) equals the
+# stored footer, crc16(body) does not -- which is exactly why re-spelling
+# a number forces that CRC to be recomputed. An earlier claim in this
+# crate that the reference decoder REJECTED the longer form was that
+# artifact: a stale CRC, not a structural rule.)
+# the reference decoder ACCEPTS those forms (it just never writes
+# them), so our refusal is a policy divergence, recorded here rather
+# than argued.
+
+stream_vector s1_plain_8k_mono
+note two-block container: streaminfo first, a real (empty) Vorbis comment carrying the last-metadata-block flag. No padding, no seektable: --no-padding/--no-seektable are encoder options, so this is libFLAC's own output, not a hand-trimmed file. Also the host of the frame-number FORM mutation (`mutation number-form-overlong`): a frame header of this real stream rewritten with its number in each longer form, both CRCs recomputed — the only witness here that pins what the reference decoder does with a non-minimal form, as opposed to what libFLAC writes.
+encode_command flac -1 -f -s --no-padding --no-seektable -b 128 s1_plain_8k_mono.wav -o s1_plain_8k_mono.flac
+fixture s1_plain_8k_mono.flac
+fixture_len 1181
+fixture_fnv1a64 14376563200947798989
+encoder_vendor reference libFLAC 1.5.0 20250211
+block_count 2
+block 0 type 0(STREAMINFO) last false length 34
+block 1 type 4(VORBIS_COMMENT) last true length 40
+frame_data_offset 86
+streaminfo_minimum_blocksize 128
+streaminfo_maximum_blocksize 128
+streaminfo_minimum_framesize 51
+streaminfo_maximum_framesize 117
+streaminfo_sample_rate_hz 8000
+streaminfo_channels 1
+streaminfo_bits_per_sample 16
+streaminfo_total_samples 1200
+streaminfo_md5 6fbeacf13af62e01b246b6fe7387590f
+frame_count 10
+frame_number_forms_checked 10
+frame_number_forms_all_minimal true
+scan_frame_starts_strict 10
+scan_frame_starts_all_forms_allowed 10
+frame_header_widths_bits 56
+max_frame_header_width_bits 56
+first_frame_hex FF F8 64 08 00 7F 99
+first_frame_header_bits 56
+first_frame_number 0
+first_frame_blocksize 128
+first_frame_sample_rate_hz 8000
+first_frame_bits_per_sample 16
+first_frame_subframes 1
+first_frame_decorrelation none
+last_frame_offset 1130
+last_frame_number 9
+last_frame_header_bits 56
+last_frame_blocksize 48
+last_frame_bytes_to_region_end 51
+
+mutation number-form-overlong
+mutation_at 86
+mutation_before_hex FF F8 64 08 00 7F 99
+mutation_forms 2 3 4
+mutation_form2_header_hex FF F8 64 08 C0 80 7F E6
+mutation_form2_reference_exit 0
+mutation_form3_header_hex FF F8 64 08 E0 80 80 7F DF
+mutation_form3_reference_exit 0
+mutation_form4_header_hex FF F8 64 08 F0 80 80 80 7F 8C
+mutation_form4_reference_exit 0
+reference_decoder_accepts_nonminimal_forms true
+
+stream_vector s2_seekable_96k_stereo
+note four-block container: every real block type this encoder emits, three of them skipped by length. A walk that only knows streaminfo cannot reach the frames; this is the walk.
+encode_command flac -1 -f -s -P 64 -b 4608 -m s2_seekable_96k_stereo.wav -o s2_seekable_96k_stereo.flac
+fixture s2_seekable_96k_stereo.flac
+fixture_len 16488
+fixture_fnv1a64 17910388616024771065
+encoder_vendor reference libFLAC 1.5.0 20250211
+block_count 4
+block 0 type 0(STREAMINFO) last false length 34
+block 1 type 3(SEEKTABLE) last false length 18
+block 2 type 4(VORBIS_COMMENT) last false length 40
+block 3 type 1(PADDING) last true length 64
+frame_data_offset 176
+streaminfo_minimum_blocksize 4608
+streaminfo_maximum_blocksize 4608
+streaminfo_minimum_framesize 666
+streaminfo_maximum_framesize 7823
+streaminfo_sample_rate_hz 96000
+streaminfo_channels 2
+streaminfo_bits_per_sample 16
+streaminfo_total_samples 9600
+streaminfo_md5 5f89028d9197af68825649750823e1a2
+frame_count 3
+frame_number_forms_checked 3
+frame_number_forms_all_minimal true
+scan_frame_starts_strict 3
+scan_frame_starts_all_forms_allowed 3
+frame_header_widths_bits 48 64
+max_frame_header_width_bits 64
+first_frame_hex FF F8 5B 18 00 BD
+first_frame_header_bits 48
+first_frame_number 0
+first_frame_blocksize 4608
+first_frame_sample_rate_hz 96000
+first_frame_bits_per_sample 16
+first_frame_subframes 2
+first_frame_decorrelation none
+last_frame_offset 15822
+last_frame_number 2
+last_frame_header_bits 64
+last_frame_blocksize 384
+last_frame_bytes_to_region_end 666
+
+stream_vector s3_wide_48001hz_b3000
+note header width OUTSIDE our packer's 48..=72-bit profile at frame 0: 48001 Hz has no 4-bit sample-rate code (0b1101 appends a 16-bit Hz value, section 9.1.7) and 3000 samples has no 4-bit block-size code (0b0111 appends a 16-bit size-1, section 9.1.6). Both appended forms sit AFTER the coded frame number (Table 13's column order — the same order frame_vectors.py's parser follows), so the FIRST header is 32+8+16+16+8 = 80 bits and both frames here carry 3000/1801, i.e. the 16-bit form twice. Two frames are enough: an appended value form is not tied to frame count, and this is the widest real header this repo commits. Anything wider also needs the frame NUMBER to reach two octets (128+ frames) — measured on a 2.1M-frame synthetic stream (-b 257, 44100 Hz) a single stream contained widths of 80, 88, 96 and 104 bits; that file is not committed (multi-megabyte for a width rule). The format's own ceiling, 128 bits — a 6-octet coded number (the most the 31-bit frame-number bound allows) plus both appended forms plus the CRC — is therefore witnessed by a computed synthetic header in the Rust suite, not by a fixture. Measured: this encode needs no --lax (same as the uncommon-rate streams gen_frame_vectors.sh already encodes) — a wide header is not the same thing as an unstreamable stream. If a future libFLAC stops using the 16-bit forms here, the census below refuses to write.
+encode_command flac -1 -f -s --no-padding --no-seektable -b 3000 s3_wide_48001hz_b3000.wav -o s3_wide_48001hz_b3000.flac
+fixture s3_wide_48001hz_b3000.flac
+fixture_len 4013
+fixture_fnv1a64 2236240562515878472
+encoder_vendor reference libFLAC 1.5.0 20250211
+block_count 2
+block 0 type 0(STREAMINFO) last false length 34
+block 1 type 4(VORBIS_COMMENT) last true length 40
+frame_data_offset 86
+streaminfo_minimum_blocksize 3000
+streaminfo_maximum_blocksize 3000
+streaminfo_minimum_framesize 1477
+streaminfo_maximum_framesize 2450
+streaminfo_sample_rate_hz 48001
+streaminfo_channels 1
+streaminfo_bits_per_sample 16
+streaminfo_total_samples 4801
+streaminfo_md5 119b8197d3389dd486328dfbb5461fe5
+frame_count 2
+frame_number_forms_checked 2
+frame_number_forms_all_minimal true
+scan_frame_starts_strict 2
+scan_frame_starts_all_forms_allowed 2
+frame_header_widths_bits 80
+max_frame_header_width_bits 80
+first_frame_hex FF F8 7D 08 00 0B B7 BB 81 B5
+first_frame_header_bits 80
+first_frame_number 0
+first_frame_blocksize 3000
+first_frame_sample_rate_hz 48001
+first_frame_bits_per_sample 16
+first_frame_subframes 1
+first_frame_decorrelation none
+last_frame_offset 2536
+last_frame_number 1
+last_frame_header_bits 80
+last_frame_blocksize 1801
+last_frame_bytes_to_region_end 1477
+
+stream_vector s4_24bit_8k_mono
+note a valid 24-bit stream: the container is ordinary and the reference decoder verifies it, while this crate's decoder carries only 8/16-bit samples (frame.rs bits_per_sample). The stream layer refuses it as UnsupportedSampleSize, so the capability statement has a witness on real bytes rather than a sentence.
+encode_command flac -1 -f -s --no-padding --no-seektable -b 128 s4_24bit_8k_mono.wav -o s4_24bit_8k_mono.flac
+fixture s4_24bit_8k_mono.flac
+fixture_len 1191
+fixture_fnv1a64 6910355700835462752
+encoder_vendor reference libFLAC 1.5.0 20250211
+block_count 2
+block 0 type 0(STREAMINFO) last false length 34
+block 1 type 4(VORBIS_COMMENT) last true length 40
+frame_data_offset 86
+streaminfo_minimum_blocksize 128
+streaminfo_maximum_blocksize 128
+streaminfo_minimum_framesize 52
+streaminfo_maximum_framesize 118
+streaminfo_sample_rate_hz 8000
+streaminfo_channels 1
+streaminfo_bits_per_sample 24
+streaminfo_total_samples 1200
+streaminfo_md5 8a45ce7fdf5bb711e8ae55445b17671b
+frame_count 10
+frame_number_forms_checked 10
+frame_number_forms_all_minimal true
+scan_frame_starts_strict 10
+scan_frame_starts_all_forms_allowed 10
+frame_header_widths_bits 56
+max_frame_header_width_bits 56
+first_frame_hex FF F8 64 0C 00 7F 32
+first_frame_header_bits 56
+first_frame_number 0
+first_frame_blocksize 128
+first_frame_sample_rate_hz 8000
+first_frame_bits_per_sample 24
+first_frame_subframes 1
+first_frame_decorrelation none
+last_frame_offset 1139
+last_frame_number 9
+last_frame_header_bits 56
+last_frame_blocksize 48
+last_frame_bytes_to_region_end 52
+
+stream_vector s5_unseekable_total_unknown
+note the same audio as s1, fed as raw s16le PCM through a pipe and encoded to stdout: total samples 0 (unknown), min/max frame size 0 (unknown), MD5 all-zero (unset). `flac -t` still verifies it. This is the fixture that says a decoder may not count frames from total_samples — and the measured reason it exists: piping a WAV is NOT enough, because the WAV header states the sample count before a byte of audio is read, so a piped WAV still declares total_samples (measured, libFLAC 1.5.0). Only raw-in-pipe/pipe-out produces a stream that genuinely declares nothing.
+encode_command cat s5_unseekable_total_unknown.raw | flac -1 -f -s --no-padding --no-seektable --force-raw-format --endian=little --sign=signed --sample-rate=8000 --channels=1 --bps=16 -b 128 - > s5_unseekable_total_unknown.flac
+fixture s5_unseekable_total_unknown.flac
+fixture_len 1181
+fixture_fnv1a64 7591549093358576046
+encoder_vendor reference libFLAC 1.5.0 20250211
+block_count 2
+block 0 type 0(STREAMINFO) last false length 34
+block 1 type 4(VORBIS_COMMENT) last true length 40
+frame_data_offset 86
+streaminfo_minimum_blocksize 128
+streaminfo_maximum_blocksize 128
+streaminfo_minimum_framesize 0
+streaminfo_maximum_framesize 0
+streaminfo_sample_rate_hz 8000
+streaminfo_channels 1
+streaminfo_bits_per_sample 16
+streaminfo_total_samples 0
+streaminfo_md5 00000000000000000000000000000000
+frame_count 10
+frame_number_forms_checked 10
+frame_number_forms_all_minimal true
+scan_frame_starts_strict 10
+scan_frame_starts_all_forms_allowed 10
+frame_header_widths_bits 56
+max_frame_header_width_bits 56
+first_frame_hex FF F8 64 08 00 7F 99
+first_frame_header_bits 56
+first_frame_number 0
+first_frame_blocksize 128
+first_frame_sample_rate_hz 8000
+first_frame_bits_per_sample 16
+first_frame_subframes 1
+first_frame_decorrelation none
+last_frame_offset 1130
+last_frame_number 9
+last_frame_header_bits 56
+last_frame_blocksize 48
+last_frame_bytes_to_region_end 51

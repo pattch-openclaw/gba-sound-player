@@ -237,7 +237,7 @@ fn decode_subframe_matches_the_body_vectors() {
         // impl once the scale contract landed (the *assertion* wrong
         // then). FLAC.md's "test bug, not impl bug" lesson, twice fired.
         let order = v.order as usize;
-        let pad = |x: &i64| ((x << v.wasted as i64) as i32);
+        let pad = |x: &i64| (x << v.wasted as i64) as i32;
         assert_eq!(state.len, order, "{what}: state.len");
         let mrf: Vec<i32> = v
             .warm_up_stream_order

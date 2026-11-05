@@ -36,9 +36,22 @@ additionally verifies the header CRC-8 and footer CRC-16 inside
 default — the release path consumes both CRCs unchecked, the design's "checked
 in debug, skippable in release"; gate: `make flac-test-crc`. Remaining
 `todo!()`: the manifest-driven `decoder` facade — which will be a thin shell
-over `driver`, not a second loop — and `format::Manifest`. A table-less
-stream-scan frame source is the next rung in the split ladder. `src/lib.rs`
-carries the authoritative implementation state.
+over `driver`, not a second loop — and `format::Manifest`.
+
+The file-level entry point landed next (split-ladder item 4a, 2026-11-04):
+`stream::parse` reads a real `.flac` file's `fLaC` signature, the RFC 9639
+§8.1 metadata-block chain and the §8.2 `STREAMINFO`, and returns
+`StreamFacts` — validated stream defaults plus `frame_data_offset`, the offset
+at which the frame layer can parse the first frame (`stream::frame_data_offset`
+when that is all a caller wants). It materializes no block list: the crate is
+core-only and allocation-minimal, so a caller that wants the blocks themselves
+drives `stream::Blocks`. **The next rung is 4b** — a table-less frame source
+and the end-of-stream rule. 4a deliberately stops at the offset and the
+defaults, and `tests/fixtures/s5_unseekable_total_unknown.flac` is committed
+exactly to record why the easy rule ("count frames from `total_samples`") is
+not available: a real stream can declare no sample count, no frame sizes and
+no MD5 and still carry ten frames. `src/lib.rs` carries the authoritative
+implementation state.
 Roadmap: [`../../FLAC.md`](../../FLAC.md) → "Phased plan".
 
 ```
@@ -46,6 +59,8 @@ crates/flac-lite/
 ├── src/lib.rs        crate docs, Error/Result, profile constants
 ├── src/bits.rs       bit reader + CRC-8/CRC-16
 ├── src/format.rs     GAFP manifest parse, blocksize/sample-rate/channel tables, profile
+├── src/stream.rs     fLaC signature, §8.1 block chain, §8.2 STREAMINFO, and
+│                     where the frame region begins (`frame_data_offset`)
 ├── src/frame.rs      frame header + one-frame decode driver
 ├── src/subframe.rs   CONSTANT / VERBATIM / FIXED / LPC + predictor state
 ├── src/residual.rs   partitioned Rice / Rice2 / escape
@@ -161,17 +176,21 @@ The decoder only needs to handle what our encoder is allowed to produce:
 - 16-bit PCM, 32 kHz (65,536 Hz later), mono or stereo
 - block size fixed per track: 1024 or 2048 samples
 - fixed block size (no blocking strategy / variable frames)
-- **frame headers inside the profile's 6–9 bytes (48–72 bits)** — the widths the
-  reference command below actually produces, and what `FrameHeader::parse`
-  asserts in debug builds. ⚠️ Follow-up recorded 2026-11-03 (FLAC.md → Phase 2
-  step-5 entry): this is a profile bound, not a format one. §9.1.5's coded
-  number is up to 7 octets and §9.1.6/§9.1.7 append 16 bits each for the
-  uncommon block-size/rate codes, so a legal header may be 16 bytes — and a
-  plain `flac -b 16` encode of a long, low-rate stream reaches an 80-bit header
-  (a 4-octet frame number) that trips the assert. We pack with the reference
-  command, so it is a known limitation rather than a live failure; the follow-up
-  turns it into a stated width bound that fails with a clear `Error`, not a
-  debug-only panic.
+- **frame headers inside 6–9 bytes (48–72 bits)** — that is the range the
+  reference command below produces, i.e. a *packer* profile fact. It is not a
+  decoder limit, and since 2026-11-04 it is no longer what `FrameHeader::parse`
+  asserts: the assert was an encoder observation masquerading as a bound, so it
+  has been replaced by derived bounds — `frame::MIN_HEADER_BITS` (48) to
+  `frame::MAX_ACCEPTED_HEADER_BITS` (120; the format's widest *spelling* is
+  `MAX_HEADER_BITS` = 128, and a 7-octet coded number cannot occur in a
+  fixed-blocksize stream — §9.1.5 caps a frame number at 31 bits / 6 bytes).
+  Witnessed on real encoder bytes: `tests/fixtures/s3_wide_48001hz_b3000.flac`
+  is a valid stream whose **first frame header is 80 bits**, and parsing it is a
+  test. No width `Error` was added, and the reasoning is in `frame.rs`: every
+  field value that could exceed the ceiling is already refused for its own
+  reason (number cap, variable blocking, non-minimal number form). The earlier
+  follow-up text ("a plain `flac -b 16` encode reaches an 80-bit header that
+  trips the assert") is the bug that closed it — see FLAC.md → item 4a entry.
 - **max predictor order ≤ 4** — encode with `-l 4`; higher orders stay *parsed*
   but rejected under `strict-profile`, pending the perf spike.
   ⚠️ Corrected 2026-09-07: this previously said "predictors capped at **FIXED
@@ -223,8 +242,11 @@ can be revisited for `i16` later if we need the space.
 
 The roadmap is a single list in **FLAC.md → "Phased plan"** (the only source of
 truth for outstanding work). Phase 1's decode path through `frame::decode_frame`
-is complete (`src/lib.rs` carries the per-module state), and the frame loop
-landed as `driver` on 2026-11-04; outstanding: the `decoder` facade (a shell
-over `driver`) and `format::Manifest`, plus the stream-scan frame source and
-the rest of the portability ladder in
+is complete (`src/lib.rs` carries the per-module state), the frame loop
+landed as `driver` on 2026-11-04, and the stream/metadata half of item 4
+(`stream.rs`, item 4a) landed the same day: `stream::parse` → `StreamFacts` +
+`frame_data_offset`. Outstanding in this ladder rung: **item 4b** — the
+table-less frame source and the end-of-stream rule — plus the `decoder` facade
+(a shell over `driver`) and `format::Manifest`, and the rest of the
+portability ladder in
 [FLAC.md → split proposal](../../FLAC.md#flac-lite-and-flac-lite-gba--portable-core-split-proposal-2026-11-01).

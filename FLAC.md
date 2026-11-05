@@ -5867,6 +5867,147 @@ because table-less scanning feeds the parse *arbitrary* bytes, so an
 out-of-profile width becomes reachable from data we did not choose; and no
 rewiring of the spike driver (item 6).
 
+**Split-ladder item 4a — the stream layer: the `fLaC` signature, the §8.1
+metadata-block chain, §8.2 `STREAMINFO`, and where the frames begin**
+(`crates/flac-lite/src/stream.rs`, branch `feat/flac-lite-stream-metadata`,
+2026-11-04).
+**This half of item 4 answers "where do the frames start, and what does the
+stream declare about itself". It does not answer "where does the stream
+end"** — that is 4b, and the fixture that proves the question is open
+(`s5_unseekable_total_unknown.flac`: total samples, both frame sizes and the
+MD5 all "not known", ten real frames anyway) is committed here so the next
+rung starts from a measured problem rather than a guessed one.
+
+Surface: `stream::MAGIC`, `BLOCK_HEADER_LEN`, `STREAMINFO_LEN`,
+`TYPE_STREAMINFO`, `TYPE_FORBIDDEN`, `is_last_flag`, `block_type`,
+`block_length`; `Blocks` — a streaming §8.1 walker over a borrowed slice
+(`new`, `next_block`, `cursor`) yielding `MetadataBlock {payload, span,
+after}`; `StreamInfo::parse` (§8.2, every field, with the "not known"
+sentinels exposed as `total_samples_known` / `md5_known` /
+`frame_sizes_known` instead of invented zeros) plus `is_fixed_blocksize`,
+`exact_frame_count`, `as_defaults`; `StreamFacts` and the one-call front
+`stream::parse`, which returns fixed-size facts plus `frame_data_offset` —
+the byte offset at which the frame layer can parse the first frame — and
+`stream::frame_data_offset` alone when that is all a caller wants. Four new
+`Error` variants: `StreamMagic`, `MetadataTruncated`, `StreamInfoMissing`,
+`DuplicateStreamInfo`. **No block list is materialized**: the crate is
+core-only and allocation-minimal, so the front returns facts, and a caller
+that wants the blocks themselves drives `Blocks`. Policy, stated as policy and
+witnessed rather than asserted: a stream with no leading `STREAMINFO` is
+fatal *here* (the frame layer cannot run without stream defaults, and
+silently defaulting them is how a wrong sample rate becomes corrupt samples
+three modules away); a second `STREAMINFO` is refused; reserved block types
+are skipped by length, not interpreted (a real `PADDING`/`SEEKTABLE`/
+`VORBIS_COMMENT` walk is in the suite); type 127 (`TYPE_FORBIDDEN`) is
+refused because §8.1 forbids it precisely for colliding with the frame sync
+pattern — the thing 4b's scan depends on not mistaking for a frame; a coded
+number past §9.1.5's 36-bit cap is refused inside `StreamInfo::parse` so the
+cap lives in one place (`bits::read_utf8_coded` knows the form, the caller
+knows the domain); and a 24-bit stream is refused at the capability boundary
+(`UnsupportedSampleSize`) *after* its container walks cleanly — the depth is
+the missing capability, not the container.
+
+Supporting changes in the layers below, both load-bearing for 4b. In `bits`:
+`read_utf8_coded` now refuses **non-minimal coded-number forms**
+(Table 18's ranges give each value exactly one form; the minimum per form is a
+table-driven lookup, `CODED_NUMBER_FORM_MIN`) and `bits::coded_number_octets`
+makes a form's width computable from its lead byte alone. In `frame`: the
+`48..=72`-bit width `debug_assert` — the follow-up recorded two sections above
+— is **replaced by derived bounds**, `MIN_HEADER_BITS` (32 fixed + 1-octet
+number + CRC-8), `MAX_HEADER_BITS` (32 + a 7-octet number + both appended
+value forms + CRC-8 = 128, arrived at independently of and equal to libFLAC's
+`raw_header[16]`), `MAX_HEADER_BYTES`, and `MAX_ACCEPTED_HEADER_BITS` (120:
+a 7-octet form starts at 2^31 and §9.1.5 caps a *frame* number at 31 bits /
+6 bytes, and variable blocking — where the number is a sample number — is
+rejected before any number is read). **Closing that follow-up does not add a
+width `Error`, and the reasoning for not adding one is in the code:** every
+field value that could push a header past the accepted ceiling is already
+refused for its own reason (number cap, variable blocking, non-minimal form),
+so the assert now guards only `parse`'s own arithmetic, and a debug-only panic
+no longer stands in for a decoder limit. Both ends of the range are witnessed
+on real encoder bytes: 48 bits is `s2`'s narrowest header, **80 bits is `s3`'s
+first header** (a real encode needing both appended forms — the very shape the
+old assert rejected), 120 bits is computed. Sample-rate parsing was also moved
+to classify the reserved `1111` code *before* the appended-octet reads, so a
+later scanner can reject a candidate at the field rather than at a bit-layout
+accident.
+
+**One measurement in this PR refuted a claim this crate had already written
+down, and the correction is recorded rather than quietly edited away.** The
+claim: libFLAC *rejects* a non-minimal frame number, witnessed by a stream
+whose frame number 0 was rewritten to `C0 80` failing `flac -d` with
+`BAD_HEADER`. The command was real; what it varied was not the form. The
+frame footer's CRC-16 covers the frame **header** as well as the body
+(measured per frame in the generator: `crc16(header+body)` equals the stored
+footer, `crc16(body)` does not — s1 frame 1: stored `0xf82a`, body-only
+`0x9229`), so changing header bytes at all breaks the frame, and a stale
+header CRC-8 is what `BAD_HEADER` reports. With **both** CRCs recomputed over
+the widened header, the reference decoder accepts the form: `flac -d` 1.5.0
+decodes a real stream whose frame number 0 is spelled `C0 80`, `E0 80 80`, or
+`F0 80 80 80`, MD5 check included. A malformed continuation (`C0 80 80`) *is*
+`BAD_HEADER`, but that is the shared structural rule, not minimality. So the
+rule stays, as a **deliberate divergence** — and its cost is measured at zero
+rather than argued: `frame_number_forms_all_minimal true` on all five
+fixtures (libFLAC never writes one), and `scan_frame_starts_strict ==
+scan_frame_starts_all_forms_allowed` on all five (refusing longer forms
+removes no candidate frame starts from real audio). The justification that
+survives is canonicity plus the value→form-width relation
+`MAX_ACCEPTED_HEADER_BITS` is derived from — *not* observed reference-decoder
+behaviour. Docs in `bits::read_utf8_coded`, its unit test, and the crate
+summary in `lib.rs` were corrected to say that; the general lesson is filed
+with the method notes: a "measured" claim has to state what the command
+varied, not only what it printed.
+
+Witness infrastructure (this is where the above came from, and it is kept so
+the claims stay re-runnable): `tests/fixtures/s{1..5}_*.flac` — five
+byte-for-byte `flac` 1.5.0 encodes — and `tests/stream_vectors.txt`,
+generated by `scripts/gen_stream_vectors.sh` (`scripts/stream_vectors.py`).
+Every pinned value comes from `metaflac --list`, cross-checked at generation
+time against an independent Python bit-level reading of §8; the frame rows
+come from the proven strict filter in `scripts/frame_vectors.py`; and the
+number-form/scan rows come from a **second**, separate §9.1 reading added in
+this PR (`header_at` with an `allow_nonminimal` switch, `count_frame_starts`,
+`frame_crc_covers_the_header`, `mutate_number_form` + `reference_decode`).
+The generator is fail-closed: any disagreement between the tool, the Python
+readings, or an asserted invariant refuses to write the table. It earned its
+keep twice — the new §9.1 reading disagreed with the frame filter on `s2`
+(I had rejected block-size code `0101`, which is legal: 4608) and on `s1`
+(bit-pattern strings fed to int-keyed tables), and the mutation witness failed
+twice more for the reasons above. Both bugs were in the new reading, and both
+were caught before the table could pin them. `tests/stream_metadata_layout.rs`
+(11 tests) is the third reading: it asserts the table, not the code's own
+output — agreement with `metaflac` on every field of every fixture; the first
+block is always `STREAMINFO`; the reported offset is where the frame layer
+actually parses; the last frame is short exactly where the stream says and the
+region ends at EOF; every real header is inside the measured census *and* the
+derived bounds; `s3`'s 80-bit header parses though it is outside this
+packer's profile; `s4` refuses at the depth, not the container; `s5` declares
+nothing and still has frames; a non-frame-start byte in the frame region is
+not mistaken for a frame; and the two number-form tests pin the censuses and
+the divergence (our parser's `InvalidField`, cursor left at the start of the
+number — per-read atomicity — against the pinned reference exit of 0).
+
+Gates: `flac-test` **136 → 173 passed + 1 ignored** (unit 103 → 129: the
+`stream` module's rule tests plus the coded-form/derived-bound unit tests;
+new 11-test `stream_metadata_layout` suite; thumbv4t compile clean);
+`flac-test-crc` **139 → 176 passed + 1 ignored** (same delta, feature on);
+`flac-portable-check` green (`stream` compiles for `thumbv7em-none-eabi`,
+`core,alloc` — no `std`, no `unsafe`, no new pin surface, no perf claim);
+`make check` (fmt) clean. No on-target measurement in this rung: nothing in
+the decode path changed — the frame loop's inputs just gained a producer.
+
+Deliberate scope cuts: **no 4b** — no table-less frame scanner, no
+end-of-stream rule, no consumed-length framing (4a deliberately stops at
+`frame_data_offset` plus validated defaults; 4b inherits `stream::parse`,
+`StreamInfo::as_defaults`, `frame_data_offset`, `bits::coded_number_octets`,
+the width bounds, and `s5`); no use of `SEEKTABLE` (the walker skips it by
+length; `StreamInfo` does not parse seek points); no metadata-block CRC (none
+exists in the format); no materialized block list; no 24-bit decode; no
+acceptance of non-minimal number forms (divergence, recorded); no
+`Decoder`/`format::Manifest` rewiring; and the generator needs `metaflac` and
+`flac` on PATH by design — it prints the versions it used and refuses to
+write a table it cannot cross-check.
+
 **Reading rules.** The core claims: bit-exact FLAC frame decode, no_std,
 zero-alloc, zero unsafe except the pin attribute where a feature opts
 in, builds across bare-metal targets — and **never** a 32 kHz GBA
