@@ -5535,6 +5535,13 @@ the generic seam, not silently abandoned.
 4. Core: `Decoder` loop + stream-scan cursor (composition witness).
 5. Core: `RiceKernel` seam + portable-twin default (thumbv4t-neutral
    witness above).
+   - **Amended 2026-11-05:** this item executes as **three** PRs — the
+     single-PR framing is superseded. See
+     [Split-ladder item 5 — the `RiceKernel` seam: three PRs (plan of record, 2026-11-05)](#split-ladder-item-5--the-ricekernel-seam-three-prs-plan-of-record-2026-11-05).
+     The seam's *shape* (whole-partition kernel owning the window, not the
+     per-sample `sample_step` signature named in the proposal above) is
+     settled by evidence already in this tree, recorded in that plan — no
+     design-probe precedes it.
 6. `flac-lite-gba`: asm kernels over the seam + guarded i32 + pin;
    live-link same-image witness vs the E9 stack; then the rate-play
    rewire — the spike `driver` + generated offset table (GAFP stand-in)
@@ -6341,3 +6348,185 @@ pending E5 arbitration. The overlay never claims correctness independent
 of the core's witnesses. The split may not slow the product below
 whatever the overlay does not recover: every core PR's thumbv4t gate is
 the live-link witness, per the E2b lesson.
+
+---
+
+## Split-ladder item 5 — the `RiceKernel` seam: three PRs (plan of record, 2026-11-05)
+
+**Plan, not measurement.** Expands PR-ladder item 5 ("`RiceKernel` seam +
+portable-twin default") into **three sequential PRs**, on Sam's 2026-11-05
+direction that the eight-rung draft worked up on the way here is too fine
+to land. The collapses are recorded below so a reviewer does not have to
+reconstruct them. Everything the split already rules stays ruled: the
+ladder rule (zero behavior change to decode output, every existing gate
+green, the `flac-test` count never regresses), the reading rules, the
+"the core never makes a 32 kHz GBA real-time claim" line, and the
+requirement that every core PR's thumbv4t gate *is* the live-link
+witness. Nothing below claims a code fact — the cut points are chosen so
+each PR carries **one kind of witness and exactly one way to fail**.
+
+**The seam's shape is settled by evidence already in this tree, so no
+design PR precedes this.** The proposal above names `sample_step`'s
+signature (word window + budget + order in; value/consumed/state out — a
+*per-sample* hook). The only shape that has ever produced a measured
+number is the **whole-partition** kernel that owns the window: E10 records
+that the probe "composes the hybrid as a single whole-partition kernel
+rather than calling the track's word-in/word-out kernels — the seam needs
+the byte-window ABI, so `arm_rice_partition` re-embodies the tier map around the reader". The per-sample kernel says the same from its own
+side: `examples/arm-kernels/src/sample_step.rs` states "Deliberately NOT
+here: any rev8 reversal or w_{t+1} straddle merge. Stitching the
+reversed-window domain to spec-order streams is the probe's vendored
+seam", and its committed table pins `q = 31` vectors with expectation
+`rem = 0` *precisely to convict a merge-or-reversal reading of that
+kernel*. So: **the seam is whole-partition, and PR 1 states that in
+module docs while encoding it in a type** — which is why a wrong shape
+costs one small PR, not a design argument mid-diff.
+
+**What is already written, and lifts rather than being invented.** The E10
+sample carries a working seam end to end —
+`examples/flac_spike/experiments/e10-three-arm-probe/e10-three-arm-probe.patch`
+holds `arm_rice_partition` (patch line 124), its `KernelState` memory
+contract (patch line 548: `w` / `v` / `ptr` / `end` / `status`), the host
+twin `twin_partition` (patch line 630), and the reader-side seam method
+`AccumulatorReader::rice_partition_kernel` (patch line 1205) with its
+**exact** window mapping: bit `i` of `w` = stream bit `P + i` = bit
+`31 − i` of an MSB-first accumulator, i.e. `w = rev32(acc)`; the reader
+invariant "low `32 − valid` bits of acc are zero" *is* the kernel's
+"bits ≥ `v` of `w` are zero"; and `P + v = pos * 8` is the kernel's
+byte-pointer invariant at entry. (Those line numbers are patch-relative;
+the patch is committed and does not move.) The live core reader is the
+same shape the probe vendored — `crates/flac-lite/src/bits.rs` `BitReader`
+(MSB-first `acc`, next bit = bit 31, logical cursor `pos * 8 − valid`) —
+and the body the seam wraps is `decode_rice_partition`'s non-escape sample
+loop (`crates/flac-lite/src/residual.rs:247-279`).
+
+| PR | Scope | Why the cut is here | Witness type | Failure mode it isolates |
+|---|---|---|---|---|
+| **1** | `bits`: the window-domain bridge only — `rev32` + a `KernelWindow { w, v, ptr, end }` hand-out/take-back pair on the live reader. Pure Rust, division-free, no new `unsafe` (the ratified exception count stays at one). Module docs carry the shape decision + the two facts that force it. **Nothing in the decode path calls it.** | The one assumption in this item that could turn out **false**. It gets tested in isolation before any generic, trait, or measurement depends on it. | Invariant + round-trip tests (unit, `core`-only) | The two window domains are not actually isomorphic |
+| **2** | The seam: `residual.rs:247-279` extracted into a function shaped to the kernel contract (commit 1, a no-op move), then `RiceKernel` + `decode_rice_partition` generic over it, instantiated **only** with today's table-count loop as the default impl (commit 2). The escape path and the §9.2.7.3 `quotient > (u32::MAX >> order)` / `folded == u32::MAX` guards are untouched. | Pure plumbing with zero semantic change, so its whole risk surface is **codegen** — nothing else belongs in it. | Codegen (link-line section bytes) + cycles (live-link, with cross-session anchors) | Monomorphization / inliner coupling costs samples (the E2b lesson) |
+| **3** | The portable-twin default *behind* the hook: `CTZ8` / `REV8` / `BRUIJN_INDEX` (the 544 B the E10 plan budgeted), `ctz32`, `word_skip`, `rev8`, the whole-partition twin, then the default flip. `iwram-pin` grows to gate the new tables. | The only PR in the item that changes the decode *mechanism*, on a claim the proposal itself labels "argued, not measured, on other targets". | Two-mechanism differential on real partitions + bit-exact vs `flac -d` + on-target cycles | The portable default is slower on the founding platform |
+
+### PR 1 — `bits`: the window-domain bridge
+
+Lifts the mapping the probe already proved, into the crate, inert.
+Witness: round-trip identity (`rev32` twice is the identity), the
+zero-tail invariant checked in **both** directions, and a
+snapshot/restore differential over the *live* reader — drive the real
+`BitReader` through its alignment × refill-state space, snapshot the
+window at every step, hand it out and back, and assert the cursor,
+`bit_position()`, `bits_remaining()` and every subsequent read are
+unchanged. An independent bit-level oracle, per this file's standing rule
+that a hand-packed vector cannot witness a bit-layout claim. Gate:
+`flac-test` (count grows; the thumbv4t half must stay clean),
+`flac-portable-check` green (new `pub` code compiles for the second
+bare-metal target), `make check` clean. Revert story: additive, no
+callers — a clean revert if PR 2's shape assumption breaks.
+
+### PR 2 — the seam, defaulting to today's loop
+
+Zero behavior change by construction; the default impl *is* the current
+code. Its gate is the one 4b established and this item cannot skip: the
+**link-line measurement** on the calibration instrument, measured the same
+way as 4b's arm 3 (default build, `scan` off — the ROM's shape), with the
+growth attributed symbol by symbol; plus the **cycle reading on the live
+link**, `ctrl` against the post-seam image, calibration overhead
+subtracted, and the cross-session anchors re-stated (the E9/E10 `ctrl`
+figures: −2 cyc/frame with worst indices @136/@145 and min @156 exact).
+Reading rule unchanged: demote inside layout noise (~9–13 cyc/frame),
+carry at mean ≥ ~10%. If the generic seam regresses past the bar, the
+fallback is the proposal's **pre-named** one — the vendored-loop overlay —
+recorded as a measured negative for the generic seam, not quietly
+abandoned; PR 2's blast radius is exactly that decision. This is also the
+natural home for the ~10-line feature-matrix gate (the
+`flac-test` / `-crc` / `-scan` combinations), since this is the PR where
+the *instantiation count* changes rather than the code — it serves the
+gate-aggregation TODO in README.md:246 and is optional in every reading.
+If the host lacks `mgba-test-runner`, record that as 4b did and name the
+run that owes the numbers rather than shipping an unmeasured claim.
+
+### PR 3 — the portable-twin default, with its decision rule pre-declared
+
+The twin lands unwired and witnessed against the **incumbent**: the new
+loop vs today's `rice_quotient`-driven loop, sample by sample, over every
+real partition in the committed corpus, plus bit-exact vs `flac -d` on the
+fixtures, plus the boundaries the kernel docs pin (the `q = 31`
+shift-by-32 leg spelled rather than shifted, the `w == 0` handoff signal
+rather than an answer value, the `p = 0` mask leg), plus an on-target
+reading. Its outcome is a fork, decided by measurement rather than by
+this plan's preference:
+
+- **twin within the noise band or faster** → the default flips, and the
+  proposal's "the twins become the core's default Rust path" holds as
+  written.
+- **twin slower past the bar** → the default does **not** flip: the
+  incumbent stays, the twin stays where it already is as the overlay's
+  host witness, and the proposal's line is corrected here as a measured
+  negative — the same shape as the E-menu's demote rule, applied to the
+  core.
+
+PR 3 also owes the pin story rather than deferring it: three more tables
+become `iwram-pin`-gated (hot *data* tables pin while the budget
+affords — E10 ratified item 2; 544 B against the 32 KB IWRAM budget), and
+the existing `nm`-on-the-Built-ELF witness is the template.
+
+### What was consolidated out of the eight-rung draft (so it is not re-litigated)
+
+- **The design-of-record rung** — the shape is settled by the two tree
+  facts above, so it is PR 1's module docs, not a PR.
+- **The loop extraction** — a commit inside PR 2, not a PR; it exists to
+  shrink a diff, and the repo already does intra-PR review structure
+  (#88/#89/#90 each landed a follow-up commit beside the functional one).
+- **The timing witness** — attached to the PR it gates. The standing rule
+  that "the E-anchor decode baselines re-record at the next E probe" is
+  now discharged *by name*: PR 2 and PR 3 are those landings, so neither
+  defers its own number.
+- **The pure kernel helpers + the twin + the default flip** — one arc: the
+  helpers have no independent witness value, the differential test is only
+  meaningful with the loop present, and the flip is only meaningful with
+  the differential green.
+
+A two-PR variant exists (bridge folded into PR 2, both witness types in
+one body). It was rejected on the record: it spends review attention on
+the plumbing while the isomorphism assumption is still untested, and that
+assumption is the one thing in this item that could invalidate the rest.
+
+### Invariants this series must not trade away
+
+- **Do not seal the `RiceKernel` trait.** A sealed trait cannot be
+  implemented by `flac-lite-gba`, which is the entire point of the seam.
+  Note that PR 2 ships with **no external implementor** — that is item 6
+  landing, not an omission — rather than engineering an API surface for it
+  in advance.
+- **Do not delete `bits::rice_quotient` or `LEADING_ONES`.** PR 3's
+  differential witness needs two live mechanisms, and `LEADING_ONES` at
+  `0x0300022c` is the `nm` anchor cited by the E2b result, by E10, and by
+  the `iwram-pin` landing witness. Retiring the table would blind
+  cross-session witnesses for no gain.
+- **Do not fold the twin flip into PR 2.** A bad number must be
+  attributable either to the generic seam or to the swapped mechanism —
+  bundling them is exactly the ambiguity the E2b entry warns about.
+- **Profile facts stay the core's, not the kernel's.** The overlay kernels
+  loud-reject escape partitions and `p > 14`, and E10's kernel let the
+  folded-value overflow guard *wrap* (a probe divergence). Neither is a
+  contract: `decode_residual`'s escape path and §9.2.7.3's guards stay
+  exactly as they are, and the core stays correct for arbitrary FLAC.
+- **`scan` stays off**, and no ROM links the walk: item 6 rewires the
+  facade onto it and inherits `Frames` / `StreamBounds` / `ConsumedFrame`
+  / `resync` rather than inventing a third frame loop.
+
+### Deliberate scope cuts
+
+No overlay crate (`crates/flac-lite-gba` is item 6), no asm in this item,
+no guarded-i32 path, no `Decoder` / `format::Manifest` / GAFP work, no
+`SEEKTABLE` interpretation, no rate change, no mixer/DMA work, no
+`unsafe`, no allocation, and no GBA real-time claim — this item cannot
+make one; it can only fail to break the one the overlay owns.
+
+### Baselines to hold (as recorded at `HEAD` `388069d`)
+
+`flac-test` 173 passed + 1 ignored · `flac-test-scan` 193 + 1 ·
+`flac-test-crc` 176 + 1 · `--features crc-check,scan` 196 ·
+`spike-test` 15 + 10 · `flac-portable-check` green · `make check` clean.
+PR 1 may only *grow* these counts; PR 2 must not move them; PR 3's
+counts are its own business, but its decode output is bit-identical to
+the fixtures by construction or it does not land.
