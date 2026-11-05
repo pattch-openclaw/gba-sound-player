@@ -39,7 +39,16 @@ verification (Phase 2 step 5):
 additionally verifies the header CRC-8 and footer CRC-16 inside
 `FrameHeader::parse` / `decode_frame` (`HeaderCrc` / `FrameCrc`). Off by
 default — the release path consumes both CRCs unchecked, the design's "checked
-in debug, skippable in release"; gate: `make flac-test-crc`. Remaining
+in debug, skippable in release"; gate: `make flac-test-crc`. The frame walk is
+behind a gate of the same shape — `scan`, off by default, `make flac-test-scan`
+the gate — but for the opposite reason from `crc-check`: not to skip work the
+release path cannot afford, so that a GBA ROM does not link the walk at all
+until item 6 rewires the facade onto it. Measured, not argued: with `scan` off,
+the instrument's `.text`, `.rodata`, `.iwram` and `.ewram` are byte for byte
+the 4a image; with it on, `.text` is +3,120 B and the image contains no walk
+symbol — a second consumer of the decode path changes what the inliner does to
+the code already linked. See the module docs and `../../FLAC.md`'s landing
+note. Remaining
 `todo!()`: the manifest-driven `decoder` facade — which will be a thin shell
 over `driver`, not a second loop — and `format::Manifest`.
 
@@ -104,7 +113,16 @@ crate's depth limit applies to *locating* frames exactly as much as to decoding
 them (the generator's independent filter finds all 10 of the 24-bit fixture's
 frames; ours finds 0, and refuses the walk with `UnsupportedSampleSize`). Coded
 frame numbers are the third strict leg — enforced **before a frame writes any
-samples**. What is deliberately *not* here: `SEEKTABLE` interpretation (the
+samples**. The two ways a walk can refuse a caller's buffers are kept apart by
+the error type, because they ask the caller for different things:
+`Error::DeclaredMaxExceedsBuffers` says the buffers are shorter than the block
+size **the stream declares** — a claim about the stream, which §8.2 itself warns
+may exceed every frame in the region, fixed by making the buffers fit the stream
+or by handing the walk no bound at all — and `Error::BufferTooSmall` says they
+are shorter than **this frame's own header** asked. Same position in the walk,
+same "nothing read, nothing written"; `s2`'s second subframe is the per-frame
+case, because whether a frame carries two subframes is that frame's channel code
+rather than the stream's declared channel count. What is deliberately *not* here: `SEEKTABLE` interpretation (the
 walker skips it by length; random access is item 6's `format::Manifest`), any
 end-of-stream claim based on declared counts, and a rewired `Decoder` facade.
 Roadmap: [`../../FLAC.md`](../../FLAC.md) → "Phased plan".
@@ -123,30 +141,46 @@ crates/flac-lite/
 ├── src/driver.rs     per-frame loop over a borrowed frame index (copied, not
 │                     shared, from the perf spike's proven driver)
 ├── src/scan.rs       frame walk with no index: a frame ends itself, the bytes
-│                     end the stream (`Frames`, `StreamBounds`, `resync`)
+│                     end the stream (`Frames`, `StreamBounds`, `resync`) —
+│                     behind `feature = "scan"`, off by default until item 6
 ├── src/decoder.rs    manifest-shaped facade (scaffold: todo!())
 └── tests/README.md   committed libFLAC vector tables + layout/decode suites
 ```
 
 ## Build gates
 
-Three gates, run from this directory (or `make flac-test` /
-`make flac-portable-check` from the repo root). **All need explicit flags —
-this is not optional verbosity**, see the config-leak note below.
+The gates, run from this directory (or `make flac-test` / `make flac-test-scan`
+/ `make flac-test-crc` / `make flac-portable-check` from the repo root; the
+root Makefile is the keeper). **All need explicit flags — this is not optional
+verbosity**, see the config-leak note below.
 
 ```sh
 # GATE 1 — the GBA target. The real gate: the build symphonia could never pass.
 cargo +nightly check --release --target thumbv4t-none-eabi -Zbuild-std=core,alloc
 
 # GATE 2 — host tests (correctness: bit-exactness vs reference `flac`).
+# Default features: the frame walk (item 4b) is NOT compiled and its witness
+# suite is not built — see GATE 4.
 HOST=$(rustc -vV | sed -n 's|host: ||p')
 cargo +nightly test -Zbuild-std= --target "$HOST"
 
 # GATE 3 — second bare-metal target (portability witness, no perf claim).
-# Default features: pin OFF compiles no `.iwram` reference. Verified
-# container-portable: builds with NO prebuilt rust-std for the triple
-# (core/alloc come from rust-src via -Zbuild-std, same as gate 1).
-cargo +nightly check --release --target thumbv7em-none-eabi -Zbuild-std=core,alloc
+# Pin OFF (compiles no `.iwram` reference) and the walk ON, so that a feature a
+# GBA ROM leaves off is still compiled for a second target instead of being
+# silently un-covered. Verified container-portable: builds with NO prebuilt
+# rust-std for the triple (core/alloc come from rust-src via -Zbuild-std, same
+# as gate 1).
+cargo +nightly check --release --target thumbv7em-none-eabi -Zbuild-std=core,alloc \
+  --features scan
+
+# GATE 4 — the frame walk with its feature on (deliberately NOT part of
+# `check-gba-all`: the thing that must not carry the walk yet is the ROM).
+# Thumbv4t compile, then the walk's own witness suite. `tests/scan_frame_walk_layout.rs`
+# is `required-features = ["scan"]`, so without the feature it is not built at
+# all rather than quietly passing.
+cargo +nightly check --release --target thumbv4t-none-eabi -Zbuild-std=core,alloc \
+  --features scan
+cargo +nightly test -Zbuild-std= --target "$HOST" --features scan
 ```
 
 ### ⚠️ The `.cargo/config.toml` leak (verified 2026-08-30)

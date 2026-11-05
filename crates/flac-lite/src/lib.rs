@@ -96,7 +96,8 @@
 //! `decoder` facade — whose frame source is a `Manifest`, so it will be a
 //! thin shell over `driver`, not a second loop — and `format::Manifest`;
 //! `format::Blocksize::samples` and `EncodeProfile::validate`.
-//! Item 4's **second half — the frame walk — landed as [`scan`]**, and it
+//! Item 4's **second half — the frame walk — landed as the `scan` module and its
+//! feature of the same name**, and it
 //! answers the two questions 4a left open: how a reader gets from one frame to
 //! the next with no index in front of it, and how it knows the stream is over.
 //! The format has two answers, and this module implements both and nothing else.
@@ -136,7 +137,7 @@
 //! fields) is a cross-check or does not exist for this stream; a walk reads to
 //! the end of its region and then *checks* the walk against what the stream
 //! declared, which is one code path for seekable and unseekable streams alike.
-//! Scanning ([`scan::next_frame_start`]) exists only as **recovery**, never as a
+//! Scanning (`scan::next_frame_start`) exists only as **recovery**, never as a
 //! frame finder — the measured record is 1223 sync-shaped candidates for 979 real
 //! frames, and ~9.4× over-counting alone on noise-like material, so the candidate
 //! rule is the two-byte shape plus the full RFC field validation plus the header
@@ -144,12 +145,12 @@
 //! without it, so a scan result does not move with the feature), bounded per
 //! position by the derived header bounds 4a introduced ([`frame::MAX_HEADER_BYTES`],
 //! [`frame::MAX_ACCEPTED_HEADER_BITS`]). Where a walk has already lost its
-//! boundary, [`scan::Frames::resync`] applies that search to the walk's own state
+//! boundary, `scan::Frames::resync` applies that search to the walk's own state
 //! and re-anchors the numbering **on** the frame it lands on — the frame in
 //! progress is abandoned, which is what "a dead frame is dead" ([`frame`]) means
 //! for a player, and what the first version of that function got wrong.
 //! Coded frame numbers are the walk's third
-//! strict leg — anchored at 0 for a whole file, [`.anchored()`](scan::Frames::anchored)
+//! strict leg — anchored at 0 for a whole file, `Frames::anchored`
 //! for a range whose position is known, and enforced **before any sample is
 //! written**. Witness: `scan`'s unit tests, which claim only the walk's state
 //! machine and caller contract over hand-cut regions, plus
@@ -173,6 +174,27 @@
 //! one of them. A build that accepted 24-bit samples would need no new framing
 //! layer; `tests/scan_frame_walk_layout.rs` is where a reader finds out that the
 //! two questions are separate.
+//! **The whole module sits behind the `scan` feature, which is off by default**
+//! (`make flac-test-scan` runs its suite; `make flac-portable-check` is the only
+//! gate that compiles the walk for a non-thumbv4t target). Two reasons, both
+//! measured rather than assumed. (1) A GBA ROM should not carry the walk until
+//! item 6 rewires the facade onto it: with `scan` off, the E instrument's sections
+//! are byte-identical to the 4a build; with it on, `.text` is **+3,120 B** while
+//! **no `scan` symbol appears in the image at all** — the walk links for nothing,
+//! but its presence in the rlib changes how LLVM inlines the decode path it shares
+//! a codegen unit with (`crates/flac-lite/Cargo.toml` and
+//! [`../../../FLAC.md`](../../../../FLAC.md) carry the numbers). So the gate defers
+//! that cost to the change that will re-anchor the instrument anyway; it does not
+//! remove it. (2) Nothing in `scan` is a *profile* layer, so nothing in it belongs
+//! in a build that has no use for a walk: it neither defines nor relaxes a profile,
+//! and every frame-shape refusal it reports arrives through `frame::parse` — the
+//! `s4` refusal above is that check, not a scan one. The walk adds no block-size or
+//! sample-rate claim of its own to enforce, which is why `s3`'s 3000-sample blocks
+//! (a block size that is not a power of two, and a declared maximum larger than the
+//! 1801 samples its last frame actually carries) walk and decode bit-exactly
+//! instead of being refused as off-profile. A packer profile is asserted where a
+//! manifest pins one ([`format::Manifest`], [`format::EncodeProfile`]) — item 6's
+//! seam, which is also where the profile-anchored measurements get re-pinned.
 //! the module layout, types, and signatures are the contract the
 //! implementation fills in (FLAC.md → phased plan, step 4 onward).
 //! Design rationale and the decision to write this at all live in
@@ -212,7 +234,8 @@
 //!             └─ stereo   mid/side, left/side, right/side  (stereo only)
 //!
 //! scan (item 4b — a *second* frame source, with no index; it decodes through
-//!   the same layers below and reads the file level through stream)
+//!   the same layers below and reads the file level through stream). Behind the
+//!   `scan` feature, OFF by default: nothing here links it until item 6 does.
 //!   └─ scan             frame walk: one frame's own fields end it (bit cursor,
 //!                       `frame_bytes` witnessed per frame against the generated
 //!                       table), and the end of the region is the end of the
@@ -275,6 +298,12 @@ pub mod driver;
 pub mod format;
 pub mod frame;
 pub mod residual;
+// The frame walk (split-ladder item 4b), behind the `scan` feature — off by
+// default. Nothing in this crate links it yet; the reason and the measured
+// code-size cost of turning it on are in `Cargo.toml`, and the module docs name
+// what its suite is (`make flac-test-scan`) and what proves it portable
+// (`make flac-portable-check`).
+#[cfg(feature = "scan")]
 pub mod scan;
 pub mod stereo;
 pub mod stream;

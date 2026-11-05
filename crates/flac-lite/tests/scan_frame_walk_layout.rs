@@ -761,7 +761,11 @@ fn the_depth_boundary_applies_to_locating_frames_as_much_as_to_decoding_them() {
 /// be sized for in advance, and the requirement is checked before a single bit
 /// is read; a frame whose size only the header knows (a range, a packed blob, a
 /// stream that declares nothing) can only be checked after the header parses.
-/// Both are witnessed here against real encoder bytes.
+/// Both are witnessed here against real encoder bytes, and the error type keeps
+/// them apart: [`scan::Error::DeclaredMaxExceedsBuffers`] is a refusal against
+/// what the **stream declares**, [`scan::Error::BufferTooSmall`] a refusal
+/// against what **this frame's header** says. Same position, same "nothing read,
+/// nothing written" — the variant says which claim the caller has to fix.
 ///
 /// The last part is the one that matters most for a real-time player: the final
 /// frame of a track is legitimately short, and a walk that wrote through its
@@ -772,7 +776,10 @@ fn the_buffers_a_walk_asks_for_come_from_the_stream_and_from_the_frame() {
     const SENTINEL: i32 = 0x5A5A_5A5A; // outside every supported sample depth
     let vs = load_vectors();
 
-    // (a) A declared maximum, checked before any bit is read.
+    // (a) A declared maximum, checked before any bit is read — and named as what
+    // the stream declared, not as what the frame at the cursor needs (the walk
+    // has not read it yet, and §8.2 says a declared maximum may exceed every
+    // frame in the region).
     for v in vs.iter().filter(|v| v.bits_per_sample() != 24) {
         let facts = stream::parse(v.fixture()).unwrap();
         let declared = v.num("streaminfo_maximum_blocksize") as usize;
@@ -790,8 +797,8 @@ fn the_buffers_a_walk_asks_for_come_from_the_stream_and_from_the_frame() {
             .next_frame(&mut left, &mut right, &mut state)
             .expect_err("a buffer one sample short of the declared maximum");
         assert!(
-            matches!(e, scan::Error::BufferTooSmall { need, have }
-                     if need == declared && have == declared - 1),
+            matches!(e, scan::Error::DeclaredMaxExceedsBuffers { declared: want, have }
+                     if want == declared && have == declared - 1),
             "{}: {e:?}",
             v.name
         );
@@ -807,7 +814,14 @@ fn the_buffers_a_walk_asks_for_come_from_the_stream_and_from_the_frame() {
     // how many subframes a frame carries is a property of the frame header, not
     // of the stream's channel count. s2's first frame carries 4608 samples in
     // each of two subframes; `right` empty is the caller's error, and the walk
-    // says so with the number that frame asked for.
+    // says so with the number that frame asked for. The walk is therefore built
+    // with **no declared bound** (`max_blocksize: None`): that is the path where
+    // the requirement can only come from the frame's own header, which is what
+    // this arm is about, and it is the path a caller with buffers sized from
+    // something else takes. With the stream's bound in hand the same refusal
+    // arrives as `DeclaredMaxExceedsBuffers` — arm (a) and `scan.rs`'s unit test
+    // witness that — and the numbers here would happen to agree only because
+    // this stream's declared maximum *is* its first frame's block size.
     let stereo = vs
         .iter()
         .find(|v| v.channels() == 2)
@@ -817,7 +831,14 @@ fn the_buffers_a_walk_asks_for_come_from_the_stream_and_from_the_frame() {
     let mut left = vec![SENTINEL; first_blocksize];
     let mut right: Vec<i32> = Vec::new();
     let mut state: [PredictorState; 2] = Default::default();
-    let mut walk = scan::Frames::stream(stereo.fixture(), &facts);
+    let mut walk = scan::Frames::region(
+        frame_region(stereo, &facts),
+        &facts.info.as_defaults(),
+        scan::StreamBounds {
+            max_blocksize: None,
+            ..scan::StreamBounds::of_stream_info(&facts.info)
+        },
+    );
     let e = walk
         .next_frame(&mut left, &mut right, &mut state)
         .expect_err("a stereo frame needs a second buffer");

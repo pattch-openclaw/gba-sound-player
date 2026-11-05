@@ -40,7 +40,15 @@ accepts. Where the two readings disagree about a *stream*, the table refuses to 
 written; where the crate disagrees with the table, a test fails. The 24-bit fixture is deliberately included in
 that suite's framing and depth-boundary tests and deliberately absent from its
 PCM comparisons: this crate declines 24-bit decode at the capability boundary,
-and the test says so by name rather than skipping quietly.
+and the test says so by name rather than skipping quietly. That suite is only
+built when the walk is: `tests/scan_frame_walk_layout.rs` is
+`required-features = ["scan"]` in `Cargo.toml`, so a default-feature build does
+not compile it and `make flac-test` does not run it — `make flac-test-scan`
+compiles the walk for the GBA target and runs this suite over the same rows, and
+`make flac-test-scan` is deliberately not part of `check-gba-all` because the
+thing that must not carry the walk yet is the ROM. The tables themselves are
+feature-independent: they are descriptions of the bytes, written by generators
+that never call the crate.
 
 ## The `.gfp` fixtures that are still planned
 

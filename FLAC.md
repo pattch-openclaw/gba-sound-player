@@ -6076,7 +6076,9 @@ measures, from the opposite side; `Stats`; `StreamBounds {samples, frames,
 max_blocksize}` + `StreamBounds::NOTHING` + `StreamBounds::of_stream_info`,
 which is where Table 3's sentinels become `None` arms; `scan::next_frame_start`,
 recovery only; and a **scan-local `Error`** carrying numbers
-(`BufferTooSmall {need, have}`, `FrameOutOfSequence {offset, expected, found}`,
+(`BufferTooSmall {need, have}` — what *this frame's own header* asked for,
+`DeclaredMaxExceedsBuffers {declared, have}` — what the **stream declares** and
+the walk has not read the frame at the cursor yet; `FrameOutOfSequence {offset, expected, found}`,
 `DeclaredSampleCountMismatch {declared, decoded, frames, region_len}`,
 `DeclaredFrameCountMismatch`, `Decode(frame-layer Error)`). The crate's flat
 `Error` is left alone: whether it grows payloads is the facade step's API
@@ -6091,8 +6093,24 @@ block size the caller's buffers are refused before a single bit is read (a calle
 error must not be masked by a later stream error), where it does not the
 requirement comes from the parsed frame's own block size, and `right` is gated
 per frame by the *header's* channel code, because a stream may declare two
-channels and carry mono frames. **A frame that is not the next one in sequence is
-refused before it writes any samples** — the coded number is the walk's third
+channels and carry mono frames. **Those two refusals are separate variants, because
+they are different asks of the caller.** `DeclaredMaxExceedsBuffers` is a mismatch
+between the caller's buffers and a *claim about the stream* — and §8.2's own
+caveat is that a declared maximum may exceed every frame in the region; the
+committed table has the case at full-stream scale, where `s3` declares block size
+3000/3000 and its last frame carries 1801, so a caller whose buffers are 1801
+samples is refused on that frame by the **declaration**, on a frame that would
+have decoded. So the number in that refusal is not a claim that the frame at the
+cursor needs it; the
+fix is buffers that fit the stream, or handing the walk no bound and letting each
+frame's header size the requirement. `BufferTooSmall` is the requirement no
+declaration can anticipate: the frame's own block size, and the second subframe of
+a stereo frame. Same position in the walk, same "nothing read, nothing written"
+either way — the variant is the diagnosis, and a caller whose buffers come from
+somewhere else (a manifest's fixed block size is the product-shaped case) has to
+tell them apart because only one of them is fixed by making the buffers bigger.
+**A frame that is not the next one in sequence is refused before it writes any
+samples** — the coded number is the walk's third
 strict leg, and it is what makes the 24-bit fixture's walk refuse rather than
 report 0-of-0. **A mid-frame truncation is a decode error, and a clean
 frame-boundary truncation is a declared-count mismatch with the numbers in it** —
@@ -6251,16 +6269,55 @@ run of the new claim test failed because a mutation was still in the tree — th
 tests were right and my working copy was wrong. Restores here went through
 `git checkout` plus `touch`, and everything was re-confirmed green afterwards.
 
-Gates: `flac-test` **173 → 193 passed + 1 ignored** (unit 129 → 137: eight
-`scan` rule tests; the new 12-test `scan_frame_walk_layout` suite; thumbv4t
-compile clean); `flac-test-crc` **176 → 196 passed + 1 ignored** (same delta,
-feature on — and the misframed-frame witness exercises its other arm under this
-gate); `flac-portable-check` green (`scan` compiles for `thumbv7em-none-eabi`,
-`core,alloc` — no `std`, no `unsafe`, no new pin surface, no perf claim); `make
-check` (fmt) clean. The generated fixtures are byte-for-byte unchanged — the
-generator's new work reads them, it does not re-encode them. No on-target
-measurement: nothing in the decode path changed, and nothing in the product calls
-`scan` yet.
+Gates: the walk is a feature now, so the counts split rather than move. Default
+features — `flac-test` — are **unchanged at 173 passed + 1 ignored**: that gate
+neither compiles `scan` nor builds `tests/scan_frame_walk_layout.rs`, which is
+`required-features = ["scan"]` in `Cargo.toml` (not built at all, rather than
+built and quietly passing). **`make flac-test-scan`**, new, is **193 passed + 1
+ignored** (thumbv4t compile gate + host tests with `--features scan`; unit 129 →
+137 — the eight `scan` rule tests — plus the 12-test walk suite). `flac-test-crc`
+stays **176 + 1**: `crc-check` alone does not turn the walk on; the combined
+`--features crc-check,scan` build is **196**, and that is where the misframed-frame
+witness exercises its other arm. `flac-portable-check` now runs **with**
+`--features scan`, so a second bare-metal target keeps *compiling* the walk even
+though no ROM links it (`core,alloc` — no `std`, no `unsafe`, no new pin surface,
+no perf claim); `flac-test-scan` is deliberately not in `check-gba-all`, because
+the thing that must not carry the walk yet is the ROM. `make check` (fmt) clean.
+The generated fixtures are byte-for-byte unchanged — the generator's new work
+reads them, it does not re-encode them.
+
+**The link-line measurement, because "nothing in the decode path changed" was the
+wrong sentence.** No on-target run is in this PR: `mgba-test-runner` is not on the
+host that built it, and the cycle-level re-anchor belongs to item 6 — the point at
+which the facade starts calling the walk and the walk starts *costing* cycles. What
+could be measured statically was measured, on the calibration instrument
+(`examples/flac_spike/`, the ROM the E menu re-anchors against), three arms built
+from one path with the repo's native nightly — the toolchain
+`make native-spike-rom` runs:
+
+| arm | `.text` | `.rodata` | `.iwram` | `.ewram` |
+|---|---|---|---|---|
+| 4a, `b0704b2` | 46,008 B | 1,829,648 B | 812 B | 368 B |
+| 4b as first pushed (ungated) | 49,128 B (**+3,120**) | same size, content moved with the code | 812 B | 368 B |
+| 4b with `scan` a feature, **off** | 46,008 B | 1,829,648 B | 812 B | 368 B |
+
+The third arm does not merely match 4a's section *sizes*: its `.text`, `.rodata`,
+`.iwram` and `.ewram` are the same **bytes** (sha-256 of every dumped section
+matches). With the feature **on** the image is 3,120 B bigger and contains **no
+`scan` symbol at all** — `nm` reports none, the walk is dead-stripped — and the
+growth sits in code that was linked before this PR: `residual::decode_residual`
+596 → 2,412 B, `subframe::decode_subframe` 888 → 1,576 B, a newly outlined
+`bits::BitReader::peek_at` +212 B, one extra specialised `read_bits`,
+`subframe::integrate_lpc` +20 B, the spike's own `decode_one` −4 B. Adding a
+second consumer of the decode path changes what the inliner does to the decode
+path — which is the whole reason this rung is an opt-in feature and not a judgement
+call. So the honest claim is narrower than the one this note first carried: **no
+source in the decode path changed and no cycle was measured, but the generated code
+of the decode path did, and its size is now gated rather than argued.** Nothing on
+hardware is claimed either way; the E-anchor baselines are re-recorded at the next
+E probe against the ROM the default build produces — which is the 4a image, byte for
+byte — and the walk's real-time cost is charged to the run that wires the facade
+onto it.
 
 Deliberate scope cuts: **no `SEEKTABLE` interpretation** (the block walker still
 skips it by length; `.anchored(n)` is the seam a real seek point will use in

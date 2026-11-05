@@ -31,8 +31,9 @@
 //! frame_footer_gaps_bits  23  17  16  16  21  21  16  16  19  22
 //! ```
 //!
-//! (`s1_plain_8k_mono.flac`; `s3_wide_48001hz_b3000.flac` adds `4096` to the
-//! block-size mix, and its two frames are 2450 and 1477 bytes.)
+//! (`s1_plain_8k_mono.flac`; `s3_wide_48001hz_b3000.flac` puts a 16-bit custom
+//! block-size field in the mix — 3000, and 1801 for its final frame under the same
+//! declared maximum — and its two frames are 2450 and 1477 bytes.)
 //!
 //! **No byte stride is the rule.** Adjacent frames differ by a byte, and the last
 //! is a quarter of the length: a fixed stride from the first frame's length
@@ -231,9 +232,12 @@
 //! number is an upper bound, never a too-small one. Where the stream declares no
 //! bound (an encode whose framesizes field is 0/0 as well as its sample count:
 //! `s5`) the walk cannot know a frame's block size before its header, so it
-//! checks each frame against its own header instead. Either way a short buffer is
-//! refused as [`Error::BufferTooSmall`] with the numbers involved, and that
-//! frame's samples are not written.
+//! checks each frame against its own header instead. Which of the two the
+//! requirement came from is part of the diagnosis, so it is in the error: a
+//! refusal against a bound the **stream declares** is
+//! [`Error::DeclaredMaxExceedsBuffers`], a refusal against the block size **this
+//! frame's header** carries is [`Error::BufferTooSmall`]. Either way the frame is
+//! refused with the numbers involved and its samples are not written.
 //!
 //! The tail frame follows the same contract as [`crate::driver`]'s tail test: a
 //! 48-sample final frame writes its 48 and leaves the rest of the caller's buffer
@@ -241,6 +245,15 @@
 //! … 128 48`, `frame_bytes … 51`).
 //!
 //! ## Feature gates
+//!
+//! **This module is itself behind a gate** — `scan`, off by default, so a build
+//! that has no use for a frame walk does not carry one. Nothing in this crate
+//! links it yet. What the gate moves is code size, never results: everything
+//! below holds with it on or off, and both features in this section behave the
+//! same either way. Its suite is `make flac-test-scan` (the only gate that runs
+//! it); `make flac-portable-check` is the only gate that compiles the walk for a
+//! non-thumbv4t bare-metal target, and it turns the feature on for exactly that
+//! reason — an unbuilt module has no portability witness.
 //!
 //! `crc-check` changes what is *verified*, never what is *found*: the scan's
 //! candidate rule checks the header CRC-8 in both builds (in a `crc-check` build
@@ -250,12 +263,35 @@
 //! framing: the framing comes from the field walk above, which is why a build
 //! without the feature still knows where the next frame begins.
 //!
-//! `strict-profile` gates this crate's *encode-profile* claims — the packer's
-//! block-size and sample-rate sets. A walk across someone else's `.flac` file
-//! makes no such claim, and nothing here enforces one: `s3_wide_48001hz_b3000.flac`
-//! exists to keep that honest, and it walks here (its 4096-block frames decode
+//! ### The profile question, stated exactly
+//!
+//! "The scan enforces no profile" is true in one sense and false in another, and
+//! the two are worth separating because the difference decides where a profile
+//! check belongs.
+//!
+//! The scan has **no profile leg of its own**: it adds no check, and it relaxes
+//! none. Every frame-level refusal it reports arrives from
+//! [`crate::frame::FrameHeader::parse`], which **is** the frame-start filter —
+//! the sync code, the field tables, §9.1.5's blocking strategy, the sample-size
+//! table, 3–8-channel configurations, reserved codes, and the minimal-number-form
+//! rule. Those refusals are unconditional, not gated by `strict-profile`; they are
+//! why a walk over `s4_24bit_2048.flac` reports `UnsupportedSampleSize` at both
+//! entry points. That is the frame layer's claim, reached through the walk, not a
+//! claim this module makes.
+//!
+//! What the walk genuinely does not do is state **which frames a packer is
+//! allowed to write** — the encode profile: the block-size set and sample-rate set
+//! that `strict-profile` guards on the encode side and that
+//! [`crate::format::EncodeProfile`] / [`crate::format::Manifest`] will pin at item
+//! 6's seam. A walk across someone else's `.flac` file makes no such claim, and
+//! nothing here enforces one: `s3_wide_48001hz_b3000.flac`
+//! exists to keep that honest, and it walks here (its 3000-sample blocks, and the
+//! 1801-sample frame under that same declared maximum, decode
 //! bit-exactly against the reference decoder, per `tests/frame_run_layout.rs`'s
-//! rule). Profile enforcement belongs where a manifest pins a profile.
+//! rule). So the honest sentence is: the scan inherits the frame layer's
+//! refusals, asserts nothing about a stream's shape beyond what its own bytes
+//! say, and leaves profile enforcement to the manifest seam where a profile is
+//! pinned — which is also where the profile-anchored measurements get re-pinned.
 //!
 //! ## What this module is not yet
 //!
@@ -353,8 +389,14 @@ pub struct StreamBounds {
     /// `s5_unseekable_total_unknown.flac`.
     pub frames: Option<usize>,
     /// The largest block size the stream declares (§8.2), or `None` where it
-    /// declares none. Where present this is the caller's required buffer length
-    /// per channel.
+    /// declares none. **A claim, and an upper bound — not per-frame truth:**
+    /// §8.2's own caveat is that the actual maximum may be *smaller* than the
+    /// listed one, and a walk that takes a bound is asking to size its buffers
+    /// once for the whole stream, so it refuses a frame against the bound before
+    /// it reads that frame's header ([`Error::DeclaredMaxExceedsBuffers`]). A
+    /// caller whose buffers come from something else — a manifest's fixed block
+    /// size, or a range whose frames it knows — passes `None` and lets each
+    /// frame's own header size the requirement ([`Error::BufferTooSmall`]).
     pub max_blocksize: Option<usize>,
 }
 
@@ -386,14 +428,49 @@ impl StreamBounds {
 /// Anything `flac-lite` rejects is passed through unchanged as [`Error::Decode`].
 #[derive(Debug)]
 pub enum Error {
-    /// Caller buffers shorter than the frame needs. Checked against the block size
-    /// the stream declares where it declares one — before a bit of that frame is
-    /// read, which is [`crate::driver`]'s contract — and against the frame's own
-    /// header where the stream declares no bound. Either way the frame is refused
-    /// and its samples are not written.
+    /// Caller buffers shorter than **this frame's own header** asked for. Reached
+    /// where the stream declared no block-size bound ([`StreamBounds::max_blocksize`]
+    /// is `None`: an encode that states neither a sample count nor frame sizes —
+    /// `s5` — and a caller that deliberately hands the walk no bound), and where
+    /// the second subframe of a stereo frame is the short one: whether a frame
+    /// carries two subframes is that frame's channel code, per-frame truth rather
+    /// than a declared field like [`crate::driver::FrameSource::channels`]. Either
+    /// way the frame is refused and its samples are not written. Where the stream
+    /// *does* declare a bound the refusal is
+    /// [`Error::DeclaredMaxExceedsBuffers`], which says which claim answered.
     BufferTooSmall {
-        /// Samples per subframe the buffers must hold.
+        /// Samples per subframe this frame's header asked for.
         need: usize,
+        /// Length actually provided for the failing channel.
+        have: usize,
+    },
+    /// The caller's buffers are shorter than the maximum block size **the stream
+    /// declares** (§8.2, [`StreamBounds::max_blocksize`]) — which is *not* a claim
+    /// that the frame at the cursor needs `declared` samples, because at this
+    /// point the walk has not read it.
+    ///
+    /// Asking before reading is deliberate: where a bound is declared the
+    /// requirement is knowable in advance, and a caller error must not be masked
+    /// by a stream one ([`crate::driver`]'s order, and the reason the buffers are
+    /// gated at all).
+    ///
+    /// The cost of asking early is that the number here belongs to the stream, not
+    /// to the frame: §8.2's own caveat is that a declared maximum may exceed every
+    /// frame in the region, and a walk over part of a stream may be handed a bound
+    /// larger than anything in it. The committed table has the case at full-stream
+    /// scale: `s3` declares minimum and maximum block size **3000/3000** and its
+    /// last frame carries **1801**, so a caller whose buffers are 1801 samples is
+    /// refused on that frame by the *declaration*, not by the frame — a frame that
+    /// would have decoded. Which is precisely why the refusal names the declaration.
+    /// So the two possible fixes are told apart by the
+    /// variant rather than guessed at: make the buffers fit the stream, or hand the
+    /// walk no bound ([`StreamBounds::NOTHING`], or `max_blocksize: None`) and let
+    /// each frame's own header size the requirement — that path answers as
+    /// [`Error::BufferTooSmall`]. Same refusal point, same "nothing read, nothing
+    /// written", either way.
+    DeclaredMaxExceedsBuffers {
+        /// Maximum block size the stream declares, in samples per subframe.
+        declared: usize,
         /// Length actually provided for the failing channel.
         have: usize,
     },
@@ -597,12 +674,34 @@ impl<'a> Frames<'a> {
         self.expect_number
     }
 
+    /// The refusal for a buffer that is too short, naming **which claim** the
+    /// requirement came from.
+    ///
+    /// Same check, same position, same "nothing read and nothing written" either
+    /// way — the variant is the diagnosis. A declared bound is a claim about the
+    /// stream (§8.2's caveat: it may exceed every frame in the region); no bound
+    /// means the requirement can only come from this frame's own header. A caller
+    /// whose buffers are sized from something else — a manifest's fixed block size
+    /// being the product-shaped case — has to be able to tell the two apart,
+    /// because only one of them is fixed by making the buffers bigger.
+    fn capacity_refusal(&self, needed: usize, have: usize) -> Error {
+        match self.bounds.max_blocksize {
+            Some(declared) => Error::DeclaredMaxExceedsBuffers { declared, have },
+            None => Error::BufferTooSmall { need: needed, have },
+        }
+    }
+
     /// The next frame, decoded into the caller's buffers, or `None` at the end of
     /// the region.
     ///
     /// One frame per call, in stream order, with no lookahead and no index: the
     /// next position is wherever this frame's own fields ended — which is why the
-    /// caller's buffers are used and re-used and no frame length is assumed. A
+    /// caller's buffers are used and re-used and no frame length is assumed. **No
+    /// search is part of the steady state**: nothing here looks ahead for a sync
+    /// code or tries to land on a frame start, and the walk's only step is the
+    /// field walk of Rule 1. [`next_frame_start`] is reached from exactly one
+    /// place, [`Frames::resync`], and only after a rejection has already left the
+    /// walk somewhere that is not a frame. A
     /// short final frame writes into the first `samples` slots only and leaves the
     /// rest of the caller's buffers alone (measured: 48 samples into a buffer
     /// 128 long — [`crate::driver`]'s tail-frame rule, same contract).
@@ -628,10 +727,7 @@ impl<'a> Frames<'a> {
         // not a declared field like `driver::FrameSource::channels`).
         if let Some(bound) = self.bounds.max_blocksize {
             if left.len() < bound {
-                return Err(Error::BufferTooSmall {
-                    need: bound,
-                    have: left.len(),
-                });
+                return Err(self.capacity_refusal(bound, left.len()));
             }
         }
         let rest = self
@@ -661,16 +757,10 @@ impl<'a> Frames<'a> {
         // the backstop either way.
         let need = self.bounds.max_blocksize.unwrap_or(header.blocksize);
         if left.len() < need {
-            return Err(Error::BufferTooSmall {
-                need,
-                have: left.len(),
-            });
+            return Err(self.capacity_refusal(need, left.len()));
         }
         if usize::from(header.channels.subframe_count()) == 2 && right.len() < need {
-            return Err(Error::BufferTooSmall {
-                need,
-                have: right.len(),
-            });
+            return Err(self.capacity_refusal(need, right.len()));
         }
 
         let samples =
@@ -717,14 +807,26 @@ impl<'a> Frames<'a> {
     /// where a range begins uses [`Frames::region`] with [`Frames::anchored`]
     /// instead of searching.
     ///
+    /// Cost, and where it is allowed to run: the search is **O(region)** in the
+    /// worst case — every byte position from one past the cursor to the end, each
+    /// candidate read bounded by [`frame::MAX_HEADER_BYTES`] (module docs, "The
+    /// scan, which is recovery") — and a candidate test is the expensive filter,
+    /// measured at 1223 sync-shaped candidates for 979 real frames. That is what
+    /// makes this recovery rather than a loop body: nothing in the steady-state
+    /// walk searches ([`Frames::next_frame`]), and a real-time caller keeps a
+    /// rescan **out of the pull loop** — item 6's facade re-anchors at the seam,
+    /// charged to the seek whose offset was wrong rather than to a frame's budget.
+    /// `resync` is deliberately caller-invoked for that reason; a walk that called
+    /// it after every rejection would be paying a rescan inside the audio path.
+    ///
     /// The walk is left positioned **on** the frame it found, which is what
     /// re-anchoring means here: that frame's own number becomes the next one
-    /// expected, and [`next_frame`] checks it against the frame it is about to
+    /// expected, and [`Frames::next_frame`] checks it against the frame it is about to
     /// decode. Anchoring on the number *after* it would reject the very frame
     /// resync landed on — witnessed by
     /// `scan_frame_walk_layout.rs::a_walk_that_lost_its_frame_boundary_recovers_onto_the_next_real_frame`,
     /// which is where the first version of this function was caught. From there,
-    /// sequencing proceeds normally: [`next_frame`] advances one number per frame
+    /// sequencing proceeds normally: [`Frames::next_frame`] advances one number per frame
     /// accepted, and turns itself off if a number ever reaches the top of the
     /// range ([`u64`]), rather than wrapping into a false refusal.
     pub fn resync(&mut self) -> Option<usize> {
@@ -865,7 +967,9 @@ mod tests {
     fn a_short_buffer_is_refused_at_the_declared_bound_before_the_frame_is_read() {
         // Where a block-size bound is declared, the caller contract is knowable
         // before the frame — `crate::driver`'s rule — and the region's contents are
-        // irrelevant, because the gate runs first.
+        // irrelevant, because the gate runs first. The variant is part of the point:
+        // the number in this refusal belongs to the *stream's declaration*, not to a
+        // frame the walk never read, and it says so.
         let bounds = StreamBounds {
             max_blocksize: Some(2048),
             ..StreamBounds::NOTHING
@@ -876,8 +980,10 @@ mod tests {
         let mut right: [i32; 0] = [];
         let mut state = Default::default();
         match walk.next_frame(&mut left, &mut right, &mut state) {
-            Err(Error::BufferTooSmall { need, have }) => assert_eq!((need, have), (2048, 2047)),
-            other => panic!("expected BufferTooSmall, got {other:?}"),
+            Err(Error::DeclaredMaxExceedsBuffers { declared, have }) => {
+                assert_eq!((declared, have), (2048, 2047))
+            }
+            other => panic!("expected DeclaredMaxExceedsBuffers, got {other:?}"),
         }
     }
 

@@ -4,7 +4,7 @@
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
-        test test-rom flac-test flac-test-crc flac-portable-check spike-test opus-test kernel-test podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test \
+        test test-rom flac-test flac-test-crc flac-test-scan flac-portable-check spike-test opus-test kernel-test podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test \
         clean clean-cache check podman-check help toolchain-check
 
 # ---------------------------------------------------------------------------
@@ -100,6 +100,23 @@ flac-test-crc: toolchain-check
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features crc-check
 	@echo "flac-test-crc passed: frame CRC verification compiles for $(TARGET) and the host witness is green with crc-check on"
+
+# The `scan` gate (4b's frame walk): same shape as flac-test-crc and for the same
+# reason. With the feature off the module and its suite do not exist in a default
+# build (`required-features = ["scan"]` in the crate manifest), so `flac-test`
+# cannot go green on the walk's witness by accident. Keep the counts straight when
+# reading logs: `flac-test` runs the crate WITHOUT the walk (its total is 4b's
+# total minus the walk's tests), `flac-test-scan` runs it WITH them. Like
+# flac-test-crc, this is not in `check-gba-all`: a GBA ROM does not link the walk
+# until item 6 rewires the facade onto it, and crates/flac-lite/Cargo.toml records
+# the measured code-size cost of doing that.
+flac-test-scan: toolchain-check
+	cd crates/flac-lite && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features scan
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features scan
+	@echo "flac-test-scan passed: the frame walk compiles for $(TARGET) and its witness suite is green with the scan feature on"
 
 # Second bare-metal target for the portability witness (`flac-portable-check`,
 # FLAC.md split-proposal ladder step 3, 2026-11-02). Cortex-M4F: a canonical
@@ -434,12 +451,17 @@ flac-test: toolchain-check
 # REMOVED, which is the container image's shape (nightly + rust-src only;
 # no Dockerfile change). Scope: rlib compile, not final link — a link wants a
 # board link script, same boundary as the thumbv4t `check` half (whose real
-# link is `make flac-rom`). Default features only: pin OFF means no `.iwram`
-# reference compiles in on non-GBA targets (step 2's gate made that the shape).
+# link is `make flac-rom`). Pin OFF: no `.iwram` reference compiles in on
+# non-GBA targets (step 2's gate made that the shape). `scan` is turned ON here on
+# purpose (review decision, 2026-11-05): the walk is `no_std` + `alloc` code whose
+# portability no other gate proves, and a feature-gated module that no gate builds
+# for a second target is a module whose portability claim is asserted rather than
+# measured. This is the only gate that compiles the walk for a non-thumbv4t
+# bare-metal target; `flac-test-scan` covers the thumbv4t half.
 flac-portable-check: toolchain-check
 	cd crates/flac-lite && \
-	  $(CARGO) check --release --target $(SECOND_TARGET) -Zbuild-std=core,alloc
-	@echo "flac-portable-check passed: flac-lite compiles for $(SECOND_TARGET) (portability witness, no perf claim)"
+	  $(CARGO) check --release --target $(SECOND_TARGET) -Zbuild-std=core,alloc --features scan
+	@echo "flac-portable-check passed: flac-lite with the frame walk on compiles for $(SECOND_TARGET) (portability witness, no perf claim)"
 
 # The spike's assets witness: the host tests (examples/flac_spike/tests/) decode
 # the EXACT embedded clips bit-exactly against flac -d reference PCM. Same
@@ -621,8 +643,9 @@ help:
 	@echo "    test              test-rom + flac-test (verify-only: no reformat)"
 	@echo "    test-rom          ROM #[test_case] suite in mGBA"
 	@echo "    flac-test         flac-lite alone (target compile gate + host tests)"
-	@echo "    flac-portable-check  flac-lite second-target build witness ($(SECOND_TARGET); portability fact, no perf claim)"
+	@echo "    flac-portable-check  flac-lite second-target build witness ($(SECOND_TARGET); with the frame walk on: portability fact, no perf claim)"
 	@echo "    flac-test-crc     flac-lite host suite + thumbv4t compile with crc-check ON (hand-invoked; see README gate-aggregation TODO)"
+	@echo "    flac-test-scan    flac-lite host suite + thumbv4t compile with the frame walk (`scan`) ON (hand-invoked; see README gate-aggregation TODO)"
 	@echo ""
 	@echo "  Tests — containerized (same gates, no host tooling needed):"
 	@echo "    podman-test       test-rom + flac-test in the $(CONTAINER) image"
