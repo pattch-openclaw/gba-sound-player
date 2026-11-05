@@ -203,6 +203,7 @@ requirements (nightly + `rust-src`, plus `agb-gbafix` for ROM fixing).
 | `make podman-flac-rom` | Same FLAC integration ROM, built in the container | needs podman/docker |
 | `make flac-test` | `flac-lite` **in isolation**: GBA target compile gate + host unit tests. No agb, no ROM, no emulator. Default features — the frame walk (`scan`) is **off**, so no ROM links it. `make flac-test-crc` is the same shape with `crc-check` on | native |
 | `make flac-test-scan` | The same two steps with `--features scan` on: the walk's thumbv4t compile plus its witness suite (`tests/scan_frame_walk_layout.rs` is `required-features = ["scan"]`, so it is not built at all without the feature). Deliberately **not** in `check-gba-all` — the thing that must not carry the walk yet is the ROM. `flac-portable-check` runs with `scan` **on** so the second bare-metal target keeps compiling it | native |
+| `make flac-gates` | **Every `crates/flac-lite` configuration in one command**: `flac-test` + `flac-test-crc` + `flac-test-scan` + `flac-portable-check`, plus the two both-feature (`crc-check,scan`) arms — the thumbv4t `cargo check` and the host witness. Adds no new witness: it is the aggregate the TODO below asked for, by the name it gave it, landed 2026-11-05 | native |
 | `make test-rom` | ROM `#[test_case]` suite, headless in mGBA via `mgba-test-runner` | native (needs `mgba-test-runner`) |
 | `make test` | Top-level: `test-rom` + `flac-test`. Verify-only — never reformats your tree | native |
 | `make podman-test` | **The same suite**, running inside the image (`make test` in there) — no host tooling | needs podman/docker |
@@ -235,7 +236,7 @@ Two deliberate separations:
 | | Writes files? | Fails on unformatted? | Fails on test failures? |
 |---|---|---|---|
 | `make build` / `*-rom` | ✅ (`format` first) | no — fixes them | no |
-| `make test` / `test-rom` / `flac-test` | never | no | ✅ |
+| `make test` / `test-rom` / `flac-test` / `flac-gates` | never | no | ✅ |
 | `make check` | never | ✅ | no |
 
 If a build reformats your tree, run `make check` before committing to confirm
@@ -254,18 +255,35 @@ risk a by-default-OFF feature like `crc-check` or `scan` creates. `scan` makes t
 point twice over: a module no default build compiles is witnessed by
 `flac-test-scan` (its rules, and the GBA-target compile) and by
 `flac-portable-check`'s `--features scan` (the second target) — nothing else builds
-it at all. Tracked here so it is not forgotten; deliberately not
-part of any feature PR, since each gate lands with its own PR's gate work.
+it at all. Tracked here so it is not forgotten; when written it was deliberately
+not part of any feature PR, since each gate lands with its own PR's gate work —
+that part changed on 2026-11-05, when the aggregate landed inside split-ladder
+item 5 PR 2 (the PR where the *instantiation count* changes rather than the code,
+which is the natural home for a feature *combination*). The invocation hook below
+is still open.
 
-- A single `flac-gates` aggregate: `flac-test` + `flac-test-crc` +
-  `flac-test-scan` + `flac-portable-check` — one command covering every
+- ✅ **Landed 2026-11-05** — a single `flac-gates` aggregate: `flac-test` + `flac-test-crc` +
+  `flac-test-scan` + `flac-portable-check`, **plus** the two `--features
+  crc-check,scan` arms (thumbv4t `cargo check`, and the host test run from the
+  gate-neutral cwd) that no single-feature gate runs — one command covering every
   `crates/flac-lite` configuration. Measured on the `crc-check` landing tree with warm caches: the
   extra thumbv4t `cargo check` and host test run complete in hundredths of a
-  second; cold caches pay the usual `-Zbuild-std` cost, once.
+  second; cold caches pay the usual `-Zbuild-std` cost, once. Measured on item 5
+  PR 2's landing host, twice, with every cache warm and everything already built:
+  **0.72 s** and **0.75 s** for the aggregate, of which the two combination arms
+  are **0.18–0.21 s** — the four suite runs dominate, exactly as the sentence
+  above predicts. (The first run after a source edit costs more — 2.95 s on the
+  re-run following this PR's own doc-text change — because "warm" is not the state
+  a tree is in immediately after an edit.)
 - Something to *invoke* it: with no CI, the cheap honest hook is local (a
   pre-commit/pre-push hook, or a documented rule that any commit touching
   `crates/flac-lite` runs `make flac-gates` first). `FLAC.md` already names the
   gate for each landed feature — only the automation is missing.
+- Still open alongside it, left out of the aggregate's own PR on purpose: a
+  `podman-flac-gates` sibling, so the container path covers the same set. Today
+  `make podman-flac-test` covers the **default** configuration only — the
+  non-default configurations have no containerized path, which is the same
+  omission this section was written about.
 
 ### Containerized testing
 

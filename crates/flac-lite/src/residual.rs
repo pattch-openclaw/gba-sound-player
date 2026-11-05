@@ -36,6 +36,16 @@
 //!   into quotients), and libFLAC's `read_residual_partitioned_rice_` (reads
 //!   nothing but method, partition order, and per-partition param/escape +
 //!   raw width). FLAC.md → "Prior assumptions".
+//!
+//! STATUS (2026-11-05): **the Rice kernel seam is open** — [`RiceKernel`] +
+//! [`TableCountKernel`] + [`decode_rice_partition_with`] (split-ladder item 5,
+//! PR 2). Zero behavior change: the one instantiation the crate uses *is* the
+//! loop that was already here, and no other crate implements the trait yet —
+//! that is item 6 (`flac-lite-gba`, which links none of this into the ROM
+//! today), and PR 3 is the PR that may change which mechanism sits behind the
+//! hook. Why the hook is whole-partition rather than per-sample is argued on
+//! the trait; the window half of the seam (the `rev32` bridge) landed inert in
+//! PR 1 and is argued in `bits`' module docs.
 
 use crate::bits::BitReader;
 
@@ -178,8 +188,166 @@ pub fn decode_residual(
     Ok(())
 }
 
+/// One **whole** non-escape Rice partition, as a callable — the seam this
+/// module exists to have (split-ladder item 5, PR 2, 2026-11-05: FLAC.md →
+/// "Split-ladder item 5 — the `RiceKernel` seam: three PRs (plan of record)").
+///
+/// The shape is written here *in a type* rather than argued, which is what
+/// makes a wrong shape cost one small PR instead of a design argument
+/// mid-diff. Both facts that settled it are already in this tree, they are
+/// cited in `bits`' module docs (the module that owns the window bridge), and
+/// they agree with each other:
+///
+/// - **Whole-partition, not per-sample.** The proposal's `sample_step`
+///   signature (word window + budget + order in; value/consumed/state out)
+///   cannot host any kernel that has ever produced a number: E10 composes
+///   "the hybrid as a single whole-partition kernel rather than calling the
+///   track's word-in/word-out kernels — the seam needs the byte-window ABI",
+///   and `examples/arm-kernels/src/sample_step.rs` declines the reversal and
+///   straddle-merge stitching from its own side. A per-sample hook has nowhere
+///   to put a loop, nowhere to hold a window across samples.
+/// - **The kernel owns that loop.** One call per partition body, not one per
+///   sample: a kernel refills, consumes, keeps its own window, and decides
+///   when the partition is finished. That is what lets the probe's shape —
+///   `arm_rice_partition` and its host twin `twin_partition`, both whole-
+///   partition over a `w`/`v`/`ptr`/`end` state — be implemented by an overlay
+///   instead of re-derived from scratch.
+///
+/// **Not sealed**, deliberately: `flac-lite-gba` (item 6) implementing this is
+/// the point of the seam. PR 2 ships exactly one implementor —
+/// [`TableCountKernel`], the loop that already lived here — and **no external**
+/// one, which is item 6 landing rather than a gap in this one. **Monomorphized,
+/// never `dyn`**: the method below is an associated function, which makes the
+/// trait non-object-safe, so a vtable is not expressible rather than merely
+/// discouraged. That is on purpose — the E2b lesson is that a seam's cost shows
+/// up as codegen coupling, so the seam may not be a dynamic call.
+///
+/// Reachable to other crates as `flac_lite::residual::RiceKernel`; the generic
+/// driver that takes it stays private to this module until a caller outside the
+/// crate exists to thread it through, which is item 6's decision to make.
+pub trait RiceKernel {
+    /// Produce `out.len()` Rice-coded residuals (§9.2.7.2) into `out`, from a
+    /// cursor sitting on the first bit of the partition body, at Rice parameter
+    /// `order`.
+    ///
+    /// What every kernel owes the core. Every item here is *existing* core
+    /// behavior, stated on the trait because a kernel now owns the part of the
+    /// loop that implements it — none of it is new contract this PR invents:
+    ///
+    /// - **`order` is the parameter as read from the header**: `0..=14` under
+    ///   the 4-bit coding method, `0..=30` under the 5-bit. The escape code
+    ///   never reaches a kernel — [`decode_rice_partition_with`] owns the
+    ///   §9.2.7.1 escape path. And the encode profile's limits are the core's
+    ///   to enforce, never a kernel's to assume: the overlay kernels' loud
+    ///   rejection of escape partitions and `p > 14` is a probe fact, not a
+    ///   contract, and the core stays correct for arbitrary FLAC.
+    /// - **§9.2.7.3's two stream MUSTs are the kernel's to enforce**, because
+    ///   a kernel is what computes the folded value: `quotient > (u32::MAX >>
+    ///   order)` (not representable in 32 bits) and `folded == u32::MAX` (the
+    ///   unique pre-image of `i32::MIN`, which [`rice_unmap`] deliberately
+    ///   does *not* reject) are both [`Error::InvalidField`](crate::Error).
+    /// - **Running out of bits is [`Error::EndOfStream`](crate::Error).** This
+    ///   is where the probe's `KernelState::status` field went: PR 1's
+    ///   [`KernelWindow`](crate::bits::KernelWindow) deliberately does not
+    ///   carry it, because this seam is the thing that has to act on it and the
+    ///   reader's own end-of-data condition is already that variant.
+    /// - **Cursor rules are exactly as they were before the seam existed:** on
+    ///   success the cursor sits precisely past the partition body; on error
+    ///   only per-read atomicity holds (an unterminated unary quotient restores
+    ///   to that codeword's start — [`BitReader::rice_quotient`]'s atomicity),
+    ///   because an errored frame is discarded wholesale and partially written
+    ///   `out` samples are undefined.
+    ///
+    /// A kernel that keeps its own bit window uses
+    /// [`BitReader::kernel_window`] / [`BitReader::set_kernel_window`]: that
+    /// pair *is* the probe's `AccumulatorReader::rice_partition_kernel` seam
+    /// method (patch line 1205 of the committed `e10-three-arm-probe.patch`),
+    /// lifted into the crate by PR 1. One trap then belongs to every
+    /// window-domain implementor, and to none of PR 2's default: do **not**
+    /// express the empty window with [`BitReader::consume`] — its `acc <<= n`
+    /// is a shift-by-32 at `n = 32`, a fact PR 1's landing record hands forward
+    /// rather than changing. Spell the leg (`if n >= 32 { 0 }`, ARM's
+    /// `LSR`-by-≥32-yields-0 rule), which is also the `q = 31` leg PR 3's twin
+    /// docs and the kernel crate's committed table pin.
+    fn decode_partition(
+        reader: &mut BitReader<'_>,
+        order: u32,
+        out: &mut [i32],
+    ) -> crate::Result<()>;
+}
+
+/// The core's Rice kernel as it already stands — the E2b table count, driven
+/// through the reader's own primitives — as the default instantiation of
+/// [`RiceKernel`].
+///
+/// **Nothing in this type changes what it does.** Its body is the loop that has
+/// been `decode_rice_partition`'s non-escape sample loop since step 3b
+/// (2026-09-11), counted by [`BitReader::rice_quotient`] since E2b
+/// (2026-10-21): it arrives here with no edit beyond the indentation that
+/// puts a free function's body inside a method. That is deliberate — PR 2's
+/// whole claim is that the default impl **is** today's code, so the only thing
+/// the PR can possibly cost samples is the plumbing, which is why its gate is a
+/// codegen reading plus a cycle reading and not a new test suite.
+///
+/// It stays live whichever way PR 3's measurement lands: that differential
+/// needs **two** mechanisms side by side (FLAC.md's item-5 invariant: do not
+/// delete `bits::rice_quotient` or `LEADING_ONES` — two live mechanisms are
+/// what the comparison consumes, and `LEADING_ONES` at `0x0300022c` is an `nm`
+/// anchor cited by E2b, by E10 and by the `iwram-pin` witness). If the twin
+/// comes in slower than the bar, this stays the core's default and says so.
+///
+/// No `#[inline]`, no `#[inline(never)]`, no generic parameter and no `repr`
+/// was added to this type or around it in PR 2: what the inliner does with the
+/// seam *is* what PR 2 measures, and pre-empting that decision here would
+/// spend the one measurement the item exists to make.
+pub struct TableCountKernel;
+
+impl RiceKernel for TableCountKernel {
+    fn decode_partition(
+        reader: &mut BitReader<'_>,
+        order: u32,
+        out: &mut [i32],
+    ) -> crate::Result<()> {
+        for sample in out.iter_mut() {
+            // Unary quotient: count zeros until the terminating one — the E2b
+            // table count (BitReader::rice_quotient), landed 2026-10-21: this
+            // per-sample loop was E8's measured cost center for FIXED (unary
+            // 56.2% of gross); E2b priced the table count at −21.7% on the
+            // whole FIXED arm. Bit-exact replacement, atomic on EOF.
+            let quotient = reader.rice_quotient()?;
+            // Binary remainder — only when the parameter says so. `order == 0`
+            // is unary-only words; there is nothing to read.
+            let remainder = if order == 0 {
+                0
+            } else {
+                reader.read_bits(order)?
+            };
+            // §9.2.7.3: a residual must be representable in 32 bits, so a folded
+            // value that does not fit `u32` cannot occur in a conforming stream.
+            // Guard on the *quotient* against `MAX >> order`: `checked_shl` is NOT
+            // that check — it only rejects a shift *amount* >= 32 and wraps bits
+            // shifted out of the value (found by test, 2026-09-11: quotient 4 at
+            // order 30 silently yielded folded = 0). The `order >= 32` arm
+            // short-circuits before the shift, so `MAX >> order` is never a
+            // shift-by-32. Under the profile order <= 30 (0b11111 is the escape),
+            // so this is belt-and-braces for a bad caller header.
+            if order >= 32 || quotient > (u32::MAX >> order) {
+                return Err(crate::Error::InvalidField);
+            }
+            let folded = (quotient << order) | remainder;
+            if folded == u32::MAX {
+                // The i32::MIN pre-image: forbidden in a stream (§9.2.7.3).
+                return Err(crate::Error::InvalidField);
+            }
+            *sample = rice_unmap(folded);
+        }
+        Ok(())
+    }
+}
+
 /// Decode one partition's samples into `out` (RFC 9639 §9.2.7.2 Rice, or
-/// §9.2.7.1 escape-record raw samples).
+/// §9.2.7.1 escape-record raw samples) with the kernel `K` producing the
+/// non-escape body.
 ///
 /// Split out from [`decode_residual`] so it can be unit-tested on its own —
 /// this is the inner loop. The parameter field (and the escape code that
@@ -187,31 +355,26 @@ pub fn decode_residual(
 /// function consumes the partition *body* only, from a cursor sitting on the
 /// first body bit.
 ///
+/// **What the driver owns, and what [`RiceKernel`] owns.** The two contract
+/// halves are separated along the seam: this function keeps the caller
+/// contract, the §9.2.7.1 escape record and the cursor rules; the kernel owns
+/// the §9.2.7.2 codeword walk and the §9.2.7.3 value-limit rejections, since
+/// it is the code computing the folded value. The split is exactly the code
+/// that was already here — the escape block below has not been edited since
+/// 3b, and the Rice half is the same loop, carried across with no edit at all.
+///
 /// Contract: `out.len()` must equal `header.sample_count`. The caller
 /// (step 3c's [`decode_residual`]) slices `out` per partition; a mismatch is
 /// a caller bug, not a stream condition, and yields `InvalidField` without
 /// moving the cursor.
 ///
-/// **Rice partition (§9.2.7.2):** per sample, count unary zeros until the
-/// terminating one (the quotient), read `order` remainder bits, combine
-/// `folded = (quotient << order) | remainder`, and unfold with [`rice_unmap`].
-/// `order == 0` means unary-only: the remainder read is *skipped*, not
-/// zero-width — [`BitReader::read_bits`] rejects `n == 0` by design, and
-/// conflating the two desynchronises every subsequent word.
-///
 /// **Escape partition (§9.2.7.1):** `raw_bits` signed two's-complement bits
 /// per sample (via [`BitReader::read_signed`], which owns sign extension).
 /// `raw_bits == 0` is legal and means every sample is 0 with **no bits
 /// consumed at all** — the partition is just its escape code and `0b00000`
-/// (which the caller read).
-///
-/// **§9.2.7.3 value limit:** residuals MUST NOT reach `±2^31`. Two stream
-/// conditions implement that here as `InvalidField`:
-/// a folded value that cannot fit `u32` (checked shift — such a residual
-/// cannot exist under the limit), and `folded == 0xFFFF_FFFF`, the unique
-/// pre-image of `i32::MIN`. [`rice_unmap`] deliberately stays total and
-/// returns `i32::MIN`; rejecting it is this function's job (the seam pinned
-/// in step 3a).
+/// (which the caller read). Escaped partitions never reach a kernel: the
+/// profile-bound things the overlay kernels reject are the core's to handle
+/// here, and `K` is chosen per *partition*, not per stream.
 ///
 /// Cursor: on success it sits exactly past the partition body. On error it
 /// stays where the failing read left it (per-read atomicity only, the same
@@ -221,7 +384,7 @@ pub fn decode_residual(
 /// codeword's start ([`BitReader::rice_quotient`]'s atomicity) rather than
 /// leaving it after the consumed zeros — observable only on a dead frame,
 /// which the caller discards wholesale anyway.
-fn decode_rice_partition(
+fn decode_rice_partition_with<K: RiceKernel>(
     reader: &mut BitReader<'_>,
     header: &PartitionHeader,
     out: &mut [i32],
@@ -243,41 +406,28 @@ fn decode_rice_partition(
         }
         return Ok(());
     }
-    let order = u32::from(header.order);
-    for sample in out.iter_mut() {
-        // Unary quotient: count zeros until the terminating one — the E2b
-        // table count (BitReader::rice_quotient), landed 2026-10-21: this
-        // per-sample loop was E8's measured cost center for FIXED (unary
-        // 56.2% of gross); E2b priced the table count at −21.7% on the
-        // whole FIXED arm. Bit-exact replacement, atomic on EOF.
-        let quotient = reader.rice_quotient()?;
-        // Binary remainder — only when the parameter says so. `order == 0`
-        // is unary-only words; there is nothing to read.
-        let remainder = if order == 0 {
-            0
-        } else {
-            reader.read_bits(order)?
-        };
-        // §9.2.7.3: a residual must be representable in 32 bits, so a folded
-        // value that does not fit `u32` cannot occur in a conforming stream.
-        // Guard on the *quotient* against `MAX >> order`: `checked_shl` is NOT
-        // that check — it only rejects a shift *amount* >= 32 and wraps bits
-        // shifted out of the value (found by test, 2026-09-11: quotient 4 at
-        // order 30 silently yielded folded = 0). The `order >= 32` arm
-        // short-circuits before the shift, so `MAX >> order` is never a
-        // shift-by-32. Under the profile order <= 30 (0b11111 is the escape),
-        // so this is belt-and-braces for a bad caller header.
-        if order >= 32 || quotient > (u32::MAX >> order) {
-            return Err(crate::Error::InvalidField);
-        }
-        let folded = (quotient << order) | remainder;
-        if folded == u32::MAX {
-            // The i32::MIN pre-image: forbidden in a stream (§9.2.7.3).
-            return Err(crate::Error::InvalidField);
-        }
-        *sample = rice_unmap(folded);
-    }
-    Ok(())
+    K::decode_partition(reader, u32::from(header.order), out)
+}
+
+/// [`decode_rice_partition_with`] at the core's default kernel,
+/// [`TableCountKernel`] — which is why no existing caller changed, and why the
+/// module's unit tests (which built this partition body directly, from before
+/// the seam existed) keep doing so against the incumbent rather than against a
+/// test-only stand-in.
+///
+/// This is the one place the default is chosen. PR 3 is the PR that may change
+/// it — that is what its "default flip" means, decided by measurement against a
+/// pre-declared bar and not by preference — and keeping the choice in a single
+/// named call is what makes that flip one line and attributable to one cause
+/// (FLAC.md's item-5 invariant: do not fold the twin flip into PR 2, because a
+/// bad number has to be attributable either to the generic seam or to the
+/// swapped mechanism, never to both).
+fn decode_rice_partition(
+    reader: &mut BitReader<'_>,
+    header: &PartitionHeader,
+    out: &mut [i32],
+) -> crate::Result<()> {
+    decode_rice_partition_with::<TableCountKernel>(reader, header, out)
 }
 
 /// Unfold a Rice-coded residual: folded magnitude → signed sample

@@ -6496,9 +6496,159 @@ abandoned; PR 2's blast radius is exactly that decision. This is also the
 natural home for the ~10-line feature-matrix gate (the
 `flac-test` / `-crc` / `-scan` combinations), since this is the PR where
 the *instantiation count* changes rather than the code — it serves the
-gate-aggregation TODO in README.md:246 and is optional in every reading.
+gate-aggregation TODO in README.md (the section titled "one aggregate for the
+non-default-configuration gates" — it sat at README.md:246 when this plan was
+written, and it is referred to by title from here on because this item's own
+PR 2 moved it by adding a gate-table row above it).
 If the host lacks `mgba-test-runner`, record that as 4b did and name the
 run that owes the numbers rather than shipping an unmeasured claim.
+
+**Landed 2026-11-05 as `feat/flac-lite-rice-kernel-seam`**, pushed as a **single
+commit** — the plan's two-commit structure (extraction, then seam) was built and
+measured that way and folded before push, because the intermediate state still got
+its own build (second table arm below) and the branch history does not need to
+carry it. What the seam turned out to be, in one paragraph: `RiceKernel` is a
+`pub` trait
+whose single method is an **associated function** —
+`decode_partition(reader, order, out)`, no `self` — which is what encodes the
+whole-partition shape *and* makes the trait non-object-safe, so a `dyn` seam is
+not expressible in this crate rather than merely discouraged; `TableCountKernel`
+is its one implementor, and its body is the loop that already existed — extracted
+into a free function, built and measured there, then moved into the impl; the
+generic driver
+is private (`decode_rice_partition_with<K>`) and `decode_rice_partition` is the
+one place that names the default (`decode_rice_partition_with::<TableCountKernel>`).
+That last part is the one place this record departs from the plan's phrasing
+("`decode_rice_partition` generic over it"), and the reason is the invariant
+above: putting the choice in **one named line of one named function** is what
+makes PR 3's default flip one line, attributable to one cause — and it is what
+lets `decode_residual`'s call site, this module's unit tests, and every current
+caller stay exactly as they were. The trait is not sealed, and nothing outside
+the crate implements it yet (item 6 landing, not a gap here). The escape path,
+both §9.2.7.3 guards, `rice_quotient` and `LEADING_ONES` are untouched; no new
+`unsafe`, no `#[inline]` anywhere, no test added or removed.
+
+**Every gate, on the landing host, against numbers taken on the same host minutes
+before the change** (Linux/aarch64; target work runs the repo's pinned nightly,
+1.100.0-nightly a69a63265 2026-09-03 — the same nightly E9/E10 quote). Nothing
+moves: `flac-test` **178 passed + 1 ignored**, `flac-test-crc` **181 + 1**,
+`flac-test-scan` **198 + 1**, the `crc-check,scan` **combination** **201 + 1**,
+`flac-portable-check` green, `spike-test` **15 + 10**, `kernel-test` **20** (the
+arm-kernels / `flac-lite-gba` side sees no change — that is item 6's work, not
+this PR's), `make check` clean. PR 2 adds no test deliberately: the item's
+baseline rule is that these counts must not move, and the behavior witness is the
+existing suite running through an entry point whose name did not change.
+
+**The link-line arm came back a null result, which is the best outcome this PR
+could have been asked for.** Six builds of the calibration instrument
+(`examples/flac_spike/`, default build, `scan` off — the ROM's shape, measured as
+4b's arm 3 was: every section dumped with `objcopy -O binary --only-section`, then
+hashed), plus the two clean-rebuild controls the method needs:
+
+| arm | `.text` | `.rodata` | `.iwram` | `.ewram` |
+|---|---|---|---|---|
+| pre-change `main` (`d98df6f`), working-tree caches as left | 46,008 B | 1,829,760 B | 812 B | 368 B |
+| same tree after `cargo clean` (determinism control) | same bytes | same bytes | same bytes | same bytes |
+| intermediate tree — the extraction alone, before the seam existed | same bytes | same bytes | same bytes | same bytes |
+| **the seam** | **same bytes** | same size, **2 bytes differ** | same bytes | same bytes |
+| that tree after `cargo clean` (control) | same bytes | identical to the row above | same bytes | same bytes |
+
+**Re-measured once more at the tip of the branch** (the record and gate edits
+touch no Rust), so what merged is the tree this table describes:
+every section byte-for-byte identical to the seam row above, and `nm` identical in
+all 172 symbols — same addresses, same sizes. The gate sequence was re-run at that
+tip too: the aggregate's four configurations came back 178 / 181 / 198 / 201 with
+one ignored each, `spike-test` 25 (15 + 10), `kernel-test` 20, `make check` clean.
+
+`.text` hashes `f0f88c33d150…` in **all six** images: on this instrument the
+generic seam costs no machine code at all. One instantiation, monomorphized, and
+the inliner put it back where the extracted free function had been put. So there
+is nothing to attribute **symbol by symbol** — `nm --print-size --size-sort` on
+the pre- and post-seam images reports no change whatsoever: same symbols, same
+addresses, same sizes. `BitReader::rice_quotient` is still live at 336 B;
+`LEADING_ONES` is still at `0x0300022c`, the anchor E2b, E10 and the `iwram-pin`
+witness cite; `residual::decode_residual` is still `0x254` = 596 B, with the Rice
+walk inlined inside it as it has been since 3b. `.iwram` and `.ewram` are
+unchanged to the byte.
+
+**The two bytes are attributed, because "zero bytes changed" is not what the image
+says — so the difference is named rather than glossed.** They sit in the panic
+call-site table (`Location` records: line, col, source path, col), at
+`.rodata+0x1be4a0` and `.rodata+0x1be4c0`, 32 bytes apart, and only their `line`
+fields move: 665 → 674 and 174 → 184. Those two records are `bits.rs:665` →
+`:674`, the spanned-bytes gather
+`&self.data[byte_idx..byte_idx + bytes_needed]` inside `BitReader::read_bits`,
+and `residual.rs:174` → `:184`, `rest.split_at_mut(count)` in `decode_residual`'s
+partition walk — the **two files this change edits**, at lines below its doc
+insertions, shifted by exactly the line counts those insertions add (+9 and +10).
+(The records' path fields read as `frame.rs` / `subframe.rs`, which is why the
+pairing looks wrong at first glance — 665 is past that file's end, and 174 is a
+doc line there; what was verified is the arithmetic and the source, i.e. that the
+line values resolve to the two sites above and that each shift equals this
+change's insertion count.) Both values reproduce from a clean rebuild on their own
+side, so this is not stale-incremental drift. The practical reading: those records
+are read only when a panic *happens*, and the only thing that moved is the line
+number such a panic would print — the code reporting it is the same bytes at the
+same address. The decode path's failures are `Error`s, not panics, and that
+`split_at_mut` is a caller-contract guard, not a reachable stream condition.
+
+**A cross-session note about absolute sizes, because 4b's table is what a
+reviewer reaches for.** `.text` on this host matches 4b's recorded 4a figure to
+the byte (46,008 B), but `.rodata` reads 1,829,760 B where that table records
+1,829,648 B. The pre-change control build above shows the 112 B **already on
+`main`**, before PR 1 and PR 2 — it is this checkout's absolute source-path string
+pool (the panic metadata carries full paths), not a code delta. Recorded here so
+nobody spends an evening hunting 112 B inside the seam.
+
+**The cycle arm: not run — and that is a different statement from "not needed",
+so both are recorded.** No on-target or runner run is in this PR:
+`mgba-test-runner`, `mgba` and `qemu` are none of them on the host that built it
+(4b's precedent for saying so plainly). What the item asks for — `ctrl` against
+the post-seam image, calibration overhead subtracted, the cross-session anchors
+re-stated — is discharged here by an argument stronger than a measurement: on a
+device with no cache and no address-space randomization, an image whose code
+section, `.iwram` contents, and section addresses are *the same bytes at the same
+addresses* executes the same instruction stream, so the post-seam `ctrl` arm
+cannot cost a different cycles-per-frame than the pre-seam one. The anchors
+therefore carry over **unmodified** rather than re-measured: E9/E10 `ctrl` =
+**−2 cyc/frame**, worst indices **@136 / @145**, min **@156 exact**. The run that
+now owes fresh numbers is item 6's on-target run — the one 4b already named —
+which reads them against this image for free. The reading rule (demote inside
+~9–13 cyc/frame of layout noise, carry at mean ≥ ~10%) is **not invoked**, because
+nothing is being carried: this PR claims no perf change and the image agrees with
+it. The pre-named fallback (the vendored-loop overlay) is **not reached** either:
+the generic seam cost nothing measurable, which is the bet the item's shape
+decision — monomorphized, never `dyn` — was placing. PR 3 inherits the seam for
+free, and its differential is now the only place in this item where a cycle
+number can appear.
+
+**PR 3's baseline is this image**: `.text` 46,008 B, `.rodata` 1,829,760 B,
+`.iwram` 812 B, `.ewram` 368 B, `decode_residual` 596 B with the table-count walk
+inlined inside it, at the addresses above. Two facts PR 3 needs are recorded here
+so they are not rediscovered there. (1) The default path never touches the window
+bridge — the incumbent kernel reads through the reader's own primitives — so
+`BitReader::consume`'s shift-by-32 hazard is not reached by anything the core
+ships; `bits`' module doc now says that, correcting PR 1's note which expected PR
+2 to be the caller, and the trap is stated on the trait method for whichever
+window-domain implementor does reach it. (2) The empty-window state for such an
+implementor is the spelled `if n >= 32 { 0 }` leg — the same leg PR 3's twin docs
+and the kernel crate's committed `q = 31` table pin — and the take-back must not
+lean on `consume`.
+
+**The optional feature-matrix gate landed with it**, under the name README's TODO
+gave it: `make flac-gates` = `flac-test` + `flac-test-crc` + `flac-test-scan` +
+`flac-portable-check`, plus the two `crc-check,scan` combination arms (the
+thumbv4t `cargo check`, and the host witness from the gate-neutral cwd). It
+witnesses nothing the numbers above do not already witness — all four
+configurations were run for this landing anyway — and the totals add the way they
+must: **758 passed + 4 ignored** across the four configurations, i.e. 178/181/
+198/201 with one ignored test each. A **combination** is the only arm that can see
+a second instantiation, which is why this is its home. Warm caches, everything
+already built, twice: **0.72 s** and **0.75 s** for the aggregate, the two
+combination arms **0.18–0.21 s** of it. (Immediately after a source edit the same
+command costs 2.95 s — that is not a warm number, and the distinction is the one
+the timing claim above depends on.) README's TODO first bullet is marked landed; the invocation hook and a
+`podman-flac-gates` sibling stay open there.
 
 ### PR 3 — the portable-twin default, with its decision rule pre-declared
 
@@ -6586,3 +6736,16 @@ make one; it can only fail to break the one the overlay owns.
 PR 1 may only *grow* these counts; PR 2 must not move them; PR 3's
 counts are its own business, but its decode output is bit-identical to
 the fixtures by construction or it does not land.
+
+**Re-recorded at PR 2's landing (2026-11-05), which moved none of them:**
+`flac-test` 178 + 1 · `flac-test-scan` 198 + 1 · `flac-test-crc` 181 + 1 ·
+`--features crc-check,scan` 201 + 1 · `spike-test` 15 + 10 · `kernel-test` 20 ·
+`flac-portable-check` green · `make check` clean — and `make flac-gates` now runs
+the first four as one command, with the combination arms added. PR 3's
+codegen reading is measured against the post-seam image, recorded in full under
+"PR 2" above — on the landing host that is `.text` 46,008 B · `.rodata`
+1,829,760 B · `.iwram` 812 B · `.ewram` 368 B. The `.rodata` figure is the
+host-dependent one (it carries absolute source paths; the other three match 4b's
+table to the byte), so PR 3 reads `.text` as a **differential** against its own
+pre-change build and treats the `nm` anchors as the invariant part:
+`LEADING_ONES @ 0x0300022c`, `rice_quotient` live, `decode_residual` 596 B.
