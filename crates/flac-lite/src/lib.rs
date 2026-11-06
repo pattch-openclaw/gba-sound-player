@@ -311,7 +311,12 @@ pub mod residual;
 // The portable hybrid Rice kernel — split-ladder item 5 PR 3's second
 // `residual::RiceKernel` implementor, behind the `rice-hybrid` feature — off
 // by default. It is *not* the default the decode path uses, and the module says
-// why. What the feature decides is only whether a build *carries* it: a measured
+// why — and since PR 4 (2026-11-06) "off by default" is a *measured* state, not a
+// deferral: the on-target cycle reading the pre-registered flip rule was gated on
+// came back slower (+42.6 / +42.7 cycles per decoded sample, +9.71% / +2.64% mean
+// per frame, 314/314 frames), so the rule's "does not flip" arm is the one that
+// applies and this module stays the portable alternative item 6 lifts and rewrites
+// in asm. What the feature decides is only whether a build *carries* it: a measured
 // +2,984 B on the calibration instrument with the feature on and **no hybrid
 // symbol in the image at all** — the same second-implementor effect 4b recorded
 // for the walk, so the reason for the gate and its measured cost live in

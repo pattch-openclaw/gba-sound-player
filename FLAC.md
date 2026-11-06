@@ -5508,9 +5508,23 @@ tables already exist in `examples/arm-kernels/` (dual-witnessed, PR #80);
 **the twins become the core's default Rust path** and the asm becomes
 the overlay's implementation; (b) the guarded i32 integrator path;
 (c) `iwram-pin` enablement; (d) the convert word-store kernel when it
-lands. The overlay owns no decode semantics of its own — correctness
-remains the core's witnesses (same golden tables, same `flac -d`
-bit-exactness).
+lands.
+
+**Measured correction (2026-11-06, item 5 PR 4): the bolded half is the half the
+measurement refused.** The core's default Rice kernel is still `TableCountKernel` —
+the portable twin was measured against it on-target at **+42.6 / +42.7 cycles per
+decoded sample slower** (314/314 frames, tables pinned in IWRAM, both arms decoding
+bit-identically) and the pre-declared rule resolved to its "does not flip" arm. What
+this proposal got right is the other half: the win does belong to the platform-bound
+realization (E10's asm: −349/−348 cyc/sample on the same platform), and the core
+carrying the twin as a *portable alternative behind a feature* — not as its default —
+is where it stayed. Statement of record now: the core keeps the incumbent as its
+default, carries the twin as an alternative and as item 6's starting point, and the
+overlay owns the realization. Full numbers in
+[item 5, PR 4](#pr-4--the-reading-taken-2026-11-06).
+
+The overlay owns no decode semantics of its own — correctness remains the core's
+witnesses (same golden tables, same `flac -d` bit-exactness).
 
 **The seam is the real engineering cost.** The kernels replace the
 per-sample codeword step inside `residual::decode_rice_partition`, so
@@ -5542,10 +5556,25 @@ the generic seam, not silently abandoned.
      per-sample `sample_step` signature named in the proposal above) is
      settled by evidence already in this tree, recorded in that plan — no
      design-probe precedes it.
+   - **Landed 2026-11-06, PRs 1–4.** The seam is open (`RiceKernel`,
+     monomorphized, default = today's table-count loop) and the portable twin is
+     in the core behind `rice-hybrid`, differentially witnessed on the corpus and
+     on-target. **The "default" half of this item's title closes as a measured
+     negative**: PR 4's on-target reading puts the twin at +42.6 / +42.7 cycles per
+     decoded sample against the incumbent (314/314 frames), so the default stayed
+     `TableCountKernel` — see
+     [PR 4 — the reading, taken](#pr-4--the-reading-taken-2026-11-06). Nothing
+     about the seam's shape or the twin's correctness is in question; the record
+     says the mechanism is right and the portable *realization* is the cost.
 6. `flac-lite-gba`: asm kernels over the seam + guarded i32 + pin;
    live-link same-image witness vs the E9 stack; then the rate-play
    rewire — the spike `driver` + generated offset table (GAFP stand-in)
    retires toward the real manifest (Phase 2 step 6).
+   - **Item 5's number is this item's baseline**: the cycles to beat are recorded
+     in PR 4's record (`l0_stereo` mean 1,788,842 / worst 1,797,752; `l4_stereo`
+     mean 6,609,128 / worst 6,643,224), and E10's ARM arm is already −349/−348
+     cyc/sample against it. The realization is the overlay's job — that is the half
+     the measurement supports.
 
 **How these entries are labeled (convention set 2026-11-03).** The two
 ladders above are ordered checklists, not a step counter: the portability
@@ -6353,6 +6382,18 @@ the live-link witness, per the E2b lesson.
 
 ## Split-ladder item 5 — the `RiceKernel` seam: three PRs (plan of record, 2026-11-05)
 
+**Status (2026-11-06): PRs 1–4 have all landed, and the item's open fork is
+closed — by measurement, in its negative arm.** The plan below is the plan as it
+was written: three PRs. PR 3 shipped the twin and moved its *decision* to a
+**PR 4** whose only content was the flip and the on-target reading that decides it.
+PR 4 ran the same day, the reading says the twin is slower, and so the default
+does **not** flip: `decode_rice_partition` still names `TableCountKernel`, the
+twin stays behind `rice-hybrid` exactly where PR 3 left it, and the proposal's
+"the twins become the core's default Rust path" line is corrected below as a
+measured negative. Record: [PR 4 — the reading, taken](#pr-4--the-reading-taken-2026-11-06).
+The section heading keeps "three PRs" so existing anchors resolve; the fourth is
+documented as what it is — the deferred half of the third.
+
 **Plan, not measurement.** Expands PR-ladder item 5 ("`RiceKernel` seam +
 portable-twin default") into **three sequential PRs**, on Sam's 2026-11-05
 direction that the eight-rung draft worked up on the way here is too fine
@@ -6405,6 +6446,7 @@ loop (`crates/flac-lite/src/residual.rs:247-279`).
 | **1** | `bits`: the window-domain bridge only — `rev32` + a `KernelWindow { w, v, ptr, end }` hand-out/take-back pair on the live reader. Pure Rust, division-free, no new `unsafe` (the ratified exception count stays at one). Module docs carry the shape decision + the two facts that force it. **Nothing in the decode path calls it.** | The one assumption in this item that could turn out **false**. It gets tested in isolation before any generic, trait, or measurement depends on it. | Invariant + round-trip tests (unit, `core`-only) | The two window domains are not actually isomorphic |
 | **2** | The seam: `residual.rs:247-279` extracted into a function shaped to the kernel contract (commit 1, a no-op move), then `RiceKernel` + `decode_rice_partition` generic over it, instantiated **only** with today's table-count loop as the default impl (commit 2). The escape path and the §9.2.7.3 `quotient > (u32::MAX >> order)` / `folded == u32::MAX` guards are untouched. | Pure plumbing with zero semantic change, so its whole risk surface is **codegen** — nothing else belongs in it. | Codegen (link-line section bytes) + cycles (live-link, with cross-session anchors) | Monomorphization / inliner coupling costs samples (the E2b lesson) |
 | **3** | The portable-twin default *behind* the hook: `CTZ8` / `REV8` / `BRUIJN_INDEX` (the 544 B the E10 plan budgeted), `ctz32`, `word_skip`, `rev8`, the whole-partition twin, then the default flip. `iwram-pin` grows to gate the new tables. | The only PR in the item that changes the decode *mechanism*, on a claim the proposal itself labels "argued, not measured, on other targets". | Two-mechanism differential on real partitions + bit-exact vs `flac -d` + on-target cycles | The portable default is slower on the founding platform |
+| **4** *(the deferred half of 3, not a new rung)* | The flip itself — the one type argument in `decode_rice_partition` — plus the `ctrl` reading against PR 3's shipped image and the decision the pre-declared rule carries. Nothing else: no design re-opening, no new seam, no new tables. | PR 3's landing host had no cycle-measurement environment, so the fork could not be decided there without substituting a preference for a measurement. Keeping the decision in its own PR is what makes the *only* difference between the two arms the mechanism. | Cycle reading: two images, paired per frame, calibration subtracted; plus the bit-exactness of both arms' decode proof | The portable default is slower on the founding platform — **and it is**: PR 4 lands the negative arm (see [PR 4](#pr-4--the-reading-taken-2026-11-06)) |
 
 ### PR 1 — `bits`: the window-domain bridge
 
@@ -6864,6 +6906,16 @@ missing and the fork is genuinely open. The pre-named fallback (the vendored-loo
 overlay) is not reached: nothing here is being carried. No GBA real-time claim is
 made or implied; the item still cannot make one.
 
+**Discharged 2026-11-06, same day.** [PR 4](#pr-4--the-reading-taken-2026-11-06)
+reran exactly the arm named above — `ctrl` against this image and the same arm
+against the flipped one, calibration subtracted, rule unchanged — on a host that did
+have the runner. The reading is the **negative** arm: the twin is +42.6 / +42.7
+cycles per decoded sample slower, uniformly, and the default stays
+`TableCountKernel`. Everything above this paragraph stands as PR 3 wrote it, including
+its own statement that the fork was open on its host; the flip-arm anchors it
+recorded reproduced byte for byte, which is what makes the two records one
+measurement rather than two.
+
 **Baselines to hold, re-recorded at this landing (2026-11-06):** `flac-test`
 178 + 1 · `flac-test-crc` 181 + 1 · `flac-test-scan` 198 + 1 · **`flac-test-rice`
 194 + 1** · `crc-check,scan` 201 + 1 · `crc-check,scan,rice-hybrid` 217 + 1 ·
@@ -6875,6 +6927,261 @@ Codegen baselines: the ROM-links image is **unchanged at `.text` 46,008 B**
 336 B and `decode_residual` at 596 B — the three `nm` anchors PR 2 named are
 untouched in the configuration it ships — and the `rice-hybrid` configuration's
 image is 48,992 B with the attributed deltas above.
+
+### PR 4 — the reading, taken (2026-11-06)
+
+**The measured negative: the portable twin does not clear the bar, so the core's
+default Rice kernel stays `TableCountKernel`.** This PR's content is the fork PR 3
+pre-declared, applied to a reading, and nothing else: no seam change, no new
+tables, no re-opening of the design, no re-negotiation of the bar. It ran here
+because the one thing PR 3's record named as missing is present on this host —
+`mgba-test-runner` — so the reading that was owed got taken the same day the
+deferral was written down.
+
+**The arms.** Control = PR 3's shipped image, built from `HEAD` **before any source
+edit**, section-witnessed first (`.text` 46,008 B `f0f88c33d150…`, `.rodata`
+1,829,760 B, `.iwram` 812 B, `.ewram` 368 B, `.entrypoint` 380 B; `LEADING_ONES @
+0x0300022c`, `rice_quotient` live at 336 B, `decode_residual` at 596 B — the three
+anchors PR 2 named, all present, which is the configuration the item ships).
+Flip = the same tree with the default pointed at the twin, and the twin's module
+made unconditional so the default build can name it (see the "one-line flip" note
+below), rebuilt by the same `make native-spike-rom` — no `--cfg`, no asm, no kernel
+crate: the *shipped* build shape, which is what the flip decision is about. Each
+image run twice under `timeout -k 5 280 mgba-test-runner <rom>`, output redirected to
+files; both images built in one session from one checkout, run back-to-back. The
+instrument's determinism is witnessed, not assumed: the `***` cycle lines are
+byte-identical between the two runs of each image (`diff` empty on that line set),
+as are the calibration lines across all five runs.
+
+**What the flip actually costs to express — the "one-line flip" claim, tested.**
+PR 2's record ("makes PR 3's default flip one line, attributable to one cause") and
+PR 3's record ("the flip must stay a one-line change") both make the claim, and
+inside the decode path it is exactly true:
+
+```rust
+ // crates/flac-lite/src/residual.rs — decode_rice_partition, the only line that names a default
+-decode_rice_partition_with::<TableCountKernel>(reader, header, out)
++decode_rice_partition_with::<HybridRiceKernel>(reader, header, out)
+```
+
+But the twin's module is `#[cfg(feature = "rice-hybrid")] pub mod rice_hybrid;`, and
+a feature that is off does not compile the module, so there is no line to flip until
+the twin exists in the build. Two shapes make it exist, and they are not
+equivalent: **(a)** drop the `cfg` and keep the feature as an intent marker (what
+this measurement ran — `pub mod rice_hybrid;` unconditional, so the default build
+carries the module and the +2,984 B second-instantiator growth PR 3 attributed, but
+nothing calls it), or **(b)** keep the `cfg` and turn the feature on by default
+(`default = ["rice-hybrid"]`), which drags that same +2,984 B into *every* build
+including the ROM's, because the growth is triggered by the twin being *in the
+build*, not by it being called. So: "one line" is true of the decode path and false
+of the build. Recording it because the next person to make a *real* flip will
+otherwise buy the short version; since the answer came out no, neither shape was
+chosen and the tree reverted.
+
+**The numbers** (cycles, calibration overhead 22 subtracted by the harness itself;
+both arms print `overhead_estimate=22 stable=true nets=[0 0 0 0 0]`, so what is
+being compared is the net). Per clip, 157 frames each, all frames paired:
+
+| clip | arm | mean/frame | worst frame | min frame (the short tail frame) | sum |
+|---|---|---|---|---|---|
+| FIXED `l0_stereo` | control (PR 3's image) | 1,788,842 | **1,797,752 @136** | 454,632 @156 | 280,848,260 |
+| | flip arm | 1,962,492 | **1,972,237 @136** | 498,079 @156 | 308,111,218 |
+| | **delta** | **+173,649 (+9.71%)** | +174,485 | +43,447 | **+27,262,958** |
+| LPC `l4_stereo` | control | 6,609,128 | **6,643,224 @145** | 1,411,224 @156 | 1,037,633,086 |
+| | flip arm | 6,783,293 | **6,818,247 @145** | 1,454,613 @156 | 1,064,976,966 |
+| | **delta** | **+174,165 (+2.64%)** | +175,023 | +43,389 | **+27,343,880** |
+
+Paired per-frame deltas, which is the number of record and not the percentages:
+**+173,649** cycles/frame mean on FIXED and **+174,165** on LPC; medians
++174,477 / +175,002; the 156 *full*-frame deltas sit in a band of
+174,448–174,541 (FIXED) and 174,893–175,124 (LPC) — ±0.03% and ±0.07% of their
+own means; per decoded sample (blocksize × 2 ch, and 640,000 samples per clip
+including the 512-sample tail frame): **+42.60** and **+42.72 cycles/sample**, with
+the short frame giving +43,447/+43,389 = 42.43/42.37 c/sample — the same constant
+on a frame a quarter the size. **314 of 314 frames slower; 0 inside the ~9–13
+cyc/frame band** the plan names as layout noise; no frame faster in either clip.
+
+**Applying the rule as written.** The arms were "twin within the noise band or
+faster → the default flips" / "twin slower past the bar → the default does not
+flip: the incumbent stays, the twin stays where it already is as the overlay's host
+witness, and the proposal's line is corrected here as a measured negative". The
+second arm, by a factor of ~13,000 over the band, on both clips, in every frame.
+One note so the relative figures are not mis-read later: the FIXED arm's mean is
+**+9.71%**, and a reader holding the other clause's "carry at mean ≥ ~10%" in mind
+might call that a near-miss. That clause is the E-menu's *gain* threshold (when a
+measured win is big enough to carry forward); this fork's bar is the noise band,
+stated in **cycles per frame**, and under that bar LPC's +2.64% and FIXED's +9.71%
+are the *same* measurement — +174K cycles per frame. The percentages differ only
+because an LPC frame already costs 3.7× a FIXED one; the per-sample cost the flip
+adds is identical on both. Decided: no flip.
+
+**PR 3's flip-arm anchor table reproduces from a different host, to the byte.** The
+flip image measures `.text` **50,000 B** (+3,992 — exactly the instruction-stream
+delta PR 3 said the flip would cause), `.iwram` **1,068 B** (+256 net — exactly the
++544 B of tables minus the 256 B of the retired `LEADING_ONES`, which PR 3 predicted
+would leave the image), with **`CTZ8` at `0x0300022c` and `REV8` at
+`0x0300032c`** — the incumbent's freed slot — `decode_residual` 596 → **3,028 B**,
+`emit` live at **800 B**, and `rice_quotient` (336 B) and `LEADING_ONES` (256 B)
+gone. A cross-session confirmation of PR 3's codegen table, which is worth having
+because PR 3 could only quote it as a probe, and it is what licenses comparing this
+cycle reading against PR 3's recorded numbers at all.
+
+**Both arms decode identically — the comparison is between two correct images.**
+All **314** per-frame running-FNV chain lines (157 per clip, both clips) are
+byte-identical across the two images — `diff` empty — and the terminal proofs match
+in both arms: region FNVs `l0_stereo 0x5A0096689BE6EDCE`, `l4_stereo
+0x5EE2546D35776FD6`, PCM FNV `0x54C7B356621B6E15` `[MATCH]`, and the
+`walk complete frames=157/157 samples=320000` checkpoints. That is E10's
+"sample-equality 314/314" witness again, but obtained from the shipped decode path
+rather than a probe: the two mechanisms are bit-identical *on the device*, which is
+the precondition for the cycle difference to mean anything.
+
+**What the uniformity rules in, and the instrument-sensitivity control that backs
+it.** A delta that is constant per decoded sample, on two clip families with
+3.7× different frame costs, on a short frame as on a full one, in one sign, with
+the worst-frame *indices* unchanged (136/145 in both arms), is not code-layout
+noise — and there is a direct control for that, because after the decision the tree
+reverted and the reverted build was run too: the docs-only image (`.text`,
+`.iwram`, `.ewram`, `.entrypoint` **byte-identical** to the control; `.rodata`
+differing in exactly **one byte** of 1,829,760 — the low byte of one word, 196 →
+201, at `.rodata` offset `0x1be4c0` — and that word is **identified, not guessed**:
+the records around it are the crate's **panic-location table** (each a `file`
+pointer, path length, line, column — `bits.rs` (72-char path) line 696 col 29,
+`frame.rs` (73) 599/23, `residual.rs` (76) …/33, `subframe.rs` (76) 557/27,
+555/27, 342/9, 361/63), and the changed record names `residual.rs` line 196 **col
+33**, which is the `split_at_mut` call in the sub-block loop (`grep -bo` puts that
+call at byte offset 32 on its line — column 33, exactly where the record says). The
+docs-only edit added a net +5 lines above that call site (hunks at 40/44/51: 0, +3,
++2 — nothing between 61 and 196), so the record moved 196 → 201 and the instruction
+stream did not move at all. That is the *reason* the item's baseline rule is written
+the way it is — `.text` plus the `nm` anchors are the code invariant, `.rodata`
+content is not: a comment edit above a panicking call site is a `.rodata` event and
+nothing else. It prints **bit-identical timing** anyway — same sums, same min/max, same
+frame indices, same calibration, and byte-identical `***` cycle lines across two
+runs of it and across the pre-edit control. So: with the instruction stream
+unchanged the image repeats to the cycle, and the run-to-run determinism of this
+harness is not in question. That does not price the ~9–13 cyc/frame band earlier
+records budget for *recompiled* layouts — this control kept the layout — but it does
+say the band cannot explain a reading of this size, and it puts an upper bound on
+what any uninstrumented re-run of a fixed image can be hiding: zero.
+
+**A mechanism for the loss, stated as a reading and not an attribution.**
+`thumbv4t-none-eabi` is Thumb-1: there is no `RBIT`, no `REV`, no `CLZ` in the
+instruction set, and the image agrees — disassembling the live kernel body (`emit`,
+800 B, 394 Thumb instructions) finds **zero** of those mnemonics and instead 85
+`ldr` + 12 `ldrb`, 45 `str`, 33 `movs`, 27 `ands`, 18 `lsls`, 18 `lsrs`, 7 `eors`,
+6 `orrs`. The walk's reversals and counts are therefore shift/mask/table-read
+sequences (`rors` appears 6 times — Thumb-1's rotate-shift *moves*, not ARM's `ROR`
+barrel shifter), and the body opens `push {r4,r5,r6,r7,lr}` + `sub sp, #68`: a
+68-byte stack frame around a per-sample loop, i.e. the state that ARM-mode asm keeps
+in registers is living in memory here. What this does **not** do is price the legs.
+Tier 1 / tier 2 / tier 3 / refill attribution would need an E8-style sub-stage probe
+over the twin, and PR 4 deliberately did not build one — the decision did not need it
+(the bar is cleared by 13,000×), and the probe would be item 6's if it wants one.
+
+**Ruled out, each with its witness.** *Table placement* — the flip arm's `CTZ8`/
+`REV8` are in `.iwram`, zero-wait, at the same slots E10's ARM kernel's tables
+occupied and the slot the incumbent's own table occupies in the control; +256 B
+against a 32 KB budget, which E10's own line calls immaterial. *The harness* —
+identical calibration output (22, stable, nets `[0]`), same clips, same frame
+counts, both runs of each image byte-identical. *A decode-shape difference* — the
+FNV chains above. *Sign-flipping noise* — 314/314 frames in one direction. *The
+instrument being unrepeatable* — the control reproduces PR 3's own shipped-image
+anchors exactly (`f0f88c33d150…`) and PR 3's flip-arm anchors exactly, from a
+different host and a different session.
+
+**What lands in the tree.** Nothing in the decode path: the flip existed only as
+the measured arm, and the revert control re-ran the shipped build — `.text` again
+`f0f88c33d150…`, `.iwram` 812 B, `LEADING_ONES @ 0x0300022c`, `rice_quotient` 336
+B, `decode_residual` 596 B, i.e. byte-for-byte the PR 3 landing image whose witness
+the baseline was. What lands instead is the *state of the decision*, written down
+where a reader will look: `Cargo.toml`'s `rice-hybrid` note (off by decision, not
+deferral, with the numbers), `src/lib.rs`'s module comment, `residual.rs`'s module
+STATUS + the `TableCountKernel` and `decode_rice_partition` docs ("the default
+names the incumbent **by measurement**"), `rice_hybrid.rs`'s STATUS (the twin
+measured on-target; its tables were pinned; it lost), both READMEs, and
+`tests/rice_two_mechanism_differential.rs::the_default_still_names_the_incumbent`,
+which stops being a placeholder for a decision that has not been taken and becomes
+an assertion about a settled one — its message now reads "anyone flipping this line
+owes a newer measurement". Assertions unchanged, so the witness is unchanged.
+
+**Gates re-run to confirm the no-change rather than assume it.** `flac-test` 178 +
+1 · `flac-test-crc` 181 + 1 · `flac-test-scan` 198 + 1 · **`flac-test-rice` 194 +
+1** · `crc-check,scan` 201 + 1 · `crc-check,scan,rice-hybrid` 217 + 1 ·
+`flac-portable-check` green (second bare-metal target, `scan,rice-hybrid`) —
+`make flac-gates` aggregate **1,169 passed + 6 ignored**, identical to PR 3's
+landing count; `spike-test` **15 + 10** (bit-exact against `flac -d`),
+`kernel-test` **20**, `make check` clean. Zero behavior change, zero count change:
+that is what a PR whose only code effect was inside a measured arm should look like.
+
+**A tension to hold, now with all four corners measured on the same platform.**
+E10's four-arm table (2026-10-30, quoted verbatim from that record) puts `ctrl` —
+the production **Rust** table-count path — at FIXED sum 280,206,731 and `tab` —
+E2b's **asm** table-count kernel carried verbatim — at 280,212,854: a Rust
+realization and an asm realization of the *table-count* map measuring equal (within
+2 cyc/frame); and its `arm` — the **ARM-mode asm hybrid** — at 167,911,108,
+**−40.08%** against `tab` (≈ −349 c/sample). PR 4 supplies the missing fourth
+corner: the **portable-Rust hybrid** at 308,111,218, **+9.71%** against the
+production Rust table-count (280,848,260). Read together on one platform, the same
+*map* swings about fifty percentage points on who realizes it: ARM-mode asm wins it
+by forty, portable Rust loses it by ten, and for the incumbent map the two
+realizations tie. That is the strongest thing this record can honestly say, it is
+consistent with the disassembly above (no `RBIT`/`REV`/`CLZ` in Thumb-1, and the
+ARM-mode kernel is a different instruction set with a hand allocator), and it is
+item 6's brief in one sentence: the map is not the finding, the realization is.
+
+**Two caveats so it is not over-read.** (1) E10's `arm` is not walk-against-walk:
+that record says its kernel "subsumes the whole per-sample loop — fold, remainder,
+drain, refill", so its −40% includes the value/fold leg, which PR 4's twin never
+touches (that leg is the integrator's, and the i32 item's). The comparison that *is*
+clean is the pair of controls — Rust table-count vs asm table-count, equal on E10's
+image — because there both arms are the same map. (2) Cross-record comparisons here are shape-comparable,
+not instrument-identical: PR 4's control reads **280,848,260** where E10's `ctrl`
+read **280,206,731** (+0.23% on FIXED — as close as makes sense across six days, one
+window-domain refactor and a different host), but **1,037,633,086** where E10's
+`ctrl` read **970,588,441** (**+6.9% on LPC** — and inside E10's own image `ctrl`
+and the asm `tab` row agree, 970,588,441 vs 970,594,564, so the gap is between
+records and not within one). This record offers no explanation for that LPC gap. PR 1's landing gate
+was a *same-image* reading, which is the instrument this series trusts; a cross-host,
+cross-era pair is not a regression claim. It is a standing question for item 6 to
+close from a same-image baseline **before** anyone quotes cycles across records —
+which is also why PR 4's own numbers are stated against its own control, in its own
+session, and not as absolute costs of a mechanism.
+
+**What this record does *not* settle.** Whether a *better-written* portable-Rust
+kernel would beat the incumbent. Neither E10 nor PR 4 tests that — PR 4 tested the
+twin as written, which is the corpus-differential witness made executable, not a
+kernel anyone optimized for Thumb-1 register pressure or for a 32-bit source window.
+If someone wants that sign settled it is a new probe, and an E8-style sub-stage
+probe would price the legs rather than another whole-kernel arm.
+
+**What this record decides, stated narrowly.** **The twin as written, in the core,
+on the founding platform, costs a constant ~42.6 cycles per sample against the
+incumbent, so the core's default does not move.** Not "Rust can't do it", and not a
+verdict on the hybrid map — the map's own number on this platform is E10's −349
+through −348 c/sample.
+
+**What it changes downstream (item 6, and only as a consequence).** The overlay's
+argument is stronger, not weaker: E10's ARM realization measures −349/−348
+cyc/sample against the incumbent on this platform, and PR 4 adds "+42.6/+42.7 for
+the portable Rust form of the same map on the same platform". The win lives in the
+realization, not the algorithm — which is the core/overlay split's whole
+justification, now measured from both sides. Item 6's job is therefore not "wire
+the core's hybrid into the ROM" but own the realization: asm kernels over the seam,
+with the core's semantics and the core's witnesses, against a baseline this item
+left exactly where it found it.
+
+**No GBA real-time claim, and the instrument's own verdict line says why.** Both
+arms print `budget: … vs budget=1048750 [OVER BUDGET]` (control worst nets
+1,797,752 / 6,643,224; flip arm 1,972,237 / 6,818,247) — the 32 kHz/2048-block
+target stays out of reach for this decode path, unchanged by this PR and unchanged
+by the flip either way. The spike's budget arithmetic itself needs the correction
+spike PR 5 carries; that is a separate ladder and is not touched here. **Limits:**
+the readings are mGBA's on this host for the two clips the instrument embeds; the
+per-sample constant and the sign are stable across runs, images and sessions, but
+the *percentages* are clip-shape-dependent, which is why the paired per-frame delta
+is the number of record; nothing here measures real hardware; and no attribution to
+the walk's legs was made.
 
 ### What was consolidated out of the eight-rung draft (so it is not re-litigated)
 
@@ -6962,3 +7269,27 @@ untouched. **PR 4's baseline is the image PR 3 ships**, with the flip's own
 numbers already taken beside it (50,000 B / `.iwram` 1,068 B / `decode_residual`
 3,028 B): the reading PR 4 owes is the on-target `ctrl` comparison, not a new
 codegen one.
+
+**Re-recorded at PR 4's landing (2026-11-06).** Gate counts unchanged in every
+configuration — `flac-test` 178 + 1 · `flac-test-crc` 181 + 1 · `flac-test-scan`
+198 + 1 · `flac-test-rice` 194 + 1 · `crc-check,scan` 201 + 1 ·
+`crc-check,scan,rice-hybrid` 217 + 1 · `flac-portable-check` green · `spike-test` 15 + 10 ·
+`kernel-test` 20 · `make check` clean — `make flac-gates` aggregate **1,169 passed +
+6 ignored**, the same as PR 3's. Image baselines unchanged in the configuration a ROM
+links, re-verified after the flip arm and the revert: `.text` 46,008 B
+`f0f88c33d150…` · `.iwram` 812 B · `.ewram` 368 B · `.entrypoint` 380 B ·
+`LEADING_ONES @ 0x0300022c` · `rice_quotient` 336 B live · `decode_residual` 596 B —
+and the flip arm reproduces PR 3's recorded anchors exactly (50,000 B / `.iwram`
+1,068 B / `CTZ8 @ 0x0300022c`, `REV8 @ 0x0300032c` / `decode_residual` 3,028 B /
+`emit` 800 B / incumbent gone), which is the cross-session witness that both records
+describe one build. **The cycle baseline for item 6 is now this** (calibration
+overhead 22, nets): `l0_stereo` mean 1,788,842 / worst 1,797,752 @136 / sum
+280,848,260; `l4_stereo` mean 6,609,128 / worst 6,643,224 @145 / sum
+1,037,633,086 — the same numbers as E10's on-target record's `ctrl` arm in shape,
+and the numbers any item-6 kernel has to beat. Note the one `.rodata` subtlety PR 4
+exposes: a docs-only edit leaves `.text`/`.iwram`/`.ewram`/`.entrypoint` identical
+and moves a single 4-byte field in `.rodata`'s panic-location table (196 → 201, the
+`split_at_mut` call site in `residual.rs`, shifted by the five lines the edit added
+above it — see PR 4's record), while
+the emulator's timing report comes out bit-identical — so `.rodata` *content* is not
+a codegen signal, and `.text` plus the `nm` anchors remain the ones that matter.

@@ -64,8 +64,17 @@ probe wrote in ARM assembly (CTZ8 tier 1 / De Bruijn tier 2 / word-skip tier 3 /
 REV8 refills), owning the bit window across a whole partition through
 `BitReader::kernel_window` — the first caller of that bridge. **Decoding is
 unchanged in every configuration**: the one line that names the default still
-names `TableCountKernel`, and a test asserts it, because whether to flip is a
-decision gated on an on-target cycle reading this host cannot take (that is PR 4).
+names `TableCountKernel`, and a test asserts it. Whether to flip was gated on an
+on-target cycle reading this host could not take when PR 3 landed; **PR 4 took it
+(2026-11-06) and it declined the flip** — the hybrid runs **+42.6 / +42.7 cycles
+per decoded sample slower** than the incumbent on the same instrument (+9.71% FIXED
+/ +2.64% LPC mean per frame, 314/314 frames slower, 0 inside the ~9–13 cyc/frame
+layout-noise band), with its tables pinned in `.iwram` at the very slots the
+incumbent's occupy, and both images producing bit-identical PCM. `FLAC.md`, item 5
+PR 4, carries the table and the reading. So the module stays exactly where PR 3 put
+it — the portable alternative, and the thing item 6 lifts and rewrites in asm —
+because the algorithm's win belongs to the ARM realization (E10: −349/−348
+cyc/sample), not to a portable Rust form of it.
 Why a feature rather than a module: measured on the same instrument, with
 `rice-hybrid` off the ROM-links image is **byte-for-byte the pre-PR-3 image**
 (`.text` 46,008 B, same sha, `nm` identical); with it on `.text` is **+2,984 B**

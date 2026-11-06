@@ -37,27 +37,32 @@
 //!   nothing but method, partition order, and per-partition param/escape +
 //!   raw width). FLAC.md → "Prior assumptions".
 //!
-//! STATUS (2026-11-06): **the Rice kernel seam is open, and a second
-//! implementor exists behind a feature** — [`RiceKernel`] + [`TableCountKernel`]
-//! (PR 2), which is the decode path, and
+//! STATUS (2026-11-06): **the Rice kernel seam is open, has two implementors,
+//! and the default is decided by measurement, not by deferral** —
+//! [`RiceKernel`] + [`TableCountKernel`] (PR 2), which *is* the decode path, and
 //! [`crate::rice_hybrid::HybridRiceKernel`], the portable hybrid twin, which
-//! exists only in a build with `rice-hybrid` on and is not the default in any
-//! build (split-ladder item 5, PRs 2–3; the module states what it is and the
-//! `Cargo.toml` note states the measured +2,984 B that made it a feature).
-//! Zero behavior change from either PR: the one instantiation the crate's decode
-//! path uses is still the loop that was already here, chosen on the one line of
+//! exists only in a build with `rice-hybrid` on and was measured against this
+//! mechanism on-target on 2026-11-06 (split-ladder item 5, PRs 2–4). PR 4's
+//! reading is the item's last word on the default: the twin is **+9.71% FIXED /
+//! +2.64% LPC slower per frame** (+42.6 / +42.7 cycles per decoded sample,
+//! uniformly across 314/314 frames, zero inside the layout-noise band), so the
+//! pre-registered fork resolves to "the default does **not** flip". Zero behavior
+//! change from any of the four PRs: the one instantiation the crate's decode path
+//! uses is the loop that was already here, chosen on the one line of
 //! [`decode_rice_partition`]; and no crate outside this one implements the trait
 //! yet — that is item 6 (`flac-lite-gba`, which links none of this into the ROM
-//! today). [`decode_rice_partition_with`] became `pub` in PR 3 for one reason:
-//! PR 3's witness is a caller *outside* this crate running both mechanisms over
-//! the same real partitions (`tests/rice_two_mechanism_differential.rs`, which
-//! is `required-features = ["rice-hybrid"]`); nothing above this module threads
-//! a kernel choice, which is item 6's to make. Why the hook is whole-partition
-//! rather than per-sample is argued on the trait; the window half of the seam
-//! (the `rev32` bridge) landed inert in PR 1 and is argued in `bits`' module
-//! docs — its only caller is the twin, so the bridge is unreachable in a default
-//! build and in any build that does not name a window-domain kernel at all. The
-//! record lives in `FLAC.md` under "split-ladder item 5", PR 3.
+//! today), and PR 4's number is the strongest argument item 6 has for owning the
+//! *realization* rather than the algorithm. [`decode_rice_partition_with`] became
+//! `pub` in PR 3 for one reason: PR 3's witness is a caller *outside* this crate
+//! running both mechanisms over the same real partitions
+//! (`tests/rice_two_mechanism_differential.rs`, which is `required-features =
+//! ["rice-hybrid"]`); nothing above this module threads a kernel choice, which is
+//! item 6's to make. Why the hook is whole-partition rather than per-sample is
+//! argued on the trait; the window half of the seam (the `rev32` bridge) landed
+//! inert in PR 1 and is argued in `bits`' module docs — its only caller is the
+//! twin, so the bridge is unreachable in a default build and in any build that
+//! does not name a window-domain kernel at all. The record lives in `FLAC.md`
+//! under "split-ladder item 5", PRs 3 and 4.
 
 use crate::bits::BitReader;
 
@@ -339,6 +344,16 @@ pub trait RiceKernel {
 /// "do not delete them" invariant is therefore about the *build*, not about what
 /// the linker happens to keep, and it is the `rice-hybrid` gate that keeps both
 /// mechanisms observable in one checkout.
+///
+/// **This loop is the default by measurement now, not by deferral.** PR 4 took the
+/// on-target reading the flip was gated on (2026-11-06, `mgba-test-runner`, the
+/// calibration instrument, both clips, two byte-identical runs per arm) and the
+/// twin came back slower on both arms: +9.71% / +2.64% mean per frame, a constant
+/// **+42.6 / +42.7 cycles per decoded sample**, every one of 314 frames slower,
+/// none inside the ~9–13 cyc/frame layout-noise band. `FLAC.md` → split-ladder
+/// item 5, PR 4, carries the table and the reading; the short version is that the
+/// algorithm's win belongs to the ARM realization (E10: −349/−348 cyc/sample) and
+/// the portable Rust realization does not inherit it on this target.
 pub struct TableCountKernel;
 
 impl RiceKernel for TableCountKernel {
@@ -472,12 +487,23 @@ pub fn decode_rice_partition_with<K: RiceKernel>(
 /// is attributable either to the generic seam or to the swapped mechanism, never
 /// to both (FLAC.md's item-5 invariant: do not fold the twin flip into PR 2).
 ///
-/// **It still names [`TableCountKernel`] after PR 3.** The twin
-/// ([`crate::rice_hybrid::HybridRiceKernel`]) landed behind the hook, witnessed
-/// against this mechanism sample-by-sample on the committed corpus, and the
-/// pre-declared bar it has to clear is an *on-target cycle* bar that this host
-/// cannot read. Nothing here flipped, and the non-flip is recorded rather than
-/// left implied — see `FLAC.md`, "split-ladder item 5", PR 3.
+/// **The default names [`TableCountKernel`] by measurement, and PR 4 is the
+/// reading that decided it** (2026-11-06). The twin
+/// ([`crate::rice_hybrid::HybridRiceKernel`]) landed behind the hook in PR 3,
+/// witnessed sample-by-sample against this mechanism on the committed corpus, and
+/// PR 4 ran the on-target cycle arm the pre-declared fork was waiting for: same
+/// instrument, same clips, same harness, two images differing only in this line.
+/// The twin is **+42.6 / +42.7 cycles per decoded sample slower** (+9.71% FIXED /
+/// +2.64% LPC mean per frame; 314/314 frames slower; 0 frames inside the
+/// layout-noise band; both images bit-identical in the PCM they produce, and the
+/// flip image reproduced PR 3's recorded flip-arm codegen exactly — `.text`
+/// 50,000 B, `.iwram` 1,068 B, `CTZ8`/`REV8` pinned at the `LEADING_ONES` slot).
+/// That is the fork's "twin slower past the bar" arm, so the default stays here
+/// and the proposal's "the twins become the core's default Rust path" line is
+/// corrected in the record as a measured negative. Nothing about this line's shape
+/// changed: the flip remains one type argument wide, and the source-level
+/// assertion in `tests/rice_two_mechanism_differential.rs` is what keeps it that
+/// way in both directions now.
 fn decode_rice_partition(
     reader: &mut BitReader<'_>,
     header: &PartitionHeader,
