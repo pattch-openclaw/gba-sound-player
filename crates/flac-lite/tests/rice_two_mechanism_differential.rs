@@ -6,9 +6,14 @@
 //! run, an order-30 remainder, a truncated codeword ending mid-byte) are legs no
 //! caller in the crate reaches yet. This file is the other half of PR 3's
 //! witness: the partitions the corpus actually contains, walked by both
-//! mechanisms at once. PR 3 does **not** make the flip it was planned to make —
-//! that is PR 4's, and it needs an on-target cycle reading this host cannot take —
-//! so the second test here is what keeps that deferral from becoming a drift.
+//! mechanisms at once. PR 3 did **not** make the flip it was planned to make; PR 4
+//! took the on-target cycle reading that flip was gated on (2026-11-06: the
+//! calibration instrument under `mgba-test-runner`, both clips, two runs per arm),
+//! and the reading came back **slower** — +9.71% FIXED / +2.64% LPC mean per frame,
+//! +42.6 / +42.7 cycles per decoded sample, 314/314 frames slower, 0 inside the
+//! ~9–13 cyc/frame layout-noise band. So the default is decided by measurement now
+//! rather than deferred, and the second test here is what keeps that decision from
+//! drifting in either direction.
 //!
 //! **Four independent walks have to agree for a case to pass**, which is what
 //! makes the comparison worth having:
@@ -50,14 +55,16 @@
 //!   `decode_subframe` / `decode_frame`, and PR 3's rule is that the default
 //!   stays put until there is an on-target cycle reading. Nothing above the seam
 //!   names a kernel.
-//! * It does not flip the default. `residual::decode_rice_partition` — the one
+//! * It does not flip the default, and since PR 4 nothing should: the reading that
+//!   would have decided it says *stay*. `residual::decode_rice_partition` — the one
 //!   line that names it — is unchanged, and `subframe_body_layout.rs` /
 //!   `frame_run_layout.rs` keep witnessing the production path.
 //!   [`the_default_still_names_the_incumbent`] pins that in the cheapest way
-//!   available, so a future flip is an attributable change and not a drift.
+//!   available, so any future flip stays an attributable change and not a drift.
 //! * It does not claim the twin is faster, or that either mechanism is
 //!   real-time on a GBA. It claims equivalence, on the corpus, at the partition
-//!   boundary — which is exactly the boundary PR 4 would move.
+//!   boundary — which is the boundary PR 4's cycle reading judged, and judged
+//!   against the incumbent.
 
 use flac_lite::Error;
 use flac_lite::bits::BitReader;
@@ -597,16 +604,20 @@ fn both_mechanisms_decode_every_corpus_partition_to_the_same_bits() {
     );
 }
 
-/// PR 3 leaves the default where it was, and this pins that in the least clever
-/// way available — a source-level check that the line naming the default still
-/// names the incumbent, and names nothing else.
+/// PR 3 left the default where it was and pinned that in the least clever way
+/// available — a source-level check that the line naming the default still names
+/// the incumbent, and names nothing else. PR 4 then *decided* it, with the
+/// on-target cycle reading the rule asked for (2026-11-06): the twin is +42.6 /
+/// +42.7 cycles per decoded sample slower than the incumbent, uniformly, with its
+/// tables pinned in IWRAM (`FLAC.md`, item 5 PR 4). So this assertion no longer
+/// marks a deferral; it marks a decided state, and it is the thing that says "you
+/// changed what the measurement settled" if anyone moves the line again.
 ///
 /// It is deliberately not a behaviour test: both mechanisms produce identical
-/// output, so no corpus reading can distinguish them, which is exactly why the
-/// flip has to be a separate, on-target-witnessed change rather than something
-/// that arrives inside a green test run. If it ever does move, this is the
-/// assertion that says "you changed what PR 3 left in place", pointing at the
-/// line instead of at a diff.
+/// output — PR 4's two images produced bit-identical per-frame FNV chains — so no
+/// corpus reading can distinguish them, which is exactly why the flip had to be a
+/// separate, on-target-witnessed change rather than something arriving inside a
+/// green test run.
 #[test]
 fn the_default_still_names_the_incumbent() {
     let source = include_str!("../src/residual.rs");
@@ -619,12 +630,15 @@ fn the_default_still_names_the_incumbent() {
         .expect("and have a body");
     assert!(
         body.contains("decode_rice_partition_with::<TableCountKernel>"),
-        "the default must name TableCountKernel until an on-target cycle reading says \
-         otherwise (split-ladder item 5, PR 3)"
+        "the default names TableCountKernel by measurement, not by default: PR 4's \
+         on-target reading (2026-11-06) measured the hybrid at +42.6/+42.7 cycles per \
+         decoded sample against it, and the pre-registered rule resolved to \"no \
+         flip\" (FLAC.md, item 5 PR 4). Anyone flipping this line owes a newer \
+         measurement."
     );
     assert!(
         !body.contains("HybridRiceKernel"),
-        "PR 3 leaves the twin unwired; wiring it in is PR 4's decision, and it needs the \
-         on-target reading first"
+        "PR 3 built the twin and PR 4 measured it; neither wired it into the \
+         default, so the default must not name it by accident or by drift."
     );
 }

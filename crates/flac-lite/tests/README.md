@@ -78,9 +78,14 @@ the corpus contains **no escaped partition** (the escape path belongs to
 whose own witnesses are the layout suites), and its widest Rice parameter is **8** —
 so the 5-bit-parameter remainder legs (`order` 17…31) are covered by the module's
 own spec-text sweep, not by real streams. The second mechanism is not the default
-anywhere: the suite's second test asserts at source level that the one line naming
-the default still names `TableCountKernel`, which is what keeps the on-target-witnessed
-flip (item 5 PR 4) an attributable change instead of a drift. Like the walk's suite,
+anywhere, and since PR 4 that is a measured state rather than a deferral: PR 4 took
+the on-target cycle reading the flip was gated on (2026-11-06) and the hybrid came
+back at **+42.6 / +42.7 cycles per decoded sample slower** than the incumbent
+(+9.71% / +2.64% mean per frame, 314/314 frames, 0 inside the layout-noise band).
+The suite's second test therefore asserts at source level that the one line naming
+the default still names `TableCountKernel` — which is what keeps that decision from
+drifting in either direction, and what makes any future flip an attributable change
+that owes a newer measurement. Like the walk's suite,
 this one is only built with its feature: `required-features = ["rice-hybrid"]`, so a
 default-feature build does not compile it and `make flac-test` does not run it —
 `make flac-test-rice` compiles the twin for the GBA target and runs it, and it is

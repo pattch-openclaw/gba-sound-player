@@ -77,16 +77,27 @@
 //! position. Those are the legs a real stream rarely reaches and a re-write is
 //! most likely to get wrong while every real input still passes.
 //!
-//! **STATUS (2026-11-06, split-ladder item 5 PR 3): implemented, witnessed
+//! **STATUS (2026-11-06, split-ladder item 5 PRs 3–4): implemented, witnessed
 //! against the incumbent, behind `feature = "rice-hybrid"`, and NOT the default in
-//! any configuration.** Nothing in the crate's decode path calls this kernel:
+//! any configuration — and since PR 4 that is a measured outcome, not a
+//! deferral.** Nothing in the crate's decode path calls this kernel:
 //! `decode_rice_partition` still names
-//! [`crate::residual::TableCountKernel`] on one line, and flipping that line is a
-//! decision gated on an on-target cycle reading — the pre-registered rule is in the
-//! plan, the reading owes it, and the host this landed on has no runner, so the
-//! flip is **PR 4's** and this PR does not quietly make it. What keeps the
-//! deferral from drifting is a test: the differential suite asserts at source level
-//! that the one line naming the default still names the incumbent.
+//! [`crate::residual::TableCountKernel`] on one line. PR 3 left that flip undone
+//! because the pre-registered rule needs an on-target cycle reading and the host it
+//! landed on had no runner; PR 4 is that reading, taken on a host that does have
+//! one (`mgba-test-runner`, the calibration instrument, both clips, two
+//! byte-identical runs per arm). It came back **slower**: +9.71% FIXED / +2.64%
+//! LPC mean per frame, a constant **+42.6 / +42.7 cycles per decoded sample** —
+//! the same constant on both clips to within 0.1 c/sample — with all 314 frames
+//! slower and 0 inside the ~9–13 cyc/frame layout-noise band, and with this
+//! kernel's tables pinned in `.iwram` at the very slots E10's ARM kernel
+//! occupied. The pre-registered arms were "within the noise band or faster → the
+//! default flips" / "slower past the bar → it does not"; the second is the arm
+//! measured, so the default stays put, and the proposal's "the twins become the
+//! core's default Rust path" line is corrected in `FLAC.md` as a measured
+//! negative. What keeps the decision from drifting in either direction is a test:
+//! the differential suite asserts at source level that the one line naming the
+//! default still names the incumbent.
 //!
 //! It is reachable and tested through
 //! [`crate::residual::decode_rice_partition_with`], which is why that driver is
@@ -99,7 +110,9 @@
 //! PR 2's and its rationale ("why a trait at all", "why monomorphized, never
 //! `dyn`", what it costs) lives in [`crate::residual`]'s docs, where a reader of
 //! the seam will look; the *bridge* is PR 1's, and this kernel is its first
-//! caller outside a test; the *flip* is PR 4's. What lands in the core and what
+//! caller outside a test; the *flip* was PR 4's, and PR 4 took it and the reading
+//! declined it — the numbers are in the STATUS block above and in `FLAC.md`'s
+//! item-5 record. What lands in the core and what
 //! lands in the GBA overlay is recorded under "core-vs-overlay split" in the
 //! plan's item-5 section, and this module is the half the split-ladder proposed as
 //! the **portable default** — the mechanism in the core, the probe's asm left in
@@ -111,7 +124,8 @@
 //! twin is now redundant (item 6 lifts this one); it is **not wired**, so no
 //! configuration decodes with it; and it **does not replace the incumbent** —
 //! `TableCountKernel` and `rice_quotient` stay, because the loop that decodes
-//! today is a controlled input every later rung is measured against.
+//! today is a controlled input every later rung is measured against, and since PR 4
+//! it is also the loop an on-target reading chose over this one.
 //!
 //! **Where its own witness obligation is discharged.** The plan's PR-3 cell names
 //! a "two-mechanism differential witness", and that is a corpus obligation: only a
@@ -127,7 +141,9 @@
 //! mechanisms does not convict either; the in-crate mutation series (M1…M5) is
 //! written in the PR record, and it convicts exactly where the real corpus does.
 //! And no claim of the kind this host cannot support appears in this file or its
-//! tests: this PR makes no GBA real-time claim, and the cycle reading is PR 4's.
+//! tests: this PR makes no GBA real-time claim, and the cycle reading PR 3 deferred
+//! to PR 4 has since been taken there — it declined this kernel's promotion to the
+//! core default, and the reading itself is recorded in `FLAC.md`, not here.
 //!
 //! **Cost, measured rather than asserted.** The three tables are 256 + 256 + 32
 //! = **544 bytes**, the exact amount the E10-on-target proposal budgeted for the

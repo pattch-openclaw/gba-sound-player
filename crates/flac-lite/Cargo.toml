@@ -82,11 +82,17 @@ crc-check = []
 scan = []
 # The portable hybrid Rice kernel (`rice_hybrid::HybridRiceKernel`) — split-
 # ladder item 5 PR 3's second `residual::RiceKernel` implementor. Off by
-# default, for the same reason `scan` is: it is code no GBA ROM should carry
-# yet, and the item's own default-flip decision is gated on an on-target cycle
-# reading that has not been taken. It changes nothing about what is decoded —
-# `decode_rice_partition` still names `TableCountKernel` on one line — it
-# decides only whether the second mechanism exists in a build.
+# default, and — since the reading PR 4 took on 2026-11-06 — off by *decision*,
+# not deferral: the on-target cycle reading the flip was gated on came back
+# **slower** on the founding platform (+9.71% FIXED / +2.64% LPC mean per frame;
+# +42.6 / +42.7 cycles per decoded sample; 314/314 frames slower, 0 inside the
+# ~9–13 cyc/frame layout-noise band). The pre-registered fork resolves to its
+# "does not flip" arm, so `decode_rice_partition` still names `TableCountKernel`
+# on one line and this feature decides only whether the second mechanism exists
+# in a build. Full numbers and the reading: `FLAC.md`, split-ladder item 5, PR 4.
+# The one thing that did NOT cause it: the pin. At the flip arm `CTZ8`/`REV8` sat
+# in `.iwram` at the same zero-wait slots E10's ARM kernel used, and it was still
+# slower — the regret is in the per-sample step, not the table placement.
 #
 # Measured, not asserted, and the measurement is the whole reason for the gate.
 # On the E instrument (`examples/flac_spike/`, default build — the ROM's shape),
