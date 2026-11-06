@@ -6422,6 +6422,62 @@ that a hand-packed vector cannot witness a bit-layout claim. Gate:
 bare-metal target), `make check` clean. Revert story: additive, no
 callers — a clean revert if PR 2's shape assumption breaks.
 
+**PR 1 landed (2026-11-05), as scoped.** One file: `bits.rs` (+680, −0).
+Shipped: `bits::rev32` (`pub const fn`, delegating to `u32::reverse_bits`
+— the const-callability is load-bearing for PR 3, whose `CTZ8` / `REV8` /
+`BRUIJN_INDEX` tables are built in a `const fn`, and it is witnessed by a
+`const` assertion rather than by a test), `KernelWindow { w, v, ptr, end }`
+(the probe's `KernelState` minus `status` — that field's type *is* PR 2's
+end-of-data decision), and `BitReader::kernel_window` /
+`set_kernel_window`. **No caller was added anywhere**; `residual.rs` and
+`subframe.rs` are untouched, so no timing of any kind is claimed or
+possible. `set_kernel_window` shipped **total** — it clamps the four
+fields into the reader's own invariants (`valid ≤ 32`, `valid ≤ pos * 8`,
+`pos ≤ len`) rather than taking a `Result` or panicking, and it masks `w`
+to its valid low bits, because the zero tail is the same fact stated from
+both sides. The `status`-free four-field form and the clamping are both
+PR 2's to revisit; neither is load-bearing for this PR's witness.
+
+Measured on the landing, against the baseline above: `flac-test` **173 →
+178 passed + 1 ignored** (unit 129 → 134: five new `bits` tests; the
+integration suites are unchanged), `flac-test-scan` **193 → 198 + 1**,
+`flac-test-crc` **176 → 181 + 1**, `flac-portable-check` green, `make
+check` clean, and `spike-test` unchanged at 15 + 10 (the spike links
+`flac-lite` with `iwram-pin`, so it is the nearest witness that nothing
+here reaches a build that ships). The five new tests are the isomorphism
+witness: four of them carry it — `rev32` against a naive bit-loop oracle
+and as its own inverse; the hand-out judged at every alignment × refill
+state a mixed-width sweep reaches, plus a bit-at-a-time drain that walks
+`valid` through all 33 counts by construction (the sweep alone reaches 32
+of them, so the coverage self-check would otherwise be a coincidence); the
+snapshot/restore differential against a twin with no bridge contact; and
+the take-back half — a window consumed by shifting is installed
+**field-for-field identically** (`pos`, `valid`, `acc` compared directly)
+to a reader that consumed the same bits one at a time, at every window
+size and every `n` such a window can supply. The fifth names each clamp
+leg one by one. Two mutations were tried against the witness and both were
+convicted: handing out `w = acc` un-reversed fails the hand-out, the
+round-trip, and the take-back differential (and *only* those three — the
+`rev32` test stands on its own), and dropping the take-back's mask fails
+the clamp test alone. No hand-packed bit-layout vector witnesses anything
+in the five: the bit-level oracles are `ref_bit` over raw bytes and a
+naive `ref_rev32` bit loop, and the reader-vs-reader comparisons are
+judged against a live reader that never touches a window.
+
+**One fact PR 2 inherits, and it is not new.** `BitReader::consume`'s
+contract (`n ≤ valid`, caller-guaranteed) does not hold at `n = 32`: its
+`acc <<= n` is a shift-by-32, which panics under debug overflow checks and
+is UB elsewhere. Nothing on the decode path reaches it — `read_bits` keeps
+`n = 32` out of its fast path, and `peek_at` takes that width through a
+`u64` precisely to avoid the same trap ("there is no shift-by-32 trap even
+though `n == 32` is legal"), while `rice_quotient` consumes at most 8 at a
+time — and the bridge did not change `consume` (adding a branch to a hot
+primitive is a measurement PR's decision, not a bridge PR's). But the
+empty-window state the take-back has to express is reached on the
+**window** side by the spelled `if n >= 32 { 0 }` leg, the same leg PR 3's
+kernel docs pin for `q = 31`; PR 2's kernel needs it too, and its
+take-back must not lean on `consume`.
+
 ### PR 2 — the seam, defaulting to today's loop
 
 Zero behavior change by construction; the default impl *is* the current

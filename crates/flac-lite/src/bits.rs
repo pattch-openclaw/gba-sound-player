@@ -8,6 +8,14 @@
 //! (Phase 2 step 5, landed 2026-11-03 — table-free; *verification* is gated
 //! behind the `crc-check` feature, the release path stays check-free by
 //! design).
+//!
+//! STATUS (2026-11-05): **the window-domain bridge is present and inert** —
+//! [`rev32`] plus the hand-out/take-back pair [`BitReader::kernel_window`] /
+//! [`BitReader::set_kernel_window`] (split-ladder item 5, PR 1). **Nothing in
+//! the decode path calls it**; PR 2 is the PR that does, and this PR exists so
+//! that the one assumption item 5 rests on is witnessed on its own before any
+//! generic, trait, or measurement stands on it.
+//!
 //! The roadmap itself lives in FLAC.md → "Phased plan" (single source of truth).
 //!
 //! FLAC packs its fields MSB-first across byte boundaries, so the whole decoder
@@ -25,6 +33,23 @@
 //!   divides or modulo-divides by a variable.
 //! - Signed fields (LP coefficients, residuals, verbatim samples) are
 //!   two's-complement in the field's stated width: sign-extend after reading.
+//! - **The seam shape is whole-partition, and this module owns its window
+//!   bridge** (split-ladder item 5, PR 1, 2026-11-05). The shape is recorded
+//!   here rather than argued because a type now carries it, and the two facts
+//!   in this tree that settled it are both cited by name: (1) FLAC.md's E10
+//!   entry — the probe "composes the hybrid as a single whole-partition
+//!   kernel rather than calling the track's word-in/word-out kernels: the
+//!   seam needs the byte-window ABI", so `arm_rice_partition` re-embodies the
+//!   tier map around the reader; (2) the per-sample kernel says the same from
+//!   its own side — `examples/arm-kernels/src/sample_step.rs`: "Deliberately
+//!   NOT here: any rev8 reversal or w_{t+1} straddle merge. Stitching the
+//!   reversed-window domain to spec-order streams is the probe's vendored
+//!   seam", and that kernel's committed table pins `q = 31` vectors with
+//!   expectation `rem = 0` *precisely* to convict a merge-or-reversal reading
+//!   of it. So the stitching is the core's job — this module's — and the
+//!   stitching is nothing new: it is this reader's own invariant restated in
+//!   the other domain, which is what [`KernelWindow`]'s and [`rev32`]'s docs
+//!   spell out.
 //! - Verbatim / raw-signature subframes and metadata DIDs are byte-aligned:
 //!   use [`BitReader::byte_align`], never assume alignment.
 
@@ -516,6 +541,99 @@ impl<'a> BitReader<'a> {
         self.data.get(start_bit / 8..end_bit / 8)
     }
 
+    /// Hand out this reader's bit window in **the kernel's** domain — the
+    /// hand-out half of the seam bridge (split-ladder item 5, PR 1; see
+    /// [`KernelWindow`] and [`BitReader::set_kernel_window`] for the shape
+    /// decision and the take-back half).
+    ///
+    /// The mapping is exact in both directions, and the two windows' shared
+    /// invariants are *one* invariant stated twice:
+    ///
+    /// ```text
+    /// bit i of w  ==  stream bit P + i  ==  bit 31 - i of acc
+    ///                 i.e. w = rev32(acc),  P = bit_position()
+    ///
+    /// "the low 32 - valid bits of acc are zero"  ==  "bits >= v of w are zero"
+    /// P + v = pos * 8                             ==  the kernel's byte-pointer
+    ///                                               invariant at entry
+    /// ```
+    ///
+    /// So a kernel holding this window is looking at exactly what this reader
+    /// is looking at: the same next bit, the same valid count, the same byte
+    /// cursor (`ptr`), bounded by the same end (`end`). This neither refills
+    /// nor consumes nor moves the cursor — [`Self::refill`] and
+    /// [`Self::consume`] stay the only code that touches `acc`/`pos`/`valid`.
+    ///
+    /// Lifted, not invented: `AccumulatorReader::rice_partition_kernel`
+    /// (patch line 1205 of the committed
+    /// `examples/flac_spike/experiments/e10-three-arm-probe/e10-three-arm-probe.patch`)
+    /// builds exactly this window and resyncs with the same `rev32`; that
+    /// probe is where the mapping was measured. The core's side of that seam
+    /// is what lands here.
+    #[inline]
+    pub fn kernel_window(&self) -> KernelWindow {
+        KernelWindow {
+            w: rev32(self.acc),
+            v: self.valid,
+            ptr: self.pos,
+            end: self.data.len(),
+        }
+    }
+
+    /// Take a window back — the resync half of the bridge, and the only way
+    /// a window gets back into the reader.
+    ///
+    /// For a window that still satisfies the invariants it was handed out
+    /// with ("bits ≥ `v` of `w` are zero", `P + v = ptr * 8`) this is exact,
+    /// *including* the cursor the kernel advanced: shifting `n` bits out of
+    /// `w` and handing back puts `bit_position()` exactly `n` bits further on
+    /// and leaves `acc` exactly what `n` [`Self::consume`] calls would have
+    /// left. That is the property PR 2's whole-partition kernel will depend
+    /// on, so it is witnessed here as a differential against the live reader
+    /// (bit-at-a-time consumption), not asserted.
+    ///
+    /// **Total by design: no `Result`, no panic, no new error variant.** A
+    /// kernel that hands back a dirty, over-wide, or out-of-range window is a
+    /// kernel bug, and the three clamps below are what keep that bug
+    /// observable as a wrong sample count rather than as a panic inside a
+    /// decode path that has none. The alternatives considered and rejected on
+    /// the record: returning `Result` (a per-partition error arm on the hot
+    /// path PR 2 exists to protect, and a new variant for a condition no real
+    /// stream can produce) and `debug_assert!` (the tests that witness these
+    /// clamps run in debug, so the witness would panic). Every clamp is
+    /// inert for a window this reader produced — the byte-pointer invariant
+    /// alone makes `v <= ptr * 8` true for any cursor a legal walk reaches —
+    /// and each one is pinned by name in the tests.
+    #[inline]
+    pub fn set_kernel_window(&mut self, k: KernelWindow) {
+        // Bounded by THIS reader's slice, not by `k.end`: `end` is the bound
+        // this reader handed out, and it is not the authority here — `self
+        // .data` is. A window built against a shorter region cannot extend
+        // this reader's, and a window that walked past its own end stops at
+        // this one's.
+        let pos = k.ptr.min(self.data.len());
+        // The window is 32 bits wide, and the reader's own invariant
+        // `valid <= pos * 8` has to hold for `bit_position()` to stay in
+        // range (see the module's `assert_window` witness). Clamped in
+        // `usize` because `pos * 8` is a `usize`; the result is at most 32,
+        // so narrowing it back is exact, not a truncation.
+        let valid = (k.v as usize).min(32).min(pos * 8) as u32;
+        // Keep only the bits the window still counts as valid. Masking `w`
+        // to its low `v` bits is the *same* operation, seen from the window
+        // side, as "the low 32 - valid bits of acc are zero" seen from the
+        // reader side: bit i of w maps to bit 31 - i of acc, so bits >= v of
+        // w are exactly the low 32 - v bits of acc. Shift amount is in 0..=31
+        // by the clamp above, so there is no shift-by-32 leg here.
+        let mask = if valid >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << valid) - 1
+        };
+        self.pos = pos;
+        self.valid = valid;
+        self.acc = rev32(k.w & mask);
+    }
+
     /// Read `n` bits (1..=32, MSB-first) starting at absolute bit position
     /// `pos`, without moving the cursor. This is the single place that touches
     /// the bytes; `read_bits` (and later `peek_bits`) layer on top of it.
@@ -600,6 +718,80 @@ impl<'a> BitReader<'a> {
         }
         Ok(value)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Window-domain bridge (split-ladder item 5, PR 1 — INERT: no decode-path
+// call site). The seam itself (`RiceKernel`, the generic over it, and the
+// sample loop that defaults to today's table count) is PR 2; the portable
+// twin that sits behind it is PR 3. FLAC.md → "Split-ladder item 5 — the
+// `RiceKernel` seam: three PRs (plan of record, 2026-11-05)".
+// ---------------------------------------------------------------------------
+
+/// Reverse the bit order of a `u32`: bit `i` ↔ bit `31 − i`. The one place
+/// the reader's MSB-first `acc` and a kernel's LSB-first `w` are translated,
+/// in either direction — the map is its own inverse, so the hand-out and the
+/// resync are the same call.
+///
+/// Written through `core`'s `u32::reverse_bits` deliberately: pure Rust, no
+/// table, no divide, no `unsafe` — consistent with this module's ARMv4T rule
+/// (no CLZ, no hardware divide). What that lowers to on ARM7TDMI (which has
+/// no bit-reverse instruction) is a codegen question, not a claim made here:
+/// it is PR 2's gate that measures section bytes and cycles, and PR 3 is the
+/// PR that *adds a table*. The E10 sample's `rev32` did ride a `REV8` table
+/// (four lookups plus `swap_bytes`); that table is one of the three tables
+/// PR 3 budgets at 544 B, and it does not exist in this PR, which carries no
+/// data at all.
+///
+/// `pub` because the other side of the seam is not in this crate: an
+/// implementor outside the core (item 6's `flac-lite-gba`) has to be able to
+/// state the same mapping, and PR 3's twin is tested against it. Nothing
+/// calls it yet.
+pub const fn rev32(x: u32) -> u32 {
+    x.reverse_bits()
+}
+
+/// The kernel-side view of [`BitReader`]'s window — the seam's data contract
+/// (split-ladder item 5, PR 1). Produced by [`BitReader::kernel_window`],
+/// consumed by [`BitReader::set_kernel_window`]; a kernel is free to mutate
+/// one in place between those two calls.
+///
+/// Four fields, deliberately the same four the probe's kernel ABI used
+/// (`w`/`v`/`ptr`/`end` out of the probe's five-field `KernelState`,
+/// patch line 548 of the committed e10 patch). **There is no `status` field
+/// here**: the probe's `status` (0 = all samples produced, 1 = unterminated)
+/// is the *seam's* report, and the reporting shape belongs with the seam that
+/// has to act on it — the reader's own end-of-data condition is already
+/// [`Error::EndOfStream`], which PR 2 decides how to reach. Adding it now
+/// would be engineering an API surface ahead of the PR that uses it.
+///
+/// Invariants at hand-out (both directions of the same facts — see
+/// [`BitReader::kernel_window`] for the mapping they come from):
+///
+/// - bits ≥ `v` of `w` are zero — equivalently, the low `32 − valid` bits of
+///   the reader's `acc` are zero;
+/// - `bit_position() + v == ptr * 8` — the reader's last buffered bit is the
+///   window's last valid bit, which is the kernel's byte-pointer invariant;
+/// - `v <= 32`, `ptr <= end == slice length`.
+///
+/// A take-back does **not** require them (see
+/// [`BitReader::set_kernel_window`] for the totality rule); they are what a
+/// correct kernel maintains, and what the bridge's tests pin.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KernelWindow {
+    /// The bit-reversed window: bit 0 is the next stream bit, bit `i` is
+    /// stream bit `bit_position() + i`; bits ≥ `v` are zero at hand-out.
+    pub w: u32,
+    /// Valid bits in `w` (0..=32). The reader's `valid`, unchanged.
+    pub v: u32,
+    /// Byte cursor — the next byte a kernel may merge in. Same view (a
+    /// slice-relative offset) as the reader's own `pos`, unchanged.
+    pub ptr: usize,
+    /// End of the region a kernel may read, in the same view as `ptr`. The
+    /// reader's slice length at hand-out; the take-back re-bounds against
+    /// the reader, which is the authority (see
+    /// [`BitReader::set_kernel_window`]).
+    pub end: usize,
 }
 
 /// CRC-8 with FLAC's polynomial: `0x07` (x⁸+x²+x+1), no reflection, init
@@ -2169,5 +2361,495 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- window-domain bridge (split-ladder item 5, PR 1) ------------------
+
+    // Const-context witness: PR 3's twin needs this translation inside a
+    // `const fn` table builder (CTZ8 / REV8 / BRUIJN_INDEX), so `rev32` being
+    // `const` is part of the surface this PR ships. A compile-time fact, not a
+    // test: 0x1234_5678's reversed form, derived here rather than recalled.
+    const REV32_IN_CONST: u32 = rev32(0x1234_5678);
+    const _: () = assert!(REV32_IN_CONST == 0x1E6A_2C48);
+
+    /// Naive bit-loop oracle for [`rev32`] — loop over bit positions, a
+    /// different mechanism from the shift/mask expansion `reverse_bits` lowers
+    /// to. Per this file's differential rule the implementation is never judged
+    /// against itself.
+    fn ref_rev32(x: u32) -> u32 {
+        let mut y = 0u32;
+        for i in 0..32 {
+            if (x >> i) & 1 == 1 {
+                y |= 1 << (31 - i);
+            }
+        }
+        y
+    }
+
+    /// The content claim of the bridge, spelled out bit by bit so it never
+    /// leans on `rev32`: the reader's valid region (`acc`'s top `valid` bits)
+    /// is exactly the low `valid` bits of `w`, and every bit from there down is
+    /// zero on both sides. This is the only content witness, so the hand-out,
+    /// the exact take-back, and the clamped take-back all go through it.
+    fn assert_window_content(r: &BitReader<'_>, k: &KernelWindow, where_: &str, at: usize) {
+        for i in 0..32u32 {
+            let want = if i < r.valid { (k.w >> i) & 1 } else { 0 };
+            let got = (r.acc >> (31 - i)) & 1;
+            assert_eq!(
+                got,
+                want,
+                "{where_} step {at}: acc bit {} vs window bit {i}",
+                31 - i
+            );
+        }
+    }
+
+    /// What a hand-out owes: the reader's own state, in the other domain.
+    /// Field identity (`v`/`ptr`/`end`); the zero tail seen from the **window
+    /// side** (bits ≥ `v` of `w` are zero — the same fact `assert_window`
+    /// checks from the reader side, and it runs here too); the byte-pointer
+    /// invariant `P + v = pos * 8`; the bit-level definition judged against the
+    /// raw bytes with the naive `ref_bit` oracle (never against a hand-packed
+    /// vector — a hand-packed vector cannot witness a bit-layout claim); and the
+    /// two-domain content mapping.
+    fn assert_hand_out_is_the_reader(r: &BitReader<'_>, k: &KernelWindow, where_: &str, at: usize) {
+        assert_eq!(k.v, r.valid, "{where_} step {at}: v != valid");
+        assert_eq!(k.ptr, r.pos, "{where_} step {at}: ptr != pos");
+        assert_eq!(k.end, r.data.len(), "{where_} step {at}: end != len");
+        assert!(k.v <= 32, "{where_} step {at}: v > 32");
+        // The shift-by-32 leg is spelled rather than shifted — the same leg
+        // PR 3's kernel docs pin for the q = 31 case.
+        let above = if k.v >= 32 { 0 } else { k.w >> k.v };
+        assert_eq!(above, 0, "{where_} step {at}: bits >= v of w are not zero");
+        assert_eq!(
+            r.bit_position() + k.v as usize,
+            r.pos * 8,
+            "{where_} step {at}: P + v != pos * 8"
+        );
+        let p = r.bit_position();
+        for i in 0..k.v as usize {
+            assert_eq!(
+                (k.w >> i) & 1,
+                ref_bit(r.data, p + i),
+                "{where_} step {at}: window bit {i} != stream bit {}",
+                p + i
+            );
+        }
+        assert_window(r, where_);
+        assert_window_content(r, k, where_, at);
+    }
+
+    /// A reader at bit `off` holding exactly `v0` valid bits: filled, then
+    /// drained bit-for-bit through the reader's own `consume`. That is the
+    /// state a partition's sample loop sits in mid-sample — window partly
+    /// consumed, byte cursor untouched — and the take-back test below walks
+    /// every count the reader can hold at that alignment.
+    fn window_holding<'a>(data: &'a [u8], off: u32, v0: u32) -> BitReader<'a> {
+        let mut r = BitReader::new(data);
+        skip(&mut r, off);
+        r.refill();
+        let have = r.valid;
+        assert!(v0 <= have, "only counts the window can actually hold");
+        // Bit at a time, not `consume(have - v0)`: `consume`'s contract does
+        // not actually hold at `n = 32` (its `acc <<= n` is the shift-by-32
+        // the reader spells everywhere else — `read_bits` keeps `n = 32` out
+        // of its fast path, and `peek_at` takes that width through a `u64`).
+        // This helper's job is to *reach* the empty window, not to step on
+        // that edge.
+        for _ in v0..have {
+            r.consume(1);
+        }
+        r
+    }
+
+    /// A reader mid-slice at bit 12 of a 6-byte region: the shape a header
+    /// leaves behind (byte cursor at 4, window holding 20 bits).
+    fn positioned(data: &[u8]) -> BitReader<'_> {
+        let mut r = BitReader::new(data);
+        r.read_bits(12).unwrap();
+        r
+    }
+
+    #[test]
+    fn rev32_matches_a_bit_loop_oracle_and_is_its_own_inverse() {
+        // Edge values: the two ends of the map, the palindromes, the
+        // nibble/byte-symmetric patterns, and one 2-cycle pair (each is the
+        // other's image, so a wrong reversal amount shows up as a fixed point).
+        const EDGE: [u32; 11] = [
+            0,
+            1,
+            0x8000_0000,
+            0x8000_0001, // palindromic: bit 0 and bit 31 trade places
+            u32::MAX,
+            0x0FFF_FFFF,
+            0xF000_0000,
+            0x0F0F_F0F0,
+            0x1234_5678,
+            0xDEAD_BEEF,
+            0x1E6A_2C48, // the reverse of the row above
+        ];
+        let mut cases: [u32; 2090] = [0; 2090]; // 11 + 64 + 2000 + 15 spare
+        let mut n = 0usize;
+        for x in EDGE {
+            cases[n] = x;
+            n += 1;
+        }
+        // Every single-bit position and its complement: both directions of the
+        // map, one set bit at a time.
+        for i in 0..32 {
+            cases[n] = 1u32 << i;
+            cases[n + 1] = !(1u32 << i);
+            n += 2;
+        }
+        // Pseudo-random sweep, four LCG bytes per value.
+        let mut rng = Lcg(0xB0BA_C0DE);
+        while n < 2075 {
+            cases[n] = u32::from(rng.next_u8())
+                | (u32::from(rng.next_u8()) << 8)
+                | (u32::from(rng.next_u8()) << 16)
+                | (u32::from(rng.next_u8()) << 24);
+            n += 1;
+        }
+        assert_eq!(n, 2075, "case list assembled");
+        for &x in &cases[..n] {
+            assert_eq!(rev32(x), ref_rev32(x), "x {x:#010X}");
+            // The map is its own inverse — which is why the hand-out and the
+            // resync are the same call, here and in the probe.
+            assert_eq!(rev32(rev32(x)), x, "round trip x {x:#010X}");
+        }
+    }
+
+    /// The hand-out half over the live reader's state space: every bit
+    /// alignment 0..7 crossed with the refill states a mixed-width sweep
+    /// reaches (the same sweep shape as the E2a invariant test), the window
+    /// judged at every step — and once more on the exhausted tail, where no
+    /// refill is possible at all.
+    #[test]
+    fn kernel_window_carries_the_readers_window_at_every_alignment() {
+        let widths: [u32; 14] = [1, 2, 3, 5, 7, 8, 9, 12, 16, 20, 24, 25, 31, 32];
+        let mut seen_valid = [false; 33];
+        let mut snapshots = 0usize;
+        for (si, seed) in [0x1234_5678u32, 0xDEAD_BEEF, 0x0F0F_F0F0, 0x88C7_7A3B]
+            .into_iter()
+            .enumerate()
+        {
+            let mut rng = Lcg(seed);
+            let mut data = [0u8; 48];
+            for b in data.iter_mut() {
+                *b = rng.next_u8();
+            }
+            for off in 0..8usize {
+                let mut r = BitReader::new(&data);
+                skip(&mut r, off as u32);
+                for round in 0..120usize {
+                    let k = r.kernel_window();
+                    assert_hand_out_is_the_reader(&r, &k, "sweep", si * 10000 + off * 100 + round);
+                    seen_valid[k.v as usize] = true;
+                    snapshots += 1;
+                    let n = widths[(round * 7 + data[round % data.len()] as usize) % widths.len()];
+                    let _ = r.read_bits(n);
+                }
+                // The exhausted tail: `valid` can only shrink here, and these
+                // are the sub-byte states a real last frame sits in.
+                let k = r.kernel_window();
+                assert_hand_out_is_the_reader(&r, &k, "tail", si * 10000 + off * 100 + 999);
+                seen_valid[k.v as usize] = true;
+                snapshots += 1;
+            }
+        }
+        // A bit-at-a-time drain from a full window: judged at every step, so
+        // it walks `valid` through every count 32..=0 by construction. The
+        // mixed-width sweep above hits most of those counts by accident of the
+        // refill rule; this leg is what makes the coverage claim below a fact
+        // rather than a coincidence.
+        let mut tail_data = [0u8; 48];
+        for (i, b) in tail_data.iter_mut().enumerate() {
+            *b = 0xA7u8.wrapping_mul(i as u8 + 1);
+        }
+        for off in 0..8usize {
+            let mut r = BitReader::new(&tail_data);
+            skip(&mut r, off as u32);
+            r.refill();
+            loop {
+                let k = r.kernel_window();
+                assert_hand_out_is_the_reader(&r, &k, "drain", off * 100 + k.v as usize);
+                seen_valid[k.v as usize] = true;
+                snapshots += 1;
+                if r.valid == 0 {
+                    break;
+                }
+                r.consume(1);
+            }
+        }
+        // Coverage self-check, so the witness above cannot silently degenerate
+        // into a single refill state: every `valid` count 0..=32 is judged, and
+        // the total number of judged windows is what the loops above add up to
+        // (measured, pinned, and it fails if a loop bound is ever edited out
+        // from under the witness).
+        let reached = seen_valid.iter().filter(|b| **b).count();
+        assert_eq!(reached, 33, "distinct valid counts exercised");
+        assert_eq!(snapshots, 4_108, "window snapshots judged");
+    }
+
+    /// The snapshot/restore differential: one reader driven with a
+    /// hand-out/take-back pair at every step, a twin driven with no bridge
+    /// contact at all, both through the same read/peek sequence over the same
+    /// bytes — identical results, identical `bit_position()` and
+    /// `bits_remaining()`, and an identical window, at every step and at the
+    /// end (which for these lengths is deep into EOF).
+    #[test]
+    fn bridge_round_trip_leaves_every_later_read_unchanged() {
+        let widths: [u32; 18] = [
+            1, 1, 1, 2, 3, 5, 7, 8, 9, 12, 16, 20, 24, 25, 31, 32, 33, 11,
+        ];
+        for (si, seed) in [0x1234_5678u32, 0xDEAD_BEEF, 0x0F0F_F0F0, 0x88C7_7A3B]
+            .into_iter()
+            .enumerate()
+        {
+            let mut rng = Lcg(seed);
+            let mut data = [0u8; 40];
+            for b in data.iter_mut() {
+                *b = rng.next_u8();
+            }
+            for off in 0..8usize {
+                let mut a = BitReader::new(&data);
+                let mut b = BitReader::new(&data);
+                skip(&mut a, off as u32);
+                skip(&mut b, off as u32);
+                for round in 0..250usize {
+                    let at = si * 100000 + off * 1000 + round;
+                    // The bridge, at every step: handed out and straight back.
+                    let snap = a.kernel_window();
+                    a.set_kernel_window(snap);
+                    assert_window(&a, "round-trip step");
+                    assert_window_content(&a, &snap, "round-trip identity", at);
+                    // Nothing moved: same next bit, same valid count, same byte
+                    // cursor, same bound — judged against the twin that never
+                    // touched a window.
+                    assert_eq!(a.kernel_window(), b.kernel_window(), "window {at}");
+                    assert_eq!(a.bit_position(), b.bit_position(), "cursor {at}");
+                    assert_eq!(a.bits_remaining(), b.bits_remaining(), "remaining {at}");
+
+                    let n = widths[(round * 7 + data[round % data.len()] as usize) % widths.len()];
+                    assert_eq!(a.read_bits(n), b.read_bits(n), "read {n} at {at}");
+                    for pn in [1u32, 7, 32] {
+                        assert_eq!(a.peek_bits(pn), b.peek_bits(pn), "peek {pn} at {at}");
+                    }
+                    assert_eq!(a.bit_position(), b.bit_position(), "cursor after {at}");
+                    assert_eq!(a.bits_remaining(), b.bits_remaining(), "rem after {at}");
+                    assert_window(&a, "after step");
+                }
+                assert_eq!(a.bit_position(), b.bit_position(), "final cursor");
+                assert_eq!(a.kernel_window(), b.kernel_window(), "final window");
+            }
+        }
+    }
+
+    /// The take-back half, and the property PR 2's kernel will rest on: a
+    /// kernel consumes by shifting `w` — its only way to consume — so handing
+    /// back a consumed window must install exactly what the same consumption
+    /// through the reader's own primitives installs. Judged against a live
+    /// reader consuming bit-at-a-time with `consume(1)` (a different
+    /// mechanism) at every alignment, at every count a window can hold at that
+    /// alignment, and for every `n` such a window can supply. The two states
+    /// then have to be identical field-for-field — `pos`, `valid`, `acc`
+    /// compared directly, not inferred from observables — and every later read
+    /// has to agree.
+    #[test]
+    fn take_back_after_consuming_from_the_window_matches_bitwise_consumption() {
+        let mut seen_n = [false; 33];
+        let mut seen_v0 = [false; 33];
+        for off in 0..8usize {
+            let mut rng = Lcg(0x5EED_1000 + (off as u32) * 64);
+            let mut data = [0u8; 40];
+            for b in data.iter_mut() {
+                *b = rng.next_u8();
+            }
+            // The largest count this alignment can hold — 32 at a byte
+            // boundary, less as the refill rule leaves bits behind — and then
+            // every count down from it.
+            let have = {
+                let mut r = BitReader::new(&data);
+                skip(&mut r, off as u32);
+                r.refill();
+                r.valid
+            };
+            for v0 in 0..=have {
+                seen_v0[v0 as usize] = true;
+                for n in 0..=v0 {
+                    // The kernel's way: shift the consumed bits out of the
+                    // window and leave `ptr` alone — it had enough buffered,
+                    // and a kernel only moves `ptr` when it refills.
+                    let mut a = window_holding(&data, off as u32, v0);
+                    let mut k = a.kernel_window();
+                    k.w = if n >= 32 { 0 } else { k.w >> n }; // no shift-by-32 leg
+                    k.v -= n;
+                    a.set_kernel_window(k);
+                    // The reader's way, one bit at a time.
+                    let mut b = window_holding(&data, off as u32, v0);
+                    for _ in 0..n {
+                        b.consume(1);
+                    }
+
+                    assert_window(&a, "after kernel consume");
+                    assert_window(&b, "after bitwise consume");
+                    assert_window_content(&a, &k, "take-back content", n as usize);
+                    assert_eq!(a.pos, b.pos, "pos after consuming {n} of {v0}");
+                    assert_eq!(a.valid, b.valid, "valid after consuming {n} of {v0}");
+                    assert_eq!(a.acc, b.acc, "acc after consuming {n} of {v0}");
+                    assert_eq!(a.bit_position(), b.bit_position(), "cursor after {n}");
+                    assert_eq!(
+                        a.bits_remaining(),
+                        b.bits_remaining(),
+                        "remaining after {n}"
+                    );
+                    // The window the kernel holds and the window the reader
+                    // would hand out are the same value: the state the next
+                    // kernel iteration sees.
+                    assert_eq!(k, b.kernel_window(), "window after consuming {n}");
+                    seen_n[n as usize] = true;
+
+                    // And every later read agrees, from every width.
+                    for m in [1u32, 3, 8, 16, 24, 25, 31, 32] {
+                        assert_eq!(
+                            a.read_bits(m),
+                            b.read_bits(m),
+                            "read {m} after consuming {n} of {v0}"
+                        );
+                        assert_eq!(a.bit_position(), b.bit_position(), "cursor read {m}");
+                        assert_window(&a, "after read");
+                    }
+                }
+            }
+        }
+        // Coverage self-check: every consumption count 0..=32 was exercised,
+        // and every window size it could be exercised against — 33 of each,
+        // which is what the loops above build at a byte alignment.
+        assert_eq!(
+            seen_n.iter().filter(|b| **b).count(),
+            33,
+            "every n exercised"
+        );
+        assert_eq!(
+            seen_v0.iter().filter(|b| **b).count(),
+            33,
+            "every window size exercised"
+        );
+    }
+
+    /// Totality: the clamps a hand-made window can trip, each named, each
+    /// producing a *well-formed* reader (`assert_window`) whose window is the
+    /// input clipped to what the reader can represent. None of these is
+    /// reachable for a window this reader handed out — the byte-pointer
+    /// invariant alone makes `v <= ptr * 8` true at every cursor a legal walk
+    /// reaches, which is what the test above witnesses — so they exist for the
+    /// one thing PR 1 cannot control: a window some other code built.
+    #[test]
+    fn take_back_clamps_windows_that_break_the_contract() {
+        let data = [0xE7u8, 0x3C, 0x5A, 0xA5, 0xC3, 0x0F]; // 48 bits
+
+        // (a) `v` over the window's 32-bit width: clipped to 32 — and the
+        // cursor that follows from it, wherever a 32-bit window at that byte
+        // cursor sits. Self-consistency is the contract; a take-back installs
+        // state, it does not only advance it.
+        let mut r = positioned(&data);
+        let mut k = r.kernel_window();
+        k.v = 40;
+        r.set_kernel_window(k);
+        assert_window(&r, "clamp v over 32");
+        assert_eq!(r.valid, 32, "v clipped to the window width");
+        assert_eq!(
+            r.bit_position(),
+            r.pos * 8 - 32,
+            "cursor follows the window"
+        );
+        assert_eq!(r.bit_position(), 0, "a 32-bit window at pos 4 starts at 0");
+        assert_window_content(&r, &k, "clamp v over 32", 0);
+
+        // (b) Dirty window: bits at and above `v` non-zero. The zero tail is a
+        // both-domains fact, so the dirty bits are dropped rather than carried
+        // into `acc` — and they are not counted as extra validity either.
+        let mut r = positioned(&data);
+        let mut k = r.kernel_window();
+        let v = k.v;
+        k.w |= !(u32::MAX >> v); // deliberately dirty
+        assert_ne!(
+            if v >= 32 { 0 } else { k.w >> v },
+            0,
+            "dirty by construction"
+        );
+        r.set_kernel_window(k);
+        assert_window(&r, "clamp dirty w");
+        assert_eq!(r.valid, v, "a dirty tail is not extra validity");
+        assert_window_content(&r, &k, "clamp dirty w", 1);
+
+        // (c) `ptr` past the slice: clipped to the slice, so the cursor cannot
+        // run off the end of the data. `usize::MAX` is the same leg with a
+        // bigger number — and it must not overflow `pos * 8`.
+        for (i, ptr) in [data.len() + 7usize, usize::MAX].into_iter().enumerate() {
+            let mut r = positioned(&data);
+            let mut k = r.kernel_window();
+            k.ptr = ptr;
+            r.set_kernel_window(k);
+            assert_window(&r, "clamp ptr");
+            assert_eq!(r.pos, data.len(), "byte cursor clipped to the slice");
+            assert_eq!(
+                r.bits_remaining(),
+                r.valid as usize,
+                "nothing past the slice"
+            );
+            assert_eq!(r.bit_position(), data.len() * 8 - r.valid as usize);
+            assert_window_content(&r, &k, "clamp ptr", i);
+        }
+
+        // (d) A window whose declared `end` is *shorter* than this reader's
+        // slice does not shrink the reader: the reader is the authority on its
+        // own region, and `end` is only the bound it handed out. Pinned as a
+        // decision, not left to the accident of which clamp is written first.
+        let mut r = positioned(&data);
+        let mut k = r.kernel_window();
+        k.end = 1;
+        k.ptr = 5;
+        r.set_kernel_window(k);
+        assert_window(&r, "stale end");
+        assert_eq!(r.pos, 5, "the reader's bound wins over a stale end");
+        assert_eq!(r.bit_position(), 40 - r.valid as usize, "cursor at bit 20");
+        assert_eq!(r.bits_remaining(), 48 - 20, "and 28 bits are still ahead");
+        assert_window_content(&r, &k, "stale end", 3);
+
+        // (e) `v` above what the byte cursor can support: the reader's own
+        // invariant is `valid <= pos * 8`, since `bit_position()` subtracts
+        // `valid`. Clipped, and the window contributes nothing.
+        let mut r = positioned(&data);
+        r.set_kernel_window(KernelWindow {
+            w: 0xFFFF_FFFF,
+            v: 8,
+            ptr: 0,
+            end: data.len(),
+        });
+        assert_window(&r, "clamp v over pos times 8");
+        assert_eq!(r.valid, 0, "clipped to what pos * 8 can carry");
+        assert_eq!(r.acc, 0, "a fully clipped window installs no bits");
+        assert_eq!(r.bit_position(), 0, "cursor stays at the start");
+        assert_eq!(r.bits_remaining(), data.len() * 8, "the slice is intact");
+
+        // (f) A zero-length window at a mid-slice cursor: legal, and exactly
+        // the state a kernel sits in when it has consumed everything it
+        // buffered and has not refilled yet.
+        let mut r = positioned(&data);
+        r.set_kernel_window(KernelWindow {
+            w: 0,
+            v: 0,
+            ptr: 3,
+            end: data.len(),
+        });
+        assert_window(&r, "zero-length window");
+        assert_eq!(r.pos, 3);
+        assert_eq!(r.valid, 0);
+        assert_eq!(r.acc, 0);
+        assert_eq!(r.bit_position(), 24);
+        assert_eq!(r.bits_remaining(), data.len() * 8 - 24);
+        // ...and it refills from that cursor: the next 8 bits are byte 3.
+        assert_eq!(r.read_bits(8).unwrap(), u32::from(data[3]));
     }
 }
