@@ -201,9 +201,10 @@ requirements (nightly + `rust-src`, plus `agb-gbafix` for ROM fixing).
 | `make podman-rom` | Build the `gba-builder` image and run the same ROM build inside it; `CONTAINER=docker` works | needs podman/docker |
 | `make native-flac-rom` | **EXPERIMENTAL** — build `flac-integration.gba`: a bootable ROM that links `crates/flac-lite` in | no virtualization needed |
 | `make podman-flac-rom` | Same FLAC integration ROM, built in the container | needs podman/docker |
-| `make flac-test` | `flac-lite` **in isolation**: GBA target compile gate + host unit tests. No agb, no ROM, no emulator. Default features — the frame walk (`scan`) is **off**, so no ROM links it. `make flac-test-crc` is the same shape with `crc-check` on | native |
-| `make flac-test-scan` | The same two steps with `--features scan` on: the walk's thumbv4t compile plus its witness suite (`tests/scan_frame_walk_layout.rs` is `required-features = ["scan"]`, so it is not built at all without the feature). Deliberately **not** in `check-gba-all` — the thing that must not carry the walk yet is the ROM. `flac-portable-check` runs with `scan` **on** so the second bare-metal target keeps compiling it | native |
-| `make flac-gates` | **Every `crates/flac-lite` configuration in one command**: `flac-test` + `flac-test-crc` + `flac-test-scan` + `flac-portable-check`, plus the two both-feature (`crc-check,scan`) arms — the thumbv4t `cargo check` and the host witness. Adds no new witness: it is the aggregate the TODO below asked for, by the name it gave it, landed 2026-11-05 | native |
+| `make flac-test` | `flac-lite` **in isolation**: GBA target compile gate + host unit tests. No agb, no ROM, no emulator. Default features — the frame walk (`scan`) and the portable hybrid Rice kernel (`rice-hybrid`) are **off**, so no ROM links either. `make flac-test-crc` is the same shape with `crc-check` on | native |
+| `make flac-test-scan` | The same two steps with `--features scan` on: the walk's thumbv4t compile plus its witness suite (`tests/scan_frame_walk_layout.rs` is `required-features = ["scan"]`, so it is not built at all without the feature). Deliberately **not** in `check-gba-all` — the thing that must not carry the walk yet is the ROM. `flac-portable-check` runs with `scan` (and `rice-hybrid`) **on** so the second bare-metal target keeps compiling them | native |
+| `make flac-test-rice` | Same shape again with `--features rice-hybrid` on: the portable hybrid Rice kernel's thumbv4t compile plus the **two-mechanism Rice differential** (`tests/rice_two_mechanism_differential.rs` is `required-features = ["rice-hybrid"]`). The gate exists because the module's cost is measured, not assumed: with the feature off the ROM-links image is byte-for-byte the pre-PR-3 image; with it on the calibration instrument grows **+2,984 B of `.text` while `nm` reports no hybrid symbol in the image**. Also deliberately **not** in `check-gba-all` — no ROM links the twin, and the default flip that would is gated on an on-target cycle reading (split-ladder item 5 PR 3, `FLAC.md`) | native |
+| `make flac-gates` | **Every `crates/flac-lite` configuration in one command**: `flac-test` + `flac-test-crc` + `flac-test-scan` + `flac-test-rice` + `flac-portable-check`, plus the combination arms — `crc-check,scan`, and `crc-check,scan,rice-hybrid` (the one build where the walk, the CRC verification and **both** Rice mechanisms compile at once). Adds no new witness: it is the aggregate the TODO below asked for, by the name it gave it, landed 2026-11-05 and extended with the third configuration on 2026-11-06 | native |
 | `make test-rom` | ROM `#[test_case]` suite, headless in mGBA via `mgba-test-runner` | native (needs `mgba-test-runner`) |
 | `make test` | Top-level: `test-rom` + `flac-test`. Verify-only — never reformats your tree | native |
 | `make podman-test` | **The same suite**, running inside the image (`make test` in there) — no host tooling | needs podman/docker |
@@ -249,13 +250,14 @@ never a hard dependency of building.
 `make test` runs `test-rom` + `flac-test`, and the repo has no CI workflows. The
 gates that exercise a **non-default build configuration** are therefore manual by
 omission: `flac-test-crc` (frame CRC verification ON), `flac-test-scan` (the frame
-walk ON) and `flac-portable-check` (second bare-metal target) run only when someone
+walk ON), `flac-test-rice` (the portable hybrid Rice kernel ON) and
+`flac-portable-check` (second bare-metal target) run only when someone
 remembers them — and an un-run gate is an un-witnessed gate, which is exactly the
-risk a by-default-OFF feature like `crc-check` or `scan` creates. `scan` makes the
-point twice over: a module no default build compiles is witnessed by
-`flac-test-scan` (its rules, and the GBA-target compile) and by
-`flac-portable-check`'s `--features scan` (the second target) — nothing else builds
-it at all. Tracked here so it is not forgotten; when written it was deliberately
+risk a by-default-OFF feature like `crc-check`, `scan` or `rice-hybrid` creates.
+`scan` and `rice-hybrid` make the point twice over: a module no default build
+compiles is witnessed by `flac-test-scan` / `flac-test-rice` (their rules, and the
+GBA-target compile) and by `flac-portable-check`'s `--features scan,rice-hybrid`
+(the second target) — nothing else builds them at all. Tracked here so it is not forgotten; when written it was deliberately
 not part of any feature PR, since each gate lands with its own PR's gate work —
 that part changed on 2026-11-05, when the aggregate landed inside split-ladder
 item 5 PR 2 (the PR where the *instantiation count* changes rather than the code,
@@ -275,6 +277,19 @@ is still open.
   above predicts. (The first run after a source edit costs more — 2.95 s on the
   re-run following this PR's own doc-text change — because "warm" is not the state
   a tree is in immediately after an edit.)
+- ✅ **Extended 2026-11-06 (split-ladder item 5 PR 3)** — the aggregate gained a
+  third feature configuration and a second combination arm: `flac-test-rice`
+  (`--features rice-hybrid`, the portable hybrid Rice kernel) and the
+  `crc-check,scan,rice-hybrid` pair, which is the only build in which the frame
+  walk, CRC verification and **both** Rice mechanisms compile together. `flac-portable-check`
+  now compiles the twin for the second bare-metal target too. The counts are what
+  a feature gate is supposed to produce: **178 / 181 / 198 / 194 / 201 / 217, one
+  ignored each** — the default configuration's number **unchanged** by a PR that
+  adds 16 tests, because those tests are not in the build the ROM links (1,169
+  passed + 6 ignored across the six configurations). Warm timings moved the way
+  adding two arms predicts: **1.00 s** warm for the aggregate (PR 2's four
+  configurations were 0.72–0.75 s; a run taken straight after a source edit is
+  2.15 s and is not a warm number), `flac-test-rice` itself 0.17 s.
 - Something to *invoke* it: with no CI, the cheap honest hook is local (a
   pre-commit/pre-push hook, or a documented rule that any commit touching
   `crates/flac-lite` runs `make flac-gates` first). `FLAC.md` already names the
