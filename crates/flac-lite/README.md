@@ -4,10 +4,15 @@ Minimal FLAC frame decoder: `#![no_std]`, **zero dependencies**, **zero
 allocation** on the decode path — portable pure Rust. The GBA
 (thumbv4t-none-eabi) is the founding platform, not the boundary: the decode
 path imports nothing platform-specific, and the crate's sole unsafe surface is
-one placement attribute behind `all(target_arch = "arm", feature = "iwram-pin")`
-— off by default, so host builds and ARM targets without a `.iwram` link-script
-definition compile with zero unsafe and zero pin surface. GBA ROM crates opt in
-to the pin (`flac_spike` / `flac_integration` do). The GAFP container and
+placement attributes on immutable run-length tables, behind
+`all(target_arch = "arm", feature = "iwram-pin")` — off by default, so host
+builds and ARM targets without a `.iwram` link-script definition compile with zero
+unsafe and zero pin surface. **How many such attributes exist depends on the
+configuration**: a default build carries exactly one (`bits::LEADING_ONES`), a
+`rice-hybrid` build carries four — the same attribute kind on the hybrid kernel's
+three hot tables, added by split-ladder item 5 PR 3 and recorded in
+`../../FLAC.md` rather than assumed ratified silently. GBA ROM crates opt in to
+the pin (`flac_spike` / `flac_integration` do). The GAFP container and
 encode-profile sections below are product-side container work — a manifest is
 *one* frame source, not the decoder's contract — and the build-gate/config-leak
 notes are this repo's build setup. A second bare-metal target is a build
@@ -48,7 +53,32 @@ the instrument's `.text`, `.rodata`, `.iwram` and `.ewram` are byte for byte
 the 4a image; with it on, `.text` is +3,120 B and the image contains no walk
 symbol — a second consumer of the decode path changes what the inliner does to
 the code already linked. See the module docs and `../../FLAC.md`'s landing
-note. Remaining
+note.
+
+**And the second Rice mechanism, `rice_hybrid` (landed 2026-11-06, split-ladder
+item 5 PR 3)** — behind the `rice-hybrid` feature, off by default, gate
+`make flac-test-rice`. `RiceKernel` (PR 2) has one implementor that the decode
+path uses (`TableCountKernel`, today's loop) and one that it does not:
+`HybridRiceKernel`, the pure-Rust form of the three-tier codeword walk the E10
+probe wrote in ARM assembly (CTZ8 tier 1 / De Bruijn tier 2 / word-skip tier 3 /
+REV8 refills), owning the bit window across a whole partition through
+`BitReader::kernel_window` — the first caller of that bridge. **Decoding is
+unchanged in every configuration**: the one line that names the default still
+names `TableCountKernel`, and a test asserts it, because whether to flip is a
+decision gated on an on-target cycle reading this host cannot take (that is PR 4).
+Why a feature rather than a module: measured on the same instrument, with
+`rice-hybrid` off the ROM-links image is **byte-for-byte the pre-PR-3 image**
+(`.text` 46,008 B, same sha, `nm` identical); with it on `.text` is **+2,984 B**
+and **no hybrid symbol appears in the image at all**. The growth is attributed
+symbol by symbol to the decode path's own functions plus one new `read_bits`
+specialisation, and probe arms settle the trigger: an `impl` block whose body is
+empty costs nothing, an `impl` block whose body reaches the walk costs the whole
+amount even though nothing ever calls the kernel. That is the same
+second-instantiator effect 4b measured for `scan`, one rung closer to the
+decoder, and it is why the twin's equivalence witness (a four-way differential
+over real libFLAC partitions, `tests/rice_two_mechanism_differential.rs`) is the
+thing that carries this PR rather than a perf claim: this PR makes none.
+Remaining
 `todo!()`: the manifest-driven `decoder` facade — which will be a thin shell
 over `driver`, not a second loop — and `format::Manifest`.
 
@@ -136,7 +166,11 @@ crates/flac-lite/
 │                     where the frame region begins (`frame_data_offset`)
 ├── src/frame.rs      frame header + one-frame decode driver
 ├── src/subframe.rs   CONSTANT / VERBATIM / FIXED / LPC + predictor state
-├── src/residual.rs   partitioned Rice / Rice2 / escape
+├── src/residual.rs   partitioned Rice / Rice2 / escape (+ the `RiceKernel` seam)
+├── src/rice_hybrid.rs the second Rice mechanism: three-tier codeword walk +
+│                     CTZ8/REV8/BRUIJN tables, owning the window across a
+│                     partition — behind `feature = "rice-hybrid"`, off by
+│                     default and not the default mechanism in any configuration
 ├── src/stereo.rs     mid-side, left-side, right-side decorrelation
 ├── src/driver.rs     per-frame loop over a borrowed frame index (copied, not
 │                     shared, from the perf spike's proven driver)
@@ -150,28 +184,30 @@ crates/flac-lite/
 ## Build gates
 
 The gates, run from this directory (or `make flac-test` / `make flac-test-scan`
-/ `make flac-test-crc` / `make flac-portable-check` from the repo root; the
-root Makefile is the keeper). **All need explicit flags — this is not optional
-verbosity**, see the config-leak note below.
+/ `make flac-test-crc` / `make flac-test-rice` / `make flac-gates` /
+`make flac-portable-check` from the repo root; the root Makefile is the keeper).
+**All need explicit flags — this is not optional verbosity**, see the config-leak
+note below.
 
 ```sh
 # GATE 1 — the GBA target. The real gate: the build symphonia could never pass.
 cargo +nightly check --release --target thumbv4t-none-eabi -Zbuild-std=core,alloc
 
 # GATE 2 — host tests (correctness: bit-exactness vs reference `flac`).
-# Default features: the frame walk (item 4b) is NOT compiled and its witness
-# suite is not built — see GATE 4.
+# Default features: the frame walk (item 4b) and the second Rice mechanism
+# (item 5 PR 3) are NOT compiled, and neither witness suite is built — see
+# GATE 4 and GATE 5.
 HOST=$(rustc -vV | sed -n 's|host: ||p')
 cargo +nightly test -Zbuild-std= --target "$HOST"
 
 # GATE 3 — second bare-metal target (portability witness, no perf claim).
-# Pin OFF (compiles no `.iwram` reference) and the walk ON, so that a feature a
-# GBA ROM leaves off is still compiled for a second target instead of being
-# silently un-covered. Verified container-portable: builds with NO prebuilt
+# Pin OFF (compiles no `.iwram` reference) and the gated modules ON, so that a
+# feature a GBA ROM leaves off is still compiled for a second target instead of
+# being silently un-covered. Verified container-portable: builds with NO prebuilt
 # rust-std for the triple (core/alloc come from rust-src via -Zbuild-std, same
 # as gate 1).
 cargo +nightly check --release --target thumbv7em-none-eabi -Zbuild-std=core,alloc \
-  --features scan
+  --features scan,rice-hybrid
 
 # GATE 4 — the frame walk with its feature on (deliberately NOT part of
 # `check-gba-all`: the thing that must not carry the walk yet is the ROM).
@@ -181,6 +217,16 @@ cargo +nightly check --release --target thumbv7em-none-eabi -Zbuild-std=core,all
 cargo +nightly check --release --target thumbv4t-none-eabi -Zbuild-std=core,alloc \
   --features scan
 cargo +nightly test -Zbuild-std= --target "$HOST" --features scan
+
+# GATE 5 — the second Rice mechanism with its feature on (`make flac-test-rice`;
+# same reason as GATE 4, plus the measured one: with `rice-hybrid` off the
+# ROM-links image is byte-identical to the pre-PR-3 image, with it on it is
+# +2,984 B with no hybrid symbol in it — `../../FLAC.md`, split-ladder item 5
+# PR 3). `tests/rice_two_mechanism_differential.rs` is
+# `required-features = ["rice-hybrid"]`.
+cargo +nightly check --release --target thumbv4t-none-eabi -Zbuild-std=core,alloc \
+  --features rice-hybrid
+cargo +nightly test -Zbuild-std= --target "$HOST" --features rice-hybrid
 ```
 
 ### ⚠️ The `.cargo/config.toml` leak (verified 2026-08-30)

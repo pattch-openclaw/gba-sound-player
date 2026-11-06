@@ -37,15 +37,27 @@
 //!   nothing but method, partition order, and per-partition param/escape +
 //!   raw width). FLAC.md → "Prior assumptions".
 //!
-//! STATUS (2026-11-05): **the Rice kernel seam is open** — [`RiceKernel`] +
-//! [`TableCountKernel`] + [`decode_rice_partition_with`] (split-ladder item 5,
-//! PR 2). Zero behavior change: the one instantiation the crate uses *is* the
-//! loop that was already here, and no other crate implements the trait yet —
-//! that is item 6 (`flac-lite-gba`, which links none of this into the ROM
-//! today), and PR 3 is the PR that may change which mechanism sits behind the
-//! hook. Why the hook is whole-partition rather than per-sample is argued on
-//! the trait; the window half of the seam (the `rev32` bridge) landed inert in
-//! PR 1 and is argued in `bits`' module docs.
+//! STATUS (2026-11-06): **the Rice kernel seam is open, and a second
+//! implementor exists behind a feature** — [`RiceKernel`] + [`TableCountKernel`]
+//! (PR 2), which is the decode path, and
+//! [`crate::rice_hybrid::HybridRiceKernel`], the portable hybrid twin, which
+//! exists only in a build with `rice-hybrid` on and is not the default in any
+//! build (split-ladder item 5, PRs 2–3; the module states what it is and the
+//! `Cargo.toml` note states the measured +2,984 B that made it a feature).
+//! Zero behavior change from either PR: the one instantiation the crate's decode
+//! path uses is still the loop that was already here, chosen on the one line of
+//! [`decode_rice_partition`]; and no crate outside this one implements the trait
+//! yet — that is item 6 (`flac-lite-gba`, which links none of this into the ROM
+//! today). [`decode_rice_partition_with`] became `pub` in PR 3 for one reason:
+//! PR 3's witness is a caller *outside* this crate running both mechanisms over
+//! the same real partitions (`tests/rice_two_mechanism_differential.rs`, which
+//! is `required-features = ["rice-hybrid"]`); nothing above this module threads
+//! a kernel choice, which is item 6's to make. Why the hook is whole-partition
+//! rather than per-sample is argued on the trait; the window half of the seam
+//! (the `rev32` bridge) landed inert in PR 1 and is argued in `bits`' module
+//! docs — its only caller is the twin, so the bridge is unreachable in a default
+//! build and in any build that does not name a window-domain kernel at all. The
+//! record lives in `FLAC.md` under "split-ladder item 5", PR 3.
 
 use crate::bits::BitReader;
 
@@ -220,11 +232,21 @@ pub fn decode_residual(
 /// never `dyn`**: the method below is an associated function, which makes the
 /// trait non-object-safe, so a vtable is not expressible rather than merely
 /// discouraged. That is on purpose — the E2b lesson is that a seam's cost shows
-/// up as codegen coupling, so the seam may not be a dynamic call.
+/// up as codegen coupling, so the seam may not be a dynamic call. PR 3 measured
+/// that coupling directly, and it is larger than it looks: adding a second
+/// implementor to this trait costs **+2,984 B of *other* code** on the
+/// calibration instrument, all of it re-inlined decode-path code, with **not one
+/// hybrid symbol in the image** (`Cargo.toml` carries the attributed reading). So
+/// the twin is feature-gated (`rice-hybrid`), and the default-flip decision stays
+/// attributable to the swapped mechanism alone.
 ///
-/// Reachable to other crates as `flac_lite::residual::RiceKernel`; the generic
-/// driver that takes it stays private to this module until a caller outside the
-/// crate exists to thread it through, which is item 6's decision to make.
+/// Reachable to other crates as `flac_lite::residual::RiceKernel`. Within this
+/// crate there are two implementors, one of them conditional: [`TableCountKernel`]
+/// (the default the decode path uses, always compiled) and
+/// [`crate::rice_hybrid::HybridRiceKernel`] (PR 3's portable twin, compiled only
+/// with `rice-hybrid` on, reachable through [`decode_rice_partition_with`] but
+/// not wired into any decode-path call site in any configuration). Outside this
+/// crate there is still none — that is item 6 landing, not a gap in this one.
 pub trait RiceKernel {
     /// Produce `out.len()` Rice-coded residuals (§9.2.7.2) into `out`, from a
     /// cursor sitting on the first bit of the partition body, at Rice parameter
@@ -300,6 +322,23 @@ pub trait RiceKernel {
 /// was added to this type or around it in PR 2: what the inliner does with the
 /// seam *is* what PR 2 measures, and pre-empting that decision here would
 /// spend the one measurement the item exists to make.
+///
+/// **PR 3 landed without flipping the default, so this is still the core's
+/// mechanism** — and the reason is a fact about the host, not a measured
+/// negative about the twin: the reading PR 3's rule is gated on is a GBA cycle
+/// reading, and there is no cycle-measurement environment here (no
+/// `mgba-test-runner` and no equivalent). The rule stays pre-declared and
+/// un-ran; `FLAC.md`'s item-5 record names the run that owes it.
+///
+/// One measured fact about that fork, so it is not rediscovered at the flip: a
+/// flip *does* retire the incumbent from the image. At the one-line flip probe the
+/// twin's walk replaced this loop and `bits::BitReader::rice_quotient` (336 B)
+/// and `LEADING_ONES` (256 B, at `0x0300022c`) both left the ELF — nothing
+/// reachable called them — which is why the IWRAM delta at the flip reads as
+/// +256 B net rather than the +544 B the E10 budget line suggests. The item's
+/// "do not delete them" invariant is therefore about the *build*, not about what
+/// the linker happens to keep, and it is the `rice-hybrid` gate that keeps both
+/// mechanisms observable in one checkout.
 pub struct TableCountKernel;
 
 impl RiceKernel for TableCountKernel {
@@ -384,7 +423,20 @@ impl RiceKernel for TableCountKernel {
 /// codeword's start ([`BitReader::rice_quotient`]'s atomicity) rather than
 /// leaving it after the consumed zeros — observable only on a dead frame,
 /// which the caller discards wholesale anyway.
-fn decode_rice_partition_with<K: RiceKernel>(
+///
+/// **`pub` since PR 3 (split-ladder item 5), for one reason and with one
+/// limit.** PR 3's gate is a *two-mechanism differential on real partitions*,
+/// and the witness that reads the committed corpus lives outside this crate —
+/// `tests/rice_two_mechanism_differential.rs` instantiates this with both
+/// [`TableCountKernel`] and [`crate::rice_hybrid::HybridRiceKernel`] over every
+/// non-escape partition of every real subframe body in
+/// `tests/subframe_body_vectors.txt`, and against an independent spec-order
+/// oracle. The limit: the *caller-facing* layers still do not take a kernel —
+/// [`decode_residual`], [`crate::subframe`] and [`crate::frame`] keep calling
+/// [`decode_rice_partition`], and threading a choice up through them (and
+/// through `scan`/`driver`) is item 6's decision, not a side effect of this
+/// signature being visible.
+pub fn decode_rice_partition_with<K: RiceKernel>(
     reader: &mut BitReader<'_>,
     header: &PartitionHeader,
     out: &mut [i32],
@@ -415,13 +467,17 @@ fn decode_rice_partition_with<K: RiceKernel>(
 /// the seam existed) keep doing so against the incumbent rather than against a
 /// test-only stand-in.
 ///
-/// This is the one place the default is chosen. PR 3 is the PR that may change
-/// it — that is what its "default flip" means, decided by measurement against a
-/// pre-declared bar and not by preference — and keeping the choice in a single
-/// named call is what makes that flip one line and attributable to one cause
-/// (FLAC.md's item-5 invariant: do not fold the twin flip into PR 2, because a
-/// bad number has to be attributable either to the generic seam or to the
-/// swapped mechanism, never to both).
+/// This is the one place the default is chosen, and one line wide by design:
+/// PR 3's "default flip" is exactly this call's type argument, so a bad number
+/// is attributable either to the generic seam or to the swapped mechanism, never
+/// to both (FLAC.md's item-5 invariant: do not fold the twin flip into PR 2).
+///
+/// **It still names [`TableCountKernel`] after PR 3.** The twin
+/// ([`crate::rice_hybrid::HybridRiceKernel`]) landed behind the hook, witnessed
+/// against this mechanism sample-by-sample on the committed corpus, and the
+/// pre-declared bar it has to clear is an *on-target cycle* bar that this host
+/// cannot read. Nothing here flipped, and the non-flip is recorded rather than
+/// left implied — see `FLAC.md`, "split-ladder item 5", PR 3.
 fn decode_rice_partition(
     reader: &mut BitReader<'_>,
     header: &PartitionHeader,
@@ -456,7 +512,12 @@ fn decode_rice_partition(
 /// partition decoder's job — it sees the stream and can fail the frame
 /// (step 3b). Here the mapping stays total and returns `i32::MIN` for that
 /// input, pinned by a test so the division of responsibility is explicit.
-fn rice_unmap(n: u32) -> i32 {
+///
+/// `pub(crate)` since PR 3, so [`crate::rice_hybrid`]'s kernel can fold through
+/// this rather than restating the map — a second copy of a mapping that was
+/// corrected once (see the note above) is a second place the correction can be
+/// wrong. It stays out of the public API.
+pub(crate) fn rice_unmap(n: u32) -> i32 {
     if n & 1 == 0 {
         (n >> 1) as i32
     } else {

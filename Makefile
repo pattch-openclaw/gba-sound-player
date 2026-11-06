@@ -4,7 +4,7 @@
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
-        test test-rom flac-test flac-test-crc flac-test-scan flac-gates flac-portable-check spike-test opus-test kernel-test podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test \
+        test test-rom flac-test flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check spike-test opus-test kernel-test podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test \
         clean clean-cache check podman-check help toolchain-check
 
 # ---------------------------------------------------------------------------
@@ -117,6 +117,30 @@ flac-test-scan: toolchain-check
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features scan
 	@echo "flac-test-scan passed: the frame walk compiles for $(TARGET) and its witness suite is green with the scan feature on"
+
+# The `rice-hybrid` gate (split-ladder item 5 PR 3's portable hybrid Rice
+# kernel): the same shape again, and here the gate is the finding rather than a
+# convenience. With the feature off, the module, its unit tests and its
+# out-of-crate differential do not exist in a default build
+# (`required-features = ["rice-hybrid"]`), so `flac-test` cannot go green on the
+# twin's witness by accident — and the image is byte-for-byte the pre-PR-3 image.
+# With it on, the calibration instrument grows **+2,984 B of .text while `nm`
+# reports no hybrid symbol at all**: a second implementor of the `RiceKernel`
+# seam re-decides how the inliner treats the decode path beside it. That is the
+# 4b `scan` result one rung over, measured in full in crates/flac-lite/Cargo.toml
+# and FLAC.md, and it is why this is a feature: the default-flip decision has to
+# stay attributable to the swapped mechanism alone. Like the other two, this is
+# not in `check-gba-all`: no ROM links the twin, and the flip that would is
+# gated on an on-target cycle reading.
+# Counts when reading logs: `flac-test` runs the crate WITHOUT the twin, this
+# gate runs it WITH the twin and its differential.
+flac-test-rice: toolchain-check
+	cd crates/flac-lite && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features rice-hybrid
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features rice-hybrid
+	@echo "flac-test-rice passed: the portable hybrid kernel compiles for $(TARGET) and its two-mechanism differential is green with rice-hybrid on"
 
 # Second bare-metal target for the portability witness (`flac-portable-check`,
 # FLAC.md split-proposal ladder step 3, 2026-11-02). Cortex-M4F: a canonical
@@ -457,10 +481,13 @@ flac-test: toolchain-check
 # portability no other gate proves, and a feature-gated module that no gate builds
 # for a second target is a module whose portability claim is asserted rather than
 # measured. This is the only gate that compiles the walk for a non-thumbv4t
-# bare-metal target; `flac-test-scan` covers the thumbv4t half.
+# bare-metal target; `flac-test-scan` covers the thumbv4t half. `rice-hybrid`
+# joins it on the same argument, and it matters more here: PR 3's own title is
+# "the *portable*-twin default", and the one claim of the twin's that no other
+# gate proves is that the hybrid walk builds for a second bare-metal ARM target.
 flac-portable-check: toolchain-check
 	cd crates/flac-lite && \
-	  $(CARGO) check --release --target $(SECOND_TARGET) -Zbuild-std=core,alloc --features scan
+	  $(CARGO) check --release --target $(SECOND_TARGET) -Zbuild-std=core,alloc --features scan,rice-hybrid
 	@echo "flac-portable-check passed: flac-lite with the frame walk on compiles for $(SECOND_TARGET) (portability witness, no perf claim)"
 
 # The spike's assets witness: the host tests (examples/flac_spike/tests/) decode
@@ -533,15 +560,23 @@ test: test-rom flac-test
 # and the host witness) are the only arms that were not already runnable, added
 # because a *feature combination* is the only way to see a second instantiation,
 # and PR 2 is the PR where the instantiation count changes rather than the code.
+# PR 3 (2026-11-06) added the `rice-hybrid` configuration and a second
+# combination arm (`crc-check,scan,rice-hybrid`): the one build in which the
+# walk, the CRC verification and BOTH Rice mechanisms are compiled at once —
+# which is also the shape a future default flip would ship in.
 # Nothing here is parallel-safe-by-design: like `test:`, it is a plain
 # prerequisite aggregate, so `make -j flac-gates` interleaves output.
-flac-gates: flac-test flac-test-crc flac-test-scan flac-portable-check
+flac-gates: flac-test flac-test-crc flac-test-scan flac-test-rice flac-portable-check
 	cd crates/flac-lite && \
 	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check,scan
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features crc-check,scan
-	@echo "flac-gates passed: every crates/flac-lite configuration is green — default, crc-check, scan, both, and the second bare-metal target"
+	cd crates/flac-lite && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check,scan,rice-hybrid
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features crc-check,scan,rice-hybrid
+	@echo "flac-gates passed: every crates/flac-lite configuration is green — default, crc-check, scan, rice-hybrid, both, all three, and the second bare-metal target"
 
 # ---------------------------------------------------------------------------
 # Containerized test entrypoints (the portable path — the image ships
@@ -664,6 +699,8 @@ help:
 	@echo "    flac-portable-check  flac-lite second-target build witness ($(SECOND_TARGET); with the frame walk on: portability fact, no perf claim)"
 	@echo "    flac-test-crc     flac-lite host suite + thumbv4t compile with crc-check ON (hand-invoked; see README gate-aggregation TODO)"
 	@echo "    flac-test-scan    flac-lite host suite + thumbv4t compile with the frame walk (`scan`) ON (hand-invoked; see README gate-aggregation TODO)"
+	@echo "    flac-test-rice    flac-lite host suite + thumbv4t compile with the portable hybrid Rice kernel (`rice-hybrid`) ON (hand-invoked; see README gate-aggregation TODO)"
+	@echo "    flac-gates        EVERY flac-lite configuration in one command, plus the combination arms"
 	@echo ""
 	@echo "  Tests — containerized (same gates, no host tooling needed):"
 	@echo "    podman-test       test-rom + flac-test in the $(CONTAINER) image"

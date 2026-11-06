@@ -6675,6 +6675,207 @@ become `iwram-pin`-gated (hot *data* tables pin while the budget
 affords — E10 ratified item 2; 544 B against the 32 KB IWRAM budget), and
 the existing `nm`-on-the-Built-ELF witness is the template.
 
+**Landed 2026-11-06 as `feat/flac-lite-rice-portable-twin`** — the twin, and
+**not the flip**. The fork above is **left open, by name**: this host has no
+cycle-measurement environment (`mgba-test-runner`, `mgba`, `qemu`, `podman`,
+`docker`: none present — the same fact PR 2 recorded), and the rule's two arms
+are both gated on an on-target cycle reading, so neither branch can be taken
+here without replacing a measurement with a preference. That is a **deviation
+from the plan of record**, recorded as one rather than smoothed over: the plan
+put the twin *and* its decision in PR 3, and what lands is the twin plus its
+gate, with the decision moved to a **PR 4 whose only job is the flip and the
+on-target reading that decides it**. Nothing about the fork is re-declared
+there — the two arms and the bar stay exactly as written above. What keeps the
+deferred half from drifting is a test, not a comment:
+`tests/rice_two_mechanism_differential.rs::the_default_still_names_the_incumbent`
+asserts at source level that the one line naming the default still names
+`TableCountKernel` and names nothing else, so PR 4 arrives as an attributable
+change or fails a gate.
+
+**What is in the tree.** `crates/flac-lite/src/rice_hybrid.rs`: `CTZ8` /
+`REV8` / `BRUIJN_INDEX` (the three tables the plan named, built by `const fn`
+folds rather than hand-copied), the three-tier + refill walk (`refill`,
+`ctz32`, `shift_past_run`, `remainder_from_window`, `rev4`, `walk`, `emit`),
+and `HybridRiceKernel`, whose `RiceKernel` impl is the whole wiring. Plus
+**three lines outside it**: `bits::BitReader::region()` — the region view a
+window-domain kernel needs to bound its own byte reads, which PR 1's bridge did
+not carry and `KernelWindow::end` alone cannot answer — and two visibility
+bumps in `residual.rs` (`decode_rice_partition_with` → `pub`, `rice_unmap` →
+`pub(crate)`), which exist only so the differential can run both mechanisms
+from outside the crate. Plus one new suite. The default line, the escape path,
+both §9.2.7.3 guards, `rice_quotient` and `LEADING_ONES`: unchanged. No asm,
+no allocation, no `unsafe` code, no `#[inline]` added anywhere, the trait stays
+unsealed.
+
+**The twin is behind a new feature, `rice-hybrid`, off by default — and the
+feature is the finding, not a courtesy.** Eleven builds of the calibration
+instrument (`examples/flac_spike/`, default build — the ROM's shape), same
+method as PR 2's table: every section dumped with `objcopy -O binary
+--only-section`, then sized and hashed, plus `nm --print-size --size-sort
+--defined-only`.
+
+| arm | `.text` | `.rodata` | `.iwram` | `.ewram` |
+|---|---|---|---|---|
+| PR 2's image, warm caches | 46,008 B | 1,829,760 B | 812 B | 368 B |
+| the same tree after `cargo clean` (determinism control) | same bytes | same bytes | same bytes | same bytes |
+| `region()` added, nothing else | same bytes | same size, 2 B differ | same | same |
+| the two visibility bumps only | same bytes | same size, 2 B differ | same | same |
+| **the shipped tree, `rice-hybrid` off** — the image a ROM links today | **the control's bytes, hash for hash** | same size, 2 B differ | same | same |
+| the shipped tree, `rice-hybrid` **on** | **48,992 B (+2,984)** | same size, content differs | same | same |
+| module present, its `impl RiceKernel` block deleted | the control's bytes | — | same | same |
+| impl block present, its body reduced to `Ok(())` | **the control's bytes** | — | same | same |
+| as above, cold arm no longer calls the incumbent | 48,992 B (unchanged) | — | same | same |
+| **the flip** (default names the twin, pin on) | 50,000 B | same size, content differs | **1,068 B** | same |
+| the flip, `iwram-pin` **off** | 50,000 B | **1,830,272 B (+512)** | 556 B | same |
+
+`.text` in the default build is `f0f88c33d150…` — **PR 2's hash**, all six
+control builds and PR 2's own landing image. `nm` reads the same 172 symbols at
+the same addresses with the same sizes. The only bytes that moved anywhere in
+that build are the **two** PR 2 attributed: the same two panic `Location`
+records, at `.rodata+0x1be4a0` and `.rodata+0x1be4c0`, whose `line` fields go
+674 → 696 and 184 → 196 — `bits.rs`'s spanned-bytes gather and
+`residual.rs`'s `split_at_mut`, shifted by the 22 and 12 lines this PR inserts
+above each. So the gate does what it claims: **the image a GBA ROM links is
+byte-for-byte the image PR 2 shipped** (`.entrypoint` included).
+
+**The +2,984 B is attributed symbol by symbol, and it is not the twin's code.**
+With `rice-hybrid` on, `nm` reports **no `rice_hybrid` symbol in the image at
+all** — not the walk, not the tables, nothing. What grew is other code:
+`residual::decode_residual` 596 → 2,484 B (+1,888), `subframe::decode_subframe`
+888 → 1,576 B (+688), a **new** outlined specialisation
+`bits::BitReader::read_bits.815` (+388), `subframe::integrate_lpc` 256 → 276 B
+(+20). Those four sum to the section delta exactly. The three probes above say
+where the trigger is: deleting the `impl` block returns the control's bytes;
+**keeping the `impl` block and emptying its body also returns the control's
+bytes**; keeping it with its body reaching the walk costs the whole +2,984 B
+regardless of whether anything ever calls the kernel; and the cold arm's direct
+call to `TableCountKernel::decode_partition` is not the cause (removing it
+changes nothing). Reading, stated as a reading: the cost is paid by *whatever
+shares a codegen unit with a reachable kernel body* — the hybrid's own functions
+are dropped by the linker, but the specialisation of `read_bits` its call sites
+cause is attached to a function the decode path does call, and the decode path
+is where the bytes land. E2b's lesson ("a seam's cost shows up as codegen
+coupling") measured directly, one rung past 4b's `scan` finding; it is also the
+strongest argument in this tree for the trait's pre-existing "monomorphized,
+never `dyn`" decision, and it is why the flip must stay a one-line change with
+its own measurement: a flip taken on an ungated tree would not be attributable
+to the swapped mechanism alone.
+
+**The pin story, which PR 3 owed rather than deferred.** At the flip arm, the
+`nm` reading is unambiguous: `rice_hybrid::CTZ8` at `0x0300022c` and
+`rice_hybrid::REV8` at `0x0300032c` — **`.iwram`, and the first is exactly the
+slot `LEADING_ONES` holds** in every image in this series — with
+`rice_hybrid::emit` live at 800 B and `decode_residual` grown to 3,028 B.
+`LEADING_ONES` (256 B) and `bits::BitReader::rice_quotient` (336 B) are **gone**:
+at the flip nothing reachable calls them, so they leave the image, which is why
+the IWRAM delta at the flip is **+256 B net (812 → 1,068 B)** and not the +544 B
+the E10 budget line suggests. With `iwram-pin` off the same two tables land in
+`.rodata` instead (+512 B; `.iwram` drops to 556 B — that arm was read before the
+gate existed, on a tree whose feature-on image is byte-identical to this one, so
+it carries). And `BRUIJN_INDEX` is **not an object in any arm**: its 32 bytes
+appear folded into `.text` at `.text+0x75c0` (verified by searching the section
+dumps for the table the `const fn` builds), so that part of the budget is read
+from ROM whichever way the pin goes. Net honest number for PR 4: **512 B
+pinnable, 32 B not, +256 B IWRAM net at the flip** — and the source-level
+invariant ("do not delete `rice_quotient` / `LEADING_ONES`") is about the build,
+not about what the linker keeps; the gate is what keeps both mechanisms
+observable in one checkout, which is also what the differential needs.
+
+**The ratified-exception line moves, so it is put on the table rather than
+assumed.** A default build carries the **same one** placement attribute it
+carried before this PR (`bits::LEADING_ONES`); a `rice-hybrid` build carries
+**four, all of the same kind** — an `unsafe(link_section)` attribute on an
+immutable table, still no `unsafe` code. The plan's PR-1 cell said "the ratified
+exception count stays at one", and for PR 1 that was true; this PR is where the
+count could move, it moves only in a non-default configuration, and the three new
+ones are precisely the tables the E10-on-target proposal's 544 B line and the
+`iwram-pin` landing's ratified rule (hot *data* tables pin while the budget
+affords) already name. `src/lib.rs`'s crate-doc exception note states the
+per-configuration count.
+
+**The equivalence witness, and what it actually covers.**
+`tests/rice_two_mechanism_differential.rs` runs **four independent walks** over
+the committed corpus: a bit-by-bit *structure* walk that re-derives every
+partition header and body width from §9.2.5's prose (no window, no table, no
+word load), then the incumbent, then the twin — both through
+`decode_rice_partition_with`, from the position the structure walk recorded — and
+finally the table's own `exit_bits`, generated beside libFLAC's encoder. Every
+partition boundary is compared *mechanism vs mechanism* and *mechanism vs width
+walk*, not just end-to-end. Coverage as the suite reports it: **4 vectors, 11
+Rice partitions, 1,015 samples, parameters {0, 2, 3, 6, 8}**, with tripwires that
+fail the run if the corpus ever yields fewer. Two vectors also pin the decoded
+residuals to `flac -d` output alone (a FIXED subframe's residual is the forward
+difference of the reference PCM at the wasted-stripped scale), so the value
+anchor does not consult either mechanism. Stated limits: the corpus contains **0
+escaped partitions** (the escape path is the driver's and is untouched here), and
+its widest parameter is 8 — so the 5-bit-parameter remainder leg (`order` 17…31)
+is **not** reached by the corpus; it is reached by the in-crate sweep
+`remainder_from_window_matches_the_spec_text_at_every_order`, which is a spec-text
+comparison rather than a real-stream one. Conversely the corpus does reach the
+`qdb == 31` tier-2 leg (M1 below panics there), which the suite's own header
+did not expect.
+
+**Mutation witnesses** (each a one-line edit to the shipped module, each
+reverted; suite run with `--features rice-hybrid`):
+
+| mutation | convicted by |
+|---|---|
+| drop the spelled `31 => 0` leg of `shift_past_run` | the in-crate oracle, word-skip, mixed-partition and `q = 31` legs, **and the corpus differential** (`shift right with overflow`) |
+| swap the two `REV8` byte roles in the warm remainder leg (`(lo<<8)|hi` → `(hi<<8)|lo`) | the order-by-order sweep and oracle legs, **and the corpus**: `fixed1-wasted5-256` partition 0 (parameter 6, bit 82) — wrong samples 1248 vs the incumbent's ±1250 |
+| let tier 1 accept `CTZ8`'s 8 sentinel (`c < 8` → `c <= 8`) | in-crate legs incl. the truncated/guard leg, **and the same corpus partition**, with visibly different values |
+| warm/cold remainder boundary `order <= 16` → `order < 16` | **not convicted — correctly**: order-16 answers through `rev32(x << 16)`, which *is* `rev16(x)`; the same identity the cold leg's doc states |
+| `REFILL_TARGET` 25 → 24 | **not convicted — correctly**: a policy knob for *which* path answers, not for the answer |
+
+The two green rows are the honest half of this table: the suites judge what the
+kernel **answers**, not which leg answers it — which is the point of item 5
+(this is a swappable mechanism, so a behaviour-neutral re-routing must not be a
+gate failure).
+
+**Every gate, on the landing host** (Linux/aarch64, the repo's pinned nightly
+1.100.0-nightly `a69a63265` 2026-09-03 — the same nightly E9/E10 quote).
+`flac-test` **178 + 1** — unchanged from PR 2, because the default build does not
+contain this PR; `flac-test-crc` **181 + 1** (unchanged); `flac-test-scan`
+**198 + 1** (unchanged); **`flac-test-rice` 194 + 1** (new gate, new
+configuration: 178 + the module's 14 unit tests + the 2 corpus witnesses);
+`crc-check,scan` **201 + 1** (unchanged); the new **`crc-check,scan,rice-hybrid`
+arm 217 + 1**; `flac-portable-check` green, and it now compiles the twin for the
+second bare-metal target too (`--features scan,rice-hybrid`) — PR 3's title says
+*portable* twin, so that claim gets a gate. `spike-test` **25** (15 + 10),
+`kernel-test` **20**, `opus-test` **28** — the overlay/probe side sees no change,
+as with PR 2. `make check` clean. `make test-rom` (the ROM `#[test_case]` suite)
+**not run**: no `mgba-test-runner` on this host, and this PR changes no ROM —
+which the byte-identical `.text` above is the strongest available statement
+about. Warm aggregate (`make flac-gates`, now six configurations + two new
+combination arms): **1.00 s** second run, against 0.72–0.75 s for PR 2's four;
+the first run after a source edit (2.15 s) is not a warm number.
+
+**PR 4's baseline is this image, and the flip's numbers are already taken** —
+50,000 B `.text`, `.iwram` 1,068 B with `CTZ8`/`REV8` pinned at
+`0x0300022c`/`0x0300032c`, `decode_residual` 3,028 B, `emit` 800 B, the
+incumbent's 336 + 256 B gone. What PR 4 owes, and nothing else: the `ctrl` arm
+against **this** image (feature off, default path) and the same arm against the
+flipped one, calibration overhead subtracted, on a machine with a runner; the
+existing rule (demote inside ~9–13 cyc/frame of layout noise, carry at mean
+≥ ~10%) applies unchanged. **The cycle arm is not run here, and unlike PR 2 this
+PR cannot argue its way out of it**: PR 2's image was the same bytes at the same
+addresses, so its `ctrl` was provably the same instruction stream; this one would
+change the instruction stream by 3,992 B, so the missing reading is genuinely
+missing and the fork is genuinely open. The pre-named fallback (the vendored-loop
+overlay) is not reached: nothing here is being carried. No GBA real-time claim is
+made or implied; the item still cannot make one.
+
+**Baselines to hold, re-recorded at this landing (2026-11-06):** `flac-test`
+178 + 1 · `flac-test-crc` 181 + 1 · `flac-test-scan` 198 + 1 · **`flac-test-rice`
+194 + 1** · `crc-check,scan` 201 + 1 · `crc-check,scan,rice-hybrid` 217 + 1 ·
+`flac-portable-check` green with `scan,rice-hybrid` · `spike-test` 15 + 10 ·
+`kernel-test` 20 · `make check` clean — `make flac-gates` runs all six
+configurations plus both combination arms (1,169 passed + 6 ignored across them).
+Codegen baselines: the ROM-links image is **unchanged at `.text` 46,008 B**
+(`f0f88c33d150…`) with `LEADING_ONES @ 0x0300022c`, `rice_quotient` live at
+336 B and `decode_residual` at 596 B — the three `nm` anchors PR 2 named are
+untouched in the configuration it ships — and the `rice-hybrid` configuration's
+image is 48,992 B with the attributed deltas above.
+
 ### What was consolidated out of the eight-rung draft (so it is not re-litigated)
 
 - **The design-of-record rung** — the shape is settled by the two tree
@@ -6749,3 +6950,15 @@ host-dependent one (it carries absolute source paths; the other three match 4b's
 table to the byte), so PR 3 reads `.text` as a **differential** against its own
 pre-change build and treats the `nm` anchors as the invariant part:
 `LEADING_ONES @ 0x0300022c`, `rice_quotient` live, `decode_residual` 596 B.
+
+**Re-recorded at PR 3's landing (2026-11-06)**, in full inside the PR 3 record
+above, because that landing *does* move counts — only never in the configuration a
+ROM links: `flac-test` 178 + 1 (unchanged), `flac-test-crc` 181 + 1, `flac-test-scan`
+198 + 1, **`flac-test-rice` 194 + 1 (new)**, `crc-check,scan` 201 + 1,
+**`crc-check,scan,rice-hybrid` 217 + 1 (new)**. And it *does* move the image —
+only in a configuration nothing links: the default build's `.text` is the same
+bytes at the same hash (`f0f88c33d150…`, 46,008 B), the three `nm` anchors
+untouched. **PR 4's baseline is the image PR 3 ships**, with the flip's own
+numbers already taken beside it (50,000 B / `.iwram` 1,068 B / `decode_residual`
+3,028 B): the reading PR 4 owes is the on-target `ctrl` comparison, not a new
+codegen one.

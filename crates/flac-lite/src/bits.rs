@@ -550,6 +550,28 @@ impl<'a> BitReader<'a> {
         self.data.get(start_bit / 8..end_bit / 8)
     }
 
+    /// The whole backing region — the byte view [`KernelWindow::ptr`] and
+    /// [`KernelWindow::end`] are offsets *into*, and the authority the
+    /// take-back re-bounds against.
+    ///
+    /// This exists for window-domain kernels (split-ladder item 5): a
+    /// [`crate::residual::RiceKernel`] that owns a whole partition walks bytes
+    /// itself — tier 3's word-skip and the byte-merging refill — and needs the
+    /// same view the window hands it to be able to bound those reads at all.
+    /// [`KernelWindow::end`] gives the bound; this gives the bytes to index.
+    /// The two are the same length by construction at hand-out
+    /// (`kernel_window` sets `end = data.len()`), and a kernel must still use
+    /// `end` rather than this slice's length if it wants the window's own
+    /// contract rather than the reader's.
+    ///
+    /// Never touches the cursor, and borrows the region immutably for the
+    /// reader's whole lifetime `'a`, so holding it across a read is fine —
+    /// reads are `&mut self` over the *cursor*, not over the bytes.
+    #[inline]
+    pub fn region(&self) -> &'a [u8] {
+        self.data
+    }
+
     /// Hand out this reader's bit window in **the kernel's** domain — the
     /// hand-out half of the seam bridge (split-ladder item 5, PR 1; see
     /// [`KernelWindow`] and [`BitReader::set_kernel_window`] for the shape

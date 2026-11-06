@@ -7,11 +7,15 @@ license = "MIT"
 keywords = ["flac", "audio", "no_std", "decoder", "bare-metal"]
 categories = ["multimedia::audio", "no-std"]
 
-# STATE (2026-11-04): the Phase 1 decode path is complete through
+# STATE (2026-11-06): the Phase 1 decode path is complete through
 # frame::decode_frame, and the per-frame loop over a borrowed frame index
 # landed as src/driver.rs (narrow copy of the spike's proven driver, split
-# PR-ladder item 4); todo!() remains for the manifest-driven decoder facade
-# and format::Manifest. Authoritative state: src/lib.rs crate docs.
+# PR-ladder item 4). Split-ladder item 5 is open: the Rice kernel seam
+# (`residual::RiceKernel`) landed in PR 2, the window-domain bridge on `bits`
+# landed inert in PR 1, and the second kernel — `src/rice_hybrid.rs`, the
+# portable hybrid twin — landed behind its own feature in PR 3, unwired and not
+# the default. todo!() remains for the manifest-driven decoder facade and
+# format::Manifest. Authoritative state: src/lib.rs crate docs.
 # Roadmap: ../../FLAC.md "Phased plan" + "split proposal".
 
 [dependencies]
@@ -33,6 +37,18 @@ default = []
 # zero-wait table read (flac_spike / flac_integration do; the ratified
 # exception count is unchanged either way). Split-proposal ladder step 2,
 # 2026-11-02.
+#
+# Since split-ladder item 5 PR 3 this ALSO covers the hybrid kernel's hot
+# tables (`rice_hybrid::CTZ8` / `REV8` / `BRUIJN_INDEX`, 544 B as the E10
+# proposal budgeted them), which it gates identically and for the same reason.
+# What that budget actually costs is measured, not transcribed: at the one-line
+# default flip the two 256 B tables land in `.iwram` at `0x0300022c` /
+# `0x0300032c` — the slot `LEADING_ONES` held, which leaves the image because
+# its only caller went uncalled, so the IWRAM delta at the flip is **+256 B
+# net**, not +544 B — while `BRUIJN_INDEX` is not an object in either pin state:
+# the 32 bytes are folded into `.text` at `.text+0x75c0`, so they are read from
+# ROM regardless. With `iwram-pin` OFF those two tables land in `.rodata`
+# instead (+512 B). Full reading: FLAC.md, "split-ladder item 5", PR 3.
 iwram-pin = []
 # Decode-profile escape hatch: when enabled, frames that violate the constrained
 # encode profile (full-LPC predictors, unsupported block sizes) are rejected with
@@ -64,6 +80,35 @@ crc-check = []
 # code. So the gate defers that cost to item 6 — where the E-anchor baselines get
 # re-recorded anyway — it does not remove it.
 scan = []
+# The portable hybrid Rice kernel (`rice_hybrid::HybridRiceKernel`) — split-
+# ladder item 5 PR 3's second `residual::RiceKernel` implementor. Off by
+# default, for the same reason `scan` is: it is code no GBA ROM should carry
+# yet, and the item's own default-flip decision is gated on an on-target cycle
+# reading that has not been taken. It changes nothing about what is decoded —
+# `decode_rice_partition` still names `TableCountKernel` on one line — it
+# decides only whether the second mechanism exists in a build.
+#
+# Measured, not asserted, and the measurement is the whole reason for the gate.
+# On the E instrument (`examples/flac_spike/`, default build — the ROM's shape),
+# with this feature OFF the image is **byte-for-byte the pre-PR-3 image**: same
+# section sizes, same `.text` sha-256 (`f0f88c33d150…`), `nm` identical in all
+# 172 symbols. With it ON, `.text` is 48,992 B — **+2,984 B** — and `nm` shows
+# **no hybrid symbol in the image at all**: not the walk, not the tables. The
+# growth is attributed symbol by symbol: `residual::decode_residual` 596 → 2,484
+# (+1,888), `subframe::decode_subframe` 888 → 1,576 (+688), a newly outlined
+# `bits::BitReader::read_bits` specialisation (+388), `subframe::integrate_lpc`
+# 256 → 276 (+20) — which sums to the delta exactly. A probe arm settled the
+# cause: with the module present (docs, tables, helpers, `walk`) but its
+# `impl RiceKernel for HybridRiceKernel` block removed, the image is identical
+# to the control again. So the cost is not the twin's code and not its 544 B of
+# tables — it is *a second implementor of the seam being emitted at all*, which
+# re-decides how the inliner treats the decode path it shares a codegen unit
+# with. That is 4b's `scan` finding one rung over, and it is why PR 3 is gated
+# rather than merely argued: a flip measured on an ungated tree would not be
+# attributable to the swapped mechanism alone, which is the one thing the item's
+# whole PR-2/PR-3 split exists to keep true. `make flac-test-rice` is the gate;
+# `make flac-portable-check` compiles the twin for the second bare-metal target.
+rice-hybrid = []
 
 [lib]
 name = "flac_lite"
@@ -83,6 +128,17 @@ required-features = ["scan"]
 [[test]]
 name = "crc_check"
 required-features = ["crc-check"]
+
+# Same shape as the two above, and for the same reason as the gate: this suite
+# is the twin's only out-of-crate witness, and both of its tests need
+# `rice_hybrid` compiled — the differential runs the two mechanisms against each
+# other, and the second one pins that the default still names the incumbent.
+# Without `required-features` a default build would report the suite's absence as
+# a green it had not earned. `make flac-test-rice` runs it; `make flac-test`
+# does not build it.
+[[test]]
+name = "rice_two_mechanism_differential"
+required-features = ["rice-hybrid"]
 
 # No workspace membership: this crate is standalone (like examples/symphonia_flac_probe/)
 # so the root ROM crate's `[build] target = thumbv4t-none-eabi` config never leaks

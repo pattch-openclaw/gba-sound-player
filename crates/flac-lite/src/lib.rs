@@ -3,9 +3,11 @@
 //! A minimal FLAC **frame** decoder: `#![no_std]`, zero dependencies, zero
 //! allocation on the decode path — portable pure Rust. The Game Boy Advance
 //! (thumbv4t-none-eabi) is the founding platform, not the boundary: the
-//! decode path imports nothing platform-specific, and the sole unsafe
-//! surface is one placement attribute behind
-//! `all(target_arch = "arm", feature = "iwram-pin")` — off by default (see
+//! decode path imports nothing platform-specific, and the only unsafe
+//! surfaces are `.iwram` placement **attributes** on immutable lookup tables —
+//! `bits::LEADING_ONES` and, since split-ladder item 5 PR 3, the hybrid
+//! kernel's three tables in [`rice_hybrid`] — all of them behind
+//! `all(target_arch = "arm", feature = "iwram-pin")` and off by default (see
 //! the `deny(unsafe_code)` note below), so host builds compile with zero
 //! unsafe and non-GBA ARM targets link without a `.iwram` section.
 //! The GAFP manifest and encode-profile material in `README.md` are
@@ -280,11 +282,19 @@
 // Bare-metal by construction. `core` only — not even `alloc` is required by the
 // decode path (buffers are caller-provided; the manifest is borrowed).
 #![no_std]
-// `deny`, not `forbid`, since 2026-10-22: one named exception — the E2b
-// run-length table's `.iwram` placement attribute in `bits::LEADING_ONES`
-// (an unsafe *attribute* on an immutable table; no unsafe code exists).
-// Sam ratified the exception when the rate-play producer-wall measurement
-// put the unpinned landing back on the table (FLAC.md, E2b pinning).
+// `deny`, not `forbid`, since 2026-10-22: named exceptions — the `.iwram`
+// placement attributes on the decode path's immutable run-length tables.
+// Four items, one kind: an unsafe *attribute* on an immutable table, no
+// unsafe code anywhere. `bits::LEADING_ONES` is the original, which Sam
+// ratified when the rate-play producer-wall measurement put the unpinned
+// landing back on the table (FLAC.md, E2b pinning); `rice_hybrid`'s
+// `CTZ8` / `REV8` / `BRUIJN_INDEX` joined them on 2026-11-05 with
+// split-ladder item 5 PR 3, under the same `iwram-pin` gate and for the same
+// reason (the hot tables the E10-on-target proposal budgeted for the hybrid —
+// see that module's notes on the pin and on what the tables cost). Those three
+// are compiled only when `rice-hybrid` is on, so a default build carries the
+// same **one** item it carried before PR 3; the count that grows is the number
+// of *gated* placement attributes, not the number any shipped image pays.
 // Everything else still fails the build.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -298,6 +308,17 @@ pub mod driver;
 pub mod format;
 pub mod frame;
 pub mod residual;
+// The portable hybrid Rice kernel — split-ladder item 5 PR 3's second
+// `residual::RiceKernel` implementor, behind the `rice-hybrid` feature — off
+// by default. It is *not* the default the decode path uses, and the module says
+// why. What the feature decides is only whether a build *carries* it: a measured
+// +2,984 B on the calibration instrument with the feature on and **no hybrid
+// symbol in the image at all** — the same second-implementor effect 4b recorded
+// for the walk, so the reason for the gate and its measured cost live in
+// `Cargo.toml`, and the module's own notes carry the 544 B table budget and what
+// those tables cost when the kernel is live (`iwram-pin`).
+#[cfg(feature = "rice-hybrid")]
+pub mod rice_hybrid;
 // The frame walk (split-ladder item 4b), behind the `scan` feature — off by
 // default. Nothing in this crate links it yet; the reason and the measured
 // code-size cost of turning it on are in `Cargo.toml`, and the module docs name
