@@ -4,7 +4,7 @@
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
-        test test-rom flac-test flac-test-crc flac-test-scan flac-portable-check spike-test opus-test kernel-test podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test \
+        test test-rom flac-test flac-test-crc flac-test-scan flac-gates flac-portable-check spike-test opus-test kernel-test podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test \
         clean clean-cache check podman-check help toolchain-check
 
 # ---------------------------------------------------------------------------
@@ -524,6 +524,24 @@ test-rom: toolchain-check
 # verify. `check` is the formatting gate.
 test: test-rom flac-test
 	@echo "test passed: ROM suite + flac-lite isolation gates"
+
+# The aggregate README's "TODO: one aggregate for the non-default-configuration
+# gates" asked for by name, landed with split-ladder item 5 PR 2 (2026-11-05):
+# one command covering every `crates/flac-lite` configuration. It adds nothing
+# that the named gates do not already witness — it is the same commands, and the
+# two combination arms at the end (both features on: the thumbv4t `cargo check`
+# and the host witness) are the only arms that were not already runnable, added
+# because a *feature combination* is the only way to see a second instantiation,
+# and PR 2 is the PR where the instantiation count changes rather than the code.
+# Nothing here is parallel-safe-by-design: like `test:`, it is a plain
+# prerequisite aggregate, so `make -j flac-gates` interleaves output.
+flac-gates: flac-test flac-test-crc flac-test-scan flac-portable-check
+	cd crates/flac-lite && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check,scan
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features crc-check,scan
+	@echo "flac-gates passed: every crates/flac-lite configuration is green — default, crc-check, scan, both, and the second bare-metal target"
 
 # ---------------------------------------------------------------------------
 # Containerized test entrypoints (the portable path — the image ships

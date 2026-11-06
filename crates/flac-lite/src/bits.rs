@@ -12,9 +12,18 @@
 //! STATUS (2026-11-05): **the window-domain bridge is present and inert** —
 //! [`rev32`] plus the hand-out/take-back pair [`BitReader::kernel_window`] /
 //! [`BitReader::set_kernel_window`] (split-ladder item 5, PR 1). **Nothing in
-//! the decode path calls it**; PR 2 is the PR that does, and this PR exists so
-//! that the one assumption item 5 rests on is witnessed on its own before any
-//! generic, trait, or measurement stands on it.
+//! the decode path calls it**, and PR 2 (2026-11-05, the seam itself) did not
+//! change that — deliberately: PR 2's rule is zero behavior change to any
+//! decode output, and the core's kernel is the incumbent loop, which reads
+//! through the reader's own primitives. PR 1's note said "PR 2 is the PR that
+//! does", and that expectation was wrong about its own successor, so it is
+//! corrected here rather than left to mislead: the window-domain callers are
+//! PR 3's host-side twin (whose kernel state *is* the `w`/`v`/`ptr`/`end` set
+//! this type carries) and item 6's `flac-lite-gba` overlay kernel. The reason
+//! this PR stood alone still holds — the one assumption item 5 rests on had to
+//! be witnessed on its own before any generic, trait, or measurement stood on
+//! it — and it now stands under the seam, in `residual`'s module docs and on
+//! the `RiceKernel` trait.
 //!
 //! The roadmap itself lives in FLAC.md → "Phased plan" (single source of truth).
 //!
