@@ -1,0 +1,80 @@
+[package]
+name = "flac-lite-gba"
+version = "0.1.0"
+edition = "2024"
+# A library, deliberately not published: the whole reason this crate exists is
+# that it is bound to one platform, and its correctness claims are the core's
+# witnesses rather than its own (see the crate docs). `publish = false` records
+# that boundary rather than leaving it to be rediscovered at `cargo publish`.
+publish = false
+description = "GBA (thumbv4t-none-eabi) overlay for flac-lite: the platform-bound realizations of the Rice codeword loop, written over the core's residual::RiceKernel seam. Split-ladder item 6 PR 6a-1: the crate exists and nothing links it."
+license = "MIT"
+
+# STATE (2026-11-06, split-ladder item 6 PR 6a-1): the crate exists and NOTHING
+# links it. No kernel, no asm, no FFI, no `unsafe`, no feature, no module beyond
+# the crate docs. The plan of record for what lands when — and for which PR owns
+# which decision — is FLAC.md, "Split-ladder item 6 — the overlay and the
+# container: plan of record (2026-11-06)", the 6a ladder. Everything below is a
+# build-plumbing decision taken once so it is not re-litigated inside 6a-3's or
+# 6a-4's diff.
+
+[dependencies]
+# The core, by path. No features are enabled here yet: `iwram-pin` is 6a-4's to
+# turn on (it is one feature forward from the kernel landing, and its witness is
+# there), and 6a-3's Rust arm goes behind an overlay feature of its own, not
+# behind a core feature. Nothing in `flac-lite`'s default set is switched by this
+# crate, so a default build of the overlay is not yet a build of anything.
+flac-lite = { path = "../flac-lite" }
+
+# Nightly 2026-09-03 added `cargo::unused_dependencies`, and in 6a-1 the core IS
+# unused by non-test source — the crate has no source beyond docs, which is the
+# whole shape of this PR. The dependency edge itself is part of what 6a-1 exists
+# to witness (the gate log shows `Checking flac-lite` through this manifest for
+# thumbv4t-none-eabi), so the warning would be noise in every gate until 6a-3
+# puts a real user here.
+#
+# OWNERSHIP: 6a-3's arm is the first non-test user of the core, and it should
+# DELETE this allow when it lands, so the lint goes back to watching the edge.
+# An allow that outlives its reason is how dead dependencies survive.
+[lints.cargo]
+unused_dependencies = "allow"
+
+[dev-dependencies]
+# Host-test-only deps (the overlay's tests run on the host triple, exactly like
+# the core's: cargo config leak — see the Makefile's `overlay-test` and
+# FLAC.md "Cargo config leak"). Reserved; empty until a test needs one.
+
+[features]
+# Intentionally EMPTY, and it stays empty in 6a-1 on purpose. The first entry
+# here is 6a-3's (the Rust arm as an instrument arm), and the item's rules say
+# an arm's cost is charged where it is wired, not here.
+default = []
+
+[lib]
+name = "flac_lite_gba"
+path = "src/lib.rs"
+
+# Standalone workspace, like crates/flac-lite/ and every examples/ crate here.
+# Without this, the root ROM crate's implicit workspace would adopt the overlay
+# and its host-side tests would inherit the GBA target (the recorded cargo-config
+# leak). Being standalone fixes the workspace; it does NOT and must NOT fix the
+# *config*: see the next comment.
+[workspace]
+
+# Deliberately NO local .cargo/config.toml. Cargo *concatenates*
+# `target.<triple>.rustflags` across config layers rather than overriding, so a
+# local re-declaration links `-Tgba.ld` twice — the failure mode this repo has
+# recorded three times (the `-Tgba.ld` double-link leak and its two variants).
+# The overlay inherits the root's `[build] target` + `-Zbuild-std` + rustflags,
+# which is exactly what makes `make overlay-check` mean what it says. Honest
+# limit of this PR: an rlib has no link step, so 6a-1 cannot CONVICT that leak
+# either way; the rule is inherited from the tree rather than tested here, and
+# the first rung in this item where a link step exists next to asm is 6a-4 (in
+# an instrument ROM — `examples/arm-kernels` / the spike), not in this crate.
+#
+# Deliberately NO [profile] block either, for the same reason in reverse: cargo
+# takes release profiles from the workspace root being BUILT, so a profile here
+# would apply only to a standalone `--release` build of the overlay — which is a
+# number nobody measures, and the item's measurements are taken inside whatever
+# instrument links this crate (whose profile governs). A decorative profile block
+# would be a false witness of the first kind.
