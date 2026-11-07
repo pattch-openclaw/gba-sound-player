@@ -4,7 +4,8 @@
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
-        test test-rom flac-test flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check spike-test opus-test kernel-test podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test \
+        test test-rom flac-test flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check spike-test opus-test kernel-test overlay-check overlay-test \
+        podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test podman-overlay-test \
         clean clean-cache check podman-check help toolchain-check
 
 # ---------------------------------------------------------------------------
@@ -60,12 +61,18 @@ FLACROM_CACHE ?= gba-flac-integration-target
 SPIKE_CACHE   ?= gba-flac-spike-target
 OPUS_CACHE    ?= gba-opus-spike-target
 KERNEL_CACHE ?= gba-arm-kernels-target
+OVERLAY_CACHE ?= gba-flac-lite-gba-target
 CACHE_MOUNTS := -v $(CARGO_CACHE):/app/target:Z \
                 -v $(FLAC_CACHE):/app/crates/flac-lite/target:Z \
+                -v $(OVERLAY_CACHE):/app/crates/flac-lite-gba/target:Z \
                 -v $(FLACROM_CACHE):/app/examples/flac_integration/target:Z \
                 -v $(SPIKE_CACHE):/app/examples/flac_spike/target:Z \
                 -v $(OPUS_CACHE):/app/examples/opus_spike/target:Z \
                 -v $(KERNEL_CACHE):/app/examples/arm-kernels/target:Z
+# Note, not fixed here: KERNEL_CACHE has been in $(CACHE_MOUNTS) since that
+# crate landed but was never added to `clean-cache` below. `clean-cache` now
+# lists $(OVERLAY_CACHE) because this change introduces it; the kernel volume's
+# absence is named so it is not mistaken for a deliberate exclusion.
 # GBA test harness (ROM tests boot headlessly in mGBA). Override to point
 # elsewhere, or set empty to see the raw cargo command.
 GBA_TEST_RUNNER ?= mgba-test-runner
@@ -187,6 +194,17 @@ KERNEL_CRATE_DIR := examples/arm-kernels
 KERNEL_CRATE_MANIFEST := $(abspath examples/arm-kernels/Cargo.toml)
 KERNEL_CRATE_BIN := target/$(TARGET)/release/arm-kernels
 
+# The GBA OVERLAY crate (crates/flac-lite-gba/) — FLAC.md split-ladder item 6,
+# 6a: the platform-bound Rice-kernel realizations written over flac-lite's
+# `residual::RiceKernel` seam. A LIBRARY, not a ROM: no agb, so there is no ROM
+# to build and no link step to witness (the crate's own docs carry that boundary
+# and its `unsafe` budget). Standalone workspace with the root's config
+# INHERITED on purpose — do NOT add a local .cargo/config.toml (cargo
+# concatenates target.<triple>.rustflags, so a local re-declaration links
+# `-Tgba.ld` twice; FLAC.md's double-link leak).
+OVERLAY_CRATE_DIR := crates/flac-lite-gba
+OVERLAY_CRATE_MANIFEST := $(abspath crates/flac-lite-gba/Cargo.toml)
+
 # `rom` is the command run INSIDE the container (where agb-gbafix lives); the
 # *-rom targets above it are the host-facing entrypoints. Keep `rom` = the
 # native ROM build so containerized and native builds produce the same artifact.
@@ -210,6 +228,7 @@ format:
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) fmt
 	cd $(OPUS_CRATE_DIR) && $(CARGO) fmt
 	cd $(KERNEL_CRATE_DIR) && $(CARGO) fmt
+	cd $(OVERLAY_CRATE_DIR) && $(CARGO) fmt
 else
 format:
 	@echo "format: skipping — no rustfmt for '$(TOOLCHAIN)' (build continues)."
@@ -531,6 +550,62 @@ podman-kernel-test:
 	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
 	$(CONTAINER) run --rm -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make kernel-test
 
+# ---------------------------------------------------------------------------
+# THE GBA OVERLAY (FLAC.md split-ladder item 6, 6a; crates/flac-lite-gba/).
+#
+#   overlay-check        the crate COMPILES for $(TARGET) and flac-lite resolves
+#                        through the path dependency, in a release check
+#   overlay-test         the crate's host witness, run out-of-tree (config leak)
+#
+# What neither one witnesses, stated plainly because both absences are the point
+# of 6a-1: no link step exists in an rlib, so there is no link witness and no
+# codegen charge claimed here (6a-1 builds no ROM — the crate carries no `agb`),
+# no cycle is claimed, and no ROM in this repo links the overlay yet. The
+# thumbv4t half is `cargo check` rather than a ROM build precisely because there
+# is no ROM to build; the real link witness for this crate arrives with 6a-3, as
+# an arm of an existing instrument. And the rule the crate manifest follows
+# because of this file: the overlay has NO local .cargo/config.toml, because
+# cargo CONCATENATES `target.<triple>.rustflags` across config layers, so a local
+# re-declaration would double-link `-Tgba.ld` (README, agb-build gotcha 2 and its
+# two variants). 6a-1 cannot convict that leak either way — there is no link step
+# in an rlib — so the rule is inherited from the tree rather than tested here; the
+# first rung in this item with a link step next to asm is 6a-4, in an instrument.
+#
+# One limit of `overlay-check`, found by 6a-1's own mutation witness (FLAC.md, the
+# 6a-1 record): `cargo check` does not compile `#[cfg(test)]` source, so an
+# `unsafe` inside a test is convicted by `overlay-test` and never here; and
+# deleting the path dependency outright leaves `overlay-check` GREEN — it asserts
+# nothing about the edge being USED. What it witnesses is that cargo resolves
+# `flac-lite` through this manifest and type-checks it for $(TARGET), which is the
+# `Checking flac-lite` line in its own log. The live-edge witness is
+# `overlay-test`.
+#
+# Deliberately NOT part of `flac-gates`: that aggregate is every configuration of
+# `crates/flac-lite`, and this is a different crate whose features do not exist
+# yet. Deliberately NOT in `test` either, and hand-invoked like
+# flac-test-crc/-scan/-rice, for the same reason: nothing links this crate, so
+# these are plumbing gates. There is no $(SECOND_TARGET) arm here on purpose — a
+# portability witness for a crate whose whole purpose is being platform-bound
+# would be a claim this item never makes; portability stays witnessed by
+# `flac-portable-check`, on the core.
+# ---------------------------------------------------------------------------
+
+overlay-check: toolchain-check
+	cd $(OVERLAY_CRATE_DIR) && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc
+	@echo "overlay-check passed: the overlay AND the core it depends on both type-check for $(TARGET) (compile witness only: an rlib has no link step, and the live-edge witness is overlay-test)"
+
+overlay-test: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(OVERLAY_CRATE_MANIFEST) --target $(HOST_TRIPLE)
+	@echo "overlay-test passed: the overlay's host witness is green (6a-1: one no-op test, by design)"
+
+podman-overlay-test:
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make overlay-test
+	@echo "podman-overlay-test done: overlay host witness ran in $(CONTAINER)."
+
 # Cargo's runner env var is the upper-cased target triple with dashes replaced
 # by underscores: CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER.
 TARGET_ENV := $(shell echo $(TARGET) | tr 'a-z-' 'A-Z_')
@@ -621,6 +696,7 @@ clean:
 	cd $(FLAC_CRATE_DIR) && $(CARGO) clean
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) clean
 	cd $(KERNEL_CRATE_DIR) && $(CARGO) clean
+	cd $(OVERLAY_CRATE_DIR) && $(CARGO) clean
 	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM) $(OPUS_ROM) $(OPUS_PROBE_ROM) $(KERNEL_ROM) $(RATE_ROM) $(RATE_PLAY_ROM)
 # The rate flow's generated assets are TEMPORARY (gitignored, like ROMs —
 # FLAC.md "Sample-rate reduction"); they regenerate from
@@ -635,8 +711,8 @@ clean:
 # Safe: they are pure build caches — the next container run rebuilds from
 # scratch, slowly once, then repopulates them. Does NOT touch ./target.
 clean-cache:
-	-$(CONTAINER) volume rm $(CARGO_CACHE) $(FLAC_CACHE) $(FLACROM_CACHE) $(SPIKE_CACHE) $(OPUS_CACHE) 2>/dev/null || true
-	@echo "container build-cache volumes removed ($(CARGO_CACHE), $(FLAC_CACHE), $(FLACROM_CACHE), $(SPIKE_CACHE), $(OPUS_CACHE))."
+	-$(CONTAINER) volume rm $(CARGO_CACHE) $(FLAC_CACHE) $(FLACROM_CACHE) $(SPIKE_CACHE) $(OPUS_CACHE) $(OVERLAY_CACHE) 2>/dev/null || true
+	@echo "container build-cache volumes removed ($(CARGO_CACHE), $(FLAC_CACHE), $(FLACROM_CACHE), $(SPIKE_CACHE), $(OPUS_CACHE), $(OVERLAY_CACHE))."
 
 check:
 	$(CARGO) fmt --check
@@ -645,6 +721,7 @@ check:
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) fmt --check
 	cd $(OPUS_CRATE_DIR) && $(CARGO) fmt --check
 	cd $(KERNEL_CRATE_DIR) && $(CARGO) fmt --check
+	cd $(OVERLAY_CRATE_DIR) && $(CARGO) fmt --check
 
 # Fail early and legibly when the pinned toolchain isn't reachable, instead of
 # half-running a gate (e.g. `--target ''` when the host triple can't be probed).
@@ -691,6 +768,11 @@ help:
 	@echo "    native-kernel-rom build $(KERNEL_ROM) natively (on-target kernel sweep ROM)"
 	@echo "    podman-kernel-rom build $(KERNEL_ROM) in the container"
 	@echo "    kernel-test       kernel twins vs oracle + committed table (host)"
+	@echo ""
+	@echo "  GBA OVERLAY (FLAC.md split-ladder item 6a; crates/flac-lite-gba):"
+	@echo "    overlay-check     the overlay COMPILES for $(TARGET) against flac-lite (compile only: an rlib has no link step)"
+	@echo "    overlay-test      the overlay's host witness (6a-1: one no-op test by design; hand-invoked, not in test/flac-gates)"
+	@echo "    podman-overlay-test  that host witness in the container"
 	@echo ""
 	@echo "  Tests — native gates (need nightly + agb-gbafix + mgba-test-runner locally):"
 	@echo "    test              test-rom + flac-test (verify-only: no reformat)"

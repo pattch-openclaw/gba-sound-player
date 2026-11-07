@@ -7389,6 +7389,9 @@ worst 1,797,752 @136 / sum 280,848,260; `l4_stereo` mean 6,609,128 / worst
 | **6a-7** | **The stack confirmation. No new code** — one measured arm: 6a-4's kernel **and** 6a-6's default together, against the same-image `ctrl`. | E9 already measured this pairing and reported **additive composition**, so this is a confirmation on the current tree, not a new question — and it is the configuration the product actually ships. Its second job is to re-anchor the E numbers on the post-6a image, which 6b-1 then inherits. | Cycles, same-image | that two measured wins composed negatively (E9's additivity claim does not reproduce) |
 | **6a-8** *(conditional)* | E8-style **sub-stage probe** over the asm kernel: tier-1 / tier-2 / tier-3 / refill / fold priced separately. | Item 5 PR 4 declined to build one because its decision did not need it, and named this item as the place it belongs. Run it **only** if 6a-5 lands inside or near the noise band; otherwise it answers a question nobody is asking. | Cycles, sub-stage | that a near-bar result is unattributable to a leg |
 
+> **6a-1 landed 2026-11-06**, as scoped: [6a-1 — landed](#6a-1--landed-2026-11-06-as-scoped-the-crate-exists-and-nothing-links-it).
+> Nothing in the tree's decode path changed; 6a-2 is next.
+
 **6a's pre-declared fork (6a-5), stated now so it cannot be negotiated after the
 fact.** As written in item 5 PR 3, with the same bar: the asm arm **within the
 ~9–13 cyc/frame layout-noise band or faster** → carry, and carrying means the
@@ -7400,6 +7403,143 @@ proposal's realization claim is corrected here as a measured negative, and 6a's
 records stay the honest statement of what was tried. No third arm: "it was faster
 in the probe" is not a carry condition, and this item has already seen that
 sentence cost samples once.
+
+#### 6a-1 — landed (2026-11-06), as scoped: the crate exists and nothing links it
+
+**What shipped.** `crates/flac-lite-gba/Cargo.toml` and `src/lib.rs` (80 + 162
+lines, of which the Rust is one `#[cfg(test)]` module: no library modules, no
+non-test items at all, zero `unsafe`, `#![deny(unsafe_code)]`, plus a crate doc that
+states what the crate is *not* — not a ROM, not `agb`-dependent, not the
+container/frame-source layer 6b will be), a generated `Cargo.lock` tracked like every
+other workspace's (no ignore rule changed: `.gitignore` already covers
+`/crates/*/target/`), and the Makefile's overlay section: an `OVERLAY_CACHE` volume
+wired into `$(CACHE_MOUNTS)`, `clean-cache` and `help`, the crate's `cargo clean` in
+`clean`, `OVERLAY_CRATE_{DIR,MANIFEST}`, the `fmt`/`fmt --check` lines that keep
+`make check` covering the new crate, and `overlay-check` / `overlay-test` /
+`podman-overlay-test`. One side observation, recorded rather than fixed: wiring
+`clean-cache` showed that `KERNEL_CACHE` has been in `$(CACHE_MOUNTS)` since 4a-3 with
+no `clean-cache` entry; a Makefile note now names it, and cleaning up someone else's
+omission is not this PR's change to make.
+
+**Pre-change control, taken before any file was edited.** `HEAD` = `0489e94`, tree
+clean. The calibration instrument was built twice from that state — once with caches as
+left (`make native-spike-rom`: 0.3 s with warm caches and nothing to rebuild), once
+after `cargo clean` in `examples/flac_spike` (9.6 s — that is the `-Zbuild-std`
+core/alloc rebuild, and it is the arm that matters). The two records are
+byte-identical: the standing `cargo clean` determinism control, which is what makes
+"no codegen charge" not an artifact of caching. Section digests are
+`objcopy -O binary --only-section` → sha256; symbols are
+`nm --print-size --size-sort`. Toolchain `rustc 1.100.0-nightly (a69a63265
+2026-09-03)` — the same nightly item 5's records and the E9/E10 figures were taken on —
+on `aarch64-unknown-linux-gnu`, GNU binutils 2.46.
+
+**The section table, four arms: pre-change warm, pre-change after `cargo clean`,
+post-change warm, post-change after `cargo clean`.** All four are identical, the ROM
+file included.
+
+| section | size | sha256, all four arms |
+|---|---|---|
+| `.entrypoint` | 380 B | `7d6b62f63b70…` |
+| `.text` | **46,008 B** | **`f0f88c33d150c776…` — the exact hash this item's "Baselines to hold" Images row names** |
+| `.rodata` | 1,829,760 B | `2151855c7e5c…` (sample tables; their content is not read here) |
+| `.iwram` | 812 B | `eeda688aa1a2…` |
+| `.ewram` | 368 B | `c8beeb9e3f5f…` |
+| ROM file | — | `467ff1231610…` (agb's trailer included) |
+
+`nm --print-size --size-sort`: 172 symbols, identical across all four arms. **There is
+no symbol-by-symbol delta to attribute, and that null is the finding rather than a
+gap** — and since this is the PR that establishes what the overlay is *allowed* to
+cost, the anchors every later record here restates are present and unchanged:
+`LEADING_ONES @ 0x0300022c` (size 0x100, the 4a-1 leak), `BitReader::rice_quotient`
+(size 0x150 = 336 B), `residual::decode_residual` (size 0x254 = 596 B).
+
+**The same control one level wider, because "adding a crate to the tree" is the
+failure this PR isolates.** One instrument is what the landing rules ask for, but a new
+*sibling* crate could only disturb the other images, so the four other ROM workspaces
+(root, the facade, the opus spike with its `ctor-probe`, the kernel crate) were
+`cargo clean`ed and rebuilt from scratch **with** the change, then again **without** it
+(the change stashed, tree at `0489e94`, `git status` empty). Both sides are genuine
+from-scratch builds (39 s wall for all four either way, `-Zbuild-std` and registry
+caches in place), and every dumped section size, section digest, ROM sha256 and `nm`
+listing matches across the two sides:
+
+| image | `.text` | ROM sha256 | `nm` |
+|---|---|---|---|
+| `gba-sound-player` | 29,740 B `7ddfbe35…` | `e665a302…` | 129 symbols ✓ |
+| `flac-integration` | 33,100 B `07565828…` | `acb95039…` | 137 ✓ |
+| `opus-spike` | 188,024 B `c0e9adbd…` | `9440145a…` | 293 ✓ |
+| `ctor-probe` | 187,864 B `101ee6a1…` | `e8687f57…` | 294 ✓ |
+| `arm-kernels` | 35,336 B `2042fcd6…` | `69577701…` | 146 ✓ |
+
+(`flac-rate-spike` / `flac-rate-play` build from the instrument's own workspace, which
+carries the four-arm record above; they were not clean-built twice.)
+
+**Gates.** Every count sits at this item's "Baselines to hold" rows, unchanged: `flac-gates`
+**1,169 passed + 6 ignored**, with the six per-configuration counts 178 / 181 / 198 /
+194 / 201 / 217 and `flac-portable-check` green; `spike-test` 15 + 10; `kernel-test`
+20; `opus-test` 28; `rate-test` 46; `make check` clean. **Two gates are new, and they
+are named as new gates rather than as modifications of existing ones:**
+`make overlay-check` and `make overlay-test` (1 passed), plus `podman-overlay-test`
+for parity with the container-visible witnesses. **`podman-overlay-test` was not run:
+this harness has no usable container runtime** — `podman` is on PATH but rootless
+podman cannot start here (`newuidmap` is absent; Homebrew has no `uidmap` formula and
+there is no non-interactive sudo to install Ubuntu's), which is the same limitation the
+project skill records and that every existing `podman-*` target in this Makefile has been
+carrying since it landed. So that target is defined and unrun: it is the only new target in this PR
+with no execution behind its description, and 6a-3 should run it on a host that has a
+runtime before anyone reads it as tested. Neither of the two native overlay gates
+joins `flac-gates`, which is defined as every configuration *of the core*, and neither
+joins `test`; both are hand-invoked like `flac-test-crc/-scan/-rice`, and the README
+gate table now lists them. `make test-rom` **was** run: exit 0, "Running 0 tests" — run because it is the
+only thing here that witnesses a linked image building, linking and booting in mGBA,
+and stated for what it showed: it asserts nothing (the known zero-collecting ROM
+suite), which is not the same sentence as "the suite passed". Timings are warm-cache
+numbers from this host and this tree (`flac-gates` 4.5 s; four clean-built ROM
+workspaces 39 s); the cold path is not hidden — it is what the two `cargo clean` arms
+above are for.
+
+**Mutation witness for the new suite**, since the item requires one for every new
+correctness suite including a behaviour-neutral re-routing, and a no-op test is exactly
+the case where the witness is the point:
+
+| # | mutation | result |
+|---|---|---|
+| A | path dependency commented out | `error[E0433]: cannot find module or crate flac_lite in this scope`; `overlay-test` exit 2 — the edge is live. **Honest green row:** `overlay-check` stayed green, because a `check` asserts nothing about the edge being *used*; what it witnesses of the edge is the `Checking flac-lite …` line in its own log |
+| B | `unsafe { … }` around the test's `type_name` call | `error: usage of an unsafe block` from `overlay-test` (exit 2). **Honest green row:** `overlay-check` stayed green — `cargo check` does not compile `#[cfg(test)]` source |
+| B2 | `const _: u32 = unsafe { 1 };` in **non-test** source | convicted by **both** halves (exit 2 each) — the mutation that actually witnesses the zero-`unsafe` budget on the target side |
+
+**Three decisions the manifest takes once, so 6a-3's and 6a-4's diffs don't re-open
+them.** (1) **No local `.cargo/config.toml`**: cargo *concatenates*
+`target.<triple>.rustflags` across config layers, so a local re-declaration would
+double-link `-Tgba.ld` — the recorded leak and its two variants — and the overlay is
+supposed to inherit the root's target, `-Zbuild-std` and rustflags, which is precisely
+what makes `overlay-check` mean what it says. Stated limit: 6a-1 has **no link step
+anywhere**, so it cannot convict that leak either way; the rule is inherited from the
+tree, and the first rung in this item with a link step next to asm is 6a-4, in an
+instrument. (2) **No `[profile]` block**: cargo takes release profiles from the
+workspace root being built, so a profile in this manifest would govern only a
+standalone build of a library nobody measures — every number in this item is taken
+inside whatever instrument links the overlay, whose profile governs — so a profile block
+here would be a decorative witness of the first kind. (3) **`[lints.cargo]
+unused_dependencies = "allow"`**: that lint is **on by default in the nightly this tree
+builds on** — it fired in `overlay-check`'s very first run, telling us to remove the
+path dependency, because in 6a-1 the core genuinely *is* unused by non-test source,
+which is the shape of this PR — so the allow carries its owner in the manifest:
+**6a-3 deletes it**, because 6a-3's arm is the first non-test user of the core, and an
+allow that outlives its reason is how dead dependencies survive. (`publish = false` is
+the same species of decision, stated once: the crate's whole reason to exist is being
+platform-bound.)
+
+**What this PR does not witness, so no one has to infer it.** No link, no codegen
+charge, no `.text` delta, no instruction stream, no cycle figure. And the seam is
+untouched on purpose: the one test is written so it cannot be mis-read as evidence on
+6a-3's question — it names `core::any::type_name::<flac_lite::Error>()`, a type that
+is *not* the trait, so the crate's only current witness proves the dependency edge and
+says nothing at all about whether `RiceKernel` is implementable from outside. 6a-2's
+control is this item's "Baselines to hold" Images row, unchanged: `.text` 46,008 B at
+`f0f88c33d150…`, `nm` 172
+symbols, with the three anchors above; and from here on, `overlay-check` and
+`overlay-test` are among the counts a record in this item restates.
 
 ### 6b — the container: where frames come from
 
@@ -7555,6 +7695,15 @@ Images, in the configuration a ROM links: `.text` **46,008 B**
 source paths) · `.iwram` 812 B · `.ewram` 368 B · `.entrypoint` 380 B; `nm`
 anchors `LEADING_ONES @ 0x0300022c`, `rice_quotient` live at 336 B,
 `decode_residual` 596 B.
+
+**Re-stated after 6a-1 (2026-11-06), because that PR is exactly the kind that is
+allowed to change none of it:** the instrument is byte-identical through the change
+(four arms: pre-change warm, pre-change after `cargo clean`, post-change warm,
+post-change clean — see the 6a-1 record), the five other ROM images (across the four
+other ROM workspaces) are identical across a clean rebuild with and without the change,
+and `crates/flac-lite` was touched not at all. Two new hand-invoked gates now exist outside `flac-gates` and outside
+`test` — `overlay-check` (thumbv4t compile witness) and `overlay-test` (1 test, the
+overlay's own) — and they are part of what a record in this item restates from here on.
 
 **Per-PR rules:** 6a-1 / 6a-2 / 6a-5 / 6a-7 / 6a-8 change no count and no
 instruction stream. 6a-3 may move counts only in its own new configuration. 6a-4
