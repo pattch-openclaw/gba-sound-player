@@ -16,6 +16,12 @@ mean-and-worst alone; the reading is cumulative. Full findings:
 This directory is **sample code only**: the probe never lands on `main`'s
 spike sources. The live `src/` stays exactly as the E2b-landed tree shipped it.
 
+> **Re-applied 2026-11-06 (item 6a-2).** Applying this archive now needs
+> `port-item6a2-header-bits.patch` after it, and the **LPC column** of the results
+> table in this README is era-denominated — its absolute values are not reproducible
+> and its percentages must not be quoted across records. See
+> [Re-application note](#re-application-note-item-6a-2-2026-11-06) at the bottom.
+
 ## What the probe does
 
 Four IRQ-off measurement windows per frame, one image (the E2b three-window
@@ -127,3 +133,41 @@ budget 1,048,750 cycles/frame; net of this image's own calibration):
 `make flac-test` (120 passed, 1 ignored — unchanged; `crates/flac-lite/`
 untouched by the patch), `make check` clean, `make native-spike-rom`
 builds. `make kernel-test` untouched (arm-kernels crate unchanged).
+
+## Re-application note (item 6a-2, 2026-11-06)
+
+Re-applied at `b15b756` (item 5's shipped tree plus the unlinked overlay crate)
+as part of that PR's baseline re-anchor. `git apply --check` is clean and the result
+does **not** compile: three `error[E0063] missing field 'header_bits' in initializer
+of 'FrameHeader'`, at `src/e10.rs:1050`, `src/e2.rs:481`, `src/e2b.rs:571`. Item
+4a's `FrameHeader::parse` counts the header bits, and this probe's vendored
+parsers predate it. Apply **`port-item6a2-header-bits.patch` after**
+`e10-three-arm-probe.patch` — the four-line-per-parser port (`let start_bit =
+reader.bit_position();` … `header_bits = reader.bit_position() - start_bit`). The
+port is compile-only: with it reverted (`header_bits: 0`) the image's `.text` and
+`.iwram` are byte-identical and the run log is unchanged.
+
+Re-measured on one image, both clips, two runs byte-identical (1,017 lines /
+84,654 B, `eq=1` 314/314, region FNVs `[OK]`); the tables are in `FLAC.md` →
+"6a-2 — landed (2026-11-06)". Two things a future re-application needs to know:
+
+1. **The four FIXED sums above reproduce exactly** — to the cycle — from this
+   archive at the very tree this patch names as its base (`c3ebd3b`), built here in
+   November. The four **LPC** sums do not: each is **+66,403,116 cycles** higher on
+   every build makeable here, and the offset is identical for all four arms. It is
+   carried by the i64 LPC leg, not by this probe, and it is not the tree, the
+   samples (both `spike_l*_frames.bin` blobs are unchanged since they were
+   introduced) or the emulator. So **−11.51% LPC is era-denominated**; the
+   portable form of that result is the absolute marginal, `tab − arm = −715,300
+   cycles/frame` (recorded −715,298, re-measured −715,304). −40.08% FIXED happens
+   to survive because that leg's cost did not move.
+2. **Every sign and every within-image differential held.** `arm` stayed the
+   fastest leg by the same margin (recorded −715,298 and −711,617 cyc/frame over
+   `tab` on FIXED/LPC; re-measured −715,304 and −711,622), `acc − ctrl` reproduced
+   *exactly* (+66,467,575 FIXED, +118,570,939 LPC, in both eras), and `tab − arm`
+   reproduced to 942 cycles in 112 million.
+
+Never quote this probe's rows against a live-decoder row: inside one image the live
+measurement window and this probe's `ctrl` window differ by a constant 1,413 cycles
+(9 cyc/frame), and adding this probe to an image moves the live decode by a constant
+−631,208 cycles at `b15b756` (−631,836 at `c3ebd3b`), both clips alike.

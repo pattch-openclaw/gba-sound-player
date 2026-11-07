@@ -18,6 +18,11 @@ both clips). Full findings:
 This directory is **sample code only**: the probe never lands on `main`'s
 spike sources. The live `src/` stays exactly as the E10-era tree shipped it.
 
+> **Re-applied 2026-11-06 (item 6a-2).** Applying this archive now needs
+> `port-item6a2-header-bits.patch` after it, and this README's **LPC percentages**
+> are no longer quotable across records. See
+> [Re-application note](#re-application-note-item-6a-2-2026-11-06) at the bottom.
+
 ## What the probe does
 
 Four IRQ-off measurement windows per frame, one image (the E10 four-window
@@ -131,3 +136,46 @@ witness `eq=1` on all 628 frame-windows (both passes × 2 clips × 157):
 8), `make flac-test` (120 passed, 1 ignored — unchanged; no `crates/` file
 touched), `make check` clean, `make native-spike-rom` builds; pre-commit
 hook full suite green on the measurement commit.
+
+## Re-application note (item 6a-2, 2026-11-06)
+
+Re-applied at `b15b756` as part of that item's baseline re-anchor. `git apply
+--check` is clean; the result does **not** compile — four `error[E0063] missing
+field 'header_bits' in initializer of 'FrameHeader'`, at `src/e10.rs:1050`,
+`src/e2.rs:481`, `src/e2b.rs:571` and `src/e9.rs:468`. Apply
+**`port-item6a2-header-bits.patch` after** `e9-composite.patch`: this archive's
+copies of `e10.rs`/`e2.rs`/`e2b.rs` are byte-identical to the E10 archive's, so
+its port is that same four-line-per-parser port plus the `e9.rs` case. The port is
+compile-only: with it reverted (`header_bits: 0`) the image's `.entrypoint`,
+`.text` (87,224 B) and `.iwram` (17,996 B) are byte-identical and the run log is
+unchanged — only `.rodata` moves, because it carries those parsers' panic-location
+strings.
+
+Re-measured, two runs byte-identical (1,357 lines / 121,107 B, `eq=1` 628/628, region FNVs
+`[OK]`, `i32_fits=true iw_fits=true` on FIXED and `false` on LPC, `.iwram` scratch
+`e9::scratch::{LEFT,RIGHT}` @`0x0300064c`/`0x0300264c`); tables in `FLAC.md` →
+"6a-2 — landed (2026-11-06)". Versus the sums recorded above, measured here on the
+post-item-5 tree:
+
+| leg | FIXED Δ (total) | LPC Δ (total) |
+|---|---|---|
+| `ctrl` | +8,908 | **+66,412,024** |
+| `arm` | −3,768 | **+66,399,348** |
+| `i32` | **−5,024** | **−5,024** |
+| `iw` | **−5,024** | **−5,024** |
+
+That table is the single cleanest witness this item found: the two legs that run
+the i64 LPC arithmetic pick up ~66.4M cycles, the two that deliberately do not are
+unmoved to 5,024 (−32 cyc/frame, tree drift plus layout noise — this file's
+existing ±9k band). Nothing about this probe changed; the LPC clip's *denominator*
+did. It lands the way this record already read it — **additivity is a statement in
+absolute cycles** — and the absolute marginals confirm it: `arm − i32` FIXED
+12,330,961 → 12,332,217 (−78,542 → −78,550 cyc/frame, **−7.35% in both worlds**),
+while the same margin as a *percentage* of LPC moves **−58.53% → −61.51%**
+(−3,201,707 → −3,624,665 cyc/frame). E3's scratch pin reproduces exactly: **`iw −
+i32` = +3,140 cycles total, +20.0 cyc/frame, both clips, both eras.**
+
+So quote this probe's marginals forward, not its percentages; and never against a
+live-decoder row — inside one image the live window and this probe's `ctrl` window
+differ by a constant 1,727 cycles (11 cyc/frame), and adding this probe to an image
+moves the live decode by a constant −631,208 cycles, both clips alike.

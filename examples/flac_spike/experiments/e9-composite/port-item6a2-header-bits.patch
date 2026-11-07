@@ -1,0 +1,124 @@
+--- a/examples/flac_spike/src/e10.rs
++++ b/examples/flac_spike/src/e10.rs
+@@ -1002,6 +1002,11 @@
+     if reader.bit_position() % 8 != 0 {
+         return Err(Error::FrameSync);
+     }
++    // PORT (2026-11-06 re-application at item 6a-2): the core's
++    // `FrameHeader::parse` has carried a header-length field since item 4a
++    // (`frame.rs`: `start_bit` / `header_bits`). The vendored copy is a
++    // transcription of that parse, so it now transcribes that rule too.
++    let start_bit = reader.bit_position();
+ 
+     let sync = reader.read_bits(14)?;
+     if sync != SYNC_14 {
+@@ -1047,12 +1052,16 @@
+ 
+     let _crc8 = reader.read_u8()?;
+ 
++    // PORT (2026-11-06): same expression as the core's parse.
++    let header_bits = reader.bit_position() - start_bit;
++
+     Ok(FrameHeader {
+         blocksize,
+         sample_rate,
+         channels,
+         bits_per_sample,
+         number,
++        header_bits,
+     })
+ }
+ 
+--- a/examples/flac_spike/src/e2.rs
++++ b/examples/flac_spike/src/e2.rs
+@@ -433,6 +433,11 @@
+     if reader.bit_position() % 8 != 0 {
+         return Err(Error::FrameSync);
+     }
++    // PORT (2026-11-06 re-application at item 6a-2): the core's
++    // `FrameHeader::parse` has carried a header-length field since item 4a
++    // (`frame.rs`: `start_bit` / `header_bits`). The vendored copy is a
++    // transcription of that parse, so it now transcribes that rule too.
++    let start_bit = reader.bit_position();
+ 
+     let sync = reader.read_bits(14)?;
+     if sync != SYNC_14 {
+@@ -478,12 +483,16 @@
+ 
+     let _crc8 = reader.read_u8()?;
+ 
++    // PORT (2026-11-06): same expression as the core's parse.
++    let header_bits = reader.bit_position() - start_bit;
++
+     Ok(flac_lite::frame::FrameHeader {
+         blocksize,
+         sample_rate,
+         channels,
+         bits_per_sample,
+         number,
++        header_bits,
+     })
+ }
+ 
+--- a/examples/flac_spike/src/e2b.rs
++++ b/examples/flac_spike/src/e2b.rs
+@@ -523,6 +523,11 @@
+     if reader.bit_position() % 8 != 0 {
+         return Err(Error::FrameSync);
+     }
++    // PORT (2026-11-06 re-application at item 6a-2): the core's
++    // `FrameHeader::parse` has carried a header-length field since item 4a
++    // (`frame.rs`: `start_bit` / `header_bits`). The vendored copy is a
++    // transcription of that parse, so it now transcribes that rule too.
++    let start_bit = reader.bit_position();
+ 
+     let sync = reader.read_bits(14)?;
+     if sync != SYNC_14 {
+@@ -568,12 +573,16 @@
+ 
+     let _crc8 = reader.read_u8()?;
+ 
++    // PORT (2026-11-06): same expression as the core's parse.
++    let header_bits = reader.bit_position() - start_bit;
++
+     Ok(FrameHeader {
+         blocksize,
+         sample_rate,
+         channels,
+         bits_per_sample,
+         number,
++        header_bits,
+     })
+ }
+ 
+--- a/examples/flac_spike/src/e9.rs
++++ b/examples/flac_spike/src/e9.rs
+@@ -420,6 +420,11 @@
+     if reader.bit_position() % 8 != 0 {
+         return Err(Error::FrameSync);
+     }
++    // PORT (2026-11-06 re-application at item 6a-2): the core's
++    // `FrameHeader::parse` has carried a header-length field since item 4a
++    // (`frame.rs`: `start_bit` / `header_bits`). The vendored copy is a
++    // transcription of that parse, so it now transcribes that rule too.
++    let start_bit = reader.bit_position();
+ 
+     let sync = reader.read_bits(14)?;
+     if sync != SYNC_14 {
+@@ -465,12 +470,16 @@
+ 
+     let _crc8 = reader.read_u8()?;
+ 
++    // PORT (2026-11-06): same expression as the core's parse.
++    let header_bits = reader.bit_position() - start_bit;
++
+     Ok(FrameHeader {
+         blocksize,
+         sample_rate,
+         channels,
+         bits_per_sample,
+         number,
++        header_bits,
+     })
+ }
+ 

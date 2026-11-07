@@ -7177,6 +7177,23 @@ close from a same-image baseline **before** anyone quotes cycles across records 
 which is also why PR 4's own numbers are stated against its own control, in its own
 session, and not as absolute costs of a mechanism.
 
+> **[ 2026-11-06, item 6a-2 ]** The standing question is closed, and this
+> paragraph's guess is not the answer: the gap does **not** need a different host.
+> Checking out E10's own stated base (`c3ebd3b`) and applying its own archived
+> patch here, on this host, with the toolchain this Makefile pins, reproduces that
+> record's four FIXED sums **to the cycle** and adds **+66,403,116 cycles to each of
+> its four LPC sums** — a constant, identical across arms, carried by the i64 LPC leg
+> (the E9 image shows the same offset on its two i64 legs and *nothing* on its two
+> i32 legs; the FIXED clip pays nothing anywhere). Re-anchoring PR 4's own control at
+> the tree item 5 shipped reproduces this paragraph's **280,848,260 /
+> 1,037,633,086** exactly, cold-built, so neither record's instrument moved.
+> What moved is the arithmetic leg's realization, and the era's binary cannot be
+> inspected to say why: the E10 record's measurement commit (`5525336`) is not an
+> object in this repo, and its own clean-worktree rebuild already printed a different
+> ROM sha than the binary it measured. Full tables, and the rules this forces on
+> every later cycle reading: [6a-2 — landed
+> (2026-11-06)](#6a-2--landed-2026-11-06-measurement-only-the-baseline-re-anchor-and-the-thing-that-actually-moves-a-cycle-count).
+
 **What this record does *not* settle.** Whether a *better-written* portable-Rust
 kernel would beat the incumbent. Neither E10 nor PR 4 tests that — PR 4 tested the
 twin as written, which is the corpus-differential witness made executable, not a
@@ -7390,7 +7407,11 @@ worst 1,797,752 @136 / sum 280,848,260; `l4_stereo` mean 6,609,128 / worst
 | **6a-8** *(conditional)* | E8-style **sub-stage probe** over the asm kernel: tier-1 / tier-2 / tier-3 / refill / fold priced separately. | Item 5 PR 4 declined to build one because its decision did not need it, and named this item as the place it belongs. Run it **only** if 6a-5 lands inside or near the noise band; otherwise it answers a question nobody is asking. | Cycles, sub-stage | that a near-bar result is unattributable to a leg |
 
 > **6a-1 landed 2026-11-06**, as scoped: [6a-1 — landed](#6a-1--landed-2026-11-06-as-scoped-the-crate-exists-and-nothing-links-it).
-> Nothing in the tree's decode path changed; 6a-2 is next.
+> **6a-2 landed 2026-11-06**, as scoped: [6a-2 — landed](#6a-2--landed-2026-11-06-measurement-only-the-baseline-re-anchor-and-the-thing-that-actually-moves-a-cycle-count).
+> Nothing in the tree's decode path changed in either. 6a-3 is next.
+> 6a-2 changes how this item — and every later record that quotes an E-series
+> number — is allowed to use cycles: read its "what 6a-2 changes in the plan"
+> paragraph before quoting a cycle figure across records, in either direction.
 
 **6a's pre-declared fork (6a-5), stated now so it cannot be negotiated after the
 fact.** As written in item 5 PR 3, with the same bar: the asm arm **within the
@@ -7540,6 +7561,281 @@ control is this item's "Baselines to hold" Images row, unchanged: `.text` 46,008
 `f0f88c33d150…`, `nm` 172
 symbols, with the three anchors above; and from here on, `overlay-check` and
 `overlay-test` are among the counts a record in this item restates.
+
+#### 6a-2 — landed (2026-11-06), measurement only: the baseline re-anchor, and the thing that actually moves a cycle count
+
+**What this PR is.** A re-anchor and a re-application record. The code it
+introduces is **two new `.patch` files**, both under
+`examples/flac_spike/experiments/`: `e10-three-arm-probe/port-item6a2-header-bits.patch`
+and `e9-composite/port-item6a2-header-bits.patch`. The rest of the diff is this
+record and a re-application note beside each archive. No source file under `crates/`
+was touched, no test was added or removed, no count moved, no instruction stream
+moved, and no probe source landed on `main`'s spike sources — the E-series rule
+held. The probe trees were built, measured, attributed and then reverted; only
+the ports that made them buildable are kept, because a future re-application will
+need them and they cannot be re-derived from the archives. The ports' only runtime
+effect on an image is in `.rodata`, where they change the panic-location strings of
+the probe parsers; and the base window's own calibration line reads 24 inside a
+probe image against 22 in the base image, in both archives alike — 2 cycles of
+probe scaffolding, itself another within-image constant.
+
+**The instrument, re-anchored at `b15b756` (6a-1's tree, i.e. item 5's shipped
+tree plus an unlinked crate).** A pre-change control from a clean worktree, a
+cold `cargo clean` rebuild, and the base ROM built a third time after the whole
+probe sequence below: all three ROMs and all three ELF files are byte-identical,
+the runs print byte-identical logs (675 lines, 47,061 B), the two FNV region
+witnesses print `[OK]`, and the base calibration reads `overhead_estimate=22
+stable=true` as item 5 PR 4 recorded. Live decode path, both clips:
+
+| tree (both built on this host, same toolchain instance) | `l0_stereo` sum | min@frame | max@frame | `l4_stereo` sum | min@frame | max@frame |
+|---|---|---|---|---|---|---|
+| `c3ebd3b` — the E10 record's own base, unpatched | 280,839,980 | 454,576@156 | 1,797,696@136 | 1,037,624,806 | 1,411,168@156 | 6,643,168@145 |
+| **`b15b756` — this item's base** | **280,848,260** | 454,632@156 | 1,797,752@136 | **1,037,633,086** | 1,411,224@156 | 6,643,224@145 |
+| delta | +8,280 | | | +8,280 | | |
+
+The second row **is** item 5 PR 4's control row, reproduced to the cycle
+(280,848,260 / 1,037,633,086; maxima 1,797,752@136 / 6,643,224@145), so the
+instrument this item inherits is the one item 5 left. The delta row is what item
+5's *landed defaults* plus 6a-1 cost the instrument: **+8,280 cycles total on
+each clip — 52.7 cyc/frame, 0.0030%, the same constant on both clips.** The
+spike's own verdict line still prints `FAILED`, measured 2/2, within budget 0/2:
+nothing here is a real-time claim, and both clips stay over `budget=1,048,750`.
+
+Images, re-stated because a record in this item must: `.text` **46,008 B**
+(`f0f88c33d150…`) · `.rodata` 1,829,760 B · `.iwram` 812 B (`eeda688aa1a2…`) ·
+`.ewram` 368 B · `.entrypoint` 380 B, and the three `nm` anchors unchanged:
+`LEADING_ONES @ 0x0300022c`, `rice_quotient` live at 336 B, `decode_residual`
+596 B. One nuance to keep rather than smooth over: **the symbol *count* a record
+quotes is an artifact of the `nm` flags** — `--print-size --size-sort` (what this
+file's records use) gives 172 sized symbols at `b15b756`, matching "`nm` 172
+symbols" in 6a-1's control line; plain `--defined-only` gives 194 symbol lines and
+`--defined-only --text-only` gives 168. The anchors and sizes are identical under
+all three; a future record that reports a different count has changed its flags,
+not the tree.
+
+**The archived patches: both still apply, neither still compiles, and that is a
+clean result.** `e10-three-arm-probe.patch` (three files) and
+`e9-composite.patch` (four) both `git apply --check` cleanly at `b15b756`, and the
+E9 composite's copies of `e10.rs`/`e2.rs`/`e2b.rs` are byte-identical to the E10
+patch's, so the two archives are one source of truth, not two. What broke is the
+compile, in exactly one way, four times: `error[E0063] missing field
+'header_bits' in initializer of 'FrameHeader'` at `e10.rs:1050`, `e2.rs:481`,
+`e2b.rs:571`, `e9.rs:468` — item 4a's `FrameHeader::parse` counts the header bits
+and the vendored initializers predate it. The port is four lines per parser
+(`let start_bit = reader.bit_position();` … `header_bits =
+reader.bit_position() - start_bit`), it is mechanical, and it is recorded as a
+standalone reappliable patch next to each archive rather than as prose. Both ports
+were generated from the *applied archive* (so they are minimal), and both
+forward-check against their archive and reverse-check to the archived bytes.
+
+**Mutation witness for the port itself, since the port is the only code this PR
+introduces.** With the port reverted to `header_bits: 0` in all four probe
+parsers, the E9 image's `.entrypoint` (380 B), `.text` (87,224 B, `6a8b95398541…`)
+and `.iwram` (17,996 B, `7dbd10df103a…`) come back **byte-identical**; only
+`.rodata` moves, because it carries the panic-location strings those parsers can
+reach (image ROM `b4782054d70a…` → `59608203ad62…`). Its run log is
+byte-identical to the ported image's: 1,357 lines / 121,107 B, `eq=1` 628/628,
+both region FNV witnesses `[OK]`, same live rows. **The port is compile-only.**
+
+**The probe images, and what grew.** Both archives rebuild deterministically: the
+E10 image came back at the same ROM sha (`16a3cbaa2b5b…`) in an independent second
+build, the E9 image built twice to identical bytes (`b4782054d70a…`), and their run
+logs are byte-identical pairwise (1,017 lines / 84,654 B, and 1,357 lines /
+121,107 B; `eq=1` 314/314 and 628/628; FNV `[OK]`; probe calibration
+`overhead: 35`, `ime_inside=0`). Their sections:
+
+| image | `.text` | `.rodata` | `.iwram` | `.iwram` contents |
+|---|---|---|---|---|
+| base `b15b756` | 46,008 B | 1,829,760 B | 812 B | core `LEADING_ONES` @`0x0300022c` |
+| base + E10 + port | 71,976 B | 1,831,832 B | 1,612 B | + `BRUIJN_INDEX @0x0300032c`, `CTZ8 @0x0300034c`, `REV8 @0x0300044c`, `LEADING_ONES @0x0300054c` |
+| base + E9 + port | 87,224 B | 1,833,516 B | 17,996 B | as E10, plus `e9::scratch::{LEFT @0x0300064c, RIGHT @0x0300264c}` |
+
+Those `.iwram` addresses are the E10 record's own layout echoes, reproduced
+exactly (`BRUIJN_INDEX @0x0300032c` / `CTZ8 @0x0300034c` / `REV8 @0x0300044c`) —
+which is a witness about the *link*, and it is the reason the cycle reading below
+can be taken at face value.
+
+`nm --print-size --size-sort` attribution, sized-symbols bucket totals:
+base 172 symbols / 47,442 B → E10 208 / 74,200 B → E9 219 / 105,368 B. All of it
+is probe-side and all of it is named: `e10` 3,738 B, `e2` 3,462 B, `e2b` 3,770 B,
+`e9` 23,020 B (which includes the two 8,192 B scratch buffers), `arm_rice_partition`
+640 B in the E10 image, and the inlined measurement pass inside the embedded
+`main`, whose `_agb_main_func_…::inner` grows 23,420 B → 30,032 B across the two
+probes. The `flac_lite` **core** symbol set moves by exactly two entries:
+`stereo::decorrelate` gains an out-of-line copy (+260 B, because a probe calls it
+through the public path) and `subframe::integrate_fixed` loses one (−244 B, and
+the core's `decode_subframe` is then seen calling `flac_spike::e2::integrate_fixed`
+— the linker folding the two identical bodies). Net core delta: **+16 B**. The
+three anchors keep their exact bytes in every image: `LEADING_ONES` stays at
+`0x0300022c`, byte-identical; `rice_quotient` is 336 B and 166 instructions and
+those 166 are identical in all three images; `decode_residual` is 596 B and 280
+instructions in all three, with 12 differing encodings, all of them branch
+immediates whose resolved targets are the same symbols at the same
+symbol-relative offsets (6 in each of two identical blocks — the linker emits
+duplicate copies). `decode_subframe` (888 B, 411 instructions) shows 6 such
+encodings, one of which is the `integrate_fixed` fold above. **This is what
+"measurement-only" looks like at machine-code level: no core function's cost-
+bearing bytes changed; only link-time target encodings moved, and one duplicate
+body was folded.**
+
+**What the sample probes are, and are not, evidence about.** E2b is a vendored
+sample path: it has its own `parse_partition` and its own `decode_rice_partition`
+(316 B), and E10 its own (312 B); neither calls the core's `rice_quotient`. So
+the re-application proves the *archives* are still buildable against today's core
+types; it says nothing about whether `RiceKernel` is passable from outside the
+crate. That is 6a-3's witness, and it is why 6a-3 exists.
+
+**The readings, and the standing question from item 5 PR 4 — answered.** Re-running
+the E10 probe at the tree its own record names as its base (`c3ebd3b`) with its
+own archived patch, unmodified, on this host today:
+
+| arm | FIXED sum, era record | FIXED, re-applied at the era tree | Δ | LPC sum, era record | LPC, re-applied | Δ |
+|---|---|---|---|---|---|---|
+| `ctrl` (production Rust, table-count) | 280,206,731 | 280,206,731 | **0** | 970,588,441 | 1,036,991,557 | **+66,403,116** |
+| `acc` (u32 refill accumulator) | 346,674,306 | 346,674,306 | **0** | 1,089,159,380 | 1,155,562,496 | **+66,403,116** |
+| `tab` (E2b's asm table-count kernel) | 280,212,854 | 280,212,854 | **0** | 970,594,564 | 1,036,997,680 | **+66,403,116** |
+| `arm` (ARM-mode hybrid codeword walk) | 167,911,108 | 167,911,108 | **0** | 858,870,747 | 925,273,863 | **+66,403,116** |
+
+Four legs reproduce **to the cycle**; four more miss by **exactly the same
+constant** — 66,403,116 cycles = 422,950 per frame = ~207 per sample at 2,048
+samples/frame — on a second clip, in a build made from the same source with the
+same recorded toolchain string on the same host. The same offset appears in the
+E9 image, and there it discriminates:
+
+| leg | era record, FIXED | re-applied, FIXED | Δ | era record, LPC | re-applied, LPC | Δ |
+|---|---|---|---|---|---|---|
+| `ctrl` (i64 leg) | 280,206,417 | 280,215,325 | +8,908 | 970,588,127 | 1,037,000,151 | **+66,412,024** |
+| `arm` (i64 leg) | 167,877,039 | 167,873,271 | −3,768 | 858,836,678 | 925,236,026 | **+66,399,348** |
+| `i32` (E9's width change) | 155,546,078 | 155,541,054 | **−5,024** | 356,168,695 | 356,163,671 | **−5,024** |
+| `iw` (i32 + scratch in IWRAM) | 155,549,218 | 155,544,194 | **−5,024** | 356,171,835 | 356,166,811 | **−5,024** |
+
+(For E9 the re-application is against `b15b756`, not the era tree, so its FIXED
+Δs carry item 5's landed costs plus layout noise — and note what that means for the
+band: the largest FIXED drift found anywhere in this PR is **8,908 cycles**, i.e.
+*inside* the ±9,411 upper bound this file already publishes, which held. Its
+`i32`/`iw` legs move by the same −5,024 on *both* clips, i.e. −32 cyc/frame, a
+constant with nothing to do with the 66.4M the i64 legs pay.)
+
+So: **the drift lives in exactly one leg.** In the controlled pair — the E10
+archive rebuilt at the very base its record names, so the source is identical — the
+four FIXED legs are unmoved **to the cycle** while the four LPC legs each pick up the
+identical +66,403,116. In the E9 pair, whose base differs by item 5's landed changes,
+the two legs that run the i64 LPC arithmetic pick up ~66.4M on the LPC clip and the
+two that deliberately do not are unmoved to 5,024 total; and nothing on the FIXED
+clip of either image moves outside the ±9k band this file already documents. The
+identification is by differential, not by disassembly — it is 4-of-4 and 2-of-2, with
+negative controls four orders of magnitude smaller than the effect. What we cannot do
+is look at the era's machine code: the E10 record's own clean rebuild printed a
+different ROM sha (`2aba8dcf…`) from the binary it measured with (`87c80fa5…`), the
+measurement commit its record names (`5525336`) is **not an object in this
+repository**, and my rebuild from the record's stated base plus the record's archived
+patch — the only reconstruction available — lands in the current-era cost family. The
+era's binary is gone.
+
+**The candidate mechanism, named and not settled.** A toolchain instance, not a
+toolchain *version string*: `Dockerfile:38–39` installs `nightly` **unpinned**
+(`rustup toolchain install nightly && rustup default nightly`), and the era
+records' "same host binary" line is about the emulator, not the compiler. This
+host builds natively through the Makefile's `RUSTUP ?= rustup` / `TOOLCHAIN ?=
+nightly`, which resolves to the installed `a69a63265` nightly — the same version
+string the era records quote — and the same string is *also* what a `nightly`
+installed months apart can print if the channel was re-pointed; the presence of a
+second, identical-looking `nightly-2026-09-04` install on this host is a trace of
+someone having had to pin a thing back. A codegen change confined to i64
+shift/mask sequences in one loop is exactly the class of change that leaves
+everything else byte-identical in cost. **Pinning the toolchain (a
+`rust-toolchain.toml`, or a pinned toolchain in the Dockerfile) is a decision for
+a PR of its own; 6a-2 is measurement-only, so it is recorded here as a request,
+not landed.** Meanwhile the records in this file should name the toolchain
+*instance* (rustc commit hash) *and* the ROM sha, as 6a-1 and 6a-2 now do — a
+version string alone has just been shown not to pin an instrument.
+
+**What 6a-2 changes in the plan — three rules, effective for 6a-3 onward.**
+
+1. **Cycles are quoted from same-image pairs, or not at all.** This record
+   establishes that within one image the instrument is that good: the live
+   measurement window and the probe's `ctrl` window differ by a *constant* 1,413
+   cycles total in the E10 image and 1,727 in the E9 image — the same constant on
+   both clips — and the E10 and E9 images print *identical* live-path rows
+   (280,217,052 / 1,037,001,878) to the cycle despite differing by 15 KB of
+   `.text`. Adding a probe to the image moves the live decode by a constant
+   −631,208 cycles at `b15b756` and −631,836 at `c3ebd3b`, on both clips alike:
+   the perturbation is in the image, it is leg-independent, and it is measured.
+   Quote the pair inside one image and the constant is invisible; quote across
+   images and you are quoting layout, not mechanism. The same lesson in miniature:
+   E10's `acc − ctrl` marginal, measured at the era tree, is **exact**; measured at
+   `b15b756` it reads **22,567 cycles off**. A cross-tree marginal drifts by the
+   difference of two drifts; a within-image one does not drift at all.
+2. **Across records, quote absolute cycle marginals; never percentages.**
+   Absolute differences between arms measured *inside one image* survive the era
+   boundary closely: E10's `tab − arm` reads −112,301,746 there and −112,302,688
+   here (942 cycles in 112M); E10's `acc − ctrl` reproduces exactly at the era tree
+   (+66,467,575 FIXED, +118,570,939 LPC); E9's `iw − i32` E3-scratch witness is
+   **+3,140 cycles (+20.0 cyc/frame)** in the era record and in today's image alike;
+   E9's `arm − i32` FIXED reproduces to 0.01% (−12,330,961 → −12,332,217). The
+   *percentages* those same records print move: E10's `arm` margin against `tab` is
+   −40.08% FIXED in both worlds and −11.51% → **−10.77%** LPC; E9's `i32` against
+   `arm` is −7.35% FIXED in both worlds and −58.53% → **−61.51%** LPC. A percentage
+   has a denominator in it, and the denominator may move while the numerator does not. 6a-5
+   and 6a-7 therefore report absolute, paired, per-frame marginals against their
+   own same-image `ctrl`; the pre-declared bar for 6a-5 ("within the ~9–13
+   cyc/frame layout-noise band or faster") is stated in cycles and stays valid.
+   Any *percent* figure quoted from the E-series in this file — including
+   "**−11.51% LPC**" in 6a's own brief and "**−58.53% LPC / −7.35% FIXED**" in
+   6a-6's motivation row — is now marked as era-denominated: its absolute
+   equivalent is the number to carry forward (E10 `tab − arm`: **−715,300
+   cyc/frame**; E9 `arm − i32`: **−78,550 cyc/frame** FIXED, and its LPC
+   equivalent is *not stable across denominators* — −3.20M there, −3.62M here).
+   The one place a percentage must be recomputed is 6a-6's decision: E4's
+   "LPC −46.90%" and E9's "−58.53%" are the *same* measurement class as the
+   number that just moved by three points, and 6a-6's own same-image pair is the
+   only reading that settles its size.
+3. **An era record's cycle *rows* are historical context, not inputs.** E10's
+   FIXED rows reproduce exactly and its LPC rows do not; E9's neither fully does
+   nor fully doesn't. Treat the E-series as establishing *signs and mechanisms*
+   with absolute magnitudes that are era-denominated, and take every forward
+   number from a same-image pair on the tree being changed.
+
+**Gates, as this item now requires them.** `make flac-gates` **1,169 passed + 6
+ignored** — per-configuration counts identical to item 5 PR 4's and to 6a-1's
+(178+1 · 181+1 · 198+1 · 194+1 · 201+1 · 217+1), `flac-portable-check` green on
+the second bare-metal target; `spike-test` 25 (15 lib + 10 `spike_witness`),
+which is *without* the probes applied — with the E9 archive plus its port applied
+the same suite ran 30 + 4 + 1 + 2 + 2 + 10 green, i.e. the probe archives pass
+their own witnesses on today's tree, and that is a fact about the archives,
+not about `main`; `kernel-test` 20; `opus-test` 28; `overlay-check` and
+`overlay-test` green (the latter 1 test); `make check` clean. `make test-rom`
+was run and prints `Running 0 tests` — as item 5 PR 3 records, the spike
+workspace's tests run under `spike-test`; the ROM runner carries none of them.
+No new configuration exists, so no gate count moved.
+
+**What 6a-2 does not claim.** It does not close the mechanism question — it
+narrows it to one leg and one axis (a toolchain instance that no artifact in this
+repo can pin down). It does not say the era records were wrong: their numbers
+were stable inside their sessions, which is exactly the property this file keeps
+insisting on; it says their *denominators* were built by a compiler instance we
+can no longer reproduce, and that the instrument we can reproduce differs from
+theirs in one leg's cost. It does not measure real hardware, it does not make the
+spike's budget verdict change (both clips, every configuration, `OVER BUDGET`),
+and it does not license quoting *this* record's numbers against item 5's or the
+E-series' either — the base rows above are `b15b756`'s, and they are for anything
+built from `b15b756` or later. It also does not re-open E-series decisions: every
+sign those records reported held in this reproduction, and held at the same size —
+E10's `arm` beat the Rust legs by 715,304 (over `tab`) and 715,411 (over `ctrl`)
+cyc/frame on FIXED, and 711,622 on LPC, where the record has −715,298 and
+−711,617; E9's `i32` beat that arm by a further 78,550 on FIXED where the record
+has 78,542; E3's scratch cost 20.0 cyc/frame, exactly as recorded. That is the
+point of re-running them.
+
+**The base this item now measures against, restated for the next PR to be able
+to check it without re-deriving it:** `b15b756`+ — ROM
+`467ff1231610d680b23409e8b3e87db7c6e18a48aad09882054631d641aa9b84` — `.text`
+46,008 B `f0f88c33d150…`, `.iwram` 812 B `eeda688aa1a2…`, `LEADING_ONES @
+0x0300022c` / `rice_quotient` 336 B / `decode_residual` 596 B — live rows
+280,848,260 (max 1,797,752@136) and 1,037,633,086 (max 6,643,224@145),
+calibration `overhead_estimate=22 stable=true`, region FNVs
+`0x5A0096689BE6EDCE` / `0x5EE2546D35776FD6` / PCM `0x54C7B356621B6E15` both
+`[OK]`.
 
 ### 6b — the container: where frames come from
 
@@ -7704,6 +8000,19 @@ other ROM workspaces) are identical across a clean rebuild with and without the 
 and `crates/flac-lite` was touched not at all. Two new hand-invoked gates now exist outside `flac-gates` and outside
 `test` — `overlay-check` (thumbv4t compile witness) and `overlay-test` (1 test, the
 overlay's own) — and they are part of what a record in this item restates from here on.
+
+**Re-stated after 6a-2 (2026-11-06), and this one is not about a PR — it is about
+the unit.** The Images row above and its three `nm` anchors were re-anchored at
+`b15b756` and came back byte-identical, cold-built, three times, and its live
+cycle rows came back *to the cycle* against item 5 PR 4's record. What 6a-2 adds
+to this list is not a number but a rule: **cycle figures are only comparable
+within one image, and across records only as absolute paired marginals** — the E-
+series' LPC percentages are era-denominated and moved by up to 3 points when the
+same patch was re-run against the same source (6a-2's record, "What 6a-2 changes
+in the plan"). The base rows a 6a record compares against are in that record's
+last paragraph. Records name the toolchain instance by rustc commit hash *and*
+their ROM sha; a version string does not pin an instrument. Re-applying either E
+archive now requires the `port-item6a2-header-bits.patch` that sits beside it.
 
 **Per-PR rules:** 6a-1 / 6a-2 / 6a-5 / 6a-7 / 6a-8 change no count and no
 instruction stream. 6a-3 may move counts only in its own new configuration. 6a-4
