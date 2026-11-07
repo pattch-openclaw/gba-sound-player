@@ -49,10 +49,17 @@
 //! pre-registered fork resolves to "the default does **not** flip". Zero behavior
 //! change from any of the four PRs: the one instantiation the crate's decode path
 //! uses is the loop that was already here, chosen on the one line of
-//! [`decode_rice_partition`]; and no crate outside this one implements the trait
-//! yet — that is item 6 (`flac-lite-gba`, which links none of this into the ROM
-//! today), and PR 4's number is the strongest argument item 6 has for owning the
-//! *realization* rather than the algorithm. [`decode_rice_partition_with`] became
+//! [`decode_rice_partition`]; and — as of split-ladder item 6 PR **6a-3** — the
+//! trait is implemented **outside** this crate. Twice, neither one wired into
+//! anything that runs: an impl in `crates/flac-lite-gba/src/rice_twin.rs` that
+//! carries [`crate::rice_hybrid::HybridRiceKernel`] by forwarding to it, and a
+//! spec-order implementor declared inside that crate's out-of-crate differential
+//! (`tests/twin_from_outside.rs`), written from this trait's documented contract
+//! with no access to any loop above. No ROM links any of it, and PR 4's number is
+//! still the strongest argument item 6 has for owning the *realization* rather than
+//! the algorithm. What 6a-3 changes here is visibility and no instruction of the
+//! default path; what an out-of-crate implementor actually named, and what was left
+//! private on purpose, is recorded on [`rice_unmap`]. [`decode_rice_partition_with`] became
 //! `pub` in PR 3 for one reason: PR 3's witness is a caller *outside* this crate
 //! running both mechanisms over the same real partitions
 //! (`tests/rice_two_mechanism_differential.rs`, which is `required-features =
@@ -539,11 +546,68 @@ fn decode_rice_partition(
 /// (step 3b). Here the mapping stays total and returns `i32::MIN` for that
 /// input, pinned by a test so the division of responsibility is explicit.
 ///
-/// `pub(crate)` since PR 3, so [`crate::rice_hybrid`]'s kernel can fold through
-/// this rather than restating the map — a second copy of a mapping that was
-/// corrected once (see the note above) is a second place the correction can be
-/// wrong. It stays out of the public API.
-pub(crate) fn rice_unmap(n: u32) -> i32 {
+/// # Visibility: `pub` since split-ladder item 6 PR **6a-3**, on the same
+/// argument PR 3 used to make it `pub(crate)`
+///
+/// PR 3 widened this to `pub(crate)` so [`crate::rice_hybrid`]'s kernel could fold
+/// *through* this map instead of restating it — "a second copy of a mapping that
+/// was corrected once is a second place the correction can be wrong". 6a-3 carries
+/// that argument one boundary further out, and the two facts behind it are
+/// measured, not rhetorical.
+///
+/// **What the attempt named.** 6a-3 asked what an implementor of [`RiceKernel`]
+/// written *outside* this crate can actually resolve, and answered it by compiling
+/// two shapes rather than by arguing about them. The shape this item ships — the
+/// core's own twin, carried by an overlay impl that forwards to it
+/// (`crates/flac-lite-gba/src/rice_twin.rs`) — needed **no** widening of this
+/// crate's surface: the trait, [`PartitionHeader`], [`decode_rice_partition_with`],
+/// the window half of `bits` (`kernel_window`, `set_kernel_window`,
+/// [`crate::bits::KernelWindow`] and its fields, [`crate::bits::rev32`],
+/// [`crate::bits::BitReader::rice_quotient`]) and every parse-side type an
+/// out-of-crate differential has to drive resolved from the other crate with zero
+/// errors. The shape it did *not* take — a foreign kernel writing its own codeword
+/// walk — failed to compile on exactly four names: `CTZ8`, `REV8`,
+/// `BRUIJN_INDEX` (module-private in `rice_hybrid`) and this function. One of the
+/// four is widened here; three are not.
+///
+/// **The map has already been restated twice outside this crate, and paid for it.**
+/// `examples/arm-kernels/` owns a Rust twin of this mapping (`oracle_rice_unmap`,
+/// deliberately kept in the spec's branch form so a shared misreading cannot survive
+/// composition) *and* an ARM-mode copy in `asm/fold_body.s`, pasted at two use
+/// sites, dual-witnessed against a committed golden table. That is what
+/// drift-witness debt costs in this repository, and it is the specific cost the
+/// split proposal's "re-export, do not vendor" recommendation exists to avoid
+/// re-creating. The rule this leaves behind: a realization in **Rust** folds through
+/// this function; the asm kernel's copy stays where its own dual witness keeps it.
+///
+/// **The witness, which is in the same PR.** `crates/flac-lite-gba/tests/`
+/// `twin_from_outside.rs` declares a *third* `RiceKernel` implementor: a spec-order, one-bit-at-a-time
+/// walk written in that crate from [`RiceKernel`]'s stated contract alone, holding
+/// none of this module's loop, no `rice_quotient`, no window primitive. Its purpose
+/// is to test that the boundary this trait documents — the `p = 0` mask, the two
+/// §9.2.7.3 rejections, the folded value's sign — is *satisfiable* from outside,
+/// which is the assumption 6a-4's FFI kernel stands on and no earlier rung tested.
+/// It cannot satisfy the last of those three without this call. The precedent for a
+/// bump landing with its witness rather than ahead of one is exactly what made
+/// [`decode_rice_partition_with`] public in PR 3.
+///
+/// **What is deliberately left private.** `rice_hybrid::CTZ8`, `REV8` and
+/// `BRUIJN_INDEX`. Nothing in 6a-3 reads them — the carried form keeps them inside
+/// the core — and the plan of record assigns table ownership (the core's behind a
+/// bump, or copies of the overlay's own, under the +512 B pinnable reading that
+/// distinguishes that case from item 5's net +256 B) to **6a-4**, where
+/// `iwram-pin` enablement lands and where the question can be answered with an
+/// IWRAM map in front of it. Widening them here would turn a decision that has a
+/// witness and a date into a public surface that has neither.
+///
+/// **What did not change about what this is.** A total map with no validation, no
+/// stream knowledge and no cursor: `0xFFFF_FFFF → i32::MIN` remains a *mapped*
+/// input, and rejecting it stays the kernel's job (see the note above and
+/// [`RiceKernel`]'s contract), because only a caller holding the stream can fail a
+/// frame. It is not a decode entry point, and nothing caller-facing takes a kernel:
+/// [`decode_residual`], [`crate::subframe`] and [`crate::frame`] still reach the
+/// default through [`decode_rice_partition`].
+pub fn rice_unmap(n: u32) -> i32 {
     if n & 1 == 0 {
         (n >> 1) as i32
     } else {
