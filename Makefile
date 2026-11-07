@@ -15,6 +15,9 @@
 # flag, used to compile core/alloc from source for this Tier-3 target. See
 # Dockerfile/README. Do NOT try to `rustup target add thumbv4t-none-eabi` — it
 # has no prebuilt artifacts on any toolchain.
+#
+# WHICH nightly is pinned in rust-toolchain.toml. Read the block below: the file
+# alone does NOT pin `make`, so the channel is read out of that file here.
 # ---------------------------------------------------------------------------
 # Toolchain resolution — deliberately NOT `cargo +nightly`.
 #
@@ -27,9 +30,43 @@
 # `rustup run <toolchain> cargo` pins the toolchain through rustup no matter
 # which cargo (or none) is on PATH — so the same Makefile works in a conda
 # shell, a bare shell, and inside the container. Override if you truly have no
-# rustup: `make check CARGO=cargo RUSTC=rustc` (needs nightly as the default).
+# rustup: `make check CARGO=cargo RUSTC=rustc` (needs the pinned nightly as the
+# default — see rust-toolchain.toml).
+#
+# ---------------------------------------------------------------------------
+# The channel is PINNED in ONE place — rust-toolchain.toml — and read here.
+#
+# Why the file is not sufficient on its own: a toolchain file is consulted when a
+# bare `cargo`/`rustc` runs in the tree, but `rustup run <name>` SELECTS a
+# toolchain explicitly and therefore OVERRIDES it. Measured on this host: inside a
+# directory whose rust-toolchain.toml says nightly-2026-09-04, plain `rustc -V`
+# follows the file, while `rustup run stable rustc -V` prints stable 1.99.1. This
+# Makefile drives every build through `rustup run $(TOOLCHAIN)`, so a channel that
+# lived only in the file would not pin `make` at all.
+#
+# So: rust-toolchain.toml is the pin and the thing that pins bare cargo/rustc,
+# rust-analyzer and editors; TOOLCHAIN below is read out of it so that `make`
+# honours the same string rather than a second copy of it. `nightly` is the
+# fallback only if that file is absent (e.g. a partial checkout) — a fallback that
+# is deliberately loud: `make help` prints the resolved toolchain, and
+# `toolchain-check` fails fast naming the channel it wants.
+# ---------------------------------------------------------------------------
 RUSTUP ?= rustup
-TOOLCHAIN ?= nightly
+PINNED_TOOLCHAIN := $(shell sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' $(dir $(lastword $(MAKEFILE_LIST)))rust-toolchain.toml 2>/dev/null | head -1)
+# Try a different instance for one command: `make flac-test TOOLCHAIN=nightly-2026-09-11`
+# (then say so in the record — FLAC.md "Baselines to hold", the instance rule).
+TOOLCHAIN ?= $(if $(PINNED_TOOLCHAIN),$(PINNED_TOOLCHAIN),nightly)
+
+# A pin file that EXISTS but yields no channel is a silent instrument downgrade,
+# which is exactly the failure mode this file exists to prevent. Refuse rather
+# than fall back: the `nightly` fallback above is for a MISSING file (a partial
+# checkout, or a tool invoked outside the tree). This fires on any `make`,
+# including `make help`, so a malformed pin cannot be missed.
+ifneq ($(wildcard $(dir $(lastword $(MAKEFILE_LIST)))rust-toolchain.toml),)
+ifeq ($(PINNED_TOOLCHAIN),)
+$(error rust-toolchain.toml exists but no `channel = "..."` line was read from it - refusing to build on the '$(TOOLCHAIN)' fallback)
+endif
+endif
 
 # Detect rustup instead of assuming the `cargo` on PATH is the rustup shim:
 #   - rustup present  -> pin through rustup (correct even when a non-shim cargo

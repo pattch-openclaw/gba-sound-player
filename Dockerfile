@@ -1,4 +1,5 @@
-# GBA ROM build + TEST image (Debian 12, Rust nightly).
+# GBA ROM build + TEST image (Debian 12, Rust nightly — a PINNED dated channel,
+# the same one rust-toolchain.toml pins).
 #
 # Target: thumbv4t-none-eabi — Tier-3, #![no_std] (core + alloc only). It ships
 # NO prebuilt core/std artifacts on ANY rustup toolchain, so `rustup target add
@@ -32,15 +33,39 @@ RUN apt-get update \
 
 # Nightly toolchain + rust-src (needed for -Zbuild-std) + rustfmt.
 #
+# The channel is PINNED, and the pin lives in ONE place: rust-toolchain.toml at
+# the repo root — the same file the host's rustup, cargo and rust-analyzer read.
+# The image installs the channel that file names, so the container cannot drift
+# from the host recipe. A dated channel resolves from the archived date-stamped
+# channel manifest, so an image rebuilt months later gets the same compiler
+# rather than the newest nightly; the current pin is the instance the cycle
+# records in FLAC.md were measured on (its header says why).
+#
+# If the file is missing or names no channel, this RUN fails the image build
+# loudly — better than quietly installing whatever `nightly` means that week.
+# (`make` inside the container can still be overridden with TOOLCHAIN= for an
+# experiment; say so in the record if you use it.)
+#
 # rustfmt is here because every build target runs the `format` pre-step, and
 # the container's CMD/entrypoint path is `make rom` -> `make build` -> `make
 # format`. Without it the container silently skips formatting.
-RUN rustup toolchain install nightly \
-    && rustup default nightly \
-    && rustup component add rust-src rustfmt
+COPY rust-toolchain.toml /tmp/rust-toolchain-pinned.toml
+RUN CHANNEL="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' /tmp/rust-toolchain-pinned.toml | head -1)" \
+    && test -n "$CHANNEL" || { echo "Dockerfile: rust-toolchain.toml has no channel = \"...\" line" >&2; exit 1; } \
+    && echo "installing the pinned Rust channel: $CHANNEL" \
+    && rustup toolchain install "$CHANNEL" \
+    && rustup default "$CHANNEL" \
+    && rustup component add rust-src rustfmt --toolchain "$CHANNEL" \
+    && rm /tmp/rust-toolchain-pinned.toml
 
-# Install the GBA ROM fixing tool
-RUN cargo install agb-gbafix
+# Install the GBA ROM fixing tool — pinned, like the mGBA runner further down.
+# Not for cycles: gbafix costs no runtime. But it rewrites the ROM header, so it
+# is part of the ROM BYTES every FLAC.md record compares by sha, and an unpinned
+# gbafix would silently change those shas on another machine. 0.25.0 is the agb
+# release this project depends on (Cargo.toml: agb = "0.25.0", AGB_REF below) and
+# the version every ROM in those records was fixed with — this host's installed
+# gbafix is 0.25.0, which is why the pin changes no byte here.
+RUN cargo install agb-gbafix --version 0.25.0 --locked
 
 WORKDIR /app
 

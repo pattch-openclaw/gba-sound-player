@@ -7409,6 +7409,11 @@ worst 1,797,752 @136 / sum 280,848,260; `l4_stereo` mean 6,609,128 / worst
 > **6a-1 landed 2026-11-06**, as scoped: [6a-1 — landed](#6a-1--landed-2026-11-06-as-scoped-the-crate-exists-and-nothing-links-it).
 > **6a-2 landed 2026-11-06**, as scoped: [6a-2 — landed](#6a-2--landed-2026-11-06-measurement-only-the-baseline-re-anchor-and-the-thing-that-actually-moves-a-cycle-count).
 > Nothing in the tree's decode path changed in either. 6a-3 is next.
+> **Off-ladder, also landed 2026-11-06, and not a rung:** [Toolchain pin
+> (2026-11-06)](#toolchain-pin-2026-11-06--the-instrument-becomes-a-string) — the
+> compiler instance every cycle record in this section was measured on is now a
+> string in `rust-toolchain.toml`. It changed no ROM byte and no cycle; read it
+> before quoting any toolchain line, in either direction.
 > 6a-2 changes how this item — and every later record that quotes an E-series
 > number — is allowed to use cycles: read its "what 6a-2 changes in the plan"
 > paragraph before quoting a cycle figure across records, in either direction.
@@ -7733,22 +7738,28 @@ patch — the only reconstruction available — lands in the current-era cost fa
 era's binary is gone.
 
 **The candidate mechanism, named and not settled.** A toolchain instance, not a
-toolchain *version string*: `Dockerfile:38–39` installs `nightly` **unpinned**
+toolchain *version string*: `Dockerfile:38–39` installed `nightly` **unpinned**
 (`rustup toolchain install nightly && rustup default nightly`), and the era
 records' "same host binary" line is about the emulator, not the compiler. This
-host builds natively through the Makefile's `RUSTUP ?= rustup` / `TOOLCHAIN ?=
+host built natively through the Makefile's `RUSTUP ?= rustup` / `TOOLCHAIN ?=
 nightly`, which resolves to the installed `a69a63265` nightly — the same version
 string the era records quote — and the same string is *also* what a `nightly`
 installed months apart can print if the channel was re-pointed; the presence of a
 second, identical-looking `nightly-2026-09-04` install on this host is a trace of
 someone having had to pin a thing back. A codegen change confined to i64
 shift/mask sequences in one loop is exactly the class of change that leaves
-everything else byte-identical in cost. **Pinning the toolchain (a
-`rust-toolchain.toml`, or a pinned toolchain in the Dockerfile) is a decision for
-a PR of its own; 6a-2 is measurement-only, so it is recorded here as a request,
-not landed.** Meanwhile the records in this file should name the toolchain
-*instance* (rustc commit hash) *and* the ROM sha, as 6a-1 and 6a-2 now do — a
-version string alone has just been shown not to pin an instrument.
+everything else byte-identical in cost. 6a-2 is measurement-only, so it recorded
+pinning as a **request**: a `rust-toolchain.toml`, or a pinned channel in the
+Dockerfile, as a PR of its own. **That request landed the same day — see
+[Toolchain pin (2026-11-06)](#toolchain-pin-2026-11-06--the-instrument-becomes-a-string).**
+One caution when reading the paragraph above against today's tree: it describes the
+tree 6a-2 found, and "installs `nightly` unpinned" / `TOOLCHAIN ?= nightly` are no
+longer true of `main`. Nothing in the era analysis moves with that — the era's
+binary is still gone, and a pin written today cannot recover a compiler nobody
+recorded — but the standing rule it leaves behind is now enforceable rather than
+aspirational: records name the toolchain *instance* (rustc commit hash) *and* the
+ROM sha, as 6a-1 and 6a-2 do, and the instance itself lives in a file. A version
+string alone has just been shown not to pin an instrument.
 
 **What 6a-2 changes in the plan — three rules, effective for 6a-3 onward.**
 
@@ -7836,6 +7847,183 @@ to check it without re-deriving it:** `b15b756`+ — ROM
 calibration `overhead_estimate=22 stable=true`, region FNVs
 `0x5A0096689BE6EDCE` / `0x5EE2546D35776FD6` / PCM `0x54C7B356621B6E15` both
 `[OK]`.
+
+#### Toolchain pin (2026-11-06) — the instrument became a string
+
+Not a ladder rung, and it owns no measurement. It is the thing 6a-2 asked for, kept
+in its own PR because a change to the compiler is a change to the instrument and
+should be reviewable as one. Branch `chore/rust-toolchain-pin`, off `main` at
+`7995fcb` (the 6a-2 merge).
+
+**One line: what changed.** The compiler instance every cycle figure in this file
+was measured on — `rustc 1.100.0-nightly (a69a63265 2026-09-03)` — is now written
+down as the dated channel `nightly-2026-09-04`, in `rust-toolchain.toml` at the
+repo root, and the Makefile and the Dockerfile read the channel out of that file
+instead of naming `nightly`. A dated channel *is* an instance: rustup resolves
+`nightly-YYYY-MM-DD` from the archived date-stamped channel manifest, so the string
+names one build of rustc instead of "whatever this machine last updated". 6a-2's
+era analysis is the argument for spending a PR on it: the records could name a
+version string, and a version string was just shown not to pin an instrument.
+
+**The change, path by path** (this record is the sixth path).
+
+| file | change |
+|---|---|
+| `rust-toolchain.toml` | *new*. `channel = "nightly-2026-09-04"`, `components = ["rust-src", "rustfmt"]`. Deliberately no `targets = [...]`: `thumbv4t-none-eabi` has no prebuilt artifacts on any channel — which is the whole reason `-Zbuild-std` and `rust-src` exist. Its header states why the pin exists and what a PR editing it must carry. |
+| `Makefile` | `TOOLCHAIN ?= nightly` → read from the pin file (`PINNED_TOOLCHAIN`), with the file's path anchored to the Makefile's own directory; plus a parse-time guard: if the pin file exists but yields no channel, `make` refuses to run at all instead of silently falling back. |
+| `Dockerfile` | no longer names a channel — it copies `rust-toolchain.toml` in and installs the channel that file names (one string in the repo, not two that can drift), failing the image build if nothing is read. `agb-gbafix` pinned: `--version 0.25.0 --locked`. |
+| `README.md` | the two native-setup install blocks now name the pinned channel and the pinned gbafix; new short "Which nightly, exactly" subsection with the two non-obvious facts about the pin file. |
+| `.agents/skills/gba-build-and-test/SKILL.md` | the host recipe a future session actually reads: prerequisites table, the `rustup run` gotcha (now noting that `rustup run <channel>` *overrides* the pin file), and a new gotcha — the channel is the instrument. |
+
+**Adding the file would not have pinned `make`.** Measured in a scratch tree whose
+`rust-toolchain.toml` pinned `nightly-2026-09-04`:
+
+| what ran | resolves to | why |
+|---|---|---|
+| plain `rustc -V` in the tree | the file | toolchain files are **directory-scoped**: rustup walks *up* the tree, so a root file also governs `crates/` and `examples/` — including those standalone workspaces, which are not members of a workspace graph. A file in a subdirectory would shadow this one. |
+| `rustup run stable rustc -V` in that same tree | `rustc 1.99.1` | `rustup run <channel>` **selects** explicitly, and so *overrides* the file |
+| `make …` before this change | `rustup run nightly cargo …` | the Makefile hard-coded a channel — immune to the file |
+| `make …` after this change | `rustup run nightly-2026-09-04 cargo …` | the channel is read out of the file |
+
+In this repo, after the change: the file governs the ambient toolchain —
+
+```
+$ rustup show active-toolchain
+nightly-2026-09-04-aarch64-unknown-linux-gnu (overridden by '…/gba-sound-player/rust-toolchain.toml')
+$ rustc -V
+rustc 1.100.0-nightly (a69a63265 2026-09-03)   # the instance the era records quote
+$ make help | grep 'Toolchain:'
+  Toolchain: rustup run nightly-2026-09-04 rustc
+```
+
+and the Makefile follows the file rather than a habit. With `channel` temporarily
+edited, `make help` prints:
+
+```
+channel = "nightly-2026-10-01"        →  Toolchain: rustup run nightly-2026-10-01 rustc
+rust-toolchain.toml removed          →  Toolchain: rustup run nightly rustc          (the fallback: no file to read)
+make help TOOLCHAIN=nightly-2026-09-11 →  Toolchain: rustup run nightly-2026-09-11 rustc  (explicit override still wins)
+```
+
+and with the file present but its `channel` line commented out, `make` stops:
+
+```
+Makefile:67: *** rust-toolchain.toml exists but no `channel = "..."` line was read from it - refusing to build on the 'nightly' fallback.  Stop.
+```
+
+That guard is the difference between a pin and a preference.
+
+**The container half, and what is *not* witnessed here.** The Dockerfile's channel
+extraction and the Makefile's are the *same program*, byte for byte, and both were
+run against formatting variants:
+
+| `rust-toolchain.toml` line | extracted |
+|---|---|
+| `channel = "nightly-2026-09-04"` | `nightly-2026-09-04` |
+| `channel="nightly-2026-10-01"` | `nightly-2026-10-01` |
+| `  channel   =   "nightly-2026-11-02"  ` | `nightly-2026-11-02` |
+| `# channel = "nope"` | *(empty → the Dockerfile's `test -n` fails the image build; the Makefile's guard fires)* |
+
+**The image build itself cannot be run on this host** — rootless podman here dies
+on a missing `newuidmap`, there is no podman machine, and the harness cannot nest
+virtualization, which is the documented reason the native targets exist (README,
+"Two environments"). So the container half is witnessed by the extraction (shared
+program, variant-tolerant, loud failure) and by the fact that the channel it would
+install is the instance already proven on this host. `make podman-rom` on a
+capable host is the arm this PR cannot run; say so in review if it matters.
+
+**The other half of the instrument was never about cycles.** Every ROM in this file
+is compared by sha, and `agb-gbafix` rewrites the ROM header — the Dockerfile
+installed it unpinned (`cargo install agb-gbafix`). It is now `0.25.0 --locked`,
+the agb release this project already depends on (`Cargo.toml: agb = "0.25.0"`,
+Dockerfile `AGB_REF=v0.25.0`, `mgba-test-runner --tag v0.25.0` — the runner has
+been pinned as far back as the records go; the header tool was the gap). This
+host's installed gbafix is 0.25.0 and crates.io's latest was 0.25.0 at the time of
+writing, so the pin is byte-neutral here — it is what makes `467ff123…` mean the
+same bytes on a machine nobody has yet.
+
+**Control: the pin moves nothing, measured as four build arms and one run.** All
+from `main` at `7995fcb`, spike ROM (`make native-spike-rom`), pre-change and
+post-change, warm and cold (`cargo clean` first):
+
+| arm | ROM sha256 | ELF sha256 |
+|---|---|---|
+| pre-change warm | `467ff1231610d680…` | `a67257f894972e26…` |
+| pre-change cold | identical to the warm arm | identical |
+| post-change warm | identical | identical |
+| post-change cold | identical | identical |
+
+All four are byte-identical to each other **and** to the ROM and ELF 6a-2
+re-anchored at `b15b756` — which is the prior thing this PR had to establish: the
+instrument carried across the 6a-2 merge untouched, docs-only merge or no.
+
+The run arm: the post-change cold ROM prints `675 lines` and its log is
+byte-identical to the pre-change run *and* to both of 6a-2's base logs, warm and
+cold. Live rows unchanged — `l0_stereo` 280,848,260 (max 1,797,752@136),
+`l4_stereo` 1,037,633,086 (max 6,643,224@145), calibration
+`overhead_estimate=22 stable=true`, region FNVs `[OK]`.
+
+Sections and symbol anchors unchanged, and `nm --print-size --size-sort` output is
+byte-identical pre/post (172 sized symbols in both):
+
+| anchor | pre | post |
+|---|---|---|
+| `.text` | 46,008 B `f0f88c33d150…` | same |
+| `.rodata` | 1,829,760 B `2151855c7e5c…` | same |
+| `.iwram` | 812 B `eeda688aa1a2…` | same |
+| `LEADING_ONES` | `0x0300022c` | same |
+| `rice_quotient` | 336 B (`0x150`) | same |
+| `decode_residual` | 596 B (`0x254`) | same |
+
+Gate battery, same eight targets as 6a-2's landing record, same counts, all exit 0:
+`flac-gates` 1,169 passed / 6 ignored across the feature-gated configurations,
+`spike-test` 25, `kernel-test` 20, `opus-test` 28, `overlay-check` 0 test binaries
+(compile witness), `overlay-test` 1, `test-rom` 0 test binaries (runner green, no
+assertions in the root crate — the standing caveat), `check` 0. Nothing was
+reformatted; `git status` shows only the six paths this PR is — the five above plus
+this record.
+
+**Those arms were re-run after the last line of the diff.** The parse-time guard is
+the final Makefile change, so the tree that ships is not the tree the four arms
+above were built on. From the final tree: `make native-spike-rom` → ROM
+`467ff123…`, ELF `a67257f8…`, both byte-identical to the cold arm above; the ROM run
+→ `675 lines`, byte-identical to the pre-change log; the eight-target battery re-run
+green with the same counts (1,169 / 25 / 20 / 28 / 0 / 1 / 0 / 0, 6 ignored inside
+`flac-gates`); and the README's raw-command form run verbatim once — through rustup,
+naming the pinned channel — which boots the suite exactly as `make test-rom` does
+(`Running 0 tests`, exit 0: the root suite collecting nothing is the standing
+caveat, not this PR's).
+
+**Why "no-op" was the expected result here, and why that is not a weakness of the
+PR.** `~/.rustup/toolchains/nightly-aarch64-unknown-linux-gnu` on this host is a
+symlink to `nightly-2026-09-04-aarch64-unknown-linux-gnu`, created 2026-10-27
+07:18 — *before* the E10, E9 and item 5 PR 4 measurement runs. So the two strings
+name one instance here, and 6a-2's era question stays open here for exactly that
+reason: "our nightly drifted afterwards" is not available as an explanation on this
+machine. The pin does not change what this host does. What it changes is that a
+record can state the instrument instead of reconstructing it from `rustup` folklore
+— and that a *change* of instrument can be stated, which is the only way the era
+gap ever gets closed: some future record says "the pin moved", and the control
+above is the shape of what "moved" means.
+
+**Deliberately not touched, and why.** A repo-wide grep finds `cargo +nightly`
+still written into [OPUS.md](OPUS.md) and
+[`crates/flac-lite/README.md`](crates/flac-lite/README.md) as raw-usage examples.
+They are left alone on purpose: they are per-crate usage docs, not the install
+recipe, and one of them — `cd /tmp && cargo +nightly test …`, the out-of-tree
+portability witness — *has* to name a channel, because a toolchain file is
+directory-scoped and `/tmp` is not under it. That example is the pin file's scope
+rule made visible, so it stays. The root README's raw invocation did change, since
+that one is the recipe people copy. If the series ever wants `+nightly` gone
+entirely, that is a docs sweep, not a pin change.
+
+**Rule, effective now.** Editing `rust-toolchain.toml` is a codegen change for
+measurement purposes, whatever the diff looks like. It carries the control this
+section carried — four build arms, the section/symbol dump, one run log — and
+states the new rustc instance by commit hash. Moving the pin forward is legitimate
+(a rustc fix we need, a `rustfmt` feature, a target-support bump); the control is
+how the baseline shift gets *declared* rather than discovered three records later,
+which is precisely the failure 6a-2 spent a PR unwinding.
 
 ### 6b — the container: where frames come from
 
@@ -8011,8 +8199,12 @@ series' LPC percentages are era-denominated and moved by up to 3 points when the
 same patch was re-run against the same source (6a-2's record, "What 6a-2 changes
 in the plan"). The base rows a 6a record compares against are in that record's
 last paragraph. Records name the toolchain instance by rustc commit hash *and*
-their ROM sha; a version string does not pin an instrument. Re-applying either E
-archive now requires the `port-item6a2-header-bits.patch` that sits beside it.
+their ROM sha; a version string does not pin an instrument. **From 2026-11-06 the
+instance is not folklore to reconstruct: it is a string in `rust-toolchain.toml`**
+([Toolchain pin (2026-11-06)](#toolchain-pin-2026-11-06--the-instrument-becomes-a-string))
+— read it from there, and treat editing that file as the codegen change it is.
+Re-applying either E archive now requires the `port-item6a2-header-bits.patch` that
+sits beside it.
 
 **Per-PR rules:** 6a-1 / 6a-2 / 6a-5 / 6a-7 / 6a-8 change no count and no
 instruction stream. 6a-3 may move counts only in its own new configuration. 6a-4
