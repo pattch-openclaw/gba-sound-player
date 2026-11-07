@@ -15,6 +15,9 @@
 # flag, used to compile core/alloc from source for this Tier-3 target. See
 # Dockerfile/README. Do NOT try to `rustup target add thumbv4t-none-eabi` — it
 # has no prebuilt artifacts on any toolchain.
+#
+# WHICH nightly is pinned in rust-toolchain.toml. Read the block below: the file
+# alone does NOT pin `make`, so the channel is read out of that file here.
 # ---------------------------------------------------------------------------
 # Toolchain resolution — deliberately NOT `cargo +nightly`.
 #
@@ -27,9 +30,83 @@
 # `rustup run <toolchain> cargo` pins the toolchain through rustup no matter
 # which cargo (or none) is on PATH — so the same Makefile works in a conda
 # shell, a bare shell, and inside the container. Override if you truly have no
-# rustup: `make check CARGO=cargo RUSTC=rustc` (needs nightly as the default).
+# rustup: `make check CARGO=cargo RUSTC=rustc` (needs the pinned nightly as the
+# default — see rust-toolchain.toml).
+#
+# ---------------------------------------------------------------------------
+# The channel is PINNED in ONE place — rust-toolchain.toml — and read here.
+#
+# Why the file is not sufficient on its own: a toolchain file is consulted when a
+# bare `cargo`/`rustc` runs in the tree, but `rustup run <name>` SELECTS a
+# toolchain explicitly and therefore OVERRIDES it. Measured on this host: inside a
+# directory whose rust-toolchain.toml says nightly-2026-09-04, plain `rustc -V`
+# follows the file, while `rustup run stable rustc -V` prints stable 1.99.1. This
+# Makefile drives every build through `rustup run $(TOOLCHAIN)`, so a channel that
+# lived only in the file would not pin `make` at all.
+#
+# So: rust-toolchain.toml is the pin and the thing that pins bare cargo/rustc,
+# rust-analyzer and editors; TOOLCHAIN below is read out of it so that `make`
+# honours the same string rather than a second copy of it. `nightly` is the
+# fallback only if that file is absent (e.g. a partial checkout) — a fallback that
+# is deliberately loud: `make help` prints the resolved toolchain, and
+# `toolchain-check` fails fast naming the channel it wants.
+#
+# The read itself uses make's own file function rather than a sed pipeline (the
+# Dockerfile runs this same expression through `make --eval`, so host and image
+# do not merely share a string — they share one rule for reading it). Three
+# layers, each doing what only it can: a version guard and a match-count guard at
+# parse time, on every target (below), and a cross-check against rustup's own
+# resolution in `toolchain-check`, which every measurement-bearing target already
+# depends on — because the file's *format* is not the property that matters; "the
+# instance this build runs" and "the instance rustup/cargo/your editor pick in this
+# tree" being the same instance is.
+# ---------------------------------------------------------------------------
 RUSTUP ?= rustup
-TOOLCHAIN ?= nightly
+RUST_TOOLCHAIN_FILE := $(dir $(lastword $(MAKEFILE_LIST)))rust-toolchain.toml
+
+# Reading the pin with no shell in the path: `$(file < X)` is make's own file read,
+# and the channel is the one word in that file wrapped end-to-end in double quotes,
+# so `$(filter "%", …)` selects exactly it and `$(subst)` drops the quotes. No sed,
+# no pipeline, no second copy of the string that could drift.
+#
+# What this read is NOT, and where each gap is closed:
+#   - It is a word-pattern match, not a TOML parse. Multi-word double-quoted phrases
+#     in that file's prose are safe (their words are only half-wrapped), but a
+#     single-word quoted term would match too — so the number of matches is counted,
+#     never trusted, and a wrong count stops the build naming what it found. (The
+#     canonical form of the pin file is load-bearing here: a space before the `]` of
+#     its `components` array would make `"rustfmt"` a standalone quoted word.)
+#   - It cannot tell a comment from a line. rustup can, and is silent about it:
+#     measured, `# channel = "nightly-2026-09-04"` makes rustup resolve the tree to
+#     the ambient default (exit 0) while this read still returns 2026-09-04. That
+#     one is caught by the rustup cross-check in `toolchain-check`, not by guessing
+#     at comment spellings here.
+#   - `$(file <)` does not exist before GNU make 4.2, and Apple still ships 3.81 at
+#     /usr/bin/make. Guarded by name below, so an old make is told which make to use
+#     rather than being told its pin file is malformed.
+ifndef MAKE_VERSION
+$(error reading the pinned channel uses make's own file function, $$(file <), which needs GNU make 4.2 or newer. This make is $(MAKE) and reports no MAKE_VERSION, so it is not GNU make. On GNU/Linux the system make is fine. On macOS install GNU make from Homebrew and run gmake, or build in the container with make podman-rom.)
+endif
+ifneq ($(filter 3.% 4.0 4.1,$(MAKE_VERSION)),)
+$(error reading the pinned channel uses make's own file function, $$(file <), which needs GNU make 4.2 or newer — this is GNU make $(MAKE_VERSION). Linux system makes are normally new enough. macOS ships 3.81 at /usr/bin/make: install GNU make from Homebrew and run gmake, or build in the container with make podman-rom.)
+endif
+
+PINNED_QUOTED := $(filter "%", $(file < $(RUST_TOOLCHAIN_FILE)))
+PINNED_TOOLCHAIN := $(subst ",,$(PINNED_QUOTED))
+# Try a different instance for one command: `make flac-test TOOLCHAIN=nightly-2026-09-11`
+# (then say so in the record — FLAC.md "Baselines to hold", the instance rule).
+TOOLCHAIN ?= $(if $(PINNED_TOOLCHAIN),$(PINNED_TOOLCHAIN),nightly)
+
+# A pin file that EXISTS but does not yield exactly one quoted value is a silent
+# instrument downgrade — the failure mode this file exists to prevent. Refuse rather
+# than fall back: the `nightly` fallback below is for a MISSING file (a partial
+# checkout, or a tool invoked outside the tree). These guards fire on any `make`,
+# including `make help`, so a malformed pin cannot be missed.
+ifneq ($(words $(PINNED_QUOTED)),1)
+ifneq ($(wildcard $(RUST_TOOLCHAIN_FILE)),)
+$(error $(RUST_TOOLCHAIN_FILE) — expected exactly one double-quoted word, the channel, and found $(words $(PINNED_QUOTED))$(if $(PINNED_QUOTED), which were $(PINNED_QUOTED),). Either the channel line is missing or unquoted, or the prose in that file contains a quoted single word. Refusing to build on a moving channel.)
+endif
+endif
 
 # Detect rustup instead of assuming the `cargo` on PATH is the rustup shim:
 #   - rustup present  -> pin through rustup (correct even when a non-shim cargo
@@ -734,6 +811,36 @@ toolchain-check:
 	  exit 1; }
 	@test -n "$(HOST_TRIPLE)" || { \
 	  echo "error: could not read the host triple from '$(RUSTC) -vV'"; exit 1; }
+ifeq ($(HAS_RUSTUP),1)
+ifneq ($(wildcard $(RUST_TOOLCHAIN_FILE)),)
+ifeq ($(TOOLCHAIN),$(PINNED_TOOLCHAIN))
+	@# The other half of the pin. Everything above asks "does the instance the
+	@# Makefile chose run?"; this asks the question the Makefile cannot answer by
+	@# itself: is that instance also the one rustup hands to a bare cargo, an
+	@# editor, or rust-analyzer in this tree? rustup skips comment lines and says
+	@# nothing about a [toolchain] table that has no channel — measured: with
+	@# `# channel = "nightly-2026-09-04"` in the pin file, `rustup show
+	@# active-toolchain` reports the ambient DEFAULT (stable 1.99.1, exit 0, and it
+	@# happily installs components for it) while a word-level read of that same file
+	@# still returns 2026-09-04. Two instruments in one tree is the exact failure the
+	@# pin exists to prevent, so it is checked by asking rustup what it resolves and
+	@# comparing the rustc it would run to the rustc this build runs — not by
+	@# pattern-guessing at the file's format.
+	@bld=$$($(RUSTC) -V 2>/dev/null); \
+	actfull=$$($(RUSTUP) show active-toolchain 2>/dev/null | head -1); \
+	act=$${actfull%% *}; got=$$($(RUSTUP) run "$$act" rustc -V 2>/dev/null); \
+	if [ -n "$$act" ] && [ -n "$$got" ] && [ "$$bld" != "$$got" ]; then \
+	  echo "error: this build runs '$$bld' (from $(TOOLCHAIN), read out of $(RUST_TOOLCHAIN_FILE)),"; \
+	  echo "  but rustup resolves this tree to '$$act', which runs '$$got'."; \
+	  echo "  rustup is not taking a channel from the pin file — a commented-out or mis-sectioned channel line makes it fall back to the ambient default silently; a RUSTUP_TOOLCHAIN environment override does the same."; \
+	  echo "  fix the tree, not the build: the instance cargo and your editor see must be the string that builds the ROM (FLAC.md, the instance rule)."; \
+	  exit 1; \
+	fi
+else
+	@echo "notice: TOOLCHAIN=$(TOOLCHAIN) overrides the pinned instance ($(PINNED_TOOLCHAIN)); this build is not the instrument $(notdir $(RUST_TOOLCHAIN_FILE)) declares, so the rustup cross-check is skipped. Say so in the record."
+endif
+endif
+endif
 
 help:
 	@echo "gba-sound-player build targets"
@@ -780,8 +887,8 @@ help:
 	@echo "    flac-test         flac-lite alone (target compile gate + host tests)"
 	@echo "    flac-portable-check  flac-lite second-target build witness ($(SECOND_TARGET); with the frame walk on: portability fact, no perf claim)"
 	@echo "    flac-test-crc     flac-lite host suite + thumbv4t compile with crc-check ON (hand-invoked; see README gate-aggregation TODO)"
-	@echo "    flac-test-scan    flac-lite host suite + thumbv4t compile with the frame walk (`scan`) ON (hand-invoked; see README gate-aggregation TODO)"
-	@echo "    flac-test-rice    flac-lite host suite + thumbv4t compile with the portable hybrid Rice kernel (`rice-hybrid`) ON (hand-invoked; see README gate-aggregation TODO)"
+	@echo "    flac-test-scan    flac-lite host suite + thumbv4t compile with the frame walk (\`scan\`) ON (hand-invoked; see README gate-aggregation TODO)"
+	@echo "    flac-test-rice    flac-lite host suite + thumbv4t compile with the portable hybrid Rice kernel (\`rice-hybrid\`) ON (hand-invoked; see README gate-aggregation TODO)"
 	@echo "    flac-gates        EVERY flac-lite configuration in one command, plus the combination arms"
 	@echo ""
 	@echo "  Tests — containerized (same gates, no host tooling needed):"

@@ -49,10 +49,11 @@ build that reformatted your tree is fine — run `make check` before committing.
 
 | Needed for | Install |
 |---|---|
-| Any target build | `rustup toolchain install nightly` + `rustup component add rust-src rustfmt --toolchain nightly` |
-| `*-rom` (ROM fixing) | `cargo install agb-gbafix` |
+| Any `make` invocation | **GNU make ≥ 4.2** — the Makefile reads the pin out of `rust-toolchain.toml` with make's own file function (`$(file <)`), which 3.81 lacks. Linux is fine; on macOS `brew install make` and call `gmake`. The Makefile checks its own version and says so. |
+| Any target build | the **pinned** channel in `rust-toolchain.toml` (`nightly-2026-09-04`) + `rustup component add rust-src rustfmt --toolchain nightly-2026-09-04`. rustup installs the pinned channel on the first build; the explicit commands are only for pre-staging. |
+| `*-rom` (ROM fixing) | `cargo install agb-gbafix --version 0.25.0 --locked` (pinned: it rewrites the ROM header, so it is part of the ROM bytes records compare by sha) |
 | `make test-rom` only | `mgba-test-runner` — run the setup script above (it builds agb's test runner; it needs `cmake`, `pkg-config`, zlib, libelf headers and libclang) |
-| Host gates | nothing beyond nightly + rust-src: they run on the **host** triple, not the GBA target |
+| Host gates | nothing beyond the pinned channel + `rust-src`: they run on the **host** triple, not the GBA target |
 
 `make help` prints the resolved toolchain; `toolchain-check` fails fast with install
 instructions rather than half-running a gate.
@@ -63,40 +64,54 @@ instructions rather than half-running a gate.
    no prebuilt `core`/`alloc` on any toolchain. The build compiles `core`/`alloc` from
    source via `-Zbuild-std`, which needs nightly + `rust-src`; `.cargo/config.toml`
    already sets it. `E0463: can't find crate for core` means those, not a missing crate.
-2. **Invoke the toolchain through rustup** (`rustup run nightly cargo …`, which the
-   Makefile resolves for you) — never `cargo +nightly`: a non-shim cargo (conda, distro)
-   reads `+nightly` as a subcommand.
-3. **Cargo config leak:** the root `.cargo/config.toml` sets `target = thumbv4t-none-eabi`
+2. **Invoke the toolchain through rustup** (`rustup run <channel> cargo …`, which the
+   Makefile resolves for you — it reads the pinned channel out of `rust-toolchain.toml`)
+   — never `cargo +nightly`: a non-shim cargo (conda, distro) reads `+nightly` as a
+   subcommand. Note the asymmetry: `rustup run <channel>` *overrides*
+   `rust-toolchain.toml`, which is why the Makefile must not hard-code a channel —
+   it reads it, with make's own file function and no text pipeline. `make
+   toolchain-check` then asks rustup what it resolves *in this tree* and fails if
+   that is not the instance the build runs: a commented-out `channel` line or a
+   `RUSTUP_TOOLCHAIN` in the environment leaves rustup on the machine default with
+   exit 0 while `make` still builds the pinned string, i.e. two instruments in one
+   tree. Don't comment the line out to unpin — delete the file.
+3. **The channel is the instrument.** `nightly` unpinned moves under `rustup update`;
+   FLAC.md compares ROM shas and cycle counts across sessions, so the channel is pinned
+   to a dated one. Changing `rust-toolchain.toml` is a measured change: carry a control
+   build (ROM/ELF bytes + a section and symbol dump) and name the rustc instance in any
+   record.
+4. **Cargo config leak:** the root `.cargo/config.toml` sets `target = thumbv4t-none-eabi`
    and `build-std`, and cargo merges config by walking *up* the tree — a `[workspace]`
    boundary does not stop it. Host test gates therefore run from a **gate-neutral cwd**
    (`/tmp/gba-sound-player-host-gate`) with `--manifest-path … --target <host triple>`;
    any in-repo directory still inherits the GBA config and fails with `E0463` /
    `E0152: duplicate lang item`. Copy that shape into any new gate.
-4. **Non-default configurations are only witnessed by their own gates.** Anything
+5. **Non-default configurations are only witnessed by their own gates.** Anything
    touching `crates/flac-lite` needs `make flac-gates` (`crc-check`, `scan`,
    `rice-hybrid`, their combinations, and the `thumbv7em-none-eabi` portability
    witness), not just `make test`. `flac-test`'s count deliberately excludes the
    feature-gated suites.
-5. **`mgba-test-runner` must match the `agb` pin** (`Cargo.toml`: `agb = "0.25.0"` →
+6. **`mgba-test-runner` must match the `agb` pin** (`Cargo.toml`: `agb = "0.25.0"` →
    `AGB_REF=v0.25.0`), and on **aarch64 Linux** agb v0.25.0 does not compile as-is: it
    assumes `c_char == i8` and an x86 `__va_list_tag`. The three `sed` patches in the
    setup script are the same ones the project Dockerfile applies, and `cargo install
    --git` cannot carry them (`--git` cannot be combined with `--path` either).
-6. **A green `make test-rom` today does not mean assertions ran.** The root crate's agb
+7. **A green `make test-rom` today does not mean assertions ran.** The root crate's agb
    suite currently collects nothing: the run ends with `Running 0 tests` and exits 0. It
    proves build → link → boot-in-mGBA works. The only `#[test_case]` in the repo lives in
    `examples/tone_playback.rs`, which is not part of that test binary.
-7. **No emulator or display here.** A `.gba` is validated by the compile/link/fix path and
+8. **No emulator or display here.** A `.gba` is validated by the compile/link/fix path and
    the test harness; screen and sound behaviour (the orange backdrop, the 440 Hz tone)
    need a human with mGBA. Never claim audio/video correctness from a green build.
-8. The root `.cargo/config.toml` `runner` is an `echo` placeholder, so a bare
+9. The root `.cargo/config.toml` `runner` is an `echo` placeholder, so a bare
    `cargo test --target thumbv4t-none-eabi` "passes" without running anything. Always go
    through `make test-rom`, which sets `CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER`.
 
 ## What green looks like (measured 2026-11-06, this host)
 
-- Toolchain: `rustc 1.100.0-nightly (a69a63265 2026-09-03)` + `rust-src`, `agb-gbafix`,
-  `mgba-test-runner` from agb v0.25.0 (mGBA 0.10.5 built by `mgba-sys`).
+- Toolchain: `rustc 1.100.0-nightly (a69a63265 2026-09-03)` + `rust-src`, `agb-gbafix`
+  0.25.0, `mgba-test-runner` from agb v0.25.0 (mGBA 0.10.5 built by `mgba-sys`) — that
+  rustc is the instance `rust-toolchain.toml` now pins as `nightly-2026-09-04`.
 - ROMs built natively: `gba-sound-player.gba`, `flac-integration.gba`, `flac-spike.gba`,
   `opus-spike.gba`, `ctor-probe.gba`, `arm-kernels.gba`, `flac-rate-spike.gba`,
   `flac-rate-play.gba`. All gitignored; `git status` stays clean.

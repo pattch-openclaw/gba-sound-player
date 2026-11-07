@@ -1,0 +1,77 @@
+# The compiler instance every cycle figure in FLAC.md was measured with, written
+# down as a string instead of as a sentence.
+#
+# Why: `nightly` is not an instrument. It is a channel, and `rustup update`
+# replaces whatever it points at without asking. This repository's records
+# compare ROM shas, section hashes and cycle counts across sessions, hosts and
+# container builds — and item 6 PR 6a-2 found a class of drift that can only be
+# discussed at all if the compiler is named rather than described: rebuilding a
+# week-old record's own archived patch against the base its own record names
+# reproduced that record's four FIXED sums *to the cycle*, and added a constant
+# +66,403,116 cycles to each of its four LPC sums (FLAC.md → "6a-2 — landed",
+# the thing that actually moves a cycle count). The candidate mechanism was a
+# codegen instance. The records could name a version string; they could not name
+# an instance.
+#
+# A dated channel *is* an instance: rustup resolves `nightly-YYYY-MM-DD` from the
+# archived date-stamped channel manifests, so this pins one build of rustc —
+# `rustc 1.100.0-nightly (a69a63265 2026-09-03)` — instead of the newest nightly
+# whichever machine happens to have. Two limits worth stating here rather than
+# discovering later: pinning changes nothing about what this host builds today
+# (measured in the PR that introduces it — same ROM, same ELF, same log), and it
+# does not retroactively repair the era gap 6a-2 documented, because the era's
+# binary is gone. What it buys is that the instrument *this* file now owns is
+# re-purchasable by the next record, on a machine nobody has yet.
+#
+# Components:
+#   rust-src  – `-Zbuild-std=core,alloc` compiles core and alloc FROM SOURCE for
+#               the Tier-3 target thumbv4t-none-eabi, so core/alloc codegen is
+#               part of the instrument too, and it arrives from this component.
+#   rustfmt   – the `make check` format gate; every build target runs the
+#               `format` pre-step, and without it the Makefile skips formatting
+#               with a notice.
+#
+# Deliberately absent: `targets = [...]`. thumbv4t-none-eabi has no prebuilt
+# artifacts on any channel (`rustup target add` for it fails); that is the whole
+# reason `-Zbuild-std` and this file's `rust-src` exist.
+#
+# Two things a reader will otherwise get wrong:
+#   * A `rust-toolchain.toml` in this directory also governs the standalone
+#     workspaces below it (`crates/*`, `examples/*`) — rustup walks up the
+#     directory tree, not the workspace graph. A file in a subdirectory would
+#     shadow this one.
+#   * `rustup run <channel>` SELECTS a toolchain explicitly and therefore
+#     OVERRIDES this file. The Makefile drives every build through
+#     `rustup run $(TOOLCHAIN)`, so it reads the channel out of this file with
+#     make's OWN file function (`$(file <)` plus a quoted-word match — no sed, no
+#     pipeline), rather than hard-coding a second copy that could drift; see the
+#     "Toolchain resolution" block in `Makefile`.
+#
+# Two requirements that read imposes, both of which fail the build by name rather
+# than quietly building on something else:
+#   * the value stays quoted and separated from its `=` by a space — the canonical
+#     TOML style used below, and the form the word-level match depends on; and
+#   * the `components` array below stays exactly as written — no space between its
+#     last element and `]`. That bracket is what keeps `"rustfmt"` from becoming a
+#     standalone quoted word; adding a space there is a valid TOML edit that would
+#     make this file ambiguous to the word-level read, and the build would stop.
+#   * prose in THIS file contains no double-quoted single word. The read takes the
+#     one word wrapped end-to-end in double quotes, so a stray quoted word anywhere
+#     else in this file is ambiguity, and the Makefile refuses ambiguity rather than
+#     choosing. (Multi-word quoted phrases are fine: their words are half-wrapped.)
+#
+# Do NOT comment the `channel` line out to unpin the tree. rustup skips comments and
+# is silent about a `[toolchain]` table with no channel: measured, it resolves the
+# tree to the machine's default toolchain with exit 0 — while the Makefile's read of
+# the same file still returns the old pinned string. Two instruments in one tree is
+# the exact failure this file exists to prevent, so it is checked, not assumed:
+# `make toolchain-check` asks rustup what it resolves in this tree and fails when
+# that is not the instance the build runs. To unpin, delete this file.
+#
+# Editing this file changes the instrument. A PR that edits it carries a control
+# build and a section/symbol dump, per FLAC.md → "Baselines to hold"
+# (the toolchain-instance rule).
+
+[toolchain]
+channel = "nightly-2026-09-04"
+components = ["rust-src", "rustfmt"]

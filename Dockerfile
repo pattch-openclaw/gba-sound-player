@@ -1,4 +1,5 @@
-# GBA ROM build + TEST image (Debian 12, Rust nightly).
+# GBA ROM build + TEST image (Debian 12, Rust nightly — a PINNED dated channel,
+# the same one rust-toolchain.toml pins).
 #
 # Target: thumbv4t-none-eabi — Tier-3, #![no_std] (core + alloc only). It ships
 # NO prebuilt core/std artifacts on ANY rustup toolchain, so `rustup target add
@@ -32,15 +33,63 @@ RUN apt-get update \
 
 # Nightly toolchain + rust-src (needed for -Zbuild-std) + rustfmt.
 #
+# The channel is PINNED, and the pin lives in ONE place: rust-toolchain.toml at
+# the repo root — the same file the host's rustup, cargo and rust-analyzer read.
+# The image installs the channel that file names, so the container cannot drift
+# from the host recipe. A dated channel resolves from the archived date-stamped
+# channel manifest, so an image rebuilt months later gets the same compiler
+# rather than the newest nightly; the current pin is the instance the cycle
+# records in FLAC.md were measured on (its header says why).
+#
+# If the file is missing or names no channel, this RUN fails the image build
+# loudly — better than quietly installing whatever `nightly` means that week.
+# (`make` inside the container can still be overridden with TOOLCHAIN= for an
+# experiment; say so in the record if you use it.)
+#
+# The read below is the SAME rule the host Makefile's "Toolchain resolution"
+# block uses — make's own file read, plus a match on the one word wrapped
+# end-to-end in double quotes, plus a count guard refusing a file that yields
+# anything other than exactly one such word. No `sed`, no `head`, no regex to
+# read, and no channel string anywhere in this file: host and image parse the pin
+# by one rule, so they cannot drift in HOW they read it either.
+# It needs GNU make 4.2+, which the apt layer above installs. There is no
+# make-version guard on this side, unlike the host Makefile (which has to survive
+# Apple's 3.81 at /usr/bin/make): if this image's make were ever too old, this
+# RUN would fail at the read — an empty expansion plus the `test -n` below, or
+# make's own unsupported-function error — rather than installing some other
+# compiler. And the file arrives by COPY, so an absent pin file fails the COPY
+# before the read ever runs.
+#
+# One gap this read shares with the host's, stated rather than papered over: a
+# COMMENTED-OUT `channel` line still yields its word, so the image would install
+# the commented-out channel — a stale pinned instance, not a moving one, which is
+# the failure the pin exists against. The host catches that case in
+# `make toolchain-check`, which asks rustup what it resolves in the tree; the
+# container's build path (`make rom`) does not run that gate.
+#
 # rustfmt is here because every build target runs the `format` pre-step, and
 # the container's CMD/entrypoint path is `make rom` -> `make build` -> `make
 # format`. Without it the container silently skips formatting.
-RUN rustup toolchain install nightly \
-    && rustup default nightly \
-    && rustup component add rust-src rustfmt
+COPY rust-toolchain.toml /tmp/rust-toolchain-pinned.toml
+RUN CHANNEL="$(make -f /dev/null \
+        --eval='pin := $(filter "%", $(file < /tmp/rust-toolchain-pinned.toml))' \
+        --eval='show:; $(if $(filter 1,$(words $(pin))),@echo $(subst ",,$(pin)),$(error expected exactly one double-quoted word, the channel; found $(words $(pin))))' \
+        show)" \
+    && test -n "$CHANNEL" || { echo "Dockerfile: rust-toolchain.toml yielded no double-quoted channel word" >&2; exit 1; } \
+    && echo "installing the pinned Rust channel: $CHANNEL" \
+    && rustup toolchain install "$CHANNEL" \
+    && rustup default "$CHANNEL" \
+    && rustup component add rust-src rustfmt --toolchain "$CHANNEL" \
+    && rm /tmp/rust-toolchain-pinned.toml
 
-# Install the GBA ROM fixing tool
-RUN cargo install agb-gbafix
+# Install the GBA ROM fixing tool — pinned, like the mGBA runner further down.
+# Not for cycles: gbafix costs no runtime. But it rewrites the ROM header, so it
+# is part of the ROM BYTES every FLAC.md record compares by sha, and an unpinned
+# gbafix would silently change those shas on another machine. 0.25.0 is the agb
+# release this project depends on (Cargo.toml: agb = "0.25.0", AGB_REF below) and
+# the version every ROM in those records was fixed with — this host's installed
+# gbafix is 0.25.0, which is why the pin changes no byte here.
+RUN cargo install agb-gbafix --version 0.25.0 --locked
 
 WORKDIR /app
 

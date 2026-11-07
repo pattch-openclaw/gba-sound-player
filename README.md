@@ -109,23 +109,30 @@ Through a series of recent refactors and debugging sessions, we:
      make podman-flac-test    # flac-lite alone (builder stage, fastest loop)
      ```
    - **Native test setup (optional, faster inner loop):** running `make test-rom`
-     on the host needs the nightly toolchain, plus the toolchain that builds
-     libmgba (a C library) for `mgba-test-runner`:
+     on the host needs the pinned nightly toolchain, plus the toolchain that
+     builds libmgba (a C library) for `mgba-test-runner`. The channel is pinned in
+     [`rust-toolchain.toml`](rust-toolchain.toml) — rustup installs it on the first
+     build — so these commands only matter if you want it pre-staged:
      ```sh
-     rustup toolchain install nightly
-     rustup component add rust-src --toolchain nightly
-     brew install cmake pkg-config libelf        # to build libmgba
-     cargo install agb-gbafix
+     rustup toolchain install nightly-2026-09-04      # the pinned channel
+     rustup component add rust-src --toolchain nightly-2026-09-04
+     brew install cmake pkg-config libelf make   # the last one for the pin read: use gmake
+     cargo install agb-gbafix --version 0.25.0 --locked
      cargo install --git https://github.com/agbrs/agb.git --tag v0.25.0 --locked mgba-test-runner
      ```
    - **Running Tests natively** (the Makefile sets this runner itself; shown for
-     a raw `cargo` invocation):
+     a raw `cargo` invocation — through rustup, so it works even when a non-shim
+     cargo shadows one on PATH, and naming the pinned channel rather than asking
+     for "the newest nightly", which is not the instrument the records use):
      ```sh
-     CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER=mgba-test-runner cargo +nightly test --target thumbv4t-none-eabi
+     CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER=mgba-test-runner \
+       rustup run nightly-2026-09-04 cargo test --target thumbv4t-none-eabi
      ```
 
 1. **Native build** — `make native-rom` compiles, links, and fixes the ROM using
-   the host toolchain (nightly + `rust-src` + `agb-gbafix` installed locally).
+   the host toolchain (the pinned nightly + `rust-src`, per
+   [`rust-toolchain.toml`](rust-toolchain.toml), plus `agb-gbafix` 0.25.0
+   installed locally).
    Produces the same runnable `gba-sound-player.gba` as the containerized path.
 2. **Containerized build** — `make podman-rom` (podman by default, docker
    also works) successfully:
@@ -383,20 +390,66 @@ same targets work in a conda shell, a bare shell, and inside the container:
 
 ```make
 HAS_RUSTUP := $(shell command -v $(RUSTUP) >/dev/null 2>&1 && echo 1)
-# rustup present   -> `rustup run nightly cargo …` (immune to a shadowed shim)
-# no rustup at all -> plain `cargo`/`rustc`, which must already be nightly
+# rustup present   -> `rustup run <pinned channel> cargo …` (immune to a shadowed shim)
+# no rustup at all -> plain `cargo`/`rustc`, which must already be the pinned nightly
 ```
+
+#### Which nightly, exactly (the channel is pinned)
+
+`nightly` is a channel, not an instrument: `rustup update` replaces what it
+points at silently. This repo compares ROM shas, section hashes and cycle counts
+across sessions and hosts ([FLAC.md](FLAC.md)), so the channel is pinned to a
+dated one — `nightly-2026-09-04`, i.e. `rustc 1.100.0-nightly (a69a63265
+2026-09-03)`, the instance the existing records name — in
+[`rust-toolchain.toml`](rust-toolchain.toml). Dated channels resolve from the
+archived date-stamped channel manifests, which is what makes the toolchain
+re-installable months later on a machine nobody has.
+
+Three things about that file that are not obvious:
+
+- A `rust-toolchain.toml` at the repo root also governs the standalone workspaces
+  under it (`crates/*`, `examples/*`): rustup walks **up the directory tree**, not
+  the workspace graph. A file in a subdirectory would shadow it.
+- `rustup run <channel>` **selects** a toolchain explicitly and therefore
+  overrides the file. That is exactly the form the Makefile uses, so it reads the
+  channel out of the file (`PINNED_TOOLCHAIN` → `TOOLCHAIN ?=`) instead of
+  hard-coding a second copy of it. A pin that lived only in the file would not
+  pin `make`.
+- The read is done with **make's own file function** (`$(file <)`) and a
+  quoted-word match — no `sed`, no pipeline, no second copy of the string. That
+  function needs **GNU make 4.2 or newer**: Linux makes are fine, Apple still ships
+  3.81 at `/usr/bin/make`, so on macOS use `brew install make` and run `gmake`. The
+  Makefile checks its own make version and names that fix, rather than reporting a
+  malformed pin file.
+
+`Dockerfile` installs the channel `rust-toolchain.toml` names: it copies the file
+and reads it with the **same rule** the Makefile uses (`make --eval` + the
+quoted-word match), so there is neither a second copy of the string nor a second
+rule for it to drift — and that side installs `make` itself, so it carries no
+version guard; a too-old make there would fail the image build at the read, not
+silently install a different compiler. It pins
+`agb-gbafix` at `0.25.0` for the same reason it pins the mGBA runner to
+`v0.25.0`: gbafix rewrites the ROM header, so it is part of the ROM bytes the
+records compare by sha. Changing the pin changes the instrument — carry a control
+build and a section/symbol dump (FLAC.md → "Baselines to hold").
 
 Overrides: `TOOLCHAIN=`, `RUSTUP=`, `CARGO=`, `RUSTC=`. `make help` prints the
 resolved toolchain and host triple; `toolchain-check` (a prerequisite of the
 test gates) fails fast with install instructions rather than half-running a
-gate. Prerequisites for a native setup:
+gate — and it also asks **rustup** what it resolves in this tree, stopping if that
+is not the instance the build runs. That second half is what catches a pin file
+rustup is quietly ignoring: a commented-out `channel` line, or a `RUSTUP_TOOLCHAIN`
+in the environment, leaves rustup on the machine default with exit 0 while the
+Makefile still builds the pinned instance — two instruments in one tree, which the
+pin exists to prevent. Prerequisites for a native setup:
 
 ```sh
-rustup toolchain install nightly
-rustup component add rust-src --toolchain nightly    # -Zbuild-std
-rustup component add rustfmt  --toolchain nightly    # make check + build's format pre-step
-cargo install agb-gbafix                             # ROM fixing
+# GNU make 4.2+: the Makefile reads rust-toolchain.toml with make's own file
+# function. Linux makes are fine; on macOS: brew install make, then run gmake.
+rustup toolchain install nightly-2026-09-04                     # pinned channel
+rustup component add rust-src --toolchain nightly-2026-09-04   # -Zbuild-std
+rustup component add rustfmt  --toolchain nightly-2026-09-04   # make check + build's format pre-step
+cargo install agb-gbafix --version 0.25.0 --locked              # ROM fixing
 cargo install --git https://github.com/agbrs/agb.git --tag v0.25.0 --locked mgba-test-runner  # make test-rom
 ```
 
