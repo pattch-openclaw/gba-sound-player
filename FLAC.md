@@ -7913,9 +7913,28 @@ Makefile:67: *** rust-toolchain.toml exists but no `channel = "..."` line was re
 
 That guard is the difference between a pin and a preference.
 
+> **Amended 2026-11-07, before this PR merged: the read moved off `sed`.** The
+> `sed` was the unreadable half of the change, and a regex the pin file has to
+> satisfy is a second invention on top of the file that already is the pin.
+> `Makefile` and `Dockerfile` now read the channel by **one rule**: make's own
+> file function (`$(file <)`) plus a match on the one word in that file wrapped
+> end-to-end in double quotes — the image evaluates that same expression through
+> `make --eval`, so the two sides share the rule and not merely the string.
+> Measured after the move, on this host (GNU make 4.4.1):
+>
+> | what changed | what now happens |
+> |---|---|
+> | the quoted guard above | it is a **count** guard now: *expected exactly one double-quoted word, the channel; found N* — which also fires when the `components` array gains a space before its `]` (→ `found 2`, the two words named) or when prose in the pin file contains a quoted single word |
+> | a commented-out `channel` line | a word-level read cannot see comments, so the word *is* read and the guard stays silent — and `toolchain-check` now answers the question the read cannot: it asks `rustup show active-toolchain`, runs the rustc that resolves, and stops when it is not the rustc the build runs (measured, exit 2, for both a commented line and a `RUSTUP_TOOLCHAIN` override). Its sibling branch prints a `notice:` when `TOOLCHAIN=` overrides the pin instead. |
+> | `channel="…"` with no spaces around `=` | **no longer accepted** — that word is not wrapped end-to-end in quotes, so the count is 0 and the build stops. The read is stricter than TOML; `rust-toolchain.toml`'s header now names its own canonical form as load-bearing, which is the honest version of that trade. |
+> | `$(file <)` is GNU make 4.2+ | the host Makefile stops by name on 3.x/4.0/4.1 ("…macOS ships 3.81 at /usr/bin/make: install GNU make from Homebrew and run gmake, or build in the container"), and the pin-file header repeats the requirement. The image installs `make` from apt in the layer above the read and carries no version guard; **this host cannot build the image to check that package's version** (no container here — see below). What is stated instead: an older make on that side fails the image build at the read — empty expansion plus the `test -n` guard, or make's own unsupported-function error — it does not install some other compiler. `make podman-rom` remains the missing arm. |
+> | the control above | re-run warm after the move: ROM `467ff1231610d680…` unchanged. The cold arm and the gate battery were **not** re-run against the new read; the four arms above stand as measured against the `sed` version. |
+
 **The container half, and what is *not* witnessed here.** The Dockerfile's channel
-extraction and the Makefile's are the *same program*, byte for byte, and both were
-run against formatting variants:
+extraction and the Makefile's were the *same program*, byte for byte (both `sed`;
+see the amendment above for the rule that replaced them), and both were run
+against formatting variants — with that `sed`, so the last two rows describe that
+program, not the current one:
 
 | `rust-toolchain.toml` line | extracted |
 |---|---|
@@ -7927,8 +7946,13 @@ run against formatting variants:
 **The image build itself cannot be run on this host** — rootless podman here dies
 on a missing `newuidmap`, there is no podman machine, and the harness cannot nest
 virtualization, which is the documented reason the native targets exist (README,
-"Two environments"). So the container half is witnessed by the extraction (shared
-program, variant-tolerant, loud failure) and by the fact that the channel it would
+"Two environments"). So the container half is witnessed by the extraction (a shared
+rule, variant-tested, loud on failure — the post-move form was tested the same
+way: the joined `RUN` body under `dash` against a copy of the pin file, which
+returns the channel for the canonical form and for extra spacing around `=`, stops
+with the count guard on a no-space or unquoted value, reports `found 2` when a
+quoted word appears anywhere in the file, and still reads a commented-out channel)
+and by the fact that the channel it would
 install is the instance already proven on this host. `make podman-rom` on a
 capable host is the arm this PR cannot run; say so in review if it matters.
 

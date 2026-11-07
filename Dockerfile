@@ -46,12 +46,36 @@ RUN apt-get update \
 # (`make` inside the container can still be overridden with TOOLCHAIN= for an
 # experiment; say so in the record if you use it.)
 #
+# The read below is the SAME rule the host Makefile's "Toolchain resolution"
+# block uses — make's own file read, plus a match on the one word wrapped
+# end-to-end in double quotes, plus a count guard refusing a file that yields
+# anything other than exactly one such word. No `sed`, no `head`, no regex to
+# read, and no channel string anywhere in this file: host and image parse the pin
+# by one rule, so they cannot drift in HOW they read it either.
+# It needs GNU make 4.2+, which the apt layer above installs. There is no
+# make-version guard on this side, unlike the host Makefile (which has to survive
+# Apple's 3.81 at /usr/bin/make): if this image's make were ever too old, this
+# RUN would fail at the read — an empty expansion plus the `test -n` below, or
+# make's own unsupported-function error — rather than installing some other
+# compiler. And the file arrives by COPY, so an absent pin file fails the COPY
+# before the read ever runs.
+#
+# One gap this read shares with the host's, stated rather than papered over: a
+# COMMENTED-OUT `channel` line still yields its word, so the image would install
+# the commented-out channel — a stale pinned instance, not a moving one, which is
+# the failure the pin exists against. The host catches that case in
+# `make toolchain-check`, which asks rustup what it resolves in the tree; the
+# container's build path (`make rom`) does not run that gate.
+#
 # rustfmt is here because every build target runs the `format` pre-step, and
 # the container's CMD/entrypoint path is `make rom` -> `make build` -> `make
 # format`. Without it the container silently skips formatting.
 COPY rust-toolchain.toml /tmp/rust-toolchain-pinned.toml
-RUN CHANNEL="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' /tmp/rust-toolchain-pinned.toml | head -1)" \
-    && test -n "$CHANNEL" || { echo "Dockerfile: rust-toolchain.toml has no channel = \"...\" line" >&2; exit 1; } \
+RUN CHANNEL="$(make -f /dev/null \
+        --eval='pin := $(filter "%", $(file < /tmp/rust-toolchain-pinned.toml))' \
+        --eval='show:; $(if $(filter 1,$(words $(pin))),@echo $(subst ",,$(pin)),$(error expected exactly one double-quoted word, the channel; found $(words $(pin))))' \
+        show)" \
+    && test -n "$CHANNEL" || { echo "Dockerfile: rust-toolchain.toml yielded no double-quoted channel word" >&2; exit 1; } \
     && echo "installing the pinned Rust channel: $CHANNEL" \
     && rustup toolchain install "$CHANNEL" \
     && rustup default "$CHANNEL" \

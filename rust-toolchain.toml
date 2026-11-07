@@ -42,8 +42,31 @@
 #     shadow this one.
 #   * `rustup run <channel>` SELECTS a toolchain explicitly and therefore
 #     OVERRIDES this file. The Makefile drives every build through
-#     `rustup run $(TOOLCHAIN)`, so it reads the channel from this file instead
-#     of hard-coding one — see the "Toolchain resolution" block in `Makefile`.
+#     `rustup run $(TOOLCHAIN)`, so it reads the channel out of this file with
+#     make's OWN file function (`$(file <)` plus a quoted-word match — no sed, no
+#     pipeline), rather than hard-coding a second copy that could drift; see the
+#     "Toolchain resolution" block in `Makefile`.
+#
+# Two requirements that read imposes, both of which fail the build by name rather
+# than quietly building on something else:
+#   * the value stays quoted and separated from its `=` by a space — the canonical
+#     TOML style used below, and the form the word-level match depends on; and
+#   * the `components` array below stays exactly as written — no space between its
+#     last element and `]`. That bracket is what keeps `"rustfmt"` from becoming a
+#     standalone quoted word; adding a space there is a valid TOML edit that would
+#     make this file ambiguous to the word-level read, and the build would stop.
+#   * prose in THIS file contains no double-quoted single word. The read takes the
+#     one word wrapped end-to-end in double quotes, so a stray quoted word anywhere
+#     else in this file is ambiguity, and the Makefile refuses ambiguity rather than
+#     choosing. (Multi-word quoted phrases are fine: their words are half-wrapped.)
+#
+# Do NOT comment the `channel` line out to unpin the tree. rustup skips comments and
+# is silent about a `[toolchain]` table with no channel: measured, it resolves the
+# tree to the machine's default toolchain with exit 0 — while the Makefile's read of
+# the same file still returns the old pinned string. Two instruments in one tree is
+# the exact failure this file exists to prevent, so it is checked, not assumed:
+# `make toolchain-check` asks rustup what it resolves in this tree and fails when
+# that is not the instance the build runs. To unpin, delete this file.
 #
 # Editing this file changes the instrument. A PR that edits it carries a control
 # build and a section/symbol dump, per FLAC.md → "Baselines to hold"

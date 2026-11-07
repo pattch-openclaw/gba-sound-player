@@ -49,6 +49,7 @@ build that reformatted your tree is fine — run `make check` before committing.
 
 | Needed for | Install |
 |---|---|
+| Any `make` invocation | **GNU make ≥ 4.2** — the Makefile reads the pin out of `rust-toolchain.toml` with make's own file function (`$(file <)`), which 3.81 lacks. Linux is fine; on macOS `brew install make` and call `gmake`. The Makefile checks its own version and says so. |
 | Any target build | the **pinned** channel in `rust-toolchain.toml` (`nightly-2026-09-04`) + `rustup component add rust-src rustfmt --toolchain nightly-2026-09-04`. rustup installs the pinned channel on the first build; the explicit commands are only for pre-staging. |
 | `*-rom` (ROM fixing) | `cargo install agb-gbafix --version 0.25.0 --locked` (pinned: it rewrites the ROM header, so it is part of the ROM bytes records compare by sha) |
 | `make test-rom` only | `mgba-test-runner` — run the setup script above (it builds agb's test runner; it needs `cmake`, `pkg-config`, zlib, libelf headers and libclang) |
@@ -67,7 +68,13 @@ instructions rather than half-running a gate.
    Makefile resolves for you — it reads the pinned channel out of `rust-toolchain.toml`)
    — never `cargo +nightly`: a non-shim cargo (conda, distro) reads `+nightly` as a
    subcommand. Note the asymmetry: `rustup run <channel>` *overrides*
-   `rust-toolchain.toml`, which is why the Makefile must not hard-code a channel.
+   `rust-toolchain.toml`, which is why the Makefile must not hard-code a channel —
+   it reads it, with make's own file function and no text pipeline. `make
+   toolchain-check` then asks rustup what it resolves *in this tree* and fails if
+   that is not the instance the build runs: a commented-out `channel` line or a
+   `RUSTUP_TOOLCHAIN` in the environment leaves rustup on the machine default with
+   exit 0 while `make` still builds the pinned string, i.e. two instruments in one
+   tree. Don't comment the line out to unpin — delete the file.
 3. **The channel is the instrument.** `nightly` unpinned moves under `rustup update`;
    FLAC.md compares ROM shas and cycle counts across sessions, so the channel is pinned
    to a dated one. Changing `rust-toolchain.toml` is a measured change: carry a control

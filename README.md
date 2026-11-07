@@ -116,7 +116,7 @@ Through a series of recent refactors and debugging sessions, we:
      ```sh
      rustup toolchain install nightly-2026-09-04      # the pinned channel
      rustup component add rust-src --toolchain nightly-2026-09-04
-     brew install cmake pkg-config libelf        # to build libmgba
+     brew install cmake pkg-config libelf make   # the last one for the pin read: use gmake
      cargo install agb-gbafix --version 0.25.0 --locked
      cargo install --git https://github.com/agbrs/agb.git --tag v0.25.0 --locked mgba-test-runner
      ```
@@ -405,7 +405,7 @@ dated one — `nightly-2026-09-04`, i.e. `rustc 1.100.0-nightly (a69a63265
 archived date-stamped channel manifests, which is what makes the toolchain
 re-installable months later on a machine nobody has.
 
-Two things about that file that are not obvious:
+Three things about that file that are not obvious:
 
 - A `rust-toolchain.toml` at the repo root also governs the standalone workspaces
   under it (`crates/*`, `examples/*`): rustup walks **up the directory tree**, not
@@ -415,9 +415,19 @@ Two things about that file that are not obvious:
   channel out of the file (`PINNED_TOOLCHAIN` → `TOOLCHAIN ?=`) instead of
   hard-coding a second copy of it. A pin that lived only in the file would not
   pin `make`.
+- The read is done with **make's own file function** (`$(file <)`) and a
+  quoted-word match — no `sed`, no pipeline, no second copy of the string. That
+  function needs **GNU make 4.2 or newer**: Linux makes are fine, Apple still ships
+  3.81 at `/usr/bin/make`, so on macOS use `brew install make` and run `gmake`. The
+  Makefile checks its own make version and names that fix, rather than reporting a
+  malformed pin file.
 
-`Dockerfile` installs the channel `rust-toolchain.toml` names (it copies the file
-and reads it, so there is no second copy of the string to drift), and it pins
+`Dockerfile` installs the channel `rust-toolchain.toml` names: it copies the file
+and reads it with the **same rule** the Makefile uses (`make --eval` + the
+quoted-word match), so there is neither a second copy of the string nor a second
+rule for it to drift — and that side installs `make` itself, so it carries no
+version guard; a too-old make there would fail the image build at the read, not
+silently install a different compiler. It pins
 `agb-gbafix` at `0.25.0` for the same reason it pins the mGBA runner to
 `v0.25.0`: gbafix rewrites the ROM header, so it is part of the ROM bytes the
 records compare by sha. Changing the pin changes the instrument — carry a control
@@ -426,9 +436,16 @@ build and a section/symbol dump (FLAC.md → "Baselines to hold").
 Overrides: `TOOLCHAIN=`, `RUSTUP=`, `CARGO=`, `RUSTC=`. `make help` prints the
 resolved toolchain and host triple; `toolchain-check` (a prerequisite of the
 test gates) fails fast with install instructions rather than half-running a
-gate. Prerequisites for a native setup:
+gate — and it also asks **rustup** what it resolves in this tree, stopping if that
+is not the instance the build runs. That second half is what catches a pin file
+rustup is quietly ignoring: a commented-out `channel` line, or a `RUSTUP_TOOLCHAIN`
+in the environment, leaves rustup on the machine default with exit 0 while the
+Makefile still builds the pinned instance — two instruments in one tree, which the
+pin exists to prevent. Prerequisites for a native setup:
 
 ```sh
+# GNU make 4.2+: the Makefile reads rust-toolchain.toml with make's own file
+# function. Linux makes are fine; on macOS: brew install make, then run gmake.
 rustup toolchain install nightly-2026-09-04                     # pinned channel
 rustup component add rust-src --toolchain nightly-2026-09-04   # -Zbuild-std
 rustup component add rustfmt  --toolchain nightly-2026-09-04   # make check + build's format pre-step
