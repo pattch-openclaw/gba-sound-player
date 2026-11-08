@@ -11,7 +11,9 @@ unsafe and zero pin surface. **How many such attributes exist depends on the
 configuration**: a default build carries exactly one (`bits::LEADING_ONES`), a
 `rice-hybrid` build carries four — the same attribute kind on the hybrid kernel's
 three hot tables, added by split-ladder item 5 PR 3 and recorded in
-`../../FLAC.md` rather than assumed ratified silently. GBA ROM crates opt in to
+[`../../flac-docs/architecture.md`](../../flac-docs/architecture.md) and
+[`../../flac-docs/measurements.md`](../../flac-docs/measurements.md) rather than
+assumed ratified silently. GBA ROM crates opt in to
 the pin (`flac_spike` / `flac_integration` do). The GAFP container and
 encode-profile sections below are product-side container work — a manifest is
 *one* frame source, not the decoder's contract — and the build-gate/config-leak
@@ -19,7 +21,7 @@ notes are this repo's build setup. A second bare-metal target is a build
 witness, not an aspiration: `make flac-portable-check` compiles this crate for
 `thumbv7em-none-eabi` alongside thumbv4t + host (portability fact, no perf
 claim — landed 2026-11-02).
-([FLAC.md → split proposal](../../FLAC.md#flac-lite-and-flac-lite-gba--portable-core-split-proposal-2026-11-01)).
+([flac-docs/architecture.md](../../flac-docs/architecture.md)).
 
 Implemented: the full Phase 1 decode path through `frame::decode_frame` —
 header, subframe types, partitioned Rice residual + escape, integrators,
@@ -32,8 +34,7 @@ region + max blocksize + channel count + stream defaults — the E1 sample's
 `ClipView` field set, no generated-asset metadata). It is a **narrow copy** of
 the perf spike's proven driver, not a shared file, and both copies are run over
 the same embedded clip bytes in the spike's own witness suite so the copy
-cannot drift silently — see [FLAC.md → split
-proposal](../../FLAC.md#flac-lite-and-flac-lite-gba--portable-core-split-proposal-2026-11-01)
+cannot drift silently — see [flac-docs/architecture.md](../../flac-docs/architecture.md)
 for why the instrument could not simply move. **And the frame walk above that,
 `scan` (landed the same day, item 4b)**: a frame source with no index in front
 of it, where each frame's own fields tell the reader where it ends and the end
@@ -52,8 +53,8 @@ until item 6 rewires the facade onto it. Measured, not argued: with `scan` off,
 the instrument's `.text`, `.rodata`, `.iwram` and `.ewram` are byte for byte
 the 4a image; with it on, `.text` is +3,120 B and the image contains no walk
 symbol — a second consumer of the decode path changes what the inliner does to
-the code already linked. See the module docs and `../../FLAC.md`'s landing
-note.
+the code already linked. See the module docs and
+[`../../flac-docs/measurements.md`](../../flac-docs/measurements.md).
 
 **And the second Rice mechanism, `rice_hybrid` (landed 2026-11-06, split-ladder
 item 5 PR 3)** — behind the `rice-hybrid` feature, off by default, gate
@@ -70,7 +71,7 @@ on-target cycle reading this host could not take when PR 3 landed; **PR 4 took i
 per decoded sample slower** than the incumbent on the same instrument (+9.71% FIXED
 / +2.64% LPC mean per frame, 314/314 frames slower, 0 inside the ~9–13 cyc/frame
 layout-noise band), with its tables pinned in `.iwram` at the very slots the
-incumbent's occupy, and both images producing bit-identical PCM. `FLAC.md`, item 5
+incumbent's occupy, and both images producing bit-identical PCM. `flac-docs/measurements.md`, item 5
 PR 4, carries the table and the reading. So the module stays exactly where PR 3 put
 it — the portable alternative, and the thing item 6 lifts and rewrites in asm —
 because the algorithm's win belongs to the ARM realization (E10: −349/−348
@@ -164,7 +165,7 @@ case, because whether a frame carries two subframes is that frame's channel code
 rather than the stream's declared channel count. What is deliberately *not* here: `SEEKTABLE` interpretation (the
 walker skips it by length; random access is item 6's `format::Manifest`), any
 end-of-stream claim based on declared counts, and a rewired `Decoder` facade.
-Roadmap: [`../../FLAC.md`](../../FLAC.md) → "Phased plan".
+Roadmap: [`../../flac-docs/plan-of-record.md`](../../flac-docs/plan-of-record.md).
 
 ```
 crates/flac-lite/
@@ -230,7 +231,7 @@ cargo +nightly test -Zbuild-std= --target "$HOST" --features scan
 # GATE 5 — the second Rice mechanism with its feature on (`make flac-test-rice`;
 # same reason as GATE 4, plus the measured one: with `rice-hybrid` off the
 # ROM-links image is byte-identical to the pre-PR-3 image, with it on it is
-# +2,984 B with no hybrid symbol in it — `../../FLAC.md`, split-ladder item 5
+# +2,984 B with no hybrid symbol in it — `../../flac-docs/measurements.md`, split-ladder item 5
 # PR 3). `tests/rice_two_mechanism_differential.rs` is
 # `required-features = ["rice-hybrid"]`.
 cargo +nightly check --release --target thumbv4t-none-eabi -Zbuild-std=core,alloc \
@@ -277,7 +278,7 @@ that was wrong (it was papering over the leak above). Gate 2 disables build-std
 instead of extending it.
 
 Zero dependencies is not cosmetic. On this target any dependency that references
-`std` breaks the build — precisely the symphonia failure documented in FLAC.md.
+`std` breaks the build — precisely the symphonia failure documented in flac-docs/architecture.md.
 Adding a dependency requires re-verifying gate #1.
 
 ## GAFP container format (contract — product-side container work)
@@ -336,14 +337,14 @@ The decoder only needs to handle what our encoder is allowed to produce:
   field value that could exceed the ceiling is already refused for its own
   reason (number cap, variable blocking, non-minimal number form). The earlier
   follow-up text ("a plain `flac -b 16` encode reaches an 80-bit header that
-  trips the assert") is the bug that closed it — see FLAC.md → item 4a entry.
+  trips the assert") is the bug that closed it — see flac-docs/format-notes.md → "Header width, coded numbers, and stream layer".
 - **max predictor order ≤ 4** — encode with `-l 4`; higher orders stay *parsed*
   but rejected under `strict-profile`, pending the perf spike.
   ⚠️ Corrected 2026-09-07: this previously said "predictors capped at **FIXED
   order 0–4**", which misreads `-l`. `-l, --max-lpc-order` is a maximum **LPC**
   order; `-l 4` emits real LPC-4 subframes (measured: `lpc4` ×156/157 frames), and
   FIXED-only is `-l 0`. The `strict-profile` switch is therefore "order > 4",
-  not "is LPC". See FLAC.md → "Correction 3".
+  not "is LPC". See flac-docs/format-notes.md → "Correction 3".
 - partitioned Rice / Rice2 residuals; escaped partitions supported
 - stereo: independent **and** mid/side (`-m`); left-side, right-side
 - no metadata blocks other than what the manifest replaces
@@ -386,13 +387,13 @@ can be revisited for `i16` later if we need the space.
 
 ## Next steps
 
-The roadmap is a single list in **FLAC.md → "Phased plan"** (the only source of
-truth for outstanding work). Phase 1's decode path through `frame::decode_frame`
-is complete (`src/lib.rs` carries the per-module state), the frame loop
-landed as `driver` on 2026-11-04, and the stream/metadata half of item 4
-(`stream.rs`, item 4a) landed the same day: `stream::parse` → `StreamFacts` +
-`frame_data_offset`. Outstanding in this ladder rung: **item 4b** — the
-table-less frame source and the end-of-stream rule — plus the `decoder` facade
-(a shell over `driver`) and `format::Manifest`, and the rest of the
-portability ladder in
-[FLAC.md → split proposal](../../FLAC.md#flac-lite-and-flac-lite-gba--portable-core-split-proposal-2026-11-01).
+The roadmap is a single list in
+**[flac-docs/plan-of-record.md](../../flac-docs/plan-of-record.md)** (the only
+source of truth for outstanding work). Phase 1's decode path through
+`frame::decode_frame` is complete (`src/lib.rs` carries the per-module state),
+the frame loop landed as `driver` on 2026-11-04, the stream layer landed the same
+day (`stream::parse` → `StreamFacts` + `frame_data_offset`), and the table-less
+`scan` walk is in behind its feature. Outstanding: the `decoder` facade (a shell
+over `driver` + a frame source), `format::Manifest` + the real packer, and the
+remaining overlay/width work in item 6. Architecture and the delivered
+portability ladder: [flac-docs/architecture.md](../../flac-docs/architecture.md).
