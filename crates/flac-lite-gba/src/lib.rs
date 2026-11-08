@@ -27,15 +27,28 @@
 //!
 //! ## What this crate is for (the plan, by PR)
 //!
-//! * **6a-3** — an implementor of [`flac_lite::residual::RiceKernel`] *from
-//!   outside the core*, in Rust: the core's own portable twin carried through the
-//!   seam as an instrument arm, so that a known number (+42.6 c/sample) is
-//!   reproduced through the shipped path before any unfamiliar one is read. That
-//!   PR also owns the visibility questions an external implementor actually hits
-//!   (`residual::rice_unmap` is `pub(crate)` today) and the question of whether
-//!   the twin is re-exported or vendored — the recommendation there being
-//!   re-export, because vendoring creates the drift-witness debt item 4 had to
-//!   pay for.
+//! * **6a-3** (this PR) — the seam, made passable from outside the core, in
+//!   Rust, with no asm anywhere in it. `src/rice_twin.rs` + the `rice-twin`
+//!   feature is one instrument arm: a `TwinKernel` that **carries** the core's
+//!   portable hybrid twin through the seam by an impl written in another crate —
+//!   so that a known number (+42.6 c/sample, item 5 PR 4) stays reproducible
+//!   through the shipped seam before an unfamiliar one is ever read through it —
+//!   and nothing else. Its witness is `tests/twin_from_outside.rs`, a differential
+//!   driven from this side of the boundary over the core's own committed corpus.
+//!   That witness is what found the one surface bump the rung needed: the core's
+//!   `residual::rice_unmap` was `pub(crate)`, and the commit before this one makes
+//!   it `pub`. The three `rice_hybrid` tables the same probe named stay private,
+//!   for the reasons their new docs give. The visibility question is therefore
+//!   closed by an attempt rather than by inspection, and the re-export-versus-
+//!   vendor question — this plan recommended re-export because vendoring creates
+//!   the drift-witness debt item 4 paid for — is closed the same way: the
+//!   forwarding impl compiles with **zero** core-side changes, so the core owns
+//!   one copy of that walk. Rung 6a-4's own docs note what changes if it wants
+//!   them.
+//!   **6a-3 changes no decode path**, and it adds one configuration behind one new
+//!   gate (`make overlay-test-twin` — both the thumbv4t compile witness and the
+//!   host differential) rather than changing an existing one; the counts of every
+//!   existing configuration are unchanged, which is that rung's own rule.
 //! * **6a-4** — the ARM-mode kernels themselves (`global_asm!` over the
 //!   `.s` bodies this repo already dual-witnesses in `examples/arm-kernels/`),
 //!   their FFI and its SAFETY blocks, the state-struct ABI mapping written as
@@ -85,12 +98,13 @@
 //! ## `unsafe`, and its budget
 //!
 //! `#![deny(unsafe_code)]` is in force from the first line of this crate, and
-//! 6a-1 contains **zero** `unsafe`. The first real `unsafe` surface in this
-//! repository is 6a-4's asm FFI, and the budget is fixed now so it can be
-//! counted later: **one `SAFETY` block per FFI site, each naming the bounds it
-//! relies on** (window length, output length, table reach, the region a read is
-//! bounded by), with a counted and named exception list in these docs — the same
-//! ratified-exception discipline the core uses for its `.iwram` placement
+//! 6a-1 contains **zero** `unsafe`; 6a-3's rule is that it stays at zero, and the
+//! record for that PR re-counts it rather than asserting it here. The first real
+//! `unsafe` surface in this repository is 6a-4's asm FFI, and the budget is fixed
+//! now so it can be counted later: **one `SAFETY` block per FFI site, each naming
+//! the bounds it relies on** (window length, output length, table reach, the region
+//! a read is bounded by), with a counted and named exception list in these docs —
+//! the same ratified-exception discipline the core uses for its `.iwram` placement
 //! attributes. **Current count: 0.**
 //!
 //! ## Build shape and gates (the plumbing, decided once)
@@ -111,9 +125,23 @@
 //!   cwd for the same reason the core's host gates are (the config leak). In
 //!   6a-1 that witness is one no-op test; see the test module for what it does
 //!   and does not claim.
-//! * Neither gate is in `flac-gates` (that aggregate is the core's
+//! * `make overlay-test-twin` — what 6a-3 adds: the same two witnesses as above
+//!   with `--features rice-twin` on, in one gate. Its first arm is the compile
+//!   witness that an out-of-crate `RiceKernel` impl builds for `thumbv4t-none-eabi`
+//!   (the half `overlay-check` cannot see, since in its default build
+//!   `src/rice_twin.rs` does not exist); its second runs the corpus differential
+//!   driven from this side of the boundary (`tests/twin_from_outside.rs`,
+//!   `required-features = ["rice-twin"]`, so it does not exist in a default build
+//!   at all). There is deliberately no `overlay-check-twin`: a gate whose arms
+//!   would be identical to a subset of this one is a second name for one
+//!   measurement. The rule this rung inherits from the core's own feature-gate
+//!   discipline is that a new configuration is a **new gate**, never a broadening
+//!   of an existing one — `make overlay-test` still runs exactly what it ran in
+//!   6a-1, which is what makes "the default build of this crate still contains no
+//!   kernel" a checkable statement rather than a claim.
+//! * None of these gates is in `flac-gates` (that aggregate is the core's
 //!   configurations, and this is a different crate whose features do not exist
-//!   yet) and neither is in `test`. They are hand-invoked, like
+//!   there) and none is in `test`. They are hand-invoked, like
 //!   `flac-test-crc`/`-scan`/`-rice`, and for the same reason: nothing links
 //!   this crate yet, so its gates are plumbing gates.
 //! * There is no `flac-portable-check` arm for this crate, and that is the
@@ -132,8 +160,12 @@
 #![no_std]
 #![deny(unsafe_code)]
 
-// No modules in 6a-1, deliberately: the first one is 6a-3's kernel arm, and an
-// empty module tree is the honest shape of a crate that nothing links.
+// 6a-1's empty module tree was the honest shape of a crate that nothing links.
+// 6a-3 changes that by exactly one module, and it stays behind that module's own
+// feature: a default build of this crate still contains no kernel, so the claim
+// "nothing links it" is still true of the default build after this PR.
+#[cfg(feature = "rice-twin")]
+pub mod rice_twin;
 
 #[cfg(test)]
 mod tests {

@@ -7393,6 +7393,14 @@ re-litigate the map.
 worst 1,797,752 @136 / sum 280,848,260; `l4_stereo` mean 6,609,128 / worst
 6,643,224 @145 / sum 1,037,633,086 (calibration overhead 22, nets).
 
+6a-3's control arm reproduces these rows exactly — sums, means, mins and the two
+worst-frame indices @136/@145 — on the 6a-3 tree, so the instrument is the same
+instrument. What 6a-3 adds is a condition on using them: they are the numbers of an
+image in which exactly one `RiceKernel` is instantiated. Putting a second one in the
+link moves the *default* path by ~168–199 k cycles per frame, which is four orders
+of magnitude past the noise band 6a-5's fork is written against. That belongs to the
+6a-3 record, not here; read it before quoting these figures against an arm.
+
 ### 6a — the overlay and the realization
 
 | PR | Scope | Why the cut is here | Witness type | Failure it isolates |
@@ -7401,14 +7409,14 @@ worst 1,797,752 @136 / sum 280,848,260; `l4_stereo` mean 6,609,128 / worst
 | **6a-2** | **The same-image baseline re-anchor. Measurement only, zero decode-path change.** `ctrl` against the image item 5 shipped; the E10/E9 sample patches re-applied to today's base and re-run (they were `git apply --check` clean at `c3ebd3b` / `a70174a` — whether they still apply against a generic `decode_rice_partition` is itself a finding). Sample stays under `examples/flac_spike/experiments/`, per the E-series rule that probes never land on `main`'s spike sources. | Item 5 PR 4 closes with a standing question: its `ctrl` reads **1,037,633,086** where E10's `ctrl` read **970,588,441** (+6.9% on LPC; −0.23% on FIXED), and says the gap must be closed **from a same-image baseline before anyone quotes cycles across records**. 6a-5 is a cycle reading; doing it before this one means quoting an arm against a denominator nobody owns. | Cycles, same-image; plus the patch-re-application record | that the item's central number compares two instruments |
 | **6a-3** | **The seam, passable from outside the crate — in Rust, no asm.** Two commits: (i) the core's surface bumps such an implementor actually needs (`residual::rice_unmap` is `pub(crate)` today; whatever else the attempt names, each justified in docs), (ii) an overlay module implementing `RiceKernel` by carrying item 5's twin, behind a feature, wired only as an instrument arm. | Item 5's twin is the one mechanism with a **known** on-target number, so this PR is an *instrument cross-check* before it is anything else: if the overlay-carried mechanism reproduces **+42.6 c/sample** through the shipped path, both the seam and the harness are sound and 6a-5's unfamiliar number is interpretable. It also forces the visibility questions to surface where the only variable is visibility — instead of entangling them with an ABI in the next PR. And it answers, for the shape that actually ships, the question item 5 left open: does an **out-of-crate** implementor still trigger the **+2,984 B** of *other* code under `lto = "fat"`? | Section-dump + symbol-level codegen attribution; the corpus differential driven **from outside the crate**; cycles as a control arm | that the seam is only passable from inside, or that passing it costs more than the in-core form did |
 | **6a-4** | **The asm kernel — correctness only, no timings.** `rice_partition.s` + `fold_body.s` lifted from the probe/kernel crate, `global_asm!(concat!(include_str!(…), …))`, the FFI declaration and its SAFETY block, the state-struct ABI mapping written down as the overlay's own contract, the tables under the existing `iwram-pin` gate (this is also where the proposal's (c) *`iwram-pin` enablement* lands — it is one feature forward, and its witness is here, not a PR of its own). | The only oracle for ARM code here is the emulator (this host is aarch64 — the stated reason `examples/arm-kernels` exists), so "is the kernel right" and "is the kernel fast" are different PRs by construction, and the boundary list is long enough to be its own review. | (i) a kernel-check ROM sweeping the **same committed golden tables** (shared-consumer rule; no second transcription of any expectation); (ii) `objdump -d`: 4-byte ARM encodings, `pop {…,lr}` + `bx lr`, never an LDM-to-PC (PR B's measured rule); (iii) the boundaries item 5 handed forward — spelled `q = 31` leg, `w == 0` handoff, `p = 0` mask, §9.2.7.3's two guards, the unterminated/short-remainder **restore-nothing** contract, reads bounded by `region()` | the kernel is wrong, or the interwork/ABI is wrong — settled **before** any cycle is trusted |
-| **6a-5** | **The realization reading — the item's number of record. No new code.** Three arms, one image: `ctrl` (the shipped default), 6a-3's Rust arm, 6a-4's asm arm; calibration subtracted, paired per frame; every byte of the delta attributed symbol by symbol. Carries the pre-declared fork, below. | This is the claim 6a exists to test: E10 measured **arm − tab −40.08% FIXED / −11.51% LPC**, and this item's own founding lesson (E2b: a −21.7% probe became **+38%** on the live link) says integration is exactly where measured samples die. Carrying the Rust arm in the same image makes the reading a *between-realizations* comparison rather than a between-records one. | Cycles, same-image; codegen attribution. **First PR in the item where `make test-rom` runs** — item 5 PR 3 recorded that ROM suite as not run, for want of a runner on its host; this host has one | the win lives in a probe but not in the product path |
+| **6a-5** | **The realization reading — the item's number of record. No new code.** Three arms, one image: `ctrl` (the shipped default), 6a-3's Rust arm, 6a-4's asm arm; calibration subtracted, paired per frame; every byte of the delta attributed symbol by symbol. Carries the pre-declared fork, below. | This is the claim 6a exists to test: E10 measured **arm − tab −40.08% FIXED / −11.51% LPC**, and this item's own founding lesson (E2b: a −21.7% probe became **+38%** on the live link) says integration is exactly where measured samples die. Carrying the Rust arm in the same image makes the reading a *between-realizations* comparison rather than a between-records one. | Cycles, same-image; codegen attribution. **First PR in the item whose ROM test suite is *non-empty* (not merely first to run `make test-rom`)** — the runner already exists on the current host and `make test-rom` has run (collecting zero tests) in the toolchain-pin record and in 6a-3; 6a-4's kernel-check is the first thing in the item to put a test in that suite | the win lives in a probe but not in the product path |
 | **6a-6** | **The width change, in the core.** i32 as the default arithmetic width, guarded per frame, with the i64 leg kept and reachable. Full design decision in [The width decision](#the-width-decision-as-planned-what-it-is-and-is-not-safe-for). | Second-largest measured lever in the whole menu (E4 isolated: **LPC −46.90%**, FIXED −3.74%; E9 stacked on the ARM arm: **−58.53% LPC / −7.35% FIXED**), and the only one whose risk is *soundness* rather than cost — so it gets its own PR, its own guard, and its own pair of gates. Placed after the realization rungs on purpose: it is a core-semantics change, and reading an asm arm against an already-changed core would spend the one clean comparison this item has. | Bit-exact vs `flac −d`; a **width differential** over the corpus and over every committed frame-run table (leg-vs-leg, item 5 PR 3's template); the guard's own unit witnesses incl. its refusal cases; **both** configurations gated; codegen attribution of a both-legs build; cycles as a same-image arm | the guard is wrong (unsound), or the two legs are not actually equivalent, or a both-legs build costs more than the win |
 | **6a-7** | **The stack confirmation. No new code** — one measured arm: 6a-4's kernel **and** 6a-6's default together, against the same-image `ctrl`. | E9 already measured this pairing and reported **additive composition**, so this is a confirmation on the current tree, not a new question — and it is the configuration the product actually ships. Its second job is to re-anchor the E numbers on the post-6a image, which 6b-1 then inherits. | Cycles, same-image | that two measured wins composed negatively (E9's additivity claim does not reproduce) |
 | **6a-8** *(conditional)* | E8-style **sub-stage probe** over the asm kernel: tier-1 / tier-2 / tier-3 / refill / fold priced separately. | Item 5 PR 4 declined to build one because its decision did not need it, and named this item as the place it belongs. Run it **only** if 6a-5 lands inside or near the noise band; otherwise it answers a question nobody is asking. | Cycles, sub-stage | that a near-bar result is unattributable to a leg |
 
 > **6a-1 landed 2026-11-06**, as scoped: [6a-1 — landed](#6a-1--landed-2026-11-06-as-scoped-the-crate-exists-and-nothing-links-it).
 > **6a-2 landed 2026-11-06**, as scoped: [6a-2 — landed](#6a-2--landed-2026-11-06-measurement-only-the-baseline-re-anchor-and-the-thing-that-actually-moves-a-cycle-count).
-> Nothing in the tree's decode path changed in either. 6a-3 is next.
+> **6a-3 landed 2026-11-07**, as scoped and with one scope correction stated in the record: [6a-3 — landed](#6a-3--landed-2026-11-07-the-seam-is-passable-from-outside-the-crate-the-crate-boundary-costs-not-one-byte-and-a-second-mechanism-is-not-free). The seam passes from outside the crate; the crate boundary costs not one byte; and a second mechanism in the image is not free — in bytes, in IWRAM, or in cycles. Read its "what 6a-3 changes in the plan" paragraph before designing 6a-5's arms: it moves the *question* about the baseline, not the baseline. Nothing in any shipped decode path changed; `flac-gates` counts are unchanged.
 > **Off-ladder, also landed 2026-11-06, and not a rung:** [Toolchain pin
 > (2026-11-06)](#toolchain-pin-2026-11-06--the-instrument-becomes-a-string) — the
 > compiler instance every cycle record in this section was measured on is now a
@@ -8049,6 +8057,398 @@ states the new rustc instance by commit hash. Moving the pin forward is legitima
 how the baseline shift gets *declared* rather than discovered three records later,
 which is precisely the failure 6a-2 spent a PR unwinding.
 
+#### 6a-3 — landed (2026-11-07): the seam is passable from outside the crate, the crate boundary costs not one byte, and a second mechanism is not free
+
+**What shipped, in the two commits the row asked for.** Commit (i) is
+`37f40ec`, one `pub(crate)` → `pub` on `residual::rice_unmap` with a doc block
+explaining who needs it and who does not; its own measured control is inside that
+commit's message. Commit (ii) is this: `crates/flac-lite-gba/src/rice_twin.rs`
+(the arm, 88 lines of which the executable part is one forwarded call), one
+feature `rice-twin = ["flac-lite/rice-hybrid"]` that *forwards* to the core's
+feature rather than inventing a second copy of the mechanism, `crates/flac-lite-gba/tests/twin_from_outside.rs`
+(the differential driven from outside: 767 lines), the `[[test]] required-features`
+entry that makes that suite unrunnable without its configuration, the module doc
+update in `src/lib.rs`, two new Make targets (`overlay-test-twin`,
+`podman-overlay-test-twin`) plus their `.PHONY`/`help` lines, and three
+feature-gated arms in the calibration instrument
+(`item6a3-twin`, `item6a3-hybrid`, `item6a3-present`) with one probe file. Zero
+`unsafe` added anywhere: 6a-3's budget is still `0` and `#![deny(unsafe_code)]`
+still holds. **No decode path changed**: `residual::decode_rice_partition` still
+names `TableCountKernel` on one line, and a test in the new suite pins that at
+source level. `flac-gates` counts are unchanged (1,169 passed / 6 ignored before
+this PR, 1,169 / 6 after) — the new configuration's tests only exist in the new
+configuration, which is the rule for this row.
+
+**Pre-change control, taken before any file was edited.** `HEAD` = `4e18ba0` (the
+toolchain-pin merge), tree clean. Instrument built twice: warm (nothing to do) and
+after `cargo clean` in `examples/flac_spike`. Byte-identical: ROM `467ff1231610…`,
+ELF `a67257f89497…`, `.text` 46,008 B `f0f88c33d150…` — the hash this item's
+"Baselines to hold" row names — `.rodata` 1,829,760 B `2151855c7e5c…`, `.iwram`
+812 B `eeda688aa1a2…`, `.ewram` 368 B `c8beeb9e3f5f…`, `LEADING_ONES` @
+`0x0300022c`, `nm` 172 rows, `rice_quotient` 336 B. Toolchain
+`rustc 1.100.0-nightly (a69a63265 2026-09-03)`, host `aarch64-unknown-linux-gnu`
+(the pinned channel and the pinned instrument, named by `rust-toolchain.toml`
+since the off-ladder PR; GNU binutils for `objcopy`/`nm`, `llvm-*` equivalents
+not installed on this host).
+
+**Commit (ii)'s own control: the shipped instrument does not move.** Every arm of
+this PR is behind a feature that the default build does not enable, and the
+default build was measured five times — pre-(ii) warm, pre-(ii) clean, post-(ii)
+warm, post-(ii) after `rm -rf target`, and `make native-spike-rom` at the end.
+All of them agree with the *post-(i)* control: ROM `7bd03b5cacfd…`, ELF
+`76f29481e0a8…`, `.text` 46,008 B `f0f88c33d150…`, `.rodata` 1,829,760 B
+`9d94e3fce69d…`, `.iwram` 812 B `eeda688aa1a2…`, `.ewram` 368 B `c8beeb9e3f5f…`,
+`.entrypoint` 380 B `7d6b62f63b70…`, `nm` 172 rows, `LEADING_ONES` @ `0x0300022c`,
+`.bss` 12 B NOBITS. So the thing 6a-1 claimed about *an empty crate* is now
+claimed about a crate that contains a real module, a test suite, and a second
+implementor of the core's central trait: **the overlay contributes not one byte to
+any ROM that does not name it.** The only movement in the whole tree since the
+pre-change control is the one `.rodata` byte commit (i) took and attributed
+(offset 1,828,033, `201 → 208`, the low byte of a panic `Location.line` shifted
+by doc lines added above a `split_at_mut`).
+
+**The visibility question, answered by attempting both shapes.**
+
+The row's scope says *whatever the attempt names*. So the attempt was made before
+any widening, in the shape that would actually be tried first, and then in the
+shape that would be tried second. Both were compiled for `thumbv4t-none-eabi`
+with the arm enabled; both were then deleted.
+
+* **Carrying the core's twin out of the crate needs nothing.**
+  `TwinKernel` forwards to `flac_lite::rice_hybrid::HybridRiceKernel` through the
+  trait — the impl *is* the ABI, since `HybridRiceKernel` has no inherent
+  methods. Zero errors, zero core changes. That is what landed.
+* **A foreign kernel owning its own codeword walk names exactly four private
+  things**, and this is the complete list, verbatim, from one compile:
+
+  ```text
+  error[E0603]: static `CTZ8` is private
+  error[E0603]: static `REV8` is private
+  error[E0603]: static `BRUIJN_INDEX` is private
+  error[E0603]: function `rice_unmap` is private
+  error: could not compile `flac-lite-gba` (lib) due to 4 previous errors
+  ```
+
+  `BitReader`, `PartitionHeader`, `RiceKernel`, `Error`, `Result` were already
+  reachable — which is worth recording, because the proposal's risk note assumed
+  the `BitReader` window surface would need widening, and it does not:
+  `BitReader::new(region())` is exactly what a foreign implementor needs for a
+  bounded read, and the new suite uses it that way.
+
+**Only `rice_unmap` was widened, and the reason is the map, not the walk.** A
+kernel that writes its own walk must produce §9.2.7.3's folded value and reject
+`u32::MAX`; without the map it restates it, and this repository has already paid
+for one restatement of that exact function — `examples/arm-kernels/src/rice_unmap.rs`
+carries the asm kernel, an independent Rust twin, *and* an encoder-round-trip
+oracle against each other, which is drift-witness machinery that exists only
+because two implementations of the map were allowed to exist. That duplication is
+now redundant on the production side (the probe keeps its own copy, which is
+correct: a probe is a witness, not a consumer). The three `rice_hybrid` tables
+were **left private**, deliberately: table placement is the `iwram-pin` question,
+which is 6a-4's, and the record below shows why a compile probe cannot answer it
+— a foreign kernel that *used* those tables would pull 512 B of them into IWRAM,
+and that is a cost with a number attached to it now.
+
+**The differential: five legs, driven from outside the crate.**
+
+`crates/flac-lite-gba/tests/twin_from_outside.rs` reads the committed
+`subframe_body_vectors.txt` by *path* (one transcription of the expectations, per
+the shared-consumer rule) and walks every vector five ways: a width walk written
+here from §9.2.7's text; the core's incumbent `TableCountKernel`; the carried arm
+`flac_lite_gba::rice_twin::TwinKernel`; a `SpecOrderKernel` written only from the
+trait's documented boundary and the §9.2.5 prose — one `read_bits(1)` per unary
+bit, no window, no table, no access to anything `residual` keeps to itself; and
+the table's own `exit_bits` oracle. It compares samples, bit positions, next
+partition's field landing, `exit_bits`, and error discriminants, and it anchors
+FIXED order ≤ 2 blocks to a forward difference of the `pcm_samples` `flac -d`
+produced, so that agreement among mechanisms is not the whole basis for "correct".
+
+Corpus witness, printed with `--nocapture`, identical to the core's own
+differential line: `4 vectors, 11 Rice partitions + 0 escaped, 1015 samples,
+parameters [0, 2, 3, 6, 8]`. The `+ 0 escaped` half is a statement, not a gap:
+escaped partitions are reached through `decode_residual`, and 6a-3 threads no
+kernel choice above the seam.
+
+Two source-level pins live in the second test, and both exist because the corpus
+*cannot* see the mutations they catch: that `residual.rs`'s default body names no
+kernel type at all, and that `rice_twin.rs` names `HybridRiceKernel` and not
+`TableCountKernel`. The second one is the anti-tautology pin: re-routing the arm
+at the incumbent is behaviour-neutral, and then the differential compares a kernel
+with itself while staying green. Mutation arms M3 and M5 below are those two pins
+failing, one at a time.
+
+What the suite does **not** claim is written in its own header: no committed sample
+folds to `u32::MAX`, so neither §9.2.7.3 rejection is witnessed by the corpus
+(M2, M6); the cursor-restore difference between the incumbent and the spec-order
+leg on an unterminated final codeword is permitted by the trait contract and is
+*not* exercised, so it is recorded as untested rather than passed; and nothing in
+this file says anything about cycles.
+
+**The codegen question, in four arms.**
+
+The row's open question — *does an out-of-crate implementor still trigger the
++2,984 B of other code under `lto = "fat"`?* — was answered by building the
+instrument four ways, with every arm's ELF archived so the table can be re-taken
+long after the build (`/tmp/6a3/dumpelf.sh`). All four are the same tree at the
+same commit; the only difference is which feature is on.
+
+| arm | what it is | `.text` | Δ | `.rodata` | `.iwram` | `nm` rows | `rice_hybrid` symbols |
+|---|---|---|---|---|---|---|---|
+| **A′** | the shipped default, no arm | 46,008 `f0f88c33d150` | — | 1,829,760 `9d94e3fce69d` | 812 `eeda688aa1a2` | 172 | none |
+| **P** | `item6a3-present`: the core's twin module compiled, **nothing reaches it**, no probe file — item 5 PR 3's shape, in this instrument | 48,992 `b283d12e4cad` | **+2,984** | same size, `0521d4aa3283` | 812 `eeda688aa1a2` | 173 | none |
+| **T** | `item6a3-twin`: the arm declared in the **overlay**, named through the seam | 49,088 `f55ab5d9af61` | +3,080 | `58c2be7ef238` | **1,324** `1c931726435b` | 176 | `CTZ8`, `REV8` |
+| **H** | `item6a3-hybrid`: the same mechanism declared in the **core**, named through the same call shape | 49,088 `570dfcfb45a4` | +3,080 | `c29f3a2a8da1` | **1,324** `6d7a432e60c9` | 176 | `CTZ8`, `REV8` |
+
+**P reproduces item 5 PR 3 exactly.** Same section sizes (48,992 = +2,984), same
+`.rodata` size with different content, `.iwram` untouched, no `rice_hybrid`
+symbol in the image. And the same five rows of attribution, symbol for symbol —
+computed here by a per-occurrence diff (a name-normalized diff undercounts,
+because `read_bits` legitimately appears twice with different sizes):
+
+```text
++1888    596 ->  2484  residual::decode_residual
+ +688    888 ->  1576  subframe::decode_subframe
+ +564      0 ->   564  bits::BitReader::read_bits          (a second body appears)
+ -176    564 ->   388  bits::BitReader::read_bits          (the first one shrinks)
+  +20    256 ->   276  subframe::integrate_lpc
+```
+
+That is PR 3's table, on this tree, five records later. One difference of
+notation first, so nobody reads it as a difference of event: PR 3 wrote its third
+row as a single "+388 B, a new outlined specialisation `read_bits.815`", and this
+instrument accounts for the same net across two rows — a 564-byte second body
+appearing while the original shrinks 564 → 388. Those `.<n>` suffixes are
+per-module scratch numbers (T's copy of the same shape is `.817`); the net is the
+same +388 and the event is the same: the hot reader grows a second body.
+
+Two things follow. The +2,984 B is not an artifact of the tree PR 3 stood on; it
+is a property of what a second `RiceKernel` body does to the codegen unit, and it
+is **not** the twin's code — not one symbol of the added mechanism is in P's
+image. And 6a-3's own
+answer to the row's question is: **yes, an out-of-crate implementor triggers it —
+and then some.** T is +3,080 B of text over the control, which is +96 B over P.
+
+**The boundary itself costs nothing, and that is measured, not inferred.** T and H
+differ in exactly one thing: which crate the `impl RiceKernel` is written in.
+Everything else — the call shape, the file, the feature plumbing, the probe — is
+the same.
+
+```text
+T vs H, symbol table:        identical. `T -> H` per-symbol diff: +0 B, 0 changed symbols.
+T vs H, decode-path symbols: identical addresses, identical sizes, and ZERO differing
+                             bytes inside every one of them — read_signed 60,
+                             read_bits 564 + read_bits.817 388, rice_quotient 336,
+                             PredictorState::fill 138, decode_residual 1,812,
+                             TableCountKernel::decode_partition 768,
+                             decode_subframe 1,576, integrate_fixed 244,
+                             integrate_lpc 276, driver::decode_one 1,432.
+T vs H, .text:               9,837 of 49,088 bytes differ, in 418 runs. Mapped to
+                             symbols, they are in panics::render_backtrace (3,845),
+                             fmt/Display impls, String::write_char, alloc::fmt,
+                             the block allocator, Gba::new_in_entry, the interrupt
+                             handler. None of them is in the decode path.
+T vs H, run log:             byte-identical. Same 675 lines, 47,061 B.
+```
+
+Two images built from two different crates, linked to different symbol names,
+produce the same machine code where it matters and the same cycle counts to the
+cycle. The crate boundary is not free of *effect* — it is free of *cost*.
+
+One caution that has to be in the record: the probe's own kept functions are
+**not** in any image. `#[used]` is rejected on functions by this toolchain
+(`the `used` attribute cannot be used on functions … can only be applied to
+statics`), and the fallback used here — `#[unsafe(no_mangle)] extern "Rust"` —
+compiles and is then collected: greps for `item6a3`, `keep_twin`, `keep_hybrid`,
+`never_called` return 0 rows in every arm. Same for the overlay itself: no symbol
+in T's image contains `flac_lite_gba`. So **the code numbers above are not the
+arm's code**; they are what the core's code becomes because an implementor
+exists. That is the honest framing, and it is the same framing PR 3 used for its
+own +2,984 B.
+
+**What reachability adds is IWRAM, and that is 6a-4's cost, measured a PR early.**
+P has the twin module compiled and drops its tables. T and H keep them:
+
+```text
+P:  .iwram 812 B, LEADING_ONES @ 0x0300022c
+T/H: .iwram 1,324 B (+512): CTZ8 @ 0x0300022c, REV8 @ 0x0300032c,
+     LEADING_ONES shifted to 0x0300042c — its 256 bytes unchanged, sha prefix
+     84ad0ee99945 in every arm.
+```
+
+1,324 B of the 32,768 B IWRAM is affordable; the incumbent table's *address*
+moving is not a cost but it is a thing 6a-4's kernel-check must not hard-code.
+Two smaller housekeeping deltas, attributed rather than waved at: `.rodata` keeps
+its exact size in every arm and changes bytes (A′→P 6,197, A′→T 6,226, A′→H 6,202,
+T↔H 24) while `strings -n 4` returns the same 22,736 strings in all four — that
+is panic-`Location` and layout-pointer churn, not a code signal; `.entrypoint`
+(380 B) changes content in T/H and P because it carries the LMA/VMA copy table
+whose destinations moved; `.ewram` is size-stable everywhere and T differs from
+the control in 2 bytes inside `agb::agb_alloc`'s two embedded constants
+(`data_end`, a `GLOBAL_ALLOC` initializer closure), which sit 8 bytes earlier in
+T's layout. `.bss` is 12 B NOBITS in every arm and is not a signal.
+
+**Cycles: the control arm, and the control moved.**
+
+The row asked for cycles as a *control arm*. Here is the reading, same-image,
+paired per frame, absolute only — 157 frames per clip, calibration
+`overhead_estimate=22 stable=true nets=[0 0 0 0 0]` in every arm, and the first
+27,077 bytes — 346 lines — of all five logs byte-identical, the divergence
+beginning at the first per-frame row: same asset region pins, same decode proof,
+`walk complete frames=157/157 samples=320000`. The work is the same work.
+
+| arm | `l0_stereo` sum | Δ | worst | `l4_stereo` sum | Δ | worst |
+|---|---|---|---|---|---|---|
+| **A′** control | **280,848,260** | — | 1,797,752 @136 | **1,037,633,086** | — | 6,643,224 @145 |
+| **P** present, unreachable | 254,389,576 | **−26,458,684** (≈−168,527/frame) | 1,628,448 @147 | 1,010,961,158 | **−26,671,928** (≈−169,885/frame) | 6,472,542 @145 |
+| **T** out-of-crate arm | 249,619,326 | **−31,228,934** (≈−198,910/frame) | 1,597,902 @147 | 1,006,542,702 | **−31,090,384** (≈−198,028/frame) | 6,444,234 @145 |
+| **H** in-core twin | = T | = T | = T @147 | = T | = T | = T @145 |
+
+Three things in that table are the finding. The direction is not one of them:
+a code growth that *buys* 26–31 M cycles is worth stating once, in the last
+paragraph of this section, and then setting aside; what the table establishes is:
+
+1. **The control reproduces this item's baseline exactly**: 280,848,260 /
+   1,037,633,086, worst frames @136 and @145, min rows @156 — the numbers in 6a's
+   "baseline to beat" paragraph and in 6a-2's landing record, on the 6a-3 tree.
+   The instrument is still the instrument.
+2. **A second `RiceKernel` body in the image changes the *default* path's machine
+   code and moves it by 168–199 k cycles per frame.** Not 9–13. Four orders of
+   magnitude past this item's declared layout-noise band. P alone — a module
+   nothing calls, whose own code the link throws away — is −26.5 M / −26.7 M.
+   Making it reachable adds another ≈4.77 M / 4.42 M. Nobody has ever put a
+   number on this before: PR 3 priced the bytes and never ran the cycles, and it
+   had every right not to, because it was not asking a cycle question. The
+   decode-path symbols that changed are the ones the diff names
+   (`decode_residual` +1,888 / +1,216, `decode_subframe` +688, a second
+   `read_bits` body appearing at 564 B while the first shrinks 564 → 388,
+   `integrate_lpc` +20); *why* those shapes are faster is not something these
+   arms can say, and the record does not guess.
+3. **The worst frame changes identity.** The control's worst is frame 136; every
+   arm with a second mechanism has its worst at 147. A record that quotes a
+   worst-frame number without naming the arm is quoting a different frame.
+
+Determinism controls, since a claim this size deserves them: the control's ELF is
+byte-identical warm and after `rm -rf target` (`76f29481e0a8`, ROM `7bd03b5cacfd`
+from the Makefile too); the T arm's ELF is byte-identical warm and cold
+(`faceefe4440c`, ROM `58c13562b8d2`) — and the T cycle run was performed on the
+**cold** image; the P arm's every allocated section is byte-identical before and
+after renaming its feature (`item6a3-present`), ROM `9f3be167f760` unchanged, only
+the ELF's symbol strings moved with the metadata hash; the T and H logs are
+byte-identical across two different images; and the P ROM was run a second
+time after its feature was renamed — the two logs are byte-identical, 675 lines
+and 47,061 B, every per-frame row equal. The per-frame numbers are a property of
+the image, not of the run, which is the only reason pairing 157 frames against
+157 frames means anything. None of the four verdict lines change:
+`PR 3 verdict FAILED … within budget 0/2`, both clips over the 1,048,750-cycle
+frame budget in every arm. Nothing here touches the standing prohibition on
+claiming real-time 32 kHz decoding.
+
+**Gates, and what was not run.**
+
+Same battery as 6a-2 and the toolchain-pin record, plus the new configuration
+gate. All eleven exit 0.
+
+```text
+toolchain-check      0            check                  0 (fmt --check over all crates)
+flac-gates           1,169 passed / 0 failed / 6 ignored   ← unchanged, same 6 ignored
+flac-portable-check  0 (out-of-tree compile witness)
+overlay-check        0 test binaries — compile witness, thumbv4t-none-eabi, default features
+overlay-test         1 passed (the 6a-1 no-op) + 0 in the lib test binary   ← unchanged
+overlay-test-twin    NEW GATE: thumbv4t-none-eabi compile witness for --features
+                     rice-twin, then from the gate-neutral cwd: 1 lib + 2 integration
+                     (twin_from_outside) + 0 doc-tests — 3 passed in all; the 2
+                     integration tests exist in no other config
+spike-test           25 passed    kernel-test  20 passed
+opus-test            28 passed    test-rom     "Running 0 tests", exit 0 — the standing
+                                                caveat, unchanged, see below
+```
+
+Warnings: the pre-existing three (`unused variable: lens` in `flac-gates`,
+`unused variable: r` in `spike_witness`, `unnecessary parentheses` in
+`arm-kernels/ss_twin`), the `proc-macro-error2` future-incompat note in the ROM
+build, and nothing new from this PR. `podman-overlay-test-twin` was added and was
+**not run** here — this host has no container runtime, the same caveat 6a-1
+recorded for `podman-overlay-test`. Host tests run on `aarch64-unknown-linux-gnu`
+because `x86_64-unknown-linux-gnu` is not installed for the pinned channel, and
+`thumbv4t-none-eabi` compilation goes through the Makefile because a bare
+`cargo check --target thumbv4t-none-eabi` fails with `can't find crate for
+'core'` without `-Zbuild-std=core,alloc`.
+
+`make test-rom` *was* run, and it collects zero tests, which is the root crate's
+standing state and not this PR's. That makes the 6a-5 row's parenthetical —
+"**First PR in the item where `make test-rom` runs**" — already false as written:
+the runner exists on this host and ran in the toolchain-pin record and here. What
+6a-5 actually needs is a *non-empty* ROM suite, which 6a-4's kernel-check is the
+first thing in the item to add. The row's sentence should be read as that, and
+6a-4 inherits it.
+
+**Mutation witness for the new suite.**
+
+Every arm below edits one string, runs the configuration gate, and restores; the
+anchor is asserted unique before it is applied, and the files are restored from
+byte copies. The green rows are not padding — they are the record of what the
+corpus *cannot* see, which the suite's own header now states.
+
+| arm | mutation | result |
+|---|---|---|
+| M0 | none | 1 + 2 passed |
+| M1 | `SpecOrderKernel`'s sign leg forgets the −1 (`-(n>>1)` instead of `!(n>>1)`) | **RED.** `vector fixed1-wasted5-256: partition 0: the spec-order leg disagrees with the incumbent about the samples, so the trait's documented boundary is not satisfiable from outside as written` — left `-1250`, right `-1249`, at exactly the samples the FIXED order-1 anchor predicts |
+| M2 | the §9.2.7.3 `folded == u32::MAX` rejection deleted from the spec-order leg | **green** — no committed sample folds to `u32::MAX`. Stated, not hidden |
+| M3 | the arm re-routed from `HybridRiceKernel` to `TableCountKernel` | differential **green**, source pin **RED** (`naming_a_kernel_from_outside_has_not_wired_one_in`, at `twin_from_outside.rs:753`), with `warning: unused import: flac_lite::rice_hybrid::HybridRiceKernel` as the compiler's own corroboration. This is the degenerate case the corpus cannot see |
+| M4 | the width walk consumes one extra remainder bit per sample | **RED.** `fixed1-wasted5-256: unary run ran off the frame: EndOfStream` at `twin_from_outside.rs:392` — the walk desyncs and the position legs never get to disagree, which is itself the point: positions are load-bearing |
+| M5 | the core's default rewired to `HybridRiceKernel` | differential **green**, pin **RED** at `twin_from_outside.rs:690` — the corpus cannot tell which kernel the default uses; the pin can |
+| M6 | the spec-order leg's `order >= 32 \|\| quotient > (u32::MAX >> order)` guard deleted | **green** — no codeword in the corpus overflows. Stated, not hidden |
+
+**What 6a-3 changes in the plan.**
+
+**For 6a-4.** The `iwram-pin` tables have a price tag now: +512 B of IWRAM
+(812 → 1,324) and a relocation of `LEADING_ONES` to `0x0300042c`, with its
+content unchanged. That is affordable and it is not the interesting part; the
+interesting part is that *whether the tables survive* is a property of reachability,
+not of the `link_section` attribute — P proves an unreachable walk's tables are
+dropped. So `iwram-pin` is not a placement the core guarantees; it is a
+consequence of something calling the code. Any 6a-4 kernel-check that assumes a
+table's address is stable across arms will be wrong: the address moved here with
+no source change to the table at all.
+
+**For 6a-5, and this is the paragraph to read before designing its arms.** The row
+plans "three arms, one image: `ctrl` (the shipped default), 6a-3's Rust arm,
+6a-4's asm arm". In one image, the `ctrl` leg is not the shipped default's code:
+instantiating a second `RiceKernel` in the same link moves the default path by
+≈168–199 k cycles per frame, four orders of magnitude past the ~9–13 cyc/frame
+band the row's own fork is written against, and it moves the worst frame from
+136 to 147. If 6a-5 wants `ctrl` to mean "the default this item has been quoting
+all along", the default must be measured in an image that contains no second
+mechanism, and the arm-vs-arm reading must be made in a second image. That is not
+a veto on the design — it is a requirement to name which image each number came
+from, which is exactly the rule 6a-2 wrote. What 6a-5 must not do is compare its
+arm against the 280,848,260 / 1,037,633,086 baseline while the arm's image also
+contains the arm; the baseline belongs to an image without it, and every number in
+this record's cycle table is measured against the right one.
+
+**A scope correction, in the open.** The 6a-3 row says this PR is an instrument
+cross-check: "if the overlay-carried mechanism reproduces **+42.6 c/sample**
+through the shipped path, both the seam and the harness are sound". That sentence
+contradicts the same row's own constraint — "wired only as an instrument arm",
+and this item's rule that no decode path changes before the reading that decides
+it. Nothing in 6a-3's image *calls* the carried mechanism through the decode path,
+so no per-sample figure for it exists to compare, and inventing one would have
+meant wiring the default, which is 6a-5's decision to make with its cycles in
+hand. The cross-check is therefore **carried forward, not dropped**: it happens in
+6a-5, which already lists 6a-3's Rust arm as one of its three arms, and it will
+be a same-image reading there rather than a comparison against item 5's record.
+The part of the cross-check 6a-3 *can* settle — does the seam pass, does the
+harness see the same corpus through the seam from outside, does the arm decode the
+corpus identically — is settled, above, with the same vector/partition/sample
+counts as the core's own differential.
+
+**For the corpus, and it is a standing gift to 6a-4.** The four codegen arms and
+the two source pins exist because the committed corpus is blind in three places
+that this PR found rather than assumed: it contains no `u32::MAX` fold, no
+overflowing codeword, and — as M3/M5 show — nothing that can tell one kernel from
+another. A kernel-sweep ROM over the same committed tables is the cheapest thing
+that closes the third one, and 6a-4 was already going to build it.
+
 ### 6b — the container: where frames come from
 
 | PR | Scope | Witness | Failure it isolates |
@@ -8250,3 +8650,285 @@ configuration as a new gate rather than a changed one, and stating `make test-ro
 as run or not-run and why; (4) a **mutation witness** for every new correctness
 suite, including the honest green rows — a behaviour-neutral re-routing must not
 read as a gate failure (item 5 PR 3's mutation table is the template).
+
+## Recording Q&A for a future session to resolve (2026-11-07)
+
+**Not a measurement, and not a plan.** The plans of record (items 5 and 6) say what
+will be built and what bar it is judged against. This section is the residue:
+questions that this file has already *earned* — each one raised, or left open by
+name, in a landed record — gathered where a session that arrives later can find
+them in one place instead of reconstructing them from nine sections. Rules for
+reading it: every Q names the record that opened it and the rung that owns it;
+a question whose answer is already in this file is **not** listed (so the list is
+shorter than the file's number of "TODO"s would suggest); nothing here re-declares
+a decision, a bar, or a reading rule; and where a Q has a partial answer, that
+half is written down so it does not get re-litigated. Answering one of these owes
+the standing landing record (control build, section/`nm` table, gate counts,
+mutation witness), not a paragraph.
+
+**State of the tree as this section is written** (so the first Q is answerable):
+item 6a is up to **6a-3**, whose commit (i) (`rice_unmap` visibility, `37f40ec`)
+and commit (ii) — `crates/flac-lite-gba/src/rice_twin.rs`, the out-of-crate
+differential, the `rice-twin` feature, `item6a3*` instrument arms, the new
+`overlay-test-twin` gate, and the 6a-3 record above — are **both committed on the
+6a-3 branch, awaiting merge**. (`37f40ec` also happens to sit on local `main`, but
+`origin/main` does not have it: it is the first commit of this PR, so until this PR
+merges the *published* tree has neither commit.) 6a-2, 6a-1 and the toolchain pin are
+merged (#95–#97). Nothing in any shipped decode path has changed since item 5 PR 4:
+`.text` 46,008 B `f0f88c33d150…`, `rice_quotient` live, `decode_residual` 596 B,
+`flac-gates` 1,169 passed / 6 ignored. The live `nm` anchor is
+`LEADING_ONES @ 0x0300022c` — but only in an image with **no** second mechanism, which
+is every image this record's default/control arms measure. Once a second `RiceKernel`
+body is reachable the table *relocates* to `0x0300042c` with its bytes unchanged (see
+the 6a-3 section table, arms T/H); so no reader should treat `0x0300022c` as a
+scheme-wide constant, and no kernel-check may hard-code it.
+
+### Q1 — Is the ARM kernel *right* through the seam on the device, and on whose tables?
+
+**Opened by:** item 6a's row 6a-4; the boundaries item 5 handed forward; the corpus
+blindnesses 6a-3 discovered rather than assumed. **Owned by:** 6a-4.
+
+Three halves, and none of them is about speed. (a) The kernel's boundary list is
+long enough to be its own review, and the only oracle for ARM code here is the
+emulator (this host is aarch64 — the stated reason `examples/arm-kernels` exists):
+the spelled `q = 31` leg, the `w == 0` handoff signal rather than an answer value,
+the `p = 0` mask leg, §9.2.7.3's two guards, the unterminated/short-remainder
+**restore-nothing** contract, reads bounded by `region()`. The kernel-check ROM must
+sweep the **same committed golden tables** — no second transcription of any
+expectation. (b) Table ownership was deferred out of item 5 explicitly: does the
+overlay carry the core's `CTZ8`/`REV8`/`BRUIJN_INDEX` behind a visibility bump, or
+own copies? 6a-3 measured the cost of the second choice: a foreign kernel that
+*used* those tables hits exactly four private names (`CTZ8`, `REV8`,
+`BRUIJN_INDEX`, `rice_unmap`) and only the fourth was widened, deliberately. It
+also put a price on reachability: **`.iwram` 812 → 1,324 B (+512)**, with
+`LEADING_ONES` *relocated* to `0x0300042c` with its bytes unchanged. So the IWRAM
+arithmetic in item 5's flip record (net +256 B) does **not** apply at the overlay
+default, where the incumbent table stays live — the honest overlay figure is +512 B
+pinnable. And no kernel-check may hard-code a table address: it moved with no source
+change to the table at all. Whether the tables survive is a property of
+reachability, not of the `link_section` attribute (arm P proved an unreachable
+walk's tables are dropped by the link).
+(c) The `unsafe` budget: this is the first real `unsafe` code in the repo. One
+SAFETY block per FFI site, each naming the bounds it relies on, with a counted and
+named exception list in the overlay's crate docs — the core's placement-attribute
+discipline, copied rather than improvised. 6a-3's budget is still zero; 6a-4's is a
+decision it must write down, not inherit.
+
+### Q2 — Which image is each cycle number from, and can one image carry three arms?
+
+**Opened by:** 6a-3's codegen/cycle table. **Owned by:** 6a-5 (and 6a-7 after it).
+
+The row plans "three arms, one image". 6a-3 measured why that is not free: putting
+a second `RiceKernel` body in a link moves the **default** path by ≈168–199 k
+cycles per frame — four orders of magnitude past the ~9–13 cyc/frame band the
+pre-declared fork is written against — and moves the worst frame from 136 to 147.
+A module *nothing calls*, whose own code the link throws away, is enough to do it
+(−26.5 M / −26.7 M with the module present and unreachable; a further ≈4.4–4.8 M
+when it is made reachable). So the open design question is not whether to run the
+arms but how to number them: `ctrl` has to be measured in an image that contains no
+second mechanism, arm-vs-arm in a second image, and every figure names its own
+control in its own session. Two corollaries, already stated elsewhere and repeated
+here because they are the ones a late-arriving session gets wrong: the
+280,848,260 / 1,037,633,086 baseline belongs to an image **without** the arm, and a
+worst-frame number without a named arm is quoting a different frame. The
+cross-check 6a-3 carried forward — does the carried Rust mechanism reproduce item 5's
++42.6 c/sample through the shipped path — happens here, as a same-image reading, not
+as a comparison against item 5's record.
+
+### Q3 — Why did a code-size increase *buy* 26–31 M cycles?
+
+**Opened by:** 6a-3's cycle table. **Owned by:** nobody yet; it is offered, not
+assigned.
+
+Arm P (module present, unreachable, +2,984 B of *other* code) is 26.5 M cycles
+faster on FIXED and 26.7 M faster on LPC than the control; arm T/H add another ~4.4–
+4.8 M. The decode-path symbols that changed are named (`decode_residual` +1,888 /
++1,216, `decode_subframe` +688, a second `read_bits` body appearing while the first
+shrinks, `integrate_lpc` +20), but 6a-3's record refuses to guess *why* those shapes
+are faster, and nothing since has. This is the same mechanism as the +2,984 B and the
++3,120 B findings (a second consumer re-decides how the inliner treats the code it
+shares a codegen unit with) seen from the profitable side. It is worth pricing
+because it is a *free* 9.4–11% on the default path that nobody chose, and because a
+measurement plan that does not know it can accidentally buy it and read it as a
+mechanism win. Cheapest way to close it: the sub-stage/instruction-level attribution
+6a-8 describes, applied to the pair of images rather than to a kernel leg.
+
+### Q4 — What is the exact width guard, is it per frame or per subframe, and what does a both-legs build cost?
+
+**Opened by:** the width decision (6a-6's row) and E4's own numbers. **Owned by:**
+6a-6.
+
+The decision is taken (i32 default, feature-gated, armed per frame at parse time
+from data the header already parsed, i64 as the escape leg rather than an error, and
+which leg answered reported per frame). What is *not* taken is the formula and its
+grain: E4's bound (`order × |coeff| × |sample|`, with the concrete
+`4 × 2^(prec−1) × 2^16`) holds to precision 13 and **fails at 15**, and the mid/side
+`>> 1` margin is sample-width-dependent, so E4's `3 × 2^16` figure does not
+generalize on its own. Two more open halves ride along: (1) making i32 default means
+`make flac-test` stops witnessing the i64 leg while every count stays numerically
+identical — the companion wide-shaped gate and `tests/width_two_mechanism_differential.rs`
+are not optional, they are the only thing that keeps a moved *meaning* visible; and
+(2) a both-legs build carries both legs' arithmetic, which item 5's and 6a-3's
+measureings say is not free — 6a-6's gate prices it in the configuration a ROM links.
+And the size of the win must be re-taken, not inherited: E4's "LPC −46.90%" and E9's
+"−58.53%" are era-denominated percentages of exactly the class 6a-2 showed moving by
+three points; the absolute equivalents that survive the era boundary are the ones to
+carry (E10 `tab − arm` = −715,300 cyc/frame; E9 `arm − i32` = −78,550 cyc/frame on
+FIXED, and its LPC equivalent is *not* stable across denominators).
+
+### Q5 — Does E9's additivity claim reproduce, and would a better-written portable kernel win?
+
+**Opened by:** E9 (additive composition) and item 5 PR 4's own "what this record
+does not settle". **Owned by:** 6a-7 (confirmation, no new code) and, if anyone
+wants the second one, a new probe.
+
+Q5a is a confirmation on the current tree of a pairing E9 measured as additive, and
+it is the configuration the product ships; its second job is re-anchoring the E
+numbers on the post-6a image, which 6b-1 inherits. Q5b is genuinely open: neither
+E10 nor PR 4 tested a portable-Rust kernel *written for* Thumb-1 register pressure
+and a 32-bit source window — PR 4 tested the twin as written, which is the
+corpus-differential witness made executable. If someone wants that sign settled it
+is a new probe, and an E8-style sub-stage probe would price the legs rather than
+adding another whole-kernel arm (6a-8, conditional on 6a-5 landing near the bar).
+
+### Q6 — What compiler produced the era's code, and can the pin be moved forward without losing the thread?
+
+**Opened by:** 6a-2. **Owned by:** whoever next edits `rust-toolchain.toml`.
+
+6a-2 narrowed the cross-record LPC gap (a constant **+66,403,116** cycles) to one
+leg — the i64 LPC arithmetic: it appears on every i64 leg in both archives and on
+nothing that uses the i32 leg, and on no FIXED clip. It cannot identify the
+mechanism, because the era's binary is gone: E10's measurement commit (`5525336`) is
+not an object in this repository, and its own clean-worktree rebuild already printed
+a different ROM sha than the image it measured. What is settled is the discipline:
+the compiler instance is now a string (`nightly-2026-09-04` = `a69a63265`), a
+version string does not pin an instrument, and editing the pin is a codegen change
+that carries the four-arm control plus a run log. The open arm is therefore narrow:
+a future record that says "the pin moved" — and whether the era gap moves with it.
+Two adjacent unknowns to keep in view while that is unanswered: the ~9–13 cyc/frame
+layout-noise band is budgeted for *recompiled* layouts, and the only determinism
+control that has been taken (PR 4's docs-only image) held the layout, so it bounds
+re-runs of a fixed image at exactly zero and says nothing about a recompile; and
+`agb-gbafix` is now pinned at 0.25.0 `--locked`, which is byte-neutral here but has
+never been verified on another machine (it rewrites the ROM header every sha in this
+file is computed over).
+
+### Q7 — What does the frame walk cost once the facade turns it on, and what replaces the frame-number rule when there is no table?
+
+**Opened by:** the `scan` feature's own note; the loop rung's end-of-stream boundary;
+4b's "the format has exactly two answers". **Owned by:** 6b-1.
+
+The charge is already measured and deferred with a name: **+3,120 B** of `.text`,
+attributed symbol by symbol in 4b's link-line table (`decode_residual` 596 → 2,412,
+`decode_subframe` 888 → 1,576, a newly outlined `peek_at`, one extra specialised
+`read_bits`), deferred to the rung that turns the feature on — which is 6b-1, "not a
+judgement call". No cycle of the walk has ever been measured on-target; the walk's
+real-time cost is charged to the run that wires the facade onto it. The harder half
+is a correctness question the loop rung explicitly left *bounded, not answered*:
+the frame-number monotonicity rule that made the frame finder exact on real streams
+is a property of table-backed sources, and a table-less scan has to replace it with
+something defensible. The seam it can stand on is measured: `read_bits` reports
+`EndOfStream` while `read_u` reports `FrameSync`, so "no bytes left" and "bytes
+left, not a frame start" are different signals, and only one of them ends a stream —
+and 4b's other two answers (a frame ends itself; the end of the bytes is the end of
+the stream) are implemented and witnessed with no index in front of them. Two API
+questions land in the same place: whether the crate's flat `Error` grows payloads or
+these conditions become source-level rejections before decode (the facade's call,
+recorded at the loop rung), and whether the two per-frame `[PredictorState; 2]`
+shapes duplicated across `driver` and `scan` merge. Note the consequence for the
+header-width follow-up: 4a replaced the width `debug_assert` with derived bounds and
+deliberately did **not** add a width `Error`, because every value that could exceed
+the ceiling is refused for its own reason — that reasoning presumes the parser is
+handed bytes somebody chose. Table-less scanning hands it arbitrary bytes.
+
+### Q8 — Is the pack-time profile guard load-bearing, and was the throwaway rate harness carrying anything unwritten?
+
+**Opened by:** the split proposal's Phase 2 step 6; the rate-play path's generated
+offset table. **Owned by:** 6b-2 and 6b-3.
+
+6b-2 is where `scripts/pack_flac.sh`, `format::Manifest`, and
+`EncodeProfile::validate` meet, and the failure it isolates is that the guard the
+whole design leans on turns out to be decorative — it must convict at pack time,
+not at decode time, and the `EncodeProfile` wording still has to obey Correction 3
+(the enforceable constraint is max predictor order plus a fixed/LPC flag, never a
+"reject LPC" assumption baked into the parser). 6b-3 retires the spike's generated
+offset table in favour of a real manifest and isolates the opposite failure: that the
+throwaway harness was load-bearing in ways nobody wrote down. Its witnesses are the
+`rate-*` flow as it has actually been run before — assets staged, ROM built,
+measured — through the manifest instead of a hand-computed index, plus the seek
+witness via `SEEKTABLE` + `Frames::anchored(n)` (which 4b left as an explicit seam,
+not an omission). Ordering items that never ran: the rate-sweep re-run on the
+stacked path, and E5's hardware arbitration — which is also the only thing that can
+turn the standing "no GBA real-time claim" line into a claim. Every verdict line in
+every arm of every image in this file still prints `OVER BUDGET`.
+
+### Q9 — Which gates have never been run anywhere, and which ones assert nothing?
+
+**Opened by:** 6a-1's honest caveat rows, the toolchain pin's container half, and the
+project skill. **Owned by:** the next PR that touches each surface.
+
+Stated plainly so nobody reads a defined target as a tested one: every `podman-*`
+target in this Makefile — including `podman-overlay-test` and `podman-overlay-test-twin`
+added in item 6, and `podman-rom`, which is the missing arm of the pin's container
+half — has **never been run** in this harness (rootless podman cannot start here:
+`newuidmap` absent, no podman machine, no nested virtualization). `make test-rom`
+runs, exits 0, and prints `Running 0 tests`: the root ROM `#[test_case]` suite
+collects nothing, which is a standing repo state, not this item's bug — and it is why
+6a-5's row sentence "first PR where `make test-rom` runs" is already false as
+written; what 6a-5 needs is a **non-empty** ROM suite, and 6a-4's kernel-check is
+the first thing in the item to add one. `rate-test` is not runnable when the
+generated assets are gitignored (several records say so). README's
+gate-aggregation TODO is half landed — `make flac-gates` exists and runs six
+configurations plus the combination arms — but its invocation hook and a
+`podman-flac-gates` sibling are still open. And `flac-portable-check` is a *compile*
+gate: nothing in this tree measures a non-GBA target's performance, so no
+host-side performance claim of any kind is available, in either direction.
+
+### Q10 — Do the committed corpora keep witnessing what the new code needs witnessed?
+
+**Opened by:** item 5 PR 3's corpus coverage lines, 6a-3's mutation arms M2/M6, the
+hand-packed-vector rule. **Owned by:** 6a-4 (cheapest fix), then anyone extending the
+corpus.
+
+The corpus used by every Rice differential in this tree is **4 vectors, 11 partitions,
+1,015 samples, parameters {0, 2, 3, 6, 8}**, and it is blind in three measured ways:
+it contains **0 escaped partitions**, **no sample that folds to `u32::MAX`**, and
+**no codeword that overflows the §9.2.7.3 guard** — so both rejection paths and the
+escape path are witnessed only by in-crate spec-text comparisons, and mutation arms
+M2/M6 are green *correctly*. Worse, and this is the one 6a-4 closes: as M3/M5 showed,
+nothing in the corpus can tell one kernel from another, so a differential can be
+keeping itself honest by comparing a kernel with a copy of itself; that is why both
+source-level pins exist. The 5-bit-parameter remainder leg (`order` 17…31) is reached
+only by a spec-text sweep, not by real streams; the cursor-restore difference between
+the incumbent and a spec-order kernel on an unterminated final codeword is permitted
+by the trait contract and is recorded as **untested**, not passed. The standing fix is
+the one the plan already names: a kernel-check ROM sweeping the **same** committed
+golden tables (shared-consumer rule — never a second transcription of an expectation),
+which is also the cheapest thing that makes the corpus able to see a kernel swap.
+
+### Q11 — Is anything in this file still a phantom?
+
+**Opened by:** the record's own habit. **Owned by:** whoever reads next.
+
+The known-likely list, offered as a standing invitation rather than a claim, in the
+order the file's own corrections arrived: frame fixed fields are **32** bits, not 31
+(Correction 1); channel assignment is **4** bits; the `side_bit` swap was a phantom
+(Correction 2); `-l 4` does **not** mean "FIXED order 0–4" (Correction 3, and it is
+load-bearing on the profile wording); `--force-utf8-legacy-noop` is not a real flag;
+the frame header has **14**-bit sync (`0x3FFE`) so a frame starts `FFF8`/`FFF9`;
+CRC-16's init is **0x0000**, not the scaffold's 0xFFFF, and the "reflected FLAC
+variant" reading is excluded outright, not merely unfavoured; native FLAC has **no**
+metadata-block CRC (the question needed no re-probe); libFLAC does **not** reject a
+non-minimal coded-number form (the witness varied the frame's CRC, not the form) so
+our stricter rule stands as a *deliberate divergence* justified by canonicity, not by
+observed reference behaviour; a constant-16-bit footer walk does **not** silently
+slip here (at all 23 such positions no header parses), and the byte-re-anchoring
+variant lands *correctly* by arithmetic — the docs said both the opposite until they
+were measured; the "no byte stride describes these frames" argument is refuted as
+stated by `s3`, whose two starts *are* an arithmetic sequence, and the load-bearing
+claim is the tiling instead; `resync`'s first version refused the frame it had found;
+and the frame-count cross-check arm was implemented, documented and **untested** until
+a mutation proved it. The general lesson filed with the method notes: a "measured"
+claim has to state what the command *varied*, not only what it printed — and a
+zero-returning throwaway script can report a fact that merely agrees with the prose
+being checked.

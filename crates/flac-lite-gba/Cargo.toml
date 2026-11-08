@@ -7,35 +7,63 @@ edition = "2024"
 # witnesses rather than its own (see the crate docs). `publish = false` records
 # that boundary rather than leaving it to be rediscovered at `cargo publish`.
 publish = false
-description = "GBA (thumbv4t-none-eabi) overlay for flac-lite: the platform-bound realizations of the Rice codeword loop, written over the core's residual::RiceKernel seam. Split-ladder item 6 PR 6a-1: the crate exists and nothing links it."
+description = "GBA (thumbv4t-none-eabi) overlay for flac-lite: the platform-bound realizations of the Rice codeword loop, written over the core's residual::RiceKernel seam. Split-ladder item 6 PR 6a-3: the seam is passable from outside the core (one instrument arm, Rust only); still nothing links this crate."
 license = "MIT"
 
-# STATE (2026-11-06, split-ladder item 6 PR 6a-1): the crate exists and NOTHING
-# links it. No kernel, no asm, no FFI, no `unsafe`, no feature, no module beyond
-# the crate docs. The plan of record for what lands when — and for which PR owns
-# which decision — is FLAC.md, "Split-ladder item 6 — the overlay and the
-# container: plan of record (2026-11-06)", the 6a ladder. Everything below is a
-# build-plumbing decision taken once so it is not re-litigated inside 6a-3's or
-# 6a-4's diff.
+# STATE (2026-11-07, split-ladder item 6 PR 6a-3): the crate exists and NOTHING
+# links it — no ROM, no example, no other crate. It now has one module and one
+# feature (`rice-twin` -> `src/rice_twin.rs`, an out-of-crate `RiceKernel` arm),
+# both behind that feature, so a DEFAULT build of this crate still contains no
+# kernel, no asm, no FFI and no `unsafe`. The plan of record for what lands when —
+# and for which PR owns which decision — is FLAC.md, "Split-ladder item 6 — the
+# overlay and the container: plan of record (2026-11-06)", the 6a ladder, and the
+# 6a-3 landing record that follows it. Everything below is a build-plumbing
+# decision taken once so it is not re-litigated inside 6a-4's diff.
 
 [dependencies]
-# The core, by path. No features are enabled here yet: `iwram-pin` is 6a-4's to
-# turn on (it is one feature forward from the kernel landing, and its witness is
-# there), and 6a-3's Rust arm goes behind an overlay feature of its own, not
-# behind a core feature. Nothing in `flac-lite`'s default set is switched by this
-# crate, so a default build of the overlay is not yet a build of anything.
+# The core, by path. No core feature is switched on in the DEFAULT set: `iwram-pin`
+# is 6a-4's to turn on (it is one feature forward from the kernel landing, and its
+# witness is there), and 6a-3's Rust arm goes behind an overlay feature rather than
+# being switched on unconditionally. So a default build of the overlay is still not
+# a build of anything — which is the shape this rung is required to keep, not an
+# accident of it.
+#
+# With `--features rice-twin` the picture changes, and honestly: this crate then
+# switches on a *core* feature too (`rice-twin` forwards to `flac-lite/rice-hybrid`),
+# because the arm carries the core's mechanism rather than copying it. That is a
+# deliberate decision, argued in `src/rice_twin.rs`; what it means for a reader is
+# that there is no build in which the arm exists and the core's hybrid twin does
+# not.
 flac-lite = { path = "../flac-lite" }
 
-# Nightly 2026-09-03 added `cargo::unused_dependencies`, and in 6a-1 the core IS
-# unused by non-test source — the crate has no source beyond docs, which is the
-# whole shape of this PR. The dependency edge itself is part of what 6a-1 exists
+# Nightly 2026-09-03 added `cargo::unused_dependencies`, and in 6a-1 the core WAS
+# unused by non-test source — the crate had no source beyond docs, which was the
+# whole shape of that PR. The dependency edge itself is part of what 6a-1 existed
 # to witness (the gate log shows `Checking flac-lite` through this manifest for
-# thumbv4t-none-eabi), so the warning would be noise in every gate until 6a-3
-# puts a real user here.
+# thumbv4t-none-eabi), so the warning would have been noise in every gate.
 #
-# OWNERSHIP: 6a-3's arm is the first non-test user of the core, and it should
-# DELETE this allow when it lands, so the lint goes back to watching the edge.
-# An allow that outlives its reason is how dead dependencies survive.
+# OWNERSHIP, and where it did not work out: 6a-1 assigned this allow to 6a-3 —
+# "6a-3's arm is the first non-test user of the core, and it should DELETE this
+# allow when it lands, so the lint goes back to watching the edge". 6a-3 landed an
+# arm, and the allow stays. Not by oversight: the two instructions turn out to be
+# in conflict, and the measurement is why. `cargo::unused_dependencies` is a
+# *manifest* lint; it cannot see a feature-gated use. Measured on this manifest
+# with the allow deleted, `make overlay-check` — a gate whose job is to be silent —
+# prints `warning: unused dependency \`flac-lite\`` for the default build, because
+# in that build `src/rice_twin.rs` is cfg'd out and nothing in `src/` names the
+# core. That warning would be TRUE, and it is 6a-3's own rule that makes it true:
+# an instrument arm must not be in the default build. Making the arm unconditional
+# to satisfy the lint would be the lint setting the design.
+#
+# What the lint was meant to watch — that the edge is used, not merely declared — is
+# watched by two things that can see a build: `overlay-test`'s `use
+# flac_lite::Error` in `src/lib.rs`'s test module, and 6a-3's `overlay-test-twin`,
+# which compiles the arm for thumbv4t and runs the out-of-crate differential. An
+# allow that outlives its reason is how dead dependencies survive, so the answer
+# here is not to keep the allow silently but to record that it has become an allow
+# for one configuration, and to name what actually watches the edge. Reconsidering
+# the deletion is 6a-4's: 6a-4 is the rung where an arm may become unconditional,
+# because an asm kernel is what a real build of this crate will contain.
 [lints.cargo]
 unused_dependencies = "allow"
 
@@ -44,11 +72,30 @@ unused_dependencies = "allow"
 # the core's: cargo config leak — see the Makefile's `overlay-test` and
 # FLAC.md "Cargo config leak"). Reserved; empty until a test needs one.
 
+# Same shape as the core's three `[[test]] required-features` entries, and for
+# the same reason: this suite is the out-of-crate seam witness, and both of its
+# tests need the arm compiled — without `required-features` a default
+# `make overlay-test` would report the suite's absence as a green it had not
+# earned. `make overlay-test-twin` is the gate that runs it; `overlay-test` does
+# not build it. New configuration, new gate — 6a-3 is allowed to move counts only
+# in its own new configuration (FLAC.md, item 6a "Per-PR rules").
+[[test]]
+name = "twin_from_outside"
+required-features = ["rice-twin"]
+
 [features]
-# Intentionally EMPTY, and it stays empty in 6a-1 on purpose. The first entry
-# here is 6a-3's (the Rust arm as an instrument arm), and the item's rules say
-# an arm's cost is charged where it is wired, not here.
+# 6a-1 left this empty on purpose; 6a-3's entry is the first one, and the item's
+# rules say an arm's cost is charged where it is wired, not here — so this turns
+# on a mechanism that no decode path in either crate calls.
 default = []
+# The out-of-crate `RiceKernel` arm (`src/rice_twin.rs`), as an instrument arm.
+#
+# It forwards to `flac-lite/rice-hybrid` rather than carrying its own copy of the
+# hybrid walk, and that is a decision, not an oversight: see the module docs on
+# "Carried, not vendored" and "The feature, and why it forwards to a core
+# feature". A caller of this feature is therefore also opting into the core's
+# gate — the honest reading of "the core's own mechanism, run from outside".
+rice-twin = ["flac-lite/rice-hybrid"]
 
 [lib]
 name = "flac_lite_gba"

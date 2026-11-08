@@ -74,6 +74,16 @@
 #[cfg(target_arch = "arm")]
 extern crate alloc;
 
+// Split-ladder item 6 PR 6a-3's codegen arm (see that file's header for the arms
+// and the one variable). Gated so that NEITHER feature compiles it at all: the
+// control build of this instrument is then "the manifest edge exists and the file
+// is in the tree", which is the exact thing 6a-1's control discipline asks to be
+// proven free — that adding a crate to this tree does not change what the shipped
+// ROMs link. A file no build compiles is the honest shape of that control; the
+// record says so rather than dressing it up.
+#[cfg(any(feature = "item6a3-twin", feature = "item6a3-hybrid"))]
+mod item6a3_probe;
+
 #[cfg(target_arch = "arm")]
 mod rom {
     use agb::display::Rgb;
