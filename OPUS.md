@@ -7,8 +7,9 @@ real target, witnesses over recollection). Opened 2026-09-27.
 ## Why look at Opus at all
 
 The FLAC perf gate is not passing: measured on-target, `flac-lite` runs at
-**≈219% of the real-time budget on the FIXED arm and ≈654% on LPC** (FLAC.md,
-spike PR 3), and experiments E1–E7 have ruled out every cheap lever — no probe
+**≈219% of the real-time budget on the FIXED arm and ≈654% on LPC** (the
+2026-09-21 baseline, see [flac-docs/perf-results.md](flac-docs/perf-results.md)),
+and experiments E1–E7 ruled out every cheap lever at that time — no probe
 has moved the mean meaningfully. Opus is the alternative worth pricing in:
 far higher compression (less ROM per minute of audio) and *potentially* cheaper
 per-sample decode for speech-like content (SILK is integer arithmetic).
@@ -16,13 +17,14 @@ per-sample decode for speech-like content (SILK is integer arithmetic).
 The honest caveat up front: **Opus is more compressed, not obviously cheaper to
 decode on this hardware.** CELT is MDCT-heavy and float-based; the ARM7TDMI has
 no FPU, so every butterfly is soft-float. Any Opus path must clear the same
-correctness-before-speed perf gate FLAC.md already defines.
+correctness-before-speed perf gate the FLAC work already defines
+([flac-docs/method-and-gates.md](flac-docs/method-and-gates.md)).
 
 ## The Constraint (unchanged)
 
 `thumbv4t-none-eabi`, Tier-3 bare-metal, `#![no_std]`, **`core` + `alloc` only**.
 Any crate referencing `std` — directly or transitively — cannot compile. Full
-argument in FLAC.md → "The Constraint".
+argument in [flac-docs/architecture.md](flac-docs/architecture.md).
 
 ## Rust Opus landscape (surveyed 2026-09-27)
 
@@ -156,12 +158,13 @@ cargo +nightly build --release --target thumbv4t-none-eabi -Zbuild-std=core,allo
 Probe crates lived in `/tmp/opus_probe*` during the survey (throwaway). If this
 evaluation proceeds, promote to `examples/opus_probe/` with the vendored patch,
 and add Makefile gates in the `flac-test` pattern (host tests outside the repo
-tree — the cargo-config-leak rule, FLAC.md; target check inside it).
+tree — the cargo-config-inheritance rule,
+[flac-docs/method-and-gates.md](flac-docs/method-and-gates.md); target check inside it).
 
 ## Minimal proposal — an Opus ROM, shaped like the FLAC ROM
 
-Deliberately mirrors the `flac-lite` architecture (FLAC.md → Decision
-2026-08-30): we own both ends, the "filesystem" is fixed-layout ROM, so the
+Deliberately mirrors the `flac-lite` architecture
+([flac-docs/architecture.md](flac-docs/architecture.md), decision of 2026-08-30): we own both ends, the "filesystem" is fixed-layout ROM, so the
 entire Ogg container layer is **deleted** — Opus packets are self-delimiting
 via the TOC byte, and packet boundaries come from an offline manifest.
 

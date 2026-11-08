@@ -1,6 +1,6 @@
 # E7 — `-Cforce-frame-pointers=yes` flag-flip probe (result: **inert**)
 
-Menu item: FLAC.md "Perf follow-ups" E7. Full result entry: FLAC.md
+Menu item: E7. Full result entry: flac-docs/perf-results.md
 "E7 result — the flag is inert: thumbv4t-none-eabi forces frame pointers
 (2026-09-25)".
 

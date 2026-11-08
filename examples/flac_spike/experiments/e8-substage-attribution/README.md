@@ -1,7 +1,6 @@
 # E8 sample — sub-stage attribution (measured 2026-10-12, **not integrated**)
 
-The reappliable sample code for E8 in FLAC.md's "Perf follow-ups —
-experiment menu": a **measurement, not a variant** — one image, one pass,
+The reappliable sample code for E8 in flac-docs/perf-results.md: a **measurement, not a variant** — one image, one pass,
 timed windows per frame partitioning the decode into sub-stages, plus
 per-sample boundary reads splitting the Rice hot loop into `unary` (E2b's
 addressable share) vs `rest` (remainder read + fold + guard + unmap +
@@ -9,7 +8,7 @@ store). **Result: FIXED's cost center is named — the Rice per-sample loop
 carries 94.6% of the instrumented gross (unary 56.2% + rest 38.5%), every
 other bucket ≤ 4.2%; the LPC arm's cost center is the i64 integrator
 (49.5%).** Full findings, witnesses, and the menu consequences:
-[`../../../../FLAC.md`](../../../../FLAC.md) →
+[`../../../../flac-docs/perf-results.md`](../../../../flac-docs/perf-results.md) →
 "E8 result — sub-stage attribution names the cost centers (2026-10-12)".
 
 This directory is **sample code only**: the probe never lands on `main`'s
@@ -149,7 +148,7 @@ Layout-confound evidence (`nm` on the built ELF): `e8::decode_residual_e8`
 `0xba4` vs `flac_lite::residual::decode_residual` `0x574`;
 `e8::decode_subframe_e8` `0xe2c` vs `flac_lite::subframe::decode_subframe`
 `0x388` — instrumentation moves inlining layout along with itself (the
-menu's E6 confound), stated in the FLAC.md entry; the reading is the
+menu's E6 confound), stated in the flac-docs/perf-results.md entry; the reading is the
 per-bucket shares with that caveat.
 
 Gates green on the patched tree: `make spike-test` (host tests 23 → 28:

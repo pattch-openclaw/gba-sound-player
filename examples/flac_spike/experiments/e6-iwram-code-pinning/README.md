@@ -1,7 +1,6 @@
 # E6 sample — hot decode code pinned to IWRAM (measured 2026-09-26, **not integrated**)
 
-The reappliable sample code for E6 in FLAC.md's "Perf follow-ups —
-experiment menu" (code placement — the one dimension E1–E4 structurally
+The reappliable sample code for E6 in flac-docs/perf-results.md (code placement — the one dimension E1–E4 structurally
 could not touch). **Result: pinning the hot decode path to IWRAM is
 decisively the wrong direction** — the FIXED arm is **17.8% slower**
 (217.4% → 256.1% of the 1,048,750-cycle budget, 1,113 → 1,312 c/sample)
@@ -10,7 +9,7 @@ demotes E6: instruction-fetch location is not the cost center, and code
 placement joins the ruled-out list. Full findings, witnesses, and the
 mechanism correction (`.text_iwram` is a trap — plain `.iwram` is the
 working pin target):
-[`../../../../FLAC.md`](../../../../FLAC.md) →
+[`../../../../flac-docs/perf-results.md`](../../../../flac-docs/perf-results.md) →
 "E6 result — IWRAM code pinning is slower on both arms (2026-09-27)".
 
 This directory is **sample code only**: the probe never lands on `main`'s

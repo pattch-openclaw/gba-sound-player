@@ -1,6 +1,6 @@
 # Feeder-off control probe — A/B/C arms on the rate-play ROM (measured 2026-10-26, not integrated)
 
-The reappliable sample code for FLAC.md ordering step ③ (rate-play entry,
+The reappliable sample code for flac-docs/playback-results.md ordering step ③ (rate-play entry,
 2026-10-22 revised ordering): split the decode path's claimed **+39 % live
 penalty** (1,643 c/s IRQ-live vs the rate ROM's recorded IME-off 1,180 c/s)
 into handler CPU, sound-DMA bus contention, and everything else — with
@@ -9,7 +9,7 @@ activity). **Result: the live path costs ≈ +1.5 % (≈ 3 ms/frame), not
 +39 %; the +39 % was a stale comparator — the committed rate ROM on the
 current tree prints FIXED mean 1,614.6 c/s, and a bisect convicts the E2b
 `rice_quotient` landing (`e455dba`, 2026-10-21) with +37.96 % decode.
-Full findings: [`../../../../FLAC.md`](../../../../FLAC.md) →
+Full findings: [`../../../../flac-docs/perf-results.md`](../../../../flac-docs/perf-results.md) →
 "Completed: rate-play ROM" entry, 2026-10-26 amendment.**
 
 ## Arms

@@ -1,7 +1,6 @@
 # E9 sample — composite arms: stacked variants vs isolated gains (measured 2026-10-31, **not integrated**)
 
-The reappliable sample code for **E9** in FLAC.md's "Perf follow-ups —
-experiment menu": every menu gain had been measured in isolation; E9 measures
+The reappliable sample code for **E9** in flac-docs/perf-results.md: every menu gain had been measured in isolation; E9 measures
 the levers **stacked** on one image. Four arms per frame: **ctrl / arm /
 i32 / iw**, where `i32` = E10's ARM hybrid codeword kernel + E4's i32
 arithmetic width, and `iw` = the same decode writing `.iwram` static scratch
@@ -12,7 +11,7 @@ in-budget FIXED decode in the menu's history** (mGBA; pending E5 hardware
 arbitration and the landing). LPC lands 216.3% (fits 10,512 Hz at 69.4%,
 misses 18,157 Hz at ~120%). E3's scratch pin is **inert** (+20 cyc/frame,
 both clips). Full findings:
-[`../../../../FLAC.md`](../../../../FLAC.md) →
+[`../../../../flac-docs/perf-results.md`](../../../../flac-docs/perf-results.md) →
 "E9 result — stacking ARM and i32 lands the first in-budget FIXED decode (2026-10-31)".
 
 This directory is **sample code only**: the probe never lands on `main`'s
@@ -47,8 +46,7 @@ pass spans ≈ 7 G cycles):
    `addr_of_mut!`). `iw − i32` is E3's scratch-placement lever measured
    *renormalized* against the stacked frame.
 
-**E1 was excluded by design** (ordering decision, recorded in the FLAC.md
-entry): staging relieves the position-only reader's per-byte ROM re-fetch
+**E1 was excluded by design** (ordering decision, recorded in the flac-docs/perf-results.md entry): staging relieves the position-only reader's per-byte ROM re-fetch
 premium, which the ARM kernel's windowed refills already absorbed; shipping
 decode reads ROM regardless, and E1 was ruled out as a production
 mitigation. Stacking it would double-count the same relief.
@@ -153,8 +151,8 @@ strings.
 
 Re-measured, two runs byte-identical (1,357 lines / 121,107 B, `eq=1` 628/628, region FNVs
 `[OK]`, `i32_fits=true iw_fits=true` on FIXED and `false` on LPC, `.iwram` scratch
-`e9::scratch::{LEFT,RIGHT}` @`0x0300064c`/`0x0300264c`); tables in `FLAC.md` →
-"6a-2 — landed (2026-11-06)". Versus the sums recorded above, measured here on the
+`e9::scratch::{LEFT,RIGHT}` @`0x0300064c`/`0x0300264c`); tables in
+[flac-docs/measurements.md](../../../../flac-docs/measurements.md). Versus the sums recorded above, measured here on the
 post-item-5 tree:
 
 | leg | FIXED Δ (total) | LPC Δ (total) |

@@ -2,8 +2,8 @@
 
 **Status: PR 1 landed — scaffold + embedded clips.** This crate is the
 go/no-go measurement vehicle for FLAC-on-GBA. Full plan + validation rules:
-[`../../FLAC.md`](../../FLAC.md) → "Perf gate spike — concrete plan and
-validation process (2026-09-18)".
+[`../flac-docs/method-and-gates.md`](../../flac-docs/method-and-gates.md) and
+[`../flac-docs/perf-results.md`](../../flac-docs/perf-results.md).
 
 ## The question
 
@@ -20,7 +20,7 @@ Budget per frame at the initial profile (2048 samples @ 32,768 Hz):
 > **microsecond** figure (62.5 ms = 62,500 µs) with its unit misapplied. The
 > derived budget above is ~16.78× larger, and the placeholder's working
 > targets (≤35k mean / ≤55k max) inherit the error — they are ~3% of the true
-> budget. Per the FLAC.md plan, the gate's working targets are re-derived in
+> budget. Per the project's method, the gate's working targets are re-derived in
 > PR 3 against *measured* mixer/DMA/vsync load, never against a recalled
 > margin. (The plan scheduled this correction for PR 5; it came early because
 > the crate landed now and a false README is worse than an early one.)
@@ -29,7 +29,7 @@ Budget per frame at the initial profile (2048 samples @ 32,768 Hz):
 
 1. Decode-only cost per frame for the FIXED arm (`flac -l 0`),
 2. The same for the LPC arm (`flac -l 4`) — the gate's question is the
-   **comparison** (`-l 4` emits real LPC frames; FLAC.md Correction 3),
+   **comparison** (`-l 4` emits real LPC frames; flac-docs/format-notes.md, Correction 3),
 3. The tail, not just the mean: one over-budget frame is an audible glitch,
    so max is reported next to min/mean.
 
@@ -68,9 +68,9 @@ FNV-1a pins, censuses, `include_bytes!`).
 | `make native-spike-rom` / `podman-spike-rom` | The spike ROM builds, links, fixes for `thumbv4t-none-eabi`; boots, verifies region hash pins, then **decodes both arms on-target** and compares the PCM FNV-1a against the pins (blue/red screen, BitReader-PoC convention) |
 
 Standalone workspace; cargo config is **inherited** from the repo root — do
-not add a local `.cargo/config.toml` (the duplicated `-Tgba.ld` leak, FLAC.md).
+not add a local `.cargo/config.toml` (the duplicated `-Tgba.ld` leak, flac-docs/method-and-gates.md).
 
-## PR sequence (per the FLAC.md plan)
+## PR sequence (all landed; the live plan is flac-docs/plan-of-record.md)
 
 | PR | Scope | Status |
 |---|---|---|

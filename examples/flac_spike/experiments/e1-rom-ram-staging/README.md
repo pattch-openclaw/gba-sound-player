@@ -1,11 +1,10 @@
 # E1 sample — ROM→RAM staging probe (measured 2026-09-22, **not integrated**)
 
-The reappliable sample code for the E1 experiment in FLAC.md's
-"Perf follow-ups — experiment menu". **Result: cartridge reads are not the
+The reappliable sample code for the E1 experiment in [flac-docs/perf-results.md](../../../../flac-docs/perf-results.md). **Result: cartridge reads are not the
 story** — staging the frame bytes into EWRAM before decoding saved only
 4.72% (FIXED) / 1.78% (LPC); worst frames stayed 210% / 646% of the
 1,048,750-cycle budget. Full findings, method, and reading:
-[`../../../../FLAC.md`](../../../../FLAC.md) →
+[`../../../../flac-docs/perf-results.md`](../../../../flac-docs/perf-results.md) →
 "E1 result — ROM→RAM staging: cartridge reads are not the story (2026-09-22)".
 
 This directory is **sample code only**: the probe never lands on `main`'s

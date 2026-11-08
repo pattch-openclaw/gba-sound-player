@@ -1,7 +1,6 @@
 # E2b sample — run-length-table Rice quotient count (measured 2026-10-13, **not integrated**)
 
-The reappliable sample code for **E2b** in FLAC.md's "Perf follow-ups —
-experiment menu": replace the Rice unary per-bit loop with a table count —
+The reappliable sample code for **E2b** in flac-docs/perf-results.md: replace the Rice unary per-bit loop with a table count —
 a 256-entry leading-ones lookup pinned to `.iwram`, riding the E2a
 refill-accumulator reader. **Result: the biggest decoder-side win the menu
 has measured** — FIXED mean **−21.7%** vs the live control (**−19.2%**
@@ -10,7 +9,7 @@ change), 217.4% → **170.2%** of budget; LPC **−9.6%** vs control
 (−10.9% marginal), 652.3% → 589.5%. Both arms remove ≈35% of their E8
 unary buckets. Not a collapse: FIXED stays over budget, exactly as E8's
 floor arithmetic said any single lever would. Full findings and reading:
-[`../../../../FLAC.md`](../../../../FLAC.md) →
+[`../../../../flac-docs/perf-results.md`](../../../../flac-docs/perf-results.md) →
 "E2b result — run-length table count lands the biggest decoder-side win
 on the menu so far (2026-10-13)".
 
