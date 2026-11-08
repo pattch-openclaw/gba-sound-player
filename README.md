@@ -20,7 +20,7 @@ libraries that other GBA ROMs can build on top of.
    so a ROM can be used as a playable instrument, not just a fixed playback
    device.
 
-4. **Compressed audio (FLAC).** Support FLAC decoding in order to make use of compressed audio files, allowing us to fit more songs (or a full album) onto the cartridge. Status and library evaluation live in **[FLAC.md](FLAC.md)**. An alternative-codec evaluation (Opus, opened 2026-09-27 while the FLAC perf gate is failing) lives in **[OPUS.md](OPUS.md)**.
+4. **Compressed audio (FLAC).** Support FLAC decoding in order to make use of compressed audio files, allowing us to fit more songs (or a full album) onto the cartridge. Status and library evaluation live in **[FLAC.md](FLAC.md)**. An alternative-codec evaluation (Opus, opened 2026-09-27 while the FLAC perf gate is failing) lives in **[OPUS.md](OPUS.md)**. Cart-fidelity findings from the comparison with the sister project [gba-audio](https://github.com/pattch-openclaw/gba-audio) — the 8-bit FLAC encode target (~23 min/cart, measured), the fidelity frontier at cart scale, and the decision to pursue a ULC codec in Rust for album length — live in **[FINDINGS.md](FINDINGS.md)**.
 
 5. **Upstream higher sample rates.** Add support for higher sample rates (like 65kHz) to the upstream `agb` library to push past the current 32kHz software mixer limit.
 
