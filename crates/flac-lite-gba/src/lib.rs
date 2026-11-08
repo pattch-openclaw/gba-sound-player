@@ -45,10 +45,10 @@
 //!   forwarding impl compiles with **zero** core-side changes, so the core owns
 //!   one copy of that walk. Rung 6a-4's own docs note what changes if it wants
 //!   them.
-//!   **6a-3 changes no decode path**, and it adds one configuration and two gates
-//!   (`make overlay-check-twin`, `make overlay-test-twin`) rather than changing an
-//!   existing one; the counts of every existing configuration are unchanged, which
-//!   is that rung's own rule.
+//!   **6a-3 changes no decode path**, and it adds one configuration behind one new
+//!   gate (`make overlay-test-twin` — both the thumbv4t compile witness and the
+//!   host differential) rather than changing an existing one; the counts of every
+//!   existing configuration are unchanged, which is that rung's own rule.
 //! * **6a-4** — the ARM-mode kernels themselves (`global_asm!` over the
 //!   `.s` bodies this repo already dual-witnesses in `examples/arm-kernels/`),
 //!   their FFI and its SAFETY blocks, the state-struct ABI mapping written as
@@ -125,17 +125,20 @@
 //!   cwd for the same reason the core's host gates are (the config leak). In
 //!   6a-1 that witness is one no-op test; see the test module for what it does
 //!   and does not claim.
-//! * `make overlay-check-twin` and `make overlay-test-twin` — the same two, with
-//!   `--features rice-twin` on. These are what 6a-3 adds: the first is the compile
-//!   witness that an out-of-crate `RiceKernel` impl builds for the GBA target, the
-//!   second runs the corpus differential driven from this side of the boundary
-//!   (`tests/twin_from_outside.rs`, `required-features = ["rice-twin"]`, so it
-//!   does not exist in a default build at all). The rule this rung inherits from
-//!   the core's own feature-gate discipline is that a new configuration is a
-//!   **new gate**, never a broadening of an existing one — `make overlay-test`
-//!   still runs exactly what it ran in 6a-1, which is what makes "the default
-//!   build of this crate still contains no kernel" a checkable statement rather
-//!   than a claim.
+//! * `make overlay-test-twin` — what 6a-3 adds: the same two witnesses as above
+//!   with `--features rice-twin` on, in one gate. Its first arm is the compile
+//!   witness that an out-of-crate `RiceKernel` impl builds for `thumbv4t-none-eabi`
+//!   (the half `overlay-check` cannot see, since in its default build
+//!   `src/rice_twin.rs` does not exist); its second runs the corpus differential
+//!   driven from this side of the boundary (`tests/twin_from_outside.rs`,
+//!   `required-features = ["rice-twin"]`, so it does not exist in a default build
+//!   at all). There is deliberately no `overlay-check-twin`: a gate whose arms
+//!   would be identical to a subset of this one is a second name for one
+//!   measurement. The rule this rung inherits from the core's own feature-gate
+//!   discipline is that a new configuration is a **new gate**, never a broadening
+//!   of an existing one — `make overlay-test` still runs exactly what it ran in
+//!   6a-1, which is what makes "the default build of this crate still contains no
+//!   kernel" a checkable statement rather than a claim.
 //! * None of these gates is in `flac-gates` (that aggregate is the core's
 //!   configurations, and this is a different crate whose features do not exist
 //!   there) and none is in `test`. They are hand-invoked, like

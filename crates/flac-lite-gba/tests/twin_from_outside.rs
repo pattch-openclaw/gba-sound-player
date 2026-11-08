@@ -102,6 +102,16 @@
 //! * It is not the codegen witness. Whether an out-of-crate implementor
 //!   re-triggers the +2,984 B item 5 PR 3 measured is a section-table question,
 //!   and the record in `FLAC.md` answers it.
+//! * Its “carried arm” leg is not wholly disjoint from the incumbent. `TwinKernel`
+//!   forwards to `HybridRiceKernel`, and `HybridRiceKernel::decode_partition`
+//!   itself falls back to `TableCountKernel::decode_partition` for `order >= 32`
+//!   (`rice_hybrid.rs`). So on that branch the arm *is* the incumbent, one call
+//!   deep. It never fires in the corpus (parameters are `<= 30`, and `30` is the
+//!   5-bit coding method's ceiling), so the differential is not measuring the
+//!   incumbent against itself; but the anti-tautology source pin below reads
+//!   `rice_twin.rs` only, so it would not see a fallback hidden a level deeper. This
+//!   is the same class of blind spot M5 names, recorded so 6a-4 knows the arm's
+//!   `order >= 32` path is the incumbent's, not a second implementation’s.
 //! * It does not reach any GBA-specific behavior: this suite runs on the host
 //!   triple, like every other test in this repository.
 
@@ -442,13 +452,27 @@ fn with_kernel<K: RiceKernel>(
 ///   corrected once (step 3a, 2026-09-10) is a fourth place the correction can be
 ///   wrong.
 ///
-/// One honest difference, recorded rather than smoothed over. On an unterminated
-/// final codeword the incumbent restores the cursor to that codeword's start (the
-/// atomicity of `BitReader::rice_quotient`) while this leg leaves it wherever the
-/// failing read stopped. The trait permits both — "on error only per-read atomicity
-/// holds" — and **no corpus case in this table reaches an error**, so that
-/// difference is untested here, not passed. It matters to 6a-4, whose kernel will
-/// have to say which of the two it does.
+/// Two honest differences, recorded rather than smoothed over. **No corpus case in
+/// this table reaches either** — every vector decodes cleanly — so both are untested
+/// here, not passed, and both matter to 6a-4, whose kernel has to say which side of
+/// each it lands on:
+///
+/// 1. *Cursor on an unterminated final codeword.* The incumbent restores the cursor
+///    to that codeword's start (the atomicity of `BitReader::rice_quotient`) while
+///    this leg leaves it wherever the failing read stopped. The trait permits both —
+///    "on error only per-read atomicity holds".
+/// 2. *Guard order on an out-of-range parameter.* This leg checks
+///    `order >= 32 || quotient > (u32::MAX >> order)` **after** reading the
+///    remainder, whereas the incumbent checks `order >= 32` (and the quotient bound)
+///    **before** it — so for a malformed `order >= 32` the two can return different
+///    error variants (this leg reads up to 32 remainder bits first, and for
+///    `order > 32` `read_bits` fails `EndOfStream` before the guard is reached). On
+///    conforming input `order <= 30`, so this never fires in the corpus. It is kept
+///    this way on purpose: it is the literal §9.2.5 reading (unary, then remainder,
+///    then the representability check), which is exactly the naive-from-prose
+///    property this leg exists to demonstrate. A `SpecOrderKernel` that reordered its
+///    guard to match the incumbent would be reading the incumbent's code, not the
+///    spec.
 struct SpecOrderKernel;
 
 impl RiceKernel for SpecOrderKernel {

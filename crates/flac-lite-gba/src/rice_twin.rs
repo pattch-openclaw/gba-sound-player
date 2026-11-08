@@ -26,6 +26,17 @@
 //! cross-crate name resolution and the orphan-rule shape 6a-4 will need, plus the
 //! witness that the resulting arm decodes what the core's mechanisms decode.
 //!
+//! One limit of "carried" worth naming here rather than discovering later:
+//! [`HybridRiceKernel`] is itself not a second implementation for `order >= 32` — it
+//! forwards that branch straight to
+//! [`flac_lite::residual::TableCountKernel`]. So `TwinKernel` is the incumbent, one
+//! call deep, for that out-of-range parameter. That branch never fires in a
+//! conforming stream (the 5-bit coding method tops out at `order == 30`, and
+//! `0b11111` is the escape), so it is not a hole in the differential; but it means
+//! "the arm is a distinct mechanism" holds on `order <= 30` and not on `order >= 32`.
+//! 6a-4 replaces this body with an asm kernel and inherits the question of what
+//! *it* does at that boundary.
+//!
 //! ## What this arm is, and is not, wired into
 //!
 //! It is an **instrument arm**: it exists to be instantiated by a caller that

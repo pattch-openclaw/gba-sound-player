@@ -701,8 +701,11 @@ overlay-test: toolchain-check
 # this gate is a compile witness and a correctness witness, NOT a codegen or cycle
 # witness — an rlib still has no link step, so the "second implementor present"
 # charge that item 5 measured can only be read in an image that links this crate,
-# which is the instrument arm in examples/flac_spike/experiments/ (FLAC.md, 6a-3
-# paragraph 2), not anything here.
+# which is the instrument arm in examples/flac_spike/src/item6a3_probe.rs under the
+# `item6a3-*` features (FLAC.md, 6a-3 paragraph 2), not anything here. That file is a
+# permanent instrument arm, not an E-series patch, so it lives in the spike's `src/`
+# rather than under `experiments/` — the deviation from "probes never land on main's
+# spike sources" is recorded here and in the 6a-3 landing record.
 overlay-test-twin: toolchain-check
 	cd $(OVERLAY_CRATE_DIR) && \
 	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features rice-twin

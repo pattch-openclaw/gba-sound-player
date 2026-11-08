@@ -33,7 +33,16 @@
 //!   anchor every record in this item compares against.
 //! * **A′** — this file present, both features **off**: an empty module and a new
 //!   path-dependency edge in the manifest. The control for "adding the edge and the
-//!   file costs a ROM nothing".
+//!   file costs a ROM nothing". Note precisely what A′ compiles: with both features
+//!   off the `mod item6a3_probe;` declaration in `main.rs` is itself cfg'd out (it is
+//!   gated on `item6a3-twin`/`item6a3-hybrid`), so A′ is "the file is in the tree and
+//!   the manifest edge exists, and *no* build compiles either" — not "this file
+//!   compiles to nothing". That is the honest shape of the control (a file no build
+//!   includes), and it is the exact thing 6a-1's control discipline asks to be proven
+//!   free: adding a crate to the tree does not change what the shipped ROMs link.
+//!   Arm **P** (`item6a3-present`) is a *different* control on this axis: it turns on
+//!   `flac-lite/rice-hybrid` but still compiles this module out, so it measures a
+//!   present-but-unreachable core mechanism with no probe file at all.
 //! * **T** — `--features item6a3-twin`: the kept kernel body is
 //!   `flac_lite_gba::rice_twin::TwinKernel`'s, i.e. **an impl declared in another
 //!   crate**, which forwards to the core's hybrid twin.
