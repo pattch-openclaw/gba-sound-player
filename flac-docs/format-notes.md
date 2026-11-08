@@ -18,7 +18,7 @@ Contents:
 
 1. Frame header layout and its three corrections (measured 2026-09-07).
 2. Facts established while implementing the frame layer, condensed.
-3. Prior assumptions that did not survive measurement (the 24-row table).
+3. Prior assumptions that did not survive measurement (the 28-row table).
 
 ## Frame header: measured byte layout — the 31-vs-32-bit correction (2026-09-07)
 
@@ -287,10 +287,10 @@ pins it; none is a recall. Tests live in `crates/flac-lite/tests/`, generators i
 | Fact | Witness |
 |---|---|
 | The side subframe is coded at **bps + 1**, not bps − 1 (§4.2: "the side channel needs one extra bit of bit depth"). A read at bps desyncs every decorrelated frame. | anti-phase encode: side warm-up at bps+1 equals `flac -d`'s L−R on 24/24 frames, 12 of them values a 16-bit field cannot hold; at bps it disagrees 24/24. libFLAC `read_subframe_` does `bps++` on the side slot |
-| For `0b1001` (right/side) subframe **0 is the side**; for `0b1010`/`0b1011` the side is the slot libFLAC increments (slot 0 for right-side, slot 1 for left/mid-side). | Table 16 "stored as side-right"; §4.2 decode wording; `undo_channel_coding` `output[0][i] += output[1][i]`; near-identical-channels construction emits `0b1001` on 63/63 frames |
+| For `0b1001` (right/side) subframe **0 is the side**; for `0b1000` (left/side) and `0b1010` (mid/side) it is subframe 1 — the slot libFLAC increments (slot 0 for right/side, slot 1 for left/mid-side). | Table 16 "stored as side-right"; §4.2 decode wording; `undo_channel_coding` `output[0][i] += output[1][i]`; near-identical-channels construction emits `0b1001` on 63/63 frames |
 | Mid/side recovery is exact with no `+1`: `m_ext = (mid << 1) \| (side & 1)`, then `(m_ext ± side) >> 1`. The `& 1` **is** the rounding term. | generation-witnessed oracle (`stereo::decorrelate`); 55 pairs incl. the side-saturating `(32767, −32768)` |
 | A frame's tail is **zero-padding (0–7 bits) plus the 16-bit CRC**, i.e. a 16..23-bit gap. Frame lengths are not a stride (`117 116 116 116 116 116 115 116 116 51`). | `tests/scan_frame_walk_layout.rs` over 35 real frames; 23 of them carry non-zero padding |
-| A constant-16-bit footer walk does **not** silently slip (0 sync-shaped parses at all 23 positions, 0 strict headers at the 30 down-rounded byte positions); re-anchoring *up* to the next byte boundary lands correctly by arithmetic. Both are safe only because the body's bit end was computed by walking the fields. | same suite's `footer_slip_positions_*` / `footer_byte_truncation_*` rows |
+| A constant-16-bit footer walk does **not** silently slip (0 strict-header parses at all 23 slipped positions — 1 of the 23 is sync-shaped but field-refusing — and 0 strict headers at the 30 down-rounded byte positions); re-anchoring *up* to the next byte boundary lands correctly by arithmetic. Both are safe only because the body's bit end was computed by walking the fields. | same suite's `footer_slip_positions_*` / `footer_byte_truncation_*` rows |
 | CRC-16 init is **0x0000**. The scaffold's 0xFFFF was corrected; the reflected "FLAC variant" reading is excluded outright. | CRC-16 measured across 10 real frames: sole init consistent with all of them; three-way mechanism agreement; derived check 0xFEE8 |
 | Header CRC-8 coverage is sync through the last header field, **excluding** the CRC byte itself; the header CRC is always byte-aligned (the footer is the reason `read_u8` must stay bit-level). | `tests/crc_check.rs`; `tests/frame_header_layout.rs` |
 | There is **no metadata-block CRC**. A metadata block is a 4-byte header plus exactly `length` bytes (§8.1); the format's only CRCs are header and frame footer. | `stream` module + RFC §8.1; no probe reproduced anything else |

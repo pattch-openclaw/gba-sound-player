@@ -101,7 +101,7 @@ One line per rung; the full plan, bars and invariants are in
 | File | What it answers |
 |---|---|
 | [`flac-docs/architecture.md`](flac-docs/architecture.md) | What exists and why it is shaped this way: the constraint, the two crates, the `RiceKernel` seam, the container, the design rules, the delivered portability ladder, decisions of record. |
-| [`flac-docs/format-notes.md`](flac-docs/format-notes.md) | Every measured FLAC byte fact, with its witness: frame header layout and three corrections, subframe/residual/stereo rules, footer, and the 24-row table of assumptions measurement killed. |
+| [`flac-docs/format-notes.md`](flac-docs/format-notes.md) | Every measured FLAC byte fact, with its witness: frame header layout and three corrections, subframe/residual/stereo rules, footer, and the 28-row table of assumptions measurement killed. |
 | [`flac-docs/measurements.md`](flac-docs/measurements.md) | The ledger: what each number belongs to, the baseline of record, absolute marginals that survive an era, the item-6 constraints, and what not to quote. |
 | [`flac-docs/perf-results.md`](flac-docs/perf-results.md) | The E-series experiments in their own words — positives and negatives, each with its control and witnesses. |
 | [`flac-docs/playback-results.md`](flac-docs/playback-results.md) | The rate flow and audible-playback records: push, convert, FIFO, feeder-off control, the landing regression and its fix. |
@@ -119,7 +119,7 @@ cite its section names. Those names now resolve here:
 
 | Old section | Now |
 |---|---|
-| The Constraint; Rust FLAC Landscape; Candidate Evaluated; Upstream Status; Decision (c) | [`architecture.md`](flac-docs/architecture.md) §"Why we wrote our own decoder" |
+| The Constraint; Rust FLAC Landscape; Candidate Evaluated; Upstream Status; Decision (c) | [`architecture.md`](flac-docs/architecture.md) §"Why we wrote our own decoder" and §"Alternatives considered" |
 | Perf gate spike — concrete plan; Budget; Validation process | [`method-and-gates.md`](flac-docs/method-and-gates.md) §"The real-time budget", §"Rules every run follows" |
 | Frame header: measured byte layout; Corrections 1–3; frame sync scanning; encoder choices; `--force-utf8-legacy-noop` | [`format-notes.md`](flac-docs/format-notes.md) |
 | Golden vectors | [`method-and-gates.md`](flac-docs/method-and-gates.md) §"Golden vectors" |

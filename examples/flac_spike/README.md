@@ -70,7 +70,7 @@ FNV-1a pins, censuses, `include_bytes!`).
 Standalone workspace; cargo config is **inherited** from the repo root — do
 not add a local `.cargo/config.toml` (the duplicated `-Tgba.ld` leak, flac-docs/method-and-gates.md).
 
-## PR sequence (all landed; the live plan is flac-docs/plan-of-record.md)
+## PR sequence (PRs 1–3 landed; 4–5 remain open; the live plan is flac-docs/plan-of-record.md)
 
 | PR | Scope | Status |
 |---|---|---|

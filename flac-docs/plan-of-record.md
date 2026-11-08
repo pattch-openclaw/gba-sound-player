@@ -3,14 +3,14 @@
 Everything else in these docs describes what has been built or measured. This file
 describes what is being built next, what bar each piece is judged against, and the
 rules a landing may not bend. It replaces the item-5 plan (fully landed), the
-"Phased plan" (fully landed or superseded), the perf-spike five-PR plan (landed),
-the E10 plans (landed) and the rate-tooling proposal (landed, with its step-4/5
-sweep still open) — all of which now live only in git history and in the records
-they produced.
+"Phased plan" (fully landed or superseded), the perf-spike five-PR plan (PRs 1–3
+landed; 4–5 open), the E10 plans (landed) and the rate-tooling proposal (landed,
+with its step-4 multi-clip ROM and its cross-rate sweep still open) — all of which
+now live only in git history and in the records they produced.
 
 ## Status at a glance (2026-11-08, `8711e2f`)
 
-- **Landed and shipped:** the Phase-1 decode path through `decode_frame`; the
+- **Landed:** the Phase-1 decode path through `decode_frame`; the
   stream layer; the per-frame `driver`; CRC verification behind `crc-check`; the
   table-less `scan` walk (feature, off); the `RiceKernel` seam (item 5, all four
   PRs) with the portable twin behind `rice-hybrid`; the overlay crate (6a-1), the

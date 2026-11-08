@@ -123,7 +123,7 @@ under `examples/flac_spike/experiments/<name>/`.
 | `make flac-test-crc` | Same, `--features crc-check`: header CRC-8 + footer CRC-16 verification, both accept and reject paths. |
 | `make flac-test-scan` | Same, `--features scan`: the frame walk + `tests/scan_frame_walk_layout.rs` (`required-features = ["scan"]`). |
 | `make flac-test-rice` | Same, `--features rice-hybrid`: the two-mechanism differential. |
-| `make flac-portable-check` | A **second** bare-metal target (`thumbv7em-none-eabi`) compiles, `--features scan`, `iwram-pin` off. Compile only — **no non-GBA performance claim exists**. |
+| `make flac-portable-check` | A **second** bare-metal target (`thumbv7em-none-eabi`) compiles, `--features scan,rice-hybrid`, `iwram-pin` off. Compile only — **no non-GBA performance claim exists**. |
 | `make flac-gates` | The aggregate: six configurations plus the combination arms (1,169 passed / 6 ignored at the item-6 baseline). |
 | `make native-flac-rom` | The decoder bundles into a bootable ROM (`examples/flac_integration/`), links and fixes. Build sanity, not audio. |
 | `make spike-test` / `native-spike-rom` | The measurement instrument: host witness over the exact embedded bytes, then on-target decode proof and cycle harness. |

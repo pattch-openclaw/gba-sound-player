@@ -43,6 +43,31 @@ The reproduction of the symphonia failure is kept at
 It is the evidence for the decision, not a live component. The root ROM carries no
 FLAC dependency.
 
+## Alternatives considered (surveyed 2026-08-29)
+
+The mature Rust FLAC decoders were `symphonia` (`symphonia-bundle-flac` — the
+best-engineered pure-Rust decoder; full `no_std` still upstream WIP), `clac` (MIT,
+smaller surface), `ferrosintesis-flac` (minimal, patchy API), and the thin,
+largely unmaintained `flac-rs`/`flac-decoder` wrappers. None was `no_std` in a
+usable form at the time.
+
+The candidate probed was the community no-std fork — keks `Symphonia`, branch
+`chore/core-step-towards-nostd-0.6`, commit `8301d26` (2025-10-18), *a step
+towards* no-std, not *at* it. `examples/symphonia_flac_probe/` fails before
+symphonia's own code compiles: `E0463: can't find crate for std` from
+`lazy_static` and `num-traits` in the dependency graph (which crate aborts first
+depends on cargo's build order). The FLAC crate carries no `#![no_std]` at all,
+and the hard blockers are structural: `Error::IoError(std::io::Error)` as the
+single error type, an `io/` module built on `Read`/`Seek`/`BufRead`, a `HashMap`
+codec registry, and `std::sync::Arc` in `symphonia-metadata` — ~27 non-trivial
+`std` usages across core/common/metadata.
+
+| Option | Cost |
+|---|---|
+| (a) Fork the keks branch | ~200–400-line diff, mechanical-to-moderate, but permanently tracking a WIP fork of a moving upstream. |
+| (b) Port `clac` | The same porting cost as (c), against someone else's architecture, which assumes `std::io` too. |
+| (c) Write a minimal decoder | ~500 lines of integer math; deletes the metadata/demuxer/seek/registry stack because we own both ends. **Chosen.** |
+
 ## What the tree contains today
 
 ```
