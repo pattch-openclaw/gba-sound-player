@@ -56,6 +56,15 @@ Handoff and contract decisions of record (settled before any table was generated
   LSB end), because that composes with C1 as shipped. `8` means "run past the
   byte" → dispatch to C1. Functionally equivalent to an MSB-first table at one
   `ldrb`; the choice is convention.
+- **Provenance correction (6a-4, measured):** 6a-4's plan line said the
+  partition kernel would be "lifted from `examples/arm-kernels/`". That is right
+  about the **fold** (`asm/fold_body.s` is a committed main-tree file and is pasted
+  by `include_str!`) and wrong about the **partition body**: `rice_partition.s` was
+  never committed on main — its only source of record is the E10 sample patch
+  (`examples/flac_spike/experiments/e10-three-arm-probe/…patch`), and the landed
+  copy in `crates/flac-lite-gba/asm/` comes from there, with four marked deltas.
+  The asm file's own header carries the correction; this line exists so the plan
+  text does not keep sending readers to the wrong tree.
 - **The fold is shared by textual include, not duplicated by hand.** The assembler
   pastes an identical copy at each site, so runtime is unchanged, but the offline
   `objdump` witness ("the shipped fold is the tested fold") stays honest. In this

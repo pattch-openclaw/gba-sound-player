@@ -8,17 +8,19 @@ landed; 4–5 open), the E10 plans (landed) and the rate-tooling proposal (lande
 with its step-4 multi-clip ROM and its cross-rate sweep still open) — all of which
 now live only in git history and in the records they produced.
 
-## Status at a glance (2026-11-08, `8711e2f`)
+## Status at a glance (2026-11-08, branch `feat/flac-lite-gba-arm-kernel`)
 
 - **Landed:** the Phase-1 decode path through `decode_frame`; the
   stream layer; the per-frame `driver`; CRC verification behind `crc-check`; the
   table-less `scan` walk (feature, off); the `RiceKernel` seam (item 5, all four
   PRs) with the portable twin behind `rice-hybrid`; the overlay crate (6a-1), the
-  same-image re-anchor (6a-2), and the out-of-crate seam arm (6a-3).
+  same-image re-anchor (6a-2), the out-of-crate seam arm (6a-3), and **the ARM
+  kernel itself (6a-4)** — asm, FFI, state-struct ABI, pinned tables, plus the
+  kernel-check ROM that is the device-side witness.
 - **Nothing in any shipped decode path has changed since item 5 PR 4.** The
   default is still `TableCountKernel`; `.text` 46,008 B `f0f88c33d150…`; the
-  overlay links into no ROM.
-- **Next rung:** **6a-4** — the ARM kernel, correctness only, no timings.
+  overlay links into exactly one ROM, the correctness instrument.
+- **Next rung:** **6a-5** — the realization reading, three arms in one image.
 - **Not started:** 6a-5…6a-8, all of 6b, and the product work they unblock
   (manifest, packer, facade, mixer).
 
@@ -33,11 +35,85 @@ from and it does not turn `scan` on.
 | **6a-1** ✅ | `crates/flac-lite-gba` exists; nothing links it. No `agb`, no asm, no `unsafe`, no modules. | Build gate + control build: the instrument's sections come back byte-identical (`f0f88c33d150…`) | that adding a crate to the tree changes what the existing ROMs link |
 | **6a-2** ✅ | The same-image baseline re-anchor. Measurement only, zero decode-path change: E10/E9 sample patches re-applied to today's base and re-run. | Cycles, same-image; plus the patch-re-application record | that the item's central number compares two instruments |
 | **6a-3** ✅ | The seam passable from outside the crate, in Rust: `rice_unmap` visibility bump + `TwinKernel` behind `rice-twin`, carrying the core's twin as an instrument arm. | Section dump + symbol-level attribution; the corpus differential driven from outside; cycles as a control arm | that the seam is only passable from inside, or costs more than the in-core form |
-| **6a-4** | **The asm kernel — correctness only, no timings.** `rice_partition.s` + `fold_body.s` lifted from `examples/arm-kernels/`, `global_asm!`, the FFI declaration and its `SAFETY` block, the state-struct ABI written down, tables under `iwram-pin` (this is also where pin enablement lands). | (i) a kernel-check ROM sweeping the **same committed golden tables**; (ii) `objdump -d`: 4-byte ARM encodings, `pop {…,lr}` + `bx lr`, never LDM-to-PC; (iii) the boundaries item 5 handed forward — spelled `q = 31` leg, `w == 0` handoff signal, `p = 0` mask, §9.2.7.3's two guards, unterminated/short-remainder **restore-nothing**, reads bounded by `region()` | the kernel is wrong, or the interwork/ABI is wrong — settled **before** any cycle is trusted |
+| **6a-4** ✅ | **The asm kernel — correctness only, no timings.** `rice_partition.s` + `fold_body.s` lifted from `examples/arm-kernels/`, `global_asm!`, the FFI declaration and its `SAFETY` block, the state-struct ABI written down, tables under `iwram-pin` (this is also where pin enablement lands). | (i) a kernel-check ROM sweeping the **same committed golden tables**; (ii) `objdump -d`: 4-byte ARM encodings, `pop {…,lr}` + `bx lr`, never LDM-to-PC; (iii) the boundaries item 5 handed forward — spelled `q = 31` leg, `w == 0` handoff signal, `p = 0` mask, §9.2.7.3's two guards, unterminated/short-remainder **restore-nothing**, reads bounded by `region()` | the kernel is wrong, or the interwork/ABI is wrong — settled **before** any cycle is trusted |
 | **6a-5** | **The realization reading — the item's number of record. No new code.** Three arms, one image: `ctrl`, 6a-3's Rust arm, 6a-4's asm arm; calibration subtracted, paired per frame, every delta byte attributed symbol by symbol. Carries the pre-declared fork below. | Cycles, same-image; codegen attribution. **The first ROM suite with a test in it is 6a-4's kernel check**; 6a-5 inherits a non-empty suite rather than "first to run `make test-rom`" (which already runs, collecting zero) | the win lives in a probe but not in the product path |
 | **6a-6** | **The width change, in the core.** i32 as the default arithmetic width, guarded per frame, i64 kept and reachable. Design in "The width decision" below. | Bit-exact vs `flac -d`; a width differential over the corpus and every committed frame-run table; the guard's unit witnesses incl. refusal cases; **both** configurations gated; codegen attribution of a both-legs build; cycles as a same-image arm | the guard is wrong (unsound), the legs are not equivalent, or a both-legs build costs more than the win |
 | **6a-7** | **The stack confirmation. No new code** — one measured arm: 6a-4's kernel **and** 6a-6's default together, against the same-image `ctrl`. Re-anchors the E numbers on the post-6a image, which 6b-1 inherits. | Cycles, same-image | that two measured wins composed negatively (E9's additivity does not reproduce) |
 | **6a-8** *(conditional)* | E8-style **sub-stage probe** over the asm kernel: tier-1 / tier-2 / tier-3 / refill / fold priced separately. Run **only** if 6a-5 lands inside or near the noise band. | Cycles, sub-stage | that a near-bar result is unattributable to a leg |
+
+### 6a-4 — landed, and what the device witness actually found
+
+The rung landed with one correctness bug that **no host-side arm could see**, found
+by the ROM's first end-of-stream case and fixed here. That is the whole argument
+for the rung existing, so it is written down rather than tidied away.
+
+**The bug.** The probe's kernel used an 8-byte frame and read its three stack
+arguments at `[sp+44]`, `[sp+48]`, `[sp+52]`. The landed `[6a-4 FRAME]` delta is
+12 bytes (`[sp+8]` holds the hoisted §9.2.7.3 limit), so the arguments move **one
+word**, not two: `[sp+48]`, `[sp+52]`, `[sp+56]`. The first cut added 12 instead of
+4 and read `[sp+56]`, `[sp+60]`, `[sp+64]` — i.e. `BRUIJN_INDEX` where `CTZ8`
+belongs, and the caller's frame for the other two. On the host every arm stayed
+green, because the host's FFI leg is `model_partition` and the model receives those
+pointers as Rust arguments: a wrong stack slot is not a wrong answer until the
+assembly runs. On the device, `make overlay-kernel-test`'s first
+`#[test_case]` returned `Done` where the incumbent said `EndOfStream`
+(`8 mismatch(es)` in that family). Fixed; the offsets are now pinned by an
+AAPCS-arithmetic source check in the host suite (`36 + 12 = 48`) as well as by the
+ROM.
+
+**Control build.** From `HEAD` (`0e16439`) in a separate worktree, before any
+source edit: `flac-spike` `.text` **46,008 B `f0f88c33d150…`**, `.iwram` 812 B
+`eeda688aa1a2…`, `.ewram` 368 B `c8beeb9e3f5f…`, `.entrypoint` 380 B
+`7d6b62f63b70…`, `nm` anchors `LEADING_ONES @ 0x0300022c` (256 B), `rice_quotient`
+336 B, `decode_residual` 596 B — the record of record exactly. After the change the
+same image is **byte-identical in all five sections and all three anchors**;
+`cargo clean` + rebuild reproduces it. `flac-integration` is unchanged in every
+size (`.text` 33,100 B, `.iwram` 556 B, `.ewram` 368 B); its `.text` digest differs
+between two build *directories* (measured: a clean rebuild of one tree reproduces
+its own digest, so the digest is path-sensitive in that crate) — so it is compared
+same-tree, where it is identical.
+
+**The new image** (`overlay-kernel-check.gba`, built `rice-arm,iwram-pin`;
+sha256 `5842ebde2c43981e…`): `.text` 67,772 B `8d8c7fe85a14…`, `.iwram` **1,356 B**
+`a568ddbb5c5f…` (812 + **544**, the three tables exactly as the plan budgeted),
+`.rodata` 145,988 B, `.ewram` 368 B, `.entrypoint` 380 B, 243 symbols.
+`arm_rice_partition` is **684 B at `0x0800017c`** (ARM state, 171 instruction words,
+one `mul`, 22 base+register `ldrb`); `LEADING_ONES` keeps `0x0300022c` and the
+tables sit at `0x0300032c` (`CTZ8`), `0x0300042c` (`REV8`), `0x0300052c`
+(`BRUIJN_INDEX`) — the ROM's own test asserts those ranges at runtime.
+
+**Gates.** `flac-gates` **1,169 passed + 6 ignored** (unchanged); `flac-test`
+178 + 1; `spike-test` 15 + 10; `kernel-test` 20; `opus-test` 28; `test-rom` 0
+cases (still the standing state — the repo's first non-empty ROM suite is this
+PR's, in a different crate); `overlay-check`, `overlay-test` (default config,
+1 lib test), `overlay-test-twin` unchanged. **New configurations, named as new
+gates:** `overlay-check-arm`, `overlay-test-arm` (15 host arms: corpus
+differential, 5,524 swept boundary cases / 6,166 samples with 2,648 delegated,
+11 guard rejections + 10 near-miss controls, the `p = 0` unary-only law, 5
+end-of-stream shapes, an out-of-range/delegation arm, the table re-derivations,
+the `unsafe` budget, and the corpus census), `overlay-objdump`, and
+`overlay-kernel-test` — **8 device `#[test_case]`s**, the first ROM suite in this
+repo that runs assertions.
+
+**Mutation witnesses** (each applied, run, reverted):
+
+| Mutation | Host suite | Device suite | Verdict |
+|---|---|---|---|
+| Stack slots 48/52/56 → 56/60/64 (the bug above) | **red** — the new AAPCS slot pin (behavioural arms stay green) | **red** on the first end-of-stream case | caught *only* on target until the pin existed |
+| Swap the remainder un-reversal's two `REV8` bytes (`orr r3, r12, r3, lsl #8`) | **green 15/15** (the model is untouched — the mutation is asm-only) | **red**: `the samples written before the failure are not the packer's` | the device witness is the only witness of the instruction stream |
+| `bx lr` → `mov pc, lr` | — | — | `overlay-objdump` red: "no `bx lr` in the body" |
+| `pop {r4-r11, lr}` + `bx lr` → `ldmfd sp!, {r4-r10, pc}` | — | — | `overlay-objdump` red twice: pop does not restore lr, and LDM-to-PC |
+| Behaviour-neutral: delete the duplicated `and r12, r3, #0xFF` | **green** | **green 8/8** | an honest green row — a no-op edit does not read as a failure |
+
+**What 6a-4 deliberately did not do**, re-stated because the next rung depends on
+it: no cycle claim (E10's −349/−348 is a different image with a different driver),
+no default moved (`TableCountKernel` is still named on one line), no frame or
+stream decoded through the kernel, no escape partition, no `agb` in either library
+crate, and no hardware claim. The ROM cannot construct the two largest guard
+regions (§9.2.7.3 at orders 12 and 13 are 131 KB and 65 KB against 256 KB of
+EWRAM) and the `p = 0` extreme (2 MB); those three cases are host-only and the
+device suite **counts** them rather than dropping them silently — 6a-5's record
+inherits that split.
 
 ### 6a's pre-declared fork (stated before the reading, so it cannot be negotiated)
 
@@ -152,12 +228,24 @@ Unchanged since item 5 PR 4, and re-stated byte-identically by 6a-1/6a-2/6a-3:
 Images in the configuration a ROM links: `.text` **46,008 B** (`f0f88c33d150…`) ·
 `.rodata` 1,829,760 B · `.iwram` 812 B · `.ewram` 368 B · `.entrypoint` 380 B;
 `nm` anchors `LEADING_ONES @ 0x0300022c`, `rice_quotient` 336 B,
-`decode_residual` 596 B. Two hand-invoked gates exist outside `flac-gates`:
-`overlay-check` (thumbv4t compile witness) and `overlay-test` / `overlay-test-twin`.
+`decode_residual` 596 B. Hand-invoked gates outside `flac-gates`:
+`overlay-check` (thumbv4t compile witness), `overlay-test` / `overlay-test-twin`,
+and 6a-4's own configuration: `overlay-check-arm`, `overlay-test-arm` (15 host
+arms), `overlay-objdump`, `overlay-kernel-rom`,
+`overlay-kernel-test` (8 device arms, ~16 s real). 6a-4's instrument image
+(`overlay-kernel-check.gba`, `rice-arm,iwram-pin`): `.text` 67,772 B
+`8d8c7fe85a14…` · `.iwram` **1,356 B** `a568ddbb5c5f…` · `.rodata` 145,988 B ·
+`.ewram` 368 B · `.entrypoint` 380 B; `arm_rice_partition` 684 B at
+`0x0800017c`; tables `CTZ8 @ 0x0300032c`, `REV8 @ 0x0300042c`,
+`BRUIJN_INDEX @ 0x0300052c` (runtime-asserted by the ROM, never hard-coded by a
+kernel-check). This image is **not** the shipped path and its numbers are not
+comparable to the 46,008 B figure — different crate, different linked set, no
+cycle meaning.
 
 **Per-PR rules:** 6a-1 / 6a-2 / 6a-5 / 6a-7 / 6a-8 change no count and no
-instruction stream. 6a-3 may move counts only in its own new configuration. 6a-4
-may not move the default configuration at all. 6a-6 *is* allowed to move it, and
+instruction stream. 6a-3 and 6a-4 may move counts only in their own new
+configurations. 6a-4 moved none outside its own (verified: the default image is
+byte-identical, above). 6a-6 *is* allowed to move the default configuration, and
 must name its deltas symbol by symbol.
 
 ## The landing record every PR in this item carries

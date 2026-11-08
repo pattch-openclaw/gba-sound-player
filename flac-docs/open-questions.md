@@ -33,11 +33,13 @@ the standing landing record (control build, section/`nm` table, gate counts,
 mutation witness), not a paragraph.
 
 **Tree state when this section was written** (kept for the first Q's
-answerability, updated 2026-11-08): item 6a is up to **6a-3**, whose two commits
-(`37f40ec` visibility bump; `rice_twin.rs`, the out-of-crate differential, the
-`rice-twin` feature, the `item6a3*` instrument arms, `overlay-test-twin`, and the
-6a-3 record) are **merged** (PR #98, `8711e2f`). 6a-2, 6a-1 and the toolchain pin
-are merged (#95–#97). Nothing in any shipped decode path has changed since item 5 PR 4:
+answerability, updated 2026-11-08): item 6a is up to **6a-4**, which is on the
+branch `feat/flac-lite-gba-arm-kernel` (the asm kernel, the FFI/ABI, the
+`rice-arm` and `iwram-pin` features, `examples/overlay-kernel-check/` with its 8
+device `#[test_case]`s, `overlay-check-arm`/`-test-arm`/`-objdump`/`-kernel-rom`/
+`-test`, and the 6a-4 landing record — not yet merged). 6a-3 is merged (PR #98,
+`8711e2f`); 6a-2, 6a-1 and the toolchain pin are merged (#95–#97). Nothing in any
+shipped decode path has changed since item 5 PR 4:
 `.text` 46,008 B `f0f88c33d150…`, `rice_quotient` live, `decode_residual` 596 B,
 `flac-gates` 1,169 passed / 6 ignored. The live `nm` anchor is
 `LEADING_ONES @ 0x0300022c` — but only in an image with **no** second mechanism, which
@@ -51,7 +53,17 @@ scheme-wide constant, and no kernel-check may hard-code it.
 ### Q1 — Is the ARM kernel *right* through the seam on the device, and on whose tables?
 
 **Opened by:** item 6a's row 6a-4; the boundaries item 5 handed forward; the corpus
-blindnesses 6a-3 discovered rather than assumed. **Owned by:** 6a-4.
+blindnesses 6a-3 discovered rather than assumed. **Owned by:** 6a-4 — **answered
+2026-11-08**, and the answer is in [`plan-of-record.md`](plan-of-record.md)
+("6a-4 — landed"). The short form: (a) the ROM sweeps the same committed corpus and
+the same synthesized case set the host does, and the asm, the model and the
+incumbent agree on both; (b) the overlay owns its three tables' copies (544 B,
+`.iwram` 812 → 1,356 B), witnessed by re-derivation and FNV digests on the host and
+by runtime addresses on the device — never by a hard-coded address; (c) the
+`unsafe` budget is written down and counted: **0 in a default build, 3 items with
+`rice-arm`, 6 with `iwram-pin` on top**. And the half nobody could have reasoned
+out: the first landed cut read its three stack arguments two words too high, every
+host arm stayed green, and the ROM's first end-of-stream case convicted it.
 
 Three halves, and none of them is about speed. (a) The kernel's boundary list is
 long enough to be its own review, and the only oracle for ARM code here is the
@@ -266,10 +278,14 @@ keeping itself honest by comparing a kernel with a copy of itself; that is why b
 source-level pins exist. The 5-bit-parameter remainder leg (`order` 17…31) is reached
 only by a spec-text sweep, not by real streams; the cursor-restore difference between
 the incumbent and a spec-order kernel on an unterminated final codeword is permitted
-by the trait contract and is recorded as **untested**, not passed. The standing fix is
-the one the plan already names: a kernel-check ROM sweeping the **same** committed
-golden tables (shared-consumer rule — never a second transcription of an expectation),
-which is also the cheapest thing that makes the corpus able to see a kernel swap.
+by the trait contract and is recorded as **untested**, not passed. The standing fix was
+the one the plan named — a kernel-check ROM sweeping the **same** committed golden
+tables (shared-consumer rule — never a second transcription of an expectation) —
+and 6a-4 landed it: `examples/overlay-kernel-check/` parses the corpus through one
+`#[path]`-shared source and runs three legs over it on the device, so the corpus can
+now see a kernel swap. The census stays a **tripwire in both consumers** (host and
+ROM): 11 partitions / 1,015 samples / parameters `{0, 2, 3, 6, 8}` / 0 escapes /
+longest unary run 39. Widening the corpus now fails two gates and says so.
 
 ### Q11 — Is anything in these docs still a phantom?
 
