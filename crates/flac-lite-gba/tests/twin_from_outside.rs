@@ -741,9 +741,12 @@ fn naming_a_kernel_from_outside_has_not_wired_one_in() {
     files.sort();
     assert_eq!(
         files,
-        vec!["lib.rs", "rice_twin.rs"],
-        "6a-3 declares exactly one module; a second one here has to be in the same diff \
-         as the decode path or the ROM that uses it"
+        vec!["lib.rs", "rice_arm.rs", "rice_twin.rs"],
+        "6a-3 declared one module and 6a-4 declared one more (`rice_arm.rs`, its \
+         asm kernel) — and 6a-4 is the rung that brought the ROM which uses it \
+         (`examples/overlay-kernel-check/`), which is the condition this census \
+         set for a second module. A third file still has to arrive in the same \
+         diff as the decode path or the ROM that uses it."
     );
     for file in &files {
         let text = std::fs::read_to_string(format!("{src_dir}/{file}"))
