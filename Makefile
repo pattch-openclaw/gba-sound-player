@@ -4,8 +4,8 @@
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
-        test test-rom flac-test flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check spike-test opus-test kernel-test overlay-check overlay-test \
-        podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test podman-overlay-test \
+        test test-rom flac-test flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check spike-test opus-test kernel-test overlay-check overlay-test overlay-test-twin \
+        podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test podman-overlay-test podman-overlay-test-twin \
         clean clean-cache check podman-check help toolchain-check
 
 # ---------------------------------------------------------------------------
@@ -633,6 +633,9 @@ podman-kernel-test:
 #   overlay-check        the crate COMPILES for $(TARGET) and flac-lite resolves
 #                        through the path dependency, in a release check
 #   overlay-test         the crate's host witness, run out-of-tree (config leak)
+#   overlay-test-twin    6a-3's configuration: both arms above with
+#                        --features rice-twin on. New configuration, NEW GATE —
+#                        never a broadening of the two above it.
 #
 # What neither one witnesses, stated plainly because both absences are the point
 # of 6a-1: no link step exists in an rlib, so there is no link witness and no
@@ -678,10 +681,49 @@ overlay-test: toolchain-check
 	  $(CARGO) test --manifest-path $(OVERLAY_CRATE_MANIFEST) --target $(HOST_TRIPLE)
 	@echo "overlay-test passed: the overlay's host witness is green (6a-1: one no-op test, by design)"
 
+# The `rice-twin` configuration, named as its OWN gate rather than by broadening
+# `overlay-test` — the `flac-test-crc`/`-scan`/`-rice` pattern one rung over, and
+# required by 6a-3's own per-PR rule ("it may move counts only in its own new
+# configuration"). Two arms, both with `--features rice-twin` on:
+#   1. the thumbv4t COMPILE witness — that a `RiceKernel` impl declared in this
+#      crate, i.e. outside the core, builds for the GBA target. This is the half
+#      `overlay-check` structurally cannot see: it builds the default set, in which
+#      `src/rice_twin.rs` does not exist;
+#   2. the host differential `tests/twin_from_outside.rs`, which is declared
+#      `required-features = ["rice-twin"]` in the manifest, so a default
+#      `overlay-test` does not even build it. That declaration is what makes "the
+#      default build of this crate contains no kernel" a checked statement instead
+#      of a claim: without it, cargo would report the suite's absence as a green it
+#      had not earned.
+# Same split-ladder rule as the two gates above it: hand-invoked, not in
+# `flac-gates` (a different crate whose features do not exist there), not in `test`
+# (nothing links this crate). And the same limit, stated because it is now sharper:
+# this gate is a compile witness and a correctness witness, NOT a codegen or cycle
+# witness — an rlib still has no link step, so the "second implementor present"
+# charge that item 5 measured can only be read in an image that links this crate,
+# which is the instrument arm in examples/flac_spike/experiments/ (FLAC.md, 6a-3
+# paragraph 2), not anything here.
+overlay-test-twin: toolchain-check
+	cd $(OVERLAY_CRATE_DIR) && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features rice-twin
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(OVERLAY_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features rice-twin
+	@echo "overlay-test-twin passed: the rice-twin configuration is green — an out-of-crate RiceKernel impl compiles for $(TARGET), and the out-of-crate corpus differential (independent width walk + incumbent + carried arm + spec-order leg vs exit_bits) is green on $(HOST_TRIPLE). Neither arm is a decode path; neither owes a cycle."
+
 podman-overlay-test:
 	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
 	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make overlay-test
 	@echo "podman-overlay-test done: overlay host witness ran in $(CONTAINER)."
+
+# 6a-3's configuration in the image, for the same reason the arm above exists in
+# both environments. NOT run for the 6a-3 record — no container runtime on the host
+# that wrote it, exactly the caveat 6a-1's record carries; `make podman-overlay-test-twin`
+# on a capable host is that missing arm.
+podman-overlay-test-twin:
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make overlay-test-twin
+	@echo "podman-overlay-test-twin done: overlay rice-twin configuration ran in $(CONTAINER)."
 
 # Cargo's runner env var is the upper-cased target triple with dashes replaced
 # by underscores: CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER.
@@ -879,7 +921,9 @@ help:
 	@echo "  GBA OVERLAY (FLAC.md split-ladder item 6a; crates/flac-lite-gba):"
 	@echo "    overlay-check     the overlay COMPILES for $(TARGET) against flac-lite (compile only: an rlib has no link step)"
 	@echo "    overlay-test      the overlay's host witness (6a-1: one no-op test by design; hand-invoked, not in test/flac-gates)"
+	@echo "    overlay-test-twin the overlay's \`rice-twin\` configuration: out-of-crate RiceKernel impl compiles for $(TARGET) + the out-of-crate corpus differential (hand-invoked; new configuration, new gate)"
 	@echo "    podman-overlay-test  that host witness in the container"
+	@echo "    podman-overlay-test-twin  the \`rice-twin\` configuration in the container"
 	@echo ""
 	@echo "  Tests — native gates (need nightly + agb-gbafix + mgba-test-runner locally):"
 	@echo "    test              test-rom + flac-test (verify-only: no reformat)"

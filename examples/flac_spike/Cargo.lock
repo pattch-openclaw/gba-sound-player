@@ -277,11 +277,19 @@ name = "flac-lite"
 version = "0.1.0"
 
 [[package]]
+name = "flac-lite-gba"
+version = "0.1.0"
+dependencies = [
+ "flac-lite",
+]
+
+[[package]]
 name = "flac-spike"
 version = "0.1.0"
 dependencies = [
  "agb",
  "flac-lite",
+ "flac-lite-gba",
 ]
 
 [[package]]

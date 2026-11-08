@@ -29,6 +29,15 @@ edition = "2024"
 # ladder step 2, 2026-11-02 — GBA ROM crates opt in).
 flac-lite = { path = "../../crates/flac-lite", features = ["iwram-pin"] }
 
+# The GBA OVERLAY crate, optional and off in every shipped build: this is the
+# first time anything in this repository links `flac-lite-gba` at all, which is
+# what 6a-3's link witness needs (an rlib has no link step, so no gate on the
+# overlay crate itself can answer a codegen question — that limit is written in
+# the Makefile's overlay section and in the crate's own docs). Enabling it also
+# turns on the overlay's `rice-twin`, i.e. the core's `rice-hybrid`; see the two
+# feature entries below.
+flac-lite-gba = { path = "../../crates/flac-lite-gba", features = ["rice-twin"], optional = true }
+
 # The sample-rate ROM flow (FLAC.md "Sample-rate reduction" Part 1). The
 # feature exists to gate the rate bin + rate witness so the default spike
 # build NEVER sees them: `make native-spike-rom` / `make spike-test` compile
@@ -39,6 +48,24 @@ flac-lite = { path = "../../crates/flac-lite", features = ["iwram-pin"] }
 # (gitignored, `make clean` removes): build `make rate-assets` first.
 [features]
 rate-assets = []
+
+# Item 6 PR 6a-3's codegen arms (FLAC.md, the 6a-3 record; src/item6a3_probe.rs
+# carries the design). Two features rather than one because the point is a
+# comparison with exactly one variable: T names a kernel whose `impl RiceKernel`
+# block lives in ANOTHER crate, H names the core's own hybrid twin, and both reach
+# it through the same call shape in the same file. `item6a3-twin` therefore brings
+# in the overlay, whose own `rice-twin` feature forwards to `flac-lite/rice-hybrid`
+# — so both arms build with the SAME core feature set, which is what makes T-vs-H a
+# measurement of the crate boundary and not of a feature flag. Off by default, and
+# nothing in the shipped ROM build (`make native-spike-rom`) enables either.
+item6a3-twin = ["dep:flac-lite-gba"]
+item6a3-hybrid = ["flac-lite/rice-hybrid"]
+# Control arm, not an implementation of the seam: the core's twin module is
+# compiled and NOTHING reaches it — item 5 PR 3's shape, in this instrument. Its
+# only job is to say whether the second mechanism has to be reachable to cost
+# anything, or whether presence in a codegen unit is enough. The probe module is
+# not compiled under this feature, so no call site exists.
+item6a3-present = ["flac-lite/rice-hybrid"]
 
 # agb exists only for the GBA target, and it cannot build for the host triple
 # — while the host witness tests (make spike-test) compile this crate's lib
