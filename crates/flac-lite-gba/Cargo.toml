@@ -7,18 +7,25 @@ edition = "2024"
 # witnesses rather than its own (see the crate docs). `publish = false` records
 # that boundary rather than leaving it to be rediscovered at `cargo publish`.
 publish = false
-description = "GBA (thumbv4t-none-eabi) overlay for flac-lite: the platform-bound realizations of the Rice codeword loop, written over the core's residual::RiceKernel seam. Split-ladder item 6 PR 6a-3: the seam is passable from outside the core (one instrument arm, Rust only); still nothing links this crate."
+description = "GBA (thumbv4t-none-eabi) overlay for flac-lite: the platform-bound realizations of the Rice codeword loop, written over the core's residual::RiceKernel seam. Split-ladder item 6 PR 6a-4: the ARM-mode kernel itself (`rice-arm`, off by default) is landed through that seam with its FFI, state-struct ABI and pinned tables; an instrument ROM links it, and no shipped decode path does."
 license = "MIT"
 
-# STATE (2026-11-07, split-ladder item 6 PR 6a-3): the crate exists and NOTHING
-# links it — no ROM, no example, no other crate. It now has one module and one
-# feature (`rice-twin` -> `src/rice_twin.rs`, an out-of-crate `RiceKernel` arm),
-# both behind that feature, so a DEFAULT build of this crate still contains no
-# kernel, no asm, no FFI and no `unsafe`. The plan of record for what lands when —
-# and for which PR owns which decision — is FLAC.md, "Split-ladder item 6 — the
-# overlay and the container: plan of record (2026-11-06)", the 6a ladder, and the
-# 6a-3 landing record that follows it. Everything below is a build-plumbing
-# decision taken once so it is not re-litigated inside 6a-4's diff.
+# STATE (2026-11-08, split-ladder item 6 PR 6a-4): the crate has two modules,
+# each behind its own feature — `rice-twin` (6a-3's out-of-crate Rust arm) and
+# `rice-arm` (6a-4's ARM-mode asm kernel, its FFI, its state-struct ABI and its
+# three tables). BOTH are off by default, so a DEFAULT build of this crate still
+# contains no kernel, no asm, no FFI and no `unsafe`, and the shipped default
+# Rice kernel in every configuration is still the core's `TableCountKernel`.
+# What changed in 6a-4 is that something now LINKS this crate: one instrument
+# ROM (`examples/overlay-kernel-check/`, `make overlay-kernel-rom`) is built with
+# `rice-arm` on, and that ROM is the device-side correctness witness. Nothing in
+# `examples/flac_integration/` or `examples/flac_spike/` names this crate yet —
+# that is 6a-5's, the rung that reads cycles and may move a default.
+# The plan of record for what lands when — and for which PR owns which decision —
+# is FLAC.md, "Split-ladder item 6 — the overlay and the container: plan of
+# record (2026-11-06)", the 6a ladder, and the 6a-3 and 6a-4 landing records
+# that follow it. Everything below is a build-plumbing decision taken once so it
+# is not re-litigated inside 6a-5's diff.
 
 [dependencies]
 # The core, by path. No core feature is switched on in the DEFAULT set: `iwram-pin`
@@ -64,6 +71,18 @@ flac-lite = { path = "../flac-lite" }
 # for one configuration, and to name what actually watches the edge. Reconsidering
 # the deletion is 6a-4's: 6a-4 is the rung where an arm may become unconditional,
 # because an asm kernel is what a real build of this crate will contain.
+#
+# 6a-4's answer, measured rather than assumed: the arm did NOT become
+# unconditional — 6a-4's own rule is that no default decode path moves — so the
+# allow stays, and it is now honest about exactly one configuration. Measured on
+# this manifest with the allow deleted, `make overlay-check` prints `warning:
+# unused dependency \`flac-lite\`` for the DEFAULT build, exactly as in 6a-3, and
+# prints nothing under `--features rice-arm`, because `src/rice_arm.rs` names the
+# core's `RiceKernel`, `BitReader`, `KernelWindow`, `TableCountKernel` and
+# `rice_unmap`. Deleting the allow would therefore mean putting a kernel in the
+# default build, which is the one thing 6a-4 is forbidden to do. What watches the
+# edge instead is `overlay-test-arm`'s compile-and-run pair and the instrument
+# ROM's link, both of which name the core through this manifest.
 [lints.cargo]
 unused_dependencies = "allow"
 
@@ -83,6 +102,14 @@ unused_dependencies = "allow"
 name = "twin_from_outside"
 required-features = ["rice-twin"]
 
+# Same rule, one rung later: 6a-4's correctness suite is the ARM-kernel witness
+# and it cannot run without the kernel compiled, so a default `make
+# overlay-test` must report its absence rather than a green it has not earned.
+# `make overlay-test-arm` is the gate that runs it.
+[[test]]
+name = "arm_from_outside"
+required-features = ["rice-arm"]
+
 [features]
 # 6a-1 left this empty on purpose; 6a-3's entry is the first one, and the item's
 # rules say an arm's cost is charged where it is wired, not here — so this turns
@@ -96,6 +123,35 @@ default = []
 # feature". A caller of this feature is therefore also opting into the core's
 # gate — the honest reading of "the core's own mechanism, run from outside".
 rice-twin = ["flac-lite/rice-hybrid"]
+
+# 6a-4: the GBA's own Rice kernel — `asm/rice_partition.s` assembled into the
+# crate by `global_asm!`, the FFI, the state-struct ABI, and the three tables.
+# Off by default, on purpose, twice over:
+#
+# * 6a-4's own rule is that no default decode path moves, and
+#   `TableCountKernel` stays the shipped kernel until 6a-5 reads the cycles;
+# * an off-by-default feature is also what keeps the *assembler* out of a
+#   default build, which is the difference between "this crate contains no asm"
+#   being a claim and being a checkable statement — `overlay-check` (no
+#   features) and `overlay-check-arm` (this feature) are two names for two
+#   different builds, and the pair is what makes that sentence a gate.
+#
+# It forwards to no core feature. The kernel reaches the core's seam through the
+# always-available `TableCountKernel` and the always-available window bridge, and
+# it owns its own tables rather than reaching for the core's private copies —
+# see `src/rice_arm.rs`, "Why this kernel owns its tables", for the measured
+# reason (the core's tables only exist alongside a second Rice mechanism, and
+# item 5 PR 3 measured what merely *present* costs on the live link).
+rice-arm = []
+
+# 6a-4 is where `iwram-pin` *enablement* lands in this crate, one feature
+# forward from the kernel and witnessed in the instrument ROM rather than in a PR
+# of its own — which is what the plan of record assigned. It forwards to
+# `flac-lite/iwram-pin`: the overlay's tables and the core's `LEADING_ONES` are
+# one decision about one memory system, and a GBA instrument that wants the
+# zero-wait read wants both. Off by default keeps a portable consumer of this
+# crate from inheriting a GBA link-script contract it cannot honour.
+iwram-pin = ["flac-lite/iwram-pin"]
 
 [lib]
 name = "flac_lite_gba"

@@ -65,3 +65,9 @@
 
 # Python bytecode caches (scripts/*.py); never commit.
 __pycache__/
+
+# The 6a-4 kernel-check ROM crate (examples/overlay-kernel-check/ — own
+# workspace, same pattern; builds a target/ of its own, and the ROM it fixes is
+# build output like every other one).
+/examples/overlay-kernel-check/target/
+/overlay-kernel-check.gba

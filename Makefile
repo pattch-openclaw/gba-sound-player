@@ -4,7 +4,9 @@
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
-        test test-rom flac-test flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check spike-test opus-test kernel-test overlay-check overlay-test overlay-test-twin \
+        test test-rom flac-test flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check spike-test opus-test kernel-test \
+        overlay-check overlay-check-arm overlay-test overlay-test-twin overlay-test-arm overlay-objdump \
+        overlay-kernel-rom native-overlay-kernel-rom podman-overlay-kernel-rom overlay-kernel-test podman-overlay-kernel-test \
         podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test podman-overlay-test podman-overlay-test-twin \
         clean clean-cache check podman-check help toolchain-check
 
@@ -139,13 +141,15 @@ SPIKE_CACHE   ?= gba-flac-spike-target
 OPUS_CACHE    ?= gba-opus-spike-target
 KERNEL_CACHE ?= gba-arm-kernels-target
 OVERLAY_CACHE ?= gba-flac-lite-gba-target
+OVERLAY_ROM_CACHE ?= gba-overlay-kernel-check-target
 CACHE_MOUNTS := -v $(CARGO_CACHE):/app/target:Z \
                 -v $(FLAC_CACHE):/app/crates/flac-lite/target:Z \
                 -v $(OVERLAY_CACHE):/app/crates/flac-lite-gba/target:Z \
                 -v $(FLACROM_CACHE):/app/examples/flac_integration/target:Z \
                 -v $(SPIKE_CACHE):/app/examples/flac_spike/target:Z \
                 -v $(OPUS_CACHE):/app/examples/opus_spike/target:Z \
-                -v $(KERNEL_CACHE):/app/examples/arm-kernels/target:Z
+                -v $(KERNEL_CACHE):/app/examples/arm-kernels/target:Z \
+                -v $(OVERLAY_ROM_CACHE):/app/examples/overlay-kernel-check/target:Z
 # Note, not fixed here: KERNEL_CACHE has been in $(CACHE_MOUNTS) since that
 # crate landed but was never added to `clean-cache` below. `clean-cache` now
 # lists $(OVERLAY_CACHE) because this change introduces it; the kernel volume's
@@ -282,6 +286,16 @@ KERNEL_CRATE_BIN := target/$(TARGET)/release/arm-kernels
 OVERLAY_CRATE_DIR := crates/flac-lite-gba
 OVERLAY_CRATE_MANIFEST := $(abspath crates/flac-lite-gba/Cargo.toml)
 
+# 6a-4's INSTRUMENT ROM (examples/overlay-kernel-check/) — the device-side
+# correctness witness for the overlay's ARM kernel. A ROM, so unlike the overlay
+# library it has a link step; the only place in the tree that links the overlay
+# unconditionally. Standalone workspace, root config inherited, no local
+# .cargo/config.toml (same double-`-Tgba.ld` leak as every other ROM crate).
+OVERLAY_ROM := overlay-kernel-check.gba
+OVERLAY_ROM_DIR := examples/overlay-kernel-check
+OVERLAY_ROM_MANIFEST := $(abspath examples/overlay-kernel-check/Cargo.toml)
+OVERLAY_ROM_BIN := target/$(TARGET)/release/overlay-kernel-check
+
 # `rom` is the command run INSIDE the container (where agb-gbafix lives); the
 # *-rom targets above it are the host-facing entrypoints. Keep `rom` = the
 # native ROM build so containerized and native builds produce the same artifact.
@@ -306,6 +320,7 @@ format:
 	cd $(OPUS_CRATE_DIR) && $(CARGO) fmt
 	cd $(KERNEL_CRATE_DIR) && $(CARGO) fmt
 	cd $(OVERLAY_CRATE_DIR) && $(CARGO) fmt
+	cd $(OVERLAY_ROM_DIR) && $(CARGO) fmt
 else
 format:
 	@echo "format: skipping — no rustfmt for '$(TOOLCHAIN)' (build continues)."
@@ -636,6 +651,16 @@ podman-kernel-test:
 #   overlay-test-twin    6a-3's configuration: both arms above with
 #                        --features rice-twin on. New configuration, NEW GATE —
 #                        never a broadening of the two above it.
+#   overlay-check-arm    6a-4's configuration, compile half: the asm, the FFI and
+#                        the state-struct ABI type-check for $(TARGET)
+#   overlay-test-arm     6a-4's configuration, witness half: the host differential
+#                        (`tests/arm_from_outside.rs`, required-features = rice-arm)
+#   overlay-objdump      the ELF fact a sweep cannot show: ARM mode, four-byte
+#                        encodings, `pop {…, lr}` + `bx lr`, no LDM-to-PC
+#   overlay-kernel-rom   build + fix the 6a-4 kernel-check ROM, then run the
+#                        objdump witness on the same ELF
+#   overlay-kernel-test  6a-4's `#[test_case]` suite in mGBA — the device-side
+#                        witness, and the first ROM suite in this repo with tests
 #
 # What neither one witnesses, stated plainly because both absences are the point
 # of 6a-1: no link step exists in an rlib, so there is no link witness and no
@@ -662,12 +687,19 @@ podman-kernel-test:
 #
 # Deliberately NOT part of `flac-gates`: that aggregate is every configuration of
 # `crates/flac-lite`, and this is a different crate whose features do not exist
-# yet. Deliberately NOT in `test` either, and hand-invoked like
-# flac-test-crc/-scan/-rice, for the same reason: nothing links this crate, so
-# these are plumbing gates. There is no $(SECOND_TARGET) arm here on purpose — a
+# there. Deliberately NOT in `test` either, and hand-invoked like
+# flac-test-crc/-scan/-rice. There is no $(SECOND_TARGET) arm here on purpose — a
 # portability witness for a crate whose whole purpose is being platform-bound
 # would be a claim this item never makes; portability stays witnessed by
 # `flac-portable-check`, on the core.
+#
+# 6a-4 changes one of those absences and only one: there IS now a link step, in
+# `examples/overlay-kernel-check/` (a ROM crate, not this one — the overlay still
+# carries no `agb`). So `overlay-kernel-rom`/`-test` are the link and device
+# witnesses, and this section's host gates are unchanged in kind. Per-PR rule
+# this rung lives under: **6a-4 may not move the default configuration at all**,
+# which is why `overlay-check`/`overlay-test` (no features) are re-run unchanged
+# and why the new configuration gets names of its own rather than widening them.
 # ---------------------------------------------------------------------------
 
 overlay-check: toolchain-check
@@ -679,7 +711,73 @@ overlay-test: toolchain-check
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(OVERLAY_CRATE_MANIFEST) --target $(HOST_TRIPLE)
-	@echo "overlay-test passed: the overlay's host witness is green (6a-1: one no-op test, by design)"
+	@echo "overlay-test passed: the overlay's DEFAULT configuration is green — one lib test, and no kernel, asm, FFI or unsafe exists in a default build"
+
+# 6a-4's configuration, both halves, the `overlay-test-twin` shape one rung on:
+#   1. the thumbv4t COMPILE witness — `global_asm!` assembles, the FFI and the
+#      state-struct ABI type-check, and the tables' placement attributes compile
+#      for $(TARGET). `overlay-check` structurally cannot see any of it: it builds
+#      the default set, in which `src/rice_arm.rs` does not exist;
+#   2. the host differential `tests/arm_from_outside.rs` — `required-features =
+#      ["rice-arm"]`, so a default `overlay-test` does not even build it (the same
+#      checked-absence rule 6a-3 landed).
+# On the host this differential runs `model_partition`, a label-for-label Rust
+# model of the asm; it witnesses the contract, not the instruction stream. The
+# stream is `overlay-kernel-test`'s and `overlay-objdump`'s.
+overlay-check-arm: toolchain-check
+	cd $(OVERLAY_CRATE_DIR) && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features rice-arm
+	@echo "overlay-check-arm passed: the rice-arm configuration type-checks for $(TARGET) — asm assembled, FFI and KernelAbi declared, no link step (an rlib has none; overlay-kernel-rom is the link witness)"
+
+overlay-test-arm: toolchain-check
+	cd $(OVERLAY_CRATE_DIR) && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features rice-arm
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(OVERLAY_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features rice-arm
+	@echo "overlay-test-arm passed: the rice-arm configuration is green — the boundary arms (q = 31, w == 0, p = 0, both 9.2.7.3 guards, five end-of-stream shapes, the delegated domain) and the committed-corpus differential are green against the packer's values and the incumbent. This is the CONTRACT witness; the asm runs only in the kernel-check ROM"
+
+# The ELF fact. A green sweep cannot distinguish a four-byte ARM body from a
+# Thumb build of the same algorithm — both compute the same answers — so the mode
+# and the two return rules are read out of the built ELF. Host binutils is
+# enough (`objdump -i` lists elf32-littlearm); no arm-none-eabi toolchain needed.
+# The rules and their provenance are in the script's own header.
+overlay-objdump: toolchain-check
+	sh scripts/check_arm_kernel_objdump.sh $(OVERLAY_ROM_DIR)/$(OVERLAY_ROM_BIN)
+	@echo "overlay-objdump passed: arm_rice_partition is four-byte ARM code with a pop {{..., lr}} + bx lr return and no LDM-to-PC"
+
+# 6a-4's device witness. Build + fix the ROM (the link step), then read the ELF
+# fact on the exact image that was fixed. No cycle is claimed here: E10's
+# -349/-348 cyc/sample is a different image with a different driver, and 6a-5
+# owns the realization reading.
+overlay-kernel-rom: format
+	cd $(OVERLAY_ROM_DIR) && $(CARGO) build --release --target $(TARGET)
+	agb-gbafix $(OVERLAY_ROM_DIR)/$(OVERLAY_ROM_BIN) -o $(OVERLAY_ROM)
+	sh scripts/check_arm_kernel_objdump.sh $(OVERLAY_ROM_DIR)/$(OVERLAY_ROM_BIN)
+	@echo "Kernel-check ROM built: $(OVERLAY_ROM) (iwram-pin on: the tables' placement is the ROM's own test)"
+
+native-overlay-kernel-rom: overlay-kernel-rom
+	@echo "native-overlay-kernel-rom done: $(OVERLAY_ROM)"
+
+podman-overlay-kernel-rom:
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make overlay-kernel-rom
+	@echo "podman-overlay-kernel-rom done: $(OVERLAY_ROM) built in $(CONTAINER)."
+
+# The `#[test_case]` suite on mGBA's ARM7TDMI. Debug profile on purpose: overflow
+# checks and the model's `debug_assert` domain guard are part of what is being
+# witnessed, and this is a correctness gate, not a timing one. Eight cases, one
+# per family; a failure names its boundary.
+overlay-kernel-test: toolchain-check
+	cd $(OVERLAY_ROM_DIR) && \
+	  CARGO_TARGET_$(TARGET_ENV)_RUNNER=$(GBA_TEST_RUNNER) \
+	  $(CARGO) test --target $(TARGET)
+	@echo "overlay-kernel-test passed: the assembled ARM kernel, the model and the core's incumbent agree on the committed corpus and on the synthesized boundaries, on mGBA's ARM7TDMI — the only place the asm runs"
+
+podman-overlay-kernel-test:
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make overlay-kernel-test
+	@echo "podman-overlay-kernel-test done: the device suite ran in $(CONTAINER)."
 
 # The `rice-twin` configuration, named as its OWN gate rather than by broadening
 # `overlay-test` — the `flac-test-crc`/`-scan`/`-rice` pattern one rung over, and
@@ -819,7 +917,8 @@ clean:
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) clean
 	cd $(KERNEL_CRATE_DIR) && $(CARGO) clean
 	cd $(OVERLAY_CRATE_DIR) && $(CARGO) clean
-	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM) $(OPUS_ROM) $(OPUS_PROBE_ROM) $(KERNEL_ROM) $(RATE_ROM) $(RATE_PLAY_ROM)
+	cd $(OVERLAY_ROM_DIR) && $(CARGO) clean
+	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM) $(OPUS_ROM) $(OPUS_PROBE_ROM) $(KERNEL_ROM) $(RATE_ROM) $(RATE_PLAY_ROM) $(OVERLAY_ROM)
 # The rate flow's generated assets are TEMPORARY (gitignored, like ROMs —
 # FLAC.md "Sample-rate reduction"); they regenerate from
 # `make rate-assets INPUT=… RATE=…`, so they leave with `make clean`.
@@ -833,8 +932,8 @@ clean:
 # Safe: they are pure build caches — the next container run rebuilds from
 # scratch, slowly once, then repopulates them. Does NOT touch ./target.
 clean-cache:
-	-$(CONTAINER) volume rm $(CARGO_CACHE) $(FLAC_CACHE) $(FLACROM_CACHE) $(SPIKE_CACHE) $(OPUS_CACHE) $(OVERLAY_CACHE) 2>/dev/null || true
-	@echo "container build-cache volumes removed ($(CARGO_CACHE), $(FLAC_CACHE), $(FLACROM_CACHE), $(SPIKE_CACHE), $(OPUS_CACHE), $(OVERLAY_CACHE))."
+	-$(CONTAINER) volume rm $(CARGO_CACHE) $(FLAC_CACHE) $(FLACROM_CACHE) $(SPIKE_CACHE) $(OPUS_CACHE) $(OVERLAY_CACHE) $(OVERLAY_ROM_CACHE) 2>/dev/null || true
+	@echo "container build-cache volumes removed ($(CARGO_CACHE), $(FLAC_CACHE), $(FLACROM_CACHE), $(SPIKE_CACHE), $(OPUS_CACHE), $(OVERLAY_CACHE), $(OVERLAY_ROM_CACHE))."
 
 check:
 	$(CARGO) fmt --check
@@ -844,6 +943,7 @@ check:
 	cd $(OPUS_CRATE_DIR) && $(CARGO) fmt --check
 	cd $(KERNEL_CRATE_DIR) && $(CARGO) fmt --check
 	cd $(OVERLAY_CRATE_DIR) && $(CARGO) fmt --check
+	cd $(OVERLAY_ROM_DIR) && $(CARGO) fmt --check
 
 # Fail early and legibly when the pinned toolchain isn't reachable, instead of
 # half-running a gate (e.g. `--target ''` when the host triple can't be probed).
@@ -927,6 +1027,12 @@ help:
 	@echo "    overlay-test-twin the overlay's \`rice-twin\` configuration: out-of-crate RiceKernel impl compiles for $(TARGET) + the out-of-crate corpus differential (hand-invoked; new configuration, new gate)"
 	@echo "    podman-overlay-test  that host witness in the container"
 	@echo "    podman-overlay-test-twin  the \`rice-twin\` configuration in the container"
+	@echo "    overlay-check-arm the \`rice-arm\` configuration COMPILES for $(TARGET) (asm + FFI + ABI; an rlib has no link step)"
+	@echo "    overlay-test-arm  the \`rice-arm\` host differential (contract only: the asm runs only on mGBA)"
+	@echo "    overlay-kernel-rom build + fix $(OVERLAY_ROM), then read the objdump witness"
+	@echo "    overlay-objdump   ARM-mode / pop+bx / no-LDM-to-PC on the built ELF"
+	@echo "    overlay-kernel-test  the device \`#[test_case]\` suite in mGBA (the asm's own witness)"
+	@echo "    podman-overlay-kernel-rom / podman-overlay-kernel-test  the same in the container"
 	@echo ""
 	@echo "  Tests — native gates (need nightly + agb-gbafix + mgba-test-runner locally):"
 	@echo "    test              test-rom + flac-test (verify-only: no reformat)"

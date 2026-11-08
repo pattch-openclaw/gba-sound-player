@@ -2,12 +2,17 @@
 //!
 //! The platform-bound half of a decoder whose portable half lives in
 //! [`flac_lite`] (`crates/flac-lite/`, this repo). Split-ladder item 6 PR
-//! **6a-1** created this crate, and
-//! 6a-1 is all it is so far: **it exists, and nothing links it.** There is no
-//! kernel here, no asm, no FFI, no `unsafe`, no feature, and no module other than
-//! this doc comment. What follows is therefore the crate's *contract as planned*,
-//! written down once so the decisions in it are not re-litigated inside 6a-3's or
-//! 6a-4's diff. The plan of record — the PR ladder, each rung's witness, and the
+//! **6a-1** created this crate, 6a-3 put the first module behind a feature, and
+//! 6a-4 put the first *kernel* behind a feature. What is still true of every
+//! earlier rung, and still the shape this crate is required to keep: a **default
+//! build** of this crate has no kernel, no asm, no FFI, no `unsafe` and no
+//! module beyond this doc comment — both modules are behind their own features,
+//! and no shipped decode path in either crate names this one. What links it
+//! today is one instrument ROM (`examples/overlay-kernel-check/`), built with
+//! `rice-arm` on, whose only job is to be a correctness witness on the device.
+//! What follows is therefore the crate's *contract as planned*, written down once
+//! so the decisions in it are not re-litigated inside 6a-3's, 6a-4's or 6a-5's
+//! diff. The plan of record — the PR ladder, each rung's witness, and the
 //! decisions already settled — is `FLAC.md`, "Split-ladder item 6 — the overlay
 //! and the container: plan of record (2026-11-06)".
 //!
@@ -49,12 +54,26 @@
 //!   gate (`make overlay-test-twin` — both the thumbv4t compile witness and the
 //!   host differential) rather than changing an existing one; the counts of every
 //!   existing configuration are unchanged, which is that rung's own rule.
-//! * **6a-4** — the ARM-mode kernels themselves (`global_asm!` over the
-//!   `.s` bodies this repo already dual-witnesses in `examples/arm-kernels/`),
-//!   their FFI and its SAFETY blocks, the state-struct ABI mapping written as
-//!   this crate's own contract, and the tables under the core's existing
-//!   `iwram-pin` gate. That is also where `iwram-pin` **enablement** lands —
-//!   one feature forward, witnessed there rather than in a PR of its own.
+//! * **6a-4** (this PR) — the ARM-mode kernel itself: `src/rice_arm.rs` + the
+//!   `rice-arm` feature, assembling `asm/rice_partition.s` (lifted from the E10
+//!   probe patch — that kernel was never landed on main, and the plan line's
+//!   "`examples/arm-kernels/`" is right about the *fold* and wrong about this
+//!   body; `asm/rice_partition.s`'s header carries the correction) together with
+//!   `examples/arm-kernels/asm/fold_body.s`, the one committed fold source,
+//!   pasted in the same `global_asm!` unit. Its FFI, the state-struct ABI
+//!   written as this crate's own contract (`KernelAbi`, asserted by `offset_of!`
+//!   consts), the status→`Error` mapping, and the three tables under an
+//!   `iwram-pin` feature that *forwards* to the core's existing gate — that
+//!   enablement is what the plan assigned here.
+//!   **6a-4 moves no decode path** and makes no timing claim: the kernel is
+//!   correct-only, and cycles are 6a-5's reading. Its witnesses are
+//!   `tests/arm_from_outside.rs` (host differential + boundary arms; the host
+//!   runs a label-for-label Rust model of the asm, because there is no ARM
+//!   executor here), a kernel-check ROM (`make overlay-kernel-rom`, which runs
+//!   the assembled kernel *and* the model against the core's incumbent on the
+//!   device), and `objdump -d` of the built ELF for the two standing
+//!   no-degradation rules of this repo: four-byte ARM encodings, and a leaf
+//!   `pop {…,pc}`.
 //! * **the convert word-store kernel**, when it lands (proposal item (d)).
 //! * **not** the guarded i32 leg. The split proposal originally listed that as
 //!   overlay item (b); item 6 PR 0 moved it into the **core**, because the bound
@@ -74,7 +93,14 @@
 //!   bounded by the window's own region) is stated in the seam's trait docs, not
 //!   renegotiated here. In particular the kernels' loud rejection of escape
 //!   partitions and `p > 14` is a **probe fact, never a contract**: the core
-//!   stays correct for arbitrary FLAC, and profile facts stay the core's.
+//!   stays correct for arbitrary FLAC, and profile facts stay the core's. What
+//!   6a-4 actually did with that list is in `src/rice_arm.rs`: the two
+//!   §9.2.7.3 guards are *tested* by the kernel rather than wrapped (the probe
+//!   left them wrapped, and the seam's incumbent rejects them), the
+//!   restore-nothing rule is kept and its divergence from the incumbent's
+//!   per-read restore is **witnessed as a difference** rather than hidden, and
+//!   orders above this realization's 16 are *delegated* to the incumbent rather
+//!   than rejected.
 //! * **Not `dyn`, anywhere.** The seam is monomorphized or the realization is
 //!   not worth shipping — and that is a measured claim, not a style preference:
 //!   item 5 PR 3 measured what the mere *presence* of a second implementor costs
@@ -82,11 +108,15 @@
 //!   of the added mechanism in the image). The E2b lesson ("a −21.7% probe became
 //!   +38% on the live link") is why every rung of 6a is witnessed on the link a
 //!   ROM builds, not in isolation.
-//! * **Not a ROM, and no `agb`.** This is a library. The instrument that links
-//!   it is an existing one — `examples/flac_spike/` for cycles, the kernel-check
-//!   ROM for ARM correctness — and putting `agb` here would move the mixer/DMA
+//! * **Not a ROM, and no `agb`.** This is a library. The instruments that link
+//!   it are separate crates: a new one from 6a-4,
+//!   `examples/overlay-kernel-check/`, is the ARM *correctness* instrument, and
+//!   `examples/flac_spike/` is the one that would be the *cycle* instrument if
+//!   6a-5 wires a kernel into it. Putting `agb` here would move the mixer/DMA
 //!   and `agb` integration work (Phase 2 step 9, explicitly out of item 6) into
-//!   the place where a kernel is decided.
+//!   the place where a kernel is decided — and note what that distinction is
+//!   for: the instrument ROM's `agb` use is a print path and a `#[test_case]`
+//!   hook, not a decoder that plays sound.
 //! * **Not the container.** Where frames come from — `scan::Frames`,
 //!   `format::Manifest`, `scripts/pack_flac.sh`, the rate-play rewire — is 6b,
 //!   which changes nothing about how a frame is decoded. `scan` stays off until
@@ -97,15 +127,25 @@
 //!
 //! ## `unsafe`, and its budget
 //!
-//! `#![deny(unsafe_code)]` is in force from the first line of this crate, and
-//! 6a-1 contains **zero** `unsafe`; 6a-3's rule is that it stays at zero, and the
-//! record for that PR re-counts it rather than asserting it here. The first real
-//! `unsafe` surface in this repository is 6a-4's asm FFI, and the budget is fixed
-//! now so it can be counted later: **one `SAFETY` block per FFI site, each naming
-//! the bounds it relies on** (window length, output length, table reach, the region
-//! a read is bounded by), with a counted and named exception list in these docs —
-//! the same ratified-exception discipline the core uses for its `.iwram` placement
-//! attributes. **Current count: 0.**
+//! `#![deny(unsafe_code)]` is in force from the first line of this crate. 6a-1
+//! and 6a-3 contain **zero** `unsafe`; 6a-4 adds the first, in `src/rice_arm.rs`,
+//! behind `rice-arm`. The budget this crate's own docs fixed for that rung was
+//! "one `SAFETY` block per FFI site, each naming the bounds it relies on", with a
+//! counted and named exception list here — the same ratified-exception discipline
+//! the core uses for its `.iwram` placement attributes. **Count in a default
+//! build: 0. Count with `rice-arm` on: three items — the `global_asm!`, the
+//! `unsafe extern "C"` declaration, and one `unsafe { … }` call site whose
+//! `// SAFETY:` block names the state-object extent, the output bound, the read
+//! bound (`region()`, including the word-skip's four-byte peek) and the table
+//! reach of every index. With `iwram-pin` on top of `rice-arm`: six**, the three
+//! above plus one `unsafe(link_section = ".iwram")]` placement attribute per
+//! table.**
+//!
+//! Each item carries its own `#[allow(unsafe_code)]` — six allowance attributes
+//! in `src/rice_arm.rs`, one per item, which is what makes the count a grep
+//! rather than a claim (`tests/arm_from_outside.rs`, the budget arm, counts them
+//! by attribute shape and refuses if the number moves). Prose mentions of
+//! `unsafe` in that file are not counted by that pattern on purpose.
 //!
 //! ## Build shape and gates (the plumbing, decided once)
 //!
@@ -139,6 +179,17 @@
 //!   of an existing one — `make overlay-test` still runs exactly what it ran in
 //!   6a-1, which is what makes "the default build of this crate still contains no
 //!   kernel" a checkable statement rather than a claim.
+//! * `make overlay-check-arm`, `make overlay-test-arm` and
+//!   `make overlay-kernel-rom` — what 6a-4 adds, same shape: the compile
+//!   witness for the assembled kernel for `thumbv4t-none-eabi`, the host
+//!   correctness suite (`tests/arm_from_outside.rs`), and the one instrument ROM
+//!   that links this crate and runs the assembled kernel on the device against
+//!   the core's incumbent. `overlay-kernel-rom` also reports the ROM's section
+//!   sizes and the tables' `nm`/`objdump` placement, because the table question
+//!   (does a pinned table stay a separate object once nothing in the core needs
+//!   it?) is a link question and a link question needs a link step.
+//!   `overlay-test` and `overlay-check` are unchanged by this PR — they run the
+//!   default build, and the default build still has no kernel in it.
 //! * None of these gates is in `flac-gates` (that aggregate is the core's
 //!   configurations, and this is a different crate whose features do not exist
 //!   there) and none is in `test`. They are hand-invoked, like
@@ -161,9 +212,12 @@
 #![deny(unsafe_code)]
 
 // 6a-1's empty module tree was the honest shape of a crate that nothing links.
-// 6a-3 changes that by exactly one module, and it stays behind that module's own
-// feature: a default build of this crate still contains no kernel, so the claim
-// "nothing links it" is still true of the default build after this PR.
+// 6a-3 changed that by exactly one module, and 6a-4 by exactly one more, each
+// behind its own feature: a default build of this crate still contains no
+// kernel, so the claim "no shipped decode path links it" is still true of the
+// default build after this PR.
+#[cfg(feature = "rice-arm")]
+pub mod rice_arm;
 #[cfg(feature = "rice-twin")]
 pub mod rice_twin;
 

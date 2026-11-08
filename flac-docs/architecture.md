@@ -86,9 +86,16 @@ crates/flac-lite/          portable core: no_std, zero deps, zero alloc
   scan.rs                  table-less frame walk + resync (feature `scan`)
   rice_hybrid.rs           portable hybrid Rice twin (feature `rice-hybrid`)
 
-crates/flac-lite-gba/      GBA overlay: no_std, deny(unsafe_code), unsafe budget 0
+crates/flac-lite-gba/      GBA overlay: no_std, deny(unsafe_code)
   rice_twin.rs             an out-of-crate RiceKernel arm (feature `rice-twin`)
+  rice_arm.rs              the ARM-mode kernel, FFI, KernelAbi, three tables
+                           (feature `rice-arm`); 0 unsafe in a default build,
+                           3 items with rice-arm, 6 with iwram-pin as well
+  asm/rice_partition.s     the assembled body (E10's, plus the four 6a-4 deltas)
 
+examples/overlay-kernel-check/  the kernel-check ROM (`rice-arm` + `iwram-pin`):
+                           corpus + synthesized boundaries through incumbent,
+                           assembled kernel and model, on mGBA's ARM7TDMI
 examples/flac_spike/       the measurement instrument (the `ctrl` arm of every E
                            record) + experiments/<name>/ reappliable samples
 examples/flac_integration/ standalone ROM that links the decoder (build sanity)
@@ -109,15 +116,20 @@ covered. `strict-profile` is the exception — it is declared and unimplemented.
 | `rice-hybrid` | compiles the portable hybrid Rice twin | `flac-test-rice` |
 | `strict-profile` | *declared*: rejects frames outside the constrained encode profile | **not implemented** — `format::EncodeProfile::validate` is still `todo!()`, and no gate builds the feature. Product-side work (6b-2) |
 | `rice-twin` (overlay) | forwards to `flac-lite/rice-hybrid`; exposes the out-of-crate arm | `overlay-test-twin` |
+| `rice-arm` (overlay) | assembles `asm/rice_partition.s`, declares the FFI and `KernelAbi`, owns the three tables — correct-only, nothing names it as a default | `overlay-test-arm` (host contract, 15 arms) + `overlay-kernel-test` (8 device arms) + `overlay-objdump` |
+| `iwram-pin` (overlay) | forwards to `flac-lite/iwram-pin`; pins the overlay's three tables and the core's `LEADING_ONES` | `overlay-kernel-rom`, whose own test asserts the runtime addresses are inside `.iwram` |
 
 The `decoder` facade and the `format` items above are the remaining `todo!()`s; the
 `GAFP` byte contract is specified in [`../crates/flac-lite/README.md`](../crates/flac-lite/README.md)
 and `scripts/pack_flac.sh` is still a documented stub. The spike's generated
 per-frame offset table is the deliberate stand-in.
 
-**Nothing links `flac-lite-gba` yet.** No ROM, no example, no other crate. That is
-the item-6a shape, not an oversight: the overlay's first rung exists so that the
-build plumbing and the seam's reachability are settled before any asm arrives.
+**One thing links `flac-lite-gba`: the correctness instrument**
+(`examples/overlay-kernel-check/`), and only with `rice-arm` on. No shipped decode
+path, no spike build and no product crate names it. That is the item-6a shape: the
+overlay's rungs exist so the build plumbing, the seam's reachability and the
+kernel's correctness are settled before any cycle is read (6a-5) or any default is
+moved (6a-6).
 
 ## The seam: a whole-partition `RiceKernel`
 
@@ -244,7 +256,7 @@ hurts (E6).
 | 6. `RiceKernel` seam + window bridge + portable twin + the flip reading | landed 2026-11-05/06; the default **did not flip** (measured negative) |
 | 7. Overlay crate, seam passable from outside | item 6a-1 and 6a-3 landed 2026-11-06/07 |
 | 8. Guarded i32 default width | item 6a-6, planned |
-| 9. ARM kernels over the seam | item 6a-4/6a-5, planned |
+| 9. ARM kernel over the seam | item 6a-4 **landed** 2026-11-08 (correctness only — no cycle, no default moved; 6a-5 is the reading) |
 | 10. Manifest + packer + facade rewired onto `scan` | item 6b, planned |
 
 ## Decisions of record

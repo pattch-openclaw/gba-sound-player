@@ -1,0 +1,49 @@
+[package]
+name = "overlay-kernel-check"
+version = "0.1.0"
+edition = "2024"
+
+# 6a-4's instrument ROM (FLAC.md split-ladder item 6, PR 6a-4): the device-side
+# correctness witness for crates/flac-lite-gba's ARM-mode Rice kernel.
+#
+# Why a standalone ROM crate and not a target of an existing one: `flac-lite-gba`
+# is a library with no `agb`, and its own docs keep it that way ("not a ROM, and
+# no `agb`" — the mixer/DMA work is Phase 2 step 9 and explicitly out of item 6).
+# The spike is the *cycle* instrument and names the overlay in 6a-5; this crate
+# is the *correctness* one, and it is the single place in the repo where the
+# overlay is linked unconditionally.
+#
+# Standalone workspace, root config INHERITED on purpose (the `-Tgba.ld` link
+# script and the target triple) — do NOT add a local .cargo/config.toml: cargo
+# concatenates `target.<triple>.rustflags` across config layers, so a local
+# re-declaration links `-Tgba.ld` twice and the link fails (README, agb-build
+# gotcha 2; `examples/arm-kernels/Cargo.toml` same note).
+#
+#   make overlay-kernel-rom    build + fix the ROM, then run the objdump witness
+#   make overlay-kernel-test   the #[test_case] suite under mgba-test-runner
+#
+# `iwram-pin` is on HERE and nowhere else on purpose: it is where 6a-4's pin
+# *enablement* lands (the plan assigned it to this PR), and the ROM's own test
+# asserts the three tables' runtime addresses are inside .iwram. A portable
+# consumer of the overlay never inherits a GBA link-script contract.
+
+[dependencies]
+flac-lite = { path = "../../crates/flac-lite" }
+flac-lite-gba = { path = "../../crates/flac-lite-gba", features = ["rice-arm", "iwram-pin"] }
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+agb = "0.25.0"
+
+[[bin]]
+name = "overlay-kernel-check"
+path = "src/main.rs"
+
+[workspace]
+
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true
