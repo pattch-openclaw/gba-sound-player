@@ -6,38 +6,54 @@ where performance actually stands, what is next, and where every detail lives.
 It is deliberately short — the detail is in [`flac-docs/`](flac-docs/), one file
 per concern.
 
-**Status in one line:** the decoder is complete and bit-exact, the playback
-harness plays real music at 10,512 Hz with correct tempo and pitch (audibly
-verified), full-rate (32,768 Hz) decoding is still over budget on the shipped
-path — and the ARM kernel is now **landed, witnessed on mGBA's ARM7TDMI, and
-measured through the shipped seam**: it is **−584,856 cycles/frame (−286.9
-c/sample) faster than the shipped kernel** in the product-shape image. That is
-111.3% of the 32 kHz budget on its own, and **stacking the width leg on it
-projects 103.8% — over budget, where the vendored probe projected 94.5%**; that
-gap between the two is the seam's realization cost. **It is now measured inside one
-image (6a-5b, 2026-11-09), and the projection was right**: with E10's arm timed
-beside the landed one in the same link, the same pass and the same calibration,
-`asm − vend` = **+98,291 c/frame = +48.2 c/sample = 24.11 cycles per Rice
-codeword**, the vendored realization faster on 157/157 frames of both clips,
-reproducing to ±13 c/frame across runs. The 2026-11-08 re-opening of that number
-— that it was an artifact of comparing two records — is withdrawn: the *arm*
-absolutes reproduce across images (0.02–0.04% apart) while only the control moves.
-And the differential says the seam is **not** what costs: its bridge, its pinned
-tables and its state ABI are symmetric in that image and priced at zero. The cost is
-inside the codeword loop, where the landed kernel executes **6 more instructions per
-codeword** than the probe's (G1, G2, and one provably dead duplicate `and` the guard
-insertion left behind). **6a-5c then priced them (2026-11-09): an instruction in
-this loop costs 4.0000 cycles**, so 6 × 4 = 24 is the whole 24.11 — no residue, no
-layout anomaly. Deleting the dead `and` (a real fix, all gates green) is worth
-`4 × 640,000` cycles per clip = 1.56 budget points; deleting all six would be
-worth 9.33 and would leave 0.46% of the gap. Four cycles is what the ARM7TDMI pays
-to fetch a 32-bit ARM instruction from cartridge ROM, which makes the *placement* of
-the kernel the live question rather than its spelling: **6a-5d** (the same stream in
-IWRAM, 0 wait states) is now the largest lever on the table, and **E6's
-"instruction fetch is ruled out" is reversed for this case**. Both product rates
-still fit with the kernel alone (61.7% at 18,157 Hz,
-35.7% at 10,512 Hz). See [`flac-docs/measurements.md`](flac-docs/measurements.md)
-and Q12 in [`flac-docs/open-questions.md`](flac-docs/open-questions.md).
+**Status in one line:** the decoder is complete and bit-exact; the playback harness
+plays real music at 10,512 Hz with correct tempo and pitch (audibly verified); the
+**shipped** path is still over budget at full rate (167% of the 32,768 Hz frame);
+and the ARM kernel — landed, witnessed on mGBA's ARM7TDMI, measured through the
+shipped seam — now decodes FIXED at **48.3% of the 32,768 Hz budget** (worst frame
+48.5%), **2.9× faster than it was a day earlier, from one section directive**.
+
+That is where four rungs of differential went, and the answer was not any of the
+things they suspected. It is worth reading in order, because each rung rules out
+what the next one would otherwise have blamed:
+
+- **6a-5b (2026-11-09).** With E10's vendored arm timed *beside* the landed one in
+  one link, one pass, one calibration, `asm − vend` = **+98,291 c/frame =
+  +48.2 c/sample = 24.11 cycles per Rice codeword**, on 157/157 frames of both clips.
+  The projection it was built to check was right to 0.4%, so the seam really did lose
+  48 c/sample against the probe. What the image priced at **zero**: the bridge, the
+  pinned tables, the 12-byte state frame, the ABI — all symmetric.
+- **6a-5c (2026-11-09).** The cost is the codeword loop's **instruction count**, at
+  **4.0000 cycles per instruction**: deleting the provably dead duplicated `and` the
+  guard insertion left behind moves the pair by exactly `4 × 640,000` cycles, and
+  deleting the five guard instructions on top of it by exactly `5 × 4 ×
+  640,000`, leaving 0.46% — the bridge. Not a layout effect: the saving tracks
+  codewords *executed* (16,384 on every 2048-sample frame, 4,096 on the 512-sample
+  frame). The old "4.02 cycles per inserted instruction" that 6a-5b treated as an
+  anomaly was the answer.
+- **6a-5d (2026-11-09).** 4 cycles is the price of an ARM instruction **fetched from
+  cartridge ROM** (16-bit bus, WS0 = 3,1, no cache). Put the same instruction stream
+  in **IWRAM** and the landed arm goes **1,151,236 → 506,413 c/frame**,
+  **109.77% → 48.29%** of the 32,768 Hz budget, with the `ctrl` leg cycle-identical
+  and `.text`/`.iwram` moving by exactly the body's 680 B. Both realizations were
+  paying the ROM tax: E10's body pinned on its own drops −290.4 c/sample, and with
+  both in IWRAM the pair reads **+14.2 c/sample instead of +48.2**. "The landed
+  realization lost 48 c/sample" was a statement about two *addresses*.
+- **E6's "instruction fetch is ruled out" is refuted, with its scope named**: E6
+  pinned a *Rust* path where each instruction carried many cycles of work, and its
+  variant arms forced inlining and took linker veneers. A tight ARM loop of one-cycle
+  instructions is the case it did not isolate.
+
+What this is **not**: a product claim. It is *decode only*; the producer's convert +
+push stages (~7.7 ms combined) are not in these windows; the shipped default
+(`TableCountKernel`) is untouched at 167% and no product path names `rice-arm`; and
+**E5 — hardware arbitration — is unrun**, which matters more now than ever,
+because a 4→1.4 fetch ratio is exactly what a cartridge model can get wrong. The
+direction is not model-dependent (no cache, 16-bit bus); the multiplier is mGBA's.
+Both product rates still fit with the kernel alone (61.7% at 18,157 Hz, 35.7% at
+10,512 Hz). See [`flac-docs/measurements.md`](flac-docs/measurements.md),
+[`plan-of-record.md`](flac-docs/plan-of-record.md) (6a-5c/6a-5d readings) and Q12 in
+[`flac-docs/open-questions.md`](flac-docs/open-questions.md).
 
 ## The constraint
 
@@ -135,20 +151,22 @@ One line per rung; the full plan, bars and invariants are in
   instruction in the codeword loop costs **4.0000 cycles** (two independent
   removals, exact to the cycle, proportional to codewords executed); the six-instruction
   delta is the whole 48 c/sample, and the dead `and` is deleted as a fix.
-- **6a-5d** — the codeword loop's placement: the same instruction stream resident
-  in IWRAM instead of cartridge ROM (plain `.iwram`; `.text_iwram` is E6's trap).
-  With fetch priced at 4 cycles and a ~30-instruction codeword path, this is a
-  multi-point lever, not a micro-optimization — and it is the case E6's
-  Rust-path result does not cover.
+- ~~**6a-5d** — the codeword loop's placement: the same instruction stream resident
+  in IWRAM instead of cartridge ROM (plain `.iwram`; `.text_iwram` is E6's trap).~~
+  **Measured, and it is the largest result in these records:** −644,824 c/frame on
+  the FIXED clip, 109.77% → **48.29%** of the 32,768 Hz budget, from one directive
+  and no other change, with the control leg cycle-identical. An ARM loop in
+  cartridge ROM pays 4 cycles per instruction; in IWRAM, ~1.4.
 - **6a-6** — guarded i32 becomes the core's default width, i64 kept as the
-  always-correct escape leg. It carries the **width half** of the stack question
-  (its measured marginal replaces E9's borrowed one); the verdict itself is
-  6a-5b's, and this rung does not start on a cross-image projection.
+  always-correct escape leg. Its measured marginal replaces E9's borrowed one. It
+  no longer carries the full-rate claim (decode is at 48.29% without it), but it
+  still halves real arithmetic on the decorrelate site and matters for the LPC clip.
 - **6a-7** — stack confirmation (kernel + i32) and the E-number re-anchor.
+- **E5** — hardware arbitration, once per candidate rate × path; the only route to a
+  real-time claim, and now the highest-value confirmation in the item, since a
+  4→1.4 fetch ratio is exactly what a cartridge model can get wrong.
 - **6b** — the container: the facade rewired onto `scan`, the real GAFP packer and
   manifest, and the rate-play path through a real manifest.
-- **E5** — hardware arbitration, once per candidate rate × path; the only route to
-  a real-time claim.
 - **Rate sweep** — the cross-rate profiling sweep on the improved decoder, which
   produces the "which rates become feasible" guidelines from measurement.
 

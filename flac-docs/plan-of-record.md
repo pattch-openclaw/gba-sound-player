@@ -56,25 +56,34 @@ projection re-opening on `docs/flac-6a5b-projection-reopened`)
   FIXED with no other lever. The item's central budget question therefore has a
   third candidate beside 6a-6's width leg: making the landed realization cost what
   the probe's realization cost — which is a kernel-side question, not a path one.
-- **6a-5c ran and the fork it pre-registered is resolved, cleanly and not the way the
-  fork guessed.** The 48.2 c/sample is **6 instructions at 4.0000 cycles each**, and
-  nothing else: deleting one provably dead `and` (a shippable fix, all gates green)
-  moves the pair by `2,560,000 = 4.000 × 640,000` cycles, and deleting the five
-  guard instructions on top of it moves it by another `12,800,000 = 5 × 4 ×
-  640,000`, leaving **71,627 cycles of 15,431,627** — 0.46% — which is the bridge.
-  So the currency is *instruction count*, and its price is **4 cycles**, which is
-  what a 32-bit ARM instruction costs when it is fetched from cartridge ROM on a
-  16-bit bus at WS0 = 3,1. The two channels 6a-5b posed (instruction cost vs
-  hot-loop layout) were a false pair: layout is excluded (the saving is
-  proportional to codewords executed, not to a change of position), and instruction
-  cost is real at 4× the rate the fork's own threshold assumed. **E6's
-  "instruction fetch is ruled out" is reversed for this case**, which is exactly
-  the case the 6a-5d row anticipated it would not cover.
-- **Next rung:** **6a-5d**, now unconditional and the largest quantity on the table
-  — the same instruction stream resident in IWRAM instead of ROM. If fetch is
-  priced at 4 cycles per instruction, IWRAM (0 wait states, 32-bit) is a
-  multi-point lever on a 40-instruction loop, not a layout experiment. Then **6a-6**,
-  the guarded i32 default width.
+- **6a-5c ran, and 6a-5d then reversed what it meant.** 6a-5c priced an instruction
+  in the codeword loop at **4.0000 cycles** (`4 × 640,000` and `5 × 4 × 640,000`,
+  exact, proportional to codewords executed so layout is excluded): the 48.2
+  c/sample was **6 instructions** and nothing else — no seam, no ABI, no layout.
+  6a-5d then moved that instruction stream from cartridge ROM into **IWRAM** and took
+  the landed arm from **1,151,236 to 506,413 c/frame**: **109.77% → 48.29%** of the
+  32,768 Hz frame budget, worst frame **48.5%**, with the `ctrl` leg cycle-identical
+  (275,126,433 / 1,031,931,935) and `.text`/`.iwram` moving by exactly the body's
+  680 B. `overlay-kernel-test` (8 device arms), `overlay-test-arm`,
+  `item6a5b-test` and both objdump gates are green with the body in IWRAM.
+- **So "the landed realization lost 48 c/sample" was a statement about two
+  addresses.** An instruction costs ~4 cycles fetched from cartridge ROM and ~1.4
+  from IWRAM, and *both* realizations were paying it: the vendored leg pinned on its
+  own drops −290.4 c/sample, and with both bodies in IWRAM the pair reads
+  **+14.2 c/sample** instead of +48.2. The residual is the guards at IWRAM prices —
+  the only part a cheaper G1 spelling can still buy back.
+- **The item's headline changes with it: 32,768 Hz FIXED decode is at 48.3% of
+  budget on mGBA**, from 111.33% when this rung opened. That does not make it a
+  product claim — it is decode-only, the producer's convert/push stages (~7.7 ms)
+  are not in these windows, the shipped default is untouched at 167%, and mGBA's
+  cartridge model is the one thing a 4→1.4 fetch ratio most needs hardware to
+  arbitrate. But it does change what 6a-6 and 6b are *for*: the rate question is no
+  longer "can the kernel pay for 32 kHz", it is "does the rest of the product fit in
+  the margin the kernel just opened".
+- **Next rung:** **6a-6**, the guarded i32 default width — same shape as written,
+  no longer carrying the item's rate question. Then **6a-7** (stack confirmation, the
+  E-number re-anchor), then **§E5**, hardware arbitration of the fetch model.
+
 - **Not started:** 6a-5d, 6a-6…6a-8, all of 6b, and the product work they unblock
   (manifest, packer, facade, mixer).
 
@@ -92,10 +101,9 @@ from and it does not turn `scan` on.
 | **6a-4** ✅ | **The asm kernel — correctness only, no timings.** `rice_partition.s` + `fold_body.s` lifted from `examples/arm-kernels/`, `global_asm!`, the FFI declaration and its `SAFETY` block, the state-struct ABI written down, tables under `iwram-pin` (this is also where pin enablement lands). | (i) a kernel-check ROM sweeping the **same committed golden tables**; (ii) `objdump -d`: 4-byte ARM encodings, `pop {…,lr}` + `bx lr`, never LDM-to-PC; (iii) the boundaries item 5 handed forward — spelled `q = 31` leg, `w == 0` handoff signal, `p = 0` mask, §9.2.7.3's two guards, unterminated/short-remainder **restore-nothing**, reads bounded by `region()` | the kernel is wrong, or the interwork/ABI is wrong — settled **before** any cycle is trusted |
 | **6a-5** ✅ | **The realization reading — the item's number of record. No new code.** Three arms, one image: `ctrl`, 6a-3's Rust arm, 6a-4's asm arm; calibration subtracted, paired per frame, every delta byte attributed symbol by symbol. Carries the pre-declared fork below. | Cycles, same-image; codegen attribution. **The first ROM suite with a test in it is 6a-4's kernel check**; 6a-5 inherits a non-empty suite rather than "first to run `make test-rom`" (which already runs, collecting zero) | the win lives in a probe but not in the product path |
 | **6a-5b** ✅ | **The paired realization differential. No new code — one more arm in the existing instrument.** E10/E9's committed vendored `e10::decode_one_arm` (i64, so it matches the landed `asm` arm step for step) timed in the **same link, same pass, same calibration** as `ctrl` and `asm`, so `asm − vendored` is a same-image pair. Re-opened the 103.83% projection, which compared two images. | Cycles, same-image, paired per frame; the per-frame sample-equality witness. Instrument-only: no shipped count or instruction stream moves | that the item's stack verdict is a comparison of two *images* rather than of two *realizations* — **it is not**: the projection reproduced to 0.4% inside one image |
-| **6a-5c** ✅ | **The guard marginal, and the one instruction that is not a guard.** One variable at a time in the same image: **(L1)** delete the dead `and r12, r3, #0xFF` the landing left behind — semantics untouched, `asm` shrinks 684 → 680 B, 171 → 170 words; **(L2, diagnostic)** delete G1/G2's 5 instructions (they never fire on this corpus); **(L3)** re-spell G1 where the asm header names it, still open. | Cycles, same-image, `asm − vend` re-read per leg; `overlay-test-arm` + `overlay-kernel-test` (the §9.2.7.3 rejection arms at orders 14–16 on the device) + `item6a5b-test` re-run for L1 | that the only *proven* per-sample cost of the landing stays unpriced, and that a cost attributed to "the guards" is in fact priced in instructions rather than in fetch/layout — **it is instructions, at 4.0000 cycles each**, so the guards' *count* is their price and "fetch" and "instruction cost" were never two things here |
-| **6a-5d** *(now unconditional, and the biggest lever on the table)* | **The codeword loop's placement, which 6a-5c made the question.** The same kernel, the same instruction stream, resident in IWRAM instead of ROM (plain `.iwram` — `.text_iwram` is E6's trap). 6a-5c measured the price of an instruction at **4.000 cycles**, which is the ROM fetch cost; IWRAM is 0 wait states, 32-bit, and is where an ARM7TDMI loop belongs. | Cycles, same-image, `asm − vend` and the absolute arms; the `objdump` kernel gate re-read at the new address; `.iwram` budget named (32,512 B, ~1.9 KB used) | that a cost paid in instruction *fetch* was measured, named, and then left in the wrong memory, because a 2024-era probe of a different code shape said fetch did not matter |
-| **6a-5d** *(conditional on 6a-5c)* | **Placement of the codeword loop, if 6a-5c says the cost is fetch.** The same kernel, the same instruction stream, resident in IWRAM instead of ROM (plain `.iwram` — `.text_iwram` is E6's trap). E6 ruled instruction fetch out, but its variant arm also forced `inline(always)`/`inline(never)` and took linker veneers, and it measured a *Rust* path where each instruction carries many cycles of work; a 40-instruction ARM loop of one-cycle instructions is the case E6 did not isolate. | Cycles, same-image; the `objdump` kernel gate re-read at the new address; IWRAM budget (32,512 B; 1,908 B used) named | that a cost paid in fetch is mistaken for a cost paid in instructions, twice |
-| **6a-6** | **The width change, in the core.** i32 as the default arithmetic width, guarded per frame, i64 kept and reachable. Design in "The width decision" below. **The stack verdict is not this rung's** — it is 6a-5b's, and 6a-6 must not start on a projection taken across images. What 6a-6 carries is the width half: its measured marginal replaces E9's borrowed one, and for the FIXED clip that half has exactly one named site (see 6a-5b). | Bit-exact vs `flac -d`; a width differential over the corpus and every committed frame-run table; the guard's unit witnesses incl. refusal cases; **both** configurations gated; codegen attribution of a both-legs build; cycles as a same-image arm | the guard is wrong (unsound), the legs are not equivalent, or a both-legs build costs more than the win |
+| **6a-5c** ✅ | **The guard marginal, and the one instruction that is not a guard.** One variable at a time in the same image: **(L1)** delete the dead `and r12, r3, #0xFF` the landing left behind — `asm` 684 → 680 B, 171 → 170 words, semantics untouched; **(L2, diagnostic)** delete G1/G2's 5 instructions (they never fire on this corpus); **(L3)** re-spell G1 where the asm header names it — **still open, and now small**. | Cycles, same-image, `asm − vend` per leg; `overlay-test-arm` + `overlay-kernel-test` + `item6a5b-test` re-run for L1 | that the guards' price was unknown — it is **4.0000 cycles per instruction**, so *count* is the price and "instruction cost" and "fetch cost" were never two hypotheses here |
+| **6a-5d** ✅ | **The codeword loop's placement.** The same kernel, the same instruction stream, resident in IWRAM instead of ROM: `.section .iwram,"ax",%progbits` in place of `.text` (plain `.iwram`; `.text_iwram` is E6's trap and is still a trap). Ungated by `iwram-pin`, because a ROM-resident version of this body is simply the wrong code and `rice-arm` is never a shipped path. | Cycles, same-image; `.text`/`.iwram` sizes read from the ELF; the objdump gate re-read at the new address; `overlay-kernel-test` (8 device arms) + `overlay-test-arm` + `item6a5b-test` | that a cost measured in instruction *fetch* would be left in the wrong memory, because a 2024-era probe of a different code shape said fetch did not matter — **it was**, and the fix is 2.9× |
+| **6a-6** | **The width change, in the core.** i32 as the default arithmetic width, guarded per frame, i64 kept and reachable. Design in "The width decision" below. **The stack verdict is not this rung's** — it was 6a-5b's, and 6a-5c/6a-5d have since moved the ground under it: with the kernel body in IWRAM the landed arm is at **48.3%** of the 32,768 Hz budget on its own, so the width leg is no longer how the full-rate claim is reached. It is still worth measuring for the reasons below (halved arithmetic on the decorrelate site, and the LPC clip where the wide work is real), and its FIXED marginal still must replace E9's borrowed one rather than inherit it. What 6a-6 carries is the width half: its measured marginal replaces E9's borrowed one, and for the FIXED clip that half has exactly one named site (see 6a-5b). | Bit-exact vs `flac -d`; a width differential over the corpus and every committed frame-run table; the guard's unit witnesses incl. refusal cases; **both** configurations gated; codegen attribution of a both-legs build; cycles as a same-image arm | the guard is wrong (unsound), the legs are not equivalent, or a both-legs build costs more than the win |
 | **6a-7** | **The stack confirmation. No new code** — one measured arm: 6a-4's kernel **and** 6a-6's default together, against the same-image `ctrl`. Re-anchors the E numbers on the post-6a image, which 6b-1 inherits. | Cycles, same-image | that two measured wins composed negatively (E9's additivity does not reproduce) |
 | **6a-8** *(conditional)* | E8-style **sub-stage probe** over the asm kernel: tier-1 / tier-2 / tier-3 / refill / fold priced separately. Run **only** if 6a-5 lands inside or near the noise band. | Cycles, sub-stage | that a near-bar result is unattributable to a leg |
 
@@ -638,28 +646,84 @@ budget: G1 currently spends 3 (`ldr r12,[sp,#8]`; `cmp`; `bhi`) where the hoiste
 bound sits in *memory* rather than a register, and G2 spends 2. Recovering the
 41% of the overhang that 32 kHz needs is **two instructions**.
 
-**And the instruction price is why 6a-5d is now the largest number on the table.**
-If a fetched instruction costs 4 cycles and a loop's codeword path is some thirty
-instructions, then the kernel's placement is not a micro-optimization: the same
-instruction stream in IWRAM (0 wait states, 32-bit) changes the price of *every*
-instruction in the loop, including the ones nobody can delete. E6 ruled this out —
-"pinning Rust to IWRAM was slower" — and its own caveats are why that result does
-not carry: its arm forced `inline(always)`/`inline(never)` and took linker veneers,
-and it measured a path where each instruction carries many cycles of work, so a 4x
-fetch price was invisible in it. A tight ARM loop of one-cycle instructions is
-precisely the case E6 did not isolate, and 6a-5c has now measured the price it was
-looking for. **6a-5d is not a follow-up; it is the next question the data asks.**
+**And the instruction price is why 6a-5d was the largest number on the table.** If a
+fetched instruction costs 4 cycles and a loop's codeword path is some thirty
+instructions, then the kernel's placement is not a micro-optimization. E6 had ruled
+this out — "pinning Rust to IWRAM was slower" — and its own caveats are why that
+result does not carry: its arm forced `inline(always)`/`inline(never)` and took
+linker veneers, and it measured a path where each instruction carries many cycles of
+work, so a 4x fetch price was invisible in it.
 
-**What this does not say.** L2 is diagnostic: it cannot be shipped, and its number
-must never be quoted as an achievable rate. It does not prove that *any* cheapest
-guard spelling exists — L3 is still open, and its constraint is the device suite's
-rejection arms, not this corpus. It does not say the vend realization is optimal:
-the vend leg pays the same 4-cycle fetch price for its own ~30 instructions, which
-is the strongest hint in these records that *both* realizations are paying ROM
-fetch and that the item's real headroom is placement, not algorithm. And it does
-not move 6a-6: the width leg is a separate mechanism on a separate site.
+### 6a-5d — the reading: one directive, 2.9×, and the "realization" gap was two addresses (2026-11-09)
 
-**The budget consequence, and it changes the item's arithmetic.** The overhang is
+`.section .iwram,"ax",%progbits` replaces `.text` in `asm/rice_partition.s`. Nothing
+else changes: not an instruction, not a register, not a table, not the Rust side.
+The body moves `0x0800017c` → `0x0300022c`; `.text` loses exactly 680 B and
+`.iwram` gains exactly 680 B (1,900 → 2,580 B of the 32,512 available).
+
+| arm (one image, 157 frames) | before (ROM) | after (IWRAM) | delta |
+|---|---:|---:|---:|
+| `asm`, FIXED | 1,151,236 c/f (109.77%) | **506,413 c/f (48.29%)** | −644,824 c/f = −316.4 c/sample = −158.2 c/codeword |
+| `asm`, LPC | 5,975,097 c/f (569.7%) | 5,336,152 c/f (508.8%) | −638,945 c/f = −313.5 c/sample |
+| `ctrl` (both images) | 275,126,433 | 275,126,433 | **0, to the cycle** |
+| `vend`, pinned on its own (diagnostic) | 167,872,486 | 74,957,768 | −591,813 c/f = −290.4 c/sample |
+| `asm − vend`, both pinned (diagnostic) | +15,431,627 | **+4,549,115** | +14.2 c/sample, was +48.2 |
+
+Worst FIXED frame 509,121 = **48.5%** of the 32,768 Hz budget. Two runs are
+`***`-identical, an independent rebuild reproduces the run to the cycle, the per-arm
+decode proofs are bit-exact (FNV `0x54C7B356621B6E15`, 157/157 frames, both clips),
+and the gates are green with the body in IWRAM: `overlay-kernel-test` (8 device arms
+on mGBA's ARM7TDMI — the §9.2.7.3 rejection cases at orders 14–16 included), 
+`overlay-test-arm` (host contract, 15 arms), `item6a5b-test`, and both
+`check_arm_kernel_objdump.sh` runs (170 ARM words, now at `0x0300022c`).
+
+**What it proves, and it is not "IWRAM is a bit faster".** 6a-5c had priced an
+instruction at 4.000 cycles *as fetched from cartridge ROM*; the same instructions
+from IWRAM cost about **1.4** (the landed 6-instruction guard delta falls from 20.11
+to 7.11 c/codeword; the residual 14.2 c/sample of `asm − vend` when both are pinned
+is that same delta). So the 48.2 c/sample that three rungs chased was
+**6 instructions × (ROM fetch − IWRAM fetch)** — a property of the *address*, paid
+by both realizations, and it survived 6a-5b's differential precisely because both
+legs happened to live in ROM. The seam really was free (6a-5b was right about that);
+the ABI, the tables and the state frame really were symmetric; the guards' semantics
+were never the issue. What nobody had priced was where the instructions were
+*read from*.
+
+**What it means for the item's arithmetic, which is the part that changes decisions.**
+32,768 Hz FIXED decode is at **48.29%** of the frame budget — from 111.33% when this
+rung opened, and the pre-declared fork's whole question ("does the stack fit 32 kHz")
+is answered with 52 points of margin rather than a 3.8-point deficit. 6a-6's width leg
+is no longer how full rate is reached; it is worth measuring for its own reasons
+(halved arithmetic at the decorrelate site; the LPC clip, which is still at 508.8%
+and where wide work is real) and it must still replace E9's borrowed marginal rather
+than inherit it. 6b's manifest/packer work is now the binding constraint on a
+full-rate product, not the kernel.
+
+**The caveats, in the order they could bite.** (1) **E5 is unrun.** mGBA is a model,
+and cartridge wait-state/prefetch behaviour is exactly what a model can get wrong in
+either direction; the direction here is not in doubt (no cache, 16-bit bus, WS0 =
+3,1 — an ARM loop in ROM is slow on real hardware by construction), but the *ratio*
+is mGBA's. This is now the single most valuable measurement in the item to confirm on
+hardware. (2) **Decode only.** The producer's convert + push stages (~7.7 ms combined,
+word-copy era) are not in these windows, and at 62.5 ms/frame the margin has to hold
+for them too — 48.3% of the frame is ~30 ms, so there is real room, but no such
+claim is made here. (3) **Nothing shipped moved.** The default is still
+`TableCountKernel` at 167%; `rice-arm` is named by no product path and by exactly one
+ROM, the correctness instrument. (4) **The pin is ungated by `iwram-pin` on
+purpose** — a ROM-resident version of this body is not a configuration worth
+supporting, and a build with the kernel but without the tables is a type-check rather
+than a product. That decision is recorded here so a later reader does not "fix" it
+into a feature flag and quietly reintroduce the ROM placement.
+
+**L3 is now small, and that is worth saying plainly.** Re-spelling G1 can buy back at
+most two instructions; at IWRAM prices that is ~2 × 1.4 = 2.8 c/codeword ≈ 5.6
+c/sample ≈ 0.9 budget points. It is still worth doing as hygiene (the `[sp,#8]`
+reload exists only because the bound was spilled), but it is no longer a lever, and
+the plan should not spend a rung on it before 6a-6.
+
+**The budget consequence, and it changes the item's arithmetic.** *(Superseded by
+6a-5d, below: the overhang was a memory placement, and 48.3% is the new number. Kept
+because it is what the 6a-5c numbers meant before the pin.)* The overhang is
 **9.37 budget points** on the frames×budget convention (98,291 / 1,048,750) against
 the **3.84 points** the projected landed stack is over (103.84% mean: 1,167,542 −
 E9's −78,541 = 1,089,001 c/frame vs a 1,048,750 budget; 6a-5's version of that

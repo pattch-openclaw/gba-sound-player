@@ -91,7 +91,10 @@ crates/flac-lite-gba/      GBA overlay: no_std, deny(unsafe_code)
   rice_arm.rs              the ARM-mode kernel, FFI, KernelAbi, three tables
                            (feature `rice-arm`); 0 unsafe in a default build,
                            3 items with rice-arm, 6 with iwram-pin as well
-  asm/rice_partition.s     the assembled body (E10's, plus the four 6a-4 deltas)
+  asm/rice_partition.s     the assembled body (E10's, plus the four 6a-4 deltas),
+                           placed in `.iwram` rather than `.text` since 6a-5d —
+                           measured 4.000 cycles/instruction in ROM vs ~1.4 in
+                           IWRAM, i.e. 48.3% of the 32 kHz frame instead of 109.8%
 
 examples/overlay-kernel-check/  the kernel-check ROM (`rice-arm` + `iwram-pin`):
                            corpus + synthesized boundaries through incumbent,
@@ -114,7 +117,7 @@ covered. `strict-profile` is the exception — it is declared and unimplemented.
 
 | Feature | What it changes | Gate |
 |---|---|---|
-| `iwram-pin` | pins the hot lookup tables to `.iwram` on ARM targets (the crate's only `unsafe` surface: placement attributes on immutable tables) | GBA ROM builds + `nm` witness |
+| `iwram-pin` | pins the hot lookup **tables** to `.iwram` on ARM targets (the crate's only `unsafe` surface: placement attributes on immutable tables). The ARM kernel **body** is pinned to `.iwram` unconditionally and is *not* this feature's business — 6a-5d measured a ROM-resident body at 4.000 cycles/instruction against ~1.4 in IWRAM, and there is no configuration in which that is the code you want | GBA ROM builds + `nm` witness |
 | `crc-check` | verifies header CRC-8 and footer CRC-16 instead of consuming them | `flac-test-crc` |
 | `scan` | compiles the table-less frame walk | `flac-test-scan` |
 | `rice-hybrid` | compiles the portable hybrid Rice twin | `flac-test-rice` |

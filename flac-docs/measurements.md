@@ -121,6 +121,8 @@ The absolute marginals that survive an era boundary:
 | 6a-5b: that arm + E9's i32 marginal (**projection**, same caveat as the row above) | 94.47% (worst 95.0%) | — | 1,069,252 − 78,541 = 990,711 c/frame — E9's in-budget row, reproduced from a landed-tree measurement of the arm instead of a probe's |
 | **6a-5c L1: the landed asm with the dead `and` deleted** (a real fix; `overlay-kernel-test` + `overlay-test-arm` + `item6a5b-test` green) | **109.77%** (1,151,236 c/frame) | 561.6% | `flac-spike-6a5b.gba` sha `77a63e2b506d0bd9…`, same-image pair |
 | 6a-5c L2: the same body with G1+G2 also deleted — **diagnostic only, cannot ship** (the device rejection arms fail by construction) | 102.00% (1,069,708 c/frame) | — | same image, `arm_rice_partition` 165 words |
+| **6a-5d: the landed asm with its body in IWRAM** (shipped overlay config; `overlay-kernel-test`, `overlay-test-arm`, `item6a5b-test`, both objdump gates green) | **48.29%** (506,413 c/frame; worst frame 48.5%) | 508.8% | `flac-spike-6a5b.gba` sha `232d1498…`, same-image pair |
+| 6a-5d diagnostic: *both* legs pinned, so the pair prices code and not memory | 48.29% | — | same image plus the vendored body in `.iwram`; `asm − vend` = +4,549,115 |
 
 **None of the in-budget rows is landed code.** E9's FIXED stack exists as a
 sample under `examples/flac_spike/experiments/e9-composite/`; the product path
@@ -197,6 +199,52 @@ some form. The item therefore has a plain instruction budget in front of it — 
 larger question behind it, since *every* instruction in the loop, deletable or not,
 pays the same 4 cycles: **6a-5d**, the same stream in IWRAM.
 
+**Measured 2026-11-09 (6a-5d): the placement *is* the item's headline, and the
+"realization" differential was mostly a memory-location artifact.** One directive —
+`.section .iwram,"ax",%progbits` in place of `.text` — moves the same 680 B of
+instruction stream from `0x0800017c` to `0x0300022c` and takes the landed arm from
+**1,151,236 to 506,413 c/frame** on the FIXED clip: **−644,824 c/frame =
+−316.4 c/sample = −158.2 c/codeword**, i.e. **109.77% → 48.29%** of the
+32,768 Hz frame budget (worst frame 509,121 = 48.5%), with LPC going 569.7% →
+508.8%. The `ctrl` leg is cycle-identical to the pre-pin image and `.text` / `.iwram`
+move by exactly the body's 680 B, so nothing else in the image changed. Two runs are
+`***`-identical, and an independent rebuild of the same configuration reproduces the
+run to the cycle. The device witness (`overlay-kernel-test`, 8 arms on mGBA's
+ARM7TDMI, the §9.2.7.3 rejection cases included) and the host contract
+(`overlay-test-arm`) are green with the body in IWRAM.
+
+**Why it was worth 2.9× rather than a few percent.** 6a-5c had already priced an
+instruction at 4.000 cycles *as fetched from cartridge ROM*. IWRAM is 0 wait states
+and 32 bits wide, so the same instruction costs about 1.4 — and the two kernels
+show it independently. The landed body's 6-instruction guard delta falls from
+**20.11 to 7.11 c/codeword**; the vendored body pinned on its own falls
+167,872,486 → **74,957,768** (−591,813 c/frame = −290.4 c/sample). With both
+bodies in IWRAM the pair reads `asm − vend` = **+4,549,115 = +14.2 c/sample**,
+against **+48.2 c/sample** with both in ROM.
+
+**That last number is the finding that re-writes the previous three rungs.** The
+48.2 c/sample differential was never the seam (6a-5b priced it at zero, correctly),
+never the ABI, the tables, the state frame, or even the guards' *semantics*: it was
+**6 instructions multiplied by the difference between a ROM fetch and an IWRAM
+fetch**, paid by *both* realizations wherever they happened to live. The residual
+14.2 c/sample is the guards at IWRAM prices — real, and the only part a cheaper
+G1 spelling (L3) can still buy back. So the item's earlier framing, "the landed
+realization lost 48 c/sample against the probe's", was a statement about two
+*addresses*, not two realizations.
+
+**The caveat that decides how far this may be quoted.** mGBA is a model, and ROM
+wait-state/prefetch behaviour is exactly the class of thing a model can get wrong in
+either direction; E5 (hardware arbitration) is still unrun, and the 62.5 ms frame
+budget is the only deadline in the item. What is *not* model-dependent: the
+instruction that stops being fetched from the cartridge bus, the identical
+instruction stream, the cycle-identical control leg, and the direction of the effect
+(the ARM7TDMI has no cache, and GBA ROM is a 16-bit bus at WS0 = 3,1 — an ARM
+loop there is slow on real hardware by construction; only the exact multiplier is
+mGBA's). Also unchanged: this is *decode* only. The producer's convert + push stages
+(≈7.7 ms combined, word-copy era) are not in these windows, the shipped default
+(`TableCountKernel`) is untouched at 167%, and no product path names `rice-arm`.
+
+
 ## 10,512 Hz, real music (rate ROM)
 
 `bioluminescent.wav` (96 kHz / 24-bit master) normalised to 16-bit stereo at
@@ -268,6 +316,9 @@ See [`playback-results.md`](playback-results.md) for the dated log.
 | 6a-5b the cost tracks codewords, not frames | +48.22 vs +48.16 c/sample on two clips whose control costs differ 3.75× (1,752,398 vs 6,572,815 c/f) and whose per-frame work is different code; both clips are 320,000 sample-frames = 640,000 Rice codewords | the regression is attached to the per-codeword loop, not to the frame path, the LPC work, or anything per-frame. Any candidate that scales per *call* has to survive the FIXED/LPC invariance, which the bridge (2 calls/frame in both) does only by being ~0. **The per-partition term is ruled out by the same measurement:** the LPC clip's partition count is *not* 314 — its partition orders vary frame to frame — yet the per-codeword cost moves 0.14% between the clips, so the only per-partition item in the diff (the `mvn/lsr/str` bound hoist) cannot be a meaningful share of a cost that does not scale with partitions |
 | **6a-5c L1: one dead instruction removed = 4.0000 cycles per codeword** | `flac-spike-6a5b.gba` sha `77a63e2b506d0bd9…` (same image, asm body 684 → 680 B, 171 → 170 words, the duplicated `and` deleted, all gates re-run green). `asm − vend` 15,431,627 → **12,871,627** (FIXED) and 15,409,977 → **12,854,993** (LPC) | removed **2,560,000 / 2,554,984 cycles** = **4.0000 / 3.9922 c/codeword**, 16,305.7 / 16,273.8 c/frame, 8.00 / 7.98 c/sample. Per frame the fall is *exactly* 16,384 cycles on every 2048-sample frame (156 of 157) and exactly 4,096 on the 512-sample frame — proportional to codewords executed, **not** a constant per frame and so **not** alignment |
 | **6a-5c L2 (diagnostic): the guards are the rest of it** | same image, G1+G2's 5 instructions deleted (`arm_rice_partition` 170 → **165 words**). `asm − vend` **71,627** (FIXED) / **80,073** (LPC); the per-arm decode proof still passes on every frame, so the guards never fire on this corpus | 12,871,627 − 71,627 = **12,800,000 = 5 × 4 × 640,000 exactly** (LPC: 12,774,920 = 5 × 4 × 638,746). So each of the five guard instructions is worth **4.000 cycles per execution**, and the whole 6-instruction delta is **6 × 4 × 4096 = 98,304 c/frame** against a measured 98,291 |
+| **6a-5d: the same instruction stream, resident in IWRAM** | `flac-spike-6a5b.gba` sha `232d14982718daf7…`; the *only* change is the section directive in the kernel body. `arm_rice_partition` moves `0x0800017c` → **`0x0300022c`**; `.text` shrinks by exactly 680 B and `.iwram` grows by exactly 680 B (1,900 → 2,580 B). `asm` sum **180,744,113 → 79,506,883** (FIXED) / 938,090,234 → **837,775,841** (LPC) | saves **101,237,230 / 100,314,393 cycles** = **644,824 / 638,945 c/frame = 316.4 / 313.5 c/sample = 158.2 / 156.7 c/codeword**. The landed arm goes **109.77% → 48.29%** of the 32,768 Hz frame budget (worst frame 509,121 = 48.5%); LPC 569.7% → 508.8%. The `ctrl` leg is **cycle-identical** to the pre-pin image (275,126,433 / 1,031,931,935), so nothing but the asm arm moved |
+| **6a-5d: the per-instruction price, twice measured** | 6a-5c priced an instruction at 4.000 cycles *fetched from ROM*; 6a-5d prices the same instructions at **~1.4 cycles from IWRAM** — the 6-instruction guard delta falls from 20.11 to **7.11 c/codeword** | the ratio is the fetch model, and it applies to both kernels: pinning the *vendored* leg on its own drops it 167,872,486 → **74,957,768** = −92,914,718 = **−591,813 c/frame = −290.4 c/sample** |
+| **6a-5d with both realizations in the same memory: the "seam" differential mostly evaporates** | landed pinned 79,506,883 vs vend pinned 74,957,768: `asm − vend` = **+4,549,115** = +28,975 c/frame = +7.11 c/codeword = **+14.2 c/sample**, against +15,431,627 / +48.2 c/sample with both in ROM | the 48.2 c/sample was **never** the seam, the ABI, the tables, or the guards' *semantics*: it was 6 instructions × the difference between a ROM fetch and an IWRAM fetch. The residual 14.2 c/sample is the guards at IWRAM prices — what a cheaper G1 spelling (L3) could still buy back |
 | **6a-5c: the measured instruction cost in this loop is 4.00 cycles** | three independent removals (1 instruction, then 5 more) at two clip workloads, all scaling with codeword count at 4.000 / 3.992 cycles each; 4 cycles is the ARM7TDMI fetch cost of a 32-bit ARM instruction from cartridge ROM on a 16-bit bus at WS0 = 3,1 | the 6a-5b gap is **fully accounted for by instruction count**, at 4 cycles per instruction, and *not* by hot-loop layout: the "4.02 cycles per inserted instruction" that 6a-5b's arithmetic demanded is not an anomaly, it is what an instruction costs here. This reverses E6's "instruction fetch is ruled out" **for this case** — E6 measured a Rust path where each instruction carries many cycles of work |
 | 6a-5c what is left after all six instructions are removed | L2 residual `asm − vend` = **71,627 (456 c/frame)** FIXED, **80,073 (510 c/frame)** LPC, against a per-partition prologue of 3 instructions × 4 cycles × the partition count | the residual is per-call, not per-codeword, and of the same order as the static bound's ~0.15 c/sample (≈305 c/frame) for the seam bridge — i.e. after the kernel delta is gone, what remains is the surrounding path, as predicted |
 

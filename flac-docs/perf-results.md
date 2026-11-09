@@ -1381,6 +1381,23 @@ price cannot be seen. That reframes the remaining headroom as a placement questi
 (6a-5d, the same stream in IWRAM) rather than a spelling one, and it is the first
 time in these records that a cycle number has a denominator for it.
 
+**And 6a-5d then showed the denominator was a memory address.** The same instruction
+stream, placed in IWRAM instead of cartridge ROM (one section directive, nothing
+else changed), takes the landed arm from **1,151,236 to 506,413 c/frame** on the
+FIXED clip: **−644,824 c/frame = −316.4 c/sample = −158.2 c/codeword**, i.e.
+**109.77% → 48.29%** of the 32,768 Hz frame budget, worst frame 48.5%. The `ctrl`
+leg is cycle-identical and `.text`/`.iwram` move by exactly the body's 680 B, so no
+other change is available to explain it. The per-instruction price falls from 4.000
+(ROM) to ~1.4 (IWRAM): the landed 6-instruction guard delta drops 20.11 → 7.11
+c/codeword, and E10's vendored body pinned on its own drops **−290.4 c/sample**.
+With both bodies in IWRAM the "realization" pair reads **+14.2 c/sample instead of
++48.2** — so this record's E10 row and its re-anchoring notes were describing two
+*addresses*, not two realizations, and the vendored probe's 101.98% was itself a
+ROM-resident measurement of the same code. Two caveats, and they are the ones that
+matter: mGBA's cartridge wait-state/prefetch model is doing half the arithmetic here
+(E5, unrun, is the confirmation that matters), and this is decode-only —
+the producer's convert/push stages are not in these windows.
+
 ## Appendix — the Phase-1 baseline (spike PR 3, measured 2026-09-21)
 
 The first real numbers, kept because every later percentage is relative to this

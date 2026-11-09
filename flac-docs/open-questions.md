@@ -333,14 +333,17 @@ being checked.
 ### Q12 — Where do the seam's 48 c/sample go, and what puts 32,768 Hz FIXED back under budget?
 
 **Opened by:** 6a-5's stack projection (2026-11-08) — the item's first measured
-negative. **Status 2026-11-09: the first half is ANSWERED, and the answer is
-“six instructions at 4 cycles each”; what replaces it is a memory-placement
-question (6a-5d).** The seam half closed by 6a-5b (“the seam is not it”, priced at
-zero in a same-image pair) and the guard half closed by 6a-5c (the guards *are* the
-rest of it, at 4.0000 cycles per instruction). The width half is still 6a-6's, and
-6a-7 inherits the verdict. **The live question is no longer “where do the 48
-c/sample go” — that is settled arithmetic — it is “is the ROM-resident codeword
-loop 4x more expensive than it needs to be, and does IWRAM fix it”; see 6a-5d.**
+negative. **CLOSED 2026-11-09 (first half), and the answer is a memory address.**
+The seam half closed by 6a-5b (the seam is priced at zero in a same-image pair),
+the guard half by 6a-5c (the guards *are* the rest of it — 6 executed instructions
+at **4.0000 cycles** each), and the question those two raised — why an instruction
+costs 4 — by 6a-5d: because it was being fetched from cartridge ROM. The same
+stream in IWRAM is **2.9×** cheaper and puts 32,768 Hz FIXED decode at **48.29%** of
+budget. So “where do the 48 c/sample go” is answered: six instructions times the
+difference between two addresses, paid by both realizations. The width half is still
+6a-6's and 6a-7 inherits the verdict, but neither carries the full-rate claim any
+more. **The live question is now E5** — whether a 4→1.4 fetch ratio is hardware or
+mGBA's cartridge model.
 
 **Re-opened 2026-11-08: the premise did not survive a code-level check.** The
 48 c/sample is a quantity taken across two records, and the FIXED clip's own
@@ -412,15 +415,29 @@ rather than merely unproven. **E6's "instruction fetch is ruled out" is reversed
 for this case** — it measured a Rust path where each instruction carried a dozen
 cycles of work, which is exactly the case a 4x fetch price is invisible in.
 
-**So Q12's first half is answered by instruction count, and the answer moves the
-question to memory.** Each guard instruction is worth 4 cycles/codeword = 16,384
-c/frame = **1.56 budget points**; the dead one was worth 1.56 and is gone
-(109.77% mean); the 41% of the overhang that 32 kHz needs is **two instructions**.
-But the bigger reading is that *every* instruction in the loop pays 4 cycles,
-including the ~30 that no re-spelling can delete — which is why **6a-5d** (the same
-stream in IWRAM, 0 wait states) is now the largest quantity on the table and is no
-longer a conditional. The width half is untouched: it is still 6a-6's, its FIXED
-site is still one named function, and E9's marginal is still not admissible input.
+**And then 6a-5d moved the memory, and Q12's first half closed with it.** The same
+instruction stream in IWRAM takes the landed arm from **1,151,236 to 506,413
+c/frame** — **109.77% → 48.29%** of the 32,768 Hz budget, worst frame 48.5%, `ctrl`
+cycle-identical, `.text`/`.iwram` moving by exactly the body's 680 B. So the
+4-cycle price was a *ROM* price: the same instructions from IWRAM cost ~1.4, the
+landed 6-instruction guard delta falls 20.11 → 7.11 c/codeword, and E10's vendored
+body pinned on its own falls −290.4 c/sample. With both bodies in IWRAM the
+"realization" pair reads **+14.2 c/sample instead of +48.2**: three rungs' worth of
+differential was six instructions multiplied by the difference between two
+addresses, and the only part left is the guards at IWRAM prices. **Q12 is therefore
+closed for the first half, with the answer "it was placement, and the fix is
+2.9×".** What it hands to E5 is a specific, high-value hardware question: is the
+ROM→IWRAM fetch ratio 4→1.4 on real cartridge hardware, or is that mGBA's model?
+
+**What the guards are worth, at the price they are actually paid.** In ROM, each
+guard instruction was worth 4 cycles/codeword = 16,384 c/frame = 1.56 budget points;
+in IWRAM each is worth ~1.4 cycles/codeword = 5,734 c/frame = **0.55 points**. So the
+whole 6-instruction delta that 6a-5b measured at 9.4 points is worth **2.1 points
+once the body is where it belongs**, and L3 (re-spelling G1 to drop its `[sp,#8]`
+reload) is worth about 0.9 of those. That is hygiene, not a lever, and it should not
+buy a rung before 6a-6. The width half is untouched: it is still 6a-6's, its FIXED
+site is still one named function, and E9's marginal is still not admissible input —
+but with decode at 48.29% the width leg no longer carries the full-rate claim.
 
 **The budget half, kept as the 6a-5b form of it and now re-read.** It was worth
 **9.37 points** of the 32,768 Hz frame budget (98,291 / 1,048,750) against the
