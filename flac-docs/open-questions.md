@@ -33,13 +33,15 @@ the standing landing record (control build, section/`nm` table, gate counts,
 mutation witness), not a paragraph.
 
 **Tree state when this section was written** (kept for the first Q's
-answerability, updated 2026-11-08): item 6a is up to **6a-4**, which is on the
-branch `feat/flac-lite-gba-arm-kernel` (the asm kernel, the FFI/ABI, the
-`rice-arm` and `iwram-pin` features, `examples/overlay-kernel-check/` with its 8
-device `#[test_case]`s, `overlay-check-arm`/`-test-arm`/`-objdump`/`-kernel-rom`/
-`-test`, and the 6a-4 landing record — not yet merged). 6a-3 is merged (PR #98,
-`8711e2f`); 6a-2, 6a-1 and the toolchain pin are merged (#95–#97). Nothing in any
-shipped decode path has changed since item 5 PR 4:
+answerability, updated 2026-11-08): item 6a is up to **6a-5**, which is on the
+branch `feat/flac-item6a5-realization-reading` (the threaded `…_with` seam from
+`frame` down to `residual`, the spike's feature-gated arm pass and its
+`item6a5-test` witness, the two arm images and the 6a-5 landing record — not yet
+merged). 6a-4 is merged (PR #101, `f1fb6da`); 6a-3 is merged (PR #98, `8711e2f`);
+6a-2, 6a-1 and the toolchain pin are merged (#95–#97). The **product** image is
+unchanged since item 5 PR 4 — `flac-integration` is byte-identical through both
+6a-4 and 6a-5 — while the instrument's `.text` has moved with the harness (6a-5's
+record attributes every byte). The cycle record still reads:
 `.text` 46,008 B `f0f88c33d150…`, `rice_quotient` live, `decode_residual` 596 B,
 `flac-gates` 1,169 passed / 6 ignored. The live `nm` anchor is
 `LEADING_ONES @ 0x0300022c` — but only in an image with **no** second mechanism, which
@@ -93,7 +95,18 @@ decision it must write down, not inherit.
 
 ### Q2 — Which image is each cycle number from, and can one image carry three arms?
 
-**Opened by:** 6a-3's codegen/cycle table. **Owned by:** 6a-5 (and 6a-7 after it).
+**Opened by:** 6a-3's codegen/cycle table. **Owned by:** 6a-5 — **answered
+2026-11-08, and the answer is "no, not in one image"**, with numbers. Three images
+were measured: the shipped one (A), `ctrl` + the ARM kernel (C, the product shape)
+and `ctrl` + both mechanisms (B). The asm arm's *absolute* cost is link-independent
+(183,288,727 vs 183,231,371 cycles — 0.03% apart), but `ctrl` moves by −36,543
+c/frame with one extra mechanism and −202,529 with two, exactly as 6a-3 found. So
+the arms can share an image for a **paired, same-image** reading, and the number
+that belongs to the carry must come from the product shape: asm − ctrl is
+−419,236 c/frame in B and **−584,856 in C**. The Rust cross-check inherits the same
+rule: its absolute cost reproduces item 5 PR 4 within 2.4%, while its paired delta
+reads +164.2 c/sample against a control that itself moved. Full tables:
+[`plan-of-record.md`](plan-of-record.md) "6a-5 — the realization reading".
 
 The row plans "three arms, one image". 6a-3 measured why that is not free: putting
 a second `RiceKernel` body in a link moves the **default** path by ≈168–199 k
@@ -161,7 +174,10 @@ wants the second one, a new probe.
 
 Q5a is a confirmation on the current tree of a pairing E9 measured as additive, and
 it is the configuration the product ships; its second job is re-anchoring the E
-numbers on the post-6a image, which 6b-1 inherits. Q5b is genuinely open: neither
+numbers on the post-6a image, which 6b-1 inherits. Its first input now exists:
+6a-5 measured the kernel leg *through the seam* (1,167,444 c/frame FIXED in the
+product shape) and 6a-6 will move the width leg, so the stack can be read as two
+same-image marginals rather than against E9's vendored arms. Q5b is genuinely open: neither
 E10 nor PR 4 tested a portable-Rust kernel *written for* Thumb-1 register pressure
 and a 32-bit source window — PR 4 tested the twin as written, which is the
 corpus-differential witness made executable. If someone wants that sign settled it

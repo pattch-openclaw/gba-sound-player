@@ -9,9 +9,10 @@ per concern.
 **Status in one line:** the decoder is complete and bit-exact, the playback
 harness plays real music at 10,512 Hz with correct tempo and pitch (audibly
 verified), full-rate (32,768 Hz) decoding is still over budget on the shipped
-path — the one in-budget full-rate reading is a measured probe, not landed code —
-and the ARM kernel that probe was built on is now **landed and witnessed on
-mGBA's ARM7TDMI**, correctness only, with no cycle claim until 6a-5 reads it.
+path — and the ARM kernel is now **landed, witnessed on mGBA's ARM7TDMI, and
+measured through the shipped seam**: it is **−584,856 cycles/frame (−286.9
+c/sample) faster than the shipped kernel** in the product-shape image, which is
+still 111.3% of the 32 kHz budget, so the width leg (6a-6) is the next lever.
 
 ## The constraint
 
@@ -42,6 +43,7 @@ alternative codec, evaluated under the same constraint, is
 |---|---|
 | `crates/flac-lite` | Portable core: `no_std`, zero deps, zero alloc, `#![deny(unsafe_code)]` plus named `cfg`-gated `.iwram` pin attributes (exactly one in a default build). Frame decode is **complete** (`bits` → `stream` → `frame` → `subframe` → `residual` → `stereo`), witnessed bit-exact against `flac -d` on host and in the ROM image. Per-frame `driver`, table-less `scan` walk (feature), CRC verification (feature), `RiceKernel` seam. Still `todo!()`: the `decoder` facade, `format::Manifest`, `Blocksize::samples` and `EncodeProfile::validate`. |
 | `crates/flac-lite-gba` | The GBA overlay. Two `RiceKernel` arms behind their own features: `rice-twin` (6a-3, Rust, forwards to the core's twin) and **`rice-arm`** (6a-4: the E10 ARM-mode kernel via `global_asm!`, its FFI and `KernelAbi`, three tables under `iwram-pin`). A **default build still contains no kernel, no asm, no FFI and no `unsafe`**; the shipped default is still `TableCountKernel`. |
+| `examples/flac_spike` (6a-5 arms) | Three feature-gated arms in the measurement instrument (`item6a5-rust`, `item6a5-asm`, `item6a5-arms`), reached through the **product call path** (`driver::decode_one_with` → `frame::decode_frame_with`), never a vendored decode loop. `make item6a5-test`, `item6a5-arms-rom`, `item6a5-asm-rom`. |
 | `examples/overlay-kernel-check` | 6a-4's instrument ROM — the only place the assembly runs. Sweeps the committed corpus and the synthesized boundaries through three legs (incumbent, assembled kernel, model) on mGBA's ARM7TDMI, and is the repo's first ROM suite that actually runs assertions (8 `#[test_case]`s). It also asserts the three tables' `.iwram` placement at runtime. |
 | `examples/flac_spike` | The measurement instrument and the `ctrl` arm of every performance record. Host witness + in-ROM decode proof + cycle harness. |
 | `examples/flac_spike/experiments/` | Every performance experiment as a reappliable sample (README + patch), never on the live sources. |
@@ -84,15 +86,19 @@ ledger: [`flac-docs/measurements.md`](flac-docs/measurements.md).
 One line per rung; the full plan, bars and invariants are in
 [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md).
 
+- ~~**6a-5** — the realization reading, three arms in one image; the item's number
+  of record, against a pre-declared fork.~~ **Landed: carry.** asm − ctrl =
+  **−584,856 c/frame / −286.9 c/sample** (FIXED), 157/157 frames faster, in the
+  product-shape image. The seam is now threaded from `frame` down to `residual`
+  (`…_with<K>`), which is what made the arm a product-path reading; no shipped
+  count or instruction stream moved. Record:
+  [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md).
 - ~~**6a-4** — the ARM kernel lands in the overlay: correctness only, no timings,
   dual-witnessed over the committed golden tables.~~ **Landed.** It found one
   real ABI bug on the device (the 12-byte frame's stack-argument offsets) that no
   host-side arm could see; the landing record in
   [`plan-of-record.md`](flac-docs/plan-of-record.md) has the control build, the
   new image's section table, the gate counts and the mutation table.
-- **6a-5** — the realization reading, three arms in one image; the item's number
-  of record, against a pre-declared fork (carry only if within the ~9–13
-  cycles/frame noise band or faster).
 - **6a-6** — guarded i32 becomes the core's default width, i64 kept as the
   always-correct escape leg.
 - **6a-7** — stack confirmation (kernel + i32) and the E-number re-anchor.

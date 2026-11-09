@@ -115,6 +115,7 @@ The absolute marginals that survive an era boundary:
 | + E2a/E2b landed | 170.2% | 589.5% | E2b |
 | E10 ARM kernel as measured (probe) | 101.98% (worst 102.50%) | 521.6% | E10 result |
 | E10 + E4 i32 stacked (probe) | **94.47% (worst 94.95%)** | 216.3% | E9 result |
+| 6a-5 realized asm through the seam (landed code, product-shape image) | **111.32%** | 571.28% | 6a-5 result |
 
 **None of the in-budget rows is landed code.** E9's FIXED stack exists as a
 sample under `examples/flac_spike/experiments/e9-composite/`; the product path
@@ -169,6 +170,16 @@ See [`playback-results.md`](playback-results.md) for the dated log.
 | 6a-4 device sweep | corpus 11 partitions / 1,015 samples; 5,524 synthesized clean cases / 6,166 samples, 2,648 above order 16 delegated; 11 guard rejections at orders 12–16 + 30 with 10 near-miss controls; `p = 0` 14 codewords; 5 end-of-stream shapes | the asm, the model and the incumbent agree on ARM7TDMI |
 | 6a-4 end-of-stream cursor | **3 of 5** arms leave the cursor where the incumbent does not | permitted by the seam (per-read atomicity only) and ratified by the probe; reported, never asserted to be zero |
 | 6a-4 ROM memory limits | §9.2.7.3 guard regions at orders 12 (131 KB) and 13 (65 KB) and the `p = 0` extreme (2 MB) do not fit EWRAM (256 KB) | those three cases are host-only and the device suite counts them |
+| **6a-5 realization, product shape** | asm − ctrl = **−91,822,320 / −91,286,717 cycles** per 157-frame clip = **−584,856 / −581,444 c/frame = −286.9 / −285.3 c/sample** (FIXED / LPC); 157/157 frames faster each clip | the item's number of record; the fork's `faster` side by 4 orders of magnitude |
+| 6a-5 same image | ctrl FIXED 275,111,047 → asm 183,288,727 c/frame-sum (1,752,299 → 1,167,444 c/frame = 167.08% → **111.32%** of the 32,768 Hz budget); LPC 1,031,916,549 → 940,629,832 (626.72% → 571.28%) | FIXED still over budget at 32 kHz; 6a-6's width leg is the next lever |
+| 6a-5 arm cost is link-independent | asm sum 183,288,727 (product shape) vs 183,231,371 (three-arm link): **0.03%** | the arm is a property of the kernel; the control is not |
+| 6a-5 control is *not* link-independent | ctrl 280,848,260 (shipped) → 275,111,047 (one extra mechanism) → 249,051,451 (two) = **−36,543 / −202,529 c/frame** | a second `RiceKernel` body re-decides inlining; "three arms in one image" can only be a paired same-image reading (Q2, answered) |
+| 6a-5 three-arm link | asm − ctrl = −65,820,080 / −65,404,651 cycles (−419,236 / −416,590 c/frame) | the same win, measured in a link that also carries the Rust mechanism — smaller because the control moved, not because the arm did |
+| 6a-5 Rust cross-check | rust absolute 1,920,940 c/frame vs item 5 PR 4's implied 1,876,087 (**+2.4%**); paired delta **+164.2 / +163.9 c/sample** vs PR 4's +42.6 / +42.7 | the absolute cost travels; the paired delta does not, when the control moves. Do not "correct" PR 4 |
+| 6a-5 vs E10's probe | landed asm 1,167,444 c/frame vs E10's 1,069,515 (101.98%): **+97,929 c/frame = +47.8 c/sample**, keeping **82%** of E10's −349 c/sample win | the seam's window bridge + the two §9.2.7.3 guards + the 12-byte frame; the split between them is unattributed (6a-8 does not run — far outside the band) |
+| 6a-5 `iwram-pin` marginal (asm) | tables in ROM 202,770,217 → pinned 183,288,727 c/frame-sum = **−124,086 c/frame / −60.9 c/sample** | item 5's data-pin claim, re-measured on this kernel |
+| 6a-5 codegen, product shape | `.text` 46,008 → 63,124 B, `.iwram` 812 → **1,356 B** (812 + 544), `.rodata` 1,829,760 → 1,830,876 B; the ROM harness itself is +8,584 B of the `.text` | an instrument image; the decode-path share is ~4.1 KB (arm residual/subframe/driver instantiations + the 684 B kernel), not the whole delta |
+| 6a-5 determinism / layout | two headless runs of one arm image: 342 `***` lines `cmp`-identical; every *paired* delta reproduced to the cycle across a driver-layout change while the *absolute* sums moved +2 c/frame | paired deltas are the number of record; absolute sums are layout-sensitive at the 2 c/frame level |
 
 ## Determinism controls (why a zero is believable)
 
