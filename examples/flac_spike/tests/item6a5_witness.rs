@@ -218,4 +218,35 @@ fn the_arm_features_select_exactly_the_mechanisms_they_name() {
             && feature("item6a5-arms").contains("item6a5-asm"),
         "the three-way feature must be exactly the two arms"
     );
+
+    // [6a-5b] the vendored leg, same discipline applied one rung later. It may
+    // name only the module it is (no core/overlay feature — its whole value is
+    // that it shares no code with the landed path), and it must imply the asm
+    // arm: a differential leg with no landed leg in the link measures nothing,
+    // and "the pair is in one image" belongs in the manifest, not in a Makefile
+    // convention. Conversely no pre-6a-5b feature may pull it in: every number
+    // recorded before this rung was taken in an image with no vendored decoder.
+    let vend = feature("item6a5b-vendored");
+    assert!(
+        vend.contains("item6a5-asm")
+            && !vend.contains("item6a5-rust")
+            && !vend.contains("flac-lite")
+            && !vend.contains("rice-twin")
+            && !vend.contains("rice-arm")
+            && !vend.contains("rice-hybrid"),
+        "the 6a-5b leg must add only its own vendored module and imply the asm arm: {vend}"
+    );
+    for name in [
+        "item6a5-rust",
+        "item6a5-asm",
+        "item6a5-arms",
+        "item6a3-twin",
+        "item6a3-hybrid",
+    ] {
+        assert!(
+            !feature(name).contains("item6a5b-vendored"),
+            "{name} must not pull the 6a-5b leg in: {vend} — an image that carries a \
+             second decoder is not the image the earlier records name"
+        );
+    }
 }

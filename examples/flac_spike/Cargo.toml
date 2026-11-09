@@ -104,6 +104,30 @@ item6a5-rust = ["dep:flac-lite-gba", "flac-lite-gba/rice-twin", "flac-lite-gba/i
 item6a5-asm = ["dep:flac-lite-gba", "flac-lite-gba/rice-arm", "flac-lite-gba/iwram-pin"]
 item6a5-arms = ["item6a5-rust", "item6a5-asm"]
 
+# 6a-5b's fourth measurement leg (plan-of-record 6a-5b; the pass lives in the
+# same `mod item6a5` in src/main.rs). 6a-5's stack projection — the landed asm
+# leg +48.2 c/sample against E10's vendored leg — is the one comparison in these
+# records taken across TWO images, which method-and-gates.md forbids, and whose
+# own next paragraph measures the class of effect at -36,543/-202,529 c/frame on
+# UNCHANGED control code. So the two realizations have to be timed in one link.
+#
+#   item6a5b-vendored  compiles src/e10.rs — the E10 archive's vendored decode
+#                      path (its own reader, its own frame parser, its own ARM
+#                      kernel, its own 544 B of pinned tables) — and adds the
+#                      fourth window to the 6a-5 pass. It is NOT a `RiceKernel`
+#                      arm and it turns on no core or overlay feature of its own:
+#                      the point is that this leg shares nothing with the landed
+#                      path except the bytes it decodes and the samples it must
+#                      write. It DOES imply `item6a5-asm`, because a leg with
+#                      nothing to be differential against measures nothing: the
+#                      pair has to be in the link, and the manifest is what makes
+#                      that a checked fact rather than a Makefile convention.
+#
+# OFF by default, like every other arm feature: a default build of this crate has
+# no vendored decoder, no second kernel symbol and no `deny`-vs-`forbid`
+# relaxation (see src/lib.rs), and the shipped instrument image is unchanged.
+item6a5b-vendored = ["item6a5-asm"]
+
 # agb exists only for the GBA target, and it cannot build for the host triple
 # — while the host witness tests (make spike-test) compile this crate's lib
 # + tests natively. Gate by architecture: thumbv4t-none-eabi reports
@@ -160,6 +184,19 @@ required-features = ["rate-assets"]
 name = "item6a5_witness"
 path = "tests/item6a5_witness.rs"
 required-features = ["item6a5-arms"]
+
+# 6a-5b's host witness for the vendored leg, carried from the E10 archive: the
+# hybrid ARM variant decodes the committed clips to the reference PCM, agrees with
+# the production driver frame by frame, and its vendored `fold_body.s` is pinned
+# byte-identical to the one committed source (so the two kernels in the
+# differential link really do share the fold). On the host the asm leg is the
+# Rust twin; the assembled body is `overlay-kernel-test`'s and the ROM's own
+# per-frame sample-equality witness. required-features: a default build has no
+# e10 module, and a green that names nothing is a green that means nothing.
+[[test]]
+name = "e10_witness"
+path = "tests/e10_witness.rs"
+required-features = ["item6a5b-vendored"]
 
 [workspace]
 

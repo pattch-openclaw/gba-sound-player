@@ -2,6 +2,7 @@
         spike-rom native-spike-rom podman-spike-rom \
         item6a5-test item6a5-arms-rom native-item6a5-arms-rom podman-item6a5-arms-rom \
         item6a5-asm-rom native-item6a5-asm-rom podman-item6a5-asm-rom \
+        item6a5b-test item6a5b-rom native-item6a5b-rom podman-item6a5b-rom \
         rate-assets rate-test rate-rom native-rate-rom podman-rate-rom \
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
@@ -255,6 +256,11 @@ SPIKE_ROM := flac-spike.gba
 # untouched by both, which is the per-PR rule this rung lives under.
 SPIKE_6A5_ARMS_ROM := flac-spike-6a5-arms.gba
 SPIKE_6A5_ASM_ROM := flac-spike-6a5-asm.gba
+# 6a-5b's differential image: the product-shape instrument plus the E10
+# archive's vendored leg, so the landed realization and the archived one are
+# timed in ONE link (the +48.2 c/sample overhang 6a-5 recorded is a
+# cross-image number, and this is the image that retires it).
+SPIKE_6A5B_ROM := flac-spike-6a5b.gba
 SPIKE_CRATE_DIR := examples/flac_spike
 SPIKE_CRATE_MANIFEST := $(abspath examples/flac_spike/Cargo.toml)
 SPIKE_CRATE_BIN := target/$(TARGET)/release/flac-spike
@@ -435,6 +441,24 @@ native-item6a5-asm-rom: item6a5-asm-rom
 podman-item6a5-asm-rom:
 	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
 	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make item6a5-asm-rom
+
+# 6a-5b — the realization differential (plan-of-record 6a-5b). One image, four
+# windows: ctrl, the landed ARM arm (`item6a5-asm`, the product shape), and the
+# E10 archive's vendored path (`item6a5b-vendored`, which implies the asm arm).
+# The reading is `asm − vend`, paired per frame in one link; the run loop is the
+# same: `timeout -k 5 280 mgba-test-runner flac-spike-6a5b.gba` and
+# `grep -E "6a5|6a5b|stats:|budget:"`.
+item6a5b-rom: format
+	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --features item6a5b-vendored
+	agb-gbafix $(SPIKE_CRATE_DIR)/$(SPIKE_CRATE_BIN) -o $(SPIKE_6A5B_ROM)
+	@echo "6a-5b differential ROM built: $(SPIKE_6A5B_ROM) (ctrl + landed rice-arm + the E10 archive's vendored leg in one link)"
+
+native-item6a5b-rom: item6a5b-rom
+	@echo "native-item6a5b-rom done: $(SPIKE_6A5B_ROM)"
+
+podman-item6a5b-rom:
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make item6a5b-rom
 
 podman-spike-rom:
 	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
@@ -653,6 +677,21 @@ item6a5-test: toolchain-check
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(SPIKE_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features item6a5-arms
 	@echo "item6a5-test passed: ctrl, the Rust mechanism and the ARM embodiment all reach the committed PCM pins and agree frame by frame on the host (the asm leg is the model here; the assembled body is overlay-kernel-test's)"
+
+# 6a-5b's host witness. Both feature sets at once: `item6a5-arms` keeps 6a-5's
+# arm witness running (the differential image changes nothing about the arms), and
+# `item6a5b-vendored` brings in the vendored leg's own suite — bit-exact against
+# the reference PCM, frame-by-frame agreement with the production driver, the tier
+# census, and the fold-source equality check that proves both kernels in the
+# differential link paste the SAME committed fold body. On the host the leg's
+# kernel is its Rust twin (the assembled body is `overlay-kernel-test`'s and the
+# ROM's own per-frame sample-equality witness); that is the same division of
+# labour 6a-4/6a-5 recorded, not a weaker one.
+item6a5b-test: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(SPIKE_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features item6a5-arms,item6a5b-vendored
+	@echo "item6a5b-test passed: the arms still reach the pinned PCM and agree frame by frame, and the E10 leg's own witness (reference PCM, driver agreement, tier census, byte-identical fold source) passes beside them"
 
 spike-test: toolchain-check
 	@mkdir -p $(GATE_NEUTRAL_CWD)
@@ -965,7 +1004,7 @@ clean:
 	cd $(KERNEL_CRATE_DIR) && $(CARGO) clean
 	cd $(OVERLAY_CRATE_DIR) && $(CARGO) clean
 	cd $(OVERLAY_ROM_DIR) && $(CARGO) clean
-	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM) $(SPIKE_6A5_ARMS_ROM) $(SPIKE_6A5_ASM_ROM) $(OPUS_ROM) $(OPUS_PROBE_ROM) $(KERNEL_ROM) $(RATE_ROM) $(RATE_PLAY_ROM) $(OVERLAY_ROM)
+	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM) $(SPIKE_6A5_ARMS_ROM) $(SPIKE_6A5_ASM_ROM) $(SPIKE_6A5B_ROM) $(OPUS_ROM) $(OPUS_PROBE_ROM) $(KERNEL_ROM) $(RATE_ROM) $(RATE_PLAY_ROM) $(OVERLAY_ROM)
 # The rate flow's generated assets are TEMPORARY (gitignored, like ROMs —
 # FLAC.md "Sample-rate reduction"); they regenerate from
 # `make rate-assets INPUT=… RATE=…`, so they leave with `make clean`.
@@ -1052,6 +1091,8 @@ help:
 	@echo "    item6a5-arms-rom  6a-5 instrument: ctrl + Rust mechanism + ARM kernel in one image"
 	@echo "    item6a5-asm-rom   6a-5 instrument: ctrl + ARM kernel only (the product shape)"
 	@echo "    item6a5-test      6a-5 arm witness (host: all arms reach the PCM pins, frame by frame)"
+	@echo "    item6a5b-rom      6a-5b differential image: the product shape + the E10 archive's vendored leg"
+	@echo "    item6a5b-test     6a-5b witnesses (host: the arms' PCM-pin witness + the vendored leg's own witness)"
 	@echo ""
 	@echo "  SAMPLE-RATE ROM (FLAC.md 'Sample-rate reduction', Part 1):"
 	@echo "    rate-assets       stage TEMPORARY clips from a real WAV (INPUT=… RATE={10512|18157|32768})"
