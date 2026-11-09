@@ -134,6 +134,17 @@ the end of E9's entry in [`perf-results.md`](perf-results.md) and Q12 in
 menu's biggest lever (−286.9 c/sample landed), and both product rates fit with it
 alone (61.7% at 18,157 Hz, 35.7% at 10,512 Hz).
 
+**Re-opened 2026-11-08 (6a-5b): the +48.2 c/sample is a cross-image quantity.**
+The projection's two inputs come from two different images, and this file's own
+item-6 rows above show what that costs: `ctrl` moves −36,543 / −202,529 c/frame
+across links carrying one and two `RiceKernel` bodies, with its source unchanged.
+Four static facts on the current tree (the FIXED clip's geometry ⇒ 2 kernel calls
+per frame, the bridge's ~114 instructions per call, the asm's 5-instruction
+per-sample delta, and the tables at E9's own `0x0300032c/34c/44c`) leave no room for
+48 c/sample of *code*. The 103.83% row is a projection whose error bar is larger
+than its conclusion; `asm − vendored` read in one link (6a-5b) is what settles it,
+and no sequencing decision should be taken on the row until then.
+
 ## 10,512 Hz, real music (rate ROM)
 
 `bioluminescent.wav` (96 kHz / 24-bit master) normalised to 16-bit stereo at
@@ -191,7 +202,8 @@ See [`playback-results.md`](playback-results.md) for the dated log.
 | 6a-5 vs E10's probe | landed asm 1,167,444 c/frame vs E10's 1,069,515 (101.98%): **+97,929 c/frame = +47.8 c/sample**, keeping **82%** of E10's −349 c/sample win | the seam's window bridge + the two §9.2.7.3 guards + the 12-byte frame; the split between them is unattributed (6a-8 does not run — far outside the band) |
 | 6a-5 `iwram-pin` marginal (asm) | tables in ROM 202,770,217 → pinned 183,288,727 c/frame-sum = **−124,086 c/frame / −60.9 c/sample** | item 5's data-pin claim, re-measured on this kernel |
 | 6a-5 codegen, product shape | `.text` 46,008 → 63,124 B, `.iwram` 812 → **1,356 B** (812 + 544), `.rodata` 1,829,760 → 1,830,876 B; the ROM harness itself is +8,584 B of the `.text` | an instrument image; the decode-path share is ~4.1 KB (arm residual/subframe/driver instantiations + the 684 B kernel), not the whole delta |
-| **6a-5 stack projection (the item's first measured negative)** | landed asm **183,288,727** vs E9's vendored arm **167,877,039** = **+15,411,688 / +98,164 c/frame / +48.2 c/sample (+9.18%)**; + E9's same-image i32 marginal (−12,330,961) projects **170,957,766 = 1,088,902 c/frame = 103.83% mean / 104.36% worst** of 32,768 Hz | the vendored stack's 94.47% does **not** reproduce through the landed seam; the seam costs 9.2 points against the stack's 5.5-point margin. i32 marginal to be re-measured by 6a-6; 18,157/10,512 Hz still fit (61.7% / 35.7% asm alone) |
+| **6a-5 stack projection (the item's first measured negative)** | landed asm **183,288,727** vs E9's vendored arm **167,877,039** = **+15,411,688 / +98,164 c/frame / +48.2 c/sample (+9.18%)**; + E9's same-image i32 marginal (−12,330,961) projects **170,957,766 = 1,088,902 c/frame = 103.83% mean / 104.36% worst** of 32,768 Hz | the vendored stack's 94.47% does **not** reproduce through the landed seam; the seam costs 9.2 points against the stack's 5.5-point margin. i32 marginal to be re-measured by 6a-6; 18,157/10,512 Hz still fit (61.7% / 35.7% asm alone). **Re-opened by 6a-5b: cross-image comparison** |
+| **6a-5b static bound (2026-11-08, no cycles)** | FIXED clip `MidSide`, both subframes **FIXED order 0, partition order 0**, `wasted 0`, Rice p = 8/10, **157/157 frames** ⇒ **2 kernel calls/frame**; seam bridge **~114 Thumb instr/call** ⇒ **≈0.15 c/sample**; asm delta **5 instr/sample** (G1+G2) ⇒ **≈5–15 c/sample**; tables at `0x0300032c/34c/44c` (E9's own addresses, `.iwram` 0x54c); `decode_residual_with::<ArmRiceKernel>` **2,104 B** vs `<TableCountKernel>` **1,812 B** | the overhang cannot be the bridge or the frame/status word; the only *proven* per-sample cost is the guards; the remaining share is image effect, which 6a-5b pairs away or confirms |
 | 6a-5 determinism / layout | two headless runs of one arm image: 342 `***` lines `cmp`-identical; every *paired* delta reproduced to the cycle across a driver-layout change while the *absolute* sums moved +2 c/frame | paired deltas are the number of record; absolute sums are layout-sensitive at the 2 c/frame level |
 
 ## Determinism controls (why a zero is believable)

@@ -90,7 +90,11 @@ times, twice surviving review); `checked_shl` guards the shift amount and wraps
 the value; a hand-computed "published" FNV vector was wrong from memory; a test
 that re-parsed the pristine frame asserted `Ok` from the mutation; a generated
 `\uXXXX` escape is valid JSON and invalid Rust; a gate that "runs" can collect
-zero tests.
+zero tests; and the mirror image of all of those — a *negative* composed by adding
+one record's paired marginal to another record's absolute, on the page that states
+the rule against it (6a-5's 103.83% stack projection, re-opened by 6a-5b). A
+projection is a claim about two images; the same-image pair is the measurement, and
+the plan's sequencing decisions inherit whichever one they were taken from.
 
 ## Measurement entry points (spike crate)
 

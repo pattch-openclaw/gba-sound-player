@@ -333,8 +333,21 @@ being checked.
 ### Q12 — Where do the seam's 48 c/sample go, and what puts 32,768 Hz FIXED back under budget?
 
 **Opened by:** 6a-5's stack projection (2026-11-08) — the item's first measured
-negative. **Owned by:** 6a-6 for the width half; a probe with the 6a-8 *shape* (but
-a new justification) for the seam half; 6a-7 inherits the verdict.
+negative. **Owned by:** **6a-5b** for the seam half (a same-image *differential*,
+not a sub-stage probe — see the plan's 6a-5b section); 6a-6 for the width half;
+6a-7 inherits the verdict.
+
+**Re-opened 2026-11-08: the premise did not survive a code-level check.** The
+48 c/sample is a quantity taken across two records, and the FIXED clip's own
+geometry bounds most of it away before any probe runs: the clip is `MidSide`, order-0
+FIXED, `wasted == 0`, **partition order 0 on both subframes, 157/157 frames** — so
+there are exactly **2 kernel calls per frame**, which bounds candidates (a) (the
+window bridge) and (c) (the 12-byte frame and status word) together to ~0.15
+c/sample. That leaves (b), the two §9.2.7.3 guards, at **5 instructions per sample
+≈ 5–15 c/sample** — the only per-sample code delta the landing introduced, provable
+by diffing the two asm bodies — and pushes the rest of the overhang into the
+image-effect class this repo already measured at ~99 c/sample on `ctrl`'s unchanged
+code. Read the plan's 6a-5b section before using any number below.
 
 The landed realization is +48.2 c/sample (+9.18%) slower than E10's vendored arm
 (183,288,727 vs 167,877,039 on a 157-frame FIXED clip), and stacking E9's i32
@@ -352,11 +365,19 @@ by ~168–199 K cycles/frame, so a per-partition call boundary is not free even
 before its instructions.
 
 Two constraints on any answer. The conditional **6a-8 does not run** — the plan
-wrote it for a near-band fork result, and this result is far outside the band — so a
-sub-stage probe here is a *new* probe with a new justification, not 6a-8's trigger.
-And **6a-6's measured i32 marginal, not E9's**, is the only admissible width input:
+wrote it for a near-band fork result, and this result is far outside the band — and
+the shape 6a-5b uses is deliberately *not* 6a-8's: it compares two realizations in
+one link, pairing per frame, rather than pricing one kernel's sub-stages. And
+**6a-6's measured i32 marginal, not E9's**, is the only admissible width input:
 the i32 sites are outside the kernel and the seam, so transfer is expected, but
 "expected" is how E9's caveat (1) got written in the first place. Honest answers
 already established: both product rates fit FIXED with the kernel alone (61.7% at
 18,157 Hz, 35.7% at 10,512 Hz), so this Q is about the *full-rate* claim, not about
 whether the kernel was worth landing (it is: −286.9 c/sample, fork = carry).
+
+**And one half of the width question is now identified by mechanism, not averaged.**
+On this clip E9's FIXED `i32 − arm` marginal (−78,541 c/frame = −38.4 c/sample) has
+exactly one active site — `stereo::decorrelate`'s mid/side arm, which is `i64` with
+two `>> 1` per sample pair — because `integrate_fixed` is a no-op at order 0 and
+`pad_block` a no-op at `wasted == 0`. So 6a-6's FIXED half is testable at a named
+function rather than against a clip average; see the plan's 6a-5b section.

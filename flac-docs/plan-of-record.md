@@ -8,7 +8,8 @@ landed; 4–5 open), the E10 plans (landed) and the rate-tooling proposal (lande
 with its step-4 multi-clip ROM and its cross-rate sweep still open) — all of which
 now live only in git history and in the records they produced.
 
-## Status at a glance (2026-11-08, branch `feat/flac-item6a5-realization-reading`)
+## Status at a glance (2026-11-08, branch `docs/flac-6a5b-projection-reopened`;
+the 6a-5 realization reading itself is on `feat/flac-item6a5-realization-reading`)
 
 - **Landed:** the Phase-1 decode path through `decode_frame`; the
   stream layer; the per-frame `driver`; CRC verification behind `crc-check`; the
@@ -28,17 +29,24 @@ now live only in git history and in the records they produced.
   in this rung: 6a-5's own rule is that no shipped count or instruction stream
   moves, and none did (the product image `flac-integration` is byte-identical; the
   instrument's cycle readings reproduce the record to the cycle).
-- **The stack verdict does not survive the seam, and that is the item's first
-  measured negative.** The landed realization is +48.2 c/sample (+9.18%) slower
-  than E10's vendored arm; applying E9's same-image i32 marginal projects FIXED at
-  **103.83% mean / 104.36% worst** of the 32,768 Hz budget — over, where the probe
-  projected 94.47%. The seam costs 9.2 points against the stack's 5.5-point margin.
-  The *fork's* carry decision is unaffected (the kernel is still a −286.9 c/sample
-  lever), and both product rates fit with the kernel alone (61.7% at 18,157 Hz,
-  35.7% at 10,512 Hz). Attribution of the 48 c/sample is open (Q12).
-- **Next rung:** **6a-6** — the guarded i32 default width in the core.
-- **Not started:** 6a-6…6a-8, all of 6b, and the product work they unblock
-  (manifest, packer, facade, mixer).
+- **The stack verdict is re-opened, not measured (6a-5b).** 6a-5's projection put
+  the landed stack at **103.83% mean / 104.36% worst** of the 32,768 Hz budget by
+  adding E9's i32 marginal to the landed asm arm — over, where the vendored probe
+  projected 94.47%, and the seam was charged 9.2 points against a 5.5-point margin.
+  That is the one comparison in these records taken **across two records**, which
+  the reading rule forbids, and four static facts now bound what it blames: the
+  FIXED clip's own geometry gives **2 kernel calls per frame**, so the seam's
+  bridge is ≈0.15 c/sample, and the only per-sample code delta the landing added is
+  **5 instructions** (≈5–15 c/sample). The *fork's* carry decision is untouched (the
+  kernel is still a −286.9 c/sample same-image lever) and both product rates fit
+  with the kernel alone (61.7% at 18,157 Hz, 35.7% at 10,512 Hz). **Nothing is
+  refactored and 6a-6 does not start** until the realization is compared in one
+  link — 6a-5b below.
+- **Next rung:** **6a-5b** — the paired realization differential (one link, one
+  pass, landed arm against the vendored one), then **6a-6**, the guarded i32 default
+  width.
+- **Not started:** 6a-5b, 6a-5c, 6a-6…6a-8, all of 6b, and the product work they
+  unblock (manifest, packer, facade, mixer).
 
 ## Item 6a — the overlay (the realization)
 
@@ -53,7 +61,9 @@ from and it does not turn `scan` on.
 | **6a-3** ✅ | The seam passable from outside the crate, in Rust: `rice_unmap` visibility bump + `TwinKernel` behind `rice-twin`, carrying the core's twin as an instrument arm. | Section dump + symbol-level attribution; the corpus differential driven from outside; cycles as a control arm | that the seam is only passable from inside, or costs more than the in-core form |
 | **6a-4** ✅ | **The asm kernel — correctness only, no timings.** `rice_partition.s` + `fold_body.s` lifted from `examples/arm-kernels/`, `global_asm!`, the FFI declaration and its `SAFETY` block, the state-struct ABI written down, tables under `iwram-pin` (this is also where pin enablement lands). | (i) a kernel-check ROM sweeping the **same committed golden tables**; (ii) `objdump -d`: 4-byte ARM encodings, `pop {…,lr}` + `bx lr`, never LDM-to-PC; (iii) the boundaries item 5 handed forward — spelled `q = 31` leg, `w == 0` handoff signal, `p = 0` mask, §9.2.7.3's two guards, unterminated/short-remainder **restore-nothing**, reads bounded by `region()` | the kernel is wrong, or the interwork/ABI is wrong — settled **before** any cycle is trusted |
 | **6a-5** ✅ | **The realization reading — the item's number of record. No new code.** Three arms, one image: `ctrl`, 6a-3's Rust arm, 6a-4's asm arm; calibration subtracted, paired per frame, every delta byte attributed symbol by symbol. Carries the pre-declared fork below. | Cycles, same-image; codegen attribution. **The first ROM suite with a test in it is 6a-4's kernel check**; 6a-5 inherits a non-empty suite rather than "first to run `make test-rom`" (which already runs, collecting zero) | the win lives in a probe but not in the product path |
-| **6a-6** | **The width change, in the core.** i32 as the default arithmetic width, guarded per frame, i64 kept and reachable. Design in "The width decision" below. **It now also carries the stack verdict:** 6a-5 projects 103.83% at 32,768 Hz if E9's i32 marginal transfers, so this rung's measured marginal — not E9's — decides whether the full-rate FIXED claim can be restored, and 6a-7's stack confirmation inherits the answer. | Bit-exact vs `flac -d`; a width differential over the corpus and every committed frame-run table; the guard's unit witnesses incl. refusal cases; **both** configurations gated; codegen attribution of a both-legs build; cycles as a same-image arm | the guard is wrong (unsound), the legs are not equivalent, or a both-legs build costs more than the win |
+| **6a-5b** | **The paired realization differential. No new code — one more arm in the existing instrument.** E10/E9's committed vendored `e10::decode_one_arm` (i64, so it matches the landed `asm` arm step for step) timed in the **same link, same pass, same calibration** as `ctrl` and `asm`, so `asm − vendored` is a same-image pair. Re-opens the 103.83% projection, which compared two images. | Cycles, same-image, paired per frame; the per-frame sample-equality witness. Instrument-only: no shipped count or instruction stream moves | that the item's stack verdict is a comparison of two *images* rather than of two *realizations* |
+| **6a-5c** *(conditional on 6a-5b)* | **The guard marginal.** The same image with §9.2.7.3's G1/G2 removed from the overlay asm — the only per-sample code delta the landing introduced (5 instructions). Guards never fire on this corpus (p = 8/10, no long runs), so the equality witness still proves the samples identical. The asm header names a cheaper G1 spelling (test at the accumulation points, not the shared tail). | Cycles, same-image; `overlay-kernel-test` and `tests/arm_from_outside.rs` re-run | that the only *proven* per-sample cost of the landing stays unpriced |
+| **6a-6** | **The width change, in the core.** i32 as the default arithmetic width, guarded per frame, i64 kept and reachable. Design in "The width decision" below. **The stack verdict is not this rung's** — it is 6a-5b's, and 6a-6 must not start on a projection taken across images. What 6a-6 carries is the width half: its measured marginal replaces E9's borrowed one, and for the FIXED clip that half has exactly one named site (see 6a-5b). | Bit-exact vs `flac -d`; a width differential over the corpus and every committed frame-run table; the guard's unit witnesses incl. refusal cases; **both** configurations gated; codegen attribution of a both-legs build; cycles as a same-image arm | the guard is wrong (unsound), the legs are not equivalent, or a both-legs build costs more than the win |
 | **6a-7** | **The stack confirmation. No new code** — one measured arm: 6a-4's kernel **and** 6a-6's default together, against the same-image `ctrl`. Re-anchors the E numbers on the post-6a image, which 6b-1 inherits. | Cycles, same-image | that two measured wins composed negatively (E9's additivity does not reproduce) |
 | **6a-8** *(conditional)* | E8-style **sub-stage probe** over the asm kernel: tier-1 / tier-2 / tier-3 / refill / fold priced separately. Run **only** if 6a-5 lands inside or near the noise band. | Cycles, sub-stage | that a near-bar result is unattributable to a leg |
 
@@ -269,9 +279,10 @@ arms at 280,296,337 / 1,037,081,163. So the −584,856 c/frame delta is the kern
 and a wrong plumb would read as "no win" rather than as a win. Restored; the
 restored sources reproduce the numbers above.
 
-**What this costs the stack — the item's first measured negative.** The landed
-realization is **+15,411,688 cycles/clip = +98,164 c/frame = +48.2 c/sample
-(+9.18%)** slower than E10's vendored arm (183,288,727 vs 167,877,039). E9's i32
+**What this cost the stack — the item's first measured negative, re-opened by
+6a-5b.** The landed realization is **+15,411,688 cycles/clip = +98,164 c/frame =
++48.2 c/sample (+9.18%)** slower than E10's vendored arm (183,288,727 vs
+167,877,039). E9's i32
 leg saved 12,330,961 in its own image; applying that same-image marginal projects
 the landed stack at **170,957,766 = 1,088,902 c/frame = 534.2 c/sample = 103.83%
 mean / 104.36% worst** of the 32,768 Hz budget. The vendored stack sat at
@@ -281,7 +292,7 @@ the shipped path. For the projection to be wrong by enough to fit, the i32 leg
 would have to save ~40,200 c/frame more in the seam image than E9 measured (+51%);
 the i32 sites are outside the kernel and the seam, so a shift that large is not
 credible. It is a structural result, not a rounding — and it is the reason
-`perf-results.md`'s E9 caveat (1) is now written as fired.
+`perf-results.md`'s E9 caveat (1) was recorded as fired.
 
 The caveats, so this is not over-read: the i32 marginal is E9's, not measured on
 this image (6a-6 measures it; 6a-7 confirms); the kernel alone still fits both
@@ -294,6 +305,91 @@ attributed.** E10's arm had a vendored reader and no guards, and the conditional
 sub-stage probe (6a-8) does not run because 6a-5 landed far outside the noise band
 — so the split needs a probe with a *different* justification from the one the
 plan wrote (Q12).
+
+**Re-opened 2026-11-08 (6a-5b).** The paragraph above is this rung's conclusion and
+stays as the record of it; it is not the stack's verdict. The projection is the one
+comparison in these records taken across two records, and four static facts on the
+current tree bound what it blames to a fraction of itself. The numbers stand; the
+*sequencing decision* they were used to justify does not, and no code is entitled to
+change until `asm − vendored` is read in one link.
+
+### 6a-5b — the 48 c/sample is re-opened: it is a cross-image comparison (2026-11-08)
+
+**What changed.** The 103.83% projection is arithmetically correct and
+methodologically unsound. It adds one record's *paired* marginal (E9's i32,
+measured on the *vendored* arm of an image that also carried the e2b four-arm pass)
+to another record's *absolute* (6a-5's asm, measured in a two-window image), on a
+page whose own rule forbids exactly that ([`method-and-gates.md`](method-and-gates.md):
+"No cycles quoted across records … Same-image pairs only"), and whose next
+paragraph already carries this record's own evidence for how large that class of
+effect is: `ctrl` moves **−36,543 / −202,529 c/frame** between links that carry one
+and two `RiceKernel` bodies, with its source unchanged.
+
+Four static facts, all re-derivable on the current tree, bound the seam below the
+number the projection attributes to it:
+
+| fact | how it was taken | consequence |
+|---|---|---|
+| The FIXED clip is `MidSide`, **FIXED order 0 on both subframes, partition order 0**, `wasted == 0`, Rice p = 8 (mid) / 10 (side) — **157/157 frames**, 320,000 samples (matching the record) | a throwaway bit-parser over `examples/flac_spike/assets/spike_l0_frames.bin` (frame header → subframe type/order → residual header; bodies walked to advance the cursor) | **exactly 2 kernel calls per frame.** Order-0 FIXED returns from `integrate_fixed` immediately and `wasted == 0` makes `pad_block` a no-op, so the FIXED frame's per-sample cost is the kernel + the shared mid/side decorrelate + stores — nothing else |
+| The seam bridge is **~114 Thumb instructions per call**: two `reverse_bits()` SWAR chains (≈28 each), a 5-word `KernelAbi` built in stack memory, three literal-pool reloads of `&CTZ8/&REV8/&BRUIJN_INDEX`, six clamp compares, one ARM↔Thumb interworking thunk | `objdump -d` of the `item6a5-asm` image, inside `decode_residual_with::<ArmRiceKernel>`: 55 instructions before the `bl` (`0x80014b2–0x800151e`), 59 after (`0x8001524–0x8001598`) | 2 calls/frame ⇒ **≈0.15 c/sample**. Q12's candidate (a), and (c) (12-byte frame, third status word) with it, cannot carry the overhang |
+| The asm bodies differ by **5 instructions per sample** — G1's `ldr+cmp+bhi` and G2's `adds+beq` — plus 3 per partition (the hoisted `mvn+lsr+str`) | `diff` of the E10 sample patch's `rice_partition.s` against `crates/flac-lite-gba/asm/rice_partition.s`: the four `[6a-4 …]` deltas are the *whole* difference | the only per-sample code delta there is: **≈5–15 c/sample**, i.e. 10,240–30,720 c/frame of the −40,152 needed |
+| The three tables sit at **`0x0300032c / 0x0300034c / 0x0300044c`**, `.iwram` 0x54c | `objdump -t` of the same image | byte-for-byte the addresses E9's own `nm` witness records — table placement is *not* a difference between the two measurements |
+
+Add those up and a genuine +48.2 c/sample has nowhere to live. The decorrelate is
+the same shared `flac_lite::stereo::decorrelate` in both arms, the reader
+primitives are byte-identical source, and the per-sample kernel delta is five
+instructions. What the projection is measuring is the difference between two
+**images**, and that difference is not a property of the seam.
+
+**What this does not say.** It does not say the seam is free — it says the seam's
+*bridge* cannot be 48 c/sample, and that the landed realization must be compared to
+the vendored one **in one link** before any of it is attributed. It does not
+retract the fork: −584,856 c/frame is a same-image paired reading and stands. And
+it moves no shipped count: nothing in 6a-5b is code.
+
+**The two readings that settle it.**
+
+* **6a-5b — the paired realization differential.** A fourth arm in the existing
+  `item6a5-*` instrument: E10/E9's committed vendored `e10::decode_one_arm` (i64,
+  so it matches the landed `asm` arm step for step), timed in the same link, same
+  pass and same calibration as `ctrl` and `asm`, and read as `asm − vendored` per
+  frame. The machinery is already there — the three-window pass, `timed_reset`, the
+  Opus sentinel rule, the per-frame equality witnesses, and the
+  `e9-composite.patch` modules (re-appliable; its README carries the
+  `port-item6a2-header-bits.patch` note).
+
+  **Pre-declared fork, written before the reading:** ≤ ~15 c/sample ⇒ the projection
+  is void, the landed stack re-projects to ~95–96%, 6a-6 proceeds as planned and
+  **nothing in the seam is refactored**; ≥ ~30 c/sample ⇒ the static bound above is
+  wrong and the suspect list is the *codegen* of the instantiated path — measured
+  today as `decode_residual_with::<ArmRiceKernel>` **2,104 B** against
+  `<TableCountKernel>` **1,812 B** (+292 B carrying the delegation branch, the bridge
+  and inlined `read_bits`/`peek_at` cold paths in one function) — and the placement
+  of the 684 B ARM body, **not** the bridge.
+
+* **6a-5c — the guard marginal, conditional on 6a-5b.** The same image with G1/G2
+  removed from the asm. Guards never fire on this corpus, so the equality witness
+  still holds and `guarded − unguarded` is the true cost of the only proven code
+  delta. Overlay-side only: the shipped default does not move, and the change re-runs
+  `overlay-kernel-test` (8 device arms) and `tests/arm_from_outside.rs`.
+
+**Why 6a-6 waits for 6a-5b.** Two structural reasons, not scheduling taste.
+(1) 6a-6 is the rung that *moves a default*, and its FIXED marginal is being
+projected from a quantity whose error bar (the image-effect class, ~99 c/sample
+measured on `ctrl`) exceeds the conclusion (48.2 c/sample); measuring the width leg
+against an un-anchored denominator buys a second un-anchored number. (2) 6a-6 adds
+an arithmetic leg to the link, and adding mechanisms to a link is precisely what
+moves the shared path (−36,543 → −202,529 c/frame, same `ctrl` source) — a seam
+differential taken *after* 6a-6 inherits that move.
+
+**One thing the clip geometry makes newly predictable, and it belongs to 6a-6.**
+Because the FIXED clip is order-0 FIXED and mid-side, E9's `i32 − arm` marginal on
+it (−78,541 c/frame = −38.4 c/sample) has exactly **one** active site: the mid/side
+arm of `stereo::decorrelate`, which is `i64` with two `>> 1` per sample pair — two
+`__aeabi_llsr` calls per sample on ARMv4T. `integrate_fixed` is a no-op at order 0
+and `pad_block` a no-op at `wasted == 0`. So the width leg's FIXED half is not "an
+average that might transfer": it is one named function, called from the same place
+in both arms, and 6a-6 can gate it on that site rather than on the clip average.
 
 ### 6a's pre-declared fork (stated before the reading, so it cannot be negotiated)
 
@@ -388,13 +484,17 @@ half; the "armed by a bound" half stands, and that is the half carrying the risk
 - **The core makes no real-time claim**; the overlay never claims correctness
   independent of the core's witnesses.
 - **The default Rice kernel and the shipped decode path do not change** in any PR
-  that is not 6a-6 or 6a-7.
+  that is not 6a-6 or 6a-7. 6a-5b is instrument-only (one more arm in the 6a-5
+  image); 6a-5c may move only the overlay's own arm configuration and re-runs the
+  overlay's witnesses.
 
 ## Deliberate scope cuts
 
 No `Decoder`/`format::Manifest`/`scan` rewiring in 6a. No 24-bit decode. No
 mixer/DMA or `agb` integration in either item. No `dyn` dispatch anywhere. No new
-`unsafe` in the core. No sub-stage probe unless 6a-5 lands near the bar. No GBA
+`unsafe` in the core. No sub-stage probe unless 6a-5 lands near the bar — 6a-5b is
+not that probe (it compares two realizations in one link; it does not price one
+kernel's sub-stages), so **6a-8 stays untriggered**. No GBA
 hardware claim — mGBA on this host, and E5's arbitration owns that line.
 
 ## Baselines to hold
@@ -437,8 +537,8 @@ kernel-check). This image is **not** the shipped path and its numbers are not
 comparable to the 46,008 B figure — different crate, different linked set, no
 cycle meaning.
 
-**Per-PR rules:** 6a-1 / 6a-2 / 6a-5 / 6a-7 / 6a-8 change no shipped count and no
-shipped instruction stream. 6a-3 and 6a-4 may move counts only in their own new
+**Per-PR rules:** 6a-1 / 6a-2 / 6a-5 / 6a-5b / 6a-7 / 6a-8 change no shipped count
+and no shipped instruction stream. 6a-3 and 6a-4 may move counts only in their own new
 configurations (both verified). 6a-5 is the rung that needed the rule read
 precisely: the **product** image is byte-identical, the **instrument's** cycle
 readings reproduce the record to the cycle, and the instrument's own `.text` moved
