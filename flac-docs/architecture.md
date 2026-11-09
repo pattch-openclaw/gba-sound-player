@@ -91,13 +91,20 @@ crates/flac-lite-gba/      GBA overlay: no_std, deny(unsafe_code)
   rice_arm.rs              the ARM-mode kernel, FFI, KernelAbi, three tables
                            (feature `rice-arm`); 0 unsafe in a default build,
                            3 items with rice-arm, 6 with iwram-pin as well
-  asm/rice_partition.s     the assembled body (E10's, plus the four 6a-4 deltas)
+  asm/rice_partition.s     the assembled body (E10's, plus the four 6a-4 deltas),
+                           placed in `.iwram` rather than `.text` since 6a-5d —
+                           measured 4.000 cycles/instruction in ROM vs ~1.4 in
+                           IWRAM, i.e. 48.3% of the 32 kHz frame instead of 109.8%
 
 examples/overlay-kernel-check/  the kernel-check ROM (`rice-arm` + `iwram-pin`):
                            corpus + synthesized boundaries through incumbent,
                            assembled kernel and model, on mGBA's ARM7TDMI
 examples/flac_spike/       the measurement instrument (the `ctrl` arm of every E
                            record) + experiments/<name>/ reappliable samples
+  src/e10.rs + asm/        6a-5b: one archived experiment re-applied as a live
+                           *measurement leg* (feature `item6a5b-vendored`), with
+                           its kernel symbol and local labels renamed so both
+                           kernels link, and `tests/e10_witness.rs` as its gate
 examples/flac_integration/ standalone ROM that links the decoder (build sanity)
 examples/arm-kernels/      ARM-mode kernels + dual witness, outside the decode path
 examples/symphonia_flac_probe/  the compile-failure probe (documentation)
@@ -110,7 +117,7 @@ covered. `strict-profile` is the exception — it is declared and unimplemented.
 
 | Feature | What it changes | Gate |
 |---|---|---|
-| `iwram-pin` | pins the hot lookup tables to `.iwram` on ARM targets (the crate's only `unsafe` surface: placement attributes on immutable tables) | GBA ROM builds + `nm` witness |
+| `iwram-pin` | pins the hot lookup **tables** to `.iwram` on ARM targets (the crate's only `unsafe` surface: placement attributes on immutable tables). The ARM kernel **body** is pinned to `.iwram` unconditionally and is *not* this feature's business — 6a-5d measured a ROM-resident body at 4.000 cycles/instruction against ~1.4 in IWRAM, and there is no configuration in which that is the code you want | GBA ROM builds + `nm` witness |
 | `crc-check` | verifies header CRC-8 and footer CRC-16 instead of consuming them | `flac-test-crc` |
 | `scan` | compiles the table-less frame walk | `flac-test-scan` |
 | `rice-hybrid` | compiles the portable hybrid Rice twin | `flac-test-rice` |
@@ -123,6 +130,22 @@ The `decoder` facade and the `format` items above are the remaining `todo!()`s; 
 `GAFP` byte contract is specified in [`../crates/flac-lite/README.md`](../crates/flac-lite/README.md)
 and `scripts/pack_flac.sh` is still a documented stub. The spike's generated
 per-frame offset table is the deliberate stand-in.
+
+**One experiment runs inside the tree, and it is the exception that proves the
+`experiments/` rule.** 6a-5b needed the *same image* to contain both the landed ARM
+realization and the probe's vendored one, which no patch applied to a scratch
+checkout can give a per-frame paired reading. So E10's module, its asm body and its
+witness were vendored into the spike crate behind `item6a5b-vendored` — a feature
+that implies `item6a5-asm`, because a differential leg without the landed leg in the
+link measures nothing. It is **not** a `RiceKernel` arm, deliberately: a leg that
+goes through the seam prices the seam, and the point was to price what the seam does
+not cover. Two mechanics that only show up when a second kernel is in the same link:
+`global_asm!` symbols are not namespaced (`arm_rice_partition` →
+`e10_rice_partition`), and a crate's `global_asm!` blocks assemble into one unit, so
+`.Lloop`-style local labels collide and must be renamed too. The default build
+doesn't have the module at all: it stays `forbid(unsafe_code)` outside 6a-5b
+builds, and the E10 witness is `required-features`-gated so a green cannot name
+nothing.
 
 **The seam now reaches the frame.** 6a-5 threaded the kernel choice up the
 caller-facing chain — `frame::decode_frame_with<K>` → `subframe::decode_subframe_with<K>`

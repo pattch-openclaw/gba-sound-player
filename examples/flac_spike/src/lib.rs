@@ -32,11 +32,27 @@
 //! touching decode logic.
 
 #![no_std]
-#![forbid(unsafe_code)]
+// [6a-5b] `forbid(unsafe_code)` is the shipped posture and stays the shipped
+// posture. It is relaxed to `deny` ONLY in a build that links 6a-5b's vendored
+// leg, because that leg is the E10 archive verbatim and the archive carries a
+// module-scoped `allow(unsafe_code)` for its `.iwram` placement attributes and
+// its FFI boundary (E2b's pattern) — which `forbid` makes impossible to express.
+// cfg-gating the relaxation is what keeps the sentence "the instrument's default
+// build forbids unsafe" true with the feature off and checkable, rather than a
+// claim that a feature-flag quietly weakened.
+#![cfg_attr(not(feature = "item6a5b-vendored"), forbid(unsafe_code))]
+#![cfg_attr(feature = "item6a5b-vendored", deny(unsafe_code))]
 #![warn(missing_docs)]
 
 pub mod assets;
 pub mod checksum;
 pub mod driver;
+// [6a-5b] the E10 archive's vendored decode path, kept verbatim, as the fourth
+// measurement leg. Off by default: a default build of this crate contains no
+// vendored decoder, and every pre-6a-5b number in these docs was taken without
+// it. Why a *vendored* leg rather than another `RiceKernel` arm is the point of
+// the rung — plan-of-record 6a-5b.
+#[cfg(feature = "item6a5b-vendored")]
+pub mod e10;
 pub mod playback;
 pub mod stats;

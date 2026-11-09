@@ -646,6 +646,30 @@ mod rom {
     // path by ~168–199 K cycles/frame. So `ctrl` is read in *this* image
     // alongside the arms (paired, same-image), and the shipped-baseline
     // comparison comes from the default image's own control run.
+    //
+    // 6a-5b adds a fourth window, `vend`, under `item6a5b-vendored` (which
+    // implies `item6a5-asm` — a leg with nothing to be differential against
+    // measures nothing): `flac_spike::e10::decode_one_arm`, the E10 archive's vendored
+    // decode path, verbatim but for the two ports its own archive README names
+    // (item 4a's `header_bits`, and `arm_rice_partition` -> `e10_rice_partition`
+    // so its kernel and the landed one can coexist in one link — `global_asm!`
+    // symbols are not namespaced). It is not a `RiceKernel` arm and shares no
+    // code with the landed path: its own reader, frame parser, partition loop,
+    // ARM kernel and 544 B of pinned tables.
+    //
+    // Why it exists: 6a-5's stack projection put the landed leg +48.2 c/sample
+    // over E10's vendored leg — 5.2 K frames of margin on the decision. That
+    // number is the only comparison in these records taken across TWO images,
+    // which method-and-gates.md forbids, and whose own next paragraph measures
+    // the class of effect at −36,543/−202,529 c/frame on UNCHANGED control code.
+    // Static facts bound the seam bridge at ~0.15 c/sample (both legs make the
+    // same 2 calls/frame through one in-crate generic, both keep a u32 word
+    // cursor, both pin their tables to zero-wait IWRAM), and the two kernels'
+    // bodies differ by exactly 5 instructions per sample — so the overhang is
+    // either priced in one link here or it stops being a fact at all. The
+    // reading is `asm − vend`, per frame, same link; the pre-registered fork
+    // (±5.75 c/sample about the ~9 c/sample the 5-instruction delta predicts) is
+    // in plan-of-record 6a-5b, and neither branch unlands 6a-5.
     // -----------------------------------------------------------------------
     #[cfg(any(feature = "item6a5-rust", feature = "item6a5-asm"))]
     mod item6a5 {
@@ -771,10 +795,13 @@ mod rom {
             pin_ok && stats_ok
         }
 
-        /// The three-way timing pass. One timed window per enabled arm per frame,
+        /// The per-arm timing pass. One timed window per enabled arm per frame,
         /// all in the same link; equality of the written samples against `ctrl`
         /// is checked OUTSIDE the windows, per frame, and a divergence voids the
-        /// arm's numbers (E1/E2a/E4/E9 pattern).
+        /// arm's numbers (E1/E2a/E4/E9 pattern). With `item6a5b-vendored` there
+        /// is a fourth window — the E10 archive's vendored path — paired against
+        /// the landed ARM arm rather than only against `ctrl`; that pair is what
+        /// 6a-5b's record is.
         fn pass(clip: &SpikeClip, counter: &mut Counter<'_>) -> bool {
             let name = clip.name;
             let max = usize::from(clip.max_blocksize);
@@ -794,6 +821,16 @@ mod rom {
             let mut asm_r: alloc::vec::Vec<i32> = alloc::vec![0; max];
             #[cfg(feature = "item6a5-asm")]
             let mut state_a = [PredictorState::new(), PredictorState::new()];
+            // [6a-5b] the vendored leg's own buffers and its own `PredictorState`
+            // pair: `e10::decode_one_arm` carries its own history, and neither it
+            // nor the landed legs may touch the other's state. That separation is
+            // also what makes the pair a measurement rather than a restatement.
+            #[cfg(feature = "item6a5b-vendored")]
+            let mut vend_l: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            #[cfg(feature = "item6a5b-vendored")]
+            let mut vend_r: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            #[cfg(feature = "item6a5b-vendored")]
+            let mut state_v = [PredictorState::new(), PredictorState::new()];
 
             // Calibration: one byte-identical loop, 3 discarded + 5 reported,
             // unconditional stores, nothing logged between windows (a
@@ -824,7 +861,10 @@ mod rom {
                 calib[DISCARDED + 2],
                 calib[DISCARDED + 3],
                 calib[DISCARDED + 4],
-                cfg!(feature = "item6a5-rust") as u8 + cfg!(feature = "item6a5-asm") as u8 + 1
+                cfg!(feature = "item6a5-rust") as u8
+                    + cfg!(feature = "item6a5-asm") as u8
+                    + cfg!(feature = "item6a5b-vendored") as u8
+                    + 1
             );
             if !stable {
                 agb::println!("*** {} 6a5 FAIL calibration unstable — numbers void", name);
@@ -848,6 +888,21 @@ mod rom {
             let mut asm = FrameCost::new();
             #[cfg(feature = "item6a5-asm")]
             let mut asm_paired = Paired::default();
+            #[cfg(feature = "item6a5b-vendored")]
+            let mut vend = FrameCost::new();
+            // 6a-5b's reading. `observe(frame, a, b)` computes `a − b`, so this
+            // is `asm − vend`: a POSITIVE sum means the vendored leg is the
+            // faster one — the direction the +48.2 c/sample projection claimed.
+            // `faster`/`slower` are counted in that direction and printed under
+            // names that say which leg won.
+            #[cfg(feature = "item6a5b-vendored")]
+            let mut vend_paired = Paired::default();
+            // The same leg against this image's control, which is the shape
+            // E10's own −349 c/sample reading had. It is not the rung's number
+            // (that is the pair above); it is what makes the two records
+            // comparable in kind rather than in percentage.
+            #[cfg(feature = "item6a5b-vendored")]
+            let mut vend_ctrl_paired = Paired::default();
             let mut ok = true;
 
             agb::println!(
@@ -927,6 +982,34 @@ mod rom {
                         }
                     }
                 };
+                // [6a-5b] the fourth window, laid out exactly like the others —
+                // same `timed_reset` shape, same sentinel rule — so the two legs
+                // differ in what they decode, not in how they are timed.
+                #[cfg(feature = "item6a5b-vendored")]
+                let vend_raw = {
+                    let (res, raw) = timed_reset(counter, || {
+                        flac_spike::e10::decode_one_arm(
+                            clip,
+                            frame_index,
+                            &mut vend_l,
+                            &mut vend_r,
+                            &mut state_v,
+                        )
+                    });
+                    match res {
+                        Ok(w) if w == written => raw,
+                        other => {
+                            agb::println!(
+                                "*** {} 6a5 FAIL frame {}: vend returned {:?} (ctrl wrote {})",
+                                name,
+                                frame_index,
+                                other,
+                                written
+                            );
+                            return false;
+                        }
+                    }
+                };
 
                 // Equality witness, outside the windows: a variant's numbers only
                 // count on a frame whose samples are bit-identical to the
@@ -950,6 +1033,19 @@ mod rom {
                     );
                     ok = false;
                 }
+                // [6a-5b] correctness before speed, same strength as the arms':
+                // the vendored leg has to produce the SAME samples through its own
+                // reader and its own kernel, or its cycles measure nothing.
+                #[cfg(feature = "item6a5b-vendored")]
+                if vend_l[..written] != ctrl_l[..written] || vend_r[..written] != ctrl_r[..written]
+                {
+                    agb::println!(
+                        "*** {} 6a5 FAIL frame {}: vend samples differ from ctrl — numbers void",
+                        name,
+                        frame_index
+                    );
+                    ok = false;
+                }
 
                 let ctrl_net = net_sentinel(ctrl_raw, overhead);
                 ctrl.observe(frame_index, ctrl_net);
@@ -965,6 +1061,14 @@ mod rom {
                     let n = net_sentinel(asm_raw, overhead);
                     asm.observe(frame_index, n);
                     asm_paired.observe(frame_index, ctrl_net, n);
+                    n
+                };
+                #[cfg(feature = "item6a5b-vendored")]
+                let vend_net = {
+                    let n = net_sentinel(vend_raw, overhead);
+                    vend.observe(frame_index, n);
+                    vend_paired.observe(frame_index, asm_net, n);
+                    vend_ctrl_paired.observe(frame_index, ctrl_net, n);
                     n
                 };
                 // One print per arm set: `#[cfg]` on a macro argument is not
@@ -1001,6 +1105,17 @@ mod rom {
                     ctrl_net,
                     asm_net
                 );
+                // [6a-5b] its own line, so the frame prints every earlier 6a-5
+                // record quotes stay byte-for-byte as they are. Printing rides
+                // outside the timed windows either way.
+                #[cfg(feature = "item6a5b-vendored")]
+                agb::println!(
+                    "*** {} 6a5 frame {:>3}/{} vend={}",
+                    name,
+                    frame_index,
+                    clip.frames.len(),
+                    vend_net
+                );
             }
 
             // `#[cfg]` on an operand of `||` is not expression-position Rust
@@ -1011,6 +1126,11 @@ mod rom {
             let wrapped = ctrl.wrapped || rust.wrapped;
             #[cfg(all(feature = "item6a5-asm", not(feature = "item6a5-rust")))]
             let wrapped = ctrl.wrapped || asm.wrapped;
+            // [6a-5b] `item6a5b-vendored` implies `item6a5-asm` in the manifest,
+            // so one of the spellings above defines `wrapped` whenever this
+            // shadowing line compiles.
+            #[cfg(feature = "item6a5b-vendored")]
+            let wrapped = wrapped || vend.wrapped;
             if wrapped {
                 agb::println!(
                     "*** {} 6a5 FAIL a window exceeded the 32-bit composite",
@@ -1085,6 +1205,52 @@ mod rom {
                     asm_paired.equal
                 );
             }
+            // [6a-5b] the rung's own numbers, printed last so the two pairs read
+            // in the order the plan pre-declared: leg against leg, then the leg
+            // against this image's control.
+            #[cfg(feature = "item6a5b-vendored")]
+            {
+                agb::println!(
+                    "*** {} 6a5 vend stats: count={} min={}@{} max={}@{} sum={}",
+                    name,
+                    vend.count,
+                    vend.min,
+                    vend.min_frame,
+                    vend.max,
+                    vend.max_frame,
+                    vend.sum
+                );
+                agb::println!(
+                    "*** {} 6a5b asm-vs-vend paired: sum_delta={} (asm-minus-vend; POSITIVE = the vendored leg is faster) mean_x1000={} max_delta={}@{} vend_faster={} asm_faster={} equal={}",
+                    name,
+                    vend_paired.sum,
+                    if vend.count > 0 {
+                        vend_paired.sum * 1000 / vend.count as i64
+                    } else {
+                        0
+                    },
+                    vend_paired.max,
+                    vend_paired.max_frame,
+                    vend_paired.faster,
+                    vend_paired.slower,
+                    vend_paired.equal
+                );
+                agb::println!(
+                    "*** {} 6a5 vend-vs-ctrl paired: sum_delta={} (ctrl-minus-vend, positive = faster) mean_x1000={} max_delta={}@{} faster={} slower={} equal={}",
+                    name,
+                    vend_ctrl_paired.sum,
+                    if vend.count > 0 {
+                        vend_ctrl_paired.sum * 1000 / vend.count as i64
+                    } else {
+                        0
+                    },
+                    vend_ctrl_paired.max,
+                    vend_ctrl_paired.max_frame,
+                    vend_ctrl_paired.faster,
+                    vend_ctrl_paired.slower,
+                    vend_ctrl_paired.equal
+                );
+            }
             #[cfg(all(feature = "item6a5-rust", feature = "item6a5-asm"))]
             agb::println!(
                 "*** {} 6a5 budget: ctrl_worst={} rust_worst={} asm_worst={} vs {}",
@@ -1110,7 +1276,84 @@ mod rom {
                 asm.max,
                 BUDGET_CYCLES_PER_FRAME
             );
+            #[cfg(feature = "item6a5b-vendored")]
+            agb::println!(
+                "*** {} 6a5 budget: vend_worst={} vs {}",
+                name,
+                vend.max,
+                BUDGET_CYCLES_PER_FRAME
+            );
             ok
+        }
+
+        /// [6a-5b] The vendored leg's decode proof: the same embedded-PCM pin and
+        /// the same fold, walked through the leg's own per-frame path (`e10` is a
+        /// probe: it has no `decode_clip_with`). The mono contract is the driver's
+        /// contract — an empty right window — so the bytes folded are identical
+        /// across legs and a MISMATCH here can only mean the leg drifted.
+        #[cfg(feature = "item6a5b-vendored")]
+        fn vendored_proof(clip: &SpikeClip, arm: &'static str) -> bool {
+            let max = usize::from(clip.max_blocksize);
+            let mut left: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            let mut right: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            let mut state = [PredictorState::new(), PredictorState::new()];
+            let mut hash = Fnv1a64::new();
+            let mut fold_ok = true;
+            let mut walk_ok = true;
+            let mut frames = 0usize;
+            let mut samples = 0usize;
+            for frame_index in 0..clip.frames.len() {
+                match flac_spike::e10::decode_one_arm(
+                    clip,
+                    frame_index,
+                    &mut left,
+                    &mut right,
+                    &mut state,
+                ) {
+                    Ok(written) => {
+                        let right_window: &[i32] = if clip.channels == 2 {
+                            &right[..written]
+                        } else {
+                            &[]
+                        };
+                        if fold_i16le_stereo(&mut hash, &left[..written], right_window).is_err() {
+                            fold_ok = false;
+                        }
+                        frames += 1;
+                        samples += written;
+                    }
+                    Err(err) => {
+                        agb::println!(
+                            "[spike] {} 6a5 arm {} FAIL: walk rejected at frame {}: {:?}",
+                            clip.name,
+                            arm,
+                            frame_index,
+                            err
+                        );
+                        walk_ok = false;
+                        break;
+                    }
+                }
+            }
+            let actual = hash.finish();
+            let stats_ok = walk_ok
+                && frames == clip.frames.len()
+                && samples == usize::try_from(clip.total_samples).unwrap_or(usize::MAX);
+            let pin_ok = fold_ok && actual == clip.fnv_pcm;
+            agb::println!(
+                "[spike] {} 6a5 arm {} pcm fnv: expected 0x{:016X} actual 0x{:016X} walk={} [{}]",
+                clip.name,
+                arm,
+                clip.fnv_pcm,
+                actual,
+                stats_ok,
+                if pin_ok && stats_ok {
+                    "MATCH"
+                } else {
+                    "MISMATCH"
+                }
+            );
+            pin_ok && stats_ok
         }
 
         /// Per-arm decode proofs, then the timing pass. Runs only when every arm
@@ -1131,6 +1374,13 @@ mod rom {
             proofs_then_pass::<TwinKernel>(clip, "rust", &mut proofs_ok);
             #[cfg(feature = "item6a5-asm")]
             proofs_then_pass::<ArmRiceKernel>(clip, "asm", &mut proofs_ok);
+            // [6a-5b] correctness before speed, before any timing: the vendored
+            // leg is timed only if it decodes the committed bytes to the pin.
+            #[cfg(feature = "item6a5b-vendored")]
+            {
+                let ok = vendored_proof(clip, "vend");
+                proofs_ok &= ok;
+            }
             agb::println!(
                 "*** {} 6a5: per-arm decode proof {} — timing pass {}",
                 clip.name,

@@ -1337,6 +1337,67 @@ read in one link (6a-5b). **Caveat (1) is therefore not "fired":** it is still
 open, and it is now the rung that must close it. The fork's carry decision is
 untouched — −584,856 c/frame is a same-image paired reading.
 
+**Closed 2026-11-09 (6a-5b) — caveat (1) *has* fired, and it now carries a measured
+number.** The differential ran in one image (one more timed leg in the existing pass, E10's module
+vendored into the spike tree, `flac-spike-6a5b.gba` sha `b6e35beb1e04028c…`), and
+what it found is that the re-opening above was wrong: `asm − vend` =
+**+15,431,627 cycles/clip FIXED (+98,291 c/frame = +48.22 c/sample = 24.11 cycles
+per Rice codeword)**, +15,409,977 on LPC, the vendored realization faster on
+**157/157 frames of both clips**, reproduced to ±13 c/frame across runs — within
+**0.4%** of the projection this paragraph called an image effect. Two of this
+record's numbers turned out to be load-bearing precisely because they reproduce:
+E10's absolute `arm` sum 167,911,108 re-measures at **167,872,486** in a
+landed-tree image (−0.02%), and the record's own ≈0.02% layout-offset caveat held
+across three links. So the landing did lose 48 c/sample against the probe, and the
+question is not whether but where: the bridge, the pinned tables and the 12-byte
+state frame are symmetric in that image and priced at **zero**; the two kernels'
+instruction streams are identical word for word except **6 executed instructions per
+codeword** (G1, G2, and a dead duplicated `and` the guard insertion left behind) and
+3 per partition, against 24.11 measured cycles per codeword. The four static facts
+above narrowed it correctly — they exonerated the bridge — and missed the unit:
+instruction counts bound the floor, not the price. The 94.47% row's arithmetic
+survives as a *projection* re-derived from a landed-tree arm (1,069,252 − 78,541 =
+990,711 c/frame), which is what it always was; the width leg still has to be
+measured on this tree by 6a-6. See plan-of-record ("6a-5b — the reading") and
+measurements.md.
+
+**And 2026-11-09 (6a-5c) put a price on the instruction itself: 4.0000 cycles.** The
+gap's composition is now arithmetic, not attribution. Deleting one executed
+instruction from the landed kernel — the provably dead duplicated `and` the guard
+insertion left behind — moved the same-image pair by `2,560,000 = 4.000 × 640,000`
+cycles; deleting the five guard instructions as well moved it by another
+`12,800,000 = 5 × 4 × 640,000`; 0.46% of the gap is left, and it is per call rather
+than per codeword. So 6 × 4 = 24 cycles/codeword is the 24.11 that this record's
+own earlier note called "nowhere to live": it lived in instruction count, at four
+cycles an instruction — the ARM7TDMI fetch cost of a 32-bit ARM instruction in
+cartridge ROM on a 16-bit bus at WS0 = 3,1. Two things follow, and one of them is a
+correction to this file. The 6a-5b note above said the static bound's 5-instruction
+delta "≈5–15 c/sample" could not be 48; at 4 cycles an instruction it is 20
+c/codeword ≈ 40 c/sample, i.e. almost all of it — the bound was right about the
+*count* and the item was wrong about the *price*. And E6's "instruction fetch is
+ruled out" does not survive as a general fact: it measured a Rust arm where each
+instruction carried many cycles of work, which is the one shape in which a 4x fetch
+price cannot be seen. That reframes the remaining headroom as a placement question
+(6a-5d, the same stream in IWRAM) rather than a spelling one, and it is the first
+time in these records that a cycle number has a denominator for it.
+
+**And 6a-5d then showed the denominator was a memory address.** The same instruction
+stream, placed in IWRAM instead of cartridge ROM (one section directive, nothing
+else changed), takes the landed arm from **1,151,236 to 506,413 c/frame** on the
+FIXED clip: **−644,824 c/frame = −316.4 c/sample = −158.2 c/codeword**, i.e.
+**109.77% → 48.29%** of the 32,768 Hz frame budget, worst frame 48.5%. The `ctrl`
+leg is cycle-identical and `.text`/`.iwram` move by exactly the body's 680 B, so no
+other change is available to explain it. The per-instruction price falls from 4.000
+(ROM) to ~1.4 (IWRAM): the landed 6-instruction guard delta drops 20.11 → 7.11
+c/codeword, and E10's vendored body pinned on its own drops **−290.4 c/sample**.
+With both bodies in IWRAM the "realization" pair reads **+14.2 c/sample instead of
++48.2** — so this record's E10 row and its re-anchoring notes were describing two
+*addresses*, not two realizations, and the vendored probe's 101.98% was itself a
+ROM-resident measurement of the same code. Two caveats, and they are the ones that
+matter: mGBA's cartridge wait-state/prefetch model is doing half the arithmetic here
+(E5, unrun, is the confirmation that matters), and this is decode-only —
+the producer's convert/push stages are not in these windows.
+
 ## Appendix — the Phase-1 baseline (spike PR 3, measured 2026-09-21)
 
 The first real numbers, kept because every later percentage is relative to this

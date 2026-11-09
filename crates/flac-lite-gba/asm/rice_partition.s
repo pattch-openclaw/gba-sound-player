@@ -25,6 +25,16 @@
 @   [6a-4 G2]    §9.2.7.3's second guard (folded == u32::MAX, the
 @                i32::MIN pre-image) is tested before the store.
 @   [6a-4 ST]    a third status value, 2 = guard rejection.
+@ [6a-5d] PLACEMENT. The body lives in `.iwram`, not `.text`, because the price
+@ of an instruction here is 4.000 cycles fetched from cartridge ROM (6a-5c
+@ measured it by deleting executed instructions: exactly 4 x 640,000 and
+@ 5 x 4 x 640,000 cycles) and about 1.4 from IWRAM (6a-5d relocated this same
+@ stream: 1,151,236 -> 506,413 cycles/frame on the FIXED clip). Plain
+@ `.iwram` — `.text_iwram` is swallowed by `.text : {{ *(.text .text*) }}` in the
+@ linker script (E6's recorded trap). The 4-cycle figure is also why the two
+@ guards cost what they cost: at 4 cycles per instruction, an instruction
+@ deleted from this loop is worth 1.56 budget points at 32,768 Hz.
+@
 @ The fold is NOT vendored here. This unit gets `fold_body.s` from the one
 @ committed source (examples/arm-kernels/asm/fold_body.s), pasted through
 @ the Rust `include_str!`/`concat!` in src/rice_arm.rs — decision 6's
@@ -144,7 +154,14 @@
 @   r8 out    r9 out_end r10 p                    r11 m    r12 scratch
     .syntax unified
     .arm
-    .text
+    @ [6a-5d] The body lives in `.iwram`, not `.text` — measured at 1,151,236 ->
+    @   506,413 cycles/frame on the FIXED clip (109.77% -> 48.29% of the 32,768 Hz
+    @   budget), with nothing else changed. Plain `.iwram`, never `.text_iwram`:
+    @   the linker script's `.text : {{ *(.text .text*) }}` comes first and would
+    @   swallow that name (E6's recorded trap), whereas `.iwram` is collected by
+    @   `*(.iwram .iwram.*)` into an output section marked `> iwram AT>rom`, which
+    @   the boot code copies down.
+    .section .iwram,"ax",%progbits
     .code 32
     .global arm_rice_partition
     .type arm_rice_partition, %function
@@ -253,7 +270,11 @@ arm_rice_partition:
     ldr     r12, [sp, #8]               @   the hoisted MAX >> p
     cmp     r2, r12
     bhi     .Lvalerr
-    and     r12, r3, #0xFF              @ lo = rem_w & 0xFF
+    @ [6a-5c L1] the guard insertion above used to leave its own copy of the
+    @   `and` behind, so this line appeared twice in a row (6a-5b measured the
+    @   consequence, and the two are adjacent in the emitted code because
+    @   nothing between them touches r3 or the flags). One copy is dead; the
+    @   original is kept, below, after the stitching comment.
     @ Un-reverse the window-domain remainder (header: THE STITCHING).
     and     r12, r3, #0xFF              @ lo = rem_w & 0xFF
     ldrb    r12, [r1, r12]              @ REV8[lo]

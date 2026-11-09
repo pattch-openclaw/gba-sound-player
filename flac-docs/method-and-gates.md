@@ -96,6 +96,27 @@ the rule against it (6a-5's 103.83% stack projection, re-opened by 6a-5b). A
 projection is a claim about two images; the same-image pair is the measurement, and
 the plan's sequencing decisions inherit whichever one they were taken from.
 
+**The rule's other half, which 6a-5b measured (2026-11-09).** That projection came
+out right — to 0.4% — and it is now on the record *why*: the two absolute arms it
+composed reproduce across images (landed `asm` 183,288,727 / 183,231,371 /
+183,304,113, a 0.04% spread; E10's vendored `arm` 167,911,108 → 167,872,486,
+−0.02%), while the control moved 280,848,260 → 275,111,047 → 249,051,451 across the
+same three links. So the rule is not "never compose a marginal with an absolute"; it
+is *name the image each number came from, and know whether the absolutes reproduce*.
+An arm that reproduces across named images, to a stated spread, is quotable across
+records as a paired marginal — but the only way to know that is to measure the pair
+in one image, which is what the rule asks for anyway. A projection that has had that
+check is a projection with a bound on it; one that has not is what this catalogue
+already calls it. Two corollaries, both measured on the 6a-5b image: a fixed image
+re-runs byte-identically (664 `***` lines, zero differences over two runs), and the
+~9–13 cyc/frame recompile band is a band on **paired deltas** — adding a fourth
+timed leg to the same source moved every absolute leg of both clips by exactly
++15,386 cycles (+98 c/frame on all 314 frame-legs, mins and maxes alike) while every
+pair stayed cycle-identical. The offset is a property of the image, not of any arm
+(“why” is unmeasured; that it is fixed, deterministic and cancelling is not): pairing
+does not merely reduce that error, it cancels it, and an absolute arm compared across
+two images can be off by a fixed per-frame amount with no link mechanism behind it.
+
 ## Measurement entry points (spike crate)
 
 - `timing_pass()` — the per-frame loop; the closure handed to `timed()` is exactly

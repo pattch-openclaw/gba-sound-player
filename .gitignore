@@ -72,6 +72,8 @@ __pycache__/
 /examples/overlay-kernel-check/target/
 /overlay-kernel-check.gba
 # 6a-5's instrument images (same crate, arm features on; build output like every
-# other ROM).
+# other ROM) and 6a-5b's differential image (the same crate with the vendored E10
+# leg added; a fourth timed window, nothing shipped).
 /flac-spike-6a5-arms.gba
 /flac-spike-6a5-asm.gba
+/flac-spike-6a5b.gba
