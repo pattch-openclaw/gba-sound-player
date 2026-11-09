@@ -10,7 +10,7 @@
 //! 6a-4's ARM-mode kernel rests on, with an FFI and an ABI stacked on top of it —
 //! had no execution behind it. 6a-2's record says so in as many words: the E-series
 //! sample probes each brought their *own* `parse_partition` and their own
-//! `decode_rice_partition`, "neither calls the core's `rice_quotient`... that is
+//! `decode_residual`, "neither calls the core's `rice_quotient`... that is
 //! 6a-3's witness, and it is why 6a-3 exists."
 //!
 //! This file is that witness. The kernel on the second leg is
@@ -43,7 +43,7 @@
 //!    `order` remainder bits — recording only widths. No window, no table, no
 //!    word load, no kernel;
 //! 2. the core's **incumbent**, instantiated here from outside:
-//!    `decode_rice_partition_with::<TableCountKernel>`;
+//!    `decode_residual_with::<TableCountKernel>`;
 //! 3. this crate's **arm**, [`TwinKernel`] — the core's hybrid twin, carried
 //!    through the seam by an impl written in another crate;
 //! 4. this file's own **spec-order** kernel, [`SpecOrderKernel`], described below;
@@ -83,7 +83,7 @@
 //!
 //! * It does not decode a whole frame, subframe or stream through the arm.
 //!   Nothing above the seam threads a kernel choice:
-//!   `residual::decode_rice_partition` still names `TableCountKernel` on one
+//!   `residual::decode_residual` still names `TableCountKernel` on one
 //!   line, by item 5 PR 4's measurement. That rewiring is 6a-5's, taken with the
 //!   cycle reading that decides it.
 //! * Two guards it contains are not witnessed by the corpus, and that was
@@ -703,16 +703,18 @@ fn the_seam_is_passable_from_outside_and_the_arm_decodes_the_corpus_identically(
 /// mechanism measures nothing, and 6a-5's comparison would be that differential.
 #[test]
 fn naming_a_kernel_from_outside_has_not_wired_one_in() {
+    // 6a-5 moved the default's line up to the caller-facing entry (the chain is
+    // generic now); this pin follows it. See `residual::decode_residual`'s docs.
     let source = include_str!("../../flac-lite/src/residual.rs");
     let body = source
-        .split_once("\nfn decode_rice_partition(")
-        .expect("the production entry point must exist under that exact name")
+        .split_once("\npub fn decode_residual(")
+        .expect("the default's entry point must exist under that exact name")
         .1
         .split("\n}")
         .next()
         .expect("and have a body");
     assert!(
-        body.contains("decode_rice_partition_with::<TableCountKernel>"),
+        body.contains("decode_residual_with::<TableCountKernel>"),
         "the default names TableCountKernel by measurement (item 5 PR 4, +42.6/+42.7 \
          cycles per decoded sample for the alternative). Anything reading this from outside \
          the core needs that to be true, because 6a-5's number is only interpretable \

@@ -31,7 +31,7 @@
 //! input parities present, and the expected outcomes include the pins 0 (from 0),
 //! −1 (from 1), `i32::MAX` (from 0xFFFFFFFE) and `i32::MIN` (from 0xFFFFFFFF —
 //! the value §9.2.7.3 forbids in a stream: this total fold maps it, rejecting it
-//! stays upstream in `decode_rice_partition`), plus the RFC worked example 38 → 19.
+//! stays upstream in the partition seam), plus the RFC worked example 38 → 19.
 
 /// `(folded input, expected unmapped value)`. The expectation is derived from the
 /// corrected §9.2.7.2 definition; `tests/unmap_twin.rs` re-derives it with the

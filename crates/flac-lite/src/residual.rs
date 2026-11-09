@@ -1,7 +1,7 @@
 //! Residual coding: partitioned Rice / Rice2 / escape-record residual.
 //!
 //! SCAFFOLD STATE (2026-09-11): the residual decode path is complete —
-//! [`rice_unmap`] (step 3a), [`decode_rice_partition`] (step 3b), and
+//! [`rice_unmap`] (step 3a), [`decode_rice_partition_with`] (step 3b), and
 //! [`decode_residual`] (step 3c: the §9.2.7 header, per-partition sample
 //! counts, and the escape/Rice dispatch). What remains for step 3 is the
 //! subframe/frame composition (`subframe::decode_subframe`, integrators,
@@ -49,7 +49,7 @@
 //! pre-registered fork resolves to "the default does **not** flip". Zero behavior
 //! change from any of the four PRs: the one instantiation the crate's decode path
 //! uses is the loop that was already here, chosen on the one line of
-//! [`decode_rice_partition`]; and — as of split-ladder item 6 PR **6a-3** — the
+//! [`decode_residual`]; and — as of split-ladder item 6 PR **6a-3** — the
 //! trait is implemented **outside** this crate. Twice, neither one wired into
 //! anything that runs: an impl in `crates/flac-lite-gba/src/rice_twin.rs` that
 //! carries [`crate::rice_hybrid::HybridRiceKernel`] by forwarding to it, and a
@@ -102,7 +102,7 @@ pub struct PartitionHeader {
 }
 
 /// Decode a complete coded residual (§9.2.7) into `out`: the residual header,
-/// then every partition body via [`decode_rice_partition`].
+/// then every partition body via the [`RiceKernel`] seam.
 ///
 /// `out` receives the samples as *residuals* (the caller in
 /// [`crate::subframe`] integrates them through the predictor). `blocksize` is
@@ -123,7 +123,7 @@ pub struct PartitionHeader {
 /// first `order` slots belong to the warm-up samples), every other partition
 /// carries `blocksize >> partition_order`. Total: `blocksize - order`, which
 /// is the required `out` length (a mismatch is a caller contract violation,
-/// like [`decode_rice_partition`]'s).
+/// like the partition seam's).
 ///
 /// **Stream MUSTs enforced as [`Error::InvalidField`]** (all three are
 /// stream-validity rules, checkable frame-locally, not profile gating):
@@ -135,10 +135,44 @@ pub struct PartitionHeader {
 /// - the reserved coding-method codes `0b10`/`0b11`.
 ///
 /// Cursor: lands exactly at the end of the last partition body on success;
-/// per-read atomicity on failure, same contract as
-/// [`decode_rice_partition`] (a failed frame is discarded wholesale, so a
-/// partially filled `out` is undefined).
+/// per-read atomicity on failure, same contract as the partition seam (a
+/// failed frame is discarded wholesale, so a partially filled `out` is
+/// undefined).
+///
+/// **One line names the default, and it is this function (6a-5).** The shipped
+/// path is `decode_residual` → `decode_residual_with::<TableCountKernel>`; the
+/// partition-level `decode_rice_partition` that used to hold that line was
+/// retired when 6a-5 threaded the kernel choice up the caller-facing chain
+/// (`decode_frame_with` → `decode_subframe_with` → here →
+/// `decode_rice_partition_with`), which the partition seam's own docs had
+/// deferred as "item 6's decision". The type argument below is the whole
+/// difference between the shipped path and an arm, and the source-level
+/// assertions in `tests/rice_two_mechanism_differential.rs`,
+/// `crates/flac-lite-gba/tests/twin_from_outside.rs` and
+/// `crates/flac-lite-gba/tests/arm_from_outside.rs` pin it in both directions.
 pub fn decode_residual(
+    reader: &mut BitReader<'_>,
+    blocksize: usize,
+    predictor_order: usize,
+    out: &mut [i32],
+) -> crate::Result<()> {
+    decode_residual_with::<TableCountKernel>(reader, blocksize, predictor_order, out)
+}
+
+/// [`decode_residual`] with the Rice kernel named by the caller — the
+/// caller-facing half of the [`RiceKernel`] seam, and the shape both the
+/// instrument and the product use to select a realization.
+///
+/// Everything except the non-escape partition *body* is decoded here: the coding
+/// method, the partition order, each partition parameter and header, §9.2.7.1's
+/// escape records (fixed-width samples, never Rice — which is why the overlay
+/// kernels' profile-bounded domain stays a probe fact and not a contract), and
+/// the partition walk. The body alone is `K::decode_partition`.
+///
+/// Monomorphized, never `dyn` (item 6's rule). Instantiated by
+/// `examples/flac_spike`'s 6a-5 arms and by the product's kernel choice;
+/// `decode_residual` is this same function at [`TableCountKernel`].
+pub fn decode_residual_with<K: RiceKernel>(
     reader: &mut BitReader<'_>,
     blocksize: usize,
     predictor_order: usize,
@@ -146,7 +180,7 @@ pub fn decode_residual(
 ) -> crate::Result<()> {
     // Caller contract: the residual carries one sample per blockslot the
     // warm-up did not take. Checked up front, before any bit is consumed
-    // (same rule as decode_rice_partition's out-length check). checked_sub:
+    // (same rule as the partition seam's out-length check). checked_sub:
     // order > blocksize is a caller bug to reject, not a subtraction to
     // panic on.
     let Some(total) = blocksize.checked_sub(predictor_order) else {
@@ -206,7 +240,7 @@ pub fn decode_residual(
             }
         };
         let (head, tail) = rest.split_at_mut(count);
-        decode_rice_partition(reader, &header, head)?;
+        decode_rice_partition_with::<K>(reader, &header, head)?;
         rest = tail;
     }
     Ok(())
@@ -315,7 +349,7 @@ pub trait RiceKernel {
 /// [`RiceKernel`].
 ///
 /// **Nothing in this type changes what it does.** Its body is the loop that has
-/// been `decode_rice_partition`'s non-escape sample loop since step 3b
+/// been the partition seam's non-escape sample loop since step 3b
 /// (2026-09-11), counted by [`BitReader::rice_quotient`] since E2b
 /// (2026-10-21): it arrives here with no edit beyond the indentation that
 /// puts a free function's body inside a method. That is deliberate — PR 2's
@@ -453,11 +487,21 @@ impl RiceKernel for TableCountKernel {
 /// [`TableCountKernel`] and [`crate::rice_hybrid::HybridRiceKernel`] over every
 /// non-escape partition of every real subframe body in
 /// `tests/subframe_body_vectors.txt`, and against an independent spec-order
-/// oracle. The limit: the *caller-facing* layers still do not take a kernel —
-/// [`decode_residual`], [`crate::subframe`] and [`crate::frame`] keep calling
-/// [`decode_rice_partition`], and threading a choice up through them (and
+/// oracle.
+///
+/// **The limit PR 3 named is gone, and it is worth reading what it said.** Its
+/// own note was that the caller-facing layers did not take a kernel —
+/// `decode_residual`, [`crate::subframe`] and [`crate::frame`] kept calling the
+/// partition-level default — and that "threading a choice up through them (and
 /// through `scan`/`driver`) is item 6's decision, not a side effect of this
-/// signature being visible.
+/// signature being visible". 6a-5 took that decision: the chain is
+/// [`crate::frame::decode_frame_with`] → [`crate::subframe::decode_subframe_with`]
+/// → [`decode_residual_with`] → here, each `_with` generic over `K`, and the
+/// non-generic entry points are one-line delegations to
+/// `…::<TableCountKernel>` ([`decode_residual`] holds the default's line). The
+/// reason 6a-5 had to: an arm instantiated at this entry alone is a probe, and
+/// "the win lives in a probe but not in the product path" is the failure that
+/// rung is written to rule out.
 pub fn decode_rice_partition_with<K: RiceKernel>(
     reader: &mut BitReader<'_>,
     header: &PartitionHeader,
@@ -481,42 +525,6 @@ pub fn decode_rice_partition_with<K: RiceKernel>(
         return Ok(());
     }
     K::decode_partition(reader, u32::from(header.order), out)
-}
-
-/// [`decode_rice_partition_with`] at the core's default kernel,
-/// [`TableCountKernel`] — which is why no existing caller changed, and why the
-/// module's unit tests (which built this partition body directly, from before
-/// the seam existed) keep doing so against the incumbent rather than against a
-/// test-only stand-in.
-///
-/// This is the one place the default is chosen, and one line wide by design:
-/// PR 3's "default flip" is exactly this call's type argument, so a bad number
-/// is attributable either to the generic seam or to the swapped mechanism, never
-/// to both (FLAC.md's item-5 invariant: do not fold the twin flip into PR 2).
-///
-/// **The default names [`TableCountKernel`] by measurement, and PR 4 is the
-/// reading that decided it** (2026-11-06). The twin
-/// ([`crate::rice_hybrid::HybridRiceKernel`]) landed behind the hook in PR 3,
-/// witnessed sample-by-sample against this mechanism on the committed corpus, and
-/// PR 4 ran the on-target cycle arm the pre-declared fork was waiting for: same
-/// instrument, same clips, same harness, two images differing only in this line.
-/// The twin is **+42.6 / +42.7 cycles per decoded sample slower** (+9.71% FIXED /
-/// +2.64% LPC mean per frame; 314/314 frames slower; 0 frames inside the
-/// layout-noise band; both images bit-identical in the PCM they produce, and the
-/// flip image reproduced PR 3's recorded flip-arm codegen exactly — `.text`
-/// 50,000 B, `.iwram` 1,068 B, `CTZ8`/`REV8` pinned at the `LEADING_ONES` slot).
-/// That is the fork's "twin slower past the bar" arm, so the default stays here
-/// and the proposal's "the twins become the core's default Rust path" line is
-/// corrected in the record as a measured negative. Nothing about this line's shape
-/// changed: the flip remains one type argument wide, and the source-level
-/// assertion in `tests/rice_two_mechanism_differential.rs` is what keeps it that
-/// way in both directions now.
-fn decode_rice_partition(
-    reader: &mut BitReader<'_>,
-    header: &PartitionHeader,
-    out: &mut [i32],
-) -> crate::Result<()> {
-    decode_rice_partition_with::<TableCountKernel>(reader, header, out)
 }
 
 /// Unfold a Rice-coded residual: folded magnitude → signed sample
@@ -604,9 +612,9 @@ fn decode_rice_partition(
 /// stream knowledge and no cursor: `0xFFFF_FFFF → i32::MIN` remains a *mapped*
 /// input, and rejecting it stays the kernel's job (see the note above and
 /// [`RiceKernel`]'s contract), because only a caller holding the stream can fail a
-/// frame. It is not a decode entry point, and nothing caller-facing takes a kernel:
-/// [`decode_residual`], [`crate::subframe`] and [`crate::frame`] still reach the
-/// default through [`decode_rice_partition`].
+/// frame. It is not a decode entry point: the caller-facing chain is generic
+/// (`decode_frame_with` → `decode_subframe_with` → [`decode_residual_with`]) and
+/// [`decode_residual`] is its default instantiation.
 pub fn rice_unmap(n: u32) -> i32 {
     if n & 1 == 0 {
         (n >> 1) as i32
@@ -697,11 +705,11 @@ mod tests {
         assert_eq!(rice_unmap(0xFFFF_FFFE), i32::MAX);
         // n = 0xFFFF_FFFF maps to i32::MIN — the value §9.2.7.3 forbids in a
         // stream. This pure map returns it (mapping is total); rejecting it
-        // is decode_rice_partition's contract with the stream (step 3b).
+        // is the partition seam's contract with the stream (step 3b).
         assert_eq!(rice_unmap(0xFFFF_FFFF), i32::MIN);
     }
 
-    // ---- decode_rice_partition (step 3b) ----------------------------------
+    // ---- the partition seam (step 3b) --------------------------------------
     //
     // Witness rule per Sam's 2026-09-11 direction: reuse what exists and
     // cover edge cases with unit tests; the frame_vectors.py per-partition
@@ -780,7 +788,8 @@ mod tests {
         // Unfolds to +19.
         let mut r = BitReader::new(&[0b0000_1110]);
         let mut out = [0i32; 1];
-        decode_rice_partition(&mut r, &rice_header(3, 1), &mut out).unwrap();
+        decode_rice_partition_with::<TableCountKernel>(&mut r, &rice_header(3, 1), &mut out)
+            .unwrap();
         assert_eq!(out, [19]);
         assert_eq!(r.bit_position(), 8); // exact-fit, no over/under-read
     }
@@ -801,7 +810,8 @@ mod tests {
         // must NOT be eaten.
         let mut r = BitReader::new(&[0xB2, 0x60]);
         let mut out = [0i32; 4];
-        decode_rice_partition(&mut r, &rice_header(1, 4), &mut out).unwrap();
+        decode_rice_partition_with::<TableCountKernel>(&mut r, &rice_header(1, 4), &mut out)
+            .unwrap();
         assert_eq!(out, [0, -1, 2, -2]);
         // 2 + 2 + 4 + 3 = 11 codeword bits.
         assert_eq!(r.bit_position(), 11);
@@ -819,7 +829,8 @@ mod tests {
         // = 1_01_001 → 101_001 00 → 0xA4.
         let mut r = BitReader::new(&[0xA4]);
         let mut out = [0i32; 3];
-        decode_rice_partition(&mut r, &rice_header(0, 3), &mut out).unwrap();
+        decode_rice_partition_with::<TableCountKernel>(&mut r, &rice_header(0, 3), &mut out)
+            .unwrap();
         assert_eq!(out, [0, -1, 1]);
         assert_eq!(r.bit_position(), 6); // exactly the 6 unary bits
     }
@@ -831,7 +842,8 @@ mod tests {
         // [-1, 2, -2] at 3 bits → 111 010 110 → 0xEB, 0x0 (1 slack bit).
         let mut r = BitReader::new(&[0xEB, 0x00]);
         let mut out = [0i32; 3];
-        decode_rice_partition(&mut r, &escape_header(3, 3), &mut out).unwrap();
+        decode_rice_partition_with::<TableCountKernel>(&mut r, &escape_header(3, 3), &mut out)
+            .unwrap();
         assert_eq!(out, [-1, 2, -2]);
         assert_eq!(r.bit_position(), 9);
     }
@@ -844,7 +856,8 @@ mod tests {
         // buffer must be left untouched.
         let mut r = BitReader::new(&[0xAB]); // must not be read
         let mut out = [0xFFi32; 3];
-        decode_rice_partition(&mut r, &escape_header(0, 3), &mut out).unwrap();
+        decode_rice_partition_with::<TableCountKernel>(&mut r, &escape_header(0, 3), &mut out)
+            .unwrap();
         assert_eq!(out, [0, 0, 0]);
         assert_eq!(r.bit_position(), 0); // zero bits consumed
     }
@@ -859,7 +872,7 @@ mod tests {
         let mut r = BitReader::new(&[0x1F, 0xFF, 0xFF, 0xFF, 0xC0]);
         let mut out = [0i32; 1];
         assert_eq!(
-            decode_rice_partition(&mut r, &rice_header(30, 1), &mut out),
+            decode_rice_partition_with::<TableCountKernel>(&mut r, &rice_header(30, 1), &mut out),
             Err(Error::InvalidField)
         );
     }
@@ -872,7 +885,7 @@ mod tests {
         let mut r = BitReader::new(&[0x08, 0x00, 0x00, 0x00, 0x00]);
         let mut out = [0i32; 1];
         assert_eq!(
-            decode_rice_partition(&mut r, &rice_header(30, 1), &mut out),
+            decode_rice_partition_with::<TableCountKernel>(&mut r, &rice_header(30, 1), &mut out),
             Err(Error::InvalidField)
         );
     }
@@ -883,7 +896,7 @@ mod tests {
         let mut r = BitReader::new(&[0xFF; 4]);
         let mut out = [0i32; 1];
         assert_eq!(
-            decode_rice_partition(&mut r, &rice_header(1, 2), &mut out),
+            decode_rice_partition_with::<TableCountKernel>(&mut r, &rice_header(1, 2), &mut out),
             Err(Error::InvalidField)
         );
         assert_eq!(r.bit_position(), 0);
@@ -898,7 +911,7 @@ mod tests {
         let mut r = BitReader::new(&[0b0001_1100]);
         let mut out = [-7i32; 2];
         assert_eq!(
-            decode_rice_partition(&mut r, &rice_header(2, 2), &mut out),
+            decode_rice_partition_with::<TableCountKernel>(&mut r, &rice_header(2, 2), &mut out),
             Err(Error::EndOfStream)
         );
         // fold 15 is odd → !(15 >> 1) = !7 = -8 (hand-computed, not via the
@@ -934,8 +947,12 @@ mod tests {
                     r.read_bits(align).unwrap();
                 }
                 let mut out = [0i32; RESIDUALS.len()];
-                decode_rice_partition(&mut r, &rice_header(order as u8, 12), &mut out)
-                    .unwrap_or_else(|e| panic!("order {order} align {align}: {e:?}"));
+                decode_rice_partition_with::<TableCountKernel>(
+                    &mut r,
+                    &rice_header(order as u8, 12),
+                    &mut out,
+                )
+                .unwrap_or_else(|e| panic!("order {order} align {align}: {e:?}"));
                 assert_eq!(out, RESIDUALS, "order {order} align {align}");
                 // The cursor lands exactly past the last codeword — no bit
                 // of slack eaten, none left inside the word.
@@ -1266,7 +1283,7 @@ mod tests {
             drop(p); // release &mut buf before the reader borrows it
             let mut r = BitReader::new(&buf);
             let mut out = [0i32; SAMPLES.len()];
-            decode_rice_partition(
+            decode_rice_partition_with::<TableCountKernel>(
                 &mut r,
                 &escape_header(raw as u8, SAMPLES.len() as u16),
                 &mut out,

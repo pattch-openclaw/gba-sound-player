@@ -1,5 +1,7 @@
 .PHONY: format build rom native-rom podman-rom flac-rom native-flac-rom podman-flac-rom \
         spike-rom native-spike-rom podman-spike-rom \
+        item6a5-test item6a5-arms-rom native-item6a5-arms-rom podman-item6a5-arms-rom \
+        item6a5-asm-rom native-item6a5-asm-rom podman-item6a5-asm-rom \
         rate-assets rate-test rate-rom native-rate-rom podman-rate-rom \
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
@@ -246,6 +248,13 @@ FLAC_CRATE_BIN := target/$(TARGET)/release/flac-integration
 # FLAC.md "Perf gate spike". Its host witness gate runs the same out-of-tree
 # --manifest-path way as flac-test (cargo config leak; FLAC.md).
 SPIKE_ROM := flac-spike.gba
+# 6a-5's arm images (FLAC.md split-ladder item 6, PR 6a-5). Two builds of the same
+# instrument: `arms` carries ctrl + the Rust mechanism + the ARM embodiment in one
+# link (the three-way reading), `asm` carries ctrl + the ARM embodiment only (the
+# *product shape* — one extra kernel, no second mechanism). The default build is
+# untouched by both, which is the per-PR rule this rung lives under.
+SPIKE_6A5_ARMS_ROM := flac-spike-6a5-arms.gba
+SPIKE_6A5_ASM_ROM := flac-spike-6a5-asm.gba
 SPIKE_CRATE_DIR := examples/flac_spike
 SPIKE_CRATE_MANIFEST := $(abspath examples/flac_spike/Cargo.toml)
 SPIKE_CRATE_BIN := target/$(TARGET)/release/flac-spike
@@ -398,6 +407,34 @@ spike-rom: format
 
 native-spike-rom: spike-rom
 	@echo "native-spike-rom done: $(SPIKE_ROM)"
+
+# The 6a-5 instrument images, built from the same crate with the arm features on.
+# Both are start-to-finish readable in one headless run; the run loop is the
+# method file's: `timeout -k 5 280 mgba-test-runner <rom>` with serial captured,
+# then `grep -E "6a5|stats:|budget:"`.
+item6a5-arms-rom: format
+	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --features item6a5-arms
+	agb-gbafix $(SPIKE_CRATE_DIR)/$(SPIKE_CRATE_BIN) -o $(SPIKE_6A5_ARMS_ROM)
+	@echo "6a-5 arms ROM built: $(SPIKE_6A5_ARMS_ROM) (ctrl + rice-twin + rice-arm in one link)"
+
+native-item6a5-arms-rom: item6a5-arms-rom
+	@echo "native-item6a5-arms-rom done: $(SPIKE_6A5_ARMS_ROM)"
+
+podman-item6a5-arms-rom:
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make item6a5-arms-rom
+
+item6a5-asm-rom: format
+	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --features item6a5-asm
+	agb-gbafix $(SPIKE_CRATE_DIR)/$(SPIKE_CRATE_BIN) -o $(SPIKE_6A5_ASM_ROM)
+	@echo "6a-5 asm ROM built: $(SPIKE_6A5_ASM_ROM) (ctrl + rice-arm only: the product shape)"
+
+native-item6a5-asm-rom: item6a5-asm-rom
+	@echo "native-item6a5-asm-rom done: $(SPIKE_6A5_ASM_ROM)"
+
+podman-item6a5-asm-rom:
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make item6a5-asm-rom
 
 podman-spike-rom:
 	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
@@ -607,6 +644,16 @@ flac-portable-check: toolchain-check
 # root's GBA config otherwise (cargo config leak, FLAC.md). The thumbv4t half
 # of the spike's compile gate is `make spike-rom` itself (it links the real
 # ROM, so a bare `check` would understate it).
+# 6a-5's arm witness: every arm decodes the committed clips to the pinned PCM,
+# frame window by frame window, through the product call path. New configuration,
+# new gate — `spike-test` (default features) is unchanged and still runs no arm
+# code, which the manifest's `required-features` makes a checked fact.
+item6a5-test: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(SPIKE_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features item6a5-arms
+	@echo "item6a5-test passed: ctrl, the Rust mechanism and the ARM embodiment all reach the committed PCM pins and agree frame by frame on the host (the asm leg is the model here; the assembled body is overlay-kernel-test's)"
+
 spike-test: toolchain-check
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
@@ -918,7 +965,7 @@ clean:
 	cd $(KERNEL_CRATE_DIR) && $(CARGO) clean
 	cd $(OVERLAY_CRATE_DIR) && $(CARGO) clean
 	cd $(OVERLAY_ROM_DIR) && $(CARGO) clean
-	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM) $(OPUS_ROM) $(OPUS_PROBE_ROM) $(KERNEL_ROM) $(RATE_ROM) $(RATE_PLAY_ROM) $(OVERLAY_ROM)
+	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM) $(SPIKE_6A5_ARMS_ROM) $(SPIKE_6A5_ASM_ROM) $(OPUS_ROM) $(OPUS_PROBE_ROM) $(KERNEL_ROM) $(RATE_ROM) $(RATE_PLAY_ROM) $(OVERLAY_ROM)
 # The rate flow's generated assets are TEMPORARY (gitignored, like ROMs —
 # FLAC.md "Sample-rate reduction"); they regenerate from
 # `make rate-assets INPUT=… RATE=…`, so they leave with `make clean`.
@@ -1002,6 +1049,9 @@ help:
 	@echo "    native-spike-rom  build $(SPIKE_ROM) natively"
 	@echo "    podman-spike-rom  build $(SPIKE_ROM) in the container"
 	@echo "    spike-test        spike asset witness tests (host, bit-exact)"
+	@echo "    item6a5-arms-rom  6a-5 instrument: ctrl + Rust mechanism + ARM kernel in one image"
+	@echo "    item6a5-asm-rom   6a-5 instrument: ctrl + ARM kernel only (the product shape)"
+	@echo "    item6a5-test      6a-5 arm witness (host: all arms reach the PCM pins, frame by frame)"
 	@echo ""
 	@echo "  SAMPLE-RATE ROM (FLAC.md 'Sample-rate reduction', Part 1):"
 	@echo "    rate-assets       stage TEMPORARY clips from a real WAV (INPUT=… RATE={10512|18157|32768})"

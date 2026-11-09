@@ -56,7 +56,7 @@
 //!   stays put until there is an on-target cycle reading. Nothing above the seam
 //!   names a kernel.
 //! * It does not flip the default, and since PR 4 nothing should: the reading that
-//!   would have decided it says *stay*. `residual::decode_rice_partition` — the one
+//!   would have decided it says *stay*. `residual::decode_residual` — the one
 //!   line that names it — is unchanged, and `subframe_body_layout.rs` /
 //!   `frame_run_layout.rs` keep witnessing the production path.
 //!   [`the_default_still_names_the_incumbent`] pins that in the cheapest way
@@ -620,16 +620,21 @@ fn both_mechanisms_decode_every_corpus_partition_to_the_same_bits() {
 /// green test run.
 #[test]
 fn the_default_still_names_the_incumbent() {
+    // 6a-5 moved this line: the caller-facing chain is generic
+    // (`decode_frame_with` → `decode_subframe_with` → `decode_residual_with`), and
+    // the default is the non-generic `decode_residual`, one line of delegation.
+    // The pin follows the line it guarantees, rather than pinning a function name
+    // that no longer exists.
     let source = include_str!("../src/residual.rs");
     let body = source
-        .split_once("\nfn decode_rice_partition(")
-        .expect("the production entry point must exist under that exact name")
+        .split_once("\npub fn decode_residual(")
+        .expect("the default's entry point must exist under that exact name")
         .1
         .split("\n}")
         .next()
         .expect("and have a body");
     assert!(
-        body.contains("decode_rice_partition_with::<TableCountKernel>"),
+        body.contains("decode_residual_with::<TableCountKernel>"),
         "the default names TableCountKernel by measurement, not by default: PR 4's \
          on-target reading (2026-11-06) measured the hybrid at +42.6/+42.7 cycles per \
          decoded sample against it, and the pre-registered rule resolved to \"no \

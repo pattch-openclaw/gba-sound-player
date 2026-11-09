@@ -71,3 +71,7 @@ __pycache__/
 # build output like every other one).
 /examples/overlay-kernel-check/target/
 /overlay-kernel-check.gba
+# 6a-5's instrument images (same crate, arm features on; build output like every
+# other ROM).
+/flac-spike-6a5-arms.gba
+/flac-spike-6a5-asm.gba

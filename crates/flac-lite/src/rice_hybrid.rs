@@ -81,7 +81,7 @@
 //! against the incumbent, behind `feature = "rice-hybrid"`, and NOT the default in
 //! any configuration — and since PR 4 that is a measured outcome, not a
 //! deferral.** Nothing in the crate's decode path calls this kernel:
-//! `decode_rice_partition` still names
+//! `decode_residual` still names
 //! [`crate::residual::TableCountKernel`] on one line. PR 3 left that flip undone
 //! because the pre-registered rule needs an on-target cycle reading and the host it
 //! landed on had no runner; PR 4 is that reading, taken on a host that does have

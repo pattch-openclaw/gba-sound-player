@@ -72,7 +72,7 @@
 //!
 //! # What this file does not do
 //!
-//! * It moves no default. `residual::decode_rice_partition` still names
+//! * It moves no default. `residual::decode_residual` still names
 //!   [`flac_lite::residual::TableCountKernel`] on one line, and no shipped ROM
 //!   links this crate by default. `naming_the_arm_kernel_has_wired_nothing_in`
 //!   pins that from outside, including by reading both shipped ROMs' manifests;
@@ -965,16 +965,18 @@ fn the_unsafe_budget_is_counted_by_attribute_shape_not_by_prose() {
 fn naming_the_arm_kernel_has_wired_nothing_in() {
     // The core's default, pinned from outside — the same pin the core's own
     // differential and this crate's 6a-3 suite put on it.
+    // 6a-5 moved the default's line up to the caller-facing entry (the chain is
+    // generic now); this pin follows it. See `residual::decode_residual`'s docs.
     let source = include_str!("../../flac-lite/src/residual.rs");
     let body = source
-        .split_once("\nfn decode_rice_partition(")
-        .expect("the production entry point must exist under that exact name")
+        .split_once("\npub fn decode_residual(")
+        .expect("the default's entry point must exist under that exact name")
         .1
         .split("\n}")
         .next()
         .expect("and have a body");
     assert!(
-        body.contains("decode_rice_partition_with::<TableCountKernel>"),
+        body.contains("decode_residual_with::<TableCountKernel>"),
         "the default still names TableCountKernel by measurement (item 5 PR 4). 6a-4 \
          moves no decode path: 6a-5's cycle reading is the thing allowed to"
     );
