@@ -215,8 +215,9 @@ use flac_lite::residual::{RiceKernel, TableCountKernel};
 //  "`unsafe`, counted and named"). Rides `iwram-pin` exactly like the core's
 //  `LEADING_ONES` does: off by default, so a portable consumer of this crate
 //  never inherits the GBA link-script contract, and a GBA instrument turns it
-//  on to get the zero-wait read. Plain `.iwram`, never `.text_iwram` (E6's
-//  pin target: the boot-time copy is the point; execution stays in ROM).
+//  on to get the zero-wait read. Plain `.iwram`, never `.text_iwram` (`.text :
+//  { *(.text .text*) }` comes first in the linker script and would swallow
+//  anything named `.text…`).
 #[cfg_attr(
     all(target_arch = "arm", feature = "iwram-pin"),
     unsafe(link_section = ".iwram")
@@ -328,6 +329,25 @@ pub fn tables_iwram_addrs() -> (usize, usize, usize) {
 /// edition-2024 `global_asm!` is an unsafe op, and a macro-item attribute is
 /// ignored — the module attribute is what binds (this repo's recorded
 /// pitfall, `examples/arm-kernels/src/asm.rs`).
+/// **The body is placed in `.iwram`, not `.text`** — [6a-5d], and it is the
+/// largest single cycle result in this crate's records. An instruction in this
+/// loop costs **4.000 cycles fetched from cartridge ROM** (6a-5c measured that
+/// by deleting executed instructions one at a time: `4 × 640,000` and
+/// `5 × 4 × 640,000` cycles, exact) and about **1.4 cycles from IWRAM**
+/// (6a-5d moved this same instruction stream and took the arm from 1,151,236 to
+/// 506,413 c/frame on the FIXED clip, 48.3% of the 32,768 Hz budget). An
+/// ARM7TDMI loop of one-cycle instructions is the one shape that must not live
+/// in ROM.
+///
+/// That placement is deliberately **not** gated on `iwram-pin`: the tables are
+/// gated because they are a link-script contract a portable consumer should not
+/// inherit, while a ROM-resident version of *this* body is simply the wrong
+/// code. `rice-arm` is never a shipped decode path, so no product moves.
+///
+/// The directive lives in `asm/rice_partition.s` as `.section
+/// .iwram,"ax",%progbits` — plain `.iwram`, never `.text_iwram`: the linker
+/// script's `.text : {{ *(.text .text*) }}` comes first and would swallow that
+/// name (E6's trap, recorded).
 #[cfg(target_arch = "arm")]
 #[allow(unsafe_code)]
 mod asm_unit {

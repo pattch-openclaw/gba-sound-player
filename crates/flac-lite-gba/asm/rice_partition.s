@@ -25,6 +25,16 @@
 @   [6a-4 G2]    §9.2.7.3's second guard (folded == u32::MAX, the
 @                i32::MIN pre-image) is tested before the store.
 @   [6a-4 ST]    a third status value, 2 = guard rejection.
+@ [6a-5d] PLACEMENT. The body lives in `.iwram`, not `.text`, because the price
+@ of an instruction here is 4.000 cycles fetched from cartridge ROM (6a-5c
+@ measured it by deleting executed instructions: exactly 4 x 640,000 and
+@ 5 x 4 x 640,000 cycles) and about 1.4 from IWRAM (6a-5d relocated this same
+@ stream: 1,151,236 -> 506,413 cycles/frame on the FIXED clip). Plain
+@ `.iwram` — `.text_iwram` is swallowed by `.text : {{ *(.text .text*) }}` in the
+@ linker script (E6's recorded trap). The 4-cycle figure is also why the two
+@ guards cost what they cost: at 4 cycles per instruction, an instruction
+@ deleted from this loop is worth 1.56 budget points at 32,768 Hz.
+@
 @ The fold is NOT vendored here. This unit gets `fold_body.s` from the one
 @ committed source (examples/arm-kernels/asm/fold_body.s), pasted through
 @ the Rust `include_str!`/`concat!` in src/rice_arm.rs — decision 6's
@@ -144,7 +154,13 @@
 @   r8 out    r9 out_end r10 p                    r11 m    r12 scratch
     .syntax unified
     .arm
-    .text
+    @ [6a-5d PROBE] plain `.iwram`, never `.text_iwram`: the linker script's
+    @   `.text : {{ *(.text .text*) }}` comes first and swallows anything whose
+    @   name starts with `.text`, so `.text_iwram` can never reach IWRAM (E6's
+    @   trap, recorded). `.iwram` is collected by `*(.iwram .iwram.*)` in the
+    @   `.iwram` output section, which is `> iwram AT>rom`, and the boot code
+    @   copies it down.
+    .section .iwram,"ax",%progbits
     .code 32
     .global arm_rice_partition
     .type arm_rice_partition, %function
