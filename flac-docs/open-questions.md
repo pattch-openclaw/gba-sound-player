@@ -333,9 +333,11 @@ being checked.
 ### Q12 — Where do the seam's 48 c/sample go, and what puts 32,768 Hz FIXED back under budget?
 
 **Opened by:** 6a-5's stack projection (2026-11-08) — the item's first measured
-negative. **Owned by:** **6a-5b** for the seam half (a same-image *differential*,
-not a sub-stage probe — see the plan's 6a-5b section); 6a-6 for the width half;
-6a-7 inherits the verdict.
+negative. **Owned by:** **6a-5b did its half (2026-11-09): the seam half is closed,
+as in “the seam is not it”**. What is left of the first half belongs to **6a-5c**
+(guard cost vs. loop layout, one variable at a time) and conditionally **6a-5d**
+(place the same instruction stream in IWRAM); the width half is 6a-6's; 6a-7
+inherits the verdict.
 
 **Re-opened 2026-11-08: the premise did not survive a code-level check.** The
 48 c/sample is a quantity taken across two records, and the FIXED clip's own
@@ -348,6 +350,61 @@ c/sample. That leaves (b), the two §9.2.7.3 guards, at **5 instructions per sam
 by diffing the two asm bodies — and pushes the rest of the overhang into the
 image-effect class this repo already measured at ~99 c/sample on `ctrl`'s unchanged
 code. Read the plan's 6a-5b section before using any number below.
+
+**Measured 2026-11-09 (6a-5b): the 48 c/sample is real, and the seam is not where
+it lives.** The differential ran in one link, as one more timed leg in the existing pass, and reads
+**`asm − vend` = +98,291 c/frame (FIXED) / +98,153 (LPC) = +24.11 cycles per Rice
+codeword = +48.22 / +48.16 c/sample**, the vendored realization faster on 157/157
+frames of both clips, and it reproduces the projection to **0.4%** — because the
+*arm* absolutes are link-stable (landed 183,288,727 / 183,231,371 / 183,304,113
+across three links; E10's 167,911,108 vs this image's 167,872,486) while only
+`ctrl` moves with the link. So the re-opening above is withdrawn: the comparison was
+between two realizations all along. Candidates (a) and (c) are priced at exactly
+zero by that image: both legs make the same number of kernel calls per frame (2 on
+FIXED, more on LPC, equal in the two legs either way) through a linker thunk, both
+read pinned `.iwram` tables, both hand the same state ABI on an IWRAM stack, and the
+landed kernel's bytes are identical across four images. (d) is bounded by the same
+measurements: the arm's absolute does *not* move with the link, and while the vend
+leg really does carry its own reader and subframe code — that is a path difference,
+and a large one on other clips — path cost scales per frame or per call, and the
+measured cost scales **per codeword** (+48.22 vs +48.16 on two clips whose per-frame
+work differs 3.75×). (b), the guards, is the only candidate whose scaling matches,
+and its instruction count is a fraction of its price: **6 executed instructions per
+codeword** (G1's `ldr [sp,#8]+cmp+bhi`, G2's `adds+beq`, and one **dead duplicated
+`and r12, r3, #0xFF`** — lines 256 and 258 of the shipped asm are the same line),
+3 per partition, 3,840,942 per clip, against 15,431,627 cycles measured —
+**4.02 cycles per inserted instruction** would be needed for the kernel body to be
+the whole of the gap, 24.9% of it at one cycle each.
+
+**So the first half of the question has an answer, and a narrower form.** The 48
+c/sample is inside the codeword loop: in both bodies the codeword loop is
+`str ip,[r8],#4 / cmp r8,r9 / blt .Lloop`, and a normalised word-for-word diff of
+the two disassemblies shows the *same instruction stream* everywhere else. What is
+open is **which unit the cost is paid in**. Six ALU/load/branch instructions, one of
+them dead, should cost ≈7 c/codeword (an IWRAM load feeding a compare is the only
+stall in sight); they are worth 24.11. That gap is Q3's species — a code-size or
+layout effect this project has measured and never explained — and 6a-5c separates
+the two channels by construction: delete the dead instruction *alone* and the
+semantics are untouched while the loop shifts 4 bytes, so anything at or past
+**3 cycles per codeword** from a provably dead instruction is a fetch/layout effect,
+and the item must then stop describing the guards' *semantics* as the cost and start
+asking about the loop's arrangement — 6a-5d being the same instruction stream
+resident in IWRAM, with E6's contrary result (“instruction fetch is ruled out”,
+measured on a Rust arm that also forced inlining and took veneers) stated rather
+than buried.
+
+**The budget half, rewritten with measured numbers — it is no longer width-only.**
+The overhang is worth **9.37 points** of the 32,768 Hz frame budget (98,291 /
+1,048,750) while the projected landed stack is over by **3.84** (1,167,542 − 78,541
+= 1,089,001 c/frame = 103.84%). Recovering **41%** of the measured overhang fits
+32 kHz FIXED with no other lever, and the vend leg plus E9's i32 marginal is
+1,069,252 − 78,541 = 990,711 c/frame = **94.47% mean / 95.0% worst**: the
+archive's one in-budget row, re-derived from a landed-tree measurement of the arm
+instead of a probe's. There is therefore a kernel-side candidate worth 2.4× the
+deficit, and it is unproven until a 6a-5c leg measures it. What has *not* moved:
+6a-6's own measured i32 marginal is still the only admissible width input, its
+FIXED half still has exactly one named site, 6a-8 still does not run, and neither
+product rate is in question.
 
 The landed realization is +48.2 c/sample (+9.18%) slower than E10's vendored arm
 (183,288,727 vs 167,877,039 on a 157-frame FIXED clip), and stacking E9's i32

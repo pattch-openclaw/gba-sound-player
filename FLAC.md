@@ -13,13 +13,24 @@ path — and the ARM kernel is now **landed, witnessed on mGBA's ARM7TDMI, and
 measured through the shipped seam**: it is **−584,856 cycles/frame (−286.9
 c/sample) faster than the shipped kernel** in the product-shape image. That is
 111.3% of the 32 kHz budget on its own, and **stacking the width leg on it
-projects 103.8% — over budget, where the vendored probe projected 94.5%**: the
-seam costs +48.2 c/sample against E10's vendored arm, more than the stack's
-margin. **That projection is re-opened (6a-5b, 2026-11-08):** it is the one number
-in these records taken across two records, and the FIXED clip's own geometry fixes
-the seam's bridge at ≈0.15 c/sample with only 5 instructions per sample of proven
-code delta — so the verdict waits on a same-image differential, not on a
-refactor. Both product rates still fit with the kernel alone (61.7% at 18,157 Hz,
+projects 103.8% — over budget, where the vendored probe projected 94.5%**; that
+gap between the two is the seam's realization cost. **It is now measured inside one
+image (6a-5b, 2026-11-09), and the projection was right**: with E10's arm timed
+beside the landed one in the same link, the same pass and the same calibration,
+`asm − vend` = **+98,291 c/frame = +48.2 c/sample = 24.11 cycles per Rice
+codeword**, the vendored realization faster on 157/157 frames of both clips,
+reproducing to ±13 c/frame across runs. The 2026-11-08 re-opening of that number
+— that it was an artifact of comparing two records — is withdrawn: the *arm*
+absolutes reproduce across images (0.02–0.04% apart) while only the control moves.
+And the differential says the seam is **not** what costs: its bridge, its pinned
+tables and its state ABI are symmetric in that image and priced at zero. The cost is
+inside the codeword loop, where the landed kernel executes **6 more instructions per
+codeword** than the probe's (G1, G2, and one provably dead duplicate `and` the guard
+insertion left behind) for a measured **24.11 cycles** — 4.02 cycles per inserted
+instruction, which no cost model yet explains. That is 6a-5c's question, and it is
+worth **9.4 budget points** against the stack's 3.8-point deficit, so the rate
+question now has a kernel-side candidate beside the width leg. Both product rates
+still fit with the kernel alone (61.7% at 18,157 Hz,
 35.7% at 10,512 Hz). See [`flac-docs/measurements.md`](flac-docs/measurements.md)
 and Q12 in [`flac-docs/open-questions.md`](flac-docs/open-questions.md).
 
@@ -108,10 +119,21 @@ One line per rung; the full plan, bars and invariants are in
   host-side arm could see; the landing record in
   [`plan-of-record.md`](flac-docs/plan-of-record.md) has the control build, the
   new image's section table, the gate counts and the mutation table.
-- **6a-5b** — the paired realization differential: the vendored arm and the landed
+- ~~**6a-5b** — the paired realization differential: the vendored arm and the landed
   arm in one link, one pass, one calibration, so the seam is priced as a same-image
   pair instead of across two records. Instrument-only; it decides whether 6a-5's
-  103.8% projection is real.
+  103.8% projection is real.~~ **Measured.** It is real (+48.2 c/sample same-image,
+  0.4% from the projection), the seam is exonerated, and the instrument — one more
+  timed leg behind `item6a5b-vendored`, with E10's module vendored into the spike
+  crate and its own witness green beside the others — is reusable for the next leg.
+- **6a-5c** — the guard marginal, one variable at a time: delete the dead
+  duplicated `and r12, r3, #0xFF` alone (a provably dead instruction whose removal
+  shifts the hot loop 4 bytes and changes no semantics), then delete G1/G2, then
+  re-spell G1 at the accumulation points as the kernel header already names it. That
+  separates *instruction cost* from *loop layout*, and it is what decides whether the
+  48 c/sample can be priced back inside the kernel — worth 9.4 budget points,
+  2.4× the deficit. Every leg re-runs the device-side kernel gates, because the
+  guards are not dead at the profile edges even though they never fire on this corpus.
 - **6a-6** — guarded i32 becomes the core's default width, i64 kept as the
   always-correct escape leg. It carries the **width half** of the stack question
   (its measured marginal replaces E9's borrowed one); the verdict itself is

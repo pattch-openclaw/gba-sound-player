@@ -1337,6 +1337,30 @@ read in one link (6a-5b). **Caveat (1) is therefore not "fired":** it is still
 open, and it is now the rung that must close it. The fork's carry decision is
 untouched — −584,856 c/frame is a same-image paired reading.
 
+**Closed 2026-11-09 (6a-5b) — caveat (1) *has* fired, and it now carries a measured
+number.** The differential ran in one image (one more timed leg in the existing pass, E10's module
+vendored into the spike tree, `flac-spike-6a5b.gba` sha `b6e35beb1e04028c…`), and
+what it found is that the re-opening above was wrong: `asm − vend` =
+**+15,431,627 cycles/clip FIXED (+98,291 c/frame = +48.22 c/sample = 24.11 cycles
+per Rice codeword)**, +15,409,977 on LPC, the vendored realization faster on
+**157/157 frames of both clips**, reproduced to ±13 c/frame across runs — within
+**0.4%** of the projection this paragraph called an image effect. Two of this
+record's numbers turned out to be load-bearing precisely because they reproduce:
+E10's absolute `arm` sum 167,911,108 re-measures at **167,872,486** in a
+landed-tree image (−0.02%), and the record's own ≈0.02% layout-offset caveat held
+across three links. So the landing did lose 48 c/sample against the probe, and the
+question is not whether but where: the bridge, the pinned tables and the 12-byte
+state frame are symmetric in that image and priced at **zero**; the two kernels'
+instruction streams are identical word for word except **6 executed instructions per
+codeword** (G1, G2, and a dead duplicated `and` the guard insertion left behind) and
+3 per partition, against 24.11 measured cycles per codeword. The four static facts
+above narrowed it correctly — they exonerated the bridge — and missed the unit:
+instruction counts bound the floor, not the price. The 94.47% row's arithmetic
+survives as a *projection* re-derived from a landed-tree arm (1,069,252 − 78,541 =
+990,711 c/frame), which is what it always was; the width leg still has to be
+measured on this tree by 6a-6. See plan-of-record ("6a-5b — the reading") and
+measurements.md.
+
 ## Appendix — the Phase-1 baseline (spike PR 3, measured 2026-09-21)
 
 The first real numbers, kept because every later percentage is relative to this
