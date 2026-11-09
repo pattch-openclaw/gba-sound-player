@@ -28,6 +28,14 @@ now live only in git history and in the records they produced.
   in this rung: 6a-5's own rule is that no shipped count or instruction stream
   moves, and none did (the product image `flac-integration` is byte-identical; the
   instrument's cycle readings reproduce the record to the cycle).
+- **The stack verdict does not survive the seam, and that is the item's first
+  measured negative.** The landed realization is +48.2 c/sample (+9.18%) slower
+  than E10's vendored arm; applying E9's same-image i32 marginal projects FIXED at
+  **103.83% mean / 104.36% worst** of the 32,768 Hz budget — over, where the probe
+  projected 94.47%. The seam costs 9.2 points against the stack's 5.5-point margin.
+  The *fork's* carry decision is unaffected (the kernel is still a −286.9 c/sample
+  lever), and both product rates fit with the kernel alone (61.7% at 18,157 Hz,
+  35.7% at 10,512 Hz). Attribution of the 48 c/sample is open (Q12).
 - **Next rung:** **6a-6** — the guarded i32 default width in the core.
 - **Not started:** 6a-6…6a-8, all of 6b, and the product work they unblock
   (manifest, packer, facade, mixer).
@@ -45,7 +53,7 @@ from and it does not turn `scan` on.
 | **6a-3** ✅ | The seam passable from outside the crate, in Rust: `rice_unmap` visibility bump + `TwinKernel` behind `rice-twin`, carrying the core's twin as an instrument arm. | Section dump + symbol-level attribution; the corpus differential driven from outside; cycles as a control arm | that the seam is only passable from inside, or costs more than the in-core form |
 | **6a-4** ✅ | **The asm kernel — correctness only, no timings.** `rice_partition.s` + `fold_body.s` lifted from `examples/arm-kernels/`, `global_asm!`, the FFI declaration and its `SAFETY` block, the state-struct ABI written down, tables under `iwram-pin` (this is also where pin enablement lands). | (i) a kernel-check ROM sweeping the **same committed golden tables**; (ii) `objdump -d`: 4-byte ARM encodings, `pop {…,lr}` + `bx lr`, never LDM-to-PC; (iii) the boundaries item 5 handed forward — spelled `q = 31` leg, `w == 0` handoff signal, `p = 0` mask, §9.2.7.3's two guards, unterminated/short-remainder **restore-nothing**, reads bounded by `region()` | the kernel is wrong, or the interwork/ABI is wrong — settled **before** any cycle is trusted |
 | **6a-5** ✅ | **The realization reading — the item's number of record. No new code.** Three arms, one image: `ctrl`, 6a-3's Rust arm, 6a-4's asm arm; calibration subtracted, paired per frame, every delta byte attributed symbol by symbol. Carries the pre-declared fork below. | Cycles, same-image; codegen attribution. **The first ROM suite with a test in it is 6a-4's kernel check**; 6a-5 inherits a non-empty suite rather than "first to run `make test-rom`" (which already runs, collecting zero) | the win lives in a probe but not in the product path |
-| **6a-6** | **The width change, in the core.** i32 as the default arithmetic width, guarded per frame, i64 kept and reachable. Design in "The width decision" below. | Bit-exact vs `flac -d`; a width differential over the corpus and every committed frame-run table; the guard's unit witnesses incl. refusal cases; **both** configurations gated; codegen attribution of a both-legs build; cycles as a same-image arm | the guard is wrong (unsound), the legs are not equivalent, or a both-legs build costs more than the win |
+| **6a-6** | **The width change, in the core.** i32 as the default arithmetic width, guarded per frame, i64 kept and reachable. Design in "The width decision" below. **It now also carries the stack verdict:** 6a-5 projects 103.83% at 32,768 Hz if E9's i32 marginal transfers, so this rung's measured marginal — not E9's — decides whether the full-rate FIXED claim can be restored, and 6a-7's stack confirmation inherits the answer. | Bit-exact vs `flac -d`; a width differential over the corpus and every committed frame-run table; the guard's unit witnesses incl. refusal cases; **both** configurations gated; codegen attribution of a both-legs build; cycles as a same-image arm | the guard is wrong (unsound), the legs are not equivalent, or a both-legs build costs more than the win |
 | **6a-7** | **The stack confirmation. No new code** — one measured arm: 6a-4's kernel **and** 6a-6's default together, against the same-image `ctrl`. Re-anchors the E numbers on the post-6a image, which 6b-1 inherits. | Cycles, same-image | that two measured wins composed negatively (E9's additivity does not reproduce) |
 | **6a-8** *(conditional)* | E8-style **sub-stage probe** over the asm kernel: tier-1 / tier-2 / tier-3 / refill / fold priced separately. Run **only** if 6a-5 lands inside or near the noise band. | Cycles, sub-stage | that a near-bar result is unattributable to a leg |
 
@@ -260,6 +268,32 @@ map), and the reading **collapses to `asm − ctrl = 0` on 157/157 frames** with
 arms at 280,296,337 / 1,037,081,163. So the −584,856 c/frame delta is the kernel's,
 and a wrong plumb would read as "no win" rather than as a win. Restored; the
 restored sources reproduce the numbers above.
+
+**What this costs the stack — the item's first measured negative.** The landed
+realization is **+15,411,688 cycles/clip = +98,164 c/frame = +48.2 c/sample
+(+9.18%)** slower than E10's vendored arm (183,288,727 vs 167,877,039). E9's i32
+leg saved 12,330,961 in its own image; applying that same-image marginal projects
+the landed stack at **170,957,766 = 1,088,902 c/frame = 534.2 c/sample = 103.83%
+mean / 104.36% worst** of the 32,768 Hz budget. The vendored stack sat at
+94.47/94.95: **the seam's cost (9.2 points) is larger than the stack's margin (5.5
+points)**, so the menu's "first in-budget FIXED decode" does not project through
+the shipped path. For the projection to be wrong by enough to fit, the i32 leg
+would have to save ~40,200 c/frame more in the seam image than E9 measured (+51%);
+the i32 sites are outside the kernel and the seam, so a shift that large is not
+credible. It is a structural result, not a rounding — and it is the reason
+`perf-results.md`'s E9 caveat (1) is now written as fired.
+
+The caveats, so this is not over-read: the i32 marginal is E9's, not measured on
+this image (6a-6 measures it; 6a-7 confirms); the kernel alone still fits both
+product rates (61.7% at 18,157 Hz, 35.7% at 10,512 Hz, versus the i64 control's
+94.5% / 54.7%); LPC at 10,512 Hz is 183.3% as landed and 85.3% with E9's i32
+marginal; and every number here is mGBA with E5 unrun. **Where the 48 c/sample
+goes — the seam's window bridge per partition, the two §9.2.7.3 guards, the
+12-byte frame and third status word, or the monomorphization's codegen — is not
+attributed.** E10's arm had a vendored reader and no guards, and the conditional
+sub-stage probe (6a-8) does not run because 6a-5 landed far outside the noise band
+— so the split needs a probe with a *different* justification from the one the
+plan wrote (Q12).
 
 ### 6a's pre-declared fork (stated before the reading, so it cannot be negotiated)
 

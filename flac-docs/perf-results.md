@@ -1276,6 +1276,45 @@ measurement commit `2089854`.
 
 ---
 
+**Re-anchored 2026-11-08 — caveat (1) has fired, and the FIXED fit does not survive it.**
+Split-ladder item 6 PR 6a-5 measured the *landed* realization (6a-4's ARM kernel,
+through the core's `RiceKernel` seam, through the product call path) in the
+product-shape image:
+
+| arm (FIXED, 157-frame clip) | sum | c/frame | c/sample | % of 32,768 Hz |
+|---|---|---|---|---|
+| this record's `ctrl` | 280,206,417 | 1,784,754 | 875.6 | 170.18% |
+| this record's vendored `arm` | 167,877,039 | 1,069,281 | 524.6 | 101.96% |
+| this record's `i32` stack | **155,546,078** | **990,739** | **486.1** | **94.47%** |
+| 6a-5 landed `ctrl` | 275,111,047 | 1,752,300 | 859.7 | 167.08% |
+| 6a-5 landed `asm` | 183,288,727 | 1,167,444 | 572.8 | 111.32% |
+| **projected landed stack** | **170,957,766** | **1,088,902** | **534.2** | **103.83%** (worst 104.36%) |
+
+The landed arm is **+15,411,688 cycles/clip = +98,164 c/frame = +48.2 c/sample
+(+9.18%)** slower than this record's vendored arm. Applying this record's own
+*same-image* i32 marginal (−12,330,961 = −78,541 c/frame) to it projects **103.8%
+mean / 104.4% worst — over budget**, where the vendored stack sat at 94.47/94.95.
+The seam's cost (9.2 points) is larger than the stack's margin (5.5 points). To
+recover 32,768 Hz FIXED the i32 leg would have to save ~40,200 c/frame *more* than
+measured here (+51%), which is implausible — so this is a structural result, not a
+rounding.
+
+Three things this does **not** say. (i) The i32 marginal was measured on the
+vendored arm in *this* image; the i32 sites (`integrate_*`, `pad_block`,
+`decorrelate`) are outside the kernel and outside the seam, so the transfer is
+reasonable, but item 6a-6 must measure it in the seam image and 6a-7 confirms the
+stack. (ii) FIXED still fits both product rates with the landed kernel *alone*:
+61.7% at 18,157 Hz and 35.7% at 10,512 Hz (i64 control: 94.5% / 54.7%); LPC at
+10,512 Hz is 183.3% as landed and 85.3% with this record's i32 marginal. (iii) All
+of it is mGBA; E5 is still unrun, so neither 94.47% nor 103.83% is a hardware
+claim. Where the 48 c/sample goes — seam bridge, the two §9.2.7.3 guards, the
+12-byte frame/status, or monomorphization codegen — is **unattributed**: E10's arm
+had a vendored reader and no guards, and 6a-5 landed far outside the noise band so
+the conditional sub-stage probe did not run. Records:
+[`plan-of-record.md`](plan-of-record.md) ("6a-5 — the realization reading"),
+[`measurements.md`](measurements.md) (the projection row), and
+[`open-questions.md`](open-questions.md) Q12.
+
 ## Appendix — the Phase-1 baseline (spike PR 3, measured 2026-09-21)
 
 The first real numbers, kept because every later percentage is relative to this

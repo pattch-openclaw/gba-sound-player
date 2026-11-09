@@ -116,11 +116,23 @@ The absolute marginals that survive an era boundary:
 | E10 ARM kernel as measured (probe) | 101.98% (worst 102.50%) | 521.6% | E10 result |
 | E10 + E4 i32 stacked (probe) | **94.47% (worst 94.95%)** | 216.3% | E9 result |
 | 6a-5 realized asm through the seam (landed code, product-shape image) | **111.32%** | 571.28% | 6a-5 result |
+| 6a-5 projected asm + i32 (**projection**: E9's same-image i32 marginal, not measured on this image) | **103.83%** (worst 104.36%) | 265.99% | 6a-5 + E9 marginal |
 
 **None of the in-budget rows is landed code.** E9's FIXED stack exists as a
 sample under `examples/flac_spike/experiments/e9-composite/`; the product path
 still measures the 170.2% / 589.5% row. LPC at 216.3% fits 10,512 Hz (69.4%) and
 misses 18,157 Hz (~119.9%) decode-only.
+
+**And the one in-budget row does not survive landing.** 6a-5 measured the real
+thing and projected the stack: the landed realization is +48.2 c/sample slower
+than E10's vendored arm, which puts the FIXED stack at **103.83%** at 32,768 Hz —
+over budget — where the probe projected 94.47%. The E9 record's own caveat (1)
+("these numbers describe the probe's vendored link, and the kernel + i32 landing
+must re-witness them") is now a measured negative; see the re-anchoring note at
+the end of E9's entry in [`perf-results.md`](perf-results.md) and Q12 in
+[`open-questions.md`](open-questions.md). The kernel itself still stands as the
+menu's biggest lever (−286.9 c/sample landed), and both product rates fit with it
+alone (61.7% at 18,157 Hz, 35.7% at 10,512 Hz).
 
 ## 10,512 Hz, real music (rate ROM)
 
@@ -179,6 +191,7 @@ See [`playback-results.md`](playback-results.md) for the dated log.
 | 6a-5 vs E10's probe | landed asm 1,167,444 c/frame vs E10's 1,069,515 (101.98%): **+97,929 c/frame = +47.8 c/sample**, keeping **82%** of E10's −349 c/sample win | the seam's window bridge + the two §9.2.7.3 guards + the 12-byte frame; the split between them is unattributed (6a-8 does not run — far outside the band) |
 | 6a-5 `iwram-pin` marginal (asm) | tables in ROM 202,770,217 → pinned 183,288,727 c/frame-sum = **−124,086 c/frame / −60.9 c/sample** | item 5's data-pin claim, re-measured on this kernel |
 | 6a-5 codegen, product shape | `.text` 46,008 → 63,124 B, `.iwram` 812 → **1,356 B** (812 + 544), `.rodata` 1,829,760 → 1,830,876 B; the ROM harness itself is +8,584 B of the `.text` | an instrument image; the decode-path share is ~4.1 KB (arm residual/subframe/driver instantiations + the 684 B kernel), not the whole delta |
+| **6a-5 stack projection (the item's first measured negative)** | landed asm **183,288,727** vs E9's vendored arm **167,877,039** = **+15,411,688 / +98,164 c/frame / +48.2 c/sample (+9.18%)**; + E9's same-image i32 marginal (−12,330,961) projects **170,957,766 = 1,088,902 c/frame = 103.83% mean / 104.36% worst** of 32,768 Hz | the vendored stack's 94.47% does **not** reproduce through the landed seam; the seam costs 9.2 points against the stack's 5.5-point margin. i32 marginal to be re-measured by 6a-6; 18,157/10,512 Hz still fit (61.7% / 35.7% asm alone) |
 | 6a-5 determinism / layout | two headless runs of one arm image: 342 `***` lines `cmp`-identical; every *paired* delta reproduced to the cycle across a driver-layout change while the *absolute* sums moved +2 c/frame | paired deltas are the number of record; absolute sums are layout-sensitive at the 2 c/frame level |
 
 ## Determinism controls (why a zero is believable)

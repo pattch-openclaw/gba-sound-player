@@ -329,3 +329,34 @@ a mutation proved it. The general lesson filed with the method notes: a "measure
 claim has to state what the command *varied*, not only what it printed — and a
 zero-returning throwaway script can report a fact that merely agrees with the prose
 being checked.
+
+### Q12 — Where do the seam's 48 c/sample go, and what puts 32,768 Hz FIXED back under budget?
+
+**Opened by:** 6a-5's stack projection (2026-11-08) — the item's first measured
+negative. **Owned by:** 6a-6 for the width half; a probe with the 6a-8 *shape* (but
+a new justification) for the seam half; 6a-7 inherits the verdict.
+
+The landed realization is +48.2 c/sample (+9.18%) slower than E10's vendored arm
+(183,288,727 vs 167,877,039 on a 157-frame FIXED clip), and stacking E9's i32
+marginal on it projects 103.83% mean / 104.36% worst of the 32,768 Hz budget — over
+where the probe projected 94.47%. To fit, the stack needs **−40,152 c/frame =
+−19.6 c/sample** more than the projection gives, and the seam's own overhang is
++48.2 c/sample, so *part* of it is enough. Candidate shares, all named in the
+landing's own text and none measured: (a) the seam's window hand-out/take-back per
+partition (`kernel_window` / `set_kernel_window`, plus the wrapper's class mapping
+and the `order > MAX_ORDER` branch); (b) the two §9.2.7.3 guards the landing added
+to E10's kernel (`mvn+lsr+str` per partition, `ldr+cmp+bhi` and `adds+beq` per
+sample); (c) the 12-byte frame and the third status word; (d) monomorphization
+codegen — 6a-3 measured that a second kernel body in a link moves the *shared* path
+by ~168–199 K cycles/frame, so a per-partition call boundary is not free even
+before its instructions.
+
+Two constraints on any answer. The conditional **6a-8 does not run** — the plan
+wrote it for a near-band fork result, and this result is far outside the band — so a
+sub-stage probe here is a *new* probe with a new justification, not 6a-8's trigger.
+And **6a-6's measured i32 marginal, not E9's**, is the only admissible width input:
+the i32 sites are outside the kernel and the seam, so transfer is expected, but
+"expected" is how E9's caveat (1) got written in the first place. Honest answers
+already established: both product rates fit FIXED with the kernel alone (61.7% at
+18,157 Hz, 35.7% at 10,512 Hz), so this Q is about the *full-rate* claim, not about
+whether the kernel was worth landing (it is: −286.9 c/sample, fork = carry).

@@ -11,8 +11,13 @@ harness plays real music at 10,512 Hz with correct tempo and pitch (audibly
 verified), full-rate (32,768 Hz) decoding is still over budget on the shipped
 path — and the ARM kernel is now **landed, witnessed on mGBA's ARM7TDMI, and
 measured through the shipped seam**: it is **−584,856 cycles/frame (−286.9
-c/sample) faster than the shipped kernel** in the product-shape image, which is
-still 111.3% of the 32 kHz budget, so the width leg (6a-6) is the next lever.
+c/sample) faster than the shipped kernel** in the product-shape image. That is
+111.3% of the 32 kHz budget on its own, and **stacking the width leg on it
+projects 103.8% — over budget, where the vendored probe projected 94.5%**: the
+seam costs +48.2 c/sample against E10's vendored arm, more than the stack's
+margin. Both product rates still fit with the kernel alone (61.7% at 18,157 Hz,
+35.7% at 10,512 Hz). See [`flac-docs/measurements.md`](flac-docs/measurements.md)
+and Q12 in [`flac-docs/open-questions.md`](flac-docs/open-questions.md).
 
 ## The constraint
 
@@ -100,7 +105,9 @@ One line per rung; the full plan, bars and invariants are in
   [`plan-of-record.md`](flac-docs/plan-of-record.md) has the control build, the
   new image's section table, the gate counts and the mutation table.
 - **6a-6** — guarded i32 becomes the core's default width, i64 kept as the
-  always-correct escape leg.
+  always-correct escape leg. It now also carries the stack verdict: its *measured*
+  marginal (not E9's) decides whether 32 kHz FIXED can be restored, given 6a-5's
+  103.8% projection and the +48.2 c/sample seam overhang (Q12).
 - **6a-7** — stack confirmation (kernel + i32) and the E-number re-anchor.
 - **6b** — the container: the facade rewired onto `scan`, the real GAFP packer and
   manifest, and the rate-play path through a real manifest.
