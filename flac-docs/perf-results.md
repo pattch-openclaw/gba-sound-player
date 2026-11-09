@@ -1361,6 +1361,26 @@ survives as a *projection* re-derived from a landed-tree arm (1,069,252 − 78,5
 measured on this tree by 6a-6. See plan-of-record ("6a-5b — the reading") and
 measurements.md.
 
+**And 2026-11-09 (6a-5c) put a price on the instruction itself: 4.0000 cycles.** The
+gap's composition is now arithmetic, not attribution. Deleting one executed
+instruction from the landed kernel — the provably dead duplicated `and` the guard
+insertion left behind — moved the same-image pair by `2,560,000 = 4.000 × 640,000`
+cycles; deleting the five guard instructions as well moved it by another
+`12,800,000 = 5 × 4 × 640,000`; 0.46% of the gap is left, and it is per call rather
+than per codeword. So 6 × 4 = 24 cycles/codeword is the 24.11 that this record's
+own earlier note called "nowhere to live": it lived in instruction count, at four
+cycles an instruction — the ARM7TDMI fetch cost of a 32-bit ARM instruction in
+cartridge ROM on a 16-bit bus at WS0 = 3,1. Two things follow, and one of them is a
+correction to this file. The 6a-5b note above said the static bound's 5-instruction
+delta "≈5–15 c/sample" could not be 48; at 4 cycles an instruction it is 20
+c/codeword ≈ 40 c/sample, i.e. almost all of it — the bound was right about the
+*count* and the item was wrong about the *price*. And E6's "instruction fetch is
+ruled out" does not survive as a general fact: it measured a Rust arm where each
+instruction carried many cycles of work, which is the one shape in which a 4x fetch
+price cannot be seen. That reframes the remaining headroom as a placement question
+(6a-5d, the same stream in IWRAM) rather than a spelling one, and it is the first
+time in these records that a cycle number has a denominator for it.
+
 ## Appendix — the Phase-1 baseline (spike PR 3, measured 2026-09-21)
 
 The first real numbers, kept because every later percentage is relative to this

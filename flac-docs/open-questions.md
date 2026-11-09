@@ -333,11 +333,14 @@ being checked.
 ### Q12 — Where do the seam's 48 c/sample go, and what puts 32,768 Hz FIXED back under budget?
 
 **Opened by:** 6a-5's stack projection (2026-11-08) — the item's first measured
-negative. **Owned by:** **6a-5b did its half (2026-11-09): the seam half is closed,
-as in “the seam is not it”**. What is left of the first half belongs to **6a-5c**
-(guard cost vs. loop layout, one variable at a time) and conditionally **6a-5d**
-(place the same instruction stream in IWRAM); the width half is 6a-6's; 6a-7
-inherits the verdict.
+negative. **Status 2026-11-09: the first half is ANSWERED, and the answer is
+“six instructions at 4 cycles each”; what replaces it is a memory-placement
+question (6a-5d).** The seam half closed by 6a-5b (“the seam is not it”, priced at
+zero in a same-image pair) and the guard half closed by 6a-5c (the guards *are* the
+rest of it, at 4.0000 cycles per instruction). The width half is still 6a-6's, and
+6a-7 inherits the verdict. **The live question is no longer “where do the 48
+c/sample go” — that is settled arithmetic — it is “is the ROM-resident codeword
+loop 4x more expensive than it needs to be, and does IWRAM fix it”; see 6a-5d.**
 
 **Re-opened 2026-11-08: the premise did not survive a code-level check.** The
 48 c/sample is a quantity taken across two records, and the FIXED clip's own
@@ -393,10 +396,40 @@ resident in IWRAM, with E6's contrary result (“instruction fetch is ruled out�
 measured on a Rust arm that also forced inlining and took veneers) stated rather
 than buried.
 
-**The budget half, rewritten with measured numbers — it is no longer width-only.**
-The overhang is worth **9.37 points** of the 32,768 Hz frame budget (98,291 /
-1,048,750) while the projected landed stack is over by **3.84** (1,167,542 − 78,541
-= 1,089,001 c/frame = 103.84%). Recovering **41%** of the measured overhang fits
+**Measured 2026-11-09 (6a-5c): the first half is closed, and the answer is
+arithmetic.** The 48 c/sample is **six instructions at 4.0000 cycles each**. One
+provably dead `and` removed from the landed kernel moved the same-image pair by
+`2,560,000 = 4 × 640,000` cycles; five guard instructions removed on top of it
+(diagnostic leg) moved it by `12,800,000 = 5 × 4 × 640,000`; what is left is
+**71,627 cycles of 15,431,627 — 0.46%**, per call rather than per codeword, the
+size the static bound predicted for the bridge. So there is no unexplained residue
+to hunt: 6 × 4 = 24 cycles per codeword, and the item's mistake was reading
+6a-5b's "4.02 cycles per inserted instruction" as an anomaly instead of as the
+price. That price is the ARM7TDMI fetching a 32-bit ARM instruction from cartridge
+ROM: **4 cycles**, and the saving scales with codewords *executed* (exactly 16,384
+on each 2048-sample frame, 4,096 on the 512-sample frame), so layout is excluded
+rather than merely unproven. **E6's "instruction fetch is ruled out" is reversed
+for this case** — it measured a Rust path where each instruction carried a dozen
+cycles of work, which is exactly the case a 4x fetch price is invisible in.
+
+**So Q12's first half is answered by instruction count, and the answer moves the
+question to memory.** Each guard instruction is worth 4 cycles/codeword = 16,384
+c/frame = **1.56 budget points**; the dead one was worth 1.56 and is gone
+(109.77% mean); the 41% of the overhang that 32 kHz needs is **two instructions**.
+But the bigger reading is that *every* instruction in the loop pays 4 cycles,
+including the ~30 that no re-spelling can delete — which is why **6a-5d** (the same
+stream in IWRAM, 0 wait states) is now the largest quantity on the table and is no
+longer a conditional. The width half is untouched: it is still 6a-6's, its FIXED
+site is still one named function, and E9's marginal is still not admissible input.
+
+**The budget half, kept as the 6a-5b form of it and now re-read.** It was worth
+**9.37 points** of the 32,768 Hz frame budget (98,291 / 1,048,750) against the
+projected landed stack's **3.84** (1,167,542 − 78,541 = 1,089,001 c/frame =
+103.84%). 6a-5c then priced the overhang at 1.56 points per instruction: **109.77%**
+with the dead one gone, **102.00%** if all six vanished (an upper bound no shipped
+kernel can reach), and the two instructions that matter are the `[sp,#8]` reload and
+whatever a cheaper G1 spelling costs. The paragraph below is unchanged as the
+projection it was. Recovering **41%** of the measured overhang fits
 32 kHz FIXED with no other lever, and the vend leg plus E9's i32 marginal is
 1,069,252 − 78,541 = 990,711 c/frame = **94.47% mean / 95.0% worst**: the
 archive's one in-budget row, re-derived from a landed-tree measurement of the arm

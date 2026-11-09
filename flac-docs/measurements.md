@@ -119,6 +119,8 @@ The absolute marginals that survive an era boundary:
 | 6a-5 projected asm + i32 (**projection**: E9's same-image i32 marginal, not measured on this image) | **103.83%** (worst 104.36%) | 265.99% | 6a-5 + E9 marginal |
 | 6a-5b: E10's vendored realization re-measured **as an additional arm of the product-shape image** — that pass's calibration line goes from `arms=2` to `arms=3` (instrument-only; nothing ships) | **101.95%** (worst 102.47% @147) | 561.93% | 6a-5b differential, `flac-spike-6a5b.gba` |
 | 6a-5b: that arm + E9's i32 marginal (**projection**, same caveat as the row above) | 94.47% (worst 95.0%) | — | 1,069,252 − 78,541 = 990,711 c/frame — E9's in-budget row, reproduced from a landed-tree measurement of the arm instead of a probe's |
+| **6a-5c L1: the landed asm with the dead `and` deleted** (a real fix; `overlay-kernel-test` + `overlay-test-arm` + `item6a5b-test` green) | **109.77%** (1,151,236 c/frame) | 561.6% | `flac-spike-6a5b.gba` sha `77a63e2b506d0bd9…`, same-image pair |
+| 6a-5c L2: the same body with G1+G2 also deleted — **diagnostic only, cannot ship** (the device rejection arms fail by construction) | 102.00% (1,069,708 c/frame) | — | same image, `arm_rice_partition` 165 words |
 
 **None of the in-budget rows is landed code.** E9's FIXED stack exists as a
 sample under `examples/flac_spike/experiments/e9-composite/`; the product path
@@ -170,6 +172,30 @@ the table below): semantics untouched, layout moved, and the reading decides whi
 unit the cost is in. The 103.83% row is therefore re-admitted as the item's working
 stack figure, with 6a-6's own measured i32 marginal still required before it becomes
 a measurement.
+
+**Measured 2026-11-09 (6a-5c): six instructions, 4.0000 cycles each, and the residue
+is 0.46%.** The separation 6a-5b asked for came out neither way it was posed. Two
+legs, each run twice and `***`-identical, both bit-exact on every frame: deleting the
+provably dead `and` moved `asm − vend` by `2,560,000 = 4.000 × 640,000` cycles
+(FIXED) / `2,554,984 = 3.992 × 638,746` (LPC), and deleting the five guard
+instructions on top of it moved it by `12,800,000 = 5 × 4 × 640,000` exactly,
+leaving **71,627 of 15,431,627 (0.46%)** at 456 / 510 c/frame — per call, not per
+codeword, of the order the static bound gave for the bridge. So the currency is
+**instruction count** and its price is **4 cycles**, which the whole gap confirms
+independently: `6 × 4 × 4096 = 98,304 c/frame` against 98,291 measured. Layout is
+*excluded*, not merely unproven: the saving is exactly 16,384 cycles on every one of
+the 156 frames of 2048 samples and exactly 4,096 on the single 512-sample frame of
+each clip — proportional to codewords executed — and the untouched vend leg prints
+the same sums to the cycle in all three images although its own body moved 4 bytes
+earlier. Four cycles is the ARM7TDMI's fetch cost for a 32-bit ARM instruction in
+cartridge ROM on a 16-bit bus at WS0 = 3,1; **E6's "instruction fetch is ruled out"
+is reversed for this case**. Consequences, in budget points of the 32,768 Hz frame:
+the dead instruction was worth **1.56** (111.33% → 109.77% for the landed arm); each
+further instruction is worth **1.56**; all six would be worth 9.33 and would reach
+102.00%, an upper bound no shippable kernel can reach because G1/G2 must exist in
+some form. The item therefore has a plain instruction budget in front of it — and a
+larger question behind it, since *every* instruction in the loop, deletable or not,
+pays the same 4 cycles: **6a-5d**, the same stream in IWRAM.
 
 ## 10,512 Hz, real music (rate ROM)
 
@@ -231,7 +257,7 @@ See [`playback-results.md`](playback-results.md) for the dated log.
 | **6a-5 stack projection (the item's first measured negative)** | landed asm **183,288,727** vs E9's vendored arm **167,877,039** = **+15,411,688 / +98,164 c/frame / +48.2 c/sample (+9.18%)**; + E9's same-image i32 marginal (−12,330,961) projects **170,957,766 = 1,088,902 c/frame = 103.83% mean / 104.36% worst** of 32,768 Hz | the vendored stack's 94.47% does **not** reproduce through the landed seam; the seam costs 9.2 points against the stack's 5.5-point margin. i32 marginal to be re-measured by 6a-6; 18,157/10,512 Hz still fit (61.7% / 35.7% asm alone). **Re-opened by 6a-5b: cross-image comparison** |
 | **6a-5b static bound (2026-11-08, no cycles)** | FIXED clip `MidSide`, both subframes **FIXED order 0, partition order 0**, `wasted 0`, Rice p = 8/10, **157/157 frames** ⇒ **2 kernel calls/frame**; seam bridge **~114 Thumb instr/call** ⇒ **≈0.15 c/sample**; asm delta **5 instr/sample** (G1+G2) ⇒ **≈5–15 c/sample**; tables at `0x0300032c/34c/44c` (E9's own addresses, `.iwram` 0x54c); `decode_residual_with::<ArmRiceKernel>` **2,104 B** vs `<TableCountKernel>` **1,812 B** | the overhang cannot be the bridge or the frame/status word; the only *proven* per-sample cost is the guards; the remaining share is image effect, which 6a-5b pairs away or confirms |
 | 6a-5 determinism / layout | two headless runs of one arm image: 342 `***` lines `cmp`-identical; every *paired* delta reproduced to the cycle across a driver-layout change while the *absolute* sums moved +2 c/frame | paired deltas are the number of record; absolute sums are layout-sensitive at the 2 c/frame level |
-| **6a-5b realization differential (measured)** | `flac-spike-6a5b.gba` sha `b6e35beb1e04028c…`, `rustc 1.100.0-nightly (a69a63265)`; four windows in one link, `overhead=33 stable=true ime_inside=0`; **`asm − vend` = +15,431,627 / +15,409,977 cycles** per 157-frame clip (FIXED / LPC) = **+98,291 / +98,153 c/frame = +24.11 c/codeword = +48.22 / +48.16 c/sample**; `vend_faster=157, asm_faster=0` on both clips, max +98,775 @147; run 2 differs by +820 / +2,035 cycles in total | the number of record for this rung. It confirms the 6a-5 projection and refutes its re-opening: the landed realization *is* 9.4 budget points of the 32,768 Hz frame worse than the probe's, in one image, on identical bytes |
+| **6a-5b realization differential (measured)** | `flac-spike-6a5b.gba` sha `b6e35beb1e04028c…`, `rustc 1.100.0-nightly (a69a63265)`; three timed legs in one link (`arms=3` in that pass's calibration line), `overhead=33 stable=true ime_inside=0`; **`asm − vend` = +15,431,627 / +15,409,977 cycles** per 157-frame clip (FIXED / LPC) = **+98,291 / +98,153 c/frame = +24.11 c/codeword = +48.22 / +48.16 c/sample**; `vend_faster=157, asm_faster=0` on both clips, max +98,775 @147; run 2 differs by +820 / +2,035 cycles in total | the number of record for this rung. It confirms the 6a-5 projection and refutes its re-opening: the landed realization *is* 9.4 budget points of the 32,768 Hz frame worse than the probe's, in one image, on identical bytes |
 | 6a-5b legs of the same pass | ctrl 275,126,433 (1,752,398 c/f, 167.09%) → asm 183,304,113 (1,167,542, 111.33%) → vend 167,872,486 (1,069,252, **101.95%**); `asm − ctrl` = −91,822,320 **cycle-identical to the 6a-5 record**; `vend − ctrl` = −107,253,947 (−683,146 c/f) | all three legs decoded to the pinned FNV `0x54C7B356621B6E15` and the per-frame sample-equality witness held, so the difference is realization only. The PR 3 budget verdict (0/2 in budget, screen RED) says no leg fits 32 kHz; it does not void the pair |
 | 6a-5b arm absolutes are **link-stable** | landed asm 183,288,727 (product shape) / 183,231,371 (three-arm link) / 183,304,113 (this image) — 0.04% spread; E10's vendored arm 167,911,108 / this image's vend leg 167,872,486 — −0.02%; while `ctrl` spans 280,848,260 → 275,111,047 → 249,051,451 across links | the reading rule's exception ("absolute *paired* marginals") is symmetric: an absolute that reproduces across images is quotable across records. That is *why* 6a-5's cross-record projection came out right, and why 6a-5b was still the right way to settle it |
 | 6a-5b machine-code delta, same image | `arm_rice_partition` 684 B / 171 words @`0x0800017c` vs `e10_rice_partition` 640 B / 160 words @`0x08000428`: +11 words static; **executed delta 6 per Rice codeword** — G1 `ldr [sp,#8] + cmp + bhi`, G2 `adds + beq`, and one **dead duplicated `and r12, r3, #0xFF`** — plus 3 per partition (`mvn + lsr + str`). `.Lvalerr` and the `mov r2, #2` arm are never executed on this corpus | 640,000 codewords × 6 + 314 partitions × 3 = **3,840,942 executed delta instructions per clip = 24.9% of the gap at 1 cycle each**, 49.8% at 2, 74.7% at 3; the kernel body accounts for the whole gap only at **4.02 cycles per delta instruction**. The gap is **24.11 cycles per codeword** — the unit to reason in |
@@ -240,6 +266,10 @@ See [`playback-results.md`](playback-results.md) for the dated log.
 | 6a-5b a real defect in the shipped kernel | `crates/flac-lite-gba/asm/rice_partition.s` lines **256 and 258 are the same line**: `and r12, r3, #0xFF  @ lo = rem_w & 0xFF`. The [6a-4 G1] insertion moved that line above the guard and left the original in place. Emitted adjacently at `0x8000288 / 0x800028c`; `r3` is unchanged between them and neither sets flags ⇒ the first is **dead, once per codeword**, 640,000 dead executions per clip | the cheapest counted instruction on the table, and a single-variable probe for the layout channel. **Not removed by this record**: the kernel this record anchors must keep its bytes, and removing it is a build change that re-runs `overlay-kernel-test` and `arm_from_outside` |
 | 6a-5b what is symmetric, so this image prices it at zero | the **same number of kernel calls per frame in both legs** — 2 on FIXED (partition order 0, 2 subframes), more on LPC (its partition orders vary per frame), equal in both legs either way — each call through a linker thunk (`__Thumbv4ABSLongBXThunk_arm_rice_partition`, `…_e10_rice_partition`); tables in `.iwram` in both (landed `0x0300032c/34c/44c`, vendored `0x0300054c/56c/66c`); the stack is IWRAM for both (the boot code loads `0x03007ffc`); `stereo::decorrelate` and `PredictorState` are shared by both | the bridge, the pin, the 12-byte frame and the state ABI contribute **nothing** to this differential — which is the static bound's one conclusion that survives. What the vend leg *does* carry that the landed leg does not: its own 32-bit-window `AccumulatorReader`, its own frame/subframe/residual/prediction code. "Realization" here means the whole per-codeword path, not only the asm body |
 | 6a-5b the cost tracks codewords, not frames | +48.22 vs +48.16 c/sample on two clips whose control costs differ 3.75× (1,752,398 vs 6,572,815 c/f) and whose per-frame work is different code; both clips are 320,000 sample-frames = 640,000 Rice codewords | the regression is attached to the per-codeword loop, not to the frame path, the LPC work, or anything per-frame. Any candidate that scales per *call* has to survive the FIXED/LPC invariance, which the bridge (2 calls/frame in both) does only by being ~0. **The per-partition term is ruled out by the same measurement:** the LPC clip's partition count is *not* 314 — its partition orders vary frame to frame — yet the per-codeword cost moves 0.14% between the clips, so the only per-partition item in the diff (the `mvn/lsr/str` bound hoist) cannot be a meaningful share of a cost that does not scale with partitions |
+| **6a-5c L1: one dead instruction removed = 4.0000 cycles per codeword** | `flac-spike-6a5b.gba` sha `77a63e2b506d0bd9…` (same image, asm body 684 → 680 B, 171 → 170 words, the duplicated `and` deleted, all gates re-run green). `asm − vend` 15,431,627 → **12,871,627** (FIXED) and 15,409,977 → **12,854,993** (LPC) | removed **2,560,000 / 2,554,984 cycles** = **4.0000 / 3.9922 c/codeword**, 16,305.7 / 16,273.8 c/frame, 8.00 / 7.98 c/sample. Per frame the fall is *exactly* 16,384 cycles on every 2048-sample frame (156 of 157) and exactly 4,096 on the 512-sample frame — proportional to codewords executed, **not** a constant per frame and so **not** alignment |
+| **6a-5c L2 (diagnostic): the guards are the rest of it** | same image, G1+G2's 5 instructions deleted (`arm_rice_partition` 170 → **165 words**). `asm − vend` **71,627** (FIXED) / **80,073** (LPC); the per-arm decode proof still passes on every frame, so the guards never fire on this corpus | 12,871,627 − 71,627 = **12,800,000 = 5 × 4 × 640,000 exactly** (LPC: 12,774,920 = 5 × 4 × 638,746). So each of the five guard instructions is worth **4.000 cycles per execution**, and the whole 6-instruction delta is **6 × 4 × 4096 = 98,304 c/frame** against a measured 98,291 |
+| **6a-5c: the measured instruction cost in this loop is 4.00 cycles** | three independent removals (1 instruction, then 5 more) at two clip workloads, all scaling with codeword count at 4.000 / 3.992 cycles each; 4 cycles is the ARM7TDMI fetch cost of a 32-bit ARM instruction from cartridge ROM on a 16-bit bus at WS0 = 3,1 | the 6a-5b gap is **fully accounted for by instruction count**, at 4 cycles per instruction, and *not* by hot-loop layout: the "4.02 cycles per inserted instruction" that 6a-5b's arithmetic demanded is not an anomaly, it is what an instruction costs here. This reverses E6's "instruction fetch is ruled out" **for this case** — E6 measured a Rust path where each instruction carries many cycles of work |
+| 6a-5c what is left after all six instructions are removed | L2 residual `asm − vend` = **71,627 (456 c/frame)** FIXED, **80,073 (510 c/frame)** LPC, against a per-partition prologue of 3 instructions × 4 cycles × the partition count | the residual is per-call, not per-codeword, and of the same order as the static bound's ~0.15 c/sample (≈305 c/frame) for the seam bridge — i.e. after the kernel delta is gone, what remains is the surrounding path, as predicted |
 
 ## Determinism controls (why a zero is believable)
 
@@ -274,6 +304,13 @@ See [`playback-results.md`](playback-results.md) for the dated log.
   indices. **Upper bound on what a re-run of a fixed image can hide: zero.**
 - That control bounds *re-runs*, not recompiles. The ~9–13 cyc/frame band exists
   for recompiled layouts and is still an assumption, not a measurement.
+- **6a-5c re-took it on a changed kernel body.** Two runs of the L1 image (680 B
+  body) and two of the L2 image (660 B) are each `***`-identical (664/664 lines),
+  and the vend leg prints the *same* sums to the cycle in all three images
+  (167,872,486 / 925,235,241) even though its own code moved 4 bytes earlier in
+  the L1 image. A paired delta that changes by exactly `4 × 640,000` cycles is
+  therefore a measurement and not a layout artifact: the arm's absolute moved by
+  the same amount on every frame, and the leg that did not change did not move.
 
 ## What not to quote
 

@@ -26,10 +26,15 @@ And the differential says the seam is **not** what costs: its bridge, its pinned
 tables and its state ABI are symmetric in that image and priced at zero. The cost is
 inside the codeword loop, where the landed kernel executes **6 more instructions per
 codeword** than the probe's (G1, G2, and one provably dead duplicate `and` the guard
-insertion left behind) for a measured **24.11 cycles** — 4.02 cycles per inserted
-instruction, which no cost model yet explains. That is 6a-5c's question, and it is
-worth **9.4 budget points** against the stack's 3.8-point deficit, so the rate
-question now has a kernel-side candidate beside the width leg. Both product rates
+insertion left behind). **6a-5c then priced them (2026-11-09): an instruction in
+this loop costs 4.0000 cycles**, so 6 × 4 = 24 is the whole 24.11 — no residue, no
+layout anomaly. Deleting the dead `and` (a real fix, all gates green) is worth
+`4 × 640,000` cycles per clip = 1.56 budget points; deleting all six would be
+worth 9.33 and would leave 0.46% of the gap. Four cycles is what the ARM7TDMI pays
+to fetch a 32-bit ARM instruction from cartridge ROM, which makes the *placement* of
+the kernel the live question rather than its spelling: **6a-5d** (the same stream in
+IWRAM, 0 wait states) is now the largest lever on the table, and **E6's
+"instruction fetch is ruled out" is reversed for this case**. Both product rates
 still fit with the kernel alone (61.7% at 18,157 Hz,
 35.7% at 10,512 Hz). See [`flac-docs/measurements.md`](flac-docs/measurements.md)
 and Q12 in [`flac-docs/open-questions.md`](flac-docs/open-questions.md).
@@ -126,14 +131,15 @@ One line per rung; the full plan, bars and invariants are in
   0.4% from the projection), the seam is exonerated, and the instrument — one more
   timed leg behind `item6a5b-vendored`, with E10's module vendored into the spike
   crate and its own witness green beside the others — is reusable for the next leg.
-- **6a-5c** — the guard marginal, one variable at a time: delete the dead
-  duplicated `and r12, r3, #0xFF` alone (a provably dead instruction whose removal
-  shifts the hot loop 4 bytes and changes no semantics), then delete G1/G2, then
-  re-spell G1 at the accumulation points as the kernel header already names it. That
-  separates *instruction cost* from *loop layout*, and it is what decides whether the
-  48 c/sample can be priced back inside the kernel — worth 9.4 budget points,
-  2.4× the deficit. Every leg re-runs the device-side kernel gates, because the
-  guards are not dead at the profile edges even though they never fire on this corpus.
+- ~~**6a-5c** — the guard marginal, one variable at a time.~~ **Measured.** An
+  instruction in the codeword loop costs **4.0000 cycles** (two independent
+  removals, exact to the cycle, proportional to codewords executed); the six-instruction
+  delta is the whole 48 c/sample, and the dead `and` is deleted as a fix.
+- **6a-5d** — the codeword loop's placement: the same instruction stream resident
+  in IWRAM instead of cartridge ROM (plain `.iwram`; `.text_iwram` is E6's trap).
+  With fetch priced at 4 cycles and a ~30-instruction codeword path, this is a
+  multi-point lever, not a micro-optimization — and it is the case E6's
+  Rust-path result does not cover.
 - **6a-6** — guarded i32 becomes the core's default width, i64 kept as the
   always-correct escape leg. It carries the **width half** of the stack question
   (its measured marginal replaces E9's borrowed one); the verdict itself is
