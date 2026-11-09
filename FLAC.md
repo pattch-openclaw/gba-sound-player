@@ -15,7 +15,11 @@ c/sample) faster than the shipped kernel** in the product-shape image. That is
 111.3% of the 32 kHz budget on its own, and **stacking the width leg on it
 projects 103.8% — over budget, where the vendored probe projected 94.5%**: the
 seam costs +48.2 c/sample against E10's vendored arm, more than the stack's
-margin. Both product rates still fit with the kernel alone (61.7% at 18,157 Hz,
+margin. **That projection is re-opened (6a-5b, 2026-11-08):** it is the one number
+in these records taken across two records, and the FIXED clip's own geometry fixes
+the seam's bridge at ≈0.15 c/sample with only 5 instructions per sample of proven
+code delta — so the verdict waits on a same-image differential, not on a
+refactor. Both product rates still fit with the kernel alone (61.7% at 18,157 Hz,
 35.7% at 10,512 Hz). See [`flac-docs/measurements.md`](flac-docs/measurements.md)
 and Q12 in [`flac-docs/open-questions.md`](flac-docs/open-questions.md).
 
@@ -104,10 +108,14 @@ One line per rung; the full plan, bars and invariants are in
   host-side arm could see; the landing record in
   [`plan-of-record.md`](flac-docs/plan-of-record.md) has the control build, the
   new image's section table, the gate counts and the mutation table.
+- **6a-5b** — the paired realization differential: the vendored arm and the landed
+  arm in one link, one pass, one calibration, so the seam is priced as a same-image
+  pair instead of across two records. Instrument-only; it decides whether 6a-5's
+  103.8% projection is real.
 - **6a-6** — guarded i32 becomes the core's default width, i64 kept as the
-  always-correct escape leg. It now also carries the stack verdict: its *measured*
-  marginal (not E9's) decides whether 32 kHz FIXED can be restored, given 6a-5's
-  103.8% projection and the +48.2 c/sample seam overhang (Q12).
+  always-correct escape leg. It carries the **width half** of the stack question
+  (its measured marginal replaces E9's borrowed one); the verdict itself is
+  6a-5b's, and this rung does not start on a cross-image projection.
 - **6a-7** — stack confirmation (kernel + i32) and the E-number re-anchor.
 - **6b** — the container: the facade rewired onto `scan`, the real GAFP packer and
   manifest, and the rate-play path through a real manifest.

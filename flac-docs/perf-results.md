@@ -1315,6 +1315,28 @@ the conditional sub-stage probe did not run. Records:
 [`measurements.md`](measurements.md) (the projection row), and
 [`open-questions.md`](open-questions.md) Q12.
 
+**Re-opened 2026-11-08 (6a-5b) — the +48.2 c/sample is a cross-image comparison.**
+The paragraph above adds *this record's* paired marginal to *another record's*
+absolute, which the reading rule forbids, and the table directly above it says how
+much that can be worth: this record's `arm` sits −34,069 cycles from E10's, a
+layout offset stated and bounded at ≈0.02% — but the 6a-5 image set measured `ctrl`
+moving **−202,529 c/frame** (−99 c/sample) between links that carry one and two
+`RiceKernel` bodies, with its source unchanged. Twice the overhang being claimed.
+
+Four static facts bound the claim on the current tree. The FIXED clip is `MidSide`
+with **FIXED order 0 on both subframes and partition order 0, 157/157 frames** —
+`integrate_fixed` is a no-op and `pad_block` is a no-op, so the frame's per-sample
+cost is the kernel plus the shared decorrelate and **there are exactly 2 kernel
+calls per frame**; the seam bridge is **~114 Thumb instructions per call**
+(≈0.15 c/sample at that call count); the asm bodies differ by **5 instructions per
+sample** (the two §9.2.7.3 guards, the only in-kernel delta) plus 3 per partition;
+and the three tables sit at `0x0300032c / 0x0300034c / 0x0300044c` — the very
+addresses this record's own `nm` witness lists. A +48.2 c/sample *code* difference
+has nowhere to live, so the number is an image effect until `asm − vendored` is
+read in one link (6a-5b). **Caveat (1) is therefore not "fired":** it is still
+open, and it is now the rung that must close it. The fork's carry decision is
+untouched — −584,856 c/frame is a same-image paired reading.
+
 ## Appendix — the Phase-1 baseline (spike PR 3, measured 2026-09-21)
 
 The first real numbers, kept because every later percentage is relative to this
