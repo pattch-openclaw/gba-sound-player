@@ -442,8 +442,8 @@ podman-item6a5-asm-rom:
 	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
 	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make item6a5-asm-rom
 
-# 6a-5b — the realization differential (plan-of-record 6a-5b). One image, four
-# windows: ctrl, the landed ARM arm (`item6a5-asm`, the product shape), and the
+# 6a-5b — the realization differential (plan-of-record 6a-5b). One image, three
+# timed legs: ctrl, the landed ARM arm (`item6a5-asm`, the product shape), and the
 # E10 archive's vendored path (`item6a5b-vendored`, which implies the asm arm).
 # The reading is `asm − vend`, paired per frame in one link; the run loop is the
 # same: `timeout -k 5 280 mgba-test-runner flac-spike-6a5b.gba` and

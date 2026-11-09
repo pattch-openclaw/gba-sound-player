@@ -253,7 +253,11 @@ arm_rice_partition:
     ldr     r12, [sp, #8]               @   the hoisted MAX >> p
     cmp     r2, r12
     bhi     .Lvalerr
-    and     r12, r3, #0xFF              @ lo = rem_w & 0xFF
+    @ [6a-5c L1] the guard insertion above used to leave its own copy of the
+    @   `and` behind, so this line appeared twice in a row (6a-5b measured the
+    @   consequence, and the two are adjacent in the emitted code because
+    @   nothing between them touches r3 or the flags). One copy is dead; the
+    @   original is kept, below, after the stitching comment.
     @ Un-reverse the window-domain remainder (header: THE STITCHING).
     and     r12, r3, #0xFF              @ lo = rem_w & 0xFF
     ldrb    r12, [r1, r12]              @ REV8[lo]
