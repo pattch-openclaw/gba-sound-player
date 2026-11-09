@@ -108,6 +108,15 @@ zero tests.
 Run loop: `make native-spike-rom` → `timeout -k 5 280 mgba-test-runner
 flac-spike.gba` with serial captured to a log (kill after the verdict line — the
 runner hangs on gfx-loop ROMs, expected) → `grep -E "stats:|budget:|verdict"`.
+The 6a-5 arm images use the same loop on `flac-spike-6a5-arms.gba` /
+`flac-spike-6a5-asm.gba`, grepping `6a5`; the arm pass has its own calibration
+(3 discarded + 5 reported, E4's shape) and its own paired-delta summary lines.
+
+**Paired deltas are the number of record; absolute sums are not.** 6a-5 measured
+this twice over: the arm images' absolute sums moved by **+2 cycles/frame** between
+two harness layouts while every *paired* delta reproduced to the cycle, and moving
+`ctrl` between links moves it by **−36,543 / −202,529 cycles/frame** depending on
+how many `RiceKernel` bodies the link carries. Same-image pairs, or nothing.
 
 *Provenance:* the exploration menu that produced E1–E10 was retired with the
 results; its method rules are the ones above, and its per-variant loop was:
@@ -127,6 +136,7 @@ under `examples/flac_spike/experiments/<name>/`.
 | `make flac-gates` | The aggregate: six configurations plus the combination arms (1,169 passed / 6 ignored at the item-6 baseline). |
 | `make native-flac-rom` | The decoder bundles into a bootable ROM (`examples/flac_integration/`), links and fixes. Build sanity, not audio. |
 | `make spike-test` / `native-spike-rom` | The measurement instrument: host witness over the exact embedded bytes, then on-target decode proof and cycle harness. |
+| `make item6a5-test` / `item6a5-arms-rom` / `item6a5-asm-rom` | Item 6a-5's arms: every kernel (default, Rust mechanism, ARM embodiment) decodes the committed clips to the pinned PCM and agrees with the control frame window by frame window on the host, and the two arm images time them through the product call path (three-way and product-shape). Arm features are off in every other build. |
 | `make rate-assets` / `rate-test` / `native-rate-rom` / `native-rate-play-rom` | The rate flow (10,512 / 18,157 / 32,768 Hz) and FIFO playback harness. |
 | `make kernel-test` / `native-kernel-rom` | The ARM kernels: host twin + on-target mGBA sweep over one committed golden table each. |
 | `make overlay-check` / `overlay-test` / `overlay-test-twin` | `flac-lite-gba`: thumbv4t compile witness, its own host test, and the out-of-crate Rice differential. |

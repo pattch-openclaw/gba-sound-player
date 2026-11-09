@@ -42,7 +42,7 @@
 //! It is an **instrument arm**: it exists to be instantiated by a caller that
 //! wants both mechanisms in one build (see `tests/twin_from_outside.rs`, the
 //! out-of-crate differential this PR's witness is). Nothing in either crate's
-//! decode path names it — [`flac_lite::residual::decode_rice_partition`] still
+//! decode path names it — [`flac_lite::residual::decode_residual`] still
 //! names [`flac_lite::residual::TableCountKernel`] on one line, by PR 4's
 //! measurement, and threading a kernel choice through `decode_residual` /
 //! `decode_subframe` / `decode_frame` is 6a-5's change, taken with the cycle

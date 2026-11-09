@@ -33,10 +33,16 @@ flac-lite = { path = "../../crates/flac-lite", features = ["iwram-pin"] }
 # first time anything in this repository links `flac-lite-gba` at all, which is
 # what 6a-3's link witness needs (an rlib has no link step, so no gate on the
 # overlay crate itself can answer a codegen question — that limit is written in
-# the Makefile's overlay section and in the crate's own docs). Enabling it also
-# turns on the overlay's `rice-twin`, i.e. the core's `rice-hybrid`; see the two
-# feature entries below.
-flac-lite-gba = { path = "../../crates/flac-lite-gba", features = ["rice-twin"], optional = true }
+# the Makefile's overlay section and in the crate's own docs).
+#
+# NO features on the dependency line, on purpose: each arm's feature below
+# selects exactly the overlay feature it needs. Until 6a-5 this line carried
+# `features = ["rice-twin"]`, which was fine while the overlay had one module —
+# but 6a-5 needs an *asm-only* image (the product shape), and a hard `rice-twin`
+# here would drag the Rust mechanism — and through it the core's `rice-hybrid` —
+# into every image that links the overlay at all. `item6a3-twin` below keeps
+# that rung's exact configuration by naming the feature itself.
+flac-lite-gba = { path = "../../crates/flac-lite-gba", optional = true }
 
 # The sample-rate ROM flow (FLAC.md "Sample-rate reduction" Part 1). The
 # feature exists to gate the rate bin + rate witness so the default spike
@@ -58,7 +64,7 @@ rate-assets = []
 # — so both arms build with the SAME core feature set, which is what makes T-vs-H a
 # measurement of the crate boundary and not of a feature flag. Off by default, and
 # nothing in the shipped ROM build (`make native-spike-rom`) enables either.
-item6a3-twin = ["dep:flac-lite-gba"]
+item6a3-twin = ["dep:flac-lite-gba", "flac-lite-gba/rice-twin"]
 item6a3-hybrid = ["flac-lite/rice-hybrid"]
 # Control arm, not an implementation of the seam: the core's twin module is
 # compiled and NOTHING reaches it — item 5 PR 3's shape, in this instrument. Its
@@ -66,6 +72,37 @@ item6a3-hybrid = ["flac-lite/rice-hybrid"]
 # anything, or whether presence in a codegen unit is enough. The probe module is
 # not compiled under this feature, so no call site exists.
 item6a3-present = ["flac-lite/rice-hybrid"]
+
+# 6a-5's realisation arms (FLAC.md split-ladder item 6, PR 6a-5; the pass lives
+# in src/main.rs under `mod item6a5`). Each arm selects a Rice kernel by type at
+# the *product* call path (`driver::decode_one_with` -> `frame::decode_frame_with`),
+# never through a vendored decode loop: E10/E9 priced vendored copies, and "the win
+# lives in a probe but not in the product path" is the failure 6a-5 exists to rule
+# out. All three are OFF by default, so the shipped instrument image (and every
+# number recorded before this rung) is unchanged.
+#
+#   item6a5-rust  the Rust arm: the overlay's `rice-twin` (which forwards to the
+#                 core's `rice-hybrid`), reached through the seam.
+#   item6a5-asm   the asm arm: the overlay's `rice-arm` (6a-4), and NOTHING else
+#                 from the overlay. This is the *product shape*: one extra kernel
+#                 in the link, no second mechanism.
+#   item6a5-arms  both, for the three-way reading in one link. 6a-3 measured why
+#                 this image cannot supply the control: a second `RiceKernel` body
+#                 in the link re-decides inlining and moves the default path by
+#                 ~168-199 K cycles/frame. So the paired deltas are read against
+#                 `ctrl` *inside this image*, and the shipped-baseline comparison
+#                 comes from the default image's own control run.
+#
+# Both arm features also turn on the overlay's `iwram-pin`. That is the product
+# shape (6a-4 is where pin enablement landed) and it removes an asymmetry the
+# first arm images had: this crate already pins the CORE's `LEADING_ONES` table
+# (`flac-lite` features `iwram-pin`), so an arm whose own three tables sat in ROM
+# would be paying a read tax the control does not pay. With the pin on, the asm
+# image's `.iwram` is 812 + 544 B — the three tables exactly — and `nm` shows
+# them at `0x0300xxxx` rather than in `.rodata`.
+item6a5-rust = ["dep:flac-lite-gba", "flac-lite-gba/rice-twin", "flac-lite-gba/iwram-pin"]
+item6a5-asm = ["dep:flac-lite-gba", "flac-lite-gba/rice-arm", "flac-lite-gba/iwram-pin"]
+item6a5-arms = ["item6a5-rust", "item6a5-asm"]
 
 # agb exists only for the GBA target, and it cannot build for the host triple
 # — while the host witness tests (make spike-test) compile this crate's lib
@@ -113,6 +150,16 @@ bench = false
 name = "rate_witness"
 path = "tests/rate_witness.rs"
 required-features = ["rate-assets"]
+
+# 6a-5's arm witness: one transcription of "every arm decodes the committed
+# clips to the pinned PCM, frame window by frame window". `required-features` is
+# what makes "a default `make spike-test` builds no arm code" a checked statement
+# — without it cargo would report the suite's absence as a green it did not earn
+# (the same rule 6a-3/6a-4 used for their out-of-crate suites).
+[[test]]
+name = "item6a5_witness"
+path = "tests/item6a5_witness.rs"
+required-features = ["item6a5-arms"]
 
 [workspace]
 

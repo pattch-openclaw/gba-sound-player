@@ -124,7 +124,18 @@ The `decoder` facade and the `format` items above are the remaining `todo!()`s; 
 and `scripts/pack_flac.sh` is still a documented stub. The spike's generated
 per-frame offset table is the deliberate stand-in.
 
-**One thing links `flac-lite-gba`: the correctness instrument**
+**The seam now reaches the frame.** 6a-5 threaded the kernel choice up the
+caller-facing chain — `frame::decode_frame_with<K>` → `subframe::decode_subframe_with<K>`
+→ `residual::decode_residual_with<K>` → the partition seam — with each non-generic
+entry point a one-line delegation to `…::<TableCountKernel>` (`decode_residual`'s
+line is where the default lives now; the retired private `decode_rice_partition`
+held it while nothing above it took a kernel, and that function's own docs deferred
+the threading to item 6). This is what lets a *product* name an overlay kernel
+without the core depending on the overlay, and it is why 6a-5's reading is a
+product-path reading rather than a probe.
+
+**One thing links `flac-lite-gba` outside the instrument features: the correctness
+instrument**
 (`examples/overlay-kernel-check/`), and only with `rice-arm` on. No shipped decode
 path, no spike build and no product crate names it. That is the item-6a shape: the
 overlay's rungs exist so the build plumbing, the seam's reachability and the
@@ -256,7 +267,7 @@ hurts (E6).
 | 6. `RiceKernel` seam + window bridge + portable twin + the flip reading | landed 2026-11-05/06; the default **did not flip** (measured negative) |
 | 7. Overlay crate, seam passable from outside | item 6a-1 and 6a-3 landed 2026-11-06/07 |
 | 8. Guarded i32 default width | item 6a-6, planned |
-| 9. ARM kernel over the seam | item 6a-4 **landed** 2026-11-08 (correctness only — no cycle, no default moved; 6a-5 is the reading) |
+| 9. ARM kernel over the seam | item 6a-4 **landed** 2026-11-08 (correctness only, no default moved); item 6a-5 **measured** it through the seam at −584,856 c/frame (FIXED), fork resolved to *carry* — the one-line placement lands with the product path (6b) |
 | 10. Manifest + packer + facade rewired onto `scan` | item 6b, planned |
 
 ## Decisions of record
@@ -275,5 +286,10 @@ hurts (E6).
   i64 kept as the always-correct escape leg for off-profile streams (lands in
   item 6a-6). The width needs no seam.
 - **2026-11-06 — the toolchain is a pin, not a note** (`nightly-2026-09-04`).
+- **2026-11-08 — the seam is threaded to the frame, and the ARM kernel is carried**
+  (item 6a-5). The `…_with<K>` chain is monomorphized (no `dyn`), the default stays
+  one line, and the placement of the carry is the product's line, not the core's:
+  the dependency arrow is overlay → core. Numbers:
+  [`measurements.md`](measurements.md).
 - **Unchanged throughout — correctness before speed**, one variable per run, and
   no cycle quoted across records.

@@ -627,6 +627,527 @@ mod rom {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // 6a-5 — the realisation reading. Arms: ctrl, the Rust mechanism (6a-3's
+    // `TwinKernel`), and the ARM embodiment (6a-4's `ArmRiceKernel`), reached
+    // through the *product* call path (`driver::decode_one_with` →
+    // `frame::decode_frame_with`), never through a vendored decode loop. This
+    // is the rung's whole point: E10/E9 priced vendored copies, and an arm that
+    // only exists in a probe cannot answer whether the win reaches the product.
+    //
+    // Three features, off by default, so the shipped instrument image is
+    // unchanged:
+    //   item6a5-rust  the Rust arm only (+ the overlay's `rice-twin`)
+    //   item6a5-asm   the asm arm only  (+ the overlay's `rice-arm`) — the
+    //                 *product shape*: one extra kernel, no second mechanism
+    //   item6a5-arms  both, for the three-way reading in one link
+    // 6a-3 measured why the last of those cannot supply the control: a second
+    // `RiceKernel` body in the link re-decides inlining and moves the default
+    // path by ~168–199 K cycles/frame. So `ctrl` is read in *this* image
+    // alongside the arms (paired, same-image), and the shipped-baseline
+    // comparison comes from the default image's own control run.
+    // -----------------------------------------------------------------------
+    #[cfg(any(feature = "item6a5-rust", feature = "item6a5-asm"))]
+    mod item6a5 {
+        use super::*;
+        use flac_lite::residual::TableCountKernel;
+        #[cfg(feature = "item6a5-asm")]
+        use flac_lite_gba::rice_arm::ArmRiceKernel;
+        #[cfg(feature = "item6a5-rust")]
+        use flac_lite_gba::rice_twin::TwinKernel;
+
+        /// E9's window shape: zero the counter pair before every window so the
+        /// wrap sentinel means "this window exceeded 2^32" rather than "the pass
+        /// did", and so every window enters with byte-identical preceding code
+        /// (the reset rides outside the start→end span). A three-arm pass over
+        /// both clips spans billions of cycles.
+        fn timed_reset<T>(counter: &mut Counter<'_>, work: impl FnOnce() -> T) -> (T, u32) {
+            let mut raw = 0u32;
+            let out = agb::external::critical_section::with(|_cs| {
+                counter.soft_reset();
+                let start = counter.read();
+                let out = work();
+                let end = counter.read();
+                raw = cycles_between(start, end);
+                out
+            });
+            (out, raw)
+        }
+
+        /// Net without destroying the sentinel (Opus rule, convicted in E9):
+        /// `WORST_WRAPPED - overhead` can never equal the sentinel, so a genuine
+        /// wrap would print `wrapped=false` one subtraction below it.
+        fn net_sentinel(raw: u32, overhead: u32) -> u32 {
+            if raw == WORST_WRAPPED {
+                raw
+            } else {
+                raw.saturating_sub(overhead)
+            }
+        }
+
+        /// Paired per-frame deltas, which are the number of record (percentages
+        /// are denominator-dependent; absolute cycles survive a changed one).
+        #[derive(Default)]
+        struct Paired {
+            sum: i64,
+            max: i32,
+            max_frame: usize,
+            faster: usize,
+            slower: usize,
+            equal: usize,
+        }
+
+        impl Paired {
+            fn observe(&mut self, frame: usize, ctrl: u32, arm: u32) {
+                let delta = ctrl as i64 - arm as i64; // positive = arm is faster
+                self.sum += delta;
+                let d = i32::try_from(delta).unwrap_or(if delta > 0 { i32::MAX } else { i32::MIN });
+                self.max = self.max.max(d);
+                if d == self.max {
+                    self.max_frame = frame;
+                }
+                if delta > 0 {
+                    self.faster += 1;
+                } else if delta < 0 {
+                    self.slower += 1;
+                } else {
+                    self.equal += 1;
+                }
+            }
+        }
+
+        /// Per-arm decode proof on the arm's OWN walk, against the same embedded
+        /// PCM pin the shipped proof uses. Correctness-before-speed, per arm: an
+        /// arm is timed only if it decodes the committed bytes to the pinned PCM.
+        fn proof<K: flac_lite::residual::RiceKernel>(clip: &SpikeClip, arm: &'static str) -> bool {
+            let max = usize::from(clip.max_blocksize);
+            let mut left: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            let mut right: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            let mut state = [PredictorState::new(), PredictorState::new()];
+            let mut hash = Fnv1a64::new();
+            let mut fold_ok = true;
+            let walk = driver::decode_clip_with::<K, _>(
+                clip,
+                &mut left,
+                &mut right,
+                &mut state,
+                |_frame, l, r| {
+                    if fold_i16le_stereo(&mut hash, l, r).is_err() {
+                        fold_ok = false;
+                    }
+                },
+            );
+            let stats_ok = match &walk {
+                Ok(stats) => {
+                    stats.frames == clip.frames.len()
+                        && stats.samples
+                            == usize::try_from(clip.total_samples).unwrap_or(usize::MAX)
+                }
+                Err(err) => {
+                    agb::println!(
+                        "[spike] {} 6a5 arm {} FAIL: walk rejected: {:?}",
+                        clip.name,
+                        arm,
+                        err
+                    );
+                    false
+                }
+            };
+            let actual = hash.finish();
+            let pin_ok = fold_ok && actual == clip.fnv_pcm;
+            agb::println!(
+                "[spike] {} 6a5 arm {} pcm fnv: expected 0x{:016X} actual 0x{:016X} walk={} [{}]",
+                clip.name,
+                arm,
+                clip.fnv_pcm,
+                actual,
+                stats_ok,
+                if pin_ok && stats_ok {
+                    "MATCH"
+                } else {
+                    "MISMATCH"
+                }
+            );
+            pin_ok && stats_ok
+        }
+
+        /// The three-way timing pass. One timed window per enabled arm per frame,
+        /// all in the same link; equality of the written samples against `ctrl`
+        /// is checked OUTSIDE the windows, per frame, and a divergence voids the
+        /// arm's numbers (E1/E2a/E4/E9 pattern).
+        fn pass(clip: &SpikeClip, counter: &mut Counter<'_>) -> bool {
+            let name = clip.name;
+            let max = usize::from(clip.max_blocksize);
+            let mut ctrl_l: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            let mut ctrl_r: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            let mut state_c = [PredictorState::new(), PredictorState::new()];
+
+            #[cfg(feature = "item6a5-rust")]
+            let mut rust_l: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            #[cfg(feature = "item6a5-rust")]
+            let mut rust_r: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            #[cfg(feature = "item6a5-rust")]
+            let mut state_r = [PredictorState::new(), PredictorState::new()];
+            #[cfg(feature = "item6a5-asm")]
+            let mut asm_l: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            #[cfg(feature = "item6a5-asm")]
+            let mut asm_r: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            #[cfg(feature = "item6a5-asm")]
+            let mut state_a = [PredictorState::new(), PredictorState::new()];
+
+            // Calibration: one byte-identical loop, 3 discarded + 5 reported,
+            // unconditional stores, nothing logged between windows (a
+            // micro-window is code-layout sensitive; E4's verified shape).
+            const DISCARDED: usize = 3;
+            const TOTAL: usize = DISCARDED + CALIBRATION_SAMPLES;
+            let mut calib = [0u32; TOTAL];
+            let mut probes = [0xFFFFu16; TOTAL];
+            for i in 0..TOTAL {
+                let (probe, raw) = timed_reset(counter, || {
+                    // SAFETY: REG_IME is an even address in the I/O region.
+                    unsafe { io_read_u16(REG_IME) }
+                });
+                probes[i] = probe;
+                calib[i] = raw;
+            }
+            let overhead = calib[DISCARDED];
+            let stable = (DISCARDED..TOTAL).all(|i| calib[i] == overhead);
+            let ime_inside = probes[DISCARDED];
+            agb::println!(
+                "*** {} 6a5 calibration: overhead={} stable={} ime_inside={} raws=[{} {} {} {} {}] arms={}",
+                name,
+                overhead,
+                stable,
+                ime_inside,
+                calib[DISCARDED],
+                calib[DISCARDED + 1],
+                calib[DISCARDED + 2],
+                calib[DISCARDED + 3],
+                calib[DISCARDED + 4],
+                cfg!(feature = "item6a5-rust") as u8 + cfg!(feature = "item6a5-asm") as u8 + 1
+            );
+            if !stable {
+                agb::println!("*** {} 6a5 FAIL calibration unstable — numbers void", name);
+                return false;
+            }
+            if ime_inside != 0 {
+                agb::println!(
+                    "*** {} 6a5 FAIL IME={} inside window — windows were interruptable",
+                    name,
+                    ime_inside
+                );
+                return false;
+            }
+
+            let mut ctrl = FrameCost::new();
+            #[cfg(feature = "item6a5-rust")]
+            let mut rust = FrameCost::new();
+            #[cfg(feature = "item6a5-rust")]
+            let mut rust_paired = Paired::default();
+            #[cfg(feature = "item6a5-asm")]
+            let mut asm = FrameCost::new();
+            #[cfg(feature = "item6a5-asm")]
+            let mut asm_paired = Paired::default();
+            let mut ok = true;
+
+            agb::println!(
+                "*** {} 6a5 pass: {} frames, one IRQ-off window per arm per frame (paired)",
+                name,
+                clip.frames.len()
+            );
+            for frame_index in 0..clip.frames.len() {
+                let (ctrl_res, ctrl_raw) = timed_reset(counter, || {
+                    driver::decode_one_with::<TableCountKernel>(
+                        clip,
+                        frame_index,
+                        &mut ctrl_l,
+                        &mut ctrl_r,
+                        &mut state_c,
+                    )
+                });
+                let written = match ctrl_res {
+                    Ok(w) => w,
+                    Err(err) => {
+                        agb::println!(
+                            "*** {} 6a5 FAIL frame {}: ctrl rejected after its proof passed: {:?}",
+                            name,
+                            frame_index,
+                            err
+                        );
+                        return false;
+                    }
+                };
+                #[cfg(feature = "item6a5-rust")]
+                let rust_raw = {
+                    let (res, raw) = timed_reset(counter, || {
+                        driver::decode_one_with::<TwinKernel>(
+                            clip,
+                            frame_index,
+                            &mut rust_l,
+                            &mut rust_r,
+                            &mut state_r,
+                        )
+                    });
+                    match res {
+                        Ok(w) if w == written => raw,
+                        other => {
+                            agb::println!(
+                                "*** {} 6a5 FAIL frame {}: rust returned {:?} (ctrl wrote {})",
+                                name,
+                                frame_index,
+                                other,
+                                written
+                            );
+                            return false;
+                        }
+                    }
+                };
+                #[cfg(feature = "item6a5-asm")]
+                let asm_raw = {
+                    let (res, raw) = timed_reset(counter, || {
+                        driver::decode_one_with::<ArmRiceKernel>(
+                            clip,
+                            frame_index,
+                            &mut asm_l,
+                            &mut asm_r,
+                            &mut state_a,
+                        )
+                    });
+                    match res {
+                        Ok(w) if w == written => raw,
+                        other => {
+                            agb::println!(
+                                "*** {} 6a5 FAIL frame {}: asm returned {:?} (ctrl wrote {})",
+                                name,
+                                frame_index,
+                                other,
+                                written
+                            );
+                            return false;
+                        }
+                    }
+                };
+
+                // Equality witness, outside the windows: a variant's numbers only
+                // count on a frame whose samples are bit-identical to the
+                // proven-correct control's.
+                #[cfg(feature = "item6a5-rust")]
+                if rust_l[..written] != ctrl_l[..written] || rust_r[..written] != ctrl_r[..written]
+                {
+                    agb::println!(
+                        "*** {} 6a5 FAIL frame {}: rust samples differ from ctrl — numbers void",
+                        name,
+                        frame_index
+                    );
+                    ok = false;
+                }
+                #[cfg(feature = "item6a5-asm")]
+                if asm_l[..written] != ctrl_l[..written] || asm_r[..written] != ctrl_r[..written] {
+                    agb::println!(
+                        "*** {} 6a5 FAIL frame {}: asm samples differ from ctrl — numbers void",
+                        name,
+                        frame_index
+                    );
+                    ok = false;
+                }
+
+                let ctrl_net = net_sentinel(ctrl_raw, overhead);
+                ctrl.observe(frame_index, ctrl_net);
+                #[cfg(feature = "item6a5-rust")]
+                let rust_net = {
+                    let n = net_sentinel(rust_raw, overhead);
+                    rust.observe(frame_index, n);
+                    rust_paired.observe(frame_index, ctrl_net, n);
+                    n
+                };
+                #[cfg(feature = "item6a5-asm")]
+                let asm_net = {
+                    let n = net_sentinel(asm_raw, overhead);
+                    asm.observe(frame_index, n);
+                    asm_paired.observe(frame_index, ctrl_net, n);
+                    n
+                };
+                // One print per arm set: `#[cfg]` on a macro argument is not
+                // portable expression-position Rust, so the three shapes are
+                // written out. The build picks one.
+                #[cfg(all(feature = "item6a5-rust", feature = "item6a5-asm"))]
+                agb::println!(
+                    "*** {} 6a5 frame {:>3}/{} bs={} ctrl={} rust={} asm={}",
+                    name,
+                    frame_index,
+                    clip.frames.len(),
+                    written,
+                    ctrl_net,
+                    rust_net,
+                    asm_net
+                );
+                #[cfg(all(feature = "item6a5-rust", not(feature = "item6a5-asm")))]
+                agb::println!(
+                    "*** {} 6a5 frame {:>3}/{} bs={} ctrl={} rust={}",
+                    name,
+                    frame_index,
+                    clip.frames.len(),
+                    written,
+                    ctrl_net,
+                    rust_net
+                );
+                #[cfg(all(feature = "item6a5-asm", not(feature = "item6a5-rust")))]
+                agb::println!(
+                    "*** {} 6a5 frame {:>3}/{} bs={} ctrl={} asm={}",
+                    name,
+                    frame_index,
+                    clip.frames.len(),
+                    written,
+                    ctrl_net,
+                    asm_net
+                );
+            }
+
+            // `#[cfg]` on an operand of `||` is not expression-position Rust
+            // either; spell the three shapes.
+            #[cfg(all(feature = "item6a5-rust", feature = "item6a5-asm"))]
+            let wrapped = ctrl.wrapped || rust.wrapped || asm.wrapped;
+            #[cfg(all(feature = "item6a5-rust", not(feature = "item6a5-asm")))]
+            let wrapped = ctrl.wrapped || rust.wrapped;
+            #[cfg(all(feature = "item6a5-asm", not(feature = "item6a5-rust")))]
+            let wrapped = ctrl.wrapped || asm.wrapped;
+            if wrapped {
+                agb::println!(
+                    "*** {} 6a5 FAIL a window exceeded the 32-bit composite",
+                    name
+                );
+                return false;
+            }
+
+            agb::println!(
+                "*** {} 6a5 ctrl stats: count={} min={}@{} max={}@{} sum={}",
+                name,
+                ctrl.count,
+                ctrl.min,
+                ctrl.min_frame,
+                ctrl.max,
+                ctrl.max_frame,
+                ctrl.sum
+            );
+            #[cfg(feature = "item6a5-rust")]
+            {
+                agb::println!(
+                    "*** {} 6a5 rust stats: count={} min={}@{} max={}@{} sum={}",
+                    name,
+                    rust.count,
+                    rust.min,
+                    rust.min_frame,
+                    rust.max,
+                    rust.max_frame,
+                    rust.sum
+                );
+                agb::println!(
+                    "*** {} 6a5 rust paired: sum_delta={} (ctrl-minus-arm, positive = faster) mean_x1000={} max_delta={}@{} faster={} slower={} equal={}",
+                    name,
+                    rust_paired.sum,
+                    if rust.count > 0 {
+                        rust_paired.sum * 1000 / rust.count as i64
+                    } else {
+                        0
+                    },
+                    rust_paired.max,
+                    rust_paired.max_frame,
+                    rust_paired.faster,
+                    rust_paired.slower,
+                    rust_paired.equal
+                );
+            }
+            #[cfg(feature = "item6a5-asm")]
+            {
+                agb::println!(
+                    "*** {} 6a5 asm stats: count={} min={}@{} max={}@{} sum={}",
+                    name,
+                    asm.count,
+                    asm.min,
+                    asm.min_frame,
+                    asm.max,
+                    asm.max_frame,
+                    asm.sum
+                );
+                agb::println!(
+                    "*** {} 6a5 asm paired: sum_delta={} mean_x1000={} max_delta={}@{} faster={} slower={} equal={}",
+                    name,
+                    asm_paired.sum,
+                    if asm.count > 0 {
+                        asm_paired.sum * 1000 / asm.count as i64
+                    } else {
+                        0
+                    },
+                    asm_paired.max,
+                    asm_paired.max_frame,
+                    asm_paired.faster,
+                    asm_paired.slower,
+                    asm_paired.equal
+                );
+            }
+            #[cfg(all(feature = "item6a5-rust", feature = "item6a5-asm"))]
+            agb::println!(
+                "*** {} 6a5 budget: ctrl_worst={} rust_worst={} asm_worst={} vs {}",
+                name,
+                ctrl.max,
+                rust.max,
+                asm.max,
+                BUDGET_CYCLES_PER_FRAME
+            );
+            #[cfg(all(feature = "item6a5-rust", not(feature = "item6a5-asm")))]
+            agb::println!(
+                "*** {} 6a5 budget: ctrl_worst={} rust_worst={} vs {}",
+                name,
+                ctrl.max,
+                rust.max,
+                BUDGET_CYCLES_PER_FRAME
+            );
+            #[cfg(all(feature = "item6a5-asm", not(feature = "item6a5-rust")))]
+            agb::println!(
+                "*** {} 6a5 budget: ctrl_worst={} asm_worst={} vs {}",
+                name,
+                ctrl.max,
+                asm.max,
+                BUDGET_CYCLES_PER_FRAME
+            );
+            ok
+        }
+
+        /// Per-arm decode proofs, then the timing pass. Runs only when every arm
+        /// decoded the committed bytes to the pinned PCM.
+        fn proofs_then_pass<K: flac_lite::residual::RiceKernel>(
+            clip: &SpikeClip,
+            arm: &'static str,
+            all_ok: &mut bool,
+        ) {
+            let ok = proof::<K>(clip, arm);
+            *all_ok &= ok;
+        }
+
+        pub fn run(clip: &SpikeClip, counter: &mut Counter<'_>) -> bool {
+            let mut proofs_ok = true;
+            proofs_then_pass::<TableCountKernel>(clip, "ctrl", &mut proofs_ok);
+            #[cfg(feature = "item6a5-rust")]
+            proofs_then_pass::<TwinKernel>(clip, "rust", &mut proofs_ok);
+            #[cfg(feature = "item6a5-asm")]
+            proofs_then_pass::<ArmRiceKernel>(clip, "asm", &mut proofs_ok);
+            agb::println!(
+                "*** {} 6a5: per-arm decode proof {} — timing pass {}",
+                clip.name,
+                if proofs_ok { "PASSED" } else { "FAILED" },
+                if proofs_ok {
+                    "engaged"
+                } else {
+                    "SKIPPED (numbers void)"
+                }
+            );
+            if !proofs_ok {
+                return false;
+            }
+            pass(clip, counter)
+        }
+    }
+
     #[agb::entry]
     fn main(mut gba: agb::Gba) -> ! {
         agb::eprintln!(
@@ -708,6 +1229,14 @@ mod rom {
             let mut counter = Counter::start(&mut timers);
             for (slot, clip) in CLIPS.iter().enumerate() {
                 timing[slot] = timing_pass(clip, &mut counter);
+                // 6a-5's arm pass, when the instrument is built with an arm
+                // feature on. It is a separate reading from `timing_pass` (which
+                // is the shipped-path control of record) and it never runs in a
+                // default build.
+                #[cfg(any(feature = "item6a5-rust", feature = "item6a5-asm"))]
+                {
+                    pass &= item6a5::run(clip, &mut counter);
+                }
                 // Red on EITHER failure mode — harness failure (None) or a
                 // completed measurement that misses budget — but the two
                 // counts stay separate in the verdict line below: a budget

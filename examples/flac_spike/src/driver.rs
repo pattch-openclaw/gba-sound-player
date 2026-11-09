@@ -29,6 +29,8 @@
 use crate::assets::SpikeClip;
 use flac_lite::bits::BitReader;
 use flac_lite::frame::{self, FrameHeader, StreamDefaults};
+#[cfg(any(feature = "item6a5-rust", feature = "item6a5-asm"))]
+use flac_lite::residual::RiceKernel;
 use flac_lite::subframe::PredictorState;
 
 /// Why a clip walk stopped. Every variant names the frame and the evidence,
@@ -83,6 +85,80 @@ pub struct Stats {
 /// of samples written (the frame's own blocksize, cross-checked against the
 /// table before any decode). This is the window PR 3 wraps in the cycle
 /// counter; PR 4 alternates buffer halves between calls.
+/// The seek-table frame path — the pointer arithmetic, the buffer contract, the
+/// header parse and the blocksize cross-check — written **once** and expanded at
+/// two call sites: [`decode_one`] (the shipped default, `frame::decode_frame`)
+/// and [`decode_one_with`] (6a-5's arm selector). A `macro_rules!` body rather
+/// than a generic function on purpose: a `pub fn decode_one_with<K>` would make
+/// the whole chain instantiate publicly and change what a *default* build links
+/// (measured: +2,868 B in the instrument, i.e. the cross-session anchor moving
+/// for a rung that is supposed to move nothing). Textual expansion is this
+/// repo's existing answer to exactly that problem — `examples/arm-kernels/asm/
+/// fold_body.s` is pasted at its two sites for the same reason — and it keeps
+/// the default image's tokens identical to the ones every earlier record
+/// measured.
+macro_rules! seek_table_decode {
+    ($frame:expr, $clip:ident, $frame_index:ident, $left:ident, $right:ident, $state:ident) => {{
+        let frame = &$clip.frames[$frame_index];
+        let max = usize::from($clip.max_blocksize);
+        if $left.len() < max {
+            return Err(DriverError::BufferTooSmall {
+                need: max,
+                have: $left.len(),
+            });
+        }
+        if $clip.channels == 2 && $right.len() < max {
+            return Err(DriverError::BufferTooSmall {
+                need: max,
+                have: $right.len(),
+            });
+        }
+        // `usize::from(u32)` does not exist on ANY platform (usize's width is
+        // target-dependent, so core never implements it) — route through
+        // try_from. Infallible on this project's targets (arm 32-bit, host
+        // 64-bit); on a hypothetical narrower target it degrades to a clean
+        // out-of-range rejection instead of a silent wrap.
+        let offset = match usize::try_from(frame.offset) {
+            Ok(offset) => offset,
+            Err(_) => {
+                return Err(DriverError::FrameOffsetOutOfRange {
+                    frame: $frame_index,
+                    offset: usize::MAX,
+                    len: $clip.region.len(),
+                });
+            }
+        };
+        let region = $clip
+            .region
+            .get(offset..)
+            .ok_or(DriverError::FrameOffsetOutOfRange {
+                frame: $frame_index,
+                offset,
+                len: $clip.region.len(),
+            })?;
+
+        let defaults = StreamDefaults {
+            sample_rate_hz: $clip.sample_rate_hz,
+            bits_per_sample: $clip.bits_per_sample,
+        };
+        let mut reader = BitReader::new(region);
+        let header = FrameHeader::parse(&mut reader, &defaults).map_err(DriverError::Decode)?;
+        if header.blocksize != usize::from(frame.blocksize) {
+            return Err(DriverError::MetadataMismatch {
+                frame: $frame_index,
+                table: usize::from(frame.blocksize),
+                header: header.blocksize,
+            });
+        }
+        ($frame)(&mut reader, &header, $left, $right, $state).map_err(DriverError::Decode)
+    }};
+}
+
+/// Decode exactly one frame — at its seek-table offset, with a fresh cursor —
+/// into the first `blocksize` slots of the caller buffers. Returns the number
+/// of samples written (the frame's own blocksize, cross-checked against the
+/// table before any decode). This is the window PR 3 wraps in the cycle
+/// counter; PR 4 alternates buffer halves between calls.
 pub fn decode_one(
     clip: &SpikeClip,
     frame_index: usize,
@@ -90,58 +166,63 @@ pub fn decode_one(
     right: &mut [i32],
     state: &mut [PredictorState; 2],
 ) -> Result<usize, DriverError> {
-    let frame = &clip.frames[frame_index];
-    let max = usize::from(clip.max_blocksize);
-    if left.len() < max {
-        return Err(DriverError::BufferTooSmall {
-            need: max,
-            have: left.len(),
-        });
-    }
-    if clip.channels == 2 && right.len() < max {
-        return Err(DriverError::BufferTooSmall {
-            need: max,
-            have: right.len(),
-        });
-    }
-    // `usize::from(u32)` does not exist on ANY platform (usize's width is
-    // target-dependent, so core never implements it) — route through
-    // try_from. Infallible on this project's targets (arm 32-bit, host
-    // 64-bit); on a hypothetical narrower target it degrades to a clean
-    // out-of-range rejection instead of a silent wrap.
-    let offset = match usize::try_from(frame.offset) {
-        Ok(offset) => offset,
-        Err(_) => {
-            return Err(DriverError::FrameOffsetOutOfRange {
-                frame: frame_index,
-                offset: usize::MAX,
-                len: clip.region.len(),
-            });
-        }
-    };
-    let region = clip
-        .region
-        .get(offset..)
-        .ok_or(DriverError::FrameOffsetOutOfRange {
-            frame: frame_index,
-            offset,
-            len: clip.region.len(),
-        })?;
+    seek_table_decode!(frame::decode_frame, clip, frame_index, left, right, state)
+}
 
-    let defaults = StreamDefaults {
-        sample_rate_hz: clip.sample_rate_hz,
-        bits_per_sample: clip.bits_per_sample,
-    };
-    let mut reader = BitReader::new(region);
-    let header = FrameHeader::parse(&mut reader, &defaults).map_err(DriverError::Decode)?;
-    if header.blocksize != usize::from(frame.blocksize) {
-        return Err(DriverError::MetadataMismatch {
-            frame: frame_index,
-            table: usize::from(frame.blocksize),
-            header: header.blocksize,
-        });
-    }
-    frame::decode_frame(&mut reader, &header, left, right, state).map_err(DriverError::Decode)
+/// [`decode_one`] with the Rice kernel named by the caller — 6a-5's arm
+/// selector. Same seek-table path (one expansion of the macro above), same
+/// buffer contract, same error type; the only variable is the kernel reached
+/// through the product call path
+/// (`driver::decode_one_with` → `frame::decode_frame_with`).
+///
+/// Compiled only when an arm feature is on, so a default build links neither
+/// this function nor the generic instantiations it pulls in.
+#[cfg(any(feature = "item6a5-rust", feature = "item6a5-asm"))]
+pub fn decode_one_with<K: RiceKernel>(
+    clip: &SpikeClip,
+    frame_index: usize,
+    left: &mut [i32],
+    right: &mut [i32],
+    state: &mut [PredictorState; 2],
+) -> Result<usize, DriverError> {
+    seek_table_decode!(
+        frame::decode_frame_with::<K>,
+        clip,
+        frame_index,
+        left,
+        right,
+        state
+    )
+}
+
+/// Walk the whole clip frame-by-frame from the seek table, handing each
+/// decoded block to `on_frame`. The callback runs per frame (not per sample):
+/// hashing, timing bookkeeping, and buffer rotation all have what they need
+/// at the frame boundary, and a per-sample callback would measure the
+/// callback instead of the decode.
+macro_rules! decode_clip_body {
+    ($one:expr, $clip:ident, $left:ident, $right:ident, $state:ident, $on_frame:ident) => {{
+        let mut on_frame = $on_frame;
+        let mut stats = Stats {
+            frames: 0,
+            samples: 0,
+        };
+        for frame_index in 0..$clip.frames.len() {
+            let written = ($one)($clip, frame_index, $left, $right, $state)?;
+            // Mono clips keep a zero-length `right` (flac-lite's contract) —
+            // slicing it to `written` would panic; hand the callback the empty
+            // window instead.
+            let right_window: &[i32] = if $clip.channels == 2 {
+                &$right[..written]
+            } else {
+                &[]
+            };
+            on_frame(frame_index, &$left[..written], right_window);
+            stats.frames += 1;
+            stats.samples += written;
+        }
+        Ok(stats)
+    }};
 }
 
 /// Walk the whole clip frame-by-frame from the seek table, handing each
@@ -154,28 +235,27 @@ pub fn decode_clip<F>(
     left: &mut [i32],
     right: &mut [i32],
     state: &mut [PredictorState; 2],
-    mut on_frame: F,
+    on_frame: F,
 ) -> Result<Stats, DriverError>
 where
     F: FnMut(usize, &[i32], &[i32]),
 {
-    let mut stats = Stats {
-        frames: 0,
-        samples: 0,
-    };
-    for frame_index in 0..clip.frames.len() {
-        let written = decode_one(clip, frame_index, left, right, state)?;
-        // Mono clips keep a zero-length `right` (flac-lite's contract) —
-        // slicing it to `written` would panic; hand the callback the empty
-        // window instead.
-        let right_window: &[i32] = if clip.channels == 2 {
-            &right[..written]
-        } else {
-            &[]
-        };
-        on_frame(frame_index, &left[..written], right_window);
-        stats.frames += 1;
-        stats.samples += written;
-    }
-    Ok(stats)
+    decode_clip_body!(decode_one, clip, left, right, state, on_frame)
+}
+
+/// [`decode_clip`] with the Rice kernel named by the caller: the same loop (one
+/// expansion of the same body), one different per-frame call. Compiled only when
+/// an arm feature is on — see [`decode_one_with`].
+#[cfg(any(feature = "item6a5-rust", feature = "item6a5-asm"))]
+pub fn decode_clip_with<K: RiceKernel, F>(
+    clip: &SpikeClip,
+    left: &mut [i32],
+    right: &mut [i32],
+    state: &mut [PredictorState; 2],
+    on_frame: F,
+) -> Result<Stats, DriverError>
+where
+    F: FnMut(usize, &[i32], &[i32]),
+{
+    decode_clip_body!(decode_one_with::<K>, clip, left, right, state, on_frame)
 }

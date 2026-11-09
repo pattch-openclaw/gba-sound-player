@@ -188,7 +188,7 @@
 //!
 //! ## What is NOT here
 //!
-//! No default moved: `decode_rice_partition` still names the incumbent on one
+//! No default moved: `decode_residual` still names the incumbent on one
 //! line, and nothing in either crate's decode path calls this kernel. No
 //! escape partition is decoded here — escapes ride the reader verbatim in the
 //! core's driver and never reach a kernel. No timing of any kind: the numbers

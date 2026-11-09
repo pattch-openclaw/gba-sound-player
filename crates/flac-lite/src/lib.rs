@@ -24,11 +24,11 @@
 //! bytes in `tests/`; step 3a's leaves — the wasted-bits reader, the Rice
 //! residual sign map (`residual::rice_unmap`), and the `PredictorState`
 //! correction (warm-up is per-subframe, not cross-frame) — are in, and step
-//! 3b's partition body (`residual::decode_rice_partition`: Rice + §9.2.7.1
+//! 3b's partition body (`residual::decode_rice_partition_with`: Rice + §9.2.7.1
 //! escape-record) decodes.
 //! `format.rs` carries the implemented sample-rate/channel helpers the parse
 //! needs; the residual decode path is complete through step 3c (`rice_unmap`,
-//! `decode_rice_partition`, `decode_residual`), and step 3d's integrators are
+//! `decode_rice_partition_with`, `decode_residual`), and step 3d's integrators are
 //! in: `subframe::integrate_fixed` (forward-difference cascade),
 //! `subframe::integrate_lpc` (§9.2.6 dot product), and
 //! `PredictorState::fill` (warm-up read). Step 3e's composition

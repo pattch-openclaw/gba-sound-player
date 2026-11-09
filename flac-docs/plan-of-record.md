@@ -8,7 +8,7 @@ landed; 4–5 open), the E10 plans (landed) and the rate-tooling proposal (lande
 with its step-4 multi-clip ROM and its cross-rate sweep still open) — all of which
 now live only in git history and in the records they produced.
 
-## Status at a glance (2026-11-08, branch `feat/flac-lite-gba-arm-kernel`)
+## Status at a glance (2026-11-08, branch `feat/flac-item6a5-realization-reading`)
 
 - **Landed:** the Phase-1 decode path through `decode_frame`; the
   stream layer; the per-frame `driver`; CRC verification behind `crc-check`; the
@@ -20,8 +20,24 @@ now live only in git history and in the records they produced.
 - **Nothing in any shipped decode path has changed since item 5 PR 4.** The
   default is still `TableCountKernel`; `.text` 46,008 B `f0f88c33d150…`; the
   overlay links into exactly one ROM, the correctness instrument.
-- **Next rung:** **6a-5** — the realization reading, three arms in one image.
-- **Not started:** 6a-5…6a-8, all of 6b, and the product work they unblock
+- **6a-5 landed too, on a branch:** the realization reading. The asm realization is
+  **−584,856 cycles/frame (FIXED) / −286.9 cycles/sample** against the shipped
+  kernel in the product-shape image, 157/157 frames faster on both clips — far
+  outside the pre-declared noise band's `faster` side, so the fork resolves to
+  **carry**. The carry itself is a one-line placement in a product ROM (6b), not
+  in this rung: 6a-5's own rule is that no shipped count or instruction stream
+  moves, and none did (the product image `flac-integration` is byte-identical; the
+  instrument's cycle readings reproduce the record to the cycle).
+- **The stack verdict does not survive the seam, and that is the item's first
+  measured negative.** The landed realization is +48.2 c/sample (+9.18%) slower
+  than E10's vendored arm; applying E9's same-image i32 marginal projects FIXED at
+  **103.83% mean / 104.36% worst** of the 32,768 Hz budget — over, where the probe
+  projected 94.47%. The seam costs 9.2 points against the stack's 5.5-point margin.
+  The *fork's* carry decision is unaffected (the kernel is still a −286.9 c/sample
+  lever), and both product rates fit with the kernel alone (61.7% at 18,157 Hz,
+  35.7% at 10,512 Hz). Attribution of the 48 c/sample is open (Q12).
+- **Next rung:** **6a-6** — the guarded i32 default width in the core.
+- **Not started:** 6a-6…6a-8, all of 6b, and the product work they unblock
   (manifest, packer, facade, mixer).
 
 ## Item 6a — the overlay (the realization)
@@ -36,8 +52,8 @@ from and it does not turn `scan` on.
 | **6a-2** ✅ | The same-image baseline re-anchor. Measurement only, zero decode-path change: E10/E9 sample patches re-applied to today's base and re-run. | Cycles, same-image; plus the patch-re-application record | that the item's central number compares two instruments |
 | **6a-3** ✅ | The seam passable from outside the crate, in Rust: `rice_unmap` visibility bump + `TwinKernel` behind `rice-twin`, carrying the core's twin as an instrument arm. | Section dump + symbol-level attribution; the corpus differential driven from outside; cycles as a control arm | that the seam is only passable from inside, or costs more than the in-core form |
 | **6a-4** ✅ | **The asm kernel — correctness only, no timings.** `rice_partition.s` + `fold_body.s` lifted from `examples/arm-kernels/`, `global_asm!`, the FFI declaration and its `SAFETY` block, the state-struct ABI written down, tables under `iwram-pin` (this is also where pin enablement lands). | (i) a kernel-check ROM sweeping the **same committed golden tables**; (ii) `objdump -d`: 4-byte ARM encodings, `pop {…,lr}` + `bx lr`, never LDM-to-PC; (iii) the boundaries item 5 handed forward — spelled `q = 31` leg, `w == 0` handoff signal, `p = 0` mask, §9.2.7.3's two guards, unterminated/short-remainder **restore-nothing**, reads bounded by `region()` | the kernel is wrong, or the interwork/ABI is wrong — settled **before** any cycle is trusted |
-| **6a-5** | **The realization reading — the item's number of record. No new code.** Three arms, one image: `ctrl`, 6a-3's Rust arm, 6a-4's asm arm; calibration subtracted, paired per frame, every delta byte attributed symbol by symbol. Carries the pre-declared fork below. | Cycles, same-image; codegen attribution. **The first ROM suite with a test in it is 6a-4's kernel check**; 6a-5 inherits a non-empty suite rather than "first to run `make test-rom`" (which already runs, collecting zero) | the win lives in a probe but not in the product path |
-| **6a-6** | **The width change, in the core.** i32 as the default arithmetic width, guarded per frame, i64 kept and reachable. Design in "The width decision" below. | Bit-exact vs `flac -d`; a width differential over the corpus and every committed frame-run table; the guard's unit witnesses incl. refusal cases; **both** configurations gated; codegen attribution of a both-legs build; cycles as a same-image arm | the guard is wrong (unsound), the legs are not equivalent, or a both-legs build costs more than the win |
+| **6a-5** ✅ | **The realization reading — the item's number of record. No new code.** Three arms, one image: `ctrl`, 6a-3's Rust arm, 6a-4's asm arm; calibration subtracted, paired per frame, every delta byte attributed symbol by symbol. Carries the pre-declared fork below. | Cycles, same-image; codegen attribution. **The first ROM suite with a test in it is 6a-4's kernel check**; 6a-5 inherits a non-empty suite rather than "first to run `make test-rom`" (which already runs, collecting zero) | the win lives in a probe but not in the product path |
+| **6a-6** | **The width change, in the core.** i32 as the default arithmetic width, guarded per frame, i64 kept and reachable. Design in "The width decision" below. **It now also carries the stack verdict:** 6a-5 projects 103.83% at 32,768 Hz if E9's i32 marginal transfers, so this rung's measured marginal — not E9's — decides whether the full-rate FIXED claim can be restored, and 6a-7's stack confirmation inherits the answer. | Bit-exact vs `flac -d`; a width differential over the corpus and every committed frame-run table; the guard's unit witnesses incl. refusal cases; **both** configurations gated; codegen attribution of a both-legs build; cycles as a same-image arm | the guard is wrong (unsound), the legs are not equivalent, or a both-legs build costs more than the win |
 | **6a-7** | **The stack confirmation. No new code** — one measured arm: 6a-4's kernel **and** 6a-6's default together, against the same-image `ctrl`. Re-anchors the E numbers on the post-6a image, which 6b-1 inherits. | Cycles, same-image | that two measured wins composed negatively (E9's additivity does not reproduce) |
 | **6a-8** *(conditional)* | E8-style **sub-stage probe** over the asm kernel: tier-1 / tier-2 / tier-3 / refill / fold priced separately. Run **only** if 6a-5 lands inside or near the noise band. | Cycles, sub-stage | that a near-bar result is unattributable to a leg |
 
@@ -115,6 +131,170 @@ EWRAM) and the `p = 0` extreme (2 MB); those three cases are host-only and the
 device suite **counts** them rather than dropping them silently — 6a-5's record
 inherits that split.
 
+### 6a-5 — the realization reading, and what it cost to get one
+
+**The number of record.** Through the product call path
+(`driver::decode_one_with` → `frame::decode_frame_with` → `decode_subframe_with` →
+`decode_residual_with` → the partition seam), same image, calibration subtracted,
+paired per frame:
+
+| Arm | FIXED sum (157 frames) | FIXED c/frame | FIXED c/sample | LPC sum | LPC c/frame | LPC c/sample |
+|---|---|---|---|---|---|---|
+| `ctrl` (`TableCountKernel`) | 275,111,047 | 1,752,299 | 859.7 | 1,031,916,549 | 6,572,716 | 3,224.7 |
+| asm (`ArmRiceKernel`) | **183,288,727** | **1,167,444** | **572.8** | **940,629,832** | **5,991,272** | **2,939.5** |
+| **asm − ctrl** | **−91,822,320** | **−584,856** | **−286.9** | **−91,286,717** | **−581,444** | **−285.3** |
+
+157/157 frames faster on both clips (FIXED max delta 587,680 @147; LPC 584,490 @71).
+As a fraction of the 32,768 Hz budget: FIXED **111.32%** mean (from `ctrl`'s 167.08%
+in the same image), LPC 571.28% (from 626.72%). Still over budget — the stack that
+fits FIXED at 32 kHz needs 6a-6's width leg — but the kernel's share is now real,
+landed code rather than a probe.
+
+**The verdict: carry.** −584,856 c/frame is on the fork's `faster` side by four
+orders of magnitude against the ~9–13 c/frame band, 157/157 frames, on both clips.
+**What "carry" means as code in this PR: nothing yet, by the rung's own rule.** The
+core cannot name an overlay kernel (the dependency arrow is overlay → core), so the
+placement is one line in the *product's* decode path — `decode_frame_with::<ArmRiceKernel>`
+at 6b's facade — and 6a-5 changes no shipped count and no instruction stream. The
+API that makes the placement one line is this rung's deliverable.
+
+**The seam had to be threaded, which the plan's "no new code" did not price.** The
+core's own docs deferred it: "threading a choice up through [the caller-facing
+layers] (and through `scan`/`driver`) is item 6's decision". 6a-5 took it because
+the alternative is the failure the rung exists to rule out: an arm instantiated at
+the partition entry (6a-3's instrument-arm shape) is a probe, and E10/E9's numbers
+came from *vendored decode loops*. The chain is now
+`decode_frame_with<K>` → `decode_subframe_with<K>` → `decode_residual_with<K>` →
+`decode_rice_partition_with<K>`, each non-generic entry point a one-line delegation
+to `…::<TableCountKernel>`; [`decode_residual`'s delegation](architecture.md) is
+where the default now lives. The retired private `decode_rice_partition` was that
+home while nothing above it took a kernel.
+
+**Control build and what moved.** From `HEAD` (`f1fb6da`), same tree, before the
+change: `flac-spike` `.text` **46,008 B `f0f88c33d150…`**, `.iwram` 812 B
+`eeda688aa1a2…`; cycle control **280,848,260 / 1,037,633,086**, calibration 22
+stable, 157/157 frames, min/max/indices as recorded. After:
+
+* **`flac-integration` (the product image) is byte-identical** — `.text` 33,100 B
+  `075658280b4c…` and every other section unchanged. The shipped decode path's code
+  did not move.
+* The instrument's **cycle readings are identical to the cycle** (same four sums,
+  same min/max/frame indices, calibration 22 stable). The measurement did not move.
+* The instrument's `.text` is 45,996 B `f63ff65bedea…` (−12 B) and `.iwram`'s digest
+  moved with its symbol order. Attributed symbol by symbol: `decode_residual` 596 B
+  → `decode_residual_with::<TableCountKernel>` 596 B and `decode_subframe` 888 B →
+  `decode_subframe_with::<TableCountKernel>` 888 B (same sizes, same addresses,
+  renamed); every remaining byte difference is a literal-pool relocation target
+  (the normalized `objdump -d` instruction stream is **identical**); −12 B is the
+  ROM's own inlined harness loop (`__agb_main_func…inner` 8,592 → 8,580), which is
+  instrument code and moves no cycle (the control re-run above). The 12 B came from
+  keeping one transcription of the seek-table path: the spike's `decode_one` body is
+  a `macro_rules!` expansion at two sites (default and kernel-parameterized) rather
+  than a generic function, because a `pub fn decode_one_with<K>` changed what a
+  default build links by **+2,868 B** — measured, then rejected in favour of the
+  expansion.
+
+**The image geometry (Q2, answered by measurement).** Three images, one variable
+each: **A** the shipped instrument (default features); **C** `item6a5-asm` —
+`ctrl` + the ARM kernel only, the *product shape*; **B** `item6a5-arms` — `ctrl` +
+the Rust mechanism + the ARM kernel in one link. Both arm features also turn on the
+overlay's `iwram-pin`, matching 6a-4's enablement and removing an asymmetry (the
+spike already pins the core's `LEADING_ONES`; an arm whose own tables sat in ROM
+would pay a read tax the control does not).
+
+| Image | `.text` | `.iwram` | `.rodata` | ctrl FIXED | asm FIXED | rust FIXED |
+|---|---|---|---|---|---|---|
+| A (shipped) | 46,008 B | 812 B | 1,829,760 B | 280,848,260 | — | — |
+| C (`item6a5-asm`) | 63,124 B | **1,356 B** (812 + 544) | 1,830,876 B | 275,111,047 | 183,288,727 | — |
+| B (`item6a5-arms`) | 72,428 B | **1,868 B** (+544 asm, +512 hybrid) | 1,831,228 B | 249,051,451 | 183,231,371 | 301,587,959 |
+
+Two facts fall out of that table, and they are the answer to Q2:
+
+1. **The asm arm's absolute cost is a property of the kernel, not of the link**:
+   183,288,727 (C) vs 183,231,371 (B) — **0.03% apart** across two different links,
+   two different `.iwram` layouts and two different bundle sizes.
+2. **`ctrl` is not**: 280,848,260 (A) → 275,111,047 (C, −36,543 c/frame) →
+   249,051,451 (B, −202,529 c/frame). A second `RiceKernel` body in the link
+   re-decides inlining for the shared decode path, exactly as 6a-3 measured; the
+   effect is monotone in how many mechanisms are present. **So a "three arms in one
+   image" reading can only be a paired, same-image reading, and the product number
+   must come from the product shape** — B's `asm − ctrl` is −419,236 c/frame while
+   C's is −584,856. Both are far outside the noise band; only C's is the number for
+   the carry.
+
+**The cross-check 6a-3 handed forward.** Item 5 PR 4 measured the Rust mechanism at
+**+42.60 / +42.72 c/sample** against the then-control. In image B it reads
+**+164.2 / +163.9 c/sample** — 3.9× larger — while its *absolute* cost reproduces:
+1,920,940 c/frame here vs 1,876,087 implied by PR 4 (+2.4%). The difference is
+entirely `ctrl` moving −202,529 c/frame in a two-mechanism link. That is not a
+contradiction; it is the measurement telling us that **the paired-delta cross-check
+is only valid same-image, and the absolute arm cost is the quantity that travels**.
+Recorded so nobody "corrects" PR 4's number.
+
+**How much of E10 the landing keeps.** E10's probe arm measured 101.98% of budget
+(≈1,069,515 c/frame) with a *vendored* reader and neither §9.2.7.3 guard. The
+landed realization, through the seam, is 1,167,444 c/frame — **+97,929 c/frame
+(+47.8 c/sample)**, i.e. it keeps **82%** of E10's −349 c/sample probe win. The
+gap is the seam's window hand-out/take-back per partition, the two guards (the asm
+header's `3 + 2` instructions per sample/partition), the 12-byte frame and the
+third status word. Which share belongs to which is *not* attributed here: 6a-8 (the
+conditional sub-stage probe) does not run, because the fork resolved far outside
+the band rather than near it. The pin's marginal is measured separately and for
+free: with the overlay's tables in ROM rather than `.iwram`, the asm arm reads
+202,770,217 c/frame (FIXED) — **+124,086 c/frame, +60.9 c/sample** — which is the
+data-pin claim item 5 made, re-measured on this kernel.
+
+**Gates.** `flac-gates` **1,169 + 6** (unchanged), `flac-test` 178 + 1,
+`spike-test` 15 + 10 (unchanged: no arm code in a default build — the manifest's
+`required-features` makes that checked), `kernel-test` 20, `opus-test` 28,
+`test-rom` 0, `overlay-check` / `overlay-test` / `overlay-test-twin` /
+`overlay-test-arm` unchanged, `overlay-kernel-test` 8 device cases (re-run because
+the core moved), `make check` green. **New gate:** `item6a5-test` — 28 passed
+(15 lib + 10 spike witness + 3 arm witness): every arm reaches the committed PCM
+pin `0x54C7B356621B6E15` through the product path and agrees with `ctrl` frame
+window by frame window (314/314 windows on the two clips), and the arm features are
+pinned as a manifest fact.
+
+**Determinism.** Two headless runs of one arm image: the 342 `***` lines are
+byte-identical (`cmp`). The arm images' *absolute* sums moved by +2 c/frame between
+the two driver layouts tried during the rung while every **paired delta reproduced
+to the cycle** — the practical statement of why paired deltas are the number of
+record and absolute sums are instrument-layout-sensitive.
+
+**Mutation witness (the instrument's validity, not just its code).** With the kernel
+plumb bypassed — `decode_one_with::<K>` made to call the default frame decoder — the
+image's samples stay identical (they always are: every kernel computes the same
+map), and the reading **collapses to `asm − ctrl = 0` on 157/157 frames** with both
+arms at 280,296,337 / 1,037,081,163. So the −584,856 c/frame delta is the kernel's,
+and a wrong plumb would read as "no win" rather than as a win. Restored; the
+restored sources reproduce the numbers above.
+
+**What this costs the stack — the item's first measured negative.** The landed
+realization is **+15,411,688 cycles/clip = +98,164 c/frame = +48.2 c/sample
+(+9.18%)** slower than E10's vendored arm (183,288,727 vs 167,877,039). E9's i32
+leg saved 12,330,961 in its own image; applying that same-image marginal projects
+the landed stack at **170,957,766 = 1,088,902 c/frame = 534.2 c/sample = 103.83%
+mean / 104.36% worst** of the 32,768 Hz budget. The vendored stack sat at
+94.47/94.95: **the seam's cost (9.2 points) is larger than the stack's margin (5.5
+points)**, so the menu's "first in-budget FIXED decode" does not project through
+the shipped path. For the projection to be wrong by enough to fit, the i32 leg
+would have to save ~40,200 c/frame more in the seam image than E9 measured (+51%);
+the i32 sites are outside the kernel and the seam, so a shift that large is not
+credible. It is a structural result, not a rounding — and it is the reason
+`perf-results.md`'s E9 caveat (1) is now written as fired.
+
+The caveats, so this is not over-read: the i32 marginal is E9's, not measured on
+this image (6a-6 measures it; 6a-7 confirms); the kernel alone still fits both
+product rates (61.7% at 18,157 Hz, 35.7% at 10,512 Hz, versus the i64 control's
+94.5% / 54.7%); LPC at 10,512 Hz is 183.3% as landed and 85.3% with E9's i32
+marginal; and every number here is mGBA with E5 unrun. **Where the 48 c/sample
+goes — the seam's window bridge per partition, the two §9.2.7.3 guards, the
+12-byte frame and third status word, or the monomorphization's codegen — is not
+attributed.** E10's arm had a vendored reader and no guards, and the conditional
+sub-stage probe (6a-8) does not run because 6a-5 landed far outside the noise band
+— so the split needs a probe with a *different* justification from the one the
+plan wrote (Q12).
+
 ### 6a's pre-declared fork (stated before the reading, so it cannot be negotiated)
 
 The asm arm **within the ~9–13 cyc/frame noise band or faster** → carry it: the
@@ -125,6 +305,15 @@ the proposal's realization claim is corrected as a measured negative. No third
 arm: "it was faster in the probe" is not a carry condition, and this project has
 already seen that sentence cost samples once (E2b's −21.7% became +38% when it
 landed).
+
+**Resolved 2026-11-08: carry.** The asm arm reads **−584,856 c/frame (FIXED) /
+−581,444 (LPC)** against `ctrl` in the product-shape image, 157/157 frames faster
+on both clips — the fork's `faster` side, not a near-bar result, so 6a-8 does not
+run. The bar was one-sided (a regression bar), and the reading is what decides it;
+the placement itself is one line in the product's decode path
+(`decode_frame_with::<ArmRiceKernel>`, 6b), because the core cannot name an overlay
+kernel and 6a-5's own rule forbids moving a shipped count. Numbers, images and
+attribution: "6a-5 — the realization reading", above.
 
 ## Item 6b — the container (where frames come from)
 
@@ -232,7 +421,13 @@ Images in the configuration a ROM links: `.text` **46,008 B** (`f0f88c33d150…`
 `overlay-check` (thumbv4t compile witness), `overlay-test` / `overlay-test-twin`,
 and 6a-4's own configuration: `overlay-check-arm`, `overlay-test-arm` (15 host
 arms), `overlay-objdump`, `overlay-kernel-rom`,
-`overlay-kernel-test` (8 device arms, ~16 s real). 6a-4's instrument image
+`overlay-kernel-test` (8 device arms, ~16 s real). 6a-5's instrument images (same crate, arm features on; **not** the shipped
+configuration and not comparable to the 46,008 B figure): product shape
+(`item6a5-asm`) `.text` 63,124 B · `.iwram` 1,356 B · `.rodata` 1,830,876 B;
+three-arm (`item6a5-arms`) `.text` 72,428 B · `.iwram` 1,868 B · `.rodata`
+1,831,228 B. The default instrument after the rung: `.text` 45,996 B
+`f63ff65bedea…` · `.iwram` 812 B, with the cycle control unchanged to the cycle.
+6a-4's instrument image
 (`overlay-kernel-check.gba`, `rice-arm,iwram-pin`): `.text` 67,772 B
 `8d8c7fe85a14…` · `.iwram` **1,356 B** `a568ddbb5c5f…` · `.rodata` 145,988 B ·
 `.ewram` 368 B · `.entrypoint` 380 B; `arm_rice_partition` 684 B at
@@ -242,11 +437,16 @@ kernel-check). This image is **not** the shipped path and its numbers are not
 comparable to the 46,008 B figure — different crate, different linked set, no
 cycle meaning.
 
-**Per-PR rules:** 6a-1 / 6a-2 / 6a-5 / 6a-7 / 6a-8 change no count and no
-instruction stream. 6a-3 and 6a-4 may move counts only in their own new
-configurations. 6a-4 moved none outside its own (verified: the default image is
-byte-identical, above). 6a-6 *is* allowed to move the default configuration, and
-must name its deltas symbol by symbol.
+**Per-PR rules:** 6a-1 / 6a-2 / 6a-5 / 6a-7 / 6a-8 change no shipped count and no
+shipped instruction stream. 6a-3 and 6a-4 may move counts only in their own new
+configurations (both verified). 6a-5 is the rung that needed the rule read
+precisely: the **product** image is byte-identical, the **instrument's** cycle
+readings reproduce the record to the cycle, and the instrument's own `.text` moved
+by −12 B of harness code plus symbol renames (attributed in its record, and the
+default build's `decode_one` body is a macro expansion at two sites so that a
+`pub fn decode_one_with<K>` could not move +2,868 B — measured, then rejected).
+6a-6 *is* allowed to move the default configuration, and must name its deltas
+symbol by symbol.
 
 ## The landing record every PR in this item carries
 

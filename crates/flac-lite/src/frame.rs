@@ -111,8 +111,9 @@
 use crate::Error;
 use crate::bits::BitReader;
 use crate::format::{ChannelConfig, SampleRate};
+use crate::residual::{RiceKernel, TableCountKernel};
 use crate::stereo::decorrelate;
-use crate::subframe::{PredictorState, decode_subframe};
+use crate::subframe::{PredictorState, decode_subframe_with};
 
 /// The 14-bit frame sync shared by both blocking strategies (see module
 /// docs: RFC 9639 §9.1 — 15-bit sync `0b111111111111100` + strategy bit).
@@ -556,6 +557,25 @@ pub fn decode_frame(
     right: &mut [i32],
     state: &mut [PredictorState; 2],
 ) -> crate::Result<usize> {
+    decode_frame_with::<TableCountKernel>(reader, header, left, right, state)
+}
+
+/// [`decode_frame`] with the Rice kernel named by the caller — the top of the
+/// seam, and the entry a ROM's kernel choice uses (6a-5; the whole chain is
+/// `decode_frame_with<K>` → `decode_subframe_with<K>` → `decode_residual_with<K>`
+/// → the partition seam).
+///
+/// The frame's own work is kernel-independent and identical for every `K`:
+/// header field resolution, channel-config dispatch, the side-bit width rule,
+/// the subframe order, the §9.2.7.1 escape path, CRC consumption and the
+/// buffer contract. Only the Rice partition *bodies* differ.
+pub fn decode_frame_with<K: RiceKernel>(
+    reader: &mut BitReader<'_>,
+    header: &FrameHeader,
+    left: &mut [i32],
+    right: &mut [i32],
+    state: &mut [PredictorState; 2],
+) -> crate::Result<usize> {
     let blocksize = header.blocksize;
     let slots = usize::from(header.channels.subframe_count());
 
@@ -583,7 +603,7 @@ pub fn decode_frame(
         (u32::from(header.bits_per_sample) + u32::from(side_slot == Some(slot))) as u8
     };
 
-    decode_subframe(
+    decode_subframe_with::<K>(
         reader,
         blocksize,
         slot_bits(0),
@@ -591,7 +611,7 @@ pub fn decode_frame(
         &mut left[..blocksize],
     )?;
     if slots == 2 {
-        decode_subframe(
+        decode_subframe_with::<K>(
             reader,
             blocksize,
             slot_bits(1),

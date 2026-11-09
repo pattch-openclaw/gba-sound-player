@@ -450,7 +450,7 @@ impl<'a> BitReader<'a> {
     ///
     /// **Table count — E2b + E2a refill-accumulator.** The live hot loop this
     /// replaces (`while read_bits(1)? == 0` in
-    /// [`crate::residual::decode_rice_partition`]) was E8's measured cost
+    /// [`crate::residual::decode_rice_partition_with`]) was E8's measured cost
     /// center for FIXED (unary 56.2% of gross); the E2b probe measured the
     /// table count riding E2a's `u32` refill-accumulator reader at −21.7% on
     /// the whole FIXED arm (FLAC.md "E2b result"). Each 8-bit window of the
@@ -466,7 +466,7 @@ impl<'a> BitReader<'a> {
     /// codeword start and returns [`Error::EndOfStream`]. The per-bit loop
     /// it replaced left the cursor after the consumed zeros; the difference
     /// is observable only on a dead frame (the stream rule forbids
-    /// unbounded runs and `decode_rice_partition`'s caller discards errored
+    /// unbounded runs and the partition seam's caller discards errored
     /// frames wholesale), and atomic is the stronger contract. This is the
     /// E2b sample's one deliberate divergence, carried with its scope note.
     pub fn rice_quotient(&mut self) -> Result<u32> {
@@ -1005,7 +1005,7 @@ mod tests {
                 }
                 let bytes: [u8; 12] = pack_bits(&bits[..n]);
 
-                // Oracle: the per-bit loop exactly as decode_rice_partition
+                // Oracle: the per-bit loop exactly as the partition seam
                 // ran it before this landing.
                 let mut oracle = BitReader::new(&bytes);
                 skip(&mut oracle, off as u32);

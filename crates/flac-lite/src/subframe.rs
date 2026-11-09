@@ -2,8 +2,8 @@
 //!
 //! IMPLEMENTED: [`SubframeType::parse`] + [`SubframeType::order`] (§9.2.1 type
 //! field), the whole residual path beneath this module —
-//! `residual::rice_unmap` (3a), `residual::decode_rice_partition` (3b), and
-//! `residual::decode_residual` (3c) — the step 3d integrators
+//! `residual::rice_unmap` (3a), `residual::decode_rice_partition_with` (3b), and
+//! `residual::decode_residual_with` (3c) — the step 3d integrators
 //! ([`PredictorState::fill`], the FIXED cascade, the LPC dot product), and
 //! the step 3e composition [`decode_subframe`]. What remains `todo!()`
 //! here: nothing — frame-level wiring (`frame::decode_frame`, stereo
@@ -85,7 +85,7 @@
 //!   never "reject LPC" as a category. See FLAC.md → "Correction 3".
 
 use crate::bits::BitReader;
-use crate::residual::decode_residual;
+use crate::residual::{RiceKernel, TableCountKernel, decode_residual_with};
 
 /// Subframe type, from the leading pad bit + 6-bit field (§9.2.1 Table 19).
 ///
@@ -309,6 +309,25 @@ pub fn decode_subframe(
     state: &mut PredictorState,
     out: &mut [i32],
 ) -> crate::Result<SubframeType> {
+    decode_subframe_with::<TableCountKernel>(reader, blocksize, sample_bits, state, out)
+}
+
+/// [`decode_subframe`] with the Rice kernel named by the caller — the layer
+/// between the frame and the residual walk (6a-5 threaded the seam through it;
+/// see `residual::decode_residual_with` for why the caller-facing chain has to
+/// carry a kernel at all).
+///
+/// The kernel is reached only through the two residual reads below; the
+/// subframe's own type dispatch, warm-up, wasted-bits scale, predictor
+/// parameters and integrators are identical for every `K`. A CONSTANT or
+/// VERBATIM subframe never reaches a kernel at all.
+pub fn decode_subframe_with<K: RiceKernel>(
+    reader: &mut BitReader<'_>,
+    blocksize: usize,
+    sample_bits: u8,
+    state: &mut PredictorState,
+    out: &mut [i32],
+) -> crate::Result<SubframeType> {
     // Caller contract first, before any bit is consumed: one caller-provided
     // slice per subframe (3d buffer contract).
     if out.len() != blocksize {
@@ -317,7 +336,7 @@ pub fn decode_subframe(
     let kind = SubframeType::parse(reader)?;
     let order = kind.order();
     // A predictor longer than the block is corruption (or a caller bug);
-    // `decode_residual` rejects it one read deeper, but the prefix write
+    // the residual walk rejects it one read deeper, but the prefix write
     // below must not panic first.
     if order > blocksize {
         return Err(crate::Error::InvalidField);
@@ -358,7 +377,7 @@ pub fn decode_subframe(
             }
         }
         SubframeType::Fixed(order_u8) => {
-            decode_residual(reader, blocksize, order, &mut out[order..])?;
+            decode_residual_with::<K>(reader, blocksize, order, &mut out[order..])?;
             integrate_fixed(order_u8, state, &mut out[order..])?;
         }
         SubframeType::Lpc { order: order_u8 } => {
@@ -382,7 +401,7 @@ pub fn decode_subframe(
             for c in coeffs.iter_mut().take(order) {
                 *c = reader.read_signed(precision)?;
             }
-            decode_residual(reader, blocksize, order, &mut out[order..])?;
+            decode_residual_with::<K>(reader, blocksize, order, &mut out[order..])?;
             integrate_lpc(&coeffs[..order], shift as i8, state, &mut out[order..])?;
         }
     }

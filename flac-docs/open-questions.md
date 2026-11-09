@@ -33,13 +33,15 @@ the standing landing record (control build, section/`nm` table, gate counts,
 mutation witness), not a paragraph.
 
 **Tree state when this section was written** (kept for the first Q's
-answerability, updated 2026-11-08): item 6a is up to **6a-4**, which is on the
-branch `feat/flac-lite-gba-arm-kernel` (the asm kernel, the FFI/ABI, the
-`rice-arm` and `iwram-pin` features, `examples/overlay-kernel-check/` with its 8
-device `#[test_case]`s, `overlay-check-arm`/`-test-arm`/`-objdump`/`-kernel-rom`/
-`-test`, and the 6a-4 landing record — not yet merged). 6a-3 is merged (PR #98,
-`8711e2f`); 6a-2, 6a-1 and the toolchain pin are merged (#95–#97). Nothing in any
-shipped decode path has changed since item 5 PR 4:
+answerability, updated 2026-11-08): item 6a is up to **6a-5**, which is on the
+branch `feat/flac-item6a5-realization-reading` (the threaded `…_with` seam from
+`frame` down to `residual`, the spike's feature-gated arm pass and its
+`item6a5-test` witness, the two arm images and the 6a-5 landing record — not yet
+merged). 6a-4 is merged (PR #101, `f1fb6da`); 6a-3 is merged (PR #98, `8711e2f`);
+6a-2, 6a-1 and the toolchain pin are merged (#95–#97). The **product** image is
+unchanged since item 5 PR 4 — `flac-integration` is byte-identical through both
+6a-4 and 6a-5 — while the instrument's `.text` has moved with the harness (6a-5's
+record attributes every byte). The cycle record still reads:
 `.text` 46,008 B `f0f88c33d150…`, `rice_quotient` live, `decode_residual` 596 B,
 `flac-gates` 1,169 passed / 6 ignored. The live `nm` anchor is
 `LEADING_ONES @ 0x0300022c` — but only in an image with **no** second mechanism, which
@@ -93,7 +95,18 @@ decision it must write down, not inherit.
 
 ### Q2 — Which image is each cycle number from, and can one image carry three arms?
 
-**Opened by:** 6a-3's codegen/cycle table. **Owned by:** 6a-5 (and 6a-7 after it).
+**Opened by:** 6a-3's codegen/cycle table. **Owned by:** 6a-5 — **answered
+2026-11-08, and the answer is "no, not in one image"**, with numbers. Three images
+were measured: the shipped one (A), `ctrl` + the ARM kernel (C, the product shape)
+and `ctrl` + both mechanisms (B). The asm arm's *absolute* cost is link-independent
+(183,288,727 vs 183,231,371 cycles — 0.03% apart), but `ctrl` moves by −36,543
+c/frame with one extra mechanism and −202,529 with two, exactly as 6a-3 found. So
+the arms can share an image for a **paired, same-image** reading, and the number
+that belongs to the carry must come from the product shape: asm − ctrl is
+−419,236 c/frame in B and **−584,856 in C**. The Rust cross-check inherits the same
+rule: its absolute cost reproduces item 5 PR 4 within 2.4%, while its paired delta
+reads +164.2 c/sample against a control that itself moved. Full tables:
+[`plan-of-record.md`](plan-of-record.md) "6a-5 — the realization reading".
 
 The row plans "three arms, one image". 6a-3 measured why that is not free: putting
 a second `RiceKernel` body in a link moves the **default** path by ≈168–199 k
@@ -161,7 +174,10 @@ wants the second one, a new probe.
 
 Q5a is a confirmation on the current tree of a pairing E9 measured as additive, and
 it is the configuration the product ships; its second job is re-anchoring the E
-numbers on the post-6a image, which 6b-1 inherits. Q5b is genuinely open: neither
+numbers on the post-6a image, which 6b-1 inherits. Its first input now exists:
+6a-5 measured the kernel leg *through the seam* (1,167,444 c/frame FIXED in the
+product shape) and 6a-6 will move the width leg, so the stack can be read as two
+same-image marginals rather than against E9's vendored arms. Q5b is genuinely open: neither
 E10 nor PR 4 tested a portable-Rust kernel *written for* Thumb-1 register pressure
 and a 32-bit source window — PR 4 tested the twin as written, which is the
 corpus-differential witness made executable. If someone wants that sign settled it
@@ -313,3 +329,34 @@ a mutation proved it. The general lesson filed with the method notes: a "measure
 claim has to state what the command *varied*, not only what it printed — and a
 zero-returning throwaway script can report a fact that merely agrees with the prose
 being checked.
+
+### Q12 — Where do the seam's 48 c/sample go, and what puts 32,768 Hz FIXED back under budget?
+
+**Opened by:** 6a-5's stack projection (2026-11-08) — the item's first measured
+negative. **Owned by:** 6a-6 for the width half; a probe with the 6a-8 *shape* (but
+a new justification) for the seam half; 6a-7 inherits the verdict.
+
+The landed realization is +48.2 c/sample (+9.18%) slower than E10's vendored arm
+(183,288,727 vs 167,877,039 on a 157-frame FIXED clip), and stacking E9's i32
+marginal on it projects 103.83% mean / 104.36% worst of the 32,768 Hz budget — over
+where the probe projected 94.47%. To fit, the stack needs **−40,152 c/frame =
+−19.6 c/sample** more than the projection gives, and the seam's own overhang is
++48.2 c/sample, so *part* of it is enough. Candidate shares, all named in the
+landing's own text and none measured: (a) the seam's window hand-out/take-back per
+partition (`kernel_window` / `set_kernel_window`, plus the wrapper's class mapping
+and the `order > MAX_ORDER` branch); (b) the two §9.2.7.3 guards the landing added
+to E10's kernel (`mvn+lsr+str` per partition, `ldr+cmp+bhi` and `adds+beq` per
+sample); (c) the 12-byte frame and the third status word; (d) monomorphization
+codegen — 6a-3 measured that a second kernel body in a link moves the *shared* path
+by ~168–199 K cycles/frame, so a per-partition call boundary is not free even
+before its instructions.
+
+Two constraints on any answer. The conditional **6a-8 does not run** — the plan
+wrote it for a near-band fork result, and this result is far outside the band — so a
+sub-stage probe here is a *new* probe with a new justification, not 6a-8's trigger.
+And **6a-6's measured i32 marginal, not E9's**, is the only admissible width input:
+the i32 sites are outside the kernel and the seam, so transfer is expected, but
+"expected" is how E9's caveat (1) got written in the first place. Honest answers
+already established: both product rates fit FIXED with the kernel alone (61.7% at
+18,157 Hz, 35.7% at 10,512 Hz), so this Q is about the *full-rate* claim, not about
+whether the kernel was worth landing (it is: −286.9 c/sample, fork = carry).

@@ -34,7 +34,7 @@
 /// cannot share a misreading with either implementation (witness rule).
 /// The fold is total: `0xFFFF_FFFF` maps to `i32::MIN`, the value
 /// §9.2.7.3 forbids in a stream; *rejecting* it stays upstream in
-/// `decode_rice_partition` (flac-lite's 3a seam, pinned there).
+/// the partition seam (flac-lite's 3a map, pinned there).
 #[must_use]
 pub fn oracle_rice_unmap(n: u32) -> i32 {
     if n & 1 == 0 {
