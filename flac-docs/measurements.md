@@ -124,13 +124,18 @@ The absolute marginals that survive an era boundary:
 | **6a-5d: the landed asm with its body in IWRAM** (shipped overlay config; `overlay-kernel-test`, `overlay-test-arm`, `item6a5b-test`, both objdump gates green) | **48.29%** (506,413 c/frame; worst frame 48.5%) | 508.8% | `flac-spike-6a5b.gba` sha `232d1498…`, same-image pair |
 | 6a-5d diagnostic: *both* legs pinned, so the pair prices code and not memory | 48.29% | — | same image plus the vendored body in `.iwram`; `asm − vend` = +4,549,115 |
 
-**None of the in-budget rows is landed code.** E9's FIXED stack exists as a
-sample under `examples/flac_spike/experiments/e9-composite/`; the product path
-still measures the 170.2% / 589.5% row. LPC at 216.3% fits 10,512 Hz (69.4%) and
-misses 18,157 Hz (~119.9%) decode-only.
+**None of the *probe-era* in-budget rows is landed code** — E9's FIXED stack exists
+as a sample under `examples/flac_spike/experiments/e9-composite/` — and the shipped
+product path still measures the 170.2% / 589.5% row. **The 6a-5d row is different in
+kind and that is the item's status change:** 48.29% is the *landed overlay kernel*
+(`rice-arm`, all gates green, byte-identical across rebuilds), measured through the
+product-shape seam; what keeps it out of the product is only that no product path
+names `rice-arm` yet (6b's one-line placement), not that the code is a probe. LPC at
+216.3% fits 10,512 Hz (69.4%) and misses 18,157 Hz (~119.9%) decode-only.
 
-**And the one in-budget row does not survive landing.** 6a-5 measured the real
-thing and projected the stack: the landed realization is +48.2 c/sample slower
+**And the one in-budget row does not survive landing.** *(True of E9's row; 6a-5d
+replaced it with a landed 48.29% — see the table and the 6a-5d narrative.)* 6a-5
+measured the real thing and projected the stack: the landed realization is +48.2 c/sample slower
 than E10's vendored arm, which puts the FIXED stack at **103.83%** at 32,768 Hz —
 over budget — where the probe projected 94.47%. The E9 record's own caveat (1)
 ("these numbers describe the probe's vendored link, and the kernel + i32 landing
@@ -138,7 +143,9 @@ must re-witness them") is now a measured negative; see the re-anchoring note at
 the end of E9's entry in [`perf-results.md`](perf-results.md) and Q12 in
 [`open-questions.md`](open-questions.md). The kernel itself still stands as the
 menu's biggest lever (−286.9 c/sample landed), and both product rates fit with it
-alone (61.7% at 18,157 Hz, 35.7% at 10,512 Hz).
+alone (61.7% at 18,157 Hz, 35.7% at 10,512 Hz) — and it became a *larger* lever
+than this paragraph knew: 6a-5d's IWRAM placement makes the landed arm 48.29% of the
+FIXED budget, which is 2.9× the kernel cost this paragraph is describing.
 
 **Re-opened 2026-11-08 (6a-5b): the +48.2 c/sample is a cross-image quantity.**
 The projection's two inputs come from two different images, and this file's own
@@ -173,7 +180,8 @@ provably dead instruction (the shipped asm carries `and r12, r3, #0xFF` twice, s
 the table below): semantics untouched, layout moved, and the reading decides which
 unit the cost is in. The 103.83% row is therefore re-admitted as the item's working
 stack figure, with 6a-6's own measured i32 marginal still required before it becomes
-a measurement.
+a measurement. *(Since superseded: 6a-5c priced the gap in instructions and 6a-5d
+found they cost four cycles because of where they lived. 48.29% is the number now.)*
 
 **Measured 2026-11-09 (6a-5c): six instructions, 4.0000 cycles each, and the residue
 is 0.46%.** The separation 6a-5b asked for came out neither way it was posed. Two
