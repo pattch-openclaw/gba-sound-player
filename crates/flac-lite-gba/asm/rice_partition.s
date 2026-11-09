@@ -154,12 +154,13 @@
 @   r8 out    r9 out_end r10 p                    r11 m    r12 scratch
     .syntax unified
     .arm
-    @ [6a-5d PROBE] plain `.iwram`, never `.text_iwram`: the linker script's
-    @   `.text : {{ *(.text .text*) }}` comes first and swallows anything whose
-    @   name starts with `.text`, so `.text_iwram` can never reach IWRAM (E6's
-    @   trap, recorded). `.iwram` is collected by `*(.iwram .iwram.*)` in the
-    @   `.iwram` output section, which is `> iwram AT>rom`, and the boot code
-    @   copies it down.
+    @ [6a-5d] The body lives in `.iwram`, not `.text` — measured at 1,151,236 ->
+    @   506,413 cycles/frame on the FIXED clip (109.77% -> 48.29% of the 32,768 Hz
+    @   budget), with nothing else changed. Plain `.iwram`, never `.text_iwram`:
+    @   the linker script's `.text : {{ *(.text .text*) }}` comes first and would
+    @   swallow that name (E6's recorded trap), whereas `.iwram` is collected by
+    @   `*(.iwram .iwram.*)` into an output section marked `> iwram AT>rom`, which
+    @   the boot code copies down.
     .section .iwram,"ax",%progbits
     .code 32
     .global arm_rice_partition
