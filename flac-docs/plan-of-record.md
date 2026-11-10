@@ -8,9 +8,82 @@ landed; 4–5 open), the E10 plans (landed) and the rate-tooling proposal (lande
 with its step-4 multi-clip ROM and its cross-rate sweep still open) — all of which
 now live only in git history and in the records they produced.
 
-## Status at a glance (2026-11-09, branch `feat/flac-item6a5b-vendored-differential`;
-the 6a-5 realization reading is on `feat/flac-item6a5-realization-reading`, the
-projection re-opening on `docs/flac-6a5b-projection-reopened`)
+## Acceptance criteria — what this plan is for
+
+Two criteria, stated by the project owner on 2026-11-10. They are the definition of
+done: a rung that does not move one of them is not on the critical path, and a
+measurement that does not decide one of them waits behind the work that does.
+
+### C1 — `flac-lite` is a standalone crate
+
+It can be used **independently** as a `no_std`, pure-Rust FLAC decoding crate, and
+it is **ready to be separated into its own repository**. In checkable form:
+
+- no `todo!()` anywhere in `src/`, and a facade a consumer who has never heard of
+  this repository can drive: bytes → frames → samples. Today `decoder::Decoder`,
+  `format::Manifest`, `Blocksize::samples` and `EncodeProfile::validate` are still
+  scaffold, so C1 is **not** met;
+- the crate's existing claims hold with nothing scaffolding-shaped in the way:
+  `core` + `alloc` only, zero dependencies, zero allocation on the decode path,
+  `#![deny(unsafe_code)]`, bit-exact against `flac -d`;
+- every platform-bound item confined to a documented off-by-default feature
+  (`iwram-pin`) or to `flac-lite-gba` — nothing GBA-shaped in the default public
+  API;
+- `make flac-portable-check` still compiles it for a second bare-metal target;
+- **explicitly not required:** a crates.io publication. "Ready to be separated"
+  means a `git subtree split`-shaped extraction would work, not that a registry
+  entry exists.
+
+### C2 — `flac-lite-gba` decodes *and plays back*, in real time, at 32 kHz, on a GBA
+
+The claim the project was started for, demonstrated before the split, and now to be
+demonstrated **through** the split's two crates rather than around them. In
+checkable form:
+
+- a ROM that links `flac-lite-gba` **with `rice-arm` on** and plays 2048-sample
+  frames at **32,768 Hz** from cartridge without an underrun, on hardware;
+- the decode half is already measured on hardware (42.48% mean / **42.72% worst**),
+  so what is unproven is the *combination* — decode + convert + push + mixer/DMA
+  inside one 62.5 ms frame;
+- **FIXED-only by construction.** LPC is **174.14%** of the 32 kHz frame on
+  hardware (decode alone), so the pack-time encode profile must refuse what the
+  player cannot play. The `EncodeProfile` guard is part of C2, not a nicety;
+- the acceptance run is on a GBA 001 **and** a GBA SP, and its verdict is
+  **underrun-free playback**, not a cycle count.
+
+### What must not delay them
+
+The 3.7–6.9% mGBA shortfall (Q13) is parked: C2's decode number already exists as a
+hardware measurement, and C2 is judged on hardware end to end, so an
+emulator-vs-silicon attribution is not on the path. Also out: 24-bit decode, rates
+other than the target, `dyn` dispatch, kernel sub-stage attribution (6a-8 stays
+untriggered), and crates.io publication.
+
+### The arithmetic C2 has to fit
+
+Per 2048-sample frame at 32,768 Hz: **62.5 ms = 1,048,750 cycles**.
+
+| stage | figure | source | share of frame |
+|---|---:|---|---:|
+| decode, kernel + i32, worst frame | 445,558 c ≈ 26.6 ms | **hardware** (6a-7b, two units) | 42.72% |
+| convert | 14.1 ms | mGBA, 10,512 Hz pass, **word-copy era** | 22.6% |
+| push (ring copy + credit, CS) | 12.7 ms | same pass, same era | 20.3% |
+| **gross, on paper** | | | **≈85.6%** |
+
+Both consequences are work items, not caveats. The producer figures are **stale** —
+a different rate, the pre-kernel decode path, the word-copy era — so they are
+re-measured at the target rate on hardware (item 7's first PR). And the remaining
+margin is **≈14%, ≈8.7 ms**, which is where the mixer, the IRQ handler and the
+feeder have to live: C2 will be decided by that margin, not by the gross. A 20%
+error in the producer stages alone would consume it.
+
+## Status at a glance (2026-11-10, `main` after 6a-7b merged)
+
+**The plan is now judged only against C1 and C2 above.** Item 6a is closed — the
+overlay exists, the kernel is in it, the decode half of C2 is measured on two units
+— and everything still open is either C1 (`flac-lite`'s facade and manifest), C2's
+decode half (the kernel carried into a product ROM, 6b), or C2's playback half
+(item 7).
 
 - **Landed:** the Phase-1 decode path through `decode_frame`; the
   stream layer; the per-frame `driver`; CRC verification behind `crc-check`; the
@@ -115,11 +188,23 @@ projection re-opening on `docs/flac-6a5b-projection-reopened`)
   pre-declared fork resolves to `diverges`. Decode still has **2.34× headroom**, so
   6b is unaffected. On the way it also found, and we fixed, a display bug no
   headless emulator could see: a trailing `frame.commit()` blanked the screen it
-  had just painted. Next: a probe that separates mGBA's data-read/prefetch model
-  from the flashcart's read timing, then **6b**.
+  had just painted.
+- **The data-read probe is dropped from the queue, by decision (2026-11-10).** It
+  was the natural next rung after 6a-7b and it is now parked behind the acceptance
+  criteria. The reasoning is in the criteria section: the probe would explain the
+  3.7–6.9% shortfall, but C2's decode figure is *already* a hardware measurement and
+  C2 is judged by an underrun-free playback run on hardware, so an
+  emulator-versus-silicon attribution cannot change the answer. Q13 stays open with
+  its trigger written down — re-open it if a product path needs the last 6%, or if
+  any claim is made by scaling an mGBA cycle count. Until then a *rule* replaces the
+  probe: see "mGBA numbers are derated" in the ordering rules.
 
-- **Not started:** the data-read probe 6a-7b opens, 6a-8 (untriggered), all of 6b, and the product work
-  they unblock (manifest, packer, facade, mixer).
+- **Next, in order:** **6b-1** (facade onto `scan` **and** `rice-arm` carried into a
+  product ROM — the placement 6a-5 assigned here), **6b-2** (real GAFP packer,
+  manifest, pack-time profile that refuses LPC at the target rate), **6b-3**
+  (32,768 Hz rate-play through a real manifest), then **item 7** (playback: the
+  real-time claim). Not started: 6a-8 (untriggered, and now further parked by C1/C2)
+  and the parked Q13 probe.
 
 ## Item 6a — the overlay (the realization)
 
@@ -1097,25 +1182,53 @@ is also unchanged from 6a-7 — decode only; the producer's convert/push stages
 shipped default decode path is still `TableCountKernel` at 167%, and no product
 path names `rice-arm`; that is 6b's.
 
-**What is next after it.** The two hardware runs, then **6b** (the container:
-facade onto `scan`, the real GAFP packer/manifest, rate-play through a manifest),
-then the product stages outside decode (convert/push, mixer/DMA, Phase 2 step 9).
-Still decode-only either way.
+**What is next after it.** The probe this rung opened (Q13) is **parked by
+decision** — see "Acceptance criteria". Next is the plan's critical path: **6b-1**
+(facade onto `scan`, `rice-arm` carried into a product ROM), **6b-2** (packer,
+manifest, pack-time profile), **6b-3** (32,768 Hz rate-play through a manifest), then
+**item 7**, which is where C2's real-time claim is actually made.
 
-## Item 6b — the container (where frames come from)
+## Item 6b — the container, and the kernel in a product ROM (C1, and C2's decode half)
 
-6b changes *where frames come from*. Its measurement is a codegen reading (the
-deferred `scan` **+3,120 B** is charged and attributed there) plus bit-exactness
+6b serves **C1** (the facade that makes `flac-lite` standalone) and C2's decode half
+(the kernel actually reaching a shipped ROM). Its measurement is a codegen reading
+(the deferred `scan` **+3,120 B** is charged and attributed there) plus bit-exactness
 through a real manifest.
 
 | PR | Scope | Witness | Failure it isolates |
 |---|---|---|---|
-| **6b-1** | `stream` → frame source → `decoder::Decoder` rewired onto `scan::Frames`. Inherits `Frames` / `StreamBounds` / `ConsumedFrame` / `resync` — **not** a third frame loop. Turns `scan` on in a ROM-shaped build for the first time. | Codegen: the +3,120 B charged and attributed symbol by symbol; E anchors re-pinned; bit-exactness through the walk | that the walk's measured cost was argued-as-free, and the facade pays it |
-| **6b-2** | `scripts/pack_flac.sh` real implementation (GAFP writer), `format::Manifest` parse, `EncodeProfile::validate` at pack time, `SEEKTABLE` interpretation + `Frames::anchored(n)`. | Bit-exact decode through a real manifest; profile validation convicted at pack time; the seek witness `frame_run_loop.rs` already holds the reverse-order half of | that the pack-time profile guard the whole design leans on is decorative |
-| **6b-3** | The rate-play path on a real manifest; the spike's generated offset table retires. | The `rate-*` flow as it has been run before — assets staged, ROM built, measured — now through the manifest | that the throwaway harness was load-bearing in ways nobody wrote down |
+| **6b-1** | `stream` → frame source → `decoder::Decoder` rewired onto `scan::Frames`. Inherits `Frames` / `StreamBounds` / `ConsumedFrame` / `resync` — **not** a third frame loop. Turns `scan` on in a ROM-shaped build for the first time. **And carries `rice-arm` into that ROM** — the one-line placement 6a-5 assigned to this rung, so the first ROM built after this PR decodes with the kernel instead of `TableCountKernel`. | Codegen: the +3,120 B charged and attributed symbol by symbol; E anchors re-pinned; bit-exactness through the walk; and the decode leg re-read **on hardware**, not in mGBA | that the walk's measured cost was argued-as-free and the facade pays it — and that the kernel's win lives in an instrument but never in a product |
+| **6b-2** | `scripts/pack_flac.sh` real implementation (GAFP writer), `format::Manifest` parse, `EncodeProfile::validate` at pack time, `SEEKTABLE` interpretation + `Frames::anchored(n)`. **The profile refuses what the target rate cannot play** — at 32,768 Hz on hardware that is LPC (174.14% of the frame, decode alone) — so C2's constraint is enforced by the packer rather than discovered by the player. | Bit-exact decode through a real manifest; profile validation convicted at pack time **on a real LPC clip as well as a synthetic one**; the seek witness `frame_run_loop.rs` already holds the reverse-order half of | that the pack-time profile guard the whole design leans on is decorative — and that a 32 kHz build quietly ships LPC assets that cannot play |
+| **6b-3** | The rate-play path on a real manifest **at 32,768 Hz**; the spike's generated offset table retires. This is the first product ROM that names the overlay crate. | The `rate-*` flow as it has been run before — assets staged, ROM built, measured — now through the manifest at the target rate | that the throwaway harness was load-bearing in ways nobody wrote down |
 
-**Out of 6b, explicitly:** mixer/DMA and `agb` integration (Phase 2 step 9),
-24-bit decode, `unsafe` of any kind, and any GBA real-time claim.
+**Out of 6b, explicitly:** mixer/DMA and `agb` integration, 24-bit decode, `unsafe`
+of any kind, and any **underrun-free playback claim** — 6b's verdict is "the
+container works and the kernel is in the ROM". The playback claim is **item 7's**,
+and C2 is not met until 7-3 passes.
+
+## Item 7 — playback: the real-time claim (C2)
+
+Item 6b makes the frame path real and puts the kernel in the ROM. Item 7 is what
+turns "decodes inside the budget" into "plays in real time", and it is where **C2 is
+met**. Its scope comes straight from the arithmetic in "Acceptance criteria": the
+producer stages were last measured on the **pre-kernel** path at **10,512 Hz**, they
+are per-frame work (2048 samples regardless of rate), and therefore at 32,768 Hz
+they are ~43% of the frame against decode's 42.72%.
+
+| PR | Scope | Witness | Failure it isolates |
+|---|---|---|---|
+| **7-1** | **Re-measure the producer at the target rate.** The 10,512 Hz producer pass (convert / push / wait / closure) repeated at 32,768 Hz with the kernel in the decode slot. Measurement only — no new product code. | Per-stage shares on **hardware**, same-image, with the rate pass's own discipline (`closure underflows 0`, shares read relatively, the clean image's audit as the wall authority) | that C2's margin is inherited arithmetic from a different rate and a pre-kernel decoder — the ~85.6% gross and the ~8.7 ms left are estimates, not observations |
+| **7-2** | **The shipping playback path.** `agb`'s mixer/DMA, or a written argument for why the custom IRQ feeder is the shipping path. Replaces the throwaway harness the rate track has been leaning on. | Bit-exact PCM into the FIFO plus an audibility check on hardware; underruns **counted**, not eyeballed | that the throwaway feeder was load-bearing in ways nobody wrote down (the rate track's own lesson, one layer up) |
+| **7-3** | **The acceptance run.** 2048-sample frames at 32,768 Hz, FIXED-only assets (enforced by 6b-2's pack-time profile), GBA 001 **and** GBA SP, two runs each. | **Underruns = 0**, plus 7-1's stage shares on the same image | that C2 is claimed from a mean and a projection rather than from playback on a unit |
+
+**C2 is met when 7-3 passes on both units**, and not before. "Decodes within
+budget" was already true at 42.72% and is not the claim; it is the precondition.
+
+**Sequencing note.** 7-1 can run as soon as a 32 kHz product image exists, i.e.
+right after 6b-3, and it is the PR that decides whether 7-2 has to find savings or
+merely has to land. If 7-1 shows the producer stages eating the whole margin, that
+is a decode-side or rate-side finding and it comes back to this plan rather than
+being absorbed by a playback patch.
 
 ## The width decision (what it is and is not safe for)
 
@@ -1286,4 +1399,16 @@ Four paragraphs, every PR, no exceptions:
   as the default (+42.6 c/sample), `opt-level = "z"` in `flac-lite` does not govern
   the measured ROM (workspace-root profile applies).
 - **E5 is the only open measurement that can turn a real-time claim into a claim.**
-  It runs once per candidate rate × path combination, on hardware.
+  It runs once per candidate rate × path combination, on hardware. (It has run: the
+  fetch ratio is hardware, 3.939. What it did not cover is the data-read path, and
+  that gap is now covered by the derating rule below rather than by a probe.)
+- **mGBA numbers are derated, not trusted, for anything memory-heavy.** 6a-7b
+  measured one image on two units and every leg came out **3.7–6.9% above the
+  model**, while E5's pure-fetch stream matched to 0.05%. So: use a hardware figure
+  where one exists; where none exists — today that is the producer's convert/push
+  stages — carry the mGBA figure with a **+7% derating** and say so in the record.
+  The shortfall is per-leg and does not cancel, so one arm's mGBA number may not be
+  scaled onto another arm either.
+- **Criteria before attribution.** C1 and C2 are the definition of done; a
+  measurement that does not decide one of them waits behind the work that does. This
+  is why the data-read probe is parked (Q13) and why 6a-8 stays untriggered.
