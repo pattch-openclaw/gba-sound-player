@@ -679,6 +679,8 @@ mod rom {
         use flac_lite_gba::rice_arm::ArmRiceKernel;
         #[cfg(feature = "item6a5-rust")]
         use flac_lite_gba::rice_twin::TwinKernel;
+        #[cfg(feature = "item6a7-wide")]
+        use flac_spike::wide;
 
         /// E9's window shape: zero the counter pair before every window so the
         /// wrap sentinel means "this window exceeded 2^32" rather than "the pass
@@ -808,6 +810,14 @@ mod rom {
             let mut ctrl_l: alloc::vec::Vec<i32> = alloc::vec![0; max];
             let mut ctrl_r: alloc::vec::Vec<i32> = alloc::vec![0; max];
             let mut state_c = [PredictorState::new(), PredictorState::new()];
+            // [6a-7] the i64 width leg: a separate decoder, so its buffers and
+            // predictor state are its own (6a-5b's separation rule).
+            #[cfg(feature = "item6a7-wide")]
+            let mut wide_l: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            #[cfg(feature = "item6a7-wide")]
+            let mut wide_r: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            #[cfg(feature = "item6a7-wide")]
+            let mut wide_state = [PredictorState::new(), PredictorState::new()];
 
             #[cfg(feature = "item6a5-rust")]
             let mut rust_l: alloc::vec::Vec<i32> = alloc::vec![0; max];
@@ -864,6 +874,7 @@ mod rom {
                 cfg!(feature = "item6a5-rust") as u8
                     + cfg!(feature = "item6a5-asm") as u8
                     + cfg!(feature = "item6a5b-vendored") as u8
+                    + cfg!(feature = "item6a7-wide") as u8
                     + 1
             );
             if !stable {
@@ -880,6 +891,10 @@ mod rom {
             }
 
             let mut ctrl = FrameCost::new();
+            #[cfg(feature = "item6a7-wide")]
+            let mut wide = FrameCost::new();
+            #[cfg(feature = "item6a7-wide")]
+            let mut wide_paired = Paired::default();
             #[cfg(feature = "item6a5-rust")]
             let mut rust = FrameCost::new();
             #[cfg(feature = "item6a5-rust")]
@@ -930,6 +945,33 @@ mod rom {
                             err
                         );
                         return false;
+                    }
+                };
+                // [6a-7] the width leg: the same timed shape as every other
+                // arm, so `ctrl − wide` prices arithmetic width and nothing else.
+                #[cfg(feature = "item6a7-wide")]
+                let wide_raw = {
+                    let (res, raw) = timed_reset(counter, || {
+                        wide::decode_one_wide(
+                            clip,
+                            frame_index,
+                            &mut wide_l,
+                            &mut wide_r,
+                            &mut wide_state,
+                        )
+                    });
+                    match res {
+                        Ok(w) if w == written => raw,
+                        other => {
+                            agb::println!(
+                                "*** {} 6a7 FAIL frame {}: wide returned {:?} (ctrl wrote {})",
+                                name,
+                                frame_index,
+                                other,
+                                written
+                            );
+                            return false;
+                        }
                     }
                 };
                 #[cfg(feature = "item6a5-rust")]
@@ -1014,6 +1056,16 @@ mod rom {
                 // Equality witness, outside the windows: a variant's numbers only
                 // count on a frame whose samples are bit-identical to the
                 // proven-correct control's.
+                #[cfg(feature = "item6a7-wide")]
+                if wide_l[..written] != ctrl_l[..written] || wide_r[..written] != ctrl_r[..written]
+                {
+                    agb::println!(
+                        "*** {} 6a7 FAIL frame {}: wide samples differ from ctrl — numbers void",
+                        name,
+                        frame_index
+                    );
+                    ok = false;
+                }
                 #[cfg(feature = "item6a5-rust")]
                 if rust_l[..written] != ctrl_l[..written] || rust_r[..written] != ctrl_r[..written]
                 {
@@ -1049,6 +1101,13 @@ mod rom {
 
                 let ctrl_net = net_sentinel(ctrl_raw, overhead);
                 ctrl.observe(frame_index, ctrl_net);
+                #[cfg(feature = "item6a7-wide")]
+                let wide_net = {
+                    let n = net_sentinel(wide_raw, overhead);
+                    wide.observe(frame_index, n);
+                    wide_paired.observe(frame_index, ctrl_net, n);
+                    n
+                };
                 #[cfg(feature = "item6a5-rust")]
                 let rust_net = {
                     let n = net_sentinel(rust_raw, overhead);
@@ -1105,6 +1164,16 @@ mod rom {
                     ctrl_net,
                     asm_net
                 );
+                // [6a-7] its own line, so every earlier frame print quoted in
+                // these records stays byte-for-byte as it is.
+                #[cfg(feature = "item6a7-wide")]
+                agb::println!(
+                    "*** {} 6a7 frame {:>3}/{} wide={}",
+                    name,
+                    frame_index,
+                    clip.frames.len(),
+                    wide_net
+                );
                 // [6a-5b] its own line, so the frame prints every earlier 6a-5
                 // record quotes stay byte-for-byte as they are. Printing rides
                 // outside the timed windows either way.
@@ -1131,6 +1200,8 @@ mod rom {
             // shadowing line compiles.
             #[cfg(feature = "item6a5b-vendored")]
             let wrapped = wrapped || vend.wrapped;
+            #[cfg(feature = "item6a7-wide")]
+            let wrapped = wrapped || wide.wrapped;
             if wrapped {
                 agb::println!(
                     "*** {} 6a5 FAIL a window exceeded the 32-bit composite",
@@ -1251,6 +1322,37 @@ mod rom {
                     vend_ctrl_paired.equal
                 );
             }
+            // [6a-7] the width marginal: `ctrl − wide`, positive = the i64 leg
+            // completed fewer cycles (it should be negative — wide is the
+            // reference the i32 default replaced).
+            #[cfg(feature = "item6a7-wide")]
+            {
+                agb::println!(
+                    "*** {} 6a7 wide stats: count={} min={}@{} max={}@{} sum={}",
+                    name,
+                    wide.count,
+                    wide.min,
+                    wide.min_frame,
+                    wide.max,
+                    wide.max_frame,
+                    wide.sum
+                );
+                agb::println!(
+                    "*** {} 6a7 width paired: sum_delta={} (ctrl-minus-wide; NEGATIVE = the i64 leg is slower) mean_x1000={} max_delta={}@{} wide_faster={} i32_faster={} equal={}",
+                    name,
+                    wide_paired.sum,
+                    if wide.count > 0 {
+                        wide_paired.sum * 1000 / wide.count as i64
+                    } else {
+                        0
+                    },
+                    wide_paired.max,
+                    wide_paired.max_frame,
+                    wide_paired.faster,
+                    wide_paired.slower,
+                    wide_paired.equal
+                );
+            }
             #[cfg(all(feature = "item6a5-rust", feature = "item6a5-asm"))]
             agb::println!(
                 "*** {} 6a5 budget: ctrl_worst={} rust_worst={} asm_worst={} vs {}",
@@ -1281,6 +1383,13 @@ mod rom {
                 "*** {} 6a5 budget: vend_worst={} vs {}",
                 name,
                 vend.max,
+                BUDGET_CYCLES_PER_FRAME
+            );
+            #[cfg(feature = "item6a7-wide")]
+            agb::println!(
+                "*** {} 6a7 budget: wide_worst={} vs {}",
+                name,
+                wide.max,
                 BUDGET_CYCLES_PER_FRAME
             );
             ok
@@ -1356,6 +1465,70 @@ mod rom {
             pin_ok && stats_ok
         }
 
+        /// [6a-7] the width leg's decode proof: the same embedded-PCM pin and
+        /// fold, walked through the vendored i64 path's own per-frame entry.
+        /// `wide` is a probe decoder, so it has no `decode_clip_with`; the
+        /// bytes folded are the driver's contract (empty right window on mono),
+        /// so a MISMATCH can only mean the leg drifted.
+        #[cfg(feature = "item6a7-wide")]
+        fn wide_proof(clip: &SpikeClip, arm: &'static str) -> bool {
+            let max = usize::from(clip.max_blocksize);
+            let mut left: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            let mut right: alloc::vec::Vec<i32> = alloc::vec![0; max];
+            let mut state = [PredictorState::new(), PredictorState::new()];
+            let mut hash = Fnv1a64::new();
+            let mut fold_ok = true;
+            let mut walk_ok = true;
+            let mut frames = 0usize;
+            let mut samples = 0usize;
+            for frame_index in 0..clip.frames.len() {
+                match wide::decode_one_wide(clip, frame_index, &mut left, &mut right, &mut state) {
+                    Ok(written) => {
+                        let right_window: &[i32] = if clip.channels == 2 {
+                            &right[..written]
+                        } else {
+                            &[]
+                        };
+                        if fold_i16le_stereo(&mut hash, &left[..written], right_window).is_err() {
+                            fold_ok = false;
+                        }
+                        frames += 1;
+                        samples += written;
+                    }
+                    Err(err) => {
+                        agb::println!(
+                            "[spike] {} 6a7 arm {} FAIL: walk rejected at frame {}: {:?}",
+                            clip.name,
+                            arm,
+                            frame_index,
+                            err
+                        );
+                        walk_ok = false;
+                        break;
+                    }
+                }
+            }
+            let actual = hash.finish();
+            let stats_ok = walk_ok
+                && frames == clip.frames.len()
+                && samples == usize::try_from(clip.total_samples).unwrap_or(usize::MAX);
+            let pin_ok = fold_ok && actual == clip.fnv_pcm;
+            agb::println!(
+                "[spike] {} 6a7 arm {} pcm fnv: expected 0x{:016X} actual 0x{:016X} walk={} [{}]",
+                clip.name,
+                arm,
+                clip.fnv_pcm,
+                actual,
+                stats_ok,
+                if pin_ok && stats_ok {
+                    "MATCH"
+                } else {
+                    "MISMATCH"
+                }
+            );
+            pin_ok && stats_ok
+        }
+
         /// Per-arm decode proofs, then the timing pass. Runs only when every arm
         /// decoded the committed bytes to the pinned PCM.
         fn proofs_then_pass<K: flac_lite::residual::RiceKernel>(
@@ -1379,6 +1552,14 @@ mod rom {
             #[cfg(feature = "item6a5b-vendored")]
             {
                 let ok = vendored_proof(clip, "vend");
+                proofs_ok &= ok;
+            }
+            // [6a-7] correctness before speed, before any timing: the i64
+            // width leg is timed only if it decodes the committed bytes to the
+            // pin AND agrees with the control frame by frame.
+            #[cfg(feature = "item6a7-wide")]
+            {
+                let ok = wide_proof(clip, "wide");
                 proofs_ok &= ok;
             }
             agb::println!(

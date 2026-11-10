@@ -128,6 +128,15 @@ item6a5-arms = ["item6a5-rust", "item6a5-asm"]
 # relaxation (see src/lib.rs), and the shipped instrument image is unchanged.
 item6a5b-vendored = ["item6a5-asm"]
 
+# 6a-7's width leg (plan-of-record 6a-7). `item6a6` moved the core's default
+# arithmetic width to i32 but left its cycle marginal unread — a same-image pair
+# needs both widths in one link. `src/wide.rs` is the pre-6a-6 i64 decode path,
+# vendored; the pass times `ctrl` (i32), `wide` (i64) and `asm` (the landed
+# kernel over the i32 default) in one calibration. It implies `item6a5-asm` so
+# the stack and the width marginal are read in the same image. Off by default:
+# a default build contains no second decoder, and every pre-6a-7 number stands.
+item6a7-wide = ["item6a5-asm"]
+
 # agb exists only for the GBA target, and it cannot build for the host triple
 # — while the host witness tests (make spike-test) compile this crate's lib
 # + tests natively. Gate by architecture: thumbv4t-none-eabi reports
@@ -197,6 +206,15 @@ required-features = ["item6a5-arms"]
 name = "e10_witness"
 path = "tests/e10_witness.rs"
 required-features = ["item6a5b-vendored"]
+
+# 6a-7's host witness for the width leg: the vendored i64 path decodes the
+# committed clips to the reference PCM and agrees with `driver::decode_one`
+# frame window by frame window. `required-features` keeps a default build free
+# of the second decoder — and keeps the suite's absence from reading as a green.
+[[test]]
+name = "item6a7_witness"
+path = "tests/item6a7_witness.rs"
+required-features = ["item6a7-wide"]
 
 [workspace]
 
