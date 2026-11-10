@@ -55,11 +55,13 @@ font's line height (`*** e5 font line_height=12`) as a layout check.
 
 ## The reading of record
 
-The ratio, not the absolute cycles: mGBA says ~3.9. If hardware agrees within
-~10%, the model's fetch pricing stands and the 6a-5d IWRAM placement is real.
-If prefetch makes ROM fetch near-IWRAM, the 6a-5d "2.9× from one directive" is
-largely an mGBA artifact and the placement decision has to be re-read.
+**Measured 2026-11-10 on a GBA 001 and a GBA SP, two runs each:** ROM 16,733 /
+IWRAM 4,248 c/call, ratio **3.939**, add **4.085 / 1.037** (prefetch on);
+16,747 / 4,257, ratio 3.933, add 4.088 / 1.039 (off). Both units and both runs
+are identical. Hardware reproduces mGBA within 2 cycles/call (0.012%) and
+≤0.03% on the ratio; prefetch on/off changes ≤0.2%. The fetch pricing is
+hardware, not mGBA's model, and the 6a-5d IWRAM placement is real.
 
 The real-kernel confirmation is a second run: `flac-spike-6a7.gba` (the
-`ctrl`/`wide`/`asm` stack image) on the same unit. Its numbers are decode-only
-and mGBA-only until that run exists.
+`ctrl`/`wide`/`asm` stack image) on the same unit; it needs the on-screen text
+path added first.

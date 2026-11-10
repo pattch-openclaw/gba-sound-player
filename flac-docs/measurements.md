@@ -91,7 +91,7 @@ Full narratives, controls and method: [`perf-results.md`](perf-results.md).
 | **E2b** | Run-length table quotient count | **big win** | FIXED −19.17% marginal same-image (−21.71% vs live control), LPC −10.89%; FIXED mean 217.4% → 170.2% |
 | **E3** | Decode scratch in IWRAM | inert | +20 cycles/frame on both clips (measured inside E9) |
 | **E4** | i64 → i32 intermediates | big win, LPC only | LPC **−46.9%**, FIXED −3.7% |
-| **E5** | Emulator vs hardware arbitration | **artifact built 2026-11-10; hardware run pending** | `examples/e5_fetch`, same stream in `.text` and `.iwram`; mGBA harness check ratio ≈3.94; the on-silicon run is the arbitration |
+| **E5** | Emulator vs hardware arbitration | **measured 2026-11-10** | GBA 001 + GBA SP: ROM 4.085 / IWRAM 1.037 cycles/add, ratio **3.939**; mGBA reproduced within 2 cycles/call. The fetch pricing is hardware. |
 | **E6** | Hot decode *code* in IWRAM | **slower**, ruled out | FIXED +17.8% (217.4% → 256.1%), LPC +9.0% (652.3% → 711.0%) |
 | **E7** | `-Cforce-frame-pointers` | inert | byte-identical ROM with and without |
 | **E8** | Sub-stage attribution | measurement | FIXED: unary 56.2% + rest 38.5% = 94.6% of gross; LPC: i64 integrator 49.5% |
@@ -336,6 +336,7 @@ See [`playback-results.md`](playback-results.md) for the dated log.
 
 | **E5 harness check (2026-11-10, mGBA — not hardware)** | `e5-fetch.gba`, `WAITCNT=0x4317`: prefetch on ROM 16,735 / IWRAM 4,248 c/call, ratio **3.939**, ROM/add **4.085**, IWRAM/add **1.037**; prefetch off 16,749 / 4,259, ratio 3.932 | the harness reproduces the ~4-cycle ROM cost; mGBA prices prefetch on/off within 0.1% (it does not model the buffer). **No hardware result** — E5's arbitration is the on-silicon run on the GBA 001 and GBA SP. |
 
+| **E5 hardware arbitration (2026-11-10, GBA 001 + GBA SP, two runs each)** | prefetch on: ROM **16,733** / IWRAM **4,248** c/call, ratio **3.939**, add **4.085 / 1.037**; off: 16,747 / 4,257, ratio 3.933, add 4.088 / 1.039. Both units and both runs are identical. | hardware reproduces mGBA within **2 cycles/call** on ROM (0.012%) and **≤0.03%** on the ratio; prefetch on/off moves ROM by 14 c/call (0.08%) and IWRAM by 9 (0.2%). The 6a-5d placement is real; the kernel-level stack (39.74%) still needs the 6a-7 text run. |
 ## Determinism controls (why a zero is believable)
 
 - Repeated headless runs of one ROM are byte-identical (`cmp`), including every

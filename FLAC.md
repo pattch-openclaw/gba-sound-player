@@ -51,9 +51,10 @@ what the next one would otherwise have blamed:
 What this is **not**: a product claim. It is *decode only*; the producer's convert +
 push stages (~7.7 ms combined) are not in these windows; the shipped default
 (`TableCountKernel`) is untouched at 167% and no product path names `rice-arm`; and
-**E5 — hardware arbitration — is unrun**, which matters more now than ever,
-because a 4→1.4 fetch ratio is exactly what a cartridge model can get wrong. The
-direction is not model-dependent (no cache, 16-bit bus); the multiplier is mGBA's.
+**E5 — hardware arbitration — is now measured**: the ROM→IWRAM fetch pricing is
+hardware, not mGBA's model (GBA 001 and GBA SP reproduce mGBA within 2
+cycles/call; ratio 3.94). The full real-time claim still needs the kernel-level
+stack and the convert/push stages on hardware.
 Both product rates still fit with the kernel alone (61.7% at 18,157 Hz, 35.7% at
 10,512 Hz). See [`flac-docs/measurements.md`](flac-docs/measurements.md),
 [`plan-of-record.md`](flac-docs/plan-of-record.md) (6a-5c/6a-5d readings) and Q12 in
@@ -120,9 +121,9 @@ worst) and **LPC does not** (183.9% / 211.6%). The only in-budget full-rate FIXE
 decode ever measured was E9's stacked probe — which is exactly what item 6 exists
 to land, measure on the shipped path, and then arbitrate on hardware.
 
-**No GBA-hardware real-time claim exists.** All numbers are mGBA on this host;
-E5 (hardware arbitration) has never been run and is the only thing that can turn
-that sentence into a claim.
+**No full GBA-hardware real-time claim exists.** E5 has now confirmed the fetch
+model on two units (below), but the kernel-level stack and the convert/push
+stages are still mGBA-only.
 
 Which numbers may be quoted, how eras and denominators differ, and the full
 ledger: [`flac-docs/measurements.md`](flac-docs/measurements.md).
@@ -172,11 +173,12 @@ One line per rung; the full plan, bars and invariants are in
   kernel+i32): width marginal **+44.1 / +1,759.1 c/sample** (FIXED / LPC),
   stack **39.74% / 39.96%** FIXED, additivity reproduces to **0.06% / 0.005%**.
   New gate `item6a7-test`; the default image is unchanged.
-- **E5** — hardware arbitration of the ROM→IWRAM fetch ratio. The artifact is
-  built (`examples/e5_fetch/`, `make native-e5-fetch-rom`): the same ARM stream
-  in `.text` and `.iwram`, one calibration, results rendered on screen for a
-  stock GBA. mGBA harness check ratio ≈3.94; the on-silicon run on the GBA 001
-  and GBA SP is the arbitration and the only route to a real-time claim.
+- ~~**E5** — hardware arbitration of the ROM→IWRAM fetch ratio.~~ **Measured.**
+  The same ARM stream in `.text` and `.iwram`, timed on a GBA 001 and a GBA SP
+  (two runs each): **ROM 4.085 / IWRAM 1.037 cycles/add, ratio 3.939**;
+  hardware reproduces mGBA within 2 cycles/call. Prefetch on/off changes nothing
+  measurable. The fetch pricing is hardware; the kernel-level stack on hardware
+  still needs the 6a-7 text run.
 - **6b** — the container: the facade rewired onto `scan`, the real GAFP packer and
   manifest, and the rate-play path through a real manifest.
 - **Rate sweep** — the cross-rate profiling sweep on the improved decoder, which
@@ -229,7 +231,9 @@ cite its section names. Those names now resolve here:
   with assertions in it is 6a-4's (`make overlay-kernel-test`, 8 cases); the root
   crate's suite is still empty.
 - `flac-portable-check` is a compile gate: no host-side performance claim exists.
-- E5 (hardware arbitration) is unrun, so no real-time claim exists.
+- E5 is measured for the fetch ratio (hardware confirms mGBA to ≤0.05%); the
+  kernel-level stack and the convert/push stages on hardware are still open, so
+  no full real-time claim exists.
 - The `Rice` corpus behind the differentials has 0 escaped partitions, no
   `u32::MAX` fold and no codeword that overflows the guard — the mutation arms are
   green *correctly*. See [`method-and-gates.md`](flac-docs/method-and-gates.md).

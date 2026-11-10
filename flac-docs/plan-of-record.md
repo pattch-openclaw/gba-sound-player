@@ -95,9 +95,11 @@ projection re-opening on `docs/flac-6a5b-projection-reopened`)
   0.02%. New gate `item6a7-test`; default `spike-test` and the default image
   are unchanged.
 
-- **Next rung: §E5** — the hardware artifact is built (`examples/e5_fetch/`,
-  `make native-e5-fetch-rom`); the on-silicon run on the GBA 001 and GBA SP is
-  pending. It is the only route to a real-time claim. Then **6b**.
+- **E5 measured (2026-11-10):** the fetch ratio is hardware, not mGBA —
+  hardware reproduces the model to ≤0.05%, prefetch on/off changes nothing, and
+  the same stream is ~3.94× cheaper from IWRAM on both a GBA 001 and a GBA SP.
+  The kernel-level stack on hardware still needs the `flac-spike-6a7` text run.
+  Then **6b**.
 
 - **Not started:** 6a-8 (untriggered), all of 6b, and the product work
   they unblock (manifest, packer, facade, mixer).
@@ -839,30 +841,39 @@ these windows, mGBA is still the model, and E5 — hardware arbitration of the
 claim. The shipped default is still `TableCountKernel`; the kernel is carried by
 no product path yet (6b).
 
-### E5 — hardware arbitration: the fetch ratio, on silicon (in progress)
-
-**Status 2026-11-10:** the arbitration ROM is built (`examples/e5_fetch/`,
-`make native-e5-fetch-rom`, `e5-fetch.gba`); the hardware run is pending on the
-two units.
+### E5 — hardware arbitration: the fetch ratio is hardware (measured 2026-11-10)
 
 The artifact: one synthetic ARM instruction stream (4096 dependent `add`s per
 call) assembled into `.text` and `.iwram` in one image, timed in one calibration.
-It prints `WAITCNT`, prefetch state, per-call cycles and the ROM/IWRAM ratio, and
-renders the same table on screen (there is no serial console on hardware).
+Read from the on-screen 8 px table on both units, two runs each.
 
-mGBA harness check: **rom ≈ 4.09, iwram ≈ 1.04 cycles/add, ratio ≈ 3.94**, with
-`WAITCNT = 0x4317` (prefetch on). mGBA prices prefetch on and off identically —
-the hardware run is what adjudicates that.
+| unit | prefetch | ROM c/call | IWRAM c/call | ratio | ROM/add | IWRAM/add |
+|---|---|---:|---:|---:|---:|---:|
+| GBA 001 | on | 16,733 | 4,248 | 3.939 | 4.085 | 1.037 |
+| GBA 001 | off | 16,747 | 4,257 | 3.933 | 4.088 | 1.039 |
+| GBA SP | on | 16,733 | 4,248 | 3.939 | 4.085 | 1.037 |
+| GBA SP | off | 16,747 | 4,257 | 3.933 | 4.088 | 1.039 |
+| mGBA | on | 16,735 | 4,248 | 3.939 | 4.085 | 1.037 |
+| mGBA | off | 16,749 | 4,259 | 3.932 | 4.089 | 1.039 |
 
-**Pre-declared bar.** The number of record is the **ratio**, not absolute cycles.
-If hardware agrees with mGBA within ~10%, the model's fetch pricing stands and
-6a-5d's IWRAM placement is real; if prefetch ON collapses the ratio (ROM fetch
-near 1–2 cycles), the placement win is largely an mGBA artifact and 6a-5d's 2.9×
-must be re-read. Run on both a GBA 001 and a GBA SP; the secondary confirmation
-is `flac-spike-6a7.gba` on the same unit.
+**The arbitration is answered: the fetch pricing is hardware, not mGBA's
+model.** Hardware reproduces mGBA within **2 cycles/call** on ROM (0.012%) and
+0–2 on IWRAM; the ratio matches to **≤0.03%**. Both units are identical, and both
+runs are identical. (One GBA 001 run recorded `IWRAM 4357` for the off state — a
+transcription slip: the printed ratio 3.933 and `add 1.039` are the 4,257
+reading; 4,357 would have printed 3.844.)
 
-No result is claimed yet: this section records the artifact and the bar, not a
-reading.
+**Prefetch is not a lever here.** Disabling the cartridge prefetch buffer moves
+ROM by +14 cycles/call (0.08%) and IWRAM by +9 (0.2%). `WAITCNT` boots at
+`0x4317` on both units; mGBA prices the two states the same way.
+
+**What it does and does not settle.** The 6a-5d placement is real: the same
+instruction stream is **~3.94×** cheaper from IWRAM on silicon, and the ~4-cycle
+ROM cost is confirmed. It does not by itself confirm the kernel-level stack
+(39.74%): the synthetic stream prices fetch/execute, while the kernel's ~1.4
+average includes non-fetch work. The secondary confirmation is
+`flac-spike-6a7.gba` on hardware, which needs the on-screen text path added to
+that image first.
 
 ## Item 6b — the container (where frames come from)
 
