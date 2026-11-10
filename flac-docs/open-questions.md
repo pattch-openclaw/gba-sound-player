@@ -356,7 +356,7 @@ budget. So “where do the 48 c/sample go” is answered: six instructions times
 difference between two addresses, paid by both realizations. The width half landed
 in 6a-6 and 6a-7 measured it; neither carries the full-rate claim any more. **E5 answered this**: the fetch pricing is hardware (GBA 001 and GBA SP,
 two runs each, reproduce mGBA within 2 cycles/call; ratio 3.94). The remaining
-question is the kernel-level stack on hardware, not the model.
+question is the kernel-level stack on hardware (**6a-7b**), not the model.
 
 **Re-opened 2026-11-08: the premise did not survive a code-level check.** The
 48 c/sample is a quantity taken across two records, and the FIXED clip's own

@@ -336,7 +336,7 @@ See [`playback-results.md`](playback-results.md) for the dated log.
 
 | **E5 harness check (2026-11-10, mGBA — not hardware)** | `e5-fetch.gba`, `WAITCNT=0x4317`: prefetch on ROM 16,735 / IWRAM 4,248 c/call, ratio **3.939**, ROM/add **4.085**, IWRAM/add **1.037**; prefetch off 16,749 / 4,259, ratio 3.932 | the harness reproduces the ~4-cycle ROM cost; mGBA prices prefetch on/off within 0.1% (it does not model the buffer). **No hardware result** — E5's arbitration is the on-silicon run on the GBA 001 and GBA SP. |
 
-| **E5 hardware arbitration (2026-11-10, GBA 001 + GBA SP, two runs each)** | prefetch on: ROM **16,733** / IWRAM **4,248** c/call, ratio **3.939**, add **4.085 / 1.037**; off: 16,747 / 4,257, ratio 3.933, add 4.088 / 1.039. Both units and both runs are identical. | hardware reproduces mGBA within **2 cycles/call** on ROM (0.012%) and **≤0.03%** on the ratio; prefetch on/off moves ROM by 14 c/call (0.08%) and IWRAM by 9 (0.2%). The 6a-5d placement is real; the kernel-level stack (39.74%) still needs the 6a-7 text run. |
+| **E5 hardware arbitration (2026-11-10, GBA 001 + GBA SP, two runs each)** | prefetch on: ROM **16,733** / IWRAM **4,248** c/call, ratio **3.939**, add **4.085 / 1.037**; off: 16,747 / 4,257, ratio 3.933, add 4.088 / 1.039. Both units and both runs are identical. | hardware reproduces mGBA within **2 cycles/call** on ROM (0.012%) and **≤0.03%** on the ratio; prefetch on/off moves ROM by 14 c/call (0.08%) and IWRAM by 9 (0.2%). The 6a-5d placement is real; the kernel-level stack (39.74%) is **6a-7b**. |
 ## Determinism controls (why a zero is believable)
 
 - Repeated headless runs of one ROM are byte-identical (`cmp`), including every

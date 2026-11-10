@@ -98,10 +98,13 @@ projection re-opening on `docs/flac-6a5b-projection-reopened`)
 - **E5 measured (2026-11-10):** the fetch ratio is hardware, not mGBA —
   hardware reproduces the model to ≤0.05%, prefetch on/off changes nothing, and
   the same stream is ~3.94× cheaper from IWRAM on both a GBA 001 and a GBA SP.
-  The kernel-level stack on hardware still needs the `flac-spike-6a7` text run.
+- **Next rung: 6a-7b — the kernel stack on hardware.** The 6a-7 image gains an
+  on-screen summary (gated under `item6a7-wide`), then runs on the GBA 001 and
+  GBA SP. It tests the non-fetch path E5 left open (bit-reader ROM reads, tables,
+  residual, stereo). Scope, reference numbers and the ±2% bar: "6a-7b" below.
   Then **6b**.
 
-- **Not started:** 6a-8 (untriggered), all of 6b, and the product work
+- **Not started:** 6a-7b, 6a-8 (untriggered), all of 6b, and the product work
   they unblock (manifest, packer, facade, mixer).
 
 ## Item 6a — the overlay (the realization)
@@ -122,6 +125,7 @@ from and it does not turn `scan` on.
 | **6a-5d** ✅ | **The codeword loop's placement.** The same kernel, the same instruction stream, resident in IWRAM instead of ROM: `.section .iwram,"ax",%progbits` in place of `.text` (plain `.iwram`; `.text_iwram` is E6's trap and is still a trap). Ungated by `iwram-pin`, because a ROM-resident version of this body is simply the wrong code and `rice-arm` is never a shipped path. | Cycles, same-image; `.text`/`.iwram` sizes read from the ELF; the objdump gate re-read at the new address; `overlay-kernel-test` (8 device arms) + `overlay-test-arm` + `item6a5b-test` | that a cost measured in instruction *fetch* would be left in the wrong memory, because a 2024-era probe of a different code shape said fetch did not matter — **it was**, and the fix is 2.9× |
 | **6a-6** ✅ | **Landed 2026-11-09.** The core's default width: `i32-integrator` on, ring sites unconditionally narrow, LPC guarded per subframe by `lpc_accumulator_fits_i32`, i64 as the reference/escape leg (`ArithmeticWidth`). Design in "The width decision" below. The stack verdict was 6a-5b's and the full-rate claim did not need this rung (kernel + IWRAM is 48.3%); the width still matters for the LPC clip and the decorrelate site. **Cycle marginal closed by 6a-7:** the same-image i64 leg costs **+44.1 c/sample** (FIXED) / **+1,759.1** (LPC). | Bit-exact vs `flac -d`; width differential suite; guard boundary + same-build two-leg witnesses; both configurations gated (`flac-test`, `flac-test-wide`); codegen attributed symbol by symbol. Mutation-witnessed. | the guard is wrong (unsound), the legs are not equivalent, or a both-legs build costs more than the win |
 | **6a-7** ✅ | **Landed 2026-11-10.** The stack confirmation **and** 6a-6's open width marginal in one image: `ctrl` (i32 default), `wide` (the vendored pre-6a-6 i64 path, `src/wide.rs`), `asm` (the landed kernel over the i32 default). Re-anchors the E numbers on the post-6a image, which 6b-1 inherits. | Cycles, same-image, per-frame paired; the wide leg also pinned to the reference PCM and to `ctrl` frame by frame. | that two measured wins composed negatively (E9's additivity does not reproduce) — **they do: to 0.06% / 0.005%** |
+| **6a-7b** | **The kernel stack on hardware (next rung).** Add the on-screen 8 px summary to `flac-spike-6a7.gba` (feature-gated under `item6a7-wide`, so the default image is unchanged), then run it on the GBA 001 and GBA SP and read `ctrl`/`wide`/`asm`, the stack and the width marginal. This is the non-fetch path E5 did not cover. | Cycles, same-image, per-frame paired, two runs per unit; the existing per-arm PCM pins and frame-by-frame equality witness are the correctness gate. | that the non-fetch path (bit-reader ROM reads, tables, residual, stereo) diverges from mGBA, so the 39.74% is not the hardware number. |
 | **6a-8** *(conditional)* | E8-style **sub-stage probe** over the asm kernel: tier-1 / tier-2 / tier-3 / refill / fold priced separately. Run **only** if 6a-5 lands inside or near the noise band. | Cycles, sub-stage | that a near-bar result is unattributable to a leg |
 
 ### 6a-4 — landed, and what the device witness actually found
@@ -869,9 +873,47 @@ ROM by +14 cycles/call (0.08%) and IWRAM by +9 (0.2%). `WAITCNT` boots at
 instruction stream is **~3.94×** cheaper from IWRAM on silicon, and the ~4-cycle
 ROM cost is confirmed. It does not by itself confirm the kernel-level stack
 (39.74%): the synthetic stream prices fetch/execute, while the kernel's ~1.4
-average includes non-fetch work. The secondary confirmation is
-`flac-spike-6a7.gba` on hardware, which needs the on-screen text path added to
-that image first.
+average includes non-fetch work. The secondary confirmation is **6a-7b** below.
+
+### 6a-7b — the kernel stack on hardware (planned, next rung)
+
+**Why.** E5 answered the fetch question: the same instruction stream is 4.085
+cycles/add from ROM and 1.037 from IWRAM on both a GBA 001 and a GBA SP, and
+mGBA reproduces that within 2 cycles/call (ratio 3.939). What E5 did *not* touch
+is the rest of the decode path — the bit reader's ROM byte reads, the pinned
+tables, residual, stereo. 6a-7's 39.74% stack is still an mGBA reading.
+
+**What.** The 6a-7 image already times the three legs (`ctrl` i32, `wide` i64,
+`asm` kernel+i32, body in IWRAM). It has no hardware-readable output, so:
+1. add the on-screen summary (the 8 px fusion-pixel subset; `examples/e5_fetch/
+   src/text.rs` is the template) under `item6a7-wide`; the default spike image
+   stays byte-identical;
+2. run it on both units, two runs each, and read the summary: per clip
+   `ctrl`/`wide`/`asm` means, `ctrl − asm` (stack), `wide − ctrl` (width), and
+   the worst-frame %.
+
+The per-arm PCM pins and the frame-by-frame equality witness are the
+correctness gate; a timing number only counts on proven bytes.
+
+**The mGBA reference to beat** (6a-7, 2026-11-10):
+
+| clip | ctrl | wide | asm | stack | width | worst |
+|---|---:|---:|---:|---:|---:|---:|
+| FIXED | 1,662,788 | 1,752,704 | 416,804 | 1,245,984 | 89,915 | 39.96% |
+| LPC | 2,987,753 | 6,573,096 | 1,751,090 | 1,236,663 | 3,585,343 | 167.85% |
+
+**Pre-declared bar.** The same-image `asm` mean and the `ctrl − asm` stack on
+hardware must land within **±2%** of the mGBA values above (FIXED `asm`
+408,468–425,140 c/frame; stack 1,221,064–1,270,904), and the width marginal
+within ±2%. If they do, the non-fetch path is validated and 39.74% stands as a
+hardware decode number. If they do not, the delta *is* the finding: the
+non-fetch path diverges, and the mGBA stack must not be quoted as a hardware
+number until a probe prices it. The rate decision is robust either way — FIXED
+fits 32,768 Hz under 48% even with a 20% hardware penalty on the stack.
+
+**What is next after it.** 6b (the container: facade onto `scan`, the real GAFP
+packer/manifest, rate-play through a manifest), then the product stages outside
+decode (convert/push, mixer/DMA, Phase 2 step 9). Still decode-only either way.
 
 ## Item 6b — the container (where frames come from)
 
