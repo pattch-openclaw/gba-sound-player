@@ -102,6 +102,15 @@ Whole-image sha is the wrong control for "did this change the ROM": the screen
 moved two `core::panic::Location` line numbers in `.rodata` and nothing in
 `.text` (`flac-docs/plan-of-record.md`, 6a-7b, the control build).
 
+**And the ROM must stop presenting after the screen is drawn.** Under
+`item6a7-wide` it ends in a bare `loop {}`, not the frame-commit loop the
+colour-only verdict uses. `agb`'s `TiledGraphicsFrame::commit` computes DISPCNT's
+background-enable mask from the backgrounds *shown into that frame*, so a commit
+from a fresh frame writes `enabled_backgrounds = 0` and repaints the backdrop
+alone. That is not theory: the first hardware run (GBA 001, twice, 2026-11-10)
+showed exactly that — blue backdrop, no text — because the present loop erased
+what `show()` had just committed. A headless emulator cannot see it.
+
 Standalone workspace; cargo config is **inherited** from the repo root — do
 not add a local `.cargo/config.toml` (the duplicated `-Tgba.ld` leak, flac-docs/method-and-gates.md).
 

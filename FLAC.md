@@ -22,8 +22,14 @@ three legs as a ten-line summary on the GBA screen (fit measured in-ROM: 10 line
 133 px wide, 121 px tall) and logs the same ten lines to serial, so the two
 channels cannot disagree. Its same-image mGBA reference reproduces the pre-summary
 6a-7 record to **≤18 cycles/frame on every leg** (`.text` byte-identical; the
-default image byte-identical outright). The two hardware runs — the rung's actual
-arbitration — are the part still owed.
+default image byte-identical outright). Its first hardware runs (GBA 001, twice)
+then produced the project's **first on-silicon correctness result** — the blue
+`harness_ok` backdrop means both PCM pins, the per-frame equality witness across
+`ctrl`/`wide`/`asm` and calibration all passed on the ARM7TDMI — and a display bug
+no headless emulator could see: a trailing `frame.commit()` disabled the
+background `show()` had just painted, so the numbers never appeared. Fixed
+(`loop {}` after the present; every mGBA cycle count identical afterwards). The
+timing numbers on hardware are the part still owed.
 
 That is where four rungs of differential went, and the answer was not any of the
 things they suspected. It is worth reading in order, because each rung rules out
@@ -187,13 +193,16 @@ One line per rung; the full plan, bars and invariants are in
   hardware reproduces mGBA within 2 cycles/call. Prefetch on/off changes nothing
   measurable. The fetch pricing is hardware; the kernel-level stack on hardware
   is **6a-7b** (next rung).
-- **6a-7b** — the kernel stack on hardware. **Instrument landed 2026-11-10**
-  (`flac-spike-6a7.gba` `615d38be2786…`, `.text` `9f0b19e924cd…`): the ten-line on-screen summary plus the
-  same ten lines on serial, with a fit check, and a same-image mGBA reference that
-  reproduces the pre-summary 6a-7 record to ≤18 cycles/frame. **Still owed:** run
-  it on the GBA 001 and SP, two runs each, and check the 39.74% stack against the
-  pre-declared ±2% bar (±2% of this image: FIXED `asm` 408,484–425,157 c/frame,
-  stack 1,221,056–1,270,895). It covers the non-fetch path E5 left open. Then 6b.
+- **6a-7b** — the kernel stack on hardware. **Instrument landed and screen-bug
+  fixed 2026-11-10** (`flac-spike-6a7.gba` `7e0ff19b7a0a…`, `.text`
+  `1e14085e36db…`): the ten-line on-screen summary plus the same ten lines on
+  serial, a fit check, and a same-image mGBA reference reproducing the pre-summary
+  6a-7 record to ≤18 cycles/frame. A GBA 001 has run it twice: **the decode path
+  is bit-exact on hardware**, and the first build's blank-blue screen was a
+  `frame.commit()` erasing its own background (fixed; no cycle count moved).
+  **Still owed:** the timing numbers — two runs on the 001 and two on the SP
+  against the pre-declared ±2% bar (FIXED `asm` 408,484–425,157 c/frame, stack
+  1,221,056–1,270,895). Then 6b.
 - **6b** — the container: the facade rewired onto `scan`, the real GAFP packer and
   manifest, and the rate-play path through a real manifest.
 - **Rate sweep** — the cross-rate profiling sweep on the improved decoder, which

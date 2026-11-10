@@ -20,8 +20,28 @@
 //!
 //! The template is `examples/e5_fetch/src/text.rs`, deliberately: one renderer,
 //! one palette convention (entry 0 backdrop, entry 1 glyphs), one (4,4) origin.
-//! The only difference is the font path — `include_font!` resolves relative to
-//! the file that invokes it, so this one needs one more `..`.
+//!
+//! ## [`show`] is a one-shot present, and the caller must not commit again
+//!
+//! `show` builds a `RegularBackground` that lives only for this call, draws the
+//! text into it, and commits **one** frame. That commit is the only reason the
+//! text is ever visible, and it is also why the calling ROM must stop presenting
+//! afterwards.
+//!
+//! agb 0.25's `TiledGraphicsFrame::commit` derives DISPCNT's background-enable
+//! mask from the backgrounds *shown into that frame* (`BackgroundFrame::
+//! num_regular`, reset to 0 by `Graphics::frame()`). A commit from a fresh frame
+//! therefore writes `enabled_backgrounds = 0` and repaints the backdrop alone —
+//! the text is gone, the palette (a direct VRAM write) is not. That is not a
+//! hypothesised failure: it is what the first hardware run of this rung showed
+//! on a GBA 001, twice — **a blue screen with no text** — because the spike ROM
+//! ended in a frame-commit loop left over from its colour-only verdict. No mGBA
+//! run could see it, because the harness is headless and nothing was ever
+//! displayed to be erased.
+//!
+//! So the 6a-7 image ends in a bare `loop {}` under `item6a7-wide`, which is
+//! E5's shape and is proven on both units. If this module is ever reused, the
+//! rule travels with it: after [`show`], present nothing.
 
 use agb::display::{
     Palette16, Priority, Rgb15,

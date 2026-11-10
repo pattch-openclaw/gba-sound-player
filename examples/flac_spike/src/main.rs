@@ -1846,6 +1846,27 @@ mod rom {
             );
         }
 
+        // [6a-7b] The 6a-7 image leaves the summary on screen and stops
+        // presenting. This is not cosmetic and it is not a style choice — it is
+        // the bug the first hardware run found (2026-11-10, GBA 001, twice: a
+        // blue screen with no text).
+        //
+        // `TiledGraphicsFrame::commit` computes DISPCNT's enabled-background
+        // mask from the backgrounds *shown into that frame* (`BackgroundFrame::
+        // num_regular`, which `Graphics::frame()` resets to 0 — agb 0.25,
+        // `src/display/tiled.rs`). So `show()`'s own commit paints the ten
+        // lines, and then the next iteration of the pre-existing commit loop
+        // builds a fresh frame with no background, writes
+        // `enabled_backgrounds = 0`, and leaves the backdrop alone: blue, empty.
+        // The palette survives because it is a direct VRAM write — which is why
+        // the failure looked like "the palette worked and the tiles did not".
+        //
+        // No mGBA run could see it: the harness is headless, so nothing was ever
+        // displayed to be erased. E5's ROM ends in a bare `loop {}` for exactly
+        // this reason and its table is proven on both units; this is that shape.
+        #[cfg(feature = "item6a7-wide")]
+        loop {}
+        #[cfg(not(feature = "item6a7-wide"))]
         loop {
             let frame = gfx.frame();
             frame.commit();

@@ -104,8 +104,15 @@ projection re-opening on `docs/flac-6a5b-projection-reopened`)
   measured in-ROM) and logs the same ten lines to serial, so an mGBA run and a
   stock unit print one string. The mGBA reference for **this image** is re-taken
   (two runs, byte-identical) and reproduces the pre-summary 6a-7 record to
-  **≤18 cycles/frame** on every leg. What is left is the two units: run the ROM
-  on the GBA 001 and SP, two runs each, and test the ±2% bar below. Then **6b**.
+  **≤18 cycles/frame** on every leg. **The GBA 001 has run it twice, and it
+  established the correctness half on silicon** — blue backdrop means assets, both
+  PCM pins, the per-frame equality witness and calibration all passed on hardware
+  — and then found a display bug no headless emulator could see: the ROM's
+  trailing frame-commit loop blanked the background it had just painted, so the
+  text never showed. Fixed (`loop {}` after the present, E5's shape; `.text`
+  −52 B; every mGBA number identical afterwards). What is left is the numbers:
+  two runs on the GBA 001 and two on the SP against the ±2% bar below. Then
+  **6b**.
 
 - **Not started:** 6a-7b's hardware runs, 6a-8 (untriggered), all of 6b, and the product work
   they unblock (manifest, packer, facade, mixer).
@@ -963,6 +970,34 @@ the measured path nothing. Measured, not assumed: the layout worry was real in
 principle and did not fire here, and the reference above is the image the units
 will run, so the comparison is same-image either way.
 
+**What the first hardware runs found — and no emulator could.** On 2026-11-10 the
+image was run twice on a GBA 001. Both runs reached the summary's **pass backdrop
+and nothing else: blue, no text.** The backdrop being blue rather than red is
+itself a result, and the larger half of this rung: blue is the `harness_ok`
+colour, so the assets, both per-arm PCM pins, the frame-by-frame equality witness
+across all three legs and the calibration stability check had all passed **on
+silicon** — the first time this decoder's correctness has been established on
+hardware rather than in mGBA. What failed was the display, and only the display.
+
+The mechanism, read out of `agb` 0.25 rather than guessed: `TiledGraphicsFrame::
+commit` derives DISPCNT's background-enable mask from the backgrounds *shown into
+that frame* (`BackgroundFrame::num_regular`, reset to 0 by `Graphics::frame()` —
+`src/display/tiled.rs`). `show()` commits the ten lines; the spike ROM then
+entered the frame-commit loop it has carried since its colour-only verdict. A
+fresh frame holds no background, so `commit` writes `enabled_backgrounds = 0` and
+the backdrop alone is repainted ~16 ms later. The palette survives because it is
+a **direct VRAM write** (`PALETTE_BACKGROUND`, a `MemoryMapped1DArray`), which is
+exactly why the failure presented as "the palette worked and the tiles did not".
+
+The fix is E5's shape: under `item6a7-wide` the ROM ends in `loop {}` and presents
+nothing after `show()`. Nothing else changed, and that is measured rather than
+asserted — the default image is still byte-identical, the fix moved `.text` by
+**−52 B** (89,484 → 89,432 B; `9f0b19e924cd…` → `1e14085e36db…`, the removed
+`frame()` / `commit()` and nothing else), and **every leg's mGBA number came back
+identical to the cycle** afterwards. Two lessons worth carrying: a headless
+emulator cannot see a display bug, because nothing is ever drawn to be erased; and
+the same trap is one `frame.commit()` away in any ROM that shows a static screen.
+
 **Pre-declared bar (unchanged, quoted against this image).** On hardware, two runs
 per unit, the same-image `asm` mean and `ctrl − asm` stack must land within **±2%**
 — FIXED `asm` **408,484–425,157** c/frame, stack **1,221,056–1,270,895**, width
@@ -973,7 +1008,9 @@ stack must not be quoted as a hardware number until a probe prices it. The rate
 decision is robust either way: FIXED fits 32,768 Hz under 48% even with a 20%
 hardware penalty on the stack.
 
-**Gates.** `item6a7-test` **20 + 1 + 10** (the five new `summary` tests pin the
+**Gates.** After the screen fix, one headless mGBA run reproduces all ten lines
+exactly (the fix is display-only and the numbers say so). `item6a7-test`
+**20 + 1 + 10** (the five new `summary` tests pin the
 label rule, the fixed-point formatter, `Leg::mean`, both delta signs and the
 rendered screen, including the percent-vs-per-mille factor — an off-by-100 there
 is invisible on a screen), `spike-test` **15 + 10**, `item6a5-test` **15 + 3 + 10**,
@@ -984,11 +1021,12 @@ same ten lines again. A full run takes ~6m40 under `mgba-test-runner` (the ROM
 loops after printing, so `timeout -k 5 400` is the intended invocation and exit
 124 is success).
 
-**How to quote this image.** By `.text` (`9f0b19e924cd…`, 89,484 B) and by its ten
-printed lines, not by a whole-image sha. The image as built for these runs is
-`615d38be2786…`, and that value moves with any edit that shifts a line number in
-`main.rs`, because `core::panic::Location` lives in `.rodata`. The control-build
-paragraph above is that same fact measured rather than argued.
+**How to quote this image.** By `.text` (`1e14085e36db…`, 89,432 B) and by its ten
+printed lines, not by a whole-image sha. The image with the screen fix is
+`7e0ff19b7a0a…`; the pre-fix build whose runs found the bug was `615d38be2786…`,
+and those values move with any edit that shifts a line number in `main.rs`,
+because `core::panic::Location` lives in `.rodata`. The control-build paragraph
+above is that same fact measured rather than argued.
 
 **Not claimed, and not doable here.** The two hardware runs are the rung's own
 arbitration and this host has no unit and no display: the instrument, the
