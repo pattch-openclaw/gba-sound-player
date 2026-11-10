@@ -1,0 +1,28 @@
+[package]
+name = "e5-fetch"
+version = "0.1.0"
+edition = "2024"
+description = "E5 hardware arbitration: the same ARM instruction stream timed from cartridge ROM and from IWRAM in one image"
+publish = false
+
+# Standalone workspace, like every examples/ crate here. The root config
+# (`target = thumbv4t-none-eabi`, `-Zbuild-std`) is inherited on purpose — do
+# NOT add a local `.cargo/config.toml` (the duplicated `-Tgba.ld` leak).
+[workspace]
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+agb = "0.25.0"
+
+[[bin]]
+name = "e5-fetch"
+path = "src/main.rs"
+test = false
+bench = false
+
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true

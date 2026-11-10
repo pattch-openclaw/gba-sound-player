@@ -91,7 +91,7 @@ Full narratives, controls and method: [`perf-results.md`](perf-results.md).
 | **E2b** | Run-length table quotient count | **big win** | FIXED −19.17% marginal same-image (−21.71% vs live control), LPC −10.89%; FIXED mean 217.4% → 170.2% |
 | **E3** | Decode scratch in IWRAM | inert | +20 cycles/frame on both clips (measured inside E9) |
 | **E4** | i64 → i32 intermediates | big win, LPC only | LPC **−46.9%**, FIXED −3.7% |
-| **E5** | Emulator vs hardware arbitration | **never run** | — (the only thing that can turn "no real-time claim" into one) |
+| **E5** | Emulator vs hardware arbitration | **measured 2026-11-10** | GBA 001 + GBA SP: ROM 4.085 / IWRAM 1.037 cycles/add, ratio **3.939**; mGBA reproduced within 2 cycles/call. The fetch pricing is hardware. |
 | **E6** | Hot decode *code* in IWRAM | **slower**, ruled out | FIXED +17.8% (217.4% → 256.1%), LPC +9.0% (652.3% → 711.0%) |
 | **E7** | `-Cforce-frame-pointers` | inert | byte-identical ROM with and without |
 | **E8** | Sub-stage attribution | measurement | FIXED: unary 56.2% + rest 38.5% = 94.6% of gross; LPC: i64 integrator 49.5% |
@@ -333,6 +333,10 @@ See [`playback-results.md`](playback-results.md) for the dated log.
 
 | **6a-7 width + stack (2026-11-10, one image, 157 frames/clip)** | `flac-spike-6a7.gba`; `ctrl` (i32) FIXED 1,662,788 / LPC 2,987,753 c/frame; `wide` (vendored pre-6a-6 i64) 1,752,704 / 6,573,096; `asm` (kernel+i32, IWRAM) **416,804 / 1,751,090**. Width `wide − ctrl` = **+14,116,716 / +562,898,810 cycles per clip = +89,915 / +3,585,343 c/frame = +44.1 / +1,759.1 c/sample**, 157/157 frames. Stack `ctrl − asm` = **1,245,984 / 1,236,663 c/frame**, 157/157. | Q5a: additivity reproduces — `asm_i32 + width` = 506,719 / 5,336,433 c/frame vs 6a-5d's `asm_i64` 506,413 / 5,336,152 (**+0.06% / +0.005%**). The wide leg reproduces 6a-5d's i64 `ctrl` to **+0.017% / +0.004%**. FIXED stack **39.74% mean / 39.96% worst** (from 48.29%); LPC 166.97% (from 508.8%). |
 | 6a-7 determinism / gates | two headless runs (one across a rebuild after `cargo fmt`) byte-identical, 1009 lines `cmp`; `item6a7-test` 26 passed | the wide leg is pinned to the reference PCM and to `ctrl` frame by frame; the default image is unchanged (`a03cc332f080…`, `.text` 46,428 B) |
+
+| **E5 harness check (2026-11-10, mGBA — not hardware)** | `e5-fetch.gba`, `WAITCNT=0x4317`: prefetch on ROM 16,735 / IWRAM 4,248 c/call, ratio **3.939**, ROM/add **4.085**, IWRAM/add **1.037**; prefetch off 16,749 / 4,259, ratio 3.932 | the harness reproduces the ~4-cycle ROM cost; mGBA prices prefetch on/off within 0.1% (it does not model the buffer). **No hardware result** — E5's arbitration is the on-silicon run on the GBA 001 and GBA SP. |
+
+| **E5 hardware arbitration (2026-11-10, GBA 001 + GBA SP, two runs each)** | prefetch on: ROM **16,733** / IWRAM **4,248** c/call, ratio **3.939**, add **4.085 / 1.037**; off: 16,747 / 4,257, ratio 3.933, add 4.088 / 1.039. Both units and both runs are identical. | hardware reproduces mGBA within **2 cycles/call** on ROM (0.012%) and **≤0.03%** on the ratio; prefetch on/off moves ROM by 14 c/call (0.08%) and IWRAM by 9 (0.2%). The 6a-5d placement is real; the kernel-level stack (39.74%) still needs the 6a-7 text run. |
 ## Determinism controls (why a zero is believable)
 
 - Repeated headless runs of one ROM are byte-identical (`cmp`), including every

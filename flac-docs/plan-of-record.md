@@ -95,8 +95,11 @@ projection re-opening on `docs/flac-6a5b-projection-reopened`)
   0.02%. New gate `item6a7-test`; default `spike-test` and the default image
   are unchanged.
 
-- **Next rung:** **§E5** — hardware arbitration of the 4→1.4 fetch ratio, the
-  only route to a real-time claim. Then **6b** (the container).
+- **E5 measured (2026-11-10):** the fetch ratio is hardware, not mGBA —
+  hardware reproduces the model to ≤0.05%, prefetch on/off changes nothing, and
+  the same stream is ~3.94× cheaper from IWRAM on both a GBA 001 and a GBA SP.
+  The kernel-level stack on hardware still needs the `flac-spike-6a7` text run.
+  Then **6b**.
 
 - **Not started:** 6a-8 (untriggered), all of 6b, and the product work
   they unblock (manifest, packer, facade, mixer).
@@ -835,6 +838,40 @@ these windows, mGBA is still the model, and E5 — hardware arbitration of the
 4→1.4 fetch ratio — is the only thing that can turn any of this into a real-time
 claim. The shipped default is still `TableCountKernel`; the kernel is carried by
 no product path yet (6b).
+
+### E5 — hardware arbitration: the fetch ratio is hardware (measured 2026-11-10)
+
+The artifact: one synthetic ARM instruction stream (4096 dependent `add`s per
+call) assembled into `.text` and `.iwram` in one image, timed in one calibration.
+Read from the on-screen 8 px table on both units, two runs each.
+
+| unit | prefetch | ROM c/call | IWRAM c/call | ratio | ROM/add | IWRAM/add |
+|---|---|---:|---:|---:|---:|---:|
+| GBA 001 | on | 16,733 | 4,248 | 3.939 | 4.085 | 1.037 |
+| GBA 001 | off | 16,747 | 4,257 | 3.933 | 4.088 | 1.039 |
+| GBA SP | on | 16,733 | 4,248 | 3.939 | 4.085 | 1.037 |
+| GBA SP | off | 16,747 | 4,257 | 3.933 | 4.088 | 1.039 |
+| mGBA | on | 16,735 | 4,248 | 3.939 | 4.085 | 1.037 |
+| mGBA | off | 16,749 | 4,259 | 3.932 | 4.089 | 1.039 |
+
+**The arbitration is answered: the fetch pricing is hardware, not mGBA's
+model.** Hardware reproduces mGBA within **2 cycles/call** on ROM (0.012%) and
+0–2 on IWRAM; the ratio matches to **≤0.03%**. Both units are identical, and both
+runs are identical. (One GBA 001 run recorded `IWRAM 4357` for the off state — a
+transcription slip: the printed ratio 3.933 and `add 1.039` are the 4,257
+reading; 4,357 would have printed 3.844.)
+
+**Prefetch is not a lever here.** Disabling the cartridge prefetch buffer moves
+ROM by +14 cycles/call (0.08%) and IWRAM by +9 (0.2%). `WAITCNT` boots at
+`0x4317` on both units; mGBA prices the two states the same way.
+
+**What it does and does not settle.** The 6a-5d placement is real: the same
+instruction stream is **~3.94×** cheaper from IWRAM on silicon, and the ~4-cycle
+ROM cost is confirmed. It does not by itself confirm the kernel-level stack
+(39.74%): the synthetic stream prices fetch/execute, while the kernel's ~1.4
+average includes non-fetch work. The secondary confirmation is
+`flac-spike-6a7.gba` on hardware, which needs the on-screen text path added to
+that image first.
 
 ## Item 6b — the container (where frames come from)
 
