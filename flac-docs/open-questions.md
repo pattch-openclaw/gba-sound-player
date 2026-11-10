@@ -153,8 +153,8 @@ i32::MAX`, armed per **subframe** (the grain the parsed fields support; the fram
 reports the OR of its halves). Both legs are gated (`flac-test` / `flac-test-wide`)
 and the wide escape is reachable — a boundary test and a same-build differential
 witness it. The both-legs codegen cost is +440 B of `.text` on the default
-instrument (record: `plan-of-record.md` 6a-6). The cycle marginal needs an
-in-image i64 realization (E4's pattern); no width cycle number is claimed yet.
+instrument (record: `plan-of-record.md` 6a-6). The cycle marginal is closed by
+6a-7: the same-image i64 leg costs **+44.1 c/sample** (FIXED) / **+1,759.1** (LPC).
 
 The decision is taken (i32 default, feature-gated, armed per frame at parse time
 from data the header already parsed, i64 as the escape leg rather than an error, and
@@ -179,6 +179,11 @@ FIXED, and its LPC equivalent is *not* stable across denominators).
 **Opened by:** E9 (additive composition) and item 5 PR 4's own "what this record
 does not settle". **Owned by:** 6a-7 (confirmation, no new code) and, if anyone
 wants the second one, a new probe.
+
+**Q5a CLOSED 2026-11-10 (6a-7).** Additivity reproduces: `asm_i32 + width` =
+506,719 / 5,336,433 c/frame vs 6a-5d's `asm_i64` 506,413 / 5,336,152
+(+0.06% / +0.005%). Q5b (a portable kernel written for Thumb-1) remains open and
+is a new probe, not this item.
 
 Q5a is a confirmation on the current tree of a pairing E9 measured as additive, and
 it is the configuration the product ships; its second job is re-anchoring the E
@@ -349,8 +354,7 @@ costs 4 — by 6a-5d: because it was being fetched from cartridge ROM. The same
 stream in IWRAM is **2.9×** cheaper and puts 32,768 Hz FIXED decode at **48.29%** of
 budget. So “where do the 48 c/sample go” is answered: six instructions times the
 difference between two addresses, paid by both realizations. The width half landed
-in 6a-6; 6a-7 inherits the confirmation, but neither carries the full-rate claim
-any more. **The live question is now E5** — whether a 4→1.4 fetch ratio is hardware or
+in 6a-6 and 6a-7 measured it; neither carries the full-rate claim any more. **The live question is now E5** — whether a 4→1.4 fetch ratio is hardware or
 mGBA's cartridge model.
 
 **Re-opened 2026-11-08: the premise did not survive a code-level check.** The

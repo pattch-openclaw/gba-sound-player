@@ -12,8 +12,10 @@ plays real music at 10,512 Hz with correct tempo and pitch (audibly verified); t
 and the ARM kernel — landed, witnessed on mGBA's ARM7TDMI, measured through the
 shipped seam — now decodes FIXED at **48.3% of the 32,768 Hz budget** (worst frame
 48.5%), **2.9× faster than it was a day earlier, from one section directive**.
-The core's arithmetic-width default landed as 6a-6 (2026-11-09): `i32` with a
-per-subframe guard and the `i64` escape leg — codegen only, no cycle claim yet.
+The core's arithmetic-width default landed as 6a-6 (2026-11-09), and 6a-7
+(2026-11-10) priced it same-image and re-anchored the stack: **kernel + i32 is
+39.74% mean / 39.96% worst** of the 32,768 Hz budget on FIXED, and the i64 leg
+costs +44.1 c/sample against the i32 default. Additivity reproduces to 0.06%.
 
 That is where four rungs of differential went, and the answer was not any of the
 things they suspected. It is worth reading in order, because each rung rules out
@@ -86,7 +88,7 @@ alternative codec, evaluated under the same constraint, is
 |---|---|
 | `crates/flac-lite` | Portable core: `no_std`, zero deps, zero alloc, `#![deny(unsafe_code)]` plus named `cfg`-gated `.iwram` pin attributes (exactly one in a default build). Frame decode is **complete** (`bits` → `stream` → `frame` → `subframe` → `residual` → `stereo`), witnessed bit-exact against `flac -d` on host and in the ROM image. Per-frame `driver`, table-less `scan` walk (feature), CRC verification (feature), `RiceKernel` seam. Arithmetic width (6a-6): `i32-integrator` on by default, guarded per subframe, `i64` reference/escape leg (`make flac-test-wide`). Still `todo!()`: the `decoder` facade, `format::Manifest`, `Blocksize::samples` and `EncodeProfile::validate`. |
 | `crates/flac-lite-gba` | The GBA overlay. Two `RiceKernel` arms behind their own features: `rice-twin` (6a-3, Rust, forwards to the core's twin) and **`rice-arm`** (6a-4: the E10 ARM-mode kernel via `global_asm!`, its FFI and `KernelAbi`, three tables under `iwram-pin`). A **default build still contains no kernel, no asm, no FFI and no `unsafe`**; the shipped default is still `TableCountKernel`. |
-| `examples/flac_spike` (6a-5 arms) | Three feature-gated arms in the measurement instrument (`item6a5-rust`, `item6a5-asm`, `item6a5-arms`), reached through the **product call path** (`driver::decode_one_with` → `frame::decode_frame_with`), never a vendored decode loop. `make item6a5-test`, `item6a5-arms-rom`, `item6a5-asm-rom`. |
+| `examples/flac_spike` (6a-5 / 6a-7 arms) | Three feature-gated product-path arms (`item6a5-rust`, `item6a5-asm`, `item6a5-arms`), plus 6a-7's **vendored** width leg (`item6a7-wide`, `src/wide.rs`, the pre-6a-6 i64 path) timed in one image with `ctrl` and `asm`. `make item6a5-test`, `item6a7-test`, `item6a5-arms-rom`, `item6a5-asm-rom`, `item6a7-rom`. |
 | `examples/overlay-kernel-check` | 6a-4's instrument ROM — the only place the assembly runs. Sweeps the committed corpus and the synthesized boundaries through three legs (incumbent, assembled kernel, model) on mGBA's ARM7TDMI, and is the repo's first ROM suite that actually runs assertions (8 `#[test_case]`s). It also asserts the three tables' `.iwram` placement at runtime. |
 | `examples/flac_spike` | The measurement instrument and the `ctrl` arm of every performance record. Host witness + in-ROM decode proof + cycle harness. |
 | `examples/flac_spike/experiments/` | Every performance experiment as a reappliable sample (README + patch), never on the live sources. |
@@ -163,9 +165,12 @@ One line per rung; the full plan, bars and invariants are in
   always-correct escape leg.~~ **Landed.** `i32-integrator` on by default, guarded
   per subframe by `Σ|c_j|·2^(b−1) ≤ i32::MAX`, `i64` as the reference/escape leg
   (`ArithmeticWidth` reports it); `flac-test` 183, `flac-test-wide` 178,
-  `flac-gates` 1,377; default instrument `.text` +432 B, symbol-attributed. Its
-  cycle marginal is 6a-7's, not inherited from E9.
-- **6a-7** — stack confirmation (kernel + i32) and the E-number re-anchor.
+  `flac-gates` 1,377; default instrument `.text` +432 B, symbol-attributed.
+- ~~**6a-7** — stack confirmation (kernel + i32) and the E-number re-anchor.~~
+  **Landed.** Three legs in one image (`ctrl` i32, `wide` vendored i64, `asm`
+  kernel+i32): width marginal **+44.1 / +1,759.1 c/sample** (FIXED / LPC),
+  stack **39.74% / 39.96%** FIXED, additivity reproduces to **0.06% / 0.005%**.
+  New gate `item6a7-test`; the default image is unchanged.
 - **E5** — hardware arbitration, once per candidate rate × path; the only route to a
   real-time claim, and now the highest-value confirmation in the item, since a
   4→1.4 fetch ratio is exactly what a cartridge model can get wrong.

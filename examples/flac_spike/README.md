@@ -66,6 +66,7 @@ FNV-1a pins, censuses, `include_bytes!`).
 |---|---|
 | `make spike-test` | Host witness suite: both embedded regions decode **bit-exact** vs `flac -d`, hash pins reproduce (Python ↔ Rust), the ROM's shared fold (`fold_i16le_stereo`) reaches the `fnv_pcm` pins on the host, corrupted seek entry breaks the walk (negative control) |
 | `make native-spike-rom` / `podman-spike-rom` | The spike ROM builds, links, fixes for `thumbv4t-none-eabi`; boots, verifies region hash pins, then **decodes both arms on-target** and compares the PCM FNV-1a against the pins (blue/red screen, BitReader-PoC convention) |
+| `make item6a7-test` / `item6a7-rom` | 6a-7's width leg: `src/wide.rs` (the pre-6a-6 i64 path, vendored so both widths are in one link) decodes to the reference PCM and agrees with the i32 control frame by frame; the ROM times `ctrl` (i32), `wide` (i64) and `asm` (kernel+i32) in one calibration |
 
 Standalone workspace; cargo config is **inherited** from the repo root — do
 not add a local `.cargo/config.toml` (the duplicated `-Tgba.ld` leak, flac-docs/method-and-gates.md).
