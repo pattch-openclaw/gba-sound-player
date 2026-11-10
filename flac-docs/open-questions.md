@@ -148,6 +148,14 @@ mechanism win. Cheapest way to close it: the sub-stage/instruction-level attribu
 **Opened by:** the width decision (6a-6's row) and E4's own numbers. **Owned by:**
 6a-6.
 
+**CLOSED 2026-11-09 (6a-6).** The guard is `Σ|c_j| · 2^(subframe_bits−1) ≤
+i32::MAX`, armed per **subframe** (the grain the parsed fields support; the frame
+reports the OR of its halves). Both legs are gated (`flac-test` / `flac-test-wide`)
+and the wide escape is reachable — a boundary test and a same-build differential
+witness it. The both-legs codegen cost is +440 B of `.text` on the default
+instrument (record: `plan-of-record.md` 6a-6). The cycle marginal needs an
+in-image i64 realization (E4's pattern); no width cycle number is claimed yet.
+
 The decision is taken (i32 default, feature-gated, armed per frame at parse time
 from data the header already parsed, i64 as the escape leg rather than an error, and
 which leg answered reported per frame). What is *not* taken is the formula and its
@@ -176,7 +184,7 @@ Q5a is a confirmation on the current tree of a pairing E9 measured as additive, 
 it is the configuration the product ships; its second job is re-anchoring the E
 numbers on the post-6a image, which 6b-1 inherits. Its first input now exists:
 6a-5 measured the kernel leg *through the seam* (1,167,444 c/frame FIXED in the
-product shape) and 6a-6 will move the width leg, so the stack can be read as two
+product shape) and 6a-6 has moved the width leg, so the stack can be read as two
 same-image marginals rather than against E9's vendored arms. Q5b is genuinely open: neither
 E10 nor PR 4 tested a portable-Rust kernel *written for* Thumb-1 register pressure
 and a 32-bit source window — PR 4 tested the twin as written, which is the
@@ -271,9 +279,9 @@ collects nothing, which is a standing repo state, not this item's bug — and it
 written; what 6a-5 needs is a **non-empty** ROM suite, and 6a-4's kernel-check is
 the first thing in the item to add one. `rate-test` is not runnable when the
 generated assets are gitignored (several records say so). README's
-gate-aggregation TODO is half landed — `make flac-gates` exists and runs six
-configurations plus the combination arms — but its invocation hook and a
-`podman-flac-gates` sibling are still open. And `flac-portable-check` is a *compile*
+gate aggregation is landed for the core — `make flac-gates` runs seven
+configurations plus the combination arms, with `flac-test-wide` joining at 6a-6 —
+but its `podman-flac-gates` sibling is still open. And `flac-portable-check` is a *compile*
 gate: nothing in this tree measures a non-GBA target's performance, so no
 host-side performance claim of any kind is available, in either direction.
 
@@ -340,9 +348,9 @@ at **4.0000 cycles** each), and the question those two raised — why an instruc
 costs 4 — by 6a-5d: because it was being fetched from cartridge ROM. The same
 stream in IWRAM is **2.9×** cheaper and puts 32,768 Hz FIXED decode at **48.29%** of
 budget. So “where do the 48 c/sample go” is answered: six instructions times the
-difference between two addresses, paid by both realizations. The width half is still
-6a-6's and 6a-7 inherits the verdict, but neither carries the full-rate claim any
-more. **The live question is now E5** — whether a 4→1.4 fetch ratio is hardware or
+difference between two addresses, paid by both realizations. The width half landed
+in 6a-6; 6a-7 inherits the confirmation, but neither carries the full-rate claim
+any more. **The live question is now E5** — whether a 4→1.4 fetch ratio is hardware or
 mGBA's cartridge model.
 
 **Re-opened 2026-11-08: the premise did not survive a code-level check.** The

@@ -23,6 +23,12 @@ witness, not an aspiration: `make flac-portable-check` compiles this crate for
 claim — landed 2026-11-02).
 ([flac-docs/architecture.md](../../flac-docs/architecture.md)).
 
+**Arithmetic width (item 6a-6, default):** `i32-integrator` is on — the ring
+sites run in `i32`, the LPC dot product is guarded per subframe by
+`subframe::lpc_accumulator_fits_i32` (`Σ|c_j|·2^(b−1) ≤ i32::MAX`), and a frame
+whose bound fails takes the i64 leg (`ArithmeticWidth` reports it). The
+feature-off build is the audited i64 reference; `make flac-test-wide` is its gate.
+
 Implemented: the full Phase 1 decode path through `frame::decode_frame` —
 header, subframe types, partitioned Rice residual + escape, integrators,
 stereo decorrelation — bit-exact against `flac -d` on the committed libFLAC
@@ -193,9 +199,10 @@ crates/flac-lite/
 
 ## Build gates
 
-The gates, run from this directory (or `make flac-test` / `make flac-test-scan`
-/ `make flac-test-crc` / `make flac-test-rice` / `make flac-gates` /
-`make flac-portable-check` from the repo root; the root Makefile is the keeper).
+The gates, run from this directory (or `make flac-test` / `make flac-test-wide`
+/ `make flac-test-scan` / `make flac-test-crc` / `make flac-test-rice` /
+`make flac-gates` / `make flac-portable-check` from the repo root; the root
+Makefile is the keeper).
 **All need explicit flags — this is not optional verbosity**, see the config-leak
 note below.
 
@@ -237,6 +244,15 @@ cargo +nightly test -Zbuild-std= --target "$HOST" --features scan
 cargo +nightly check --release --target thumbv4t-none-eabi -Zbuild-std=core,alloc \
   --features rice-hybrid
 cargo +nightly test -Zbuild-std= --target "$HOST" --features rice-hybrid
+
+# GATE 6 — the i64 reference build (`make flac-test-wide`): `--no-default-features`
+# turns `i32-integrator` off and runs the whole suite against the same external
+# oracle. `tests/width_two_mechanism_differential.rs` is
+# `required-features = ["i32-integrator"]`, so it is not built here — the two
+# configurations are the differential, not one suite.
+cargo +nightly check --release --target thumbv4t-none-eabi -Zbuild-std=core,alloc \
+  --no-default-features
+cargo +nightly test -Zbuild-std= --target "$HOST" --no-default-features
 ```
 
 ### ⚠️ The `.cargo/config.toml` leak (verified 2026-08-30)
