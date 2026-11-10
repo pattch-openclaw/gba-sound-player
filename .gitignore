@@ -1,11 +1,25 @@
 /target
-/gba-sound-player.gba
-/flac-integration.gba
-/flac-spike.gba
-/opus-spike.gba
-/arm-kernels.gba
-/ctor-probe.gba
 *.d
+
+# ---- ROMs are build output, never source -----------------------------------
+#
+# Every .gba in this tree is produced by a `make *-rom` target and rewritten by
+# agb-gbafix; none is input to anything, and none belongs in the repository.
+# One broad rule, deliberately not a list of names: the list this replaces had
+# grown to 13 exact filenames (one per ROM target, plus one per instrument
+# image), so every new image — 6a-5, 6a-5b, 6a-7, E5, … — was one forgotten
+# line away from committing a 1.9 MB binary to the repository root. A rule that
+# has to be extended for each new build is a rule that will be missed.
+#
+# The intended shape is "no ROM, under any name, anywhere". If a .gba ever IS
+# source — a committed reference image a test or a document reads — it belongs
+# in a specific fixture directory, and that directory gets a scoped negation
+# next to this rule (\`!\` re-includes, and a name pattern re-narrows it):
+#
+#     !/assets/reference/**/*.gba
+#
+# Do not re-open the root and do not add a filename here for a new target.
+*.gba
 
 # mGBA writes a save file beside the ROM on every local run
 # (e.g. `gba-sound-player.sav` next to `gba-sound-player.gba`).
@@ -39,9 +53,8 @@
 # The sample-rate ROM flow (FLAC.md "Sample-rate reduction"): its generated
 # clips + modules are TEMPORARY like ROMs — regenerate with
 # `make rate-assets INPUT=… RATE=…`, removed by `make clean`. The committed
-# spike assets above stay tracked; these never are.
-/flac-rate-spike.gba
-/flac-rate-play.gba
+# spike assets above stay tracked; these never are. (Its `.gba` outputs are
+# covered by the ROM rule at the top of this file.)
 /examples/flac_spike/assets/rate_*.bin
 /examples/flac_spike/src/rate_assets.rs
 /examples/flac_spike/src/rate_pcm.rs
@@ -71,12 +84,3 @@ __pycache__/
 # build output like every other one).
 /examples/overlay-kernel-check/target/
 /examples/e5_fetch/target/
-/overlay-kernel-check.gba
-# 6a-5's instrument images (same crate, arm features on; build output like every
-# other ROM) and 6a-5b's differential image (the same crate with the vendored E10
-# leg added; a fourth timed window, nothing shipped).
-/flac-spike-6a5-arms.gba
-/flac-spike-6a5-asm.gba
-/flac-spike-6a5b.gba
-/flac-spike-6a7.gba
-/e5-fetch.gba
