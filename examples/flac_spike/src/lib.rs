@@ -54,5 +54,10 @@ pub mod driver;
 // the rung — plan-of-record 6a-5b.
 #[cfg(feature = "item6a5b-vendored")]
 pub mod e10;
+// 6a-7's width leg: the pre-6a-6 i64 decode path, vendored so both arithmetic
+// widths can be timed in one link (item 6a-6 left its cycle marginal unread).
+// Off by default: a default build contains no second decoder.
 pub mod playback;
 pub mod stats;
+#[cfg(feature = "item6a7-wide")]
+pub mod wide;

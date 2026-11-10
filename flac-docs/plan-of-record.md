@@ -85,12 +85,20 @@ projection re-opening on `docs/flac-6a5b-projection-reopened`)
   `ArithmeticWidth` reporting which ran. `flac-test` is 183, the new
   `flac-test-wide` reference build is 178, and `flac-gates` is 1,377. Codegen:
   the default instrument `.text` 45,996 → 46,428 B (+432, symbol-attributed in
-  the record below), `.iwram` unchanged. No cycle claim is made here.
+  the record below), `.iwram` unchanged.
+- **6a-7 landed (2026-11-10):** three legs in one image — `ctrl` (i32),
+  `wide` (the vendored pre-6a-6 i64 path), `asm` (the kernel over the i32
+  default). The width marginal is **+44.1 c/sample** (FIXED) / **+1,759.1**
+  (LPC) against the i32 default; the stack is **39.74% / 39.96%** of the
+  32,768 Hz budget (FIXED mean / worst), and E9's additivity reproduces to
+  **0.06% / 0.005%**. The old i64 control is reproduced by the wide leg to
+  0.02%. New gate `item6a7-test`; default `spike-test` and the default image
+  are unchanged.
 
-- **Next rung:** **6a-7** (stack confirmation and the E-number re-anchor), then
-  **§E5** (hardware arbitration of the fetch model).
+- **Next rung:** **§E5** — hardware arbitration of the 4→1.4 fetch ratio, the
+  only route to a real-time claim. Then **6b** (the container).
 
-- **Not started:** 6a-7, 6a-8 (untriggered), all of 6b, and the product work
+- **Not started:** 6a-8 (untriggered), all of 6b, and the product work
   they unblock (manifest, packer, facade, mixer).
 
 ## Item 6a — the overlay (the realization)
@@ -109,8 +117,8 @@ from and it does not turn `scan` on.
 | **6a-5b** ✅ | **The paired realization differential. No new code — one more arm in the existing instrument.** E10/E9's committed vendored `e10::decode_one_arm` (i64, so it matches the landed `asm` arm step for step) timed in the **same link, same pass, same calibration** as `ctrl` and `asm`, so `asm − vendored` is a same-image pair. Re-opened the 103.83% projection, which compared two images. | Cycles, same-image, paired per frame; the per-frame sample-equality witness. Instrument-only: no shipped count or instruction stream moves | that the item's stack verdict is a comparison of two *images* rather than of two *realizations* — **it is not**: the projection reproduced to 0.4% inside one image |
 | **6a-5c** ✅ | **The guard marginal, and the one instruction that is not a guard.** One variable at a time in the same image: **(L1)** delete the dead `and r12, r3, #0xFF` the landing left behind — `asm` 684 → 680 B, 171 → 170 words, semantics untouched; **(L2, diagnostic)** delete G1/G2's 5 instructions (they never fire on this corpus); **(L3)** re-spell G1 where the asm header names it — **still open, and now small**. | Cycles, same-image, `asm − vend` per leg; `overlay-test-arm` + `overlay-kernel-test` + `item6a5b-test` re-run for L1 | that the guards' price was unknown — it is **4.0000 cycles per instruction**, so *count* is the price and "instruction cost" and "fetch cost" were never two hypotheses here |
 | **6a-5d** ✅ | **The codeword loop's placement.** The same kernel, the same instruction stream, resident in IWRAM instead of ROM: `.section .iwram,"ax",%progbits` in place of `.text` (plain `.iwram`; `.text_iwram` is E6's trap and is still a trap). Ungated by `iwram-pin`, because a ROM-resident version of this body is simply the wrong code and `rice-arm` is never a shipped path. | Cycles, same-image; `.text`/`.iwram` sizes read from the ELF; the objdump gate re-read at the new address; `overlay-kernel-test` (8 device arms) + `overlay-test-arm` + `item6a5b-test` | that a cost measured in instruction *fetch* would be left in the wrong memory, because a 2024-era probe of a different code shape said fetch did not matter — **it was**, and the fix is 2.9× |
-| **6a-6** ✅ | **Landed 2026-11-09.** The core's default width: `i32-integrator` on, ring sites unconditionally narrow, LPC guarded per subframe by `lpc_accumulator_fits_i32`, i64 as the reference/escape leg (`ArithmeticWidth`). Design in "The width decision" below. The stack verdict was 6a-5b's and the full-rate claim did not need this rung (kernel + IWRAM is 48.3%); the width still matters for the LPC clip and the decorrelate site. **Cycle marginal open:** it needs an in-image i64 realization, which feeds 6a-7. | Bit-exact vs `flac -d`; width differential suite; guard boundary + same-build two-leg witnesses; both configurations gated (`flac-test`, `flac-test-wide`); codegen attributed symbol by symbol. Mutation-witnessed. | the guard is wrong (unsound), the legs are not equivalent, or a both-legs build costs more than the win |
-| **6a-7** | **The stack confirmation. No new code** — one measured arm: 6a-4's kernel **and** 6a-6's default together, against the same-image `ctrl`. Re-anchors the E numbers on the post-6a image, which 6b-1 inherits. | Cycles, same-image | that two measured wins composed negatively (E9's additivity does not reproduce) |
+| **6a-6** ✅ | **Landed 2026-11-09.** The core's default width: `i32-integrator` on, ring sites unconditionally narrow, LPC guarded per subframe by `lpc_accumulator_fits_i32`, i64 as the reference/escape leg (`ArithmeticWidth`). Design in "The width decision" below. The stack verdict was 6a-5b's and the full-rate claim did not need this rung (kernel + IWRAM is 48.3%); the width still matters for the LPC clip and the decorrelate site. **Cycle marginal closed by 6a-7:** the same-image i64 leg costs **+44.1 c/sample** (FIXED) / **+1,759.1** (LPC). | Bit-exact vs `flac -d`; width differential suite; guard boundary + same-build two-leg witnesses; both configurations gated (`flac-test`, `flac-test-wide`); codegen attributed symbol by symbol. Mutation-witnessed. | the guard is wrong (unsound), the legs are not equivalent, or a both-legs build costs more than the win |
+| **6a-7** ✅ | **Landed 2026-11-10.** The stack confirmation **and** 6a-6's open width marginal in one image: `ctrl` (i32 default), `wide` (the vendored pre-6a-6 i64 path, `src/wide.rs`), `asm` (the landed kernel over the i32 default). Re-anchors the E numbers on the post-6a image, which 6b-1 inherits. | Cycles, same-image, per-frame paired; the wide leg also pinned to the reference PCM and to `ctrl` frame by frame. | that two measured wins composed negatively (E9's additivity does not reproduce) — **they do: to 0.06% / 0.005%** |
 | **6a-8** *(conditional)* | E8-style **sub-stage probe** over the asm kernel: tier-1 / tier-2 / tier-3 / refill / fold priced separately. Run **only** if 6a-5 lands inside or near the noise band. | Cycles, sub-stage | that a near-bar result is unattributable to a leg |
 
 ### 6a-4 — landed, and what the device witness actually found
@@ -780,8 +788,55 @@ dead-code-eliminated in the narrow image — only the LPC escape leg is carried.
 **What it does not claim.** No cycles: this is a semantics/codegen landing. A
 same-image width marginal needs an in-image i64 realization (E4's vendored-copy
 pattern); the two configurations are gated but not timed against each other, and
-nothing here reuses E9's era-denominated row. That arm is the width leg's open
-measurement, and it feeds 6a-7's stack rather than a cross-image subtraction.
+nothing here reuses E9's era-denominated row. That arm is 6a-7's (`src/wide.rs`),
+and it closes the marginal below.
+
+## Item 6b — the container (where frames come from)
+
+### 6a-7 — landed: the width marginal and the stack, in one calibration
+
+One image, `flac-spike-6a7.gba`, three timed legs per frame through the same
+`timed_reset` shape: `ctrl` (the core's i32 default), `wide` (`src/wide.rs`, the
+pre-6a-6 i64 decode path vendored so both widths are in the link), `asm` (the
+landed kernel over the i32 default, body in IWRAM). `ctrl` and `wide` share
+`TableCountKernel`; the wide leg is pinned to the reference PCM **and** to `ctrl`
+frame by frame, so `ctrl − wide` is arithmetic width and nothing else.
+
+| per-frame (157 frames/clip) | FIXED `ctrl` | FIXED `wide` | FIXED `asm` | LPC `ctrl` | LPC `wide` | LPC `asm` |
+|---|---:|---:|---:|---:|---:|---:|
+| mean c/frame | 1,662,788 | 1,752,704 | **416,804** | 2,987,753 | 6,573,096 | 1,751,090 |
+| % of 32,768 Hz | 158.55% | 167.12% | **39.74%** | 284.89% | 626.76% | 166.97% |
+| worst | 159.34% | 167.96% | **39.96%** | 286.36% | 629.99% | 167.85% |
+
+**The width marginal** (`wide − ctrl`, paired, 157/157 frames): **+14,116,716 /
++562,898,810 cycles per clip = +89,915 / +3,585,343 c/frame = +44.1 / +1,759.1
+c/sample** (FIXED / LPC). The i32 default is the faster leg on every frame of
+both clips. This is 6a-6's missing number, taken same-image.
+
+**The wide leg is the old control.** Its FIXED / LPC sums are 275,174,453 /
+1,031,976,075 against 6a-5d's i64 `ctrl` 275,126,433 / 1,031,931,935 — **+0.017%
+/ +0.004%**. The vendored path is not a new decoder; it is the pre-6a-6 one.
+
+**The stack, and Q5a's answer.** `ctrl − asm` = **1,245,984 / 1,236,663
+c/frame** (FIXED / LPC), 157/157 frames faster. Kernel+i32 is **39.74% mean /
+39.96% worst** on FIXED (from 48.29% for kernel+i64 in 6a-5d — the width
+marginal transfers to the asm arm) and 166.97% on LPC (from 508.8%).
+**Additivity reproduces:** `asm_i32 + width` = 506,719 / 5,336,433 c/frame against
+6a-5d's measured `asm_i64` 506,413 / 5,336,152 — **+0.06% / +0.005%**. E9's
+additivity claim survives the post-6a tree; the two wins do not compose
+negatively.
+
+**Gates.** `item6a7-test` (26 passed: the wide leg reaches the pinned PCM and
+agrees with `ctrl` frame by frame); the default `spike-test` (25) and the
+default `spike-rom` image are unchanged (`a03cc332f080…`, `.text` 46,428 B) — the
+new module is feature-gated off. Two headless runs (one across a rebuild after
+`cargo fmt`) are **byte-identical** (`cmp`, 1009 lines).
+
+**Not claimed.** The producer's convert/push stages (~7.7 ms) are still outside
+these windows, mGBA is still the model, and E5 — hardware arbitration of the
+4→1.4 fetch ratio — is the only thing that can turn any of this into a real-time
+claim. The shipped default is still `TableCountKernel`; the kernel is carried by
+no product path yet (6b).
 
 ## Item 6b — the container (where frames come from)
 
@@ -890,6 +945,7 @@ counts and the default instrument** (its delta is the rung's record, above):
 | `crc-check,scan,rice-hybrid` | 222 + 1 |
 | `flac-gates` | **1,377 passed + 6 ignored** |
 | `spike-test` | 15 + 10 |
+| `item6a7-test` | 15 + 1 + 10 |
 | `kernel-test` | 20 |
 | `flac-portable-check`, `make check` | green |
 
@@ -906,7 +962,11 @@ configuration and not comparable to the 46,008 B figure): product shape
 three-arm (`item6a5-arms`) `.text` 72,428 B · `.iwram` 1,868 B · `.rodata`
 1,831,228 B. After 6a-6 the default instrument is `.text` **46,428 B**
 `a03cc332f080…` · `.iwram` 812 B (control at `HEAD`: 45,996 B
-`f63ff65bedea…`; delta attributed in the 6a-6 record).
+`f63ff65bedea…`; delta attributed in the 6a-6 record). 6a-7's image
+(`flac-spike-6a7.gba`, `item6a7-wide` = `item6a5-asm` + the vendored wide leg):
+`.text` 67,264 B · `.iwram` 2,036 B (812 core + 544 tables + 680 asm body) ·
+`.rodata` 1,831,644 B; `arm_rice_partition` at `0x0300022c` (680 B), the wide
+leg in `.text`. Not the shipped configuration.
 6a-4's instrument image
 (`overlay-kernel-check.gba`, `rice-arm,iwram-pin`): `.text` 67,772 B
 `8d8c7fe85a14…` · `.iwram` **1,356 B** `a568ddbb5c5f…` · `.rodata` 145,988 B ·

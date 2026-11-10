@@ -3,6 +3,7 @@
         item6a5-test item6a5-arms-rom native-item6a5-arms-rom podman-item6a5-arms-rom \
         item6a5-asm-rom native-item6a5-asm-rom podman-item6a5-asm-rom \
         item6a5b-test item6a5b-rom native-item6a5b-rom podman-item6a5b-rom \
+        item6a7-test item6a7-rom native-item6a7-rom podman-item6a7-rom \
         rate-assets rate-test rate-rom native-rate-rom podman-rate-rom \
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
@@ -276,6 +277,11 @@ SPIKE_6A5_ASM_ROM := flac-spike-6a5-asm.gba
 # timed in ONE link (the +48.2 c/sample overhang 6a-5 recorded is a
 # cross-image number, and this is the image that retires it).
 SPIKE_6A5B_ROM := flac-spike-6a5b.gba
+# 6a-7's width + stack image: ctrl (i32 default), `wide` (the vendored pre-6a-6
+# i64 path), and the landed ARM kernel over the i32 default — three timed legs,
+# one calibration. Reads `ctrl − wide` (the width marginal 6a-6 left unread) and
+# `ctrl − asm` (the stack, re-anchored on the post-6a-6 tree).
+SPIKE_6A7_ROM := flac-spike-6a7.gba
 SPIKE_CRATE_DIR := examples/flac_spike
 SPIKE_CRATE_MANIFEST := $(abspath examples/flac_spike/Cargo.toml)
 SPIKE_CRATE_BIN := target/$(TARGET)/release/flac-spike
@@ -474,6 +480,23 @@ native-item6a5b-rom: item6a5b-rom
 podman-item6a5b-rom:
 	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
 	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make item6a5b-rom
+
+# 6a-7 — the width marginal and the stack confirmation in one image. Three legs:
+# `ctrl` (i32 default), `wide` (the vendored pre-6a-6 i64 path, src/wide.rs), and
+# `asm` (the landed kernel over the i32 default). The run loop is the method
+# file's: `timeout -k 5 280 mgba-test-runner flac-spike-6a7.gba`, then
+# `grep -E "6a7|6a5|stats:|budget:"`.
+item6a7-rom: format
+	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --features item6a7-wide
+	agb-gbafix $(SPIKE_CRATE_DIR)/$(SPIKE_CRATE_BIN) -o $(SPIKE_6A7_ROM)
+	@echo "6a-7 width/stack ROM built: $(SPIKE_6A7_ROM) (ctrl i32 + wide i64 + landed rice-arm in one link)"
+
+native-item6a7-rom: item6a7-rom
+	@echo "native-item6a7-rom done: $(SPIKE_6A7_ROM)"
+
+podman-item6a7-rom:
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make item6a7-rom
 
 podman-spike-rom:
 	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
@@ -707,6 +730,15 @@ item6a5b-test: toolchain-check
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(SPIKE_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features item6a5-arms,item6a5b-vendored
 	@echo "item6a5b-test passed: the arms still reach the pinned PCM and agree frame by frame, and the E10 leg's own witness (reference PCM, driver agreement, tier census, byte-identical fold source) passes beside them"
+
+# 6a-7's host witness: the vendored i64 width leg decodes the committed clips to
+# the reference PCM and agrees with the product i32 path frame by frame. New
+# configuration, new gate — `spike-test` still runs no arm/vendored/wide code.
+item6a7-test: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(SPIKE_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features item6a7-wide
+	@echo "item6a7-test passed: the i64 width leg reaches the pinned PCM and agrees with the i32 control frame by frame"
 
 spike-test: toolchain-check
 	@mkdir -p $(GATE_NEUTRAL_CWD)
