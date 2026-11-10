@@ -33,22 +33,25 @@ Run it on **both units** (GBA 001 and GBA SP) and note the numbers for each.
 
 ## What it prints
 
-Nine lines, so both states fit the 240x160 screen. `ON` is prefetch enabled,
-`OFF` disabled; `add` is cycles per `add`.
+Eleven lines of 12 px line height (132 px), inside the GBA's **240x160** screen.
+`ON` is prefetch enabled, `OFF` disabled; `add` is cycles per `add`.
 
 ```
 E5 FETCH ARBITRATION
-WAITCNT 0x4317
-ON ROM 16733 IWRAM 4248
-ON ratio 3.939
-ON add 4.085/1.037
-OFF ROM 16749 IWRAM 4259
-OFF ratio 3.932
-OFF add 4.089/1.039
+WAITCNT 0x4317  4096 add/call
+PREFETCH ON
+ ROM 16733  IWRAM 4248
+ ratio 3.939
+ add 4.085 / 1.037
+PREFETCH OFF
+ ROM 16749  IWRAM 4259
+ ratio 3.932
+ add 4.089 / 1.039
 PASS
 ```
 
-The mGBA serial lines (`*** e5 state ...`) carry the same numbers.
+The mGBA serial lines (`*** e5 state ...`) carry the same numbers, plus the
+font's line height (`*** e5 font line_height=12`) as a layout check.
 
 ## The reading of record
 

@@ -13,9 +13,14 @@ use agb::display::{
 };
 
 static FONT: Font = agb::include_font!(
-    "../../assets/fonts/ark-pixel-10px-proportional-latin.ttf",
-    10
+    "../../assets/fonts/fusion-pixel-8px-proportional-latin-ascii.ttf",
+    8
 );
+
+/// The font's line height, so the ROM can report the layout budget.
+pub fn line_height() -> i32 {
+    FONT.line_height()
+}
 
 /// Render `text` on a fresh background. `backdrop` is palette entry 0 (the
 /// pass/fail colour); entry 1 is the white glyph colour.
@@ -33,7 +38,7 @@ pub fn show(gfx: &mut agb::display::Graphics<'_>, text: &str, backdrop: Rgb15) {
     let layout = Layout::new(
         text,
         &FONT,
-        &LayoutSettings::new().with_max_line_length(232),
+        &LayoutSettings::new().with_max_line_length(236),
     );
     let mut renderer = RegularBackgroundTextRenderer::new((4, 4), 0);
     for group in layout {
