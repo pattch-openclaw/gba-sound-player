@@ -89,6 +89,7 @@ alternative codec, evaluated under the same constraint, is
 | `crates/flac-lite` | Portable core: `no_std`, zero deps, zero alloc, `#![deny(unsafe_code)]` plus named `cfg`-gated `.iwram` pin attributes (exactly one in a default build). Frame decode is **complete** (`bits` → `stream` → `frame` → `subframe` → `residual` → `stereo`), witnessed bit-exact against `flac -d` on host and in the ROM image. Per-frame `driver`, table-less `scan` walk (feature), CRC verification (feature), `RiceKernel` seam. Arithmetic width (6a-6): `i32-integrator` on by default, guarded per subframe, `i64` reference/escape leg (`make flac-test-wide`). Still `todo!()`: the `decoder` facade, `format::Manifest`, `Blocksize::samples` and `EncodeProfile::validate`. |
 | `crates/flac-lite-gba` | The GBA overlay. Two `RiceKernel` arms behind their own features: `rice-twin` (6a-3, Rust, forwards to the core's twin) and **`rice-arm`** (6a-4: the E10 ARM-mode kernel via `global_asm!`, its FFI and `KernelAbi`, three tables under `iwram-pin`). A **default build still contains no kernel, no asm, no FFI and no `unsafe`**; the shipped default is still `TableCountKernel`. |
 | `examples/flac_spike` (6a-5 / 6a-7 arms) | Three feature-gated product-path arms (`item6a5-rust`, `item6a5-asm`, `item6a5-arms`), plus 6a-7's **vendored** width leg (`item6a7-wide`, `src/wide.rs`, the pre-6a-6 i64 path) timed in one image with `ctrl` and `asm`. `make item6a5-test`, `item6a7-test`, `item6a5-arms-rom`, `item6a5-asm-rom`, `item6a7-rom`. |
+| `examples/e5_fetch` | E5's hardware arbitration ROM: one synthetic ARM instruction stream assembled into `.text` and `.iwram`, timed in one image with `WAITCNT`/prefetch on/off; results on screen (no serial on hardware) and on mGBA serial. `make native-e5-fetch-rom`. |
 | `examples/overlay-kernel-check` | 6a-4's instrument ROM — the only place the assembly runs. Sweeps the committed corpus and the synthesized boundaries through three legs (incumbent, assembled kernel, model) on mGBA's ARM7TDMI, and is the repo's first ROM suite that actually runs assertions (8 `#[test_case]`s). It also asserts the three tables' `.iwram` placement at runtime. |
 | `examples/flac_spike` | The measurement instrument and the `ctrl` arm of every performance record. Host witness + in-ROM decode proof + cycle harness. |
 | `examples/flac_spike/experiments/` | Every performance experiment as a reappliable sample (README + patch), never on the live sources. |
@@ -171,9 +172,11 @@ One line per rung; the full plan, bars and invariants are in
   kernel+i32): width marginal **+44.1 / +1,759.1 c/sample** (FIXED / LPC),
   stack **39.74% / 39.96%** FIXED, additivity reproduces to **0.06% / 0.005%**.
   New gate `item6a7-test`; the default image is unchanged.
-- **E5** — hardware arbitration, once per candidate rate × path; the only route to a
-  real-time claim, and now the highest-value confirmation in the item, since a
-  4→1.4 fetch ratio is exactly what a cartridge model can get wrong.
+- **E5** — hardware arbitration of the ROM→IWRAM fetch ratio. The artifact is
+  built (`examples/e5_fetch/`, `make native-e5-fetch-rom`): the same ARM stream
+  in `.text` and `.iwram`, one calibration, results rendered on screen for a
+  stock GBA. mGBA harness check ratio ≈3.94; the on-silicon run on the GBA 001
+  and GBA SP is the arbitration and the only route to a real-time claim.
 - **6b** — the container: the facade rewired onto `scan`, the real GAFP packer and
   manifest, and the rate-play path through a real manifest.
 - **Rate sweep** — the cross-rate profiling sweep on the improved decoder, which

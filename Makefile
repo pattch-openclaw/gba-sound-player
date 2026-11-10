@@ -4,6 +4,7 @@
         item6a5-asm-rom native-item6a5-asm-rom podman-item6a5-asm-rom \
         item6a5b-test item6a5b-rom native-item6a5b-rom podman-item6a5b-rom \
         item6a7-test item6a7-rom native-item6a7-rom podman-item6a7-rom \
+        e5-fetch-rom native-e5-fetch-rom podman-e5-fetch-rom \
         rate-assets rate-test rate-rom native-rate-rom podman-rate-rom \
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
@@ -285,6 +286,13 @@ SPIKE_6A7_ROM := flac-spike-6a7.gba
 SPIKE_CRATE_DIR := examples/flac_spike
 SPIKE_CRATE_MANIFEST := $(abspath examples/flac_spike/Cargo.toml)
 SPIKE_CRATE_BIN := target/$(TARGET)/release/flac-spike
+# E5 — hardware arbitration of the ROM→IWRAM fetch ratio. A standalone crate:
+# the same synthetic ARM instruction stream assembled once into .text and once
+# into .iwram, timed in one image. The hardware run is the arbitration; the
+# mGBA run is the harness check (~4.0 vs ~1.4 cycles/add expected).
+E5_FETCH_ROM := e5-fetch.gba
+E5_FETCH_CRATE_DIR := examples/e5_fetch
+E5_FETCH_CRATE_BIN := target/$(TARGET)/release/e5-fetch
 # The Opus perf-gate spike crate (examples/opus_spike/) — OPUS.md "Measurement
 # plan — start here". Same standalone-workspace + inherited-config pattern as
 # the FLAC spike; its host gate runs out-of-tree the same way (cargo config
@@ -357,6 +365,7 @@ format:
 	cd $(KERNEL_CRATE_DIR) && $(CARGO) fmt
 	cd $(OVERLAY_CRATE_DIR) && $(CARGO) fmt
 	cd $(OVERLAY_ROM_DIR) && $(CARGO) fmt
+	cd $(E5_FETCH_CRATE_DIR) && $(CARGO) fmt
 else
 format:
 	@echo "format: skipping — no rustfmt for '$(TOOLCHAIN)' (build continues)."
@@ -434,6 +443,21 @@ spike-rom: format
 
 native-spike-rom: spike-rom
 	@echo "native-spike-rom done: $(SPIKE_ROM)"
+
+# E5's arbitration ROM. Build + fix for $(TARGET); then either
+#   timeout -k 5 60 mgba-test-runner $(E5_FETCH_ROM)   (harness check)
+# or flash $(E5_FETCH_ROM) to an EverDrive and read the on-screen table.
+e5-fetch-rom: format
+	cd $(E5_FETCH_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
+	agb-gbafix $(E5_FETCH_CRATE_DIR)/$(E5_FETCH_CRATE_BIN) -o $(E5_FETCH_ROM)
+	@echo "E5 fetch ROM built: $(E5_FETCH_ROM) (same stream in .text and .iwram)"
+
+native-e5-fetch-rom: e5-fetch-rom
+	@echo "native-e5-fetch-rom done: $(E5_FETCH_ROM)"
+
+podman-e5-fetch-rom:
+	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make e5-fetch-rom
 
 # The 6a-5 instrument images, built from the same crate with the arm features on.
 # Both are start-to-finish readable in one headless run; the run loop is the
@@ -1077,6 +1101,7 @@ check:
 	cd $(KERNEL_CRATE_DIR) && $(CARGO) fmt --check
 	cd $(OVERLAY_CRATE_DIR) && $(CARGO) fmt --check
 	cd $(OVERLAY_ROM_DIR) && $(CARGO) fmt --check
+	cd $(E5_FETCH_CRATE_DIR) && $(CARGO) fmt --check
 
 # Fail early and legibly when the pinned toolchain isn't reachable, instead of
 # half-running a gate (e.g. `--target ''` when the host triple can't be probed).

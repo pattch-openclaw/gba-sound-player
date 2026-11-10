@@ -95,8 +95,9 @@ projection re-opening on `docs/flac-6a5b-projection-reopened`)
   0.02%. New gate `item6a7-test`; default `spike-test` and the default image
   are unchanged.
 
-- **Next rung:** **§E5** — hardware arbitration of the 4→1.4 fetch ratio, the
-  only route to a real-time claim. Then **6b** (the container).
+- **Next rung: §E5** — the hardware artifact is built (`examples/e5_fetch/`,
+  `make native-e5-fetch-rom`); the on-silicon run on the GBA 001 and GBA SP is
+  pending. It is the only route to a real-time claim. Then **6b**.
 
 - **Not started:** 6a-8 (untriggered), all of 6b, and the product work
   they unblock (manifest, packer, facade, mixer).
@@ -837,6 +838,31 @@ these windows, mGBA is still the model, and E5 — hardware arbitration of the
 4→1.4 fetch ratio — is the only thing that can turn any of this into a real-time
 claim. The shipped default is still `TableCountKernel`; the kernel is carried by
 no product path yet (6b).
+
+### E5 — hardware arbitration: the fetch ratio, on silicon (in progress)
+
+**Status 2026-11-10:** the arbitration ROM is built (`examples/e5_fetch/`,
+`make native-e5-fetch-rom`, `e5-fetch.gba`); the hardware run is pending on the
+two units.
+
+The artifact: one synthetic ARM instruction stream (4096 dependent `add`s per
+call) assembled into `.text` and `.iwram` in one image, timed in one calibration.
+It prints `WAITCNT`, prefetch state, per-call cycles and the ROM/IWRAM ratio, and
+renders the same table on screen (there is no serial console on hardware).
+
+mGBA harness check: **rom ≈ 4.09, iwram ≈ 1.04 cycles/add, ratio ≈ 3.94**, with
+`WAITCNT = 0x4317` (prefetch on). mGBA prices prefetch on and off identically —
+the hardware run is what adjudicates that.
+
+**Pre-declared bar.** The number of record is the **ratio**, not absolute cycles.
+If hardware agrees with mGBA within ~10%, the model's fetch pricing stands and
+6a-5d's IWRAM placement is real; if prefetch ON collapses the ratio (ROM fetch
+near 1–2 cycles), the placement win is largely an mGBA artifact and 6a-5d's 2.9×
+must be re-read. Run on both a GBA 001 and a GBA SP; the secondary confirmation
+is `flac-spike-6a7.gba` on the same unit.
+
+No result is claimed yet: this section records the artifact and the bar, not a
+reading.
 
 ## Item 6b — the container (where frames come from)
 
