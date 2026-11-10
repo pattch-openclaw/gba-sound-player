@@ -178,7 +178,10 @@ One line per rung; the full plan, bars and invariants are in
   (two runs each): **ROM 4.085 / IWRAM 1.037 cycles/add, ratio 3.939**;
   hardware reproduces mGBA within 2 cycles/call. Prefetch on/off changes nothing
   measurable. The fetch pricing is hardware; the kernel-level stack on hardware
-  still needs the 6a-7 text run.
+  is **6a-7b** (next rung).
+- **6a-7b** — the kernel stack on hardware: add the on-screen summary to
+  `flac-spike-6a7.gba`, run it on the GBA 001 and SP, and check the 39.74% stack
+  against mGBA's ±2% bar. It covers the non-fetch path E5 left open. Then 6b.
 - **6b** — the container: the facade rewired onto `scan`, the real GAFP packer and
   manifest, and the rate-play path through a real manifest.
 - **Rate sweep** — the cross-rate profiling sweep on the improved decoder, which
