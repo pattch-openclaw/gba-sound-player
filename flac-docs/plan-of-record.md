@@ -98,13 +98,16 @@ projection re-opening on `docs/flac-6a5b-projection-reopened`)
 - **E5 measured (2026-11-10):** the fetch ratio is hardware, not mGBA —
   hardware reproduces the model to ≤0.05%, prefetch on/off changes nothing, and
   the same stream is ~3.94× cheaper from IWRAM on both a GBA 001 and a GBA SP.
-- **Next rung: 6a-7b — the kernel stack on hardware.** The 6a-7 image gains an
-  on-screen summary (gated under `item6a7-wide`), then runs on the GBA 001 and
-  GBA SP. It tests the non-fetch path E5 left open (bit-reader ROM reads, tables,
-  residual, stereo). Scope, reference numbers and the ±2% bar: "6a-7b" below.
-  Then **6b**.
+- **6a-7b's instrument has landed; the hardware reading is what remains
+  (2026-11-10).** The 6a-7 image now renders its three legs on the GBA screen
+  under `item6a7-wide` (`flac-spike-6a7.gba`, `.text` `9f0b19e924cd…`, ten lines, fit
+  measured in-ROM) and logs the same ten lines to serial, so an mGBA run and a
+  stock unit print one string. The mGBA reference for **this image** is re-taken
+  (two runs, byte-identical) and reproduces the pre-summary 6a-7 record to
+  **≤18 cycles/frame** on every leg. What is left is the two units: run the ROM
+  on the GBA 001 and SP, two runs each, and test the ±2% bar below. Then **6b**.
 
-- **Not started:** 6a-7b, 6a-8 (untriggered), all of 6b, and the product work
+- **Not started:** 6a-7b's hardware runs, 6a-8 (untriggered), all of 6b, and the product work
   they unblock (manifest, packer, facade, mixer).
 
 ## Item 6a — the overlay (the realization)
@@ -125,7 +128,7 @@ from and it does not turn `scan` on.
 | **6a-5d** ✅ | **The codeword loop's placement.** The same kernel, the same instruction stream, resident in IWRAM instead of ROM: `.section .iwram,"ax",%progbits` in place of `.text` (plain `.iwram`; `.text_iwram` is E6's trap and is still a trap). Ungated by `iwram-pin`, because a ROM-resident version of this body is simply the wrong code and `rice-arm` is never a shipped path. | Cycles, same-image; `.text`/`.iwram` sizes read from the ELF; the objdump gate re-read at the new address; `overlay-kernel-test` (8 device arms) + `overlay-test-arm` + `item6a5b-test` | that a cost measured in instruction *fetch* would be left in the wrong memory, because a 2024-era probe of a different code shape said fetch did not matter — **it was**, and the fix is 2.9× |
 | **6a-6** ✅ | **Landed 2026-11-09.** The core's default width: `i32-integrator` on, ring sites unconditionally narrow, LPC guarded per subframe by `lpc_accumulator_fits_i32`, i64 as the reference/escape leg (`ArithmeticWidth`). Design in "The width decision" below. The stack verdict was 6a-5b's and the full-rate claim did not need this rung (kernel + IWRAM is 48.3%); the width still matters for the LPC clip and the decorrelate site. **Cycle marginal closed by 6a-7:** the same-image i64 leg costs **+44.1 c/sample** (FIXED) / **+1,759.1** (LPC). | Bit-exact vs `flac -d`; width differential suite; guard boundary + same-build two-leg witnesses; both configurations gated (`flac-test`, `flac-test-wide`); codegen attributed symbol by symbol. Mutation-witnessed. | the guard is wrong (unsound), the legs are not equivalent, or a both-legs build costs more than the win |
 | **6a-7** ✅ | **Landed 2026-11-10.** The stack confirmation **and** 6a-6's open width marginal in one image: `ctrl` (i32 default), `wide` (the vendored pre-6a-6 i64 path, `src/wide.rs`), `asm` (the landed kernel over the i32 default). Re-anchors the E numbers on the post-6a image, which 6b-1 inherits. | Cycles, same-image, per-frame paired; the wide leg also pinned to the reference PCM and to `ctrl` frame by frame. | that two measured wins composed negatively (E9's additivity does not reproduce) — **they do: to 0.06% / 0.005%** |
-| **6a-7b** | **The kernel stack on hardware (next rung).** Add the on-screen 8 px summary to `flac-spike-6a7.gba` (feature-gated under `item6a7-wide`, so the default image is unchanged), then run it on the GBA 001 and GBA SP and read `ctrl`/`wide`/`asm`, the stack and the width marginal. This is the non-fetch path E5 did not cover. | Cycles, same-image, per-frame paired, two runs per unit; the existing per-arm PCM pins and frame-by-frame equality witness are the correctness gate. | that the non-fetch path (bit-reader ROM reads, tables, residual, stereo) diverges from mGBA, so the 39.74% is not the hardware number. |
+| **6a-7b** ⏳ | **Instrument landed 2026-11-10; the two hardware runs are the rung.** The 8 px on-screen summary in `flac-spike-6a7.gba` (gated under `item6a7-wide`: the default image stays byte-identical), then run it on the GBA 001 and GBA SP and read `ctrl`/`wide`/`asm`, the stack and the width marginal. This is the non-fetch path E5 did not cover. Scope, same-image mGBA reference and the ±2% bar: "6a-7b" below. | Cycles, same-image, per-frame paired, two runs per unit; the per-arm PCM pins and the frame-by-frame equality witness are the correctness gate; the ROM's own fit line is the screen's gate. | that the non-fetch path (bit-reader ROM reads, tables, residual, stereo) diverges from mGBA, so the 39.74% is not the hardware number. |
 | **6a-8** *(conditional)* | E8-style **sub-stage probe** over the asm kernel: tier-1 / tier-2 / tier-3 / refill / fold priced separately. Run **only** if 6a-5 lands inside or near the noise band. | Cycles, sub-stage | that a near-bar result is unattributable to a leg |
 
 ### 6a-4 — landed, and what the device witness actually found
@@ -875,45 +878,130 @@ ROM cost is confirmed. It does not by itself confirm the kernel-level stack
 (39.74%): the synthetic stream prices fetch/execute, while the kernel's ~1.4
 average includes non-fetch work. The secondary confirmation is **6a-7b** below.
 
-### 6a-7b — the kernel stack on hardware (planned, next rung)
+### 6a-7b — instrument landed: the stack, readable on a stock GBA (2026-11-10)
 
 **Why.** E5 answered the fetch question: the same instruction stream is 4.085
-cycles/add from ROM and 1.037 from IWRAM on both a GBA 001 and a GBA SP, and
-mGBA reproduces that within 2 cycles/call (ratio 3.939). What E5 did *not* touch
-is the rest of the decode path — the bit reader's ROM byte reads, the pinned
-tables, residual, stereo. 6a-7's 39.74% stack is still an mGBA reading.
+cycles/add from ROM and 1.037 from IWRAM on both a GBA 001 and a GBA SP, and mGBA
+reproduces that within 2 cycles/call (ratio 3.939). What E5 did *not* touch is the
+rest of the decode path — the bit reader's ROM byte reads, the pinned tables,
+residual, stereo. 6a-7's 39.74% stack is therefore still an mGBA reading, and this
+rung is the one that can turn it into a hardware number.
 
-**What.** The 6a-7 image already times the three legs (`ctrl` i32, `wide` i64,
-`asm` kernel+i32, body in IWRAM). It has no hardware-readable output, so:
-1. add the on-screen summary (the 8 px fusion-pixel subset; `examples/e5_fetch/
-   src/text.rs` is the template) under `item6a7-wide`; the default spike image
-   stays byte-identical;
-2. run it on both units, two runs each, and read the summary: per clip
-   `ctrl`/`wide`/`asm` means, `ctrl − asm` (stack), `wide − ctrl` (width), and
-   the worst-frame %.
+**What landed: the instrument, not the reading.** `flac-spike-6a7.gba` gains a
+ten-line summary the ARM7TDMI can display with no cable, and logs the same ten
+lines to serial — one string, two channels, so an mGBA run and a stock unit cannot
+drift apart:
 
-The per-arm PCM pins and the frame-by-frame equality witness are the
-correctness gate; a timing number only counts on proven bytes.
+```
+6A7B STACK ON HW
+C=ctrl W=wide A=asm
+S=C-A Wd=W-C X=worst%
+l0 157f C1662797 W1752714
+   A416821 S1245976
+   Wd89917 X39.961
+l4 157f C2987762 W6573107
+   A1751108 S1236654
+   Wd3585345 X167.854
+HARNESS OK
+```
 
-**The mGBA reference to beat** (6a-7, 2026-11-10):
+The pure half (`examples/flac_spike/src/summary.rs`: the fold, the sign
+conventions, the text) is in the **library**, for `stats`'/`checksum`'s reason —
+host and ROM run one implementation, so the screen cannot encode a rule the host
+tests do not pin. The `agb` half (`src/item6a7b.rs`, inside `mod rom`) is the font,
+the layout and a **fit check**: 240×160 at this font's measured `line_height()` of
+12 is a hard 12-line budget, ten lines are used, and the ROM logs
+`lines=10 right=133 bottom=121 fits=true`. A screen that overflows would drop the
+number the rung exists to read, so it is measured rather than assumed. The
+template is E5's `text.rs` — one renderer, palette entry 0 backdrop / 1 glyphs,
+(4,4) origin.
 
-| clip | ctrl | wide | asm | stack | width | worst |
+**The verdict on the screen is validity, not budget.** The spike's `pass` ANDs the
+budget check, and the LPC clip is 167% of the 32,768 Hz frame *by design* — a
+screen coloured from `pass` would be red on a perfectly valid measurement. Blue on
+this image means "assets, decode proofs and every leg pass succeeded on these
+bytes"; the budget verdict stays on serial (`PR 3 BUDGET verdict …`).
+
+**Control build: nothing but the screen changed.** The whole addition is behind the
+6a-7 image's own feature (`item6a7-wide`), and `cfg` on a function *parameter*
+(not on a call argument, which is unstable) is what keeps the other images
+textually identical:
+
+| image | before | after |
+|---|---|---|
+| default `flac-spike.gba` | `a1acc5980a6b…` | **byte-identical** (`cmp`) |
+| 6a-5 arms | `.text` `ce5e9755d4a1…` | `.text` identical; `.iwram`/`.ewram`/`.entrypoint` identical |
+| 6a-5b | `.text` `2c2285351734…` | `.text` identical; `.iwram`/`.ewram`/`.entrypoint` identical |
+
+The two arm images are not *whole-image* identical, and the difference is
+attributed rather than waved past: **2 bytes** (6a-5) and **4 bytes** (6a-5b) of
+`.rodata`, section size unchanged, every one of them the `line` field of a
+`core::panic::Location` — `main.rs:262→275` (`clip.frames[frame]`) and
+`main.rs:1070→1098` (`rust_l[..written]`) — i.e. the line numbers of indexing
+panics, shifted by the lines this rung inserted above them. No instruction, no
+table and no datum moved. That is the same class of finding the series keeps
+recording: a `.text` hash is the codegen control, a `.gba` sha is not.
+
+**Same-image mGBA reference, and why it is re-taken.** Adding code to a link can
+move a decode path's layout (6a-3 measured ~168–199 K cycles/frame of exactly
+that), so the reference for a hardware reading is a fresh run of *this* image, two
+runs, byte-identical:
+
+| per-frame (157 frames/clip) | FIXED ctrl | FIXED wide | FIXED asm | LPC ctrl | LPC wide | LPC asm |
 |---|---:|---:|---:|---:|---:|---:|
-| FIXED | 1,662,788 | 1,752,704 | 416,804 | 1,245,984 | 89,915 | 39.96% |
-| LPC | 2,987,753 | 6,573,096 | 1,751,090 | 1,236,663 | 3,585,343 | 167.85% |
+| mean c/frame | 1,662,797 | 1,752,714 | **416,821** | 2,987,762 | 6,573,107 | 1,751,108 |
+| % of 32,768 Hz | 158.55% | 167.12% | **39.74%** | 284.89% | 626.76% | 166.97% |
+| stack `ctrl − asm` | | | **1,245,976** | | | **1,236,654** |
+| width `wide − ctrl` | | 89,917 | | | 3,585,345 | |
+| worst (`X`) | | | **39.961%** | | | **167.854%** |
 
-**Pre-declared bar.** The same-image `asm` mean and the `ctrl − asm` stack on
-hardware must land within **±2%** of the mGBA values above (FIXED `asm`
-408,468–425,140 c/frame; stack 1,221,064–1,270,904), and the width marginal
-within ±2%. If they do, the non-fetch path is validated and 39.74% stands as a
-hardware decode number. If they do not, the delta *is* the finding: the
-non-fetch path diverges, and the mGBA stack must not be quoted as a hardware
-number until a probe prices it. The rate decision is robust either way — FIXED
-fits 32,768 Hz under 48% even with a 20% hardware penalty on the stack.
+Against the pre-summary 6a-7 record (`ctrl` 1,662,788 / `wide` 1,752,704 / `asm`
+416,804; stack 1,245,984; width 89,915; worst 39.96%): the deltas are **+9 / +10 /
++17**, **−8**, **+2**, **+0.001 pp** on FIXED and **+9 / +11 / +18**, **−9**,
+**+2**, **+0.004 pp** on LPC — **≤18 cycles/frame, ≤0.005%**, i.e. the screen cost
+the measured path nothing. Measured, not assumed: the layout worry was real in
+principle and did not fire here, and the reference above is the image the units
+will run, so the comparison is same-image either way.
 
-**What is next after it.** 6b (the container: facade onto `scan`, the real GAFP
-packer/manifest, rate-play through a manifest), then the product stages outside
-decode (convert/push, mixer/DMA, Phase 2 step 9). Still decode-only either way.
+**Pre-declared bar (unchanged, quoted against this image).** On hardware, two runs
+per unit, the same-image `asm` mean and `ctrl − asm` stack must land within **±2%**
+— FIXED `asm` **408,484–425,157** c/frame, stack **1,221,056–1,270,895**, width
+FIXED **88,118–91,715** / LPC **3,513,638–3,657,051**, and the LPC `asm` mean
+within ±2% of 1,751,108. Pass, and 39.74% stands as a hardware decode number;
+fail, and the delta *is* the finding — the non-fetch path diverges and the mGBA
+stack must not be quoted as a hardware number until a probe prices it. The rate
+decision is robust either way: FIXED fits 32,768 Hz under 48% even with a 20%
+hardware penalty on the stack.
+
+**Gates.** `item6a7-test` **20 + 1 + 10** (the five new `summary` tests pin the
+label rule, the fixed-point formatter, `Leg::mean`, both delta signs and the
+rendered screen, including the percent-vs-per-mille factor — an off-by-100 there
+is invisible on a screen), `spike-test` **15 + 10**, `item6a5-test` **15 + 3 + 10**,
+`item6a5b-test` **21 + 4 + 3 + 10**, `make check` clean. Two headless mGBA runs of
+one build print **byte-identical** ten lines, and a third run after a comment-only
+edit — which moves `.rodata`'s panic `Location` lines but not `.text` — prints the
+same ten lines again. A full run takes ~6m40 under `mgba-test-runner` (the ROM
+loops after printing, so `timeout -k 5 400` is the intended invocation and exit
+124 is success).
+
+**How to quote this image.** By `.text` (`9f0b19e924cd…`, 89,484 B) and by its ten
+printed lines, not by a whole-image sha. The image as built for these runs is
+`615d38be2786…`, and that value moves with any edit that shifts a line number in
+`main.rs`, because `core::panic::Location` lives in `.rodata`. The control-build
+paragraph above is that same fact measured rather than argued.
+
+**Not claimed, and not doable here.** The two hardware runs are the rung's own
+arbitration and this host has no unit and no display: the instrument, the
+same-image mGBA reference and the bar are landed, and the reading is owed. Scope
+is also unchanged from 6a-7 — decode only; the producer's convert/push stages
+(~7.7 ms) are outside these windows and no full real-time claim exists. The
+shipped default decode path is still `TableCountKernel` at 167%, and no product
+path names `rice-arm`; that is 6b's.
+
+**What is next after it.** The two hardware runs, then **6b** (the container:
+facade onto `scan`, the real GAFP packer/manifest, rate-play through a manifest),
+then the product stages outside decode (convert/push, mixer/DMA, Phase 2 step 9).
+Still decode-only either way.
 
 ## Item 6b — the container (where frames come from)
 

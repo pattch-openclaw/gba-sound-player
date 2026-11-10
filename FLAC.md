@@ -17,6 +17,14 @@ The core's arithmetic-width default landed as 6a-6 (2026-11-09), and 6a-7
 39.74% mean / 39.96% worst** of the 32,768 Hz budget on FIXED, and the i64 leg
 costs +44.1 c/sample against the i32 default. Additivity reproduces to 0.06%.
 
+**6a-7b's instrument landed 2026-11-10:** `flac-spike-6a7.gba` now prints its
+three legs as a ten-line summary on the GBA screen (fit measured in-ROM: 10 lines,
+133 px wide, 121 px tall) and logs the same ten lines to serial, so the two
+channels cannot disagree. Its same-image mGBA reference reproduces the pre-summary
+6a-7 record to **≤18 cycles/frame on every leg** (`.text` byte-identical; the
+default image byte-identical outright). The two hardware runs — the rung's actual
+arbitration — are the part still owed.
+
 That is where four rungs of differential went, and the answer was not any of the
 things they suspected. It is worth reading in order, because each rung rules out
 what the next one would otherwise have blamed:
@@ -89,7 +97,7 @@ alternative codec, evaluated under the same constraint, is
 |---|---|
 | `crates/flac-lite` | Portable core: `no_std`, zero deps, zero alloc, `#![deny(unsafe_code)]` plus named `cfg`-gated `.iwram` pin attributes (exactly one in a default build). Frame decode is **complete** (`bits` → `stream` → `frame` → `subframe` → `residual` → `stereo`), witnessed bit-exact against `flac -d` on host and in the ROM image. Per-frame `driver`, table-less `scan` walk (feature), CRC verification (feature), `RiceKernel` seam. Arithmetic width (6a-6): `i32-integrator` on by default, guarded per subframe, `i64` reference/escape leg (`make flac-test-wide`). Still `todo!()`: the `decoder` facade, `format::Manifest`, `Blocksize::samples` and `EncodeProfile::validate`. |
 | `crates/flac-lite-gba` | The GBA overlay. Two `RiceKernel` arms behind their own features: `rice-twin` (6a-3, Rust, forwards to the core's twin) and **`rice-arm`** (6a-4: the E10 ARM-mode kernel via `global_asm!`, its FFI and `KernelAbi`, three tables under `iwram-pin`). A **default build still contains no kernel, no asm, no FFI and no `unsafe`**; the shipped default is still `TableCountKernel`. |
-| `examples/flac_spike` (6a-5 / 6a-7 arms) | Three feature-gated product-path arms (`item6a5-rust`, `item6a5-asm`, `item6a5-arms`), plus 6a-7's **vendored** width leg (`item6a7-wide`, `src/wide.rs`, the pre-6a-6 i64 path) timed in one image with `ctrl` and `asm`. `make item6a5-test`, `item6a7-test`, `item6a5-arms-rom`, `item6a5-asm-rom`, `item6a7-rom`. |
+| `examples/flac_spike` (6a-5 / 6a-7 arms) | Three feature-gated product-path arms (`item6a5-rust`, `item6a5-asm`, `item6a5-arms`), plus 6a-7's **vendored** width leg (`item6a7-wide`, `src/wide.rs`, the pre-6a-6 i64 path) timed in one image with `ctrl` and `asm`. Under `item6a7-wide` the image also renders 6a-7b's ten-line on-screen summary (`src/summary.rs` + `src/item6a7b.rs`): `ctrl`/`wide`/`asm` means, `S=C-A`, `Wd=W-C`, `X=worst%` per clip. `make item6a5-test`, `item6a7-test`, `item6a5-arms-rom`, `item6a5-asm-rom`, `item6a7-rom`. |
 | `examples/e5_fetch` | E5's hardware arbitration ROM: one synthetic ARM instruction stream assembled into `.text` and `.iwram`, timed in one image with `WAITCNT`/prefetch on/off; results on screen (no serial on hardware) and on mGBA serial. `make native-e5-fetch-rom`. |
 | `examples/overlay-kernel-check` | 6a-4's instrument ROM — the only place the assembly runs. Sweeps the committed corpus and the synthesized boundaries through three legs (incumbent, assembled kernel, model) on mGBA's ARM7TDMI, and is the repo's first ROM suite that actually runs assertions (8 `#[test_case]`s). It also asserts the three tables' `.iwram` placement at runtime. |
 | `examples/flac_spike` | The measurement instrument and the `ctrl` arm of every performance record. Host witness + in-ROM decode proof + cycle harness. |
@@ -179,9 +187,13 @@ One line per rung; the full plan, bars and invariants are in
   hardware reproduces mGBA within 2 cycles/call. Prefetch on/off changes nothing
   measurable. The fetch pricing is hardware; the kernel-level stack on hardware
   is **6a-7b** (next rung).
-- **6a-7b** — the kernel stack on hardware: add the on-screen summary to
-  `flac-spike-6a7.gba`, run it on the GBA 001 and SP, and check the 39.74% stack
-  against mGBA's ±2% bar. It covers the non-fetch path E5 left open. Then 6b.
+- **6a-7b** — the kernel stack on hardware. **Instrument landed 2026-11-10**
+  (`flac-spike-6a7.gba` `615d38be2786…`, `.text` `9f0b19e924cd…`): the ten-line on-screen summary plus the
+  same ten lines on serial, with a fit check, and a same-image mGBA reference that
+  reproduces the pre-summary 6a-7 record to ≤18 cycles/frame. **Still owed:** run
+  it on the GBA 001 and SP, two runs each, and check the 39.74% stack against the
+  pre-declared ±2% bar (±2% of this image: FIXED `asm` 408,484–425,157 c/frame,
+  stack 1,221,056–1,270,895). It covers the non-fetch path E5 left open. Then 6b.
 - **6b** — the container: the facade rewired onto `scan`, the real GAFP packer and
   manifest, and the rate-play path through a real manifest.
 - **Rate sweep** — the cross-rate profiling sweep on the improved decoder, which

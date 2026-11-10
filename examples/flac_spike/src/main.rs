@@ -84,8 +84,19 @@ extern crate alloc;
 #[cfg(any(feature = "item6a3-twin", feature = "item6a3-hybrid"))]
 mod item6a3_probe;
 
+// [6a-7b] the on-screen summary's `agb` half (see `src/item6a7b.rs`): the font,
+// the layout, and the fit check — everything that cannot exist off the GBA
+// target. Declared at the crate root so the file is `src/item6a7b.rs` rather
+// than `src/rom/item6a7b.rs`; gated on `item6a7-wide` so every image except the
+// 6a-7 one keeps the bytes its record quotes.
+#[cfg(all(target_arch = "arm", feature = "item6a7-wide"))]
+mod item6a7b;
+
 #[cfg(target_arch = "arm")]
 mod rom {
+    // [6a-7b] the summary's `agb` half — see the declaration at the crate root.
+    #[cfg(feature = "item6a7-wide")]
+    use crate::item6a7b;
     use agb::display::Rgb;
     use agb::timer::Divider;
     use flac_lite::subframe::PredictorState;
@@ -681,6 +692,11 @@ mod rom {
         use flac_lite_gba::rice_twin::TwinKernel;
         #[cfg(feature = "item6a7-wide")]
         use flac_spike::wide;
+        // [6a-7b] the summary the screen prints. Only the 6a-7 image has a
+        // screen, so the parameter that carries it exists only in that build —
+        // see the note on `pass`'s signature.
+        #[cfg(feature = "item6a7-wide")]
+        use flac_spike::summary::{ClipSummary, Leg, Summaries};
 
         /// E9's window shape: zero the counter pair before every window so the
         /// wrap sentinel means "this window exceeded 2^32" rather than "the pass
@@ -804,7 +820,17 @@ mod rom {
         /// is a fourth window — the E10 archive's vendored path — paired against
         /// the landed ARM arm rather than only against `ctrl`; that pair is what
         /// 6a-5b's record is.
-        fn pass(clip: &SpikeClip, counter: &mut Counter<'_>) -> bool {
+        fn pass(
+            clip: &SpikeClip,
+            counter: &mut Counter<'_>,
+            // [6a-7b] `cfg` on a function PARAMETER is what keeps every other
+            // image in this crate byte-identical: with `item6a7-wide` off the
+            // signature is the pre-6a-7b one, so no call, no register and no
+            // word of `pass` changes for the default, 6a-5 and 6a-5b builds.
+            // The summary is recorded once, here, after the last window.
+            #[cfg(feature = "item6a7-wide")] slot: usize,
+            #[cfg(feature = "item6a7-wide")] summaries: &mut Summaries,
+        ) -> bool {
             let name = clip.name;
             let max = usize::from(clip.max_blocksize);
             let mut ctrl_l: alloc::vec::Vec<i32> = alloc::vec![0; max];
@@ -1392,6 +1418,23 @@ mod rom {
                 wide.max,
                 BUDGET_CYCLES_PER_FRAME
             );
+            // [6a-7b] the screen's copy of this clip's three legs. Taken here,
+            // after every window has closed and every per-frame line has been
+            // printed, so nothing on the screen can be written to by a later
+            // window and the serial record above stays the source of the
+            // undivided numbers. `Leg` copies sum/max/count only — no `mean`
+            // runs in this function.
+            #[cfg(feature = "item6a7-wide")]
+            summaries.record(
+                slot,
+                ClipSummary {
+                    count: ctrl.count,
+                    budget: BUDGET_CYCLES_PER_FRAME,
+                    ctrl: Leg::of(&ctrl),
+                    wide: Leg::of(&wide),
+                    asm: Leg::of(&asm),
+                },
+            );
             ok
         }
 
@@ -1540,7 +1583,13 @@ mod rom {
             *all_ok &= ok;
         }
 
-        pub fn run(clip: &SpikeClip, counter: &mut Counter<'_>) -> bool {
+        pub fn run(
+            clip: &SpikeClip,
+            counter: &mut Counter<'_>,
+            // [6a-7b] see `pass`: both parameters exist only in the 6a-7 image.
+            #[cfg(feature = "item6a7-wide")] slot: usize,
+            #[cfg(feature = "item6a7-wide")] summaries: &mut Summaries,
+        ) -> bool {
             let mut proofs_ok = true;
             proofs_then_pass::<TableCountKernel>(clip, "ctrl", &mut proofs_ok);
             #[cfg(feature = "item6a5-rust")]
@@ -1575,7 +1624,17 @@ mod rom {
             if !proofs_ok {
                 return false;
             }
-            pass(clip, counter)
+            // [6a-7b] the extra arguments exist only in the 6a-7 image (`cfg`
+            // on a *parameter* is stable; `cfg` on a call argument is not), so
+            // the two shapes are spelled out. The build picks one.
+            #[cfg(feature = "item6a7-wide")]
+            {
+                pass(clip, counter, slot, summaries)
+            }
+            #[cfg(not(feature = "item6a7-wide"))]
+            {
+                pass(clip, counter)
+            }
         }
     }
 
@@ -1643,6 +1702,17 @@ mod rom {
                 "SKIPPED (correctness-before-speed: no numbers from an unproven image)"
             }
         );
+        // [6a-7b] the screen's own verdict is *validity*: the spike's `pass`
+        // ANDs the budget check, and the LPC clip is 167% of the 32,768 Hz
+        // frame by design, so a screen coloured from `pass` would be red on a
+        // valid measurement. `harness_ok` therefore covers the assets, the
+        // decode proofs and every leg pass — everything a reader needs in
+        // order to trust the numbers — and the budget verdict stays on serial.
+        #[cfg(feature = "item6a7-wide")]
+        let mut summaries = flac_spike::summary::Summaries::new();
+        #[cfg(feature = "item6a7-wide")]
+        let mut harness_ok = assets_pass && proofs_pass;
+
         let mut timing: [Option<(FrameCost, u32, bool)>; 2] = [None, None];
         if proofs_pass {
             // Interrupt-register witnesses around the whole timing section.
@@ -1666,7 +1736,18 @@ mod rom {
                 // default build.
                 #[cfg(any(feature = "item6a5-rust", feature = "item6a5-asm"))]
                 {
-                    pass &= item6a5::run(clip, &mut counter);
+                    // [6a-7b] same two shapes as `run`'s own tail: the 6a-7
+                    // image's pass also leaves a summary for the screen.
+                    #[cfg(feature = "item6a7-wide")]
+                    {
+                        let ok = item6a5::run(clip, &mut counter, slot, &mut summaries);
+                        pass &= ok;
+                        harness_ok &= ok;
+                    }
+                    #[cfg(not(feature = "item6a7-wide"))]
+                    {
+                        pass &= item6a5::run(clip, &mut counter);
+                    }
                 }
                 // Red on EITHER failure mode — harness failure (None) or a
                 // completed measurement that misses budget — but the two
@@ -1682,12 +1763,33 @@ mod rom {
             );
         }
 
+        // `label` names the backdrop colour in the log; only the build whose
+        // screen is the plain verdict uses it, so it is defined there (`color`
+        // is the palette colour both builds set).
+        #[cfg(not(feature = "item6a7-wide"))]
         let (color, label) = if pass {
             (COLOR_PASS, "BLUE")
         } else {
             (COLOR_FAIL, "RED")
         };
+        #[cfg(feature = "item6a7-wide")]
+        let color = if pass { COLOR_PASS } else { COLOR_FAIL };
         gfx.set_background_palette_colour(0, 0, color);
+        // [6a-7b] In the 6a-7 image the screen is the summary, whose verdict is
+        // validity; saying "screen RED" here would describe a screen that is
+        // blue. Two shapes, one build each — the same rule the arm prints use.
+        #[cfg(feature = "item6a7-wide")]
+        agb::eprintln!(
+            "[spike] PR 3 BUDGET verdict {} (assets={}, decode proof={}, measured {}/{}, within budget {}/{}) — the screen shows the 6a7b summary; its verdict is validity, not budget",
+            if pass { "PASSED" } else { "FAILED" },
+            assets_pass,
+            proofs_pass,
+            timing.iter().filter(|t| t.is_some()).count(),
+            CLIPS.len(),
+            timing.iter().flatten().filter(|t| t.2).count(),
+            CLIPS.len()
+        );
+        #[cfg(not(feature = "item6a7-wide"))]
         agb::eprintln!(
             "[spike] PR 3 verdict {} — screen {} (assets={}, decode proof={}, measured {}/{}, within budget {}/{})",
             if pass { "PASSED" } else { "FAILED" },
@@ -1699,6 +1801,50 @@ mod rom {
             timing.iter().flatten().filter(|t| t.2).count(),
             CLIPS.len()
         );
+
+        // [6a-7b] the hardware-readable summary. Only the 6a-7 image has one:
+        // every other image in this crate keeps the bytes its record quotes,
+        // which is why this whole block is feature-gated rather than
+        // conditional at runtime.
+        //
+        // Two channels, one string: the screen a stock GBA shows and the serial
+        // log an mGBA run prints are the SAME bytes (`flac_spike::summary::
+        // render`), so the mGBA reference for a hardware reading is taken from
+        // this image and cannot drift from what the unit displays.
+        #[cfg(feature = "item6a7-wide")]
+        {
+            // The font's own metrics decide whether ten lines fit; a screen that
+            // overflows silently drops the number the rung exists to read.
+            agb::println!("*** 6a7b font line_height={}", item6a7b::line_height());
+            for (clip, _) in summaries.iter() {
+                agb::println!("*** 6a7b clip {} = {}", clip.name, clip.why);
+            }
+            let text = flac_spike::summary::render(&summaries, harness_ok);
+            let fit = item6a7b::measure(&text);
+            agb::println!(
+                "*** 6a7b fit: lines={} right={} bottom={} fits={} (screen 240x160)",
+                fit.lines,
+                fit.right,
+                fit.bottom,
+                fit.fits()
+            );
+            for line in text.lines() {
+                agb::println!("[spike] 6a7b screen| {}", line);
+            }
+            agb::eprintln!(
+                "*** 6a7b verdict: {} (validity only — the budget verdict is the PR 3 line above)",
+                if harness_ok {
+                    "HARNESS OK"
+                } else {
+                    "HARNESS FAILED"
+                }
+            );
+            item6a7b::show(
+                &mut gfx,
+                &text,
+                if harness_ok { COLOR_PASS } else { COLOR_FAIL },
+            );
+        }
 
         loop {
             let frame = gfx.frame();
