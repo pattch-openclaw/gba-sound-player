@@ -29,7 +29,15 @@ categories = ["multimedia::audio", "no-std"]
 # there). Reserved for fixtures/reference comparison; keep empty until needed.
 
 [features]
-default = []
+default = ["i32-integrator"]
+# Item 6a-6: 32-bit integration is the default arithmetic width. The ring
+# sites (FIXED cascade, wasted-bit pad, side decorrelation) are unconditionally
+# bit-identical in `i32`; the LPC dot product is guarded per subframe by
+# `subframe::lpc_accumulator_fits_i32`, and a frame whose bound fails takes
+# the i64 escape leg and reports it. `--no-default-features` is exactly the
+# audited i64 reference build (`make flac-test-wide`), guardless and
+# end-to-end. See `flac-docs/plan-of-record.md`, the width decision.
+i32-integrator = []
 # Pin the E2b `LEADING_ONES` table to `.iwram` (GBA link-script contract, see
 # `bits.rs`). OFF by default: portable consumers and other ARM bare-metal
 # targets build with zero pin surface (no missing-section link failure where
@@ -145,6 +153,16 @@ required-features = ["crc-check"]
 [[test]]
 name = "rice_two_mechanism_differential"
 required-features = ["rice-hybrid"]
+
+# Item 6a-6's width witness. It pins the narrow (default) leg to the same
+# external oracle the reference build uses (`flac -d` PCM in the committed body
+# tables) and exercises the guard's boundary, so the feature-on build cannot go
+# green on the wide leg's proof by accident. With `i32-integrator` off the
+# suite is not built at all; `make flac-test-wide` is the companion
+# configuration that pins the i64 leg end to end.
+[[test]]
+name = "width_two_mechanism_differential"
+required-features = ["i32-integrator"]
 
 # No workspace membership: this crate is standalone (like examples/symphonia_flac_probe/)
 # so the root ROM crate's `[build] target = thumbv4t-none-eabi` config never leaks

@@ -81,7 +81,7 @@
 //!   coefficients, the sample width), so the width needs no seam, no overlay and
 //!   no second instantiation on the platform side. This is the place a reader of
 //!   the original proposal finds that corrected; the arithmetic and the guard are
-//!   in the plan's "width decision", and 6a-6 is where they land.
+//!   in the plan's "width decision", and 6a-6 landed them in the core.
 //!
 //! ## What this crate is not
 //!

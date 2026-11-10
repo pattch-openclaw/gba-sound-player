@@ -69,9 +69,11 @@
 //! - **LPC (body, step 3):** coefficients are signed at the u(4) precision,
 //!   then a global `shift` (5-bit signed, §9.2.6: MUST NOT be negative).
 //!   `sample[i] = (Σ coeff[j]·sample[i-1-j] >> shift) + residual[i]`. The
-//!   coefficient order in the stream is *most-recent-past first*. Accumulate
-//!   in `i64` in debug; the perf spike decides whether `i32` is provably safe
-//!   (it is for 16-bit input, but prove it before trusting it).
+//!   coefficient order in the stream is *most-recent-past first*. The width
+//!   is decided: with `i32-integrator` (default) the ring sites run in `i32`
+//!   and the LPC dot product does too whenever [`lpc_accumulator_fits_i32`]
+//!   proves the `>> shift` exact; otherwise the frame takes the `i64` leg.
+//!   `ArithmeticWidth` reports which leg answered (item 6a-6).
 //! - **Profile gating is not this layer's job.** All legal LPC orders 1..=32
 //!   parse as `Lpc`; rejecting `order > profile.max` (or LPC at all) happens
 //!   where an [`crate::format::EncodeProfile`] is in scope, exactly as
@@ -162,6 +164,32 @@ impl SubframeType {
     }
 }
 
+/// Which arithmetic width integrated a subframe/frame — item 6a-6's report.
+///
+/// [`decode_subframe_with_width`] and [`crate::frame::decode_frame_with_width`]
+/// return it so a caller (or a witness) can see whether the frame stayed on
+/// the default narrow leg or took the wide escape leg. With
+/// `i32-integrator` off every report is [`ArithmeticWidth::I64`], because that
+/// build runs the audited i64 code end to end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ArithmeticWidth {
+    /// 32-bit accumulators — the default (`i32-integrator` on).
+    I32,
+    /// 64-bit accumulators — the reference leg, and the escape leg a frame
+    /// takes when [`lpc_accumulator_fits_i32`] cannot prove i32 exact.
+    I64,
+}
+
+impl ArithmeticWidth {
+    /// Combine two subframes' reports: a frame is wide if either half is.
+    pub const fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::I32, Self::I32) => Self::I32,
+            _ => Self::I64,
+        }
+    }
+}
+
 /// Per-subframe warm-up scratch: the `order` unencoded samples the subframe
 /// header carries, consumed by the integrators as the seed of the predictor.
 ///
@@ -212,9 +240,10 @@ impl PredictorState {
     /// mis-placed read, and rejecting it keeps the pad shift from being a
     /// silent wrap.
     ///
-    /// Padding is computed in `i64` and truncated to `i32` — legal streams
-    /// cannot overflow it under the profile (see the module's i64 note), and
-    /// the perf spike revisits the intermediate, not this seam.
+    /// Padding is a ring operation (E4's unconditional-equivalence site): the
+    /// `i32-integrator` build shifts in `i32`, the reference build in `i64`
+    /// then truncates — bit-identical under either, since the final store is
+    /// the truncation.
     ///
     /// Cursor contract: on success lands on the first bit after the warm-up
     /// (LPC's precision/shift/coefficient fields sit between warm-up and
@@ -244,7 +273,14 @@ impl PredictorState {
         // integrators index directly.
         for slot in (0..order).rev() {
             let v = reader.read_signed(u32::from(subframe_bits))?;
-            warm[slot] = ((i64::from(v)) << wasted) as i32;
+            #[cfg(feature = "i32-integrator")]
+            {
+                warm[slot] = v.wrapping_shl(wasted);
+            }
+            #[cfg(not(feature = "i32-integrator"))]
+            {
+                warm[slot] = ((i64::from(v)) << wasted) as i32;
+            }
         }
         self.warm_up = warm;
         self.len = order;
@@ -328,6 +364,26 @@ pub fn decode_subframe_with<K: RiceKernel>(
     state: &mut PredictorState,
     out: &mut [i32],
 ) -> crate::Result<SubframeType> {
+    decode_subframe_with_width::<K>(reader, blocksize, sample_bits, state, out)
+        .map(|(kind, _)| kind)
+}
+
+/// [`decode_subframe_with`], also reporting which arithmetic width integrated
+/// the residual ([`ArithmeticWidth`]) — item 6a-6's per-subframe grain.
+///
+/// The grain is deliberately the subframe, not the frame: the guard's inputs
+/// (LPC coefficients, precision, shift, and the subframe's own bps — already
+/// `+1` on the side slot) exist only after that subframe's header is parsed,
+/// so this is the finest *information* available and a two-subframe frame can
+/// keep one half narrow when only the other needs the wide leg.
+/// [`crate::frame::decode_frame_with_width`] combines the halves.
+pub fn decode_subframe_with_width<K: RiceKernel>(
+    reader: &mut BitReader<'_>,
+    blocksize: usize,
+    sample_bits: u8,
+    state: &mut PredictorState,
+    out: &mut [i32],
+) -> crate::Result<(SubframeType, ArithmeticWidth)> {
     // Caller contract first, before any bit is consumed: one caller-provided
     // slice per subframe (3d buffer contract).
     if out.len() != blocksize {
@@ -360,6 +416,10 @@ pub fn decode_subframe_with<K: RiceKernel>(
     for (i, slot) in state.warm_up[..order].iter().rev().enumerate() {
         out[i] = *slot;
     }
+    #[cfg(feature = "i32-integrator")]
+    let mut width = ArithmeticWidth::I32;
+    #[cfg(not(feature = "i32-integrator"))]
+    let width = ArithmeticWidth::I64;
     match kind {
         SubframeType::Constant => {
             // One stripped value for the whole block; pad_block multiplies it
@@ -378,6 +438,9 @@ pub fn decode_subframe_with<K: RiceKernel>(
         }
         SubframeType::Fixed(order_u8) => {
             decode_residual_with::<K>(reader, blocksize, order, &mut out[order..])?;
+            #[cfg(feature = "i32-integrator")]
+            integrate_fixed_i32(order_u8, state, &mut out[order..])?;
+            #[cfg(not(feature = "i32-integrator"))]
             integrate_fixed(order_u8, state, &mut out[order..])?;
         }
         SubframeType::Lpc { order: order_u8 } => {
@@ -402,25 +465,44 @@ pub fn decode_subframe_with<K: RiceKernel>(
                 *c = reader.read_signed(precision)?;
             }
             decode_residual_with::<K>(reader, blocksize, order, &mut out[order..])?;
+            #[cfg(feature = "i32-integrator")]
+            {
+                width = integrate_lpc_guarded(
+                    &coeffs[..order],
+                    shift as i8,
+                    subframe_bits,
+                    state,
+                    &mut out[order..],
+                )?;
+            }
+            #[cfg(not(feature = "i32-integrator"))]
             integrate_lpc(&coeffs[..order], shift as i8, state, &mut out[order..])?;
         }
     }
     pad_block(out, wasted);
-    Ok(kind)
+    Ok((kind, width))
 }
 
 /// §9.2.2's decoder multiply: shift the *fully decoded* block from the
 /// wasted-stripped scale back to the sample scale, once, at block exit —
 /// exactly what libFLAC's `read_subframe_` does after its type dispatch.
-/// Same i64-then-truncate convention as the integrators; `wasted == 0` is a
-/// no-op. The shift is always < 32 here: the §9.2.2 gate above forces
-/// `wasted < sample_bits ≤ 32`.
+/// Same width rule as the integrators: `i32-integrator` shifts in `i32`
+/// (ring-equivalent to the i64-then-truncate reference build); `wasted == 0`
+/// is a no-op either way. The shift is always < 32 here: the §9.2.2 gate
+/// above forces `wasted < sample_bits ≤ 32`.
 fn pad_block(out: &mut [i32], wasted: u32) {
     if wasted == 0 {
         return;
     }
     for s in out.iter_mut() {
-        *s = ((i64::from(*s)) << wasted) as i32;
+        #[cfg(feature = "i32-integrator")]
+        {
+            *s = s.wrapping_shl(wasted);
+        }
+        #[cfg(not(feature = "i32-integrator"))]
+        {
+            *s = ((i64::from(*s)) << wasted) as i32;
+        }
     }
 }
 
@@ -446,6 +528,11 @@ fn pad_block(out: &mut [i32], wasted: u32) {
 ///
 /// Accumulates in `i64`, stores `as i32` (truncation, same convention as the
 /// module's perf note; legal profile streams never reach the edge).
+///
+/// Under `i32-integrator` the FIXED cascade runs in [`integrate_fixed_i32`]
+/// instead — every operation is a ring site, so that is unconditionally
+/// bit-identical to this function (E4's proof). This wide form is the
+/// reference build's leg and the audited end-to-end witness.
 ///
 /// Contract: `order ≤ MAX_FIXED_ORDER` (else [`crate::Error::UnsupportedPredictorOrder`])
 /// and `warm_up.len ≥ order` (a shorter warm-up is a caller bug — the
@@ -543,6 +630,11 @@ fn integrate_fixed(order: u8, warm_up: &PredictorState, residual: &mut [i32]) ->
 /// Rust's arithmetic shift on `i64` (floor for negatives — matches ARM `asr`
 /// and the oracle's Python `>>`, whose negative-accumulator vectors pin
 /// exactly this behaviour).
+///
+/// **This is the wide leg**, not a fallback nobody chose: the default
+/// (`i32-integrator` on) reaches it exactly when [`lpc_accumulator_fits_i32`]
+/// cannot prove the narrow form exact, and the reference build (`i32-integrator`
+/// off) runs it unconditionally. Either way it remains the always-correct leg.
 fn integrate_lpc(
     coefficients: &[i32],
     shift: i8,
@@ -580,6 +672,168 @@ fn integrate_lpc(
         residual[i] = ((acc >> shift) + i64::from(residual[i])) as i32;
     }
     Ok(())
+}
+
+/// The `i32-integrator` FIXED integrator: the same cascade as
+/// [`integrate_fixed`], in wrapping `i32`.
+///
+/// Every operation is `+`/`-` on a ring and the wide form already truncates at
+/// the store, so this is **unconditionally** bit-identical for any input
+/// (E4's ring-site proof). No guard is consulted.
+#[cfg(feature = "i32-integrator")]
+fn integrate_fixed_i32(
+    order: u8,
+    warm_up: &PredictorState,
+    residual: &mut [i32],
+) -> crate::Result<()> {
+    let order = usize::from(order);
+    if order > crate::MAX_FIXED_ORDER {
+        return Err(crate::Error::UnsupportedPredictorOrder);
+    }
+    if warm_up.len < order {
+        return Err(crate::Error::InvalidField);
+    }
+    let w = &warm_up.warm_up;
+    let mut d1;
+    let mut d2 = 0i32;
+    let mut d3 = 0i32;
+    let mut out = 0i32;
+    match order {
+        0 => return Ok(()),
+        1 => {
+            d1 = w[0];
+        }
+        2 => {
+            d1 = w[0].wrapping_sub(w[1]);
+            out = w[0];
+        }
+        3 => {
+            d2 = w[0].wrapping_sub(w[1].wrapping_mul(2)).wrapping_add(w[2]);
+            d1 = w[0].wrapping_sub(w[1]);
+            out = w[0];
+        }
+        _ => {
+            d3 = w[0]
+                .wrapping_sub(w[1].wrapping_mul(3))
+                .wrapping_add(w[2].wrapping_mul(3))
+                .wrapping_sub(w[3]);
+            d2 = w[0].wrapping_sub(w[1].wrapping_mul(2)).wrapping_add(w[2]);
+            d1 = w[0].wrapping_sub(w[1]);
+            out = w[0];
+        }
+    }
+    for sample in residual.iter_mut() {
+        let r = *sample;
+        match order {
+            1 => {
+                d1 = d1.wrapping_add(r);
+                out = d1;
+            }
+            2 => {
+                d1 = d1.wrapping_add(r);
+                out = out.wrapping_add(d1);
+            }
+            3 => {
+                d2 = d2.wrapping_add(r);
+                d1 = d1.wrapping_add(d2);
+                out = out.wrapping_add(d1);
+            }
+            _ => {
+                d3 = d3.wrapping_add(r);
+                d2 = d2.wrapping_add(d3);
+                d1 = d1.wrapping_add(d2);
+                out = out.wrapping_add(d1);
+            }
+        }
+        *sample = out;
+    }
+    Ok(())
+}
+
+/// The `i32-integrator` LPC dot product: [`integrate_lpc`] in wrapping `i32`,
+/// used only when [`lpc_accumulator_fits_i32`] proves the `>> shift` exact for
+/// this coefficient set and sample width.
+#[cfg(feature = "i32-integrator")]
+fn integrate_lpc_i32(
+    coefficients: &[i32],
+    shift: i8,
+    warm_up: &PredictorState,
+    residual: &mut [i32],
+) -> crate::Result<()> {
+    if shift < 0 {
+        return Err(crate::Error::InvalidField);
+    }
+    let order = coefficients.len();
+    if order > crate::MAX_LPC_ORDER {
+        return Err(crate::Error::UnsupportedPredictorOrder);
+    }
+    if warm_up.len < order {
+        return Err(crate::Error::InvalidField);
+    }
+    let shift = u32::from(shift as u8);
+    // The field caps at 15 (§9.2.6 s(5)); the guard keeps `i32 >> 32` from
+    // being a panic on a standalone call, exactly as the i64 leg guards 64.
+    if shift >= 32 {
+        return Err(crate::Error::InvalidField);
+    }
+    let w = &warm_up.warm_up;
+    for i in 0..residual.len() {
+        let mut acc = 0i32;
+        for (j, &c) in coefficients.iter().enumerate() {
+            let past = if j < i { residual[i - 1 - j] } else { w[j - i] };
+            acc = acc.wrapping_add(c.wrapping_mul(past));
+        }
+        residual[i] = (acc >> shift).wrapping_add(residual[i]);
+    }
+    Ok(())
+}
+
+/// Item 6a-6's guard: can this LPC subframe's dot product be accumulated in
+/// `i32` with bit-identical results, given only what the subframe header
+/// parsed?
+///
+/// `|acc| = |Σ c_j·past_j| ≤ (Σ|c_j|)·max|past|`, and every past sample is
+/// `s(subframe_bits)` (warm-up and decoded prefix alike), so
+/// `max|past| ≤ 2^(subframe_bits−1)`. The `>> shift` site is exact in i32 iff
+/// the true `acc` fits i32; the following `+ residual` and the store are ring
+/// operations that truncate identically either way (E4's proof,
+/// `flac-docs/perf-results.md`).
+///
+/// This sums `|c_j|` rather than taking `order × max|c|`: the same O(order)
+/// walk over the coefficients just parsed, and strictly tighter for
+/// mixed-sign taps. Accumulated in `u64` because the worst legal profile
+/// product is `32 × 2^14 × 2^16 = 2^35`.
+///
+/// `false` is not an error: the frame decodes through [`integrate_lpc`] (the
+/// wide, always-correct escape leg) and reports [`ArithmeticWidth::I64`].
+pub fn lpc_accumulator_fits_i32(coefficients: &[i32], subframe_bits: u8) -> bool {
+    if subframe_bits == 0 || subframe_bits > 32 {
+        return false;
+    }
+    let magnitude = coefficients.iter().fold(0u64, |sum, &c| {
+        sum.saturating_add(u64::from(c.unsigned_abs()))
+    });
+    let sample_bound = 1u64 << (subframe_bits - 1);
+    magnitude.saturating_mul(sample_bound) <= i32::MAX as u64
+}
+
+/// LPC dispatch for the `i32-integrator` default: narrow when the guard
+/// proves it exact, wide otherwise, and report which answered.
+#[cfg(feature = "i32-integrator")]
+fn integrate_lpc_guarded(
+    coefficients: &[i32],
+    shift: i8,
+    subframe_bits: u8,
+    warm_up: &PredictorState,
+    residual: &mut [i32],
+) -> crate::Result<ArithmeticWidth> {
+    if lpc_accumulator_fits_i32(coefficients, subframe_bits) {
+        integrate_lpc_i32(coefficients, shift, warm_up, residual)?;
+        Ok(ArithmeticWidth::I32)
+    } else {
+        integrate_lpc(coefficients, shift, warm_up, residual)?;
+        Ok(ArithmeticWidth::I64)
+    }
 }
 
 // Unit tests compile as part of the lib under the host test harness (Gate 2,
@@ -1114,5 +1368,47 @@ mod tests {
             Err(Error::InvalidField)
         );
         assert_eq!(resid, [7; 4], "LPC rejections precede every write");
+    }
+
+    // ---- item 6a-6: the two legs, in one build -------------------------------
+
+    /// Below the bound the dispatch must choose the narrow leg *and* agree with
+    /// the wide one sample for sample — the same-build half of the differential
+    /// whose other half the integration suite splits across configurations.
+    #[cfg(feature = "i32-integrator")]
+    #[test]
+    fn lpc_dispatch_narrow_leg_agrees_with_wide_below_the_bound() {
+        let st = warm_state(&[1, 2, 3, 4]);
+        let coeffs = [3, -2, 1, -1];
+        let mut narrow = [7i32, -9, 11, -13, 15, -17];
+        let mut wide = narrow;
+
+        assert!(lpc_accumulator_fits_i32(&coeffs, 16));
+        let chosen = integrate_lpc_guarded(&coeffs, 1, 16, &st, &mut narrow).unwrap();
+        assert_eq!(chosen, ArithmeticWidth::I32);
+
+        integrate_lpc(&coeffs, 1, &st, &mut wide).unwrap();
+        assert_eq!(
+            narrow, wide,
+            "narrow and wide legs must agree below the bound"
+        );
+    }
+
+    /// A coefficient set over the bound takes the wide leg, reports it, and
+    /// still produces the i64 reference result.
+    #[cfg(feature = "i32-integrator")]
+    #[test]
+    fn lpc_dispatch_takes_the_wide_leg_when_the_bound_fails() {
+        let st = warm_state(&[i32::MAX / 2]);
+        let coeffs = [i32::MAX];
+        let mut chosen_out = [1i32, 2, 3];
+        let mut reference = chosen_out;
+
+        assert!(!lpc_accumulator_fits_i32(&coeffs, 32));
+        let chosen = integrate_lpc_guarded(&coeffs, 0, 32, &st, &mut chosen_out).unwrap();
+        assert_eq!(chosen, ArithmeticWidth::I64);
+
+        integrate_lpc(&coeffs, 0, &st, &mut reference).unwrap();
+        assert_eq!(chosen_out, reference);
     }
 }

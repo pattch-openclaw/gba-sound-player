@@ -289,7 +289,7 @@ hurts (E6).
 | 5. `crc8`/`crc16` + verification behind `crc-check` | landed 2026-11-03 |
 | 6. `RiceKernel` seam + window bridge + portable twin + the flip reading | landed 2026-11-05/06; the default **did not flip** (measured negative) |
 | 7. Overlay crate, seam passable from outside | item 6a-1 and 6a-3 landed 2026-11-06/07 |
-| 8. Guarded i32 default width | item 6a-6, planned |
+| 8. Guarded i32 default width | item 6a-6 **landed** 2026-11-09 (default `i32-integrator`, per-subframe guard, i64 escape leg) |
 | 9. ARM kernel over the seam | item 6a-4 **landed** 2026-11-08 (correctness only, no default moved); item 6a-5 **measured** it through the seam at −584,856 c/frame (FIXED), fork resolved to *carry* — the one-line placement lands with the product path (6b) |
 | 10. Manifest + packer + facade rewired onto `scan` | item 6b, planned |
 
@@ -305,9 +305,10 @@ hurts (E6).
 - **2026-11-01 — the two-crate split**, corrected by measurement on 2026-11-06:
   the portable twin stays an alternative, the overlay owns the realization.
 - **2026-11-06 — i32 becomes the core's default arithmetic width**, feature-gated
-  and armed per frame by a bound computed from values the parse already has, with
-  i64 kept as the always-correct escape leg for off-profile streams (lands in
-  item 6a-6). The width needs no seam.
+  and armed per **subframe** by a bound computed from values the parse already
+  has, with i64 kept as the always-correct escape leg for off-profile streams
+  (landed in item 6a-6; the frame reports the OR of its subframes). The width
+  needs no seam.
 - **2026-11-06 — the toolchain is a pin, not a note** (`nightly-2026-09-04`).
 - **2026-11-08 — the seam is threaded to the frame, and the ARM kernel is carried**
   (item 6a-5). The `…_with<K>` chain is monomorphized (no `dyn`), the default stays

@@ -1302,8 +1302,8 @@ rounding.
 Three things this does **not** say. (i) The i32 marginal was measured on the
 vendored arm in *this* image; the i32 sites (`integrate_*`, `pad_block`,
 `decorrelate`) are outside the kernel and outside the seam, so the transfer is
-reasonable, but item 6a-6 must measure it in the seam image and 6a-7 confirms the
-stack. (ii) FIXED still fits both product rates with the landed kernel *alone*:
+reasonable, but item 6a-6 landed the width default (6a-7 takes its cycle marginal
+in the seam image) and 6a-7 confirms the stack. (ii) FIXED still fits both product rates with the landed kernel *alone*:
 61.7% at 18,157 Hz and 35.7% at 10,512 Hz (i64 control: 94.5% / 54.7%); LPC at
 10,512 Hz is 183.3% as landed and 85.3% with this record's i32 marginal. (iii) All
 of it is mGBA; E5 is still unrun, so neither 94.47% nor 103.83% is a hardware
@@ -1357,8 +1357,8 @@ codeword** (G1, G2, and a dead duplicated `and` the guard insertion left behind)
 above narrowed it correctly — they exonerated the bridge — and missed the unit:
 instruction counts bound the floor, not the price. The 94.47% row's arithmetic
 survives as a *projection* re-derived from a landed-tree arm (1,069,252 − 78,541 =
-990,711 c/frame), which is what it always was; the width leg still has to be
-measured on this tree by 6a-6. See plan-of-record ("6a-5b — the reading") and
+990,711 c/frame), which is what it always was; the width default landed in 6a-6
+and its cycle marginal is 6a-7's. See plan-of-record ("6a-5b — the reading") and
 measurements.md.
 
 **And 2026-11-09 (6a-5c) put a price on the instruction itself: 4.0000 cycles.** The

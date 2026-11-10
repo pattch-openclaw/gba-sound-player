@@ -14,6 +14,12 @@
 //! product-side container work — a manifest is *one* frame source, not the
 //! decoder's contract.
 //!
+//! **Arithmetic width (item 6a-6, default):** `i32-integrator` is on by
+//! default — 32-bit integration where it is provably bit-identical, with the
+//! LPC dot product guarded per subframe ([`subframe::lpc_accumulator_fits_i32`])
+//! and the i64 leg as the always-correct escape. [`ArithmeticWidth`] reports
+//! which leg ran. `--no-default-features` is the audited i64 reference build.
+//!
 //! **IMPLEMENTATION STATE (2026-11-04):** `bits::BitReader` is complete for
 //! the decode path (PRs #25–#32 plus step 3a's `read_wasted_bits`), and
 //! `bits::crc8`/`bits::crc16` landed with Phase 2 step 5 (2026-11-03) —
@@ -338,7 +344,7 @@ pub mod subframe;
 pub use decoder::{DecodedFrame, Decoder, FrameBuffers};
 pub use format::{Blocksize, ChannelConfig, EncodeProfile, Manifest, SampleRate};
 pub use frame::FrameHeader;
-pub use subframe::{PredictorState, SubframeType};
+pub use subframe::{ArithmeticWidth, PredictorState, SubframeType};
 
 /// Flat, `core`-only decode error type.
 ///

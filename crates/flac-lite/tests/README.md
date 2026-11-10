@@ -145,3 +145,14 @@ contradict its own frame count while agreeing with its sample count (both number
 come from the same arithmetic in `STREAMINFO`), so that arm is reachable only when
 a claim and a region come from different streams. Staging it also pins which of
 the two diagnoses answers first when both are contradicted.
+
+## The width differential (`width_two_mechanism_differential.rs`)
+
+Item 6a-6's narrow-leg witness, built only with `i32-integrator` on
+(`required-features`). It has no table of its own: it reads
+`subframe_body_vectors.txt` and pins the narrow integrators to the same
+`flac -d` PCM the default path has always been witnessed against, checks the
+guard at its boundary (including E4's two failing shapes), and checks the
+per-frame report's combination. The i64 leg is the companion configuration
+(`make flac-test-wide`), pinned to the same oracle — the pair is the
+differential.

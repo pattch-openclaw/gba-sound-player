@@ -153,12 +153,13 @@ under `examples/flac_spike/experiments/<name>/`.
 
 | Gate | What it proves |
 |---|---|
-| `make flac-test` | The real gate: `thumbv4t-none-eabi` compile (`-Zbuild-std=core,alloc`) + host unit/integration suites, default features. Run from a cwd outside the repo (see below). |
+| `make flac-test` | The real gate: `thumbv4t-none-eabi` compile (`-Zbuild-std=core,alloc`) + host unit/integration suites, default features (`i32-integrator` on). Run from a cwd outside the repo (see below). |
+| `make flac-test-wide` | Same, `--no-default-features`: the audited i64 reference build, end to end. Pairs with `flac-test` against one external oracle (`flac -d` PCM); the width differential suite is `required-features = ["i32-integrator"]`, so it is not built here. |
 | `make flac-test-crc` | Same, `--features crc-check`: header CRC-8 + footer CRC-16 verification, both accept and reject paths. |
 | `make flac-test-scan` | Same, `--features scan`: the frame walk + `tests/scan_frame_walk_layout.rs` (`required-features = ["scan"]`). |
 | `make flac-test-rice` | Same, `--features rice-hybrid`: the two-mechanism differential. |
 | `make flac-portable-check` | A **second** bare-metal target (`thumbv7em-none-eabi`) compiles, `--features scan,rice-hybrid`, `iwram-pin` off. Compile only — **no non-GBA performance claim exists**. |
-| `make flac-gates` | The aggregate: six configurations plus the combination arms (1,169 passed / 6 ignored at the item-6 baseline). |
+| `make flac-gates` | The aggregate: seven configurations plus the combination arms (1,377 passed / 6 ignored after 6a-6). |
 | `make native-flac-rom` | The decoder bundles into a bootable ROM (`examples/flac_integration/`), links and fixes. Build sanity, not audio. |
 | `make spike-test` / `native-spike-rom` | The measurement instrument: host witness over the exact embedded bytes, then on-target decode proof and cycle harness. |
 | `make item6a5-test` / `item6a5-arms-rom` / `item6a5-asm-rom` | Item 6a-5's arms: every kernel (default, Rust mechanism, ARM embodiment) decodes the committed clips to the pinned PCM and agrees with the control frame window by frame window on the host, and the two arm images time them through the product call path (three-way and product-shape). Arm features are off in every other build. |
