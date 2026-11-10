@@ -535,3 +535,15 @@ worst), which is why the rate decision was pre-declared robust to a 20% penalty.
 It becomes blocking only if a product path ever needs the last 6% — or if a
 *scaling* claim is made from cycle counts, because the shortfall is per-leg and
 would not cancel.
+
+**Parked by decision, 2026-11-10.** The project owner set two acceptance criteria
+(`plan-of-record.md` §"Acceptance criteria"): C1, `flac-lite` stands alone as a
+`no_std` crate ready for its own repository; C2, `flac-lite-gba` decodes *and plays
+back* in real time at 32 kHz on a GBA. This question cannot decide either — C2's
+decode figure is already a hardware measurement and the acceptance run is on
+hardware — so the probe is out of the queue and the critical path runs
+6b-1 → 6b-2 → 6b-3 → item 7 instead. **The trigger to re-open is unchanged and now
+written here rather than implied:** a product path that needs the last 6%, or any
+claim derived by scaling an mGBA cycle count. Until then the working substitute is
+the **+7% derating** rule on mGBA figures for memory-heavy paths
+(`plan-of-record.md` §"Ordering rules").

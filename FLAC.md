@@ -6,6 +6,27 @@ where performance actually stands, what is next, and where every detail lives.
 It is deliberately short — the detail is in [`flac-docs/`](flac-docs/), one file
 per concern.
 
+**What "done" means — two acceptance criteria** (stated 2026-11-10; the live plan is
+judged only against these, and full detail is in
+[`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) §"Acceptance criteria"):
+
+- **C1 — `flac-lite` stands alone.** It can be used independently as a `no_std`,
+  pure-Rust FLAC decoding crate, ready to be separated into its own repository — no
+  `todo!()`, a facade a stranger can drive, platform-bound surface confined to
+  off-by-default features or to the overlay crate. Not met yet: the `decoder`/
+  `format` facade is still scaffold.
+- **C2 — `flac-lite-gba` decodes *and plays back*, in real time, at 32 kHz, on a
+  GBA.** The decode half is measured on hardware (42.72% worst of the 32,768 Hz
+  frame); the claim is the *combination* — decode + convert + push + mixer/DMA in one
+  62.5 ms frame, underrun-free, on a GBA 001 and a GBA SP, with FIXED-only assets
+  enforced at pack time. Per the producer record the arithmetic is ≈85.6% of the
+  frame, i.e. ≈8.7 ms of margin, and that margin is what item 7 has to prove.
+
+The 3.7–6.9% mGBA-versus-silicon shortfall (Q13) is **parked by decision**: it would
+explain a number that is already measured on hardware, and C2 is judged on hardware
+anyway. Until something needs it, mGBA figures for memory-heavy paths carry a **+7%
+derating** instead of a probe.
+
 **Status in one line:** the decoder is complete and bit-exact; the playback harness
 plays real music at 10,512 Hz with correct tempo and pitch (audibly verified); the
 **shipped** path is still over budget at full rate (167% of the 32,768 Hz frame);
@@ -162,6 +183,20 @@ ledger: [`flac-docs/measurements.md`](flac-docs/measurements.md).
 One line per rung; the full plan, bars and invariants are in
 [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md).
 
+**The live order (2026-11-10), each step against C1/C2:**
+
+1. **6b-1** — facade onto `scan::Frames` **and** `rice-arm` carried into a product
+   ROM (the placement 6a-5 assigned here). Serves C1 and C2's decode half.
+2. **6b-2** — the real GAFP packer, `format::Manifest`, and a pack-time profile that
+   refuses LPC at the target rate (174.14% of a 32 kHz frame on hardware).
+3. **6b-3** — rate-play at 32,768 Hz through a real manifest; the first product ROM
+   naming the overlay crate.
+4. **7-1 / 7-2 / 7-3** — re-measure the producer at 32 kHz on hardware, land the
+   shipping mixer/DMA path, then the acceptance run: underruns = 0 on both units.
+   **C2 is met at 7-3.**
+5. **Parked:** Q13's data-read probe, and 6a-8. Re-open Q13 only if a product path
+   needs the last 6% or a claim is made by scaling an mGBA cycle count.
+
 - ~~**6a-5** — the realization reading, three arms in one image; the item's number
   of record, against a pre-declared fork.~~ **Landed: carry.** asm − ctrl =
   **−584,856 c/frame / −286.9 c/sample** (FIXED), 157/157 frames faster, in the
@@ -216,11 +251,13 @@ One line per rung; the full plan, bars and invariants are in
   ±2%**, so 39.74% is retired and the fork resolves to `diverges`. Decode keeps
   2.34× headroom, so the rate decision stands. Record:
   [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md).
-- **Data-read arbitration (opens with 6a-7b, not yet started)** — E5's shape one
-  layer down: the same `ldr` stream read from cartridge ROM and from IWRAM, timed
-  on both units with the prefetch buffer on and off, to separate mGBA's ROM
-  data-read/prefetch model from the flashcart's read timing. It owns the 3.7–6.9%
-  and decides whether any of it is the decoder's problem. Then 6b.
+- **Data-read arbitration — parked 2026-11-10, not dropped.** E5's shape one layer
+  down: the same `ldr` stream from cartridge ROM and from IWRAM, timed on both units
+  with prefetch on and off, to separate mGBA's ROM data-read model from the
+  flashcart's read timing. It owns the 3.7–6.9%, but it cannot move C1 or C2 — the
+  decode figure is already a hardware measurement and the acceptance run is on
+  hardware — so it waits. Q13 keeps the trigger; a **+7% derating** on mGBA
+  memory-heavy figures stands in for it meanwhile.
 - **6b** — the container: the facade rewired onto `scan`, the real GAFP packer and
   manifest, and the rate-play path through a real manifest.
 - **Rate sweep** — the cross-rate profiling sweep on the improved decoder, which
