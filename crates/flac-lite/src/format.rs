@@ -103,8 +103,16 @@ pub enum Blocksize {
 
 impl Blocksize {
     /// Number of samples per subframe in this frame.
+    ///
+    /// [`Blocksize::Invalid`] is the reserved `0b0000` code or an uncommon value
+    /// the profile forbids: a frame carrying it is malformed for this decoder,
+    /// so it is [`crate::Error::InvalidField`] — the same verdict
+    /// `frame::FrameHeader::parse` reaches from the same field.
     pub fn samples(self) -> crate::Result<usize> {
-        todo!("flac-lite scaffold: Blocksize::samples")
+        match self {
+            Blocksize::Explicit(samples) => Ok(usize::from(samples)),
+            Blocksize::Invalid => Err(crate::Error::InvalidField),
+        }
     }
 }
 
@@ -226,6 +234,13 @@ mod tests {
 
 /// A parsed, borrowed manifest. No allocation; every field is either copied out
 /// of the header or a subslice of the ROM blob.
+///
+/// The frame-offset table is kept as **bytes**, not as `&[u32]`, and each
+/// accessor decodes its own four little-endian bytes. That is deliberate: the
+/// blob is a `&[u8]` with alignment 1, so a `&[u32]` view of it would be an
+/// unaligned cast — undefined behaviour, and this crate is
+/// `#![deny(unsafe_code)]` and will stay that way. One `u32` decode per seek is
+/// the cost, and a seek is one array lookup either way.
 #[derive(Clone, Copy, Debug)]
 pub struct Manifest<'a> {
     /// Backing blob (header + frame data) — the same `&'static [u8]` the frames
@@ -233,8 +248,9 @@ pub struct Manifest<'a> {
     blob: &'a [u8],
     /// Byte offset (from blob start) of the first frame byte.
     frame_data_start: u32,
-    /// Frame-offset table: absolute blob offsets, ascending.
-    frame_offsets: &'a [u32],
+    /// Frame-offset table, raw little-endian bytes (`4 * frame_count` long,
+    /// already length-checked by [`Manifest::parse`]).
+    frame_offsets_le: &'a [u8],
     /// Track sample rate in Hz.
     sample_rate_hz: u32,
     /// Bits per sample (16 in the initial target; 8 accepted for experiments).
@@ -250,32 +266,172 @@ pub struct Manifest<'a> {
     max_fixed_order: u8,
 }
 
+/// Bytes of a `GAFP` header before the offset table (README.md, `format`
+/// section): magic 4, version 1, channels 1, bps 1, max order 1, blocksize 2,
+/// sample rate 4, total samples 8, frame count 2, frame-data offset 4.
+pub const HEADER_LEN: usize = 0x1C;
+
 impl<'a> Manifest<'a> {
     /// Parse and validate a packed blob.
     ///
     /// Validates: magic, version, header length, field sanity (channels ∈ 1..=2,
     /// bps ∈ {8, 16}, blocksize ∈ {1024, 2048} per profile), ascending offsets,
     /// and that every offset lies inside the blob.
+    ///
+    /// The error split is a decision, not an accident: a property this decoder
+    /// cannot handle at all is a *stream* verdict ([`crate::Error::UnsupportedStream`]
+    /// / [`crate::Error::UnsupportedSampleSize`]); a property the decoder could
+    /// handle but the packer's profile forbids is a *profile* verdict
+    /// ([`crate::Error::ProfileViolation`]); anything self-inconsistent
+    /// ([`crate::Error::Manifest`]) is a malformed blob.
     pub fn parse(blob: &'a [u8]) -> crate::Result<Self> {
-        todo!("flac-lite scaffold: Manifest::parse")
+        let header = blob.get(..HEADER_LEN).ok_or(crate::Error::Manifest)?;
+        if header[0..4] != MAGIC || header[4] != VERSION {
+            return Err(crate::Error::Manifest);
+        }
+        let channels = header[5];
+        let bits_per_sample = header[6];
+        let max_fixed_order = header[7];
+        let blocksize = u16::from_le_bytes([header[8], header[9]]);
+        let sample_rate_hz = u32::from_le_bytes([header[10], header[11], header[12], header[13]]);
+        let total_samples = u64::from_le_bytes([
+            header[14], header[15], header[16], header[17], header[18], header[19], header[20],
+            header[21],
+        ]);
+        let frame_count = usize::from(u16::from_le_bytes([header[22], header[23]]));
+        let frame_data_start =
+            u32::from_le_bytes([header[24], header[25], header[26], header[27]]) as usize;
+
+        if !(1..=2).contains(&channels) {
+            return Err(crate::Error::UnsupportedStream);
+        }
+        if bits_per_sample != 8 && bits_per_sample != 16 {
+            return Err(crate::Error::UnsupportedSampleSize);
+        }
+        if blocksize != 1024 && blocksize != 2048 {
+            return Err(crate::Error::ProfileViolation);
+        }
+        if max_fixed_order > 4 {
+            return Err(crate::Error::ProfileViolation);
+        }
+        if sample_rate_hz == 0 {
+            return Err(crate::Error::Manifest);
+        }
+
+        // The table is `4 * N` bytes and the frame data begins where it ends:
+        // the contract states both fields, so a blob that disagrees with itself
+        // is refused rather than trusted on one of them.
+        let table_end = HEADER_LEN
+            .checked_add(frame_count * 4)
+            .ok_or(crate::Error::Manifest)?;
+        if frame_data_start != table_end || table_end > blob.len() {
+            return Err(crate::Error::Manifest);
+        }
+        let frame_offsets_le = &blob[HEADER_LEN..table_end];
+
+        // Offsets ascending, inside the blob, and the first one *is* the start
+        // of the frame data. Frame `i` runs to `i + 1`, so an order violation
+        // would make `frame_bytes` a reversed slice; catching it here is what
+        // lets every later access be total.
+        let mut previous = frame_data_start;
+        for index in 0..frame_count {
+            let offset = read_u32(frame_offsets_le, index) as usize;
+            if index == 0 {
+                if offset != frame_data_start {
+                    return Err(crate::Error::Manifest);
+                }
+            } else if offset <= previous {
+                return Err(crate::Error::Manifest);
+            }
+            if offset >= blob.len() && !(index == 0 && frame_count == 1 && offset == blob.len()) {
+                return Err(crate::Error::Manifest);
+            }
+            previous = offset;
+        }
+        if frame_count == 0 && frame_data_start > blob.len() {
+            return Err(crate::Error::Manifest);
+        }
+
+        Ok(Manifest {
+            blob,
+            frame_data_start: frame_data_start as u32,
+            frame_offsets_le,
+            sample_rate_hz,
+            bits_per_sample,
+            blocksize,
+            channels,
+            total_samples,
+            max_fixed_order,
+        })
     }
 
     /// Total number of frames in the track.
     pub fn frame_count(&self) -> usize {
-        todo!("flac-lite scaffold: Manifest::frame_count")
+        self.frame_offsets_le.len() / 4
     }
 
     /// Absolute blob offset of frame `index`. Out-of-range → `Error::Manifest`.
     /// This *is* the seek operation: O(1), no `Seek` trait.
     pub fn frame_offset(&self, index: usize) -> crate::Result<usize> {
-        todo!("flac-lite scaffold: Manifest::frame_offset")
+        if index >= self.frame_count() {
+            return Err(crate::Error::Manifest);
+        }
+        Ok(read_u32(self.frame_offsets_le, index) as usize)
     }
 
     /// The frame bytes for `index`, sliced `[offset .. next_offset]` (last frame
     /// runs to end of blob) — lets the frame decoder detect its own end without
     /// depending on the next frame's header.
     pub fn frame_bytes(&self, index: usize) -> crate::Result<&'a [u8]> {
-        todo!("flac-lite scaffold: Manifest::frame_bytes")
+        let start = self.frame_offset(index)?;
+        let end = if index + 1 < self.frame_count() {
+            self.frame_offset(index + 1)?
+        } else {
+            self.blob.len()
+        };
+        self.blob.get(start..end).ok_or(crate::Error::Manifest)
+    }
+
+    /// The whole frame region: every frame's bytes, contiguous. This is what a
+    /// [`crate::scan::Frames`] walk reads when the facade drives the blob.
+    ///
+    /// Gated with the walk ([`crate::scan`]): a manifest in a build with no walk
+    /// has no one to hand a region to, and the accessor would be the crate's only
+    /// `format`-side reference to a feature-gated module.
+    #[cfg(feature = "scan")]
+    pub fn frame_region(&self) -> &'a [u8] {
+        &self.blob[self.frame_data_start as usize..]
+    }
+
+    /// Blob offset of the first frame byte — the base a walked cursor is
+    /// relative to.
+    pub fn frame_data_start(&self) -> usize {
+        self.frame_data_start as usize
+    }
+
+    /// The stream defaults this manifest pins, in the shape the frame layer
+    /// consumes. A packed blob has no `STREAMINFO` block, so the manifest *is*
+    /// the stream declaration: sample-rate code `0b0000` and sample-size code
+    /// `0b0000` in any frame resolve to these values.
+    pub fn stream_defaults(&self) -> crate::frame::StreamDefaults {
+        crate::frame::StreamDefaults {
+            sample_rate_hz: self.sample_rate_hz,
+            bits_per_sample: self.bits_per_sample,
+        }
+    }
+
+    /// What this manifest lets a walk check itself against: a frame count and a
+    /// sample count, both exact by construction (the packer wrote them), and no
+    /// block-size bound — each frame's own header carries per-frame truth, and
+    /// the final frame of a track is legitimately short, so a declared bound
+    /// would be a claim the frames do not have to honour.
+    #[cfg(feature = "scan")]
+    pub fn bounds(&self) -> crate::scan::StreamBounds {
+        crate::scan::StreamBounds {
+            samples: Some(self.total_samples),
+            frames: Some(self.frame_count()),
+            max_blocksize: None,
+        }
     }
 
     /// Track sample rate in Hz.
@@ -302,6 +458,27 @@ impl<'a> Manifest<'a> {
     pub fn total_samples(&self) -> u64 {
         self.total_samples
     }
+
+    /// Highest FIXED predictor order the packer recorded (0..=4).
+    pub fn max_fixed_order(&self) -> u8 {
+        self.max_fixed_order
+    }
+
+    /// The encode profile a decoder should hold this blob to, as the packer
+    /// recorded it: block size, bit depth and predictor order come from the
+    /// header, so a manifest is validated against itself plus
+    /// [`DEFAULT_PROFILE`]'s category rules.
+    pub fn profile(&self) -> crate::Result<()> {
+        DEFAULT_PROFILE.validate(self)
+    }
+}
+
+/// Little-endian `u32` at index `i` of a byte table. Total by construction: call
+/// sites only ask for indices the table contains ([`Manifest::parse`] proved the
+/// length), and a short table cannot reach here.
+fn read_u32(table: &[u8], index: usize) -> u32 {
+    let at = index * 4;
+    u32::from_le_bytes([table[at], table[at + 1], table[at + 2], table[at + 3]])
 }
 
 /// The encode profile the packer guarantees and (optionally) the decoder
@@ -338,7 +515,182 @@ pub const DEFAULT_PROFILE: EncodeProfile = EncodeProfile {
 
 impl EncodeProfile {
     /// Check a parsed manifest against this profile.
+    ///
+    /// What a *manifest* can decide, and what it cannot, is worth stating: block
+    /// size, bit depth and the packer's recorded maximum FIXED order are
+    /// header fields, so they are checked here. Whether the stream contains
+    /// **LPC subframes** — the distinction `allow_full_lpc` names, and the one
+    /// the 32 kHz target depends on, since LPC is 174.14% of that frame on
+    /// hardware — is *not* in the manifest: it lives in the subframes. That is a
+    /// pack-time scan of the frames (6b-2's `EncodeProfile` enforcement on real
+    /// assets), not something a borrowed header can answer. `#[strict-profile]`
+    /// keeps the per-frame rejection where it already is, in `subframe`.
     pub fn validate(&self, manifest: &Manifest<'_>) -> crate::Result<()> {
-        todo!("flac-lite scaffold: EncodeProfile::validate")
+        if !self.allowed_blocksizes.contains(&manifest.blocksize()) {
+            return Err(crate::Error::ProfileViolation);
+        }
+        if !self
+            .allowed_bits_per_sample
+            .contains(&manifest.bits_per_sample())
+        {
+            return Err(crate::Error::ProfileViolation);
+        }
+        if manifest.max_fixed_order() > self.max_fixed_order {
+            return Err(crate::Error::ProfileViolation);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    //! The parser's refusal table and one happy path.
+    //!
+    //! Every case is a blob the packer must never emit, and the *verdict* is the
+    //! point: a property the decoder cannot handle is a stream error, a property
+    //! the profile forbids is a profile error, and a self-inconsistent header is
+    //! a manifest error. A test that only asserted "is an Err" would let those
+    //! three drift into each other.
+    use super::*;
+    use crate::Error;
+
+    /// Build a blob. `offsets` are absolute; the table therefore ends at
+    /// `HEADER_LEN + 4 * offsets.len()`, which the caller may override to make a
+    /// blob disagree with itself.
+    fn blob(
+        channels: u8,
+        bps: u8,
+        blocksize: u16,
+        order: u8,
+        offsets: &[u32],
+        frame_data_start: u32,
+        bytes: usize,
+    ) -> [u8; 64] {
+        let mut b = [0u8; 64];
+        b[0..4].copy_from_slice(&MAGIC);
+        b[4] = VERSION;
+        b[5] = channels;
+        b[6] = bps;
+        b[7] = order;
+        b[8..10].copy_from_slice(&blocksize.to_le_bytes());
+        b[10..14].copy_from_slice(&32_768u32.to_le_bytes());
+        b[14..22].copy_from_slice(&(blocksize as u64 * offsets.len() as u64).to_le_bytes());
+        b[22..24].copy_from_slice(&(offsets.len() as u16).to_le_bytes());
+        b[24..28].copy_from_slice(&frame_data_start.to_le_bytes());
+        for (i, off) in offsets.iter().enumerate() {
+            b[HEADER_LEN + i * 4..HEADER_LEN + i * 4 + 4].copy_from_slice(&off.to_le_bytes());
+        }
+        let _ = bytes;
+        b
+    }
+
+    fn good() -> [u8; 64] {
+        // 2 frames, table ends at 36, frames are 36..40 and 40..44.
+        blob(2, 16, 2048, 4, &[36, 40], 36, 44)
+    }
+
+    #[test]
+    fn parses_a_well_formed_blob_and_slices_its_frames() {
+        let b = good();
+        let m = Manifest::parse(&b[..44]).expect("valid");
+        assert_eq!(m.frame_count(), 2);
+        assert_eq!(m.frame_data_start(), HEADER_LEN + 8);
+        assert_eq!(m.frame_offset(0), Ok(36));
+        assert_eq!(m.frame_offset(1), Ok(40));
+        assert_eq!(m.frame_bytes(0).map(<[u8]>::len), Ok(4));
+        assert_eq!(m.frame_bytes(1).map(<[u8]>::len), Ok(4), "last runs to end");
+        assert_eq!(m.channels(), 2);
+        assert_eq!(m.bits_per_sample(), 16);
+        assert_eq!(m.blocksize(), 2048);
+        assert_eq!(m.sample_rate_hz(), 32_768);
+        assert_eq!(m.max_fixed_order(), 4);
+        assert_eq!(m.total_samples(), 4096);
+        let defaults = m.stream_defaults();
+        assert_eq!(defaults.sample_rate_hz, 32_768);
+        assert_eq!(defaults.bits_per_sample, 16);
+        assert_eq!(m.frame_offset(2), Err(Error::Manifest), "out of range");
+    }
+
+    #[test]
+    fn refuses_magic_and_version() {
+        let mut b = good();
+        b[0] = b'X';
+        assert_eq!(Manifest::parse(&b[..44]).err(), Some(Error::Manifest));
+        let mut b = good();
+        b[4] = VERSION + 1;
+        assert_eq!(Manifest::parse(&b[..44]).err(), Some(Error::Manifest));
+    }
+
+    #[test]
+    fn refuses_a_header_that_disagrees_with_its_own_table() {
+        // frame_data_start says 40 while the table ends at 36.
+        let b = blob(2, 16, 2048, 4, &[40, 44], 40, 48);
+        assert_eq!(Manifest::parse(&b[..48]).err(), Some(Error::Manifest));
+        // Table runs past the blob.
+        let b = good();
+        assert_eq!(Manifest::parse(&b[..20]).err(), Some(Error::Manifest));
+    }
+
+    #[test]
+    fn refuses_offsets_that_are_not_ascending_or_not_first() {
+        // Second offset does not advance.
+        let b = blob(2, 16, 2048, 4, &[36, 36], 36, 44);
+        assert_eq!(Manifest::parse(&b[..44]).err(), Some(Error::Manifest));
+        // First offset is not the frame-data start.
+        let b = blob(2, 16, 2048, 4, &[40, 44], 36, 48);
+        assert_eq!(Manifest::parse(&b[..48]).err(), Some(Error::Manifest));
+        // Offset outside the blob.
+        let b = blob(2, 16, 2048, 4, &[36, 99], 36, 44);
+        assert_eq!(Manifest::parse(&b[..44]).err(), Some(Error::Manifest));
+    }
+
+    #[test]
+    fn the_three_refusal_kinds_stay_distinct() {
+        // What the decoder cannot do at all.
+        let b = blob(3, 16, 2048, 4, &[36], 32, 40);
+        assert_eq!(
+            Manifest::parse(&b[..40]).err(),
+            Some(Error::UnsupportedStream)
+        );
+        let b = blob(1, 12, 2048, 4, &[32], 32, 40);
+        assert_eq!(
+            Manifest::parse(&b[..40]).err(),
+            Some(Error::UnsupportedSampleSize)
+        );
+        // What the decoder could do but the packer's profile forbids.
+        let b = blob(1, 16, 512, 4, &[32], 32, 40);
+        assert_eq!(
+            Manifest::parse(&b[..40]).err(),
+            Some(Error::ProfileViolation)
+        );
+        let b = blob(1, 16, 2048, 5, &[32], 32, 40);
+        assert_eq!(
+            Manifest::parse(&b[..40]).err(),
+            Some(Error::ProfileViolation)
+        );
+    }
+
+    #[test]
+    fn blocksize_samples_resolves_or_refuses() {
+        assert_eq!(Blocksize::Explicit(2048).samples(), Ok(2048));
+        assert_eq!(Blocksize::Explicit(1024).samples(), Ok(1024));
+        assert_eq!(Blocksize::Invalid.samples(), Err(Error::InvalidField));
+    }
+
+    #[test]
+    fn the_default_profile_accepts_the_contract_and_refuses_outside_it() {
+        let b = good();
+        let m = Manifest::parse(&b[..44]).expect("valid");
+        assert_eq!(DEFAULT_PROFILE.validate(&m), Ok(()));
+
+        let b = blob(2, 16, 1024, 4, &[32], 32, 40);
+        let m = Manifest::parse(&b[..40]).expect("1024 is allowed");
+        assert_eq!(DEFAULT_PROFILE.validate(&m), Ok(()));
+
+        // 8-bit is outside the default profile even though the decoder accepts
+        // it as a stream property.
+        let b = blob(2, 8, 2048, 4, &[32], 32, 40);
+        let m = Manifest::parse(&b[..40]).expect("8-bit parses");
+        assert_eq!(DEFAULT_PROFILE.validate(&m), Err(Error::ProfileViolation));
     }
 }

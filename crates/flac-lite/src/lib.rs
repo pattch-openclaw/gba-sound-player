@@ -372,6 +372,26 @@ pub enum Error {
     FrameCrc,
     /// Manifest magic/version/length invalid.
     Manifest,
+    /// The bytes disagree with the declarations in front of them: a blob or a
+    /// walk was told a frame count or a sample count, and the frames it holds
+    /// are not that number. Both sides are carried because the numbers *are* the
+    /// diagnosis — `declared 157 / actual 156` says the table lost an entry,
+    /// while the reverse says it gained one.
+    StreamMismatch {
+        /// The count the header pinned.
+        declared: u64,
+        /// The count the bytes actually produced.
+        actual: u64,
+    },
+    /// A frame's coded number is not the one a walk expected — RFC 9639 §9.1.5
+    /// numbering was not contiguous. Carries both so a resync decision can be
+    /// made from the numbers rather than re-derived.
+    FrameNumberMismatch {
+        /// The number the walk expected next.
+        expected: u64,
+        /// The number the frame actually carries.
+        found: u64,
+    },
     /// Manifest declares a stream property this decoder cannot handle.
     UnsupportedStream,
     /// Not a FLAC stream: the `fLaC` magic (`stream::MAGIC`) is absent or
