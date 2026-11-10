@@ -113,7 +113,7 @@ use crate::bits::BitReader;
 use crate::format::{ChannelConfig, SampleRate};
 use crate::residual::{RiceKernel, TableCountKernel};
 use crate::stereo::decorrelate;
-use crate::subframe::{PredictorState, decode_subframe_with};
+use crate::subframe::{ArithmeticWidth, PredictorState, decode_subframe_with_width};
 
 /// The 14-bit frame sync shared by both blocking strategies (see module
 /// docs: RFC 9639 §9.1 — 15-bit sync `0b111111111111100` + strategy bit).
@@ -576,6 +576,21 @@ pub fn decode_frame_with<K: RiceKernel>(
     right: &mut [i32],
     state: &mut [PredictorState; 2],
 ) -> crate::Result<usize> {
+    decode_frame_with_width::<K>(reader, header, left, right, state).map(|(n, _)| n)
+}
+
+/// [`decode_frame_with`], also reporting which arithmetic width integrated
+/// the frame ([`ArithmeticWidth`]) — item 6a-6. A two-subframe frame is wide
+/// if either subframe took the wide escape leg; mono reports its single
+/// subframe. With `i32-integrator` off the report is always
+/// [`ArithmeticWidth::I64`].
+pub fn decode_frame_with_width<K: RiceKernel>(
+    reader: &mut BitReader<'_>,
+    header: &FrameHeader,
+    left: &mut [i32],
+    right: &mut [i32],
+    state: &mut [PredictorState; 2],
+) -> crate::Result<(usize, ArithmeticWidth)> {
     let blocksize = header.blocksize;
     let slots = usize::from(header.channels.subframe_count());
 
@@ -603,7 +618,7 @@ pub fn decode_frame_with<K: RiceKernel>(
         (u32::from(header.bits_per_sample) + u32::from(side_slot == Some(slot))) as u8
     };
 
-    decode_subframe_with::<K>(
+    let (_, mut width) = decode_subframe_with_width::<K>(
         reader,
         blocksize,
         slot_bits(0),
@@ -611,13 +626,14 @@ pub fn decode_frame_with<K: RiceKernel>(
         &mut left[..blocksize],
     )?;
     if slots == 2 {
-        decode_subframe_with::<K>(
+        let (_, right_width) = decode_subframe_with_width::<K>(
             reader,
             blocksize,
             slot_bits(1),
             &mut state[1],
             &mut right[..blocksize],
         )?;
+        width = width.and(right_width);
     }
 
     // Mono passes a zero-width right window: `decorrelate`'s
@@ -664,5 +680,5 @@ pub fn decode_frame_with<K: RiceKernel>(
         let _ = crc16_lo;
     }
 
-    Ok(blocksize)
+    Ok((blocksize, width))
 }

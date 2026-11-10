@@ -7,7 +7,7 @@
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
-        test test-rom flac-test flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check spike-test opus-test kernel-test \
+        test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check spike-test opus-test kernel-test \
         overlay-check overlay-check-arm overlay-test overlay-test-twin overlay-test-arm overlay-objdump \
         overlay-kernel-rom native-overlay-kernel-rom podman-overlay-kernel-rom overlay-kernel-test podman-overlay-kernel-test \
         podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test podman-overlay-test podman-overlay-test-twin \
@@ -232,6 +232,21 @@ flac-test-rice: toolchain-check
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features rice-hybrid
 	@echo "flac-test-rice passed: the portable hybrid kernel compiles for $(TARGET) and its two-mechanism differential is green with rice-hybrid on"
+
+# The `i32-integrator` companion gate (item 6a-6): the audited i64 reference
+# build, `--no-default-features`. `flac-test` runs the narrow default; this runs
+# the same suite with the wide leg end to end. `width_two_mechanism_differential`
+# is `required-features = ["i32-integrator"]`, so it is not built here — which
+# is the point: the two builds are pinned to the same external oracle
+# (`flac -d` PCM in the committed tables), so the pair is a differential rather
+# than two greens that could have been earned by the same arithmetic.
+flac-test-wide: toolchain-check
+	cd crates/flac-lite && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --no-default-features
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --no-default-features
+	@echo "flac-test-wide passed: the i64 reference leg compiles for $(TARGET) and the full host suite is green with i32-integrator off"
 
 # Second bare-metal target for the portability witness (`flac-portable-check`,
 # FLAC.md split-proposal ladder step 3, 2026-11-02). Cortex-M4F: a canonical
@@ -947,7 +962,7 @@ test: test-rom flac-test
 # which is also the shape a future default flip would ship in.
 # Nothing here is parallel-safe-by-design: like `test:`, it is a plain
 # prerequisite aggregate, so `make -j flac-gates` interleaves output.
-flac-gates: flac-test flac-test-crc flac-test-scan flac-test-rice flac-portable-check
+flac-gates: flac-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-portable-check
 	cd crates/flac-lite && \
 	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check,scan
 	@mkdir -p $(GATE_NEUTRAL_CWD)

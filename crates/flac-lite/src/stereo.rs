@@ -79,11 +79,54 @@
 //! them, so its vectors exercise values beyond 16-bit range — e.g.
 //! `(32767, −32768)` stores side `65535`.)
 //!
-//! Accumulation follows the crate's wide-intermediate convention: the adds,
-//! shifts, and halvings run in `i64` and truncate at the store, so
-//! `mid << 1` at the top of the i32 range cannot wrap silently.
+//! Accumulation follows the width decision (item 6a-6). The independent and
+//! side arms are `+`/`-` ring sites, unconditionally bit-identical in `i32`;
+//! mid/side's `>> 1` is exact for every supported 8/16-bit stream because
+//! `|m_ext ± side| ≤ 3 × 2^16`. So `i32-integrator` (the default) runs this
+//! layer in `i32`, and the feature-off reference build keeps the `i64` form.
 
 use crate::format::ChannelConfig;
+
+// Width-selected transform primitives (item 6a-6). The `i32` forms are the
+// default; the feature-off build keeps the `i64` intermediates as the audited
+// reference leg. See the module note above for why each site is safe.
+#[cfg(feature = "i32-integrator")]
+#[inline]
+fn add_width(a: i32, b: i32) -> i32 {
+    a.wrapping_add(b)
+}
+#[cfg(not(feature = "i32-integrator"))]
+#[inline]
+fn add_width(a: i32, b: i32) -> i32 {
+    (i64::from(a) + i64::from(b)) as i32
+}
+
+#[cfg(feature = "i32-integrator")]
+#[inline]
+fn sub_width(a: i32, b: i32) -> i32 {
+    a.wrapping_sub(b)
+}
+#[cfg(not(feature = "i32-integrator"))]
+#[inline]
+fn sub_width(a: i32, b: i32) -> i32 {
+    (i64::from(a) - i64::from(b)) as i32
+}
+
+#[cfg(feature = "i32-integrator")]
+#[inline]
+fn mid_side_width(m0: i32, s0: i32) -> (i32, i32) {
+    let m_ext = m0.wrapping_shl(1) | (s0 & 1);
+    (m_ext.wrapping_add(s0) >> 1, m_ext.wrapping_sub(s0) >> 1)
+}
+#[cfg(not(feature = "i32-integrator"))]
+#[inline]
+fn mid_side_width(m0: i32, s0: i32) -> (i32, i32) {
+    let m_ext = (i64::from(m0) << 1) | (i64::from(s0) & 1);
+    (
+        ((m_ext + i64::from(s0)) >> 1) as i32,
+        ((m_ext - i64::from(s0)) >> 1) as i32,
+    )
+}
 
 /// Recombine two decoded subframes into left/right PCM, in place.
 ///
@@ -133,7 +176,7 @@ pub fn decorrelate(
                 let (l0, s0) = (*l, *s);
                 // L is the primary as stored; R = L − side.
                 *l = l0;
-                *s = (i64::from(l0) - i64::from(s0)) as i32;
+                *s = sub_width(l0, s0);
             }
             Ok(())
         }
@@ -145,7 +188,7 @@ pub fn decorrelate(
                 let (s0, r0) = (*s, *r);
                 // Primary slot holds the SIDE; R is the secondary as stored;
                 // L = side + R.
-                *s = (i64::from(s0) + i64::from(r0)) as i32;
+                *s = add_width(s0, r0);
                 *r = r0;
             }
             Ok(())
@@ -158,9 +201,9 @@ pub fn decorrelate(
                 let (m0, s0) = (*m, *s);
                 // Recover the stolen LSB (side & 1 — parity identity in the
                 // module docs), then halve exactly: m_ext ± side are even.
-                let m_ext = (i64::from(m0) << 1) | (i64::from(s0) & 1);
-                *m = ((m_ext + i64::from(s0)) >> 1) as i32;
-                *s = ((m_ext - i64::from(s0)) >> 1) as i32;
+                let (l, r) = mid_side_width(m0, s0);
+                *m = l;
+                *s = r;
             }
             Ok(())
         }
