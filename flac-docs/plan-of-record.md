@@ -791,8 +791,6 @@ pattern); the two configurations are gated but not timed against each other, and
 nothing here reuses E9's era-denominated row. That arm is 6a-7's (`src/wide.rs`),
 and it closes the marginal below.
 
-## Item 6b — the container (where frames come from)
-
 ### 6a-7 — landed: the width marginal and the stack, in one calibration
 
 One image, `flac-spike-6a7.gba`, three timed legs per frame through the same
