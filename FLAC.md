@@ -13,9 +13,35 @@ and the ARM kernel — landed, witnessed on mGBA's ARM7TDMI, measured through th
 shipped seam — now decodes FIXED at **48.3% of the 32,768 Hz budget** (worst frame
 48.5%), **2.9× faster than it was a day earlier, from one section directive**.
 The core's arithmetic-width default landed as 6a-6 (2026-11-09), and 6a-7
-(2026-11-10) priced it same-image and re-anchored the stack: **kernel + i32 is
-39.74% mean / 39.96% worst** of the 32,768 Hz budget on FIXED, and the i64 leg
-costs +44.1 c/sample against the i32 default. Additivity reproduces to 0.06%.
+(2026-11-10) priced it same-image: **kernel + i32 is 39.74% mean / 39.96% worst** of
+the 32,768 Hz budget on FIXED under mGBA, the i64 leg costs +44.1 c/sample, and
+additivity reproduces to 0.06%. **On hardware that decode is 42.48% mean / 42.72%
+worst** (6a-7b, GBA 001 and GBA SP, two runs each, identical) — mGBA understates
+the non-fetch path by 3.7–6.9% per leg, so 39.74% is an emulator number and 42.72%
+is the hardware one.
+
+**6a-7b's instrument landed 2026-11-10:** `flac-spike-6a7.gba` prints its three
+legs as a ten-line summary on the GBA screen (fit measured in-ROM: 10 lines, 133 px
+wide, 121 px tall) and logs the same ten lines to serial, so the two channels
+cannot disagree. Its same-image mGBA reference reproduces the pre-summary 6a-7
+record to **≤18 cycles/frame on every leg** (`.text` byte-identical; the default
+image byte-identical outright).
+
+**Then it was measured on silicon: GBA 001 and GBA SP, two runs each, all four
+runs identical to the cycle.** Two results. The decode path is
+**bit-exact on hardware** — the blue `harness_ok` backdrop means both PCM pins, the
+frame-by-frame equality witness over `ctrl`/`wide`/`asm` and calibration all passed
+on the ARM7TDMI, the first such claim in this project. And the timing **missed the
+pre-declared ±2% bar on all five quantities**: hardware FIXED `asm` is **445,558
+c/frame = 42.48% mean / 42.72% worst** of the 32,768 Hz frame, **+6.89%** over
+mGBA, so **39.74% is retired as the hardware number** (the fork resolves to
+`diverges`). Every leg is 3.7–6.9% above the model, the stack +6.6% on both clips,
+and the width marginal moves in opposite directions per clip — so it is not a clock
+or calibration error, and the candidates (mGBA's ROM data-read model, its
+prefetch/data-read interaction, the flashcart) are named but not separated. Decode
+still has **2.34× headroom** at full rate, so the rate decision is untouched. The
+same runs found, and we fixed, a display bug no headless emulator could see: a
+trailing `frame.commit()` blanked the screen it had just painted.
 
 That is where four rungs of differential went, and the answer was not any of the
 things they suspected. It is worth reading in order, because each rung rules out
@@ -89,7 +115,7 @@ alternative codec, evaluated under the same constraint, is
 |---|---|
 | `crates/flac-lite` | Portable core: `no_std`, zero deps, zero alloc, `#![deny(unsafe_code)]` plus named `cfg`-gated `.iwram` pin attributes (exactly one in a default build). Frame decode is **complete** (`bits` → `stream` → `frame` → `subframe` → `residual` → `stereo`), witnessed bit-exact against `flac -d` on host and in the ROM image. Per-frame `driver`, table-less `scan` walk (feature), CRC verification (feature), `RiceKernel` seam. Arithmetic width (6a-6): `i32-integrator` on by default, guarded per subframe, `i64` reference/escape leg (`make flac-test-wide`). Still `todo!()`: the `decoder` facade, `format::Manifest`, `Blocksize::samples` and `EncodeProfile::validate`. |
 | `crates/flac-lite-gba` | The GBA overlay. Two `RiceKernel` arms behind their own features: `rice-twin` (6a-3, Rust, forwards to the core's twin) and **`rice-arm`** (6a-4: the E10 ARM-mode kernel via `global_asm!`, its FFI and `KernelAbi`, three tables under `iwram-pin`). A **default build still contains no kernel, no asm, no FFI and no `unsafe`**; the shipped default is still `TableCountKernel`. |
-| `examples/flac_spike` (6a-5 / 6a-7 arms) | Three feature-gated product-path arms (`item6a5-rust`, `item6a5-asm`, `item6a5-arms`), plus 6a-7's **vendored** width leg (`item6a7-wide`, `src/wide.rs`, the pre-6a-6 i64 path) timed in one image with `ctrl` and `asm`. `make item6a5-test`, `item6a7-test`, `item6a5-arms-rom`, `item6a5-asm-rom`, `item6a7-rom`. |
+| `examples/flac_spike` (6a-5 / 6a-7 arms) | Three feature-gated product-path arms (`item6a5-rust`, `item6a5-asm`, `item6a5-arms`), plus 6a-7's **vendored** width leg (`item6a7-wide`, `src/wide.rs`, the pre-6a-6 i64 path) timed in one image with `ctrl` and `asm`. Under `item6a7-wide` the image also renders 6a-7b's ten-line on-screen summary (`src/summary.rs` + `src/item6a7b.rs`): `ctrl`/`wide`/`asm` means, `S=C-A`, `Wd=W-C`, `X=worst%` per clip. `make item6a5-test`, `item6a7-test`, `item6a5-arms-rom`, `item6a5-asm-rom`, `item6a7-rom`. |
 | `examples/e5_fetch` | E5's hardware arbitration ROM: one synthetic ARM instruction stream assembled into `.text` and `.iwram`, timed in one image with `WAITCNT`/prefetch on/off; results on screen (no serial on hardware) and on mGBA serial. `make native-e5-fetch-rom`. |
 | `examples/overlay-kernel-check` | 6a-4's instrument ROM — the only place the assembly runs. Sweeps the committed corpus and the synthesized boundaries through three legs (incumbent, assembled kernel, model) on mGBA's ARM7TDMI, and is the repo's first ROM suite that actually runs assertions (8 `#[test_case]`s). It also asserts the three tables' `.iwram` placement at runtime. |
 | `examples/flac_spike` | The measurement instrument and the `ctrl` arm of every performance record. Host witness + in-ROM decode proof + cycle harness. |
@@ -115,10 +141,13 @@ lever at all.
 | E2a + E2b landed (today's shipped path) | 170.2% | 589.5% | **yes** |
 | + E10 ARM kernel (probe) | 101.98% (worst 102.50%) | 521.6% | no |
 | + E10 + E4 i32 stacked (probe) | **94.47% (worst 94.95%)** | 216.3% | no |
+| Kernel + IWRAM + i32 (6a-7, mGBA) | 39.74% (worst 39.96%) | 166.97% | no — instrument only |
+| **Kernel + IWRAM + i32 on hardware (6a-7b, GBA 001/SP)** | **42.48% (worst 42.72%)** | **173.23% (worst 174.14%)** | **measured, decode only** |
 
 At 10,512 Hz, real music, on today's path: **FIXED fits** (73.9% mean, 78.3%
-worst) and **LPC does not** (183.9% / 211.6%). The only in-budget full-rate FIXED
-decode ever measured was E9's stacked probe — which is exactly what item 6 exists
+worst) and **LPC does not** (183.9% / 211.6%). Full-rate FIXED first came in budget
+as E9's stacked probe; it now does so on hardware, at 42.72% worst (6a-7b) — which
+is exactly what item 6 existed
 to land, measure on the shipped path, and then arbitrate on hardware.
 
 **No full GBA-hardware real-time claim exists.** E5 has now confirmed the fetch
@@ -179,9 +208,19 @@ One line per rung; the full plan, bars and invariants are in
   hardware reproduces mGBA within 2 cycles/call. Prefetch on/off changes nothing
   measurable. The fetch pricing is hardware; the kernel-level stack on hardware
   is **6a-7b** (next rung).
-- **6a-7b** — the kernel stack on hardware: add the on-screen summary to
-  `flac-spike-6a7.gba`, run it on the GBA 001 and SP, and check the 39.74% stack
-  against mGBA's ±2% bar. It covers the non-fetch path E5 left open. Then 6b.
+- ~~**6a-7b** — the kernel stack on hardware.~~ **Measured, and it missed the bar.**
+  GBA 001 and GBA SP, two runs each, four runs identical to the cycle. Correctness:
+  **bit-exact on silicon**. Timing: hardware FIXED `asm` **445,558 c/frame =
+  42.48% mean / 42.72% worst**, +6.89% over mGBA; stack 1,327,714 (+6.56%); widths
+  73,654 (FIXED, −18.1%) and 3,885,745 (LPC, +8.4%) — **all five quantities outside
+  ±2%**, so 39.74% is retired and the fork resolves to `diverges`. Decode keeps
+  2.34× headroom, so the rate decision stands. Record:
+  [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md).
+- **Data-read arbitration (opens with 6a-7b, not yet started)** — E5's shape one
+  layer down: the same `ldr` stream read from cartridge ROM and from IWRAM, timed
+  on both units with the prefetch buffer on and off, to separate mGBA's ROM
+  data-read/prefetch model from the flashcart's read timing. It owns the 3.7–6.9%
+  and decides whether any of it is the decoder's problem. Then 6b.
 - **6b** — the container: the facade rewired onto `scan`, the real GAFP packer and
   manifest, and the rate-play path through a real manifest.
 - **Rate sweep** — the cross-rate profiling sweep on the improved decoder, which

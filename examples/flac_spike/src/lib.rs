@@ -44,6 +44,11 @@
 #![cfg_attr(feature = "item6a5b-vendored", deny(unsafe_code))]
 #![warn(missing_docs)]
 
+// [6a-7b] `summary` builds the text both channels print, so it needs `String`.
+// Gated with the module: a default build of this crate allocates nothing new.
+#[cfg(feature = "item6a7-wide")]
+extern crate alloc;
+
 pub mod assets;
 pub mod checksum;
 pub mod driver;
@@ -59,5 +64,12 @@ pub mod e10;
 // Off by default: a default build contains no second decoder.
 pub mod playback;
 pub mod stats;
+// [6a-7b] the on-screen summary's pure half: the three legs a pass leaves
+// behind, the sign conventions the record quotes, and the text the ROM renders.
+// In the library, not the ROM, for `stats`'/`checksum`'s reason — host and ROM
+// run one implementation, so the screen a stock GBA shows and the serial log an
+// mGBA run prints cannot drift apart. Off by default.
+#[cfg(feature = "item6a7-wide")]
+pub mod summary;
 #[cfg(feature = "item6a7-wide")]
 pub mod wide;
