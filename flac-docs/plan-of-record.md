@@ -98,23 +98,27 @@ projection re-opening on `docs/flac-6a5b-projection-reopened`)
 - **E5 measured (2026-11-10):** the fetch ratio is hardware, not mGBA —
   hardware reproduces the model to ≤0.05%, prefetch on/off changes nothing, and
   the same stream is ~3.94× cheaper from IWRAM on both a GBA 001 and a GBA SP.
-- **6a-7b's instrument has landed; the hardware reading is what remains
-  (2026-11-10).** The 6a-7 image now renders its three legs on the GBA screen
+- **6a-7b is measured, and it did not land where the projection said (2026-11-10).**
+  The 6a-7 image renders its three legs on the GBA screen
   under `item6a7-wide` (`flac-spike-6a7.gba`, `.text` `9f0b19e924cd…`, ten lines, fit
   measured in-ROM) and logs the same ten lines to serial, so an mGBA run and a
   stock unit print one string. The mGBA reference for **this image** is re-taken
   (two runs, byte-identical) and reproduces the pre-summary 6a-7 record to
-  **≤18 cycles/frame** on every leg. **The GBA 001 has run it twice, and it
-  established the correctness half on silicon** — blue backdrop means assets, both
-  PCM pins, the per-frame equality witness and calibration all passed on hardware
-  — and then found a display bug no headless emulator could see: the ROM's
-  trailing frame-commit loop blanked the background it had just painted, so the
-  text never showed. Fixed (`loop {}` after the present, E5's shape; `.text`
-  −52 B; every mGBA number identical afterwards). What is left is the numbers:
-  two runs on the GBA 001 and two on the SP against the ±2% bar below. Then
-  **6b**.
+  **≤18 cycles/frame** on every leg. **It then ran on a GBA 001 and a GBA SP,
+  twice each: all four runs identical to the cycle.** Two results, one per half of
+  the rung. **Correctness: the decoder is bit-exact on silicon** — the blue
+  backdrop means assets, both PCM pins, the per-frame equality witness and
+  calibration all passed on hardware, the first such claim in this project.
+  **Timing: the ±2% bar failed on all five quantities** — hardware FIXED `asm` is
+  **445,558 c/frame = 42.48% mean / 42.72% worst** of the 32,768 Hz frame,
+  **+6.89%** over mGBA — so **39.74% is retired as a hardware number** and the
+  pre-declared fork resolves to `diverges`. Decode still has **2.34× headroom**, so
+  6b is unaffected. On the way it also found, and we fixed, a display bug no
+  headless emulator could see: a trailing `frame.commit()` blanked the screen it
+  had just painted. Next: a probe that separates mGBA's data-read/prefetch model
+  from the flashcart's read timing, then **6b**.
 
-- **Not started:** 6a-7b's hardware runs, 6a-8 (untriggered), all of 6b, and the product work
+- **Not started:** the data-read probe 6a-7b opens, 6a-8 (untriggered), all of 6b, and the product work
   they unblock (manifest, packer, facade, mixer).
 
 ## Item 6a — the overlay (the realization)
@@ -135,7 +139,7 @@ from and it does not turn `scan` on.
 | **6a-5d** ✅ | **The codeword loop's placement.** The same kernel, the same instruction stream, resident in IWRAM instead of ROM: `.section .iwram,"ax",%progbits` in place of `.text` (plain `.iwram`; `.text_iwram` is E6's trap and is still a trap). Ungated by `iwram-pin`, because a ROM-resident version of this body is simply the wrong code and `rice-arm` is never a shipped path. | Cycles, same-image; `.text`/`.iwram` sizes read from the ELF; the objdump gate re-read at the new address; `overlay-kernel-test` (8 device arms) + `overlay-test-arm` + `item6a5b-test` | that a cost measured in instruction *fetch* would be left in the wrong memory, because a 2024-era probe of a different code shape said fetch did not matter — **it was**, and the fix is 2.9× |
 | **6a-6** ✅ | **Landed 2026-11-09.** The core's default width: `i32-integrator` on, ring sites unconditionally narrow, LPC guarded per subframe by `lpc_accumulator_fits_i32`, i64 as the reference/escape leg (`ArithmeticWidth`). Design in "The width decision" below. The stack verdict was 6a-5b's and the full-rate claim did not need this rung (kernel + IWRAM is 48.3%); the width still matters for the LPC clip and the decorrelate site. **Cycle marginal closed by 6a-7:** the same-image i64 leg costs **+44.1 c/sample** (FIXED) / **+1,759.1** (LPC). | Bit-exact vs `flac -d`; width differential suite; guard boundary + same-build two-leg witnesses; both configurations gated (`flac-test`, `flac-test-wide`); codegen attributed symbol by symbol. Mutation-witnessed. | the guard is wrong (unsound), the legs are not equivalent, or a both-legs build costs more than the win |
 | **6a-7** ✅ | **Landed 2026-11-10.** The stack confirmation **and** 6a-6's open width marginal in one image: `ctrl` (i32 default), `wide` (the vendored pre-6a-6 i64 path, `src/wide.rs`), `asm` (the landed kernel over the i32 default). Re-anchors the E numbers on the post-6a image, which 6b-1 inherits. | Cycles, same-image, per-frame paired; the wide leg also pinned to the reference PCM and to `ctrl` frame by frame. | that two measured wins composed negatively (E9's additivity does not reproduce) — **they do: to 0.06% / 0.005%** |
-| **6a-7b** ⏳ | **Instrument landed 2026-11-10; the two hardware runs are the rung.** The 8 px on-screen summary in `flac-spike-6a7.gba` (gated under `item6a7-wide`: the default image stays byte-identical), then run it on the GBA 001 and GBA SP and read `ctrl`/`wide`/`asm`, the stack and the width marginal. This is the non-fetch path E5 did not cover. Scope, same-image mGBA reference and the ±2% bar: "6a-7b" below. | Cycles, same-image, per-frame paired, two runs per unit; the per-arm PCM pins and the frame-by-frame equality witness are the correctness gate; the ROM's own fit line is the screen's gate. | that the non-fetch path (bit-reader ROM reads, tables, residual, stereo) diverges from mGBA, so the 39.74% is not the hardware number. |
+| **6a-7b** ✅ | **Measured 2026-11-10: GBA 001 and GBA SP, two runs each, all four identical.** The 8 px on-screen summary in `flac-spike-6a7.gba` (gated under `item6a7-wide`: the default image stays byte-identical), then run it on the GBA 001 and GBA SP and read `ctrl`/`wide`/`asm`, the stack and the width marginal. This is the non-fetch path E5 did not cover. The bar **failed on all five quantities**: hardware FIXED `asm` is **445,558 c/frame = 42.48% mean / 42.72% worst** of the 32,768 Hz frame (+6.89% over mGBA), so 39.74% is retired as a hardware number and the fork resolves to `diverges`. | Cycles, same-image, per-frame paired: four runs on two units, identical to the cycle; the per-arm PCM pins and the frame-by-frame equality witness are the correctness gate; the ROM's own fit line is the screen's gate. | **it did.** Every leg is 3.7–6.9% above mGBA, the stack +6.6% on both clips, and the width marginal moves in opposite directions per clip — not calibration (deltas are not a constant offset) and not a clock error (not a constant percentage). Candidates named, not yet separated: mGBA's ROM data-read model, its prefetch/data-read interaction, the flashcart. |
 | **6a-8** *(conditional)* | E8-style **sub-stage probe** over the asm kernel: tier-1 / tier-2 / tier-3 / refill / fold priced separately. Run **only** if 6a-5 lands inside or near the noise band. | Cycles, sub-stage | that a near-bar result is unattributable to a leg |
 
 ### 6a-4 — landed, and what the device witness actually found
@@ -885,7 +889,7 @@ ROM cost is confirmed. It does not by itself confirm the kernel-level stack
 (39.74%): the synthetic stream prices fetch/execute, while the kernel's ~1.4
 average includes non-fetch work. The secondary confirmation is **6a-7b** below.
 
-### 6a-7b — instrument landed: the stack, readable on a stock GBA (2026-11-10)
+### 6a-7b — measured: the stack on hardware, and the 6% mGBA does not charge (2026-11-10)
 
 **Why.** E5 answered the fetch question: the same instruction stream is 4.085
 cycles/add from ROM and 1.037 from IWRAM on both a GBA 001 and a GBA SP, and mGBA
@@ -894,7 +898,7 @@ rest of the decode path — the bit reader's ROM byte reads, the pinned tables,
 residual, stereo. 6a-7's 39.74% stack is therefore still an mGBA reading, and this
 rung is the one that can turn it into a hardware number.
 
-**What landed: the instrument, not the reading.** `flac-spike-6a7.gba` gains a
+**The instrument.** `flac-spike-6a7.gba` gains a
 ten-line summary the ARM7TDMI can display with no cable, and logs the same ten
 lines to serial — one string, two channels, so an mGBA run and a stock unit cannot
 drift apart:
@@ -911,6 +915,9 @@ l4 157f C2987762 W6573107
    Wd3585345 X167.854
 HARNESS OK
 ```
+
+(the mGBA reference run; the hardware reading further down differs by 3.7–6.9% on
+every leg, which is the rung's finding rather than a transcription)
 
 The pure half (`examples/flac_spike/src/summary.rs`: the fold, the sign
 conventions, the text) is in the **library**, for `stats`'/`checksum`'s reason —
@@ -998,15 +1005,69 @@ identical to the cycle** afterwards. Two lessons worth carrying: a headless
 emulator cannot see a display bug, because nothing is ever drawn to be erased; and
 the same trap is one `frame.commit()` away in any ROM that shows a static screen.
 
-**Pre-declared bar (unchanged, quoted against this image).** On hardware, two runs
-per unit, the same-image `asm` mean and `ctrl − asm` stack must land within **±2%**
-— FIXED `asm` **408,484–425,157** c/frame, stack **1,221,056–1,270,895**, width
-FIXED **88,118–91,715** / LPC **3,513,638–3,657,051**, and the LPC `asm` mean
-within ±2% of 1,751,108. Pass, and 39.74% stands as a hardware decode number;
-fail, and the delta *is* the finding — the non-fetch path diverges and the mGBA
-stack must not be quoted as a hardware number until a probe prices it. The rate
-decision is robust either way: FIXED fits 32,768 Hz under 48% even with a 20%
-hardware penalty on the stack.
+**The reading: four runs, two units, identical to the cycle.** The screen fix
+landed and the ROM was then run twice on a GBA 001 and twice on a GBA SP. All four
+runs produced the same ten lines, every leg every frame — so this divergence is
+systematic rather than noise, and the instrument is deterministic across two
+different units (E5's result, one instrument over).
+
+| per-frame, 157 frames/clip | FIXED `ctrl` | FIXED `wide` | FIXED `asm` | LPC `ctrl` | LPC `wide` | LPC `asm` |
+|---|---:|---:|---:|---:|---:|---:|
+| mGBA mean c/frame | 1,662,797 | 1,752,714 | 416,821 | 2,987,762 | 6,573,107 | 1,751,108 |
+| **hardware mean c/frame** | **1,773,272** | **1,846,926** | **445,558** | **3,134,342** | **7,020,087** | **1,816,753** |
+| delta | +110,475 | +94,212 | +28,737 | +146,580 | +446,980 | +65,645 |
+| delta % | **+6.64%** | +5.38% | **+6.89%** | +4.91% | +6.80% | +3.75% |
+| hardware c/sample | 865.86 | 901.82 | **217.56** | 1,530.44 | 3,427.78 | 887.09 |
+
+| derived | FIXED mGBA | FIXED hardware | LPC mGBA | LPC hardware |
+|---|---:|---:|---:|---:|
+| stack `ctrl − asm` | 1,245,976 | **1,327,714** (+6.56%) | 1,236,654 | **1,317,589** (+6.54%) |
+| width `wide − ctrl` | 89,917 | **73,654** (−18.09%) | 3,585,345 | **3,885,745** (+8.38%) |
+| `asm` mean % of 32,768 Hz | 39.74% | **42.48%** | 166.97% | **173.23%** |
+| `asm` worst frame | 39.96% | **42.72%** | 167.85% | **174.14%** |
+
+**The bar, and the fork's answer: it fails, on all five quantities.** `asm` mean,
+stack and both width marginals miss ±2% (FIXED `asm` 445,558 against
+408,484–425,157; FIXED stack 1,327,714 against 1,221,056–1,270,895; LPC `asm`
+1,816,753 against 1,716,085–1,786,130; widths 73,654 and 3,885,745 against
+88,118–91,715 and 3,513,638–3,657,051). So the pre-registered fork resolves to its
+`diverges` arm, and the consequence is exactly the one written down before the
+number existed: **39.74% is retired as a hardware number.** Hardware FIXED decode
+is **42.48% mean / 42.72% worst** of the 32,768 Hz frame.
+
+**What the shape rules out, and what it leaves.** It is *not* the calibration: a
+per-frame offset would move every leg by the same absolute cycle count, and the
+observed deltas run from +28,737 to +446,980. It is *not* a clock or timer-model
+error: a global factor would move every leg by the same percentage, and the
+observed range is 3.75%–6.89%. What it is, is per-leg and clip-dependent, and two
+features of the table constrain any explanation:
+
+* the **stack** grows by almost the same *absolute* amount on both clips (+81,738
+  FIXED, +80,935 LPC — 1.0% apart, ≈39.6 c/sample each) while each leg grows by a
+  different *fraction*: a clip-independent absolute amount points at machinery both
+  clips pay per sample, not at the predictors;
+* the **width marginal changes sign between clips**: −18.09% on FIXED (the i64 leg
+  costs *less* extra on hardware) and +8.38% on LPC. No single multiplier does
+  that, so what mGBA under-charges is not simply "the i64 path".
+
+Three candidate mechanisms survive that, and this instrument cannot separate them:
+(i) mGBA's model of **cartridge-ROM data reads** — the bit reader is the one part
+of the decode path that streams bytes from ROM, and E5 arbitrated *instruction
+fetch* only, which matched hardware to 0.05%; (ii) the **prefetch buffer's
+interaction with those data reads**, which E5's pure-fetch stream never exercised
+(a ROM data read can discard the prefetched line); (iii) the **flashcart** —
+every hardware number in this repository comes from a cart running ROM out of
+PSRAM, and a production mask ROM need not price a byte read the same way. (iii) is
+a limit of the *measurement*, not of the decoder, and it is why the numbers above
+are quoted as "hardware via flashcart".
+
+**What survives, and it is what the rung was for.** The decode path is bit-exact on
+silicon (above), and FIXED decodes on hardware at **42.72% worst frame** — **2.34×
+headroom** on the 32,768 Hz budget. The rate decision is untouched by the
+shortfall, exactly as pre-declared: even a 20% penalty leaves FIXED under 48%. LPC
+is 174.14% worst on hardware and still does not fit full rate. And the kernel is
+still a kernel: the `asm` leg is 1,327,714 c/frame cheaper than the shipped default
+*on hardware*, 157/157 frames, on both units.
 
 **Gates.** After the screen fix, one headless mGBA run reproduces all ten lines
 exactly (the fix is display-only and the numbers say so). `item6a7-test`

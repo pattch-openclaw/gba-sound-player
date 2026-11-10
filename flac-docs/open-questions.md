@@ -501,3 +501,37 @@ exactly one active site — `stereo::decorrelate`'s mid/side arm, which is `i64`
 two `>> 1` per sample pair — because `integrate_fixed` is a no-op at order 0 and
 `pad_block` a no-op at `wasted == 0`. So 6a-6's FIXED half is testable at a named
 function rather than against a clip average; see the plan's 6a-5b section.
+
+### Q13 — What is the 3.7–6.9% mGBA does not charge, and is it the decoder's problem at all?
+
+**Opened by:** 6a-7b (2026-11-10) — the first time a decode number in this
+repository was taken on silicon rather than in mGBA. Four runs, two units, all
+identical to the cycle, and every leg of the 6a-7 image lands above the mGBA
+reading: FIXED `ctrl` +6.64%, `wide` +5.38%, `asm` +6.89%; LPC +4.91%, +6.80%,
++3.75%. The stack (the kernel's win) is +6.56% / +6.54%, and the width marginal
+moves in *opposite* directions per clip (−18.09% FIXED, +8.38% LPC). So 39.74%
+became 42.48% mean / 42.72% worst, and E5's fetch arbitration — which matched
+hardware to 0.05% — does not cover this.
+
+**Why it is a question rather than a defect report.** Two of the three candidate
+mechanisms are properties of the *model*, not of the code: mGBA's pricing of
+cartridge-ROM **data** reads (the bit reader streams bytes from ROM, and E5 only
+ever arbitrated instruction fetch), the **prefetch buffer's interaction** with
+those reads (E5's stream had no data reads to disturb the prefetched line), and
+the **flashcart** — every hardware number here runs ROM from PSRAM, and a
+production mask ROM need not price a byte read the same way. The shape argues
+against the two cheap explanations: the deltas are not a constant per-frame offset
+(so not calibration: they run +28,737 to +446,980) and not a constant percentage
+(so not a clock or timer error: 3.75%–6.89%).
+
+**What would answer it.** E5's shape one layer down: a synthetic `ldr` stream read
+from cartridge ROM and from IWRAM, timed in one image on both units, with the
+prefetch buffer on and off, and in mGBA. That separates the data-read model from
+the prefetch interaction in one run; the flashcart term needs a mask-ROM cart, or
+has to be carried as a stated limit of every hardware number here.
+
+**Why it is not blocking.** Decode still has 2.34× headroom at full rate (42.72%
+worst), which is why the rate decision was pre-declared robust to a 20% penalty.
+It becomes blocking only if a product path ever needs the last 6% — or if a
+*scaling* claim is made from cycle counts, because the shortfall is per-leg and
+would not cancel.
