@@ -208,7 +208,7 @@ flac-test-scan: toolchain-check
 	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features scan
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features scan
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features scan,instrument
 	@echo "flac-test-scan passed: the frame walk compiles for $(TARGET) and its witness suite is green with the scan feature on"
 
 # The `rice-hybrid` gate (split-ladder item 5 PR 3's portable hybrid Rice
@@ -697,7 +697,7 @@ flac-test: toolchain-check
 	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE)
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features instrument
 	@echo "flac-test passed: flac-lite compiles for $(TARGET) and passes host tests"
 
 # Second-target build witness (FLAC.md split-proposal ladder step 3, 2026-11-02):

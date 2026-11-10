@@ -275,8 +275,11 @@ impl<'a> Manifest<'a> {
     /// Parse and validate a packed blob.
     ///
     /// Validates: magic, version, header length, field sanity (channels ∈ 1..=2,
-    /// bps ∈ {8, 16}, blocksize ∈ {1024, 2048} per profile), ascending offsets,
-    /// and that every offset lies inside the blob.
+    /// bps ∈ {8, 16}, blocksize ≠ 0, FIXED order ≤ 4), ascending offsets, and
+    /// that every offset lies inside the blob. The *packer's* contract —
+    /// blocksize ∈ {1024, 2048}, 16-bit only — is
+    /// [`EncodeProfile::validate`]'s: a standalone decoder should not refuse a
+    /// stream because this project's encoder would not have produced it.
     ///
     /// The error split is a decision, not an accident: a property this decoder
     /// cannot handle at all is a *stream* verdict ([`crate::Error::UnsupportedStream`]
@@ -308,8 +311,14 @@ impl<'a> Manifest<'a> {
         if bits_per_sample != 8 && bits_per_sample != 16 {
             return Err(crate::Error::UnsupportedSampleSize);
         }
-        if blocksize != 1024 && blocksize != 2048 {
-            return Err(crate::Error::ProfileViolation);
+        // Block size is a *format* property here, not a profile one: FLAC allows
+        // 1..=65535 and the decoder's buffers are the caller's, so a general
+        // manifest parser must not refuse a 4608-block stream merely because
+        // this project's packer emits 1024/2048. The profile (`DEFAULT_PROFILE`)
+        // is where that contract lives — `EncodeProfile::validate` is the check
+        // a product build applies.
+        if blocksize == 0 {
+            return Err(crate::Error::Manifest);
         }
         if max_fixed_order > 4 {
             return Err(crate::Error::ProfileViolation);
@@ -657,12 +666,13 @@ mod manifest_tests {
             Manifest::parse(&b[..40]).err(),
             Some(Error::UnsupportedSampleSize)
         );
-        // What the decoder could do but the packer's profile forbids.
+        // A block size the packer would not emit parses (it is legal FLAC); the
+        // *profile* is what refuses it. Zero is not a block size at all.
         let b = blob(1, 16, 512, 4, &[32], 32, 40);
-        assert_eq!(
-            Manifest::parse(&b[..40]).err(),
-            Some(Error::ProfileViolation)
-        );
+        let m = Manifest::parse(&b[..40]).expect("512 is a legal FLAC block size");
+        assert_eq!(DEFAULT_PROFILE.validate(&m), Err(Error::ProfileViolation));
+        let b = blob(1, 16, 0, 4, &[32], 32, 40);
+        assert_eq!(Manifest::parse(&b[..40]).err(), Some(Error::Manifest));
         let b = blob(1, 16, 2048, 5, &[32], 32, 40);
         assert_eq!(
             Manifest::parse(&b[..40]).err(),

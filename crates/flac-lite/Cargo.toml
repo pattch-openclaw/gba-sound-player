@@ -30,6 +30,15 @@ categories = ["multimedia::audio", "no-std"]
 
 [features]
 default = ["i32-integrator"]
+# The measurement instrument's per-frame loop (`driver`). Off by default and
+# `#[doc(hidden)]`: the *public contract* of this crate is the manifest facade
+# (`decoder`, itself gated on `scan`), and a crate meant to stand alone should
+# not ship two per-frame entry points. `driver` is the instrument's index-driven
+# loop — kernel-generic, shaped for same-image cycle readings — and it is
+# **intended to be deprecated and removed** once the instrument retires (its
+# module docs carry that instruction). It is kept compiling in the meantime
+# because deleting it re-pins every recorded cycle anchor.
+instrument = []
 # Item 6a-6: 32-bit integration is the default arithmetic width. The ring
 # sites (FIXED cascade, wasted-bit pad, side decorrelation) are unconditionally
 # bit-identical in `i32`; the LPC dot product is guarded per subframe by
@@ -136,6 +145,22 @@ path = "src/lib.rs"
 [[test]]
 name = "scan_frame_walk_layout"
 required-features = ["scan"]
+
+# [6b-1] The facade's witness: a hand-built GAFP blob from a committed fixture,
+# walked through `Decoder` and compared frame-by-frame against the file-level
+# `scan::Frames` walk (which reads its defaults and bounds from the fixture's own
+# STREAMINFO — an independent path to the same PCM). Needs `scan` because the
+# facade is a shell over the walk.
+[[test]]
+name = "decoder_manifest_walk"
+required-features = ["scan"]
+
+# [6b-1] `driver` is the instrument's loop, gated so the default library build
+# does not ship it. Its suite is the only direct witness it has, so the gate is
+# explicit rather than implicit — `make flac-test` runs with `instrument` on.
+[[test]]
+name = "frame_run_loop"
+required-features = ["instrument"]
 
 # The crc-check witness suite exists only with the feature on; without
 # required-features it would compile (and pass vacuously) in the default run.
