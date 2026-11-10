@@ -127,27 +127,27 @@ mod rom {
         format!("{}.{:03}", value / 1000, value % 1000)
     }
 
-    /// Log one state on both channels and append its screen lines.
-    fn report(screen: &mut String, label: &str, readings: &Readings) {
+    /// Log one state on both channels and append its compact screen lines.
+    /// Three lines per state so both prefetch states fit the 240x160 screen.
+    fn report(screen: &mut String, tag: &str, readings: &Readings) {
         agb::println!(
             "*** e5 state {:?}: rom={} iwram={} ratio_x1000={} rom_per_add_x1000={} iwram_per_add_x1000={}",
-            label,
+            tag,
             readings.rom,
             readings.iwram,
             readings.ratio_x1000,
             readings.rom_per_add_x1000,
             readings.iwram_per_add_x1000
         );
-        screen.push_str(&format!("{}:\n", label));
-        screen.push_str(&format!(" ROM   {} cyc/call\n", readings.rom));
-        screen.push_str(&format!(" IWRAM {} cyc/call\n", readings.iwram));
-        screen.push_str(&format!(" RATIO {}\n", fixed3(readings.ratio_x1000)));
         screen.push_str(&format!(
-            " ROM/add   {}\n",
-            fixed3(readings.rom_per_add_x1000)
+            "{} ROM {} IWRAM {}\n",
+            tag, readings.rom, readings.iwram
         ));
+        screen.push_str(&format!("{} ratio {}\n", tag, fixed3(readings.ratio_x1000)));
         screen.push_str(&format!(
-            " IWRAM/add {}\n",
+            "{} add {}/{}\n",
+            tag,
+            fixed3(readings.rom_per_add_x1000),
             fixed3(readings.iwram_per_add_x1000)
         ));
     }
@@ -181,23 +181,21 @@ mod rom {
         let mut screen = String::new();
         screen.push_str("E5 FETCH ARBITRATION\n");
         screen.push_str(&format!("WAITCNT 0x{:04X}\n", boot));
-        screen.push_str("same stream: ROM vs IWRAM\n\n");
+
         match &on {
-            Some(readings) => report(&mut screen, "PREFETCH ON", readings),
+            Some(readings) => report(&mut screen, "ON", readings),
             None => {
                 ok = false;
                 screen.push_str("PREFETCH ON: VOID\n");
             }
         }
-        screen.push('\n');
         match &off {
-            Some(readings) => report(&mut screen, "PREFETCH OFF", readings),
+            Some(readings) => report(&mut screen, "OFF", readings),
             None => {
                 ok = false;
                 screen.push_str("PREFETCH OFF: VOID\n");
             }
         }
-        screen.push('\n');
         screen.push_str(if ok { "PASS" } else { "HARNESS FAILED" });
 
         agb::println!(

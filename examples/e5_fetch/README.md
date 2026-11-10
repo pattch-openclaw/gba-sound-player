@@ -33,17 +33,22 @@ Run it on **both units** (GBA 001 and GBA SP) and note the numbers for each.
 
 ## What it prints
 
-For each `WAITCNT` state (prefetch on and off):
+Nine lines, so both states fit the 240x160 screen. `ON` is prefetch enabled,
+`OFF` disabled; `add` is cycles per `add`.
 
-| line | meaning |
-|---|---|
-| `ROM` / `IWRAM` | net cycles per call (4096 adds), overhead subtracted |
-| `RATIO` | `ROM / IWRAM` |
-| `ROM/add`, `IWRAM/add` | cycles per add |
+```
+E5 FETCH ARBITRATION
+WAITCNT 0x4317
+ON ROM 16733 IWRAM 4248
+ON ratio 3.939
+ON add 4.085/1.037
+OFF ROM 16749 IWRAM 4259
+OFF ratio 3.932
+OFF add 4.089/1.039
+PASS
+```
 
-`WAITCNT` at boot is printed too. `agb` sets `0x4317` (WS0 = 3,1, prefetch
-enabled); the ROM measures that state and the prefetch-disabled state, then
-restores the boot value.
+The mGBA serial lines (`*** e5 state ...`) carry the same numbers.
 
 ## The reading of record
 
