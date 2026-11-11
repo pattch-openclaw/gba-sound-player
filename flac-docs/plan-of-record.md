@@ -20,9 +20,11 @@ It can be used **independently** as a `no_std`, pure-Rust FLAC decoding crate, a
 it is **ready to be separated into its own repository**. In checkable form:
 
 - no `todo!()` anywhere in `src/`, and a facade a consumer who has never heard of
-  this repository can drive: bytes → frames → samples. Today `decoder::Decoder`,
-  `format::Manifest`, `Blocksize::samples` and `EncodeProfile::validate` are still
-  scaffold, so C1 is **not** met;
+  this repository can drive: bytes → frames → samples. That clause is met as of
+  6b-1 (2026-11-10): `decoder::Decoder`, `format::Manifest`,
+  `Blocksize::samples` and `EncodeProfile::validate` all landed, and the facade is
+  a shell over `scan::Frames`. The extraction itself is a decision, not missing
+  implementation;
 - the crate's existing claims hold with nothing scaffolding-shaped in the way:
   `core` + `alloc` only, zero dependencies, zero allocation on the decode path,
   `#![deny(unsafe_code)]`, bit-exact against `flac -d`;
@@ -45,9 +47,11 @@ checkable form:
 - the decode half is already measured on hardware (42.48% mean / **42.72% worst**),
   so what is unproven is the *combination* — decode + convert + push + mixer/DMA
   inside one 62.5 ms frame;
-- **FIXED-only by construction.** LPC is **174.14%** of the 32 kHz frame on
-  hardware (decode alone), so the pack-time encode profile must refuse what the
-  player cannot play. The `EncodeProfile` guard is part of C2, not a nicety;
+- **FIXED-0 by construction.** LPC is **174.14%** of the 32 kHz frame on
+  hardware (decode alone), and only FIXED-0 has a measured row; `-l 0` disables
+  LPC but does not force the fixed order. The pack-time encode profile must refuse
+  FIXED-1..4 and any unmeasured residual shape. The `EncodeProfile` guard is part
+  of C2, not a nicety;
 - the acceptance run is on a GBA 001 **and** a GBA SP, and its verdict is
   **underrun-free playback**, not a cycle count.
 
@@ -82,13 +86,13 @@ than the instrument's 42.72%, and a hair wider again at 6b-2 pt 2's product imag
 code layout, so the row above carries its reading and 6b-1's 38.04% stays attached
 to the bytes it was read from.)
 
-## Status at a glance (2026-11-10, `main` after 6a-7b merged)
+## Status at a glance (2026-11-11, after 6b-2)
 
 **The plan is now judged only against C1 and C2 above.** Item 6a is closed — the
-overlay exists, the kernel is in it, the decode half of C2 is measured on two units
-— and everything still open is either C1 (`flac-lite`'s facade and manifest), C2's
-decode half (the kernel carried into a product ROM, 6b), or C2's playback half
-(item 7).
+overlay exists, the kernel is in it, the decode half of C2 is measured on two units.
+C1's facade/manifest clause landed with 6b-1; what remains is C2's playback half
+(item 7). The 6b decode/product half is landed (the kernel in a product ROM, the
+real packer, the seek table and the anchored walk).
 
 - **Landed:** the Phase-1 decode path through `decode_frame`; the
   stream layer; the per-frame `driver`; CRC verification behind `crc-check`; the
@@ -1407,7 +1411,7 @@ clean (exit 0). `make flac-portable-check` green for `thumbv6m-none-eabi`.
 looking at the same binary it last saw.
 
 **The equality the stand-in was owed, paid.** The packer was run over the
-FIXED-only reference clip re-synthesized and re-encoded in a temp dir (the
+FIXED-0 reference clip re-synthesized and re-encoded in a temp dir (the
 `.flac` is a generator input, never a tracked file — only the frame/PCM regions
 under `examples/flac_spike/assets/` are committed), and compared against
 `examples/flac_integration/assets/spike_l0.gfp`, the blob `gafp-check` guards and
@@ -1929,7 +1933,7 @@ they are ~43% of the frame against decode's 42.72%.
 |---|---|---|---|
 | **7-1** | **Re-measure the producer at the target rate.** The 10,512 Hz producer pass (convert / push / wait / closure) repeated at 32,768 Hz with the kernel in the decode slot. Measurement only — no new product code. | Per-stage shares on **hardware**, same-image, with the rate pass's own discipline (`closure underflows 0`, shares read relatively, the clean image's audit as the wall authority) | that C2's margin is inherited arithmetic from a different rate and a pre-kernel decoder — the ~85.6% gross and the ~8.7 ms left are estimates, not observations |
 | **7-2** | **The shipping playback path.** `agb`'s mixer/DMA, or a written argument for why the custom IRQ feeder is the shipping path. Replaces the throwaway harness the rate track has been leaning on. | Bit-exact PCM into the FIFO plus an audibility check on hardware; underruns **counted**, not eyeballed | that the throwaway feeder was load-bearing in ways nobody wrote down (the rate track's own lesson, one layer up) |
-| **7-3** | **The acceptance run.** 2048-sample frames at 32,768 Hz, FIXED-only assets (enforced by 6b-2's pack-time profile), GBA 001 **and** GBA SP, two runs each. | **Underruns = 0**, plus 7-1's stage shares on the same image | that C2 is claimed from a mean and a projection rather than from playback on a unit |
+| **7-3** | **The acceptance run.** 2048-sample frames at 32,768 Hz, FIXED-0 assets (enforced by 6b-2's pack-time profile), GBA 001 **and** GBA SP, two runs each. | **Underruns = 0**, plus 7-1's stage shares on the same image | that C2 is claimed from a mean and a projection rather than from playback on a unit |
 
 **C2 is met when 7-3 passes on both units**, and not before. "Decodes within
 budget" was already true at 42.72% and is not the claim; it is the precondition.

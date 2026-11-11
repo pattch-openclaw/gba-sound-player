@@ -121,7 +121,8 @@
 //! because a reader might otherwise infer them from their absence: it is **not
 //! asm**, so it reaches no real device through this crate — the probe's asm stays
 //! in `examples/arm-kernels/`, and nothing was moved or deleted, and its host-side
-//! twin is now redundant (item 6 lifts this one); it is **not wired**, so no
+//! twin is now redundant (the ARM realization supersedes it, and the on-target
+//! reading declined the flip); it is **not wired**, so no
 //! configuration decodes with it; and it **does not replace the incumbent** —
 //! `TableCountKernel` and `rice_quotient` stay, because the loop that decodes
 //! today is a controlled input every later rung is measured against, and since PR 4

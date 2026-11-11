@@ -88,8 +88,8 @@ different questions, and a build that means one must not quietly get another:
     nearest measured row instead of inventing a figure.
   * `--allow-over-budget` is for a kind that HAS been measured on hardware at this
     target and is over the decode-half bar — `-l 4` at 32 kHz/2048 is 174.14% of
-    the frame for the decode half alone, which is why C2 says FIXED-only. Note
-    the measured product row is FIXED-0: `-l 0` disables LPC, but libFLAC still
+    the frame for the decode half alone, which is why C2 excludes LPC. The
+    measured product row is FIXED-0: `-l 0` disables LPC, but libFLAC still
     chooses FIXED orders 1-4 from the signal, and those orders have no measured
     row here. A real track that lands on FIXED-1..4 is therefore refused, not
     silently played; the product profile is FIXED-0-only in practice.

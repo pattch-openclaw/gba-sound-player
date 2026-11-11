@@ -509,10 +509,10 @@ pub struct EncodeProfile {
     pub allowed_blocksizes: &'static [u16],
     /// Max FIXED predictor order (0..=4).
     pub max_fixed_order: u8,
-    /// Whether full LPC subframes are permitted at all. Scaffold: the target
-    /// profile's reference encode is `-l 4` (which emits LPC), so the *order*
-    /// cap — not this category bit — is the real guard (README "Correction 3");
-    /// `validate` lands in 6b.
+    /// Whether full LPC subframes are permitted at all. The target profile's
+    /// reference encode is `-l 4` (which emits LPC), so the *order* cap — not
+    /// this category bit — is the real guard (README "Correction 3"); the
+    /// packer's subframe census is what enforces it at product time.
     pub allow_full_lpc: bool,
     /// Max LPC precision, if LPC is allowed.
     pub max_lpc_precision: u8,

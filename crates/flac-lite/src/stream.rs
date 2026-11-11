@@ -28,10 +28,11 @@
 //! the block *count*, and the frame-data offset. A caller that genuinely wants
 //! the list of blocks drives [`Blocks`] itself and keeps whatever it needs —
 //! which is what `tests/stream_metadata_layout.rs` does against real files.
-//! (If a later rung needs a retained list — a seektable-backed seek, say — the
-//! no-alloc shape is a caller-provided `&mut [MetadataBlock]`, the same idiom
-//! as the sample buffers in [`crate::frame::decode_frame`]. Nothing here
-//! guesses at that.)
+//! The seek table is no exception: [`SeekTable`] borrows one block's payload and
+//! reads it at fixed stride, so the table is not materialised either. If a later
+//! rung needs a retained block list, the no-alloc shape remains a caller-provided
+//! `&mut [MetadataBlock]`, the same idiom as the sample buffers in
+//! [`crate::frame::decode_frame`]; nothing here guesses at that.
 //!
 //! # What is enforced here, and what is only reported
 //!

@@ -18,8 +18,8 @@
 //!   total") hold because that exact call shape is unchanged. Moving it into
 //!   this crate would put the fixture on the moving side of the split — and
 //!   E2b's lesson (a −21.7% sample landing at +38% on the live link) is that
-//!   call/link shape is exactly where measured numbers die. The instrument
-//!   stays where it is; the rewire is split-ladder item 6's job.
+//!   call/link shape is exactly where measured numbers die. The instrument stays
+//!   where it is; 6b-1's facade rewired onto `scan`, not onto this loop.
 //! - **The loop's argument types must not be generated assets.** The spike's
 //!   `SpikeClip` is a `pub static` with witness-only fields (`name`, `why`,
 //!   `census`, `pcm_file`, FNV pins) and a `&'static` region (the

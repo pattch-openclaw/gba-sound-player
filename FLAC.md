@@ -13,13 +13,13 @@ judged only against these, and full detail is in
 - **C1 — `flac-lite` stands alone.** It can be used independently as a `no_std`,
   pure-Rust FLAC decoding crate, ready to be separated into its own repository — no
   `todo!()`, a facade a stranger can drive, platform-bound surface confined to
-  off-by-default features or to the overlay crate. Not met yet: the `decoder`/
-  `format` facade is still scaffold.
+  off-by-default features or to the overlay crate. The no-`todo!()`/facade clause
+  closed with 6b-1; the facade is `decoder::Decoder` over `scan::Frames`.
 - **C2 — `flac-lite-gba` decodes *and plays back*, in real time, at 32 kHz, on a
   GBA.** The decode half is measured on hardware (42.72% worst of the 32,768 Hz
   frame); the claim is the *combination* — decode + convert + push + mixer/DMA in one
-  62.5 ms frame, underrun-free, on a GBA 001 and a GBA SP, with FIXED-only assets
-  enforced at pack time. Per the producer record the arithmetic is ≈85.6% of the
+  62.5 ms frame, underrun-free, on a GBA 001 and a GBA SP, with FIXED-0 assets
+  enforced at pack time (`-l 0` is LPC-disabled, not a fixed-order guarantee). Per the producer record the arithmetic is ≈85.6% of the
   frame, i.e. ≈8.7 ms of margin, and that margin is what item 7 has to prove.
 
 The 3.7–6.9% mGBA-versus-silicon shortfall (Q13) is **parked by decision**: it would
@@ -143,7 +143,7 @@ alternative codec, evaluated under the same constraint, is
 
 | Piece | State |
 |---|---|
-| `crates/flac-lite` | Portable core: `no_std`, zero deps, zero alloc, `#![deny(unsafe_code)]` plus named `cfg`-gated `.iwram` pin attributes (exactly one in a default build). Frame decode is **complete** (`bits` → `stream` → `frame` → `subframe` → `residual` → `stereo`), witnessed bit-exact against `flac -d` on host and in the ROM image. Per-frame `driver`, table-less `scan` walk (feature), CRC verification (feature), `RiceKernel` seam. Arithmetic width (6a-6): `i32-integrator` on by default, guarded per subframe, `i64` reference/escape leg (`make flac-test-wide`). Still `todo!()`: the `decoder` facade, `format::Manifest`, `Blocksize::samples` and `EncodeProfile::validate`. |
+| `crates/flac-lite` | Portable core: `no_std`, zero deps, zero alloc, `#![deny(unsafe_code)]` plus named `cfg`-gated `.iwram` pin attributes (exactly one in a default build). Frame decode is **complete** (`bits` → `stream` → `frame` → `subframe` → `residual` → `stereo`), witnessed bit-exact against `flac -d` on host and in the ROM image. Per-frame `driver`, table-less `scan` walk (feature), CRC verification (feature), `RiceKernel` seam. Arithmetic width (6a-6): `i32-integrator` on by default, guarded per subframe, `i64` reference/escape leg (`make flac-test-wide`). Facade landed with 6b-1: `decoder::Decoder`, `format::Manifest`, `Blocksize::samples`, `EncodeProfile::validate`; no `todo!()` remains in `src/`. |
 | `crates/flac-lite-gba` | The GBA overlay. Two `RiceKernel` arms behind their own features: `rice-twin` (6a-3, Rust, forwards to the core's twin) and **`rice-arm`** (6a-4: the E10 ARM-mode kernel via `global_asm!`, its FFI and `KernelAbi`, three tables under `iwram-pin`). A **default build still contains no kernel, no asm, no FFI and no `unsafe`**; the shipped default is still `TableCountKernel`. |
 | `examples/flac_spike` (6a-5 / 6a-7 arms) | Three feature-gated product-path arms (`item6a5-rust`, `item6a5-asm`, `item6a5-arms`), plus 6a-7's **vendored** width leg (`item6a7-wide`, `src/wide.rs`, the pre-6a-6 i64 path) timed in one image with `ctrl` and `asm`. Under `item6a7-wide` the image also renders 6a-7b's ten-line on-screen summary (`src/summary.rs` + `src/item6a7b.rs`): `ctrl`/`wide`/`asm` means, `S=C-A`, `Wd=W-C`, `X=worst%` per clip. `make item6a5-test`, `item6a7-test`, `item6a5-arms-rom`, `item6a5-asm-rom`, `item6a7-rom`. |
 | `examples/e5_fetch` | E5's hardware arbitration ROM: one synthetic ARM instruction stream assembled into `.text` and `.iwram`, timed in one image with `WAITCNT`/prefetch on/off; results on screen (no serial on hardware) and on mGBA serial. `make native-e5-fetch-rom`. |

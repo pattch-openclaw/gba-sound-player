@@ -88,11 +88,12 @@
 //! a real stream broke — is replaced by derived bounds
 //! ([`frame::MIN_HEADER_BITS`], [`frame::MAX_ACCEPTED_HEADER_BITS`]), with 48-,
 //! 80- and 120-bit headers witnessed end to end. Witness: `stream`'s unit tests
-//! plus `tests/stream_metadata_layout.rs` over five real libFLAC fixtures in
+//! plus `tests/stream_metadata_layout.rs` over six real libFLAC fixtures in
 //! `tests/fixtures/` and the generated table `tests/stream_vectors.txt`
 //! (`scripts/gen_stream_vectors.sh`): a two-block container, a four-block
-//! seektable+padding container, a real 80-bit frame header, a real 24-bit
-//! stream (refused as `UnsupportedSampleSize`), and an unseekable encode that
+//! seektable+padding container, a real multi-point seek table, a real 80-bit
+//! frame header, a real 24-bit stream (refused as `UnsupportedSampleSize`), and
+//! an unseekable encode that
 //! declares no total sample count, no frame sizes and no MD5 — which is why
 //! `stream::StreamInfo::exact_frame_count` is defined only for the
 //! fixed-blocksize/known-total case. The metadata layer also confirms what the
@@ -104,9 +105,11 @@
 //! `format::Manifest`, `format::Blocksize::samples`, `EncodeProfile::validate`,
 //! and the `decoder` facade — item 6b-1 (2026-11-10) made that facade a thin
 //! shell over `scan` rather than over `driver`, exactly as predicted here, and it
-//! added no third frame loop. Item 6b-2's first half (2026-11-11) made the
-//! container real from the packer's side (`scripts/gafp_pack.py`) and gated it.
-//! Still open in this area: `SEEKTABLE` interpretation and `Frames::anchored(n)`.
+//! added no third frame loop. Item 6b-2 (2026-11-11) made the container real from
+//! the packer's side (`scripts/gafp_pack.py`), then landed `stream::SeekTable`,
+//! the fixed-block number line (`FixedBlockNumbering`) and `Frames::anchored`.
+//! Seeking is not on the GBA product path, which reads a manifest and has no
+//! random access; the stream-side code is a separate, tested seam.
 //! Item 4's **second half — the frame walk — landed as the `scan` module and its
 //! feature of the same name**, and it
 //! answers the two questions 4a left open: how a reader gets from one frame to
@@ -144,7 +147,7 @@
 //! the bytes is the end of the stream** — §6's "last byte of the last frame, and
 //! thus of the whole stream" is the only end every FLAC stream has, while
 //! everything else the format offers (§8.2's `total_samples`, the fixed-blocksize
-//! frame count 4a derives, §8.2's MD5, §8.3's seek points, §8.2's frame-size
+//! frame count 4a derives, §8.2's MD5, §8.5's seek points, §8.2's frame-size
 //! fields) is a cross-check or does not exist for this stream; a walk reads to
 //! the end of its region and then *checks* the walk against what the stream
 //! declared, which is one code path for seekable and unseekable streams alike.
@@ -192,23 +195,25 @@
 //! (`make flac-test-scan` runs its suite; `make flac-portable-check` is the only
 //! gate that compiles the walk for a non-thumbv4t target). Two reasons, both
 //! measured rather than assumed. (1) A GBA ROM should not carry the walk until
-//! item 6 rewires the facade onto it: with `scan` off, the E instrument's sections
+//! the product path wants it: with `scan` off, the E instrument's sections
 //! are byte-identical to the 4a build; with it on, `.text` is **+3,120 B** while
 //! **no `scan` symbol appears in the image at all** — the walk links for nothing,
 //! but its presence in the rlib changes how LLVM inlines the decode path it shares
 //! a codegen unit with (`crates/flac-lite/Cargo.toml` and
-//! [`../../../FLAC.md`](../../../../FLAC.md) carry the numbers). So the gate defers
-//! that cost to the change that will re-anchor the instrument anyway; it does not
-//! remove it. (2) Nothing in `scan` is a *profile* layer, so nothing in it belongs
-//! in a build that has no use for a walk: it neither defines nor relaxes a profile,
+//! [`../../../FLAC.md`](../../../../FLAC.md) carry the numbers). The product ROM now
+//! opts in (6b-1) and carries that measured cost; the gate made it a feature
+//! decision rather than removing it. (2) Nothing in `scan` is a *profile* layer,
+//! so nothing in it belongs in a build that has no use for a walk: it neither
+//! defines nor relaxes a profile,
 //! and every frame-shape refusal it reports arrives through `frame::parse` — the
 //! `s4` refusal above is that check, not a scan one. The walk adds no block-size or
 //! sample-rate claim of its own to enforce, which is why `s3`'s 3000-sample blocks
 //! (a block size that is not a power of two, and a declared maximum larger than the
 //! 1801 samples its last frame actually carries) walk and decode bit-exactly
 //! instead of being refused as off-profile. A packer profile is asserted where a
-//! manifest pins one ([`format::Manifest`], [`format::EncodeProfile`]) — item 6's
-//! seam, which is also where the profile-anchored measurements get re-pinned.
+//! manifest pins one ([`format::Manifest`], [`format::EncodeProfile`]) — the
+//! product seam opened by 6b-1/6b-2, which is also where the profile-anchored
+//! measurements get re-pinned.
 //! the module layout, types, and signatures are the contract the
 //! implementation fills in (FLAC.md → phased plan, step 4 onward).
 //! Design rationale and the decision to write this at all live in
@@ -364,8 +369,9 @@ pub mod residual;
 // deferral: the on-target cycle reading the pre-registered flip rule was gated on
 // came back slower (+42.6 / +42.7 cycles per decoded sample, +9.71% / +2.64% mean
 // per frame, 314/314 frames), so the rule's "does not flip" arm is the one that
-// applies and this module stays the portable alternative item 6 lifts and rewrites
-// in asm. What the feature decides is only whether a build *carries* it: a measured
+// applies and this module stays the portable alternative; the ARM realization
+// would have to supersede it, and the measured flip declined. What the feature
+// decides is only whether a build *carries* it: a measured
 // +2,984 B on the calibration instrument with the feature on and **no hybrid
 // symbol in the image at all** — the same second-implementor effect 4b recorded
 // for the walk, so the reason for the gate and its measured cost live in

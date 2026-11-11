@@ -55,7 +55,8 @@ in debug, skippable in release"; gate: `make flac-test-crc`. The frame walk is
 behind a gate of the same shape — `scan`, off by default, `make flac-test-scan`
 the gate — but for the opposite reason from `crc-check`: not to skip work the
 release path cannot afford, so that a GBA ROM does not link the walk at all
-until item 6 rewires the facade onto it. Measured, not argued: with `scan` off,
+until a product path opts in (6b-1 did; the cost stayed measured). Measured, not
+argued: with `scan` off,
 the instrument's `.text`, `.rodata`, `.iwram` and `.ewram` are byte for byte
 the 4a image; with it on, `.text` is +3,120 B and the image contains no walk
 symbol — a second consumer of the decode path changes what the inliner does to
@@ -79,7 +80,7 @@ per decoded sample slower** than the incumbent on the same instrument (+9.71% FI
 layout-noise band), with its tables pinned in `.iwram` at the very slots the
 incumbent's occupy, and both images producing bit-identical PCM. `flac-docs/measurements.md`, item 5
 PR 4, carries the table and the reading. So the module stays exactly where PR 3 put
-it — the portable alternative, and the thing item 6 lifts and rewrites in asm —
+it — the portable alternative, and the thing the ARM realization supersedes —
 because the algorithm's win belongs to the ARM realization (E10: −349/−348
 cyc/sample), not to a portable Rust form of it.
 Why a feature rather than a module: measured on the same instrument, with
@@ -99,8 +100,10 @@ That
 facade and `format::Manifest` both landed, the facade is a shell over the walk
 rather than a second loop, and the walk's measured cost is what keeps it a
 feature. `format::Blocksize::samples` and `EncodeProfile::validate` landed with
-them. What remains open in that area is the seektable half — `Frames::anchored(n)`
-— and it is not on the GBA product path, which has no random access to give.
+them. Item 6b-2's second half (2026-11-11) then landed `stream::SeekTable`, the
+fixed-block number line (`FixedBlockNumbering`) and `Frames::anchored(n)`. None
+of that is on the GBA product path: the ROM reads a manifest and has no random
+access to give.
 
 The file-level entry point landed next (split-ladder item 4a, 2026-11-04):
 `stream::parse` reads a real `.flac` file's `fLaC` signature, the RFC 9639
@@ -172,9 +175,12 @@ or by handing the walk no bound at all — and `Error::BufferTooSmall` says they
 are shorter than **this frame's own header** asked. Same position in the walk,
 same "nothing read, nothing written"; `s2`'s second subframe is the per-frame
 case, because whether a frame carries two subframes is that frame's channel code
-rather than the stream's declared channel count. What is deliberately *not* here: `SEEKTABLE` interpretation (the
-walker skips it by length; random access is item 6's `format::Manifest`), any
-end-of-stream claim based on declared counts, and a rewired `Decoder` facade.
+rather than the stream's declared channel count. What is deliberately *not* here:
+`SEEKTABLE` reading and frame-number arithmetic — those live in
+`stream::SeekTable` and `stream::FixedBlockNumbering`; this walk consumes a
+point's offset and frame number when a caller anchors with one. Also not here: an
+end-of-stream claim based on declared counts, or a second per-frame loop (the
+manifest facade is a shell over this walk).
 Roadmap: [`../../flac-docs/plan-of-record.md`](../../flac-docs/plan-of-record.md).
 
 ```
@@ -360,7 +366,7 @@ matters (2026-11-11):
   `-l` flag or from STREAMINFO. An all-LPC stream reads `0` there, correctly. The
   crate's own fixture set makes the consequence concrete
   (`tests/gfp/x1_lpc_stereo_32k_b2048.gfp`, described in `tests/README.md`): that
-  all-LPC asset and two FIXED-only assets that decode to the *same PCM* all carry
+  all-LPC asset and two FIXED-0 assets that decode to the *same PCM* all carry
   `0`, and `EncodeProfile::validate` accepts all three. C2's real guard is the
   packer's subframe census plus the measured cost of the kinds it finds, not this
   byte.
@@ -476,9 +482,9 @@ day (`stream::parse` → `StreamFacts` + `frame_data_offset`), the table-less
 `scan` walk is in behind its feature, the `decoder` facade and `format::Manifest`
 landed with item 6b-1 on 2026-11-10 (the facade is a shell over the walk; there
 is no third loop), and the real packer landed with 6b-2's first half on
-2026-11-11. Outstanding in this crate, from that plan: `SEEKTABLE` reading and
-`Frames::anchored(n)` (not on the GBA product path, which has no random access),
-the now-safe retirement of the stand-in generator, the fixture axes
+2026-11-11, followed by the seek table, fixed-block number line and anchored
+walk. Outstanding in this crate, from that plan: the now-safe retirement of the
+stand-in generator, the fixture axes
 `tests/README.md` names, and the crate-wide `dead_code` allow probed on
 2026-11-11 — five lib-side items it currently silences, plus one unused variable
 in `tests/scan_frame_walk_layout.rs` that it has *never* silenced (an integration
