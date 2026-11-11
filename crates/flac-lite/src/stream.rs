@@ -507,6 +507,22 @@ impl StreamInfo {
         Some(usize::try_from(self.total_samples.div_ceil(blocksize)).unwrap_or(usize::MAX))
     }
 
+    /// The sample/frame number line for a fixed-blocksize stream, or `None` when
+    /// the stream is variable-blocksize or declares a zero block size.
+    ///
+    /// This is the one place the "sample number ⇄ frame number" arithmetic lives:
+    /// [`FixedBlockNumbering`] owns the block size and the declared end, and its
+    /// methods refuse a sample that is not a frame boundary or a frame number
+    /// past that end. In particular it does **not** carry a first-frame-number
+    /// base: under RFC 9639 §9.1.5 a frame number must equal the number of frames
+    /// preceding the frame, so a conformant whole stream starts at frame 0 and
+    /// the frame number is already what [`crate::scan::Frames::anchored`] wants.
+    #[inline]
+    #[must_use]
+    pub fn fixed_block_numbering(&self) -> Option<FixedBlockNumbering> {
+        FixedBlockNumbering::from_stream_info(self)
+    }
+
     /// What [`crate::frame::FrameHeader::parse`] needs from the stream: frame
     /// headers carry sample-rate code `0b0000` and sample-size code `0b000` to
     /// mean "from the stream", and libFLAC uses the former for rates above the
@@ -521,6 +537,109 @@ impl StreamInfo {
             sample_rate_hz: self.sample_rate_hz,
             bits_per_sample: self.bits_per_sample,
         }
+    }
+}
+
+/// Fixed-block sample/frame number arithmetic, consolidated (RFC 9639 §9.1.5).
+///
+/// In a fixed-blocksize stream a frame header carries a **frame number**, and
+/// §9.1.5 requires it to equal the number of frames preceding that frame. A
+/// conformant whole stream therefore starts at frame 0; the sample number a seek
+/// point stores for a target frame is `frame_number * block_size`.
+///
+/// This type owns the block size and the declared end and provides both
+/// directions, so callers do not have to remember which of `sample / block_size`
+/// and `frame_number + first_frame_number` is the right composition. There is
+/// deliberately no first-frame-number field: a nonzero first coded number is a
+/// stream whose seeking §9.1.5 says is not reliable, not a second coordinate
+/// base to add. [`crate::scan::Frames::anchored`] still accepts a nonzero coded
+/// number for recovery, but a seek point's [`SeekPoint::frame_number`] is
+/// already that number in a conformant stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixedBlockNumbering {
+    block_size: u16,
+    total_samples: Option<u64>,
+    frame_count: Option<u64>,
+}
+
+impl FixedBlockNumbering {
+    /// Build the number line from a [`StreamInfo`], or `None` when the stream is
+    /// not fixed-blocksize (including a zero declared block size).
+    #[must_use]
+    pub fn from_stream_info(info: &StreamInfo) -> Option<Self> {
+        if !info.is_fixed_blocksize() || info.max_blocksize == 0 {
+            return None;
+        }
+        let frame_count = info
+            .exact_frame_count()
+            .and_then(|count| u64::try_from(count).ok());
+        Some(Self {
+            block_size: info.max_blocksize,
+            total_samples: info.total_samples_declared(),
+            frame_count,
+        })
+    }
+
+    /// Samples per frame in this fixed-blocksize stream.
+    #[inline]
+    #[must_use]
+    pub fn block_size(self) -> u16 {
+        self.block_size
+    }
+
+    /// Declared total interchannel samples, or `None` where the stream says
+    /// unknown (§8.2's zero sentinel).
+    #[inline]
+    #[must_use]
+    pub fn total_samples(self) -> Option<u64> {
+        self.total_samples
+    }
+
+    /// Frames the stream declares, or `None` when its total is unknown.
+    #[inline]
+    #[must_use]
+    pub fn frame_count(self) -> Option<u64> {
+        self.frame_count
+    }
+
+    /// The frame number for `sample`, where `sample` is the interchannel sample
+    /// number of the first sample in that frame (§8.5.1's seek-point field).
+    ///
+    /// `None` when `sample` is not a frame boundary, when it is at/past the
+    /// declared total, or when its arithmetic frame number is at/past the
+    /// declared frame count. A sample inside the short final frame is therefore
+    /// refused rather than rounded down to the frame that contains it.
+    #[must_use]
+    pub fn frame_number_for_sample(self, sample: u64) -> Option<u64> {
+        let block_size = u64::from(self.block_size);
+        if sample % block_size != 0 {
+            return None;
+        }
+        if let Some(total) = self.total_samples {
+            if sample >= total {
+                return None;
+            }
+        }
+        let frame_number = sample / block_size;
+        if let Some(count) = self.frame_count {
+            if frame_number >= count {
+                return None;
+            }
+        }
+        Some(frame_number)
+    }
+
+    /// The sample number of the first sample in `frame_number`, or `None` when
+    /// the stream declares a frame count and `frame_number` is at/past it, or the
+    /// multiplication would overflow.
+    #[must_use]
+    pub fn first_sample_for_frame(self, frame_number: u64) -> Option<u64> {
+        if let Some(count) = self.frame_count {
+            if frame_number >= count {
+                return None;
+            }
+        }
+        frame_number.checked_mul(u64::from(self.block_size))
     }
 }
 
@@ -694,7 +813,7 @@ fn seek_point(e: &[u8]) -> Option<SeekPoint> {
 
 /// One entry of a §8.5 seek table, exactly as its 18 bytes state it. The
 /// interpretation lives in [`SeekTable`] (which entries are usable at all) and
-/// in [`SeekPoint::frame_index`] (what this entry means for a walk); this type
+/// in [`SeekPoint::frame_number`] (what this entry means for a walk); this type
 /// adds nothing to the bytes and drops nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SeekPoint {
@@ -764,85 +883,42 @@ impl SeekPoint {
         self.first_sample == SEEKPOINT_PLACEHOLDER
     }
 
-    /// Which frame this point names, as a position in the stream's audio: 0 for
-    /// its first frame, 1 for the next, and so on. Only derivable for a stream
-    /// whose block size is fixed — `first_sample / max_blocksize`, with the
-    /// short tail included, which is the same arithmetic
-    /// [`StreamInfo::exact_frame_count`] uses — and refused otherwise:
+    /// The coded frame number this point names, or `None` when the entry cannot
+    /// name a frame in this stream.
     ///
-    /// * a placeholder names no frame, so it has no index;
-    /// * a variable-blocksize stream has no divisor. Its own seek points are
-    ///   still perfectly usable for a byte-level seek — [`Self::frame_offset`]
-    ///   is the whole answer for that — but no arithmetic maps a sample number
-    ///   to a frame position without the frames themselves, and a table gives
-    ///   each *target* frame's sample count, not the counts of the frames
-    ///   before it. §9.1.5 is the reason this crate could not walk such a
-    ///   stream anyway (its sample-numbered form is refused at the frame
-    ///   layer), and the point is stated so that a future reader of a real
-    ///   variable-blocksize file knows which half of the table still works;
-    /// * a point whose sample number is not a frame boundary in a fixed-blocksize
-    ///   stream (`first_sample % max_blocksize != 0`) names no frame in this
-    ///   stream. §8.5.1 defines the first field as "sample number of the first
-    ///   sample in the target frame", so a hand-edited point inside a frame —
-    ///   including one in the short final frame — is refused rather than
-    ///   silently anchored to the frame that contains it;
-    /// * a point at or past the stream's declared total sample count names no
-    ///   frame, where the stream declares a total
-    ///   ([`StreamInfo::total_samples_declared`]). Measured, a real writer does
-    ///   not write such points — `metaflac --add-seekpoint=12000` on a
-    ///   6000-sample stream drops the request instead — but a hand-edited table
-    ///   can hold one, and `flac -t` waves it through (FLAC.md's split-proposal
-    ///   entry records the measurements); refusing it here is what keeps
-    ///   [`crate::scan::Frames`]'s buffer requirement honest, because a walk
-    ///   told to start past the end has nothing to read. The arithmetic index
-    ///   check alone is not enough: a point at `total_samples` in a stream with
-    ///   a short tail is not a frame start, and a full-block stream's
-    ///   `total_samples` is itself a multiple of `max_blocksize`.
+    /// §8.5.1's first field is "sample number of the first sample in the target
+    /// frame". In a fixed-blocksize stream [`FixedBlockNumbering`] converts it to
+    /// the frame number RFC 9639 §9.1.5 says the frame header carries — and that
+    /// is exactly the value [`crate::scan::Frames::anchored`] wants.
     ///
-    /// ## Position, not frame number
+    /// ## No first-frame-number composition
     ///
-    /// [`crate::scan::Frames::anchored`] wants a frame **number**, and §9.1.5
-    /// allows a stream — a "mutilated contiguous" one especially — to number
-    /// its frames from something other than 0. A position is not a number, and
-    /// no metadata block states the first frame's number: it is in the first
-    /// frame header. The two are the same for a stream that numbers from 0,
-    /// which is what every encoder writes and what every fixture here does
-    /// (`first_frame_number 0` in the stream vectors table), and a caller with
-    /// a substream composes them: `first_frame_number + frame_index`.
-    /// `tests/scan_frame_walk_layout.rs` does exactly that composition rather
-    /// than assuming 0, and pins that an anchor one off is refused before the
-    /// frame is decoded, so a wrong table entry cannot become a wrong sample.
+    /// §9.1.5 says a coded frame number MUST equal the number of frames preceding
+    /// that frame. A conformant whole stream therefore starts at frame 0, and
+    /// `first_sample / block_size` **is** the frame number, not a position
+    /// relative to some other base. A nonzero first coded number is a stream for
+    /// which §9.1.5 says seeking is not reliably possible; [`crate::scan::Frames::anchored`]
+    /// can still be given that coded number for recovery, but adding a separate
+    /// `first_frame_number` to this result would double-count. This crate does not
+    /// do that.
+    ///
+    /// The refusals are the number line's own:
+    ///
+    /// * a placeholder names no frame;
+    /// * a variable-blocksize stream has no fixed divisor (its byte offsets still
+    ///   work, and this crate refuses its sample-numbered frame form anyway);
+    /// * a sample inside a frame — including the short final frame — is not a
+    ///   frame start;
+    /// * a sample at or past the declared total, or an arithmetic frame number at
+    ///   or past the declared frame count, names no frame in the stream.
     #[inline]
     #[must_use]
-    pub fn frame_index(&self, info: &StreamInfo) -> Option<u64> {
-        if self.is_placeholder() || !info.is_fixed_blocksize() {
+    pub fn frame_number(&self, info: &StreamInfo) -> Option<u64> {
+        if self.is_placeholder() {
             return None;
         }
-        let blocksize = u64::from(info.max_blocksize);
-        // A real seek point always names a frame *start*, never a sample inside
-        // a frame. This check is what makes a hand-edited point in the short
-        // final frame (`first_sample == total_samples - 1`, say) an error
-        // instead of an anchor to the frame that happens to contain it.
-        if blocksize == 0 || self.first_sample % blocksize != 0 {
-            return None;
-        }
-        // Where the stream declares its total, a point at or beyond it names no
-        // frame at all. The index check below is equivalent only when the
-        // stream has no short tail; checking the sample itself is the honest
-        // form and also covers a full-block stream whose total is a block
-        // multiple.
-        if let Some(total) = info.total_samples_declared() {
-            if self.first_sample >= total {
-                return None;
-            }
-        }
-        let index = self.first_sample / blocksize;
-        if let Some(count) = info.exact_frame_count() {
-            if index >= u64::try_from(count).unwrap_or(u64::MAX) {
-                return None;
-            }
-        }
-        Some(index)
+        info.fixed_block_numbering()?
+            .frame_number_for_sample(self.first_sample)
     }
 }
 
@@ -2155,7 +2231,7 @@ mod tests {
         }
 
         #[test]
-        fn frame_index_needs_fixed_blocking_and_a_frame_that_the_stream_states() {
+        fn frame_number_needs_fixed_blocking_and_a_frame_that_the_stream_states() {
             let info = fixed512(6000);
             assert_eq!(info.exact_frame_count(), Some(12));
             let bytes = s6_shaped();
@@ -2174,9 +2250,9 @@ mod tests {
                 (6, 11),
             ] {
                 let p = t.point(i).unwrap();
-                assert_eq!(p.frame_index(&info), Some(want), "point {i}");
+                assert_eq!(p.frame_number(&info), Some(want), "point {i}");
             }
-            assert_eq!(t.point(7).unwrap().frame_index(&info), None); // placeholder
+            assert_eq!(t.point(7).unwrap().frame_number(&info), None); // placeholder
 
             // A point at or past the stream's own frame count names no frame.
             // Measured: a real writer does not write one (`metaflac
@@ -2190,7 +2266,7 @@ mod tests {
                     .unwrap()
                     .point(0)
                     .unwrap()
-                    .frame_index(&info),
+                    .frame_number(&info),
                 None
             );
             let last_valid = table(&[entry(5632, 4713, 368)]);
@@ -2199,7 +2275,7 @@ mod tests {
                     .unwrap()
                     .point(0)
                     .unwrap()
-                    .frame_index(&info),
+                    .frame_number(&info),
                 Some(11)
             );
 
@@ -2214,7 +2290,7 @@ mod tests {
                         .unwrap()
                         .point(0)
                         .unwrap()
-                        .frame_index(&info),
+                        .frame_number(&info),
                     None,
                     "sample {sample} is inside/past the tail, not a frame start"
                 );
@@ -2227,7 +2303,7 @@ mod tests {
             // (This crate refuses such streams at the frame layer, §9.1.5.)
             let variable = StreamInfo::parse(&table3(512, 1024, 8000, 1, 16, 6000)).unwrap();
             assert!(!variable.is_fixed_blocksize());
-            assert_eq!(t.point(0).unwrap().frame_index(&variable), None);
+            assert_eq!(t.point(0).unwrap().frame_number(&variable), None);
 
             // A stream that declares no sample total (`s5`'s shape) has no frame
             // count to check a point against, so the division is all there is.
@@ -2242,7 +2318,7 @@ mod tests {
                     .unwrap()
                     .point(0)
                     .unwrap()
-                    .frame_index(&unknown),
+                    .frame_number(&unknown),
                 Some(12)
             );
             // …but the frame-start rule is still checkable without a total, so
@@ -2253,9 +2329,48 @@ mod tests {
                     .unwrap()
                     .point(0)
                     .unwrap()
-                    .frame_index(&unknown),
+                    .frame_number(&unknown),
                 None
             );
+        }
+
+        #[test]
+        fn fixed_block_numbering_owns_both_directions() {
+            let info = fixed512(6000);
+            let numbering = info
+                .fixed_block_numbering()
+                .expect("a fixed-blocksize stream has a number line");
+            assert_eq!(numbering.block_size(), 512);
+            assert_eq!(numbering.total_samples(), Some(6000));
+            assert_eq!(numbering.frame_count(), Some(12));
+
+            for (sample, frame) in [(0u64, 0u64), (512, 1), (5632, 11)] {
+                assert_eq!(numbering.frame_number_for_sample(sample), Some(frame));
+                assert_eq!(numbering.first_sample_for_frame(frame), Some(sample));
+            }
+            for sample in [1u64, 5633, 5999, 6000, 6001, 6143, 6144] {
+                assert_eq!(
+                    numbering.frame_number_for_sample(sample),
+                    None,
+                    "sample {sample} is not the first sample of a frame"
+                );
+            }
+            assert_eq!(numbering.first_sample_for_frame(12), None);
+
+            // With no declared total the end checks disappear, but the frame
+            // boundary rule and the multiplication's own check do not.
+            let unknown = fixed512(0);
+            let unknown = unknown.fixed_block_numbering().expect("fixed blocking");
+            assert_eq!(unknown.total_samples(), None);
+            assert_eq!(unknown.frame_count(), None);
+            assert_eq!(unknown.frame_number_for_sample(6144), Some(12));
+            assert_eq!(unknown.first_sample_for_frame(12), Some(6144));
+            assert_eq!(unknown.first_sample_for_frame(u64::MAX), None);
+
+            // Variable blocking has no single divisor, so there is no number
+            // line to construct.
+            let variable = StreamInfo::parse(&table3(512, 1024, 8000, 1, 16, 6000)).unwrap();
+            assert!(variable.fixed_block_numbering().is_none());
         }
 
         #[test]

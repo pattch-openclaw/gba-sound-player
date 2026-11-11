@@ -1519,7 +1519,7 @@ fn every_seek_table_is_read_as_the_tools_and_the_frame_walk_render_it() {
         let sample_numbers = nums(&v, "seek_points_sample_numbers");
         let stream_offsets = nums(&v, "seek_points_stream_offsets");
         let point_frame_samples = nums(&v, "seek_points_frame_samples");
-        let want_frame_index = nums(&v, "seek_points_frame_indices");
+        let want_frame_number = nums(&v, "seek_points_frame_indices");
         let want_absolute = nums(&v, "seek_points_frame_offsets");
         let frame_offsets = per_frame(&v, "frame_offsets");
         let frame_sizes = per_frame(&v, "frame_blocksizes");
@@ -1529,7 +1529,7 @@ fn every_seek_table_is_read_as_the_tools_and_the_frame_walk_render_it() {
             &sample_numbers,
             &stream_offsets,
             &point_frame_samples,
-            &want_frame_index,
+            &want_frame_number,
             &want_absolute,
         ] {
             assert_eq!(
@@ -1592,7 +1592,7 @@ fn every_seek_table_is_read_as_the_tools_and_the_frame_walk_render_it() {
                     );
                 }
                 assert_eq!(
-                    p.frame_index(&facts.info),
+                    p.frame_number(&facts.info),
                     None,
                     "{}: a placeholder names no sample, so it names no frame",
                     v.label
@@ -1634,35 +1634,37 @@ fn every_seek_table_is_read_as_the_tools_and_the_frame_walk_render_it() {
                 v.label
             );
 
-            // Which frame the point names: the crate's arithmetic, against the
-            // generator's count of frame starts. Two derivations, and the row is
-            // not one of the crate's.
-            let index = p.frame_index(&facts.info).expect(
+            // Which frame the point names: the number line's frame number,
+            // against the generator's count of frame starts. The row key keeps
+            // the generator's historical `frame_indices` name; the value is the
+            // coded frame number RFC 9639 §9.1.5 defines, and for these
+            // conformant streams it equals the frame-list index.
+            let frame_number = p.frame_number(&facts.info).expect(
                 "both fixtures with a table state a total and a fixed \
-                         block size, so a sample number has a frame position",
+                         block size, so a sample number has a frame number",
             );
             assert_eq!(
-                index, want_frame_index[j],
-                "{}: point {i} (sample {}) names frame {index}; counting frame \
-                 starts found {}",
-                v.label, p.first_sample, want_frame_index[j]
+                frame_number, want_frame_number[j],
+                "{}: point {i} (sample {}) names frame {frame_number}; counting \
+                 frame starts found {}",
+                v.label, p.first_sample, want_frame_number[j]
             );
             assert!(
-                index < frame_sizes.len() as u64,
-                "{}: point {i} names frame {index} of {} frames",
+                frame_number < frame_sizes.len() as u64,
+                "{}: point {i} names frame {frame_number} of {} frames",
                 v.label,
                 frame_sizes.len()
             );
             assert_eq!(
                 u64::from(p.frame_samples),
-                frame_sizes[index as usize],
+                frame_sizes[frame_number as usize],
                 "{}: point {i} claims {} samples and the frame it names carries \
                  {} — §8.5.1's frame_samples is not decoration, and this is the \
                  fixture where a short final frame would be where a decoder that \
                  inferred the length from the declared maximum went wrong",
                 v.label,
                 p.frame_samples,
-                frame_sizes[index as usize]
+                frame_sizes[frame_number as usize]
             );
 
             // The base: the table's offsets count from the first byte after the
@@ -1674,7 +1676,7 @@ fn every_seek_table_is_read_as_the_tools_and_the_frame_walk_render_it() {
                 v.label, want_absolute[j]
             );
             assert_eq!(
-                absolute, frame_offsets[index as usize],
+                absolute, frame_offsets[frame_number as usize],
                 "{}: the byte this point aims at is not where the frame it \
                  names begins",
                 v.label

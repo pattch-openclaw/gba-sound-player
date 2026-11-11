@@ -1648,19 +1648,27 @@ frames, and both suites show that reading refused — 4a, because the resolved b
 does not name a frame start; 4b, because `Frames` refuses the byte and has written
 **no samples** when it does.
 
-The other quantity is the subtle one. `SeekPoint::frame_index()` is
-`first_sample / max_blocksize`, defined only for a fixed-blocksize stream (a
-variable-blocksize stream has no divisor; its byte offsets still work, and the
-method says so by returning `None`), and it is a **position in the frame
-sequence**. `Frames::anchored(n)` wants a **frame number**, and §9.1.5 lets a
-stream's first frame carry any number it likes. Every fixture here numbers its
-frames from 0, so position and number coincide — which is precisely the condition
-under which getting them wrong is invisible. The 4b test therefore takes the anchor
-from `frame_numbers[target]` after asserting the row is contiguous from
-`first_frame_number`, and `src/scan.rs`'s `Frames::region` doc now states the
-composition (`first_frame_number + frame_index`) instead of the shorter sentence
-that conflated them. A fixture whose first frame carried a non-zero number is on
-the open list below for that reason.
+The other quantity is settled by RFC 9639 §9.1.5, not by a convention here.
+`SeekPoint::frame_number()` (implemented by `FixedBlockNumbering`, which owns the
+block size and declared end) converts the seek point's sample number to the coded
+frame number. §9.1.5 says a coded frame number **MUST equal the number of frames
+preceding the frame**, so a conformant whole stream starts at frame 0; the sample
+number is `frame_number * block_size`, and `first_sample / block_size` is already
+the frame number `Frames::anchored(n)` wants. There is no
+`first_frame_number + frame_index` composition: a nonzero first coded number is a
+stream for which §9.1.5 says seeking is not reliably possible (a mutilated/
+recovery case), not a second base to add. The 4b test now asserts the fixture rows
+start at 0 and takes its anchor from `frame_numbers[target]`; the recovery builder
+still accepts the number a mutilated region's first header states.
+
+**Correction, 2026-11-11, after reading §9.1.5 in full.** The earlier paragraph
+called the quotient a *position* and proposed composing it with a first-frame
+number. That was an inference from a phrase about mutilated streams, not the
+RFC's rule: the coded number is required to equal the number of preceding frames,
+so the first frame of a conformant stream is 0. `FixedBlockNumbering` now states
+the two-direction arithmetic in one place (`frame_number_for_sample`,
+`first_sample_for_frame`, block size, declared total/frame count), and both
+provider suites use it rather than re-deriving the division.
 
 **Four readings of every real point, in the generator.** For each fixture with a
 table: an independent 18-byte parse in Python; `metaflac --list`'s rendering; the
@@ -1682,14 +1690,15 @@ points share a tail hash: a pin that cannot tell two anchors apart is not a pin.
   bounded indexing, the non-multiple-of-18 refusal, the empty table, the
   placeholder distinguished by sample number alone and nothing else (one below it
   is a real point), every ordering refusal in the table above, and
-  `frame_index`'s two refusals (variable blocking, and a point at or past the
-  declared frame count) plus its one legitimate extension: a point whose
-  `frame_samples` disagrees with the stream's blocking is still an anchor, because
-  that field is a record and not a claim about the whole stream.
+  `frame_number`'s refusals (variable blocking, a point that is not a frame
+  start, and a point at/past the declared total/frame count) plus its one
+  legitimate extension: a point whose `frame_samples` disagrees with the stream's
+  blocking is still an anchor, because that field is a record and not a claim
+  about the whole stream.
 * `stream_metadata_layout::every_seek_table_is_read_as_the_tools_and_the_frame_walk_render_it`
   — the real fixtures: the helper agrees with an explicit `Blocks` walk, the view
   is exactly the block payload, the counts and the placeholder indices match
-  `metaflac`, every real point's three fields match the rows, `frame_index`
+  `metaflac`, every real point's three fields match the rows, `frame_number`
   matches the frame the walk counts, and the wrong-base reading is named as not a
   frame start.
 * `scan_frame_walk_layout::a_seek_point_starts_a_walk_that_finishes_the_stream_at_the_right_sample`
@@ -1896,10 +1905,12 @@ than by drift"; it now points at the decision above.
 **Open axes this half leaves.** The two 6b-2 pt 1 carried (1024-sample blocks;
 packed CONSTANT/VERBATIM/escape-shaped and higher-order-LPC assets, the highest
 LPC order any real-stream table here carrying is 8), plus three the seek work
-exposed: a stream whose **first frame number is not 0**, which is the only thing
-that would witness the position-vs-number composition outside a unit test;
-a **variable-blocksize** stream with a seek table, where the byte-offset half is
-useful and the arithmetic half is refused — nothing here shows the accepted half;
+exposed: a **variable-blocksize** stream with a seek table, where the byte-offset
+half is useful and the arithmetic half is refused — nothing here shows the
+accepted half; a nonzero first frame number is **not** a seek fixture: §9.1.5's
+MUST makes it non-conformant and says seeking there is not reliably possible, so
+it belongs to the recovery path (`Frames::anchored`), not to the table's number
+line;
 and a fixture that **edits an existing table** rather than writing a new one
 (`metaflac --delete-all-points` + `--add-seekpoint` on a copy of `s2` was probed
 and produced several placeholders — recorded as a measurement, not committed,

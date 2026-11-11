@@ -2205,13 +2205,13 @@ fn the_frame_count_claim_is_checked_after_the_sample_count_claim() {
 ///   to) are the two rows that say so; read as a raw file offset, a point would
 ///   land on a byte that is not any frame's start in this stream — and the walk
 ///   is shown refusing such a byte, having written no samples.
-/// * **the number.** [`stream::SeekPoint::frame_index`] is a *position* in the
-///   stream's frame sequence, and [`scan::Frames::anchored`] wants that
-///   sequence's *number*, which §9.1.5 lets a stream start anywhere it likes. For
-///   these fixtures the `frame_numbers` row is that number, so the composition
-///   this test anchors with is the row's, not an assumption of contiguity — and
-///   the contiguity those rows would have to have for `first + position` to work
-///   is asserted from the rows too.
+/// * **the number.** [`stream::SeekPoint::frame_number`] is the coded frame
+///   number RFC 9639 §9.1.5 says the frame header carries, and that is exactly
+///   what [`scan::Frames::anchored`] wants. §9.1.5 requires a frame number to
+///   equal the number of frames preceding the frame, so a conformant whole stream
+///   starts at 0; there is no `first + position` composition. The fixtures are
+///   asserted to start at 0, and the anchor is the requested frame's
+///   `frame_numbers` row.
 ///
 /// The claim that makes a seek a seek, though, is the audio: from an anchor to
 /// the end of the region, the samples a walk decodes have to be the samples
@@ -2252,16 +2252,20 @@ fn a_seek_point_starts_a_walk_that_finishes_the_stream_at_the_right_sample() {
         let n = offs.len();
         let first_number = v.num("first_frame_number");
         assert_eq!(
+            first_number, 0,
+            "{}: RFC 9639 §9.1.5 requires a frame number to equal the number \
+             of preceding frames, so a conformant stream's first frame is 0",
+            v.name
+        );
+        assert_eq!(
             numbers.iter().copied().collect::<Vec<_>>(),
-            (0..n as u64).map(|i| first_number + i).collect::<Vec<_>>(),
-            "{}: these frames are not numbered contiguously from {}, so \
-             `first_frame_number + position` is not a rule this test may use",
-            v.name,
-            first_number
+            (0..n as u64).collect::<Vec<_>>(),
+            "{}: these frames are not numbered 0..N-1 in stream order",
+            v.name
         );
 
         let sample_numbers = v.per_point("seek_points_sample_numbers");
-        let want_index = v.per_point("seek_points_frame_indices");
+        let want_frame_number = v.per_point("seek_points_frame_indices");
         let tails = v.per_point("seek_points_tail_pcm_fnv1a64");
         let n_real = v.num("seektable_points_real") as usize;
         assert_eq!(sample_numbers.len(), n_real, "one row entry per point");
@@ -2277,9 +2281,9 @@ fn a_seek_point_starts_a_walk_that_finishes_the_stream_at_the_right_sample() {
                 v.name
             );
             let target = p
-                .frame_index(&facts.info)
+                .frame_number(&facts.info)
                 .expect("a fixed-blocksize stream that states its total");
-            assert_eq!(target, want_index[j], "{}: point {j}", v.name);
+            assert_eq!(target, want_frame_number[j], "{}: point {j}", v.name);
             assert!(
                 (target as usize) < n,
                 "{}: point {j} names frame {target} of {n}",
@@ -2574,7 +2578,7 @@ fn a_seek_point_starts_a_walk_that_finishes_the_stream_at_the_right_sample() {
             let j = at;
             let suffix = &bytes[base + p.frame_offset as usize..];
             let target = p
-                .frame_index(&facts.info)
+                .frame_number(&facts.info)
                 .expect("a fixed-blocksize stream that states its total");
             let anchor = numbers[target as usize];
             let (mut left, mut right) = caller_buffers(&v, &facts);

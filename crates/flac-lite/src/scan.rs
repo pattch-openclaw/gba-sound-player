@@ -186,10 +186,12 @@
 //! Every real encode measured here carries coded frame numbers **exactly
 //! `0..N-1` in stream order** — the harness asserts it across 979 frames
 //! (`scripts/frame_vectors.py`), and `stream_vectors.txt` carries the rows
-//! (`frame_numbers 0 1 2 …`). That is a measured property of encoders, not a
-//! quote; §9.1.5's other arm (a *sample* number, under variable blocking) is
-//! refused inside [`crate::frame::FrameHeader::parse`] before that field is read,
-//! because variable blocking is outside this crate's profile.
+//! (`frame_numbers 0 1 2 …`). That is both a measured property of encoders and
+//! RFC 9639 §9.1.5's MUST: a frame number equals the number of frames preceding
+//! the frame, so a conformant stream starts at 0. §9.1.5's other arm (a *sample*
+//! number, under variable blocking) is refused inside
+//! [`crate::frame::FrameHeader::parse`] before that field is read, because
+//! variable blocking is outside this crate's profile.
 //!
 //! For a walk that knows where it stands, the sequence is a free and strict
 //! filter, and [`Frames`] applies it **before any sample is written**: a frame
@@ -620,21 +622,18 @@ impl<'a> Frames<'a> {
     /// range, a hand-cut slice of a file.
     ///
     /// `defaults` and `bounds` are the caller's to supply — for a packed blob,
-    /// `format::Manifest`' (item 6); for a range taken from a real stream, the
-    /// frame that a `SEEKTABLE` entry names decides the anchor. Note the two
-    /// different quantities: an entry's byte offset is relative to the first byte
-    /// after the metadata, so the region to hand this constructor starts there
-    /// (see [`crate::stream::SeekPoint`]'s field docs), and its
-    /// [`crate::stream::SeekPoint::frame_index`] is a *position* in the stream's
-    /// frame sequence, whereas [`Frames::anchored`] wants that sequence's
-    /// *number*, which §9.1.5 lets a stream start anywhere it likes. A caller
-    /// reading a whole file composes `first_frame_number + frame_index`; for a
-    /// file whose frames are numbered from 0 the two are the same number, and
-    /// every fixture in this repo is such a file, which is exactly why the
-    /// distinction is easy to get away with wrongly until one is not. With no
-    /// anchor the walk still enforces contiguity
-    /// (each frame's number follows the last one); it cannot say that the frame
-    /// it found *should* have been number 7.
+    /// `format::Manifest` (item 6); for a range taken from a real stream, the
+    /// frame a `SEEKTABLE` entry names supplies both. An entry's byte offset is
+    /// relative to the first byte after the metadata, so the region to hand this
+    /// constructor starts there; its
+    /// [`crate::stream::SeekPoint::frame_number`] is the coded frame number RFC
+    /// 9639 §9.1.5 says the frame header carries, exactly what
+    /// [`Frames::anchored`] wants. §9.1.5 requires that number to equal the
+    /// number of frames preceding the frame, so a conformant whole stream starts
+    /// at frame 0; a nonzero first coded number is a non-seekable/mutilated
+    /// stream, not a separate base to add. With no anchor the walk still enforces
+    /// contiguity (each frame's number follows the last one); it cannot say that
+    /// the frame it found *should* have been number 7.
     pub fn region(region: &'a [u8], defaults: &StreamDefaults, bounds: StreamBounds) -> Self {
         Self {
             region,
@@ -646,8 +645,12 @@ impl<'a> Frames<'a> {
         }
     }
 
-    /// Anchor the walk's frame numbering at `first_frame_number`, for a region
-    /// whose first frame's position in the stream is known. Builder-style.
+    /// Anchor the walk's frame numbering at `first_frame_number`, the coded
+    /// number the region's first frame carries. A conformant whole stream starts
+    /// at 0, and a seek point's
+    /// [`crate::stream::SeekPoint::frame_number`] is the same number; the
+    /// builder-style form also lets recovery use the number a mutilated region's
+    /// first header actually states.
     pub fn anchored(mut self, first_frame_number: u64) -> Self {
         self.expect_number = Some(first_frame_number);
         self
