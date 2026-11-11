@@ -13,10 +13,13 @@ edition = "2024"
 #   make native-flac-rom      # this host (no virtualization needed)
 #   make podman-flac-rom      # containerized, reproducible
 #
-# It produces a bootable ROM. It does NOT decode audio yet — everything past
-# flac-lite's bit reader is still `todo!()` scaffold, and the link anchor in
-# src/main.rs deliberately never runs the decoder, so the ROM boots normally
-# instead of panicking. (What it does run is a live BitReader proof.)
+# Since 6b-1 it is the **product path**: it embeds a `GAFP` blob, parses the
+# manifest, decodes every frame through `flac_lite::Decoder` with the overlay's
+# `ArmRiceKernel` (feature `arm-kernel`, on by default), checks the PCM against
+# the perf gate's committed pin, and times a second pass on the same bytes.
+# `--no-default-features` builds the same ROM with the core's default kernel —
+# that pair is the kernel A/B. The BitReader proof from the scaffold is kept as
+# the boot-time hardware sanity check.
 #
 # Standalone (own Cargo.toml + [workspace] + .cargo/config.toml) for the same
 # reason as flac-lite: the root crate must stay free of any FLAC dependency so
@@ -26,7 +29,28 @@ edition = "2024"
 agb = "0.25.0"
 # `iwram-pin`: this GBA ROM opts in to the core's .iwram pin (off by default
 # in the core since 2026-11-02; split-proposal ladder step 2).
-flac-lite = { path = "../../crates/flac-lite", features = ["iwram-pin"] }
+# `scan`: 6b-1 made the manifest facade a shell over the frame walk, so this is
+# the first product ROM to turn the walk on. That is the +3,120 B the plan
+# charged here rather than to every image.
+flac-lite = { path = "../../crates/flac-lite", features = ["iwram-pin", "scan"] }
+
+# 6b-1: the overlay, with its ARM-mode Rice kernel on. This is the first product
+# path to name `rice-arm` — before this rung the kernel existed only in an
+# instrument (6a-4/6a-5). Optional so the codegen A/B can build the same ROM
+# with the default kernel and nothing else changed.
+flac-lite-gba = { path = "../../crates/flac-lite-gba", optional = true }
+
+[features]
+default = ["arm-kernel"]
+# The kernel choice, by type at the facade call site. `arm-kernel` links the
+# overlay's `ArmRiceKernel`; with it off the same ROM decodes through the core's
+# `TableCountKernel`, which is what makes the pair a same-image A/B rather than
+# two different ROMs.
+arm-kernel = ["dep:flac-lite-gba", "flac-lite-gba/rice-arm", "flac-lite-gba/iwram-pin"]
+
+[[bin]]
+name = "flac-integration"
+path = "src/main.rs"
 
 [workspace]
 

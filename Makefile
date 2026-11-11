@@ -9,7 +9,8 @@
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
-        test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check spike-test opus-test kernel-test \
+        test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check gafp-check \
+        flac-rom-default-kernel native-flac-rom-default-kernel spike-test opus-test kernel-test \
         overlay-check overlay-check-arm overlay-test overlay-test-twin overlay-test-arm overlay-objdump \
         overlay-kernel-rom native-overlay-kernel-rom podman-overlay-kernel-rom overlay-kernel-test podman-overlay-kernel-test \
         podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test podman-overlay-test podman-overlay-test-twin \
@@ -208,7 +209,7 @@ flac-test-scan: toolchain-check
 	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features scan
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features scan
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features scan,instrument
 	@echo "flac-test-scan passed: the frame walk compiles for $(TARGET) and its witness suite is green with the scan feature on"
 
 # The `rice-hybrid` gate (split-ladder item 5 PR 3's portable hybrid Rice
@@ -256,6 +257,8 @@ flac-test-wide: toolchain-check
 SECOND_TARGET ?= thumbv7em-none-eabi
 ROM := gba-sound-player.gba
 FLAC_ROM := flac-integration.gba
+# 6b-1's same-source control: the default-kernel arm of the product A/B.
+FLAC_ROM_DEFAULT_KERNEL := flac-integration-default-kernel.gba
 # Standalone crate that bundles flac-lite into a ROM (the FLAC sanity build).
 FLAC_CRATE_DIR := examples/flac_integration
 # Absolute manifest path for the flac-lite host gate (see `flac-test`: the gate
@@ -413,10 +416,33 @@ podman-rom:
 # scaffold). The root ROM crate stays FLAC-free either way.
 # ---------------------------------------------------------------------------
 
-flac-rom: format
+# 6b-1: the integration crate is the product path now — it embeds a `GAFP` blob
+# and decodes it with the overlay's ARM kernel. The blob is generated output
+# (committed, like the spike's assets) from `scripts/gen_gafp_blob.py`; the
+# `gafp-check` gate is the tripwire that it still matches its generator.
+flac-rom: gafp-check format
 	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
 	agb-gbafix $(FLAC_CRATE_DIR)/$(FLAC_CRATE_BIN) -o $(FLAC_ROM)
-	@echo "FLAC ROM built: $(FLAC_ROM)"
+	@echo "FLAC ROM built: $(FLAC_ROM) (product path: manifest facade + ArmRiceKernel)"
+
+# The 6b-1 A/B: the *same* ROM source with the core's default kernel instead of
+# the overlay's, so the kernel's instantiation is the only difference. Its
+# witness is section-level (`make flac-rom-ab` prints both) plus the hardware
+# pair; the build here is what a cycle reading on a unit needs.
+flac-rom-default-kernel: gafp-check format
+	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --no-default-features
+	agb-gbafix $(FLAC_CRATE_DIR)/$(FLAC_CRATE_BIN) -o $(FLAC_ROM_DEFAULT_KERNEL)
+	@echo "FLAC ROM built (default kernel): $(FLAC_ROM_DEFAULT_KERNEL)"
+
+native-flac-rom-default-kernel: flac-rom-default-kernel
+	@echo "native-flac-rom-default-kernel done: $(FLAC_ROM_DEFAULT_KERNEL)"
+
+# The generated blob's tripwire: rebuild it in memory and compare with the
+# committed copy. No encoder needed — it is assembled from committed generator
+# output (see scripts/gen_gafp_blob.py).
+gafp-check: toolchain-check
+	python3 scripts/gen_gafp_blob.py --check
+	@echo "gafp-check passed: the committed GAFP blob still matches its generator"
 
 native-flac-rom: flac-rom
 	@echo "native-flac-rom done: $(FLAC_ROM)"
@@ -697,7 +723,7 @@ flac-test: toolchain-check
 	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE)
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features instrument
 	@echo "flac-test passed: flac-lite compiles for $(TARGET) and passes host tests"
 
 # Second-target build witness (FLAC.md split-proposal ladder step 3, 2026-11-02):
@@ -1018,7 +1044,7 @@ test: test-rom flac-test
 # which is also the shape a future default flip would ship in.
 # Nothing here is parallel-safe-by-design: like `test:`, it is a plain
 # prerequisite aggregate, so `make -j flac-gates` interleaves output.
-flac-gates: flac-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-portable-check
+flac-gates: flac-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-portable-check gafp-check
 	cd crates/flac-lite && \
 	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check,scan
 	@mkdir -p $(GATE_NEUTRAL_CWD)

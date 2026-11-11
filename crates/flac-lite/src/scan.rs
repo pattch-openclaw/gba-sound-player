@@ -708,7 +708,32 @@ impl<'a> Frames<'a> {
     ///
     /// `state` is reused across frames exactly as [`crate::driver`] requires:
     /// per-frame decode state, not per-stream, and not reallocated either.
+    /// Decode the next frame through the default Rice kernel.
+    ///
+    /// Exactly [`Frames::next_frame_with`] at `TableCountKernel` — one body, so
+    /// the walk cannot drift into a second codeword loop. The `K` seam exists
+    /// because the *product* path has to name its kernel by type: the overlay's
+    /// `ArmRiceKernel` lives in another crate, and a walk that hardcodes the
+    /// default can only ever be a default-kernel walk (6b-1).
+    #[inline]
     pub fn next_frame(
+        &mut self,
+        left: &mut [i32],
+        right: &mut [i32],
+        state: &mut [PredictorState; 2],
+    ) -> core::result::Result<Option<ConsumedFrame>, Error> {
+        self.next_frame_with::<crate::residual::TableCountKernel>(left, right, state)
+    }
+
+    /// Decode the next frame through the Rice kernel `K`.
+    ///
+    /// The body is the walk, unchanged; `K` reaches it through
+    /// [`crate::frame::decode_frame_with`], the same generic entry the
+    /// measurement instrument's arms use. An image holding one instantiation
+    /// pays for one; a build holding two (a gate, or a differential arm) pays the
+    /// second-instantiator cost the E-series recorded, which is why the codegen
+    /// A/B for this seam is part of 6b-1's witness rather than an assumption.
+    pub fn next_frame_with<K: crate::residual::RiceKernel>(
         &mut self,
         left: &mut [i32],
         right: &mut [i32],
@@ -763,8 +788,8 @@ impl<'a> Frames<'a> {
             return Err(self.capacity_refusal(need, right.len()));
         }
 
-        let samples =
-            frame::decode_frame(&mut reader, &header, left, right, state).map_err(Error::Decode)?;
+        let samples = frame::decode_frame_with::<K>(&mut reader, &header, left, right, state)
+            .map_err(Error::Decode)?;
 
         // Framing: the frame's own length, read off the cursor the walk already
         // has. A frame ends on a byte boundary by construction (its footer pads to

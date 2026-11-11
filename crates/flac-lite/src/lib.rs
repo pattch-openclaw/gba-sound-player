@@ -309,7 +309,19 @@
 #![allow(dead_code, unused_variables)]
 
 pub mod bits;
+// [6b-1] The product facade is a shell over the walk (`scan`), so it exists
+// exactly where the walk does. Its module docs carry the consequence: the cost of
+// making it available to a ROM is the walk's measured +3,120 B of `.text`, which
+// is why it is a feature rather than unconditional.
+#[cfg(feature = "scan")]
 pub mod decoder;
+// [6b-1] The instrument's per-frame loop. Not part of the public contract:
+// `decoder` (above) is the product path, and this is the measurement harness's
+// index-driven loop, kept compiling precisely so the E-series' cycle numbers
+// stay attributable to unchanged source. `#[doc(hidden)]` + an off-by-default
+// feature is the demotion; deletion waits for the instrument's retirement.
+#[cfg(feature = "instrument")]
+#[doc(hidden)]
 pub mod driver;
 pub mod format;
 pub mod frame;
@@ -341,6 +353,7 @@ pub mod stereo;
 pub mod stream;
 pub mod subframe;
 
+#[cfg(feature = "scan")]
 pub use decoder::{DecodedFrame, Decoder, FrameBuffers};
 pub use format::{Blocksize, ChannelConfig, EncodeProfile, Manifest, SampleRate};
 pub use frame::FrameHeader;
@@ -372,6 +385,26 @@ pub enum Error {
     FrameCrc,
     /// Manifest magic/version/length invalid.
     Manifest,
+    /// The bytes disagree with the declarations in front of them: a blob or a
+    /// walk was told a frame count or a sample count, and the frames it holds
+    /// are not that number. Both sides are carried because the numbers *are* the
+    /// diagnosis — `declared 157 / actual 156` says the table lost an entry,
+    /// while the reverse says it gained one.
+    StreamMismatch {
+        /// The count the header pinned.
+        declared: u64,
+        /// The count the bytes actually produced.
+        actual: u64,
+    },
+    /// A frame's coded number is not the one a walk expected — RFC 9639 §9.1.5
+    /// numbering was not contiguous. Carries both so a resync decision can be
+    /// made from the numbers rather than re-derived.
+    FrameNumberMismatch {
+        /// The number the walk expected next.
+        expected: u64,
+        /// The number the frame actually carries.
+        found: u64,
+    },
     /// Manifest declares a stream property this decoder cannot handle.
     UnsupportedStream,
     /// Not a FLAC stream: the `fLaC` magic (`stream::MAGIC`) is absent or

@@ -39,6 +39,26 @@
 //! ## What this module is *not*
 //!
 //! - **Not the [`crate::decoder`] facade.** `decoder`'s manifest-driven
+//! ## Deprecation intent (decided 2026-11-10, 6b-1)
+//!
+//! This module is **intended to be deprecated and eventually removed**. It is the
+//! instrument's per-frame loop — index-driven, kernel-generic, shaped for the
+//! performance spikes — and the *product* path is the facade in `crate::decoder`,
+//! which is a shell over `crate::scan`. Once the measurement instrument retires,
+//! there is no caller left, and a crate meant to stand alone should not ship two
+//! per-frame entry points.
+//!
+//! Why it is not removed *now*: deleting or relocating it moves code across a
+//! crate boundary, which changes inlining and re-pins every recorded cycle
+//! anchor (6a-3 measured ~168–199 K cycles/frame from merely adding a second
+//! instantiator). So the sequence is: demote it behind an off-by-default
+//! `instrument` feature with `#[doc(hidden)]` — so the public contract is one
+//! loop — and delete it when the instrument goes, not before. The E-series
+//! numbers are attributable to this file's source text; that is the thing being
+//! protected.
+//!
+//! A future reader who finds this note after the instrument is gone should treat
+//! it as a standing instruction, not a historical remark.
 //!   `Decoder`/`FrameBuffers`/`DecodedFrame` stay scaffold (`todo!()`): their
 //!   frame source is `format::Manifest`, which is Phase 2 step 6 (product-side
 //!   container work). When the manifest lands, the facade becomes a thin shell

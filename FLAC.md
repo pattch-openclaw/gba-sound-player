@@ -48,7 +48,16 @@ cannot disagree. Its same-image mGBA reference reproduces the pre-summary 6a-7
 record to **≤18 cycles/frame on every leg** (`.text` byte-identical; the default
 image byte-identical outright).
 
-**Then it was measured on silicon: GBA 001 and GBA SP, two runs each, all four
+**6b-1 then put the kernel in the product ROM and measured it there (2026-11-10):
+`rice-arm` decodes at 396,709 mean / 398,923 worst c/frame = 37.83% / 38.04% of the
+32,768 Hz frame, on a GBA 001 and a GBA SP, identical to the cycle, PCM pin
+matched.** mGBA agrees with hardware on that leg to **0.055%** — the 3.7–6.9%
+shortfall 6a-7b found attaches to the *default* kernel's ROM-fetch-heavy path
+(+4.03% in the same run), not to the kernel the product path ships. Decode now has
+**2.63× headroom**, and C2's arithmetic reads ≈80.9% of the frame with ≈11.9 ms
+left for the mixer and feeder.
+
+**6a-7b measured the instrument on silicon: GBA 001 and GBA SP, two runs each, all four
 runs identical to the cycle.** Two results. The decode path is
 **bit-exact on hardware** — the blue `harness_ok` backdrop means both PCM pins, the
 frame-by-frame equality witness over `ctrl`/`wide`/`asm` and calibration all passed
@@ -164,6 +173,8 @@ lever at all.
 | + E10 + E4 i32 stacked (probe) | **94.47% (worst 94.95%)** | 216.3% | no |
 | Kernel + IWRAM + i32 (6a-7, mGBA) | 39.74% (worst 39.96%) | 166.97% | no — instrument only |
 | **Kernel + IWRAM + i32 on hardware (6a-7b, GBA 001/SP)** | **42.48% (worst 42.72%)** | **173.23% (worst 174.14%)** | **measured, decode only** |
+| **Product path on hardware (6b-1, GBA 001/SP, `rice-arm`)** | **37.83% (worst 38.04%)** | — (kernel leg, FIXED clip) | **measured, product path** |
+| Product path on hardware, default kernel (6b-1 control) | 154.67% (worst 155.45%) | — | measured; this is the shipped default path |
 
 At 10,512 Hz, real music, on today's path: **FIXED fits** (73.9% mean, 78.3%
 worst) and **LPC does not** (183.9% / 211.6%). Full-rate FIXED first came in budget
@@ -258,8 +269,17 @@ One line per rung; the full plan, bars and invariants are in
   decode figure is already a hardware measurement and the acceptance run is on
   hardware — so it waits. Q13 keeps the trigger; a **+7% derating** on mGBA
   memory-heavy figures stands in for it meanwhile.
-- **6b** — the container: the facade rewired onto `scan`, the real GAFP packer and
-  manifest, and the rate-play path through a real manifest.
+- ~~**6b-1** — the facade onto `scan`, and `rice-arm` carried into a product ROM.~~
+  **Landed 2026-11-10.** `Decoder`/`FrameBuffers`/`DecodedFrame` exist as a shell
+  over the walk; `examples/flac_integration` is the product ROM and decodes the
+  embedded clip with the ARM kernel at **396,659 c/frame = 37.82% mean / 38.03%
+  worst** of the 32,768 Hz frame, pin matched (mGBA). The `scan` seam is
+  **byte-identical** in that image, so the kernel's generic parameter costs
+  nothing. `driver` is demoted behind `instrument` + `doc(hidden)`. Owed: the
+  unit reading of both A/B builds. Record:
+  [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md).
+- **6b-2** — the real GAFP packer, `format::Manifest` at pack time, and a profile
+  that refuses at pack what the target rate cannot play (LPC at 32 kHz).
 - **Rate sweep** — the cross-rate profiling sweep on the improved decoder, which
   produces the "which rates become feasible" guidelines from measurement.
 

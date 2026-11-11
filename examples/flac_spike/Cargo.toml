@@ -27,7 +27,10 @@ edition = "2024"
 # `iwram-pin`: keep the E2b LEADING_ONES table pinned to .iwram in this live
 # GBA image (the pin is off by default in the core since the split-proposal
 # ladder step 2, 2026-11-02 — GBA ROM crates opt in).
-flac-lite = { path = "../../crates/flac-lite", features = ["iwram-pin"] }
+# `instrument`: the spike drives `flac_lite::driver` (the index-based per-frame
+# loop), which 6b-1 gated behind that feature when it demoted `driver` out of the
+# public contract. This crate is exactly the instrument that feature exists for.
+flac-lite = { path = "../../crates/flac-lite", features = ["iwram-pin", "instrument"] }
 
 # The GBA OVERLAY crate, optional and off in every shipped build: this is the
 # first time anything in this repository links `flac-lite-gba` at all, which is
