@@ -100,10 +100,13 @@
 //! 9639 §8.1 defines a metadata block as
 //! a 4-byte header plus exactly `length` bytes, with no CRC trailer, and the
 //! format's only CRCs are the frame header (§9.1.8) and frame footer (§9.3)
-//! — both implemented above. What still `todo!()`: the
-//! `decoder` facade — whose frame source is a `Manifest`, so it will be a
-//! thin shell over `driver`, not a second loop — and `format::Manifest`;
-//! `format::Blocksize::samples` and `EncodeProfile::validate`.
+//! — both implemented above. What has landed since that sentence was written:
+//! `format::Manifest`, `format::Blocksize::samples`, `EncodeProfile::validate`,
+//! and the `decoder` facade — item 6b-1 (2026-11-10) made that facade a thin
+//! shell over `scan` rather than over `driver`, exactly as predicted here, and it
+//! added no third frame loop. Item 6b-2's first half (2026-11-11) made the
+//! container real from the packer's side (`scripts/gafp_pack.py`) and gated it.
+//! Still open in this area: `SEEKTABLE` interpretation and `Frames::anchored(n)`.
 //! Item 4's **second half — the frame walk — landed as the `scan` module and its
 //! feature of the same name**, and it
 //! answers the two questions 4a left open: how a reader gets from one frame to
@@ -229,21 +232,30 @@
 //! ## Decode pipeline
 //!
 //! ```text
-//! frame source          borrowed decode inputs. Today: driver::FrameSource
-//!                       (frame index + region + stream defaults). The GAFP
-//!                       manifest and the stream-scan cursor are *other*
-//!                       sources for the same loop, not new loops.
+//! frame source          borrowed decode inputs. There are two, and which one a
+//!                       build links is a feature decision:
+//!                         · `format::Manifest` + `scan::Frames` — the product
+//!                           path, behind `scan` (item 6b-1). No index in front
+//!                           of the frames: each frame ends itself.
+//!                         · `driver::FrameSource` (frame index + region +
+//!                           stream defaults) — behind `instrument`, the
+//!                           measurement path, kept because every E-series cycle
+//!                           anchor is attributable to that file's text.
+//!                       Two *sources for the same loop*, not two loops.
 //!   └─ driver           per-frame loop: index offset → fresh cursor → frame.
-//!                       `decoder::Decoder` is the manifest-shaped facade over
-//!                       this — still scaffold (Phase 2 step 6).
+//!                       `decoder::Decoder` is the manifest-shaped facade — it
+//!                       landed on `scan` (6b-1), not here, and there is no
+//!                       third loop anywhere in the crate.
 //!        └─ frame       frame header → N subframes
 //!             ├─ subframe CONSTANT | VERBATIM | FIXED(0..4) | LPC(<=32)
 //!             │    └─ residual  partitioned Rice | Rice2 | escape
 //!             └─ stereo   mid/side, left/side, right/side  (stereo only)
 //!
-//! scan (item 4b — a *second* frame source, with no index; it decodes through
+//! scan (item 4b — the second frame source, with no index; it decodes through
 //!   the same layers below and reads the file level through stream). Behind the
-//!   `scan` feature, OFF by default: nothing here links it until item 6 does.
+//!   `scan` feature, OFF by default *in this crate*: the walk's cost is measured
+//!   (+3,120 B of `.text`), so the images that want it opt in and the ones that
+//!   do not are not made to carry it.
 //!   └─ scan             frame walk: one frame's own fields end it (bit cursor,
 //!                       `frame_bytes` witnessed per frame against the generated
 //!                       table), and the end of the region is the end of the
@@ -304,8 +316,24 @@
 // Everything else still fails the build.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-// SCAFFOLD-ONLY: silence dead-code/unused noise while bodies are `todo!()`.
-// REMOVE this allow once implementations land.
+// Still load-bearing, and now named rather than assumed: probed 2026-11-11 by
+// deleting this attribute and building every gated feature combination, which
+// added five warnings, each one a cfg-conditional name whose other arm is what a
+// given build compiles — `bits::peek_at`'s `end` binding, the `crc8_bit`
+// position in the frame-header parse (read only by the `crc-check` arm), the
+// `order_u8` pattern binding in `subframe` (used only by the width arm that is
+// compiled out), `subframe::integrate_fixed` (live under `--no-default-features`
+// and under `cfg(test)`, dead in the default i32-integrator build), and a
+// test-local `pos` in `bits`. Note the scope this attribute does *not* have: an
+// integration test is its own crate, so a crate-level allow never covered
+// `tests/`, and one unused variable there (`lens`, in
+// `tests/scan_frame_walk_layout.rs`) already shows up in three arms of
+// `make flac-gates` today. None of the six is a design problem. What *is* a cost
+// is that this attribute is crate-wide, so it silences genuine dead code as
+// well: C1's closure pass gives each item its own `cfg`, fixes that test
+// variable, and deletes this line. That pass edits source, so it owes its own
+// control build and section table; 6b-2's packer work touched no Rust in the
+// shipped path, so this stopped at measuring rather than fixing.
 #![allow(dead_code, unused_variables)]
 
 pub mod bits;

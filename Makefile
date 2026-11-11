@@ -444,6 +444,55 @@ gafp-check: toolchain-check
 	python3 scripts/gen_gafp_blob.py --check
 	@echo "gafp-check passed: the committed GAFP blob still matches its generator"
 
+# The real GAFP packer (plan of record, item 6b-2) and the three things that
+# make its output mean something rather than merely exist:
+#
+#   1  byte-identity with the committed product blob. The FIXED-only reference
+#      clip is re-synthesized and re-encoded in a temp dir here — the `.flac` is
+#      a generator input, never a tracked file (only the frame/PCM regions under
+#      examples/flac_spike/assets/ are committed) — then packed and compared
+#      against examples/flac_integration/assets/spike_l0.gfp, the blob
+#      `gafp-check` guards and the one `flac-rom` embeds, which the 6b-1
+#      stand-in generator wrote. First run 2026-11-11: byte-identical, 865,996
+#      bytes, 157 frames, no first difference. That is the answer to "is there
+#      one container definition or two" — there is one, and the packer's own
+#      strict frame walk (every footer CRC-16 verified, every frame's exit
+#      landing on the next frame, 314 subframe slots censused) lands on the same
+#      bytes from the other side.
+#   2  the fixture set. `scripts/gen_gafp_fixtures.py --check` rebuilds the
+#      five-thousand-sample assets under crates/flac-lite/tests/gfp/ and the
+#      facts table that describes them, and re-runs the three refusal legs —
+#      real LPC subframes at the product profile, 44.1 kHz at a 32 kHz target,
+#      8-bit at a 16-bit profile — confirming they still refuse, still write no
+#      file, and still print the reason. The refusals are C2's guard, so they
+#      are witnesses here exactly as the accepted blobs are.
+#   3  the Rust half: `tests/gafp_asset_facts.rs`, reading those bytes back
+#      through `Manifest`, `scan::Frames` and `Decoder` and checking every
+#      offset-table entry, every frame footer CRC, and the PCM against the
+#      `flac -d` pins. `flac-test-scan` already runs it as part of the suite;
+#      this leg names it because the leg is about that suite — a leg that had
+#      quietly stopped being built would otherwise still read as a green.
+#
+# It stays a separate target from `gafp-check`, which still describes the
+# committed product blob through the 6b-1 stand-in and is what `flac-rom`
+# depends on. With leg 1 green, the two agree byte for byte, so retiring the
+# stand-in is a refactor with a safety net rather than a change of format — a
+# decision 6b-2 makes deliberately rather than by drift.
+gafp-pack-check: toolchain-check
+	@command -v flac >/dev/null && command -v metaflac >/dev/null || \
+	  { echo "gafp-pack-check needs flac and metaflac on PATH (the reference encoder, decoder and block lister)"; exit 1; }
+	@d=$$(mktemp -d /tmp/gafp-pack.XXXXXX); \
+	 python3 scripts/frame_vectors.py synth "$$d" >/dev/null && \
+	 flac -1 -f -s -l 0 -b 2048 -m -o "$$d/l0_stereo.flac" "$$d/stereo.wav" && \
+	 python3 scripts/gafp_pack.py "$$d/l0_stereo.flac" "$$d/l0.gfp" \
+	   --expect examples/flac_integration/assets/spike_l0.gfp; \
+	 rc=$$?; rm -rf "$$d"; exit $$rc
+	python3 scripts/gen_gafp_fixtures.py --check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features scan,instrument --test gafp_asset_facts
+	@echo "gafp-pack-check passed: the real packer writes the committed product blob byte for byte, the fixture set and its three refusals still match their generator, and the crate re-reads all of it bit-exactly"
+
 native-flac-rom: flac-rom
 	@echo "native-flac-rom done: $(FLAC_ROM)"
 
@@ -1042,9 +1091,16 @@ test: test-rom flac-test
 # combination arm (`crc-check,scan,rice-hybrid`): the one build in which the
 # walk, the CRC verification and BOTH Rice mechanisms are compiled at once —
 # which is also the shape a future default flip would ship in.
+# Item 6b-2 (2026-11-11) added `gafp-pack-check`: the real GAFP packer's
+# byte-identity against the committed product blob, its fixture/refusal set, and
+# the suite that reads those bytes back through the facade. It needs `flac` and
+# `metaflac` on PATH, which no other arm of this aggregate does — every other
+# arm reads tables and blobs that were generated earlier and committed. That is
+# worth knowing when a CI image is missing libFLAC tools: the failure is this
+# leg, not a decoder regression.
 # Nothing here is parallel-safe-by-design: like `test:`, it is a plain
 # prerequisite aggregate, so `make -j flac-gates` interleaves output.
-flac-gates: flac-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-portable-check gafp-check
+flac-gates: flac-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-portable-check gafp-check gafp-pack-check
 	cd crates/flac-lite && \
 	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check,scan
 	@mkdir -p $(GATE_NEUTRAL_CWD)
@@ -1054,7 +1110,7 @@ flac-gates: flac-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice
 	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check,scan,rice-hybrid
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features crc-check,scan,rice-hybrid
-	@echo "flac-gates passed: every crates/flac-lite configuration is green — default, crc-check, scan, rice-hybrid, both, all three, and the second bare-metal target"
+	@echo "flac-gates passed: every crates/flac-lite configuration is green — default, crc-check, scan, rice-hybrid, both, all three, and the second bare-metal target — plus the real GAFP packer's byte-identity and its fixture suite"
 
 # ---------------------------------------------------------------------------
 # Containerized test entrypoints (the portable path — the image ships

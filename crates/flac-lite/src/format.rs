@@ -1,8 +1,15 @@
 //! Container format (`GAFP`) + manifest parsing, and the constrained encode
 //! profile the packer and decoder agree on.
 //!
-//! SCAFFOLD STATE: types and signatures only, bodies are `todo!()`.
-//! The byte-level contract lives in [`../README.md`](../README.md).
+//! Landed — and the other half of this contract is now a program rather than a
+//! promise: `Manifest` parses and validates these bytes, `Blocksize::samples` and
+//! `EncodeProfile::validate` are implemented, and the packer side is
+//! `scripts/gafp_pack.py` (item 6b-2, 2026-11-11). That generator emits the
+//! facts table `tests/gafp_asset_vectors.txt`, which
+//! `tests/gafp_asset_facts.rs` reads back through this module and the decode
+//! path, so the packer's record of a byte string and this crate's reading of the
+//! same bytes are gated against each other rather than assumed consistent. The
+//! byte-level contract itself lives in [`../README.md`](../README.md).
 //!
 //! ## Why a manifest instead of FLAC's own metadata blocks
 //!

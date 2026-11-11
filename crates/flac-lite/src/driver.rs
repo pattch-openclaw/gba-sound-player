@@ -59,15 +59,19 @@
 //!
 //! A future reader who finds this note after the instrument is gone should treat
 //! it as a standing instruction, not a historical remark.
-//!   `Decoder`/`FrameBuffers`/`DecodedFrame` stay scaffold (`todo!()`): their
-//!   frame source is `format::Manifest`, which is Phase 2 step 6 (product-side
-//!   container work). When the manifest lands, the facade becomes a thin shell
-//!   over this loop rather than a second loop.
+//!   `Decoder`/`FrameBuffers`/`DecodedFrame` are no longer scaffold: item 6b-1
+//!   (2026-11-10) landed them as the thin shell this note predicted — over
+//!   `scan::Frames` rather than over this loop, because the manifest-backed
+//!   product path needed a frame source that finds its own frames. The shape is
+//!   the one the next bullet describes; what nobody wrote down in advance is that
+//!   the facade would land on the walk rather than here, which is why this file
+//!   is now the instrument's and not the product's.
 //! - **Not a frame *finder*.** Frames come from the caller's index. The
 //!   stream-scan cursor (the measured sync+CRC-8+field-validation filter,
-//!   FLAC.md → "Frame sync scanning") is the next rung, and it will supply a
-//!   different frame source to the same loop — which is the point of keeping
-//!   the source borrowed here.
+//!   FLAC.md → "Frame sync scanning") landed as item 4b's `scan` module, and it
+//!   supplies a different frame source to the same loop — which is the point of
+//!   keeping the source borrowed here, and which is exactly what 6b-1's facade
+//!   then consumed.
 //!
 //! ## Decode contract carried over verbatim
 //!

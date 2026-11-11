@@ -155,6 +155,18 @@ required-features = ["scan"]
 name = "decoder_manifest_walk"
 required-features = ["scan"]
 
+# [6b-2] The packer's witness: the GAFP blobs and the facts table that
+# `scripts/gafp_pack.py` writes (via `scripts/gen_gafp_fixtures.py`), read back
+# through `Manifest`, `scan::Frames` and `Decoder`. Needs `scan` for the same
+# reason the two above do — the module it walks is not in a default build — and
+# it is the suite that makes the committed `tests/gfp/*.gfp` fixtures mean
+# something rather than merely exist. `make flac-test-scan` runs it;
+# `make gafp-pack-check` is what pins those fixtures to the packer that wrote
+# them.
+[[test]]
+name = "gafp_asset_facts"
+required-features = ["scan"]
+
 # [6b-1] `driver` is the instrument's loop, gated so the default library build
 # does not ship it. Its suite is the only direct witness it has, so the gate is
 # explicit rather than implicit — `make flac-test` runs with `instrument` on.

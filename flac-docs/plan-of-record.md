@@ -207,9 +207,14 @@ decode half (the kernel carried into a product ROM, 6b), or C2's playback half
   **on a GBA 001 and a GBA SP, identical to the cycle**, pin matched, and mGBA
   agrees with hardware to **0.055%** on that leg (the default kernel's +4.03% is
   the 6a-7b shortfall, now localized). The `scan` seam is byte-identical in the
-  product image. **Next, in order:** **6b-2** (real
-  GAFP packer, manifest, pack-time profile that refuses LPC at the target rate),
-  **6b-3** (32,768 Hz rate-play through a real manifest), then **item 7**
+  product image. **6b-2's first half landed 2026-11-11** (the real `GAFP` writer
+  `scripts/gafp_pack.py`, its fixture/facts generator, `tests/gafp_asset_facts.rs`
+  and the `gafp-pack-check` gate): the packer's bytes are byte-identical to the
+  6b-1 stand-in's committed product blob, so there is one container definition and
+  the pack-time profile guard is now gated rather than drafted — see that item's
+  section. **Next, in order:** the rest of **6b-2** (`SEEKTABLE` +
+  `Frames::anchored(n)`, and the now-safe decision about retiring the stand-in
+  generator), **6b-3** (32,768 Hz rate-play through a real manifest), then **item 7**
   (playback: the real-time claim). Not started: 6a-8 (untriggered, and now further
   parked by C1/C2) and the parked Q13 probe.
 
@@ -1311,6 +1316,203 @@ with the spike now enabling `instrument`; `make check` clean;
 
 **Owed.** The product ROM's reading **on a unit** (both builds, one run each;
 the owner's step), and 6b-2.
+
+### 6b-2, first half — landed: one container definition, and a guard that reads frames (2026-11-11)
+
+**What is in the tree.** `scripts/gafp_pack.py` is the real `GAFP` writer. It
+takes a `.flac` (or a WAV, which it encodes itself through libFLAC at the
+profile's flags), walks every frame of the result with the strict reader in
+`scripts/frame_vectors.py`, then walks **every subframe slot inside that** —
+§9.2.5's partition boundaries, Rice parameters and codeword lengths, warm-ups,
+LPC precision/shift/coefficients, the bps+1 mid/side slot width, escape records,
+each footer CRC-16 — and only then writes the container. The offset table is
+where that walk says the frames begin; nothing in the header is inferred from
+`--blocksize`. It reads its own bytes back before calling the pack done
+(`audit_blob`: magic, version, every manifest field, the table it just wrote
+re-read and required strictly increasing with its first entry pointing at the byte
+after the header, the region compared byte-for-byte against the source's frames,
+then every frame re-parsed for sync and header CRC-8, its length re-matched
+against what the walk recorded, its number and block size checked, and its footer
+CRC-16 recomputed). Where the source PCM is in hand — a WAV input, or a re-encode
+the packer did itself — it also decodes that source with `flac -d` and compares
+sample-for-sample against the PCM it generated, unless `--no-verify-pcm` says
+otherwise; a `.flac` handed in already has no such comparison to make, and the
+facts table says so by carrying no PCM rows for that run rather than by inventing
+a source. `scripts/gen_gafp_fixtures.py` packs the crate's own
+test assets with it and emits `crates/flac-lite/tests/gafp_asset_vectors.txt`;
+`crates/flac-lite/tests/gafp_asset_facts.rs` reads those blobs and that table
+back through `Manifest`, `scan::Frames` and `Decoder`. The gate is
+`make gafp-pack-check`, now a prerequisite of `flac-gates`.
+
+**1. The control, before any edit.** `make flac-gates` green across every
+configuration (1379 passed / 3 ignored / 75 test binaries) and both product images
+built from that state: `flac-integration.gba`
+`12732380a0aa1543…`, `flac-integration-default-kernel.gba`
+`2b108d290d44cfcf…`. Both are still on disk and are the reference for the next
+paragraph.
+
+**2. No shipped byte moved — that is this change's section table.** Rebuilding
+both ROMs after the change reproduces **both SHA-256s exactly**. There is nothing
+to attribute symbol by symbol because nothing was linked differently: no file
+under `crates/flac-lite/src/` or `crates/flac-lite-gba/src/` changed, the
+embedded `.gfp` is the same bytes (which the new gate proves from the packer's
+side rather than from a second run of the same generator), and the `nm` anchors
+are 6b-1's by identity. No `cargo clean` control was run, and none is asked for
+here: the images being bit-identical is the stronger statement for a change whose
+Rust half is a test file and a `[[test]]` stanza. That claim is scoped to
+**this** change, and the paragraph two further down is the reason it has to be:
+the C1 doc-record pass edited comments inside those same files, and it broke the
+image hash.
+
+**3. Gate counts, with the new configuration named as a new gate.** The first
+attempt at the aggregate **failed**, and the reason is worth keeping: the new
+suite consumes `scan::Frames` and `Manifest::bounds`, which is
+`#[cfg(feature = "scan")]`, and `Cargo.toml` had no `[[test]]` stanza for it — so
+`make flac-test` compiled it under default features and died with E0432/E0599
+(`/tmp/flac-gates-6b2.log`). The fix is the pattern this tree already uses for
+`scan_frame_walk_layout.rs` (`required-features = ["scan"]`) and
+`rice_two_mechanism_differential.rs` (`["rice-hybrid"]`); the alternative —
+leaving the suite out of the aggregate — is how a witness becomes a file. After
+it: `flac-gates` green, **1403 passed / 0 failed / 3 ignored across 79 test
+binaries** (6b-1's record was 1379 / 3 / 75). The +24 is 6 × 4 — `flac-test-scan`,
+the `crc-check,scan` arm, the three-feature arm, and `gafp-pack-check`'s own named
+leg — and `make flac-test`'s count is unchanged, which is the point of the
+stanza. `gafp-pack-check` is a **new** gate, not an edit to `gafp-check`, which
+still guards the product blob through the stand-in; `flac-gates` is the changed
+aggregate, and this is its first leg that needs `flac`/`metaflac` on PATH (every
+other leg reads tables and blobs generated earlier and committed). `make check`
+clean (exit 0). `make flac-portable-check` green for `thumbv6m-none-eabi`.
+`make test-rom` **not run**, and the reason is the paragraph above: it would be
+looking at the same binary it last saw.
+
+**The equality the stand-in was owed, paid.** The packer was run over the
+FIXED-only reference clip re-synthesized and re-encoded in a temp dir (the
+`.flac` is a generator input, never a tracked file — only the frame/PCM regions
+under `examples/flac_spike/assets/` are committed), and compared against
+`examples/flac_integration/assets/spike_l0.gfp`, the blob `gafp-check` guards and
+`flac-rom` embeds. **Byte-identical: 865,996 bytes, 157 frames, first difference
+none.** That matters because the two derivations are not the same derivation: the
+stand-in reads offsets out of `examples/flac_spike/src/assets.rs`, which the perf
+gate generated from the frame table, while the packer re-derives every length from
+where its own walk exits, verifies every footer CRC-16 (314 subframe slots
+censused, `fixed0 x314`), and computes the max-FIXED-order byte from the subframes
+rather than from the `-l` flag. Two independent derivations landing on one byte
+string is what makes `GAFP` one definition instead of two, which was the whole
+point of the "stand-in" paragraph above. `scripts/pack_flac.sh` is still a stub —
+but its six-step plan (normalize to profile, *verify only profile-conforming
+frames*, strip metadata, index by strict header parse + CRC-8 rather than by sync
+scan, emit, round-trip against `flac -d`) is the shape this implements, including
+its own corrections: `-l` is `--max-lpc-order` and not a fixed-predictor cap, and
+the last frame is legitimately shorter. The remaining step for that file is to
+become the front-end.
+
+**4. Mutation witness for the new suite.** Six tests, one per claim the
+packed-asset path makes, and each mutation was applied to the *generated table*,
+not to the Rust — the suite's job is to convict the table and the crate together:
+
+| Mutation | Result |
+|---|---|
+| None (honest green) | ✅ 6 passed — all four blobs' offsets, lengths, CRCs and PCM match the packer's record |
+| Last frame's recorded CRC-16 `35d5` → `35d4` | ❌ `the_offset_table_and_a_walk_of_the_region_agree_frame_by_frame`: "frame 2's bytes are not the bytes whose CRC-16 the packer recorded" |
+| One per-frame `pcm_fnv1a64` | ❌ `every_blob_decodes_to_the_pcm_the_reference_decoder_produced`: "frame 0 does not decode to the samples `flac -d` produced for it" |
+| An `lpc` subframe row → `fixed` | ❌ `one_pcm_three_blobs_and_the_field_that_cannot_tell_them_apart`: "six LPC-4 subframes, no FIXED ones" |
+| A frame's `blob_offset` +1 | ❌ both `the_manifest_says_what_the_packer_recorded` and `the_table_and_its_blobs_are_all_here` (and the walk's `cursor() > end` abort fires before it) |
+| The record's `max_fixed_order=0` → `2` | ❌ `the_manifest_says_what_the_packer_recorded`: "the recorded max FIXED order" |
+| The LPC asset's relaxations → `none` | ❌ `one_pcm_three_blobs_…`: the test that asserts it was built with **two** guards relaxed, because the profile limit and the measured cost are two facts |
+
+Restoring the table from the copy at `/tmp/gav.orig` returned the suite to green,
+and the generator revalidated green ("4 blobs match their committed bytes, 3
+refusal legs still refused with their stated reasons, table matches").
+
+**The trap, and it is the one the row was about.** The header's max-FIXED-order
+byte reads **`0` for an all-LPC stream**, and it is not wrong: an all-LPC stream
+has no FIXED subframe above order zero. The fixture set makes that concrete —
+three of the four blobs are the *same 5,000 samples* encoded three ways
+(independent stereo, mid/side, and `-l 4`), so they carry **one PCM pin and three
+frame sets**, all three manifests say `0`, `EncodeProfile::validate` accepts all
+three including under a hand-built `max_fixed_order: 0` profile, and all three
+decode bit-exactly. The `-l 4` arm of the 157-frame reference clip is the same
+trap at product scale: the walk censuses `lpc3 x2, lpc4 x312` while
+`max_fixed_order_of(…)` returns 0. So the field is a *recording*, not a guard —
+C2's guard is the packer's census plus the measured cost of the kind, and nothing
+on the decoder's side can supply it. That is why the packer carries a measured
+table (6a-7b's rows: `fixed0` 42.48% / 42.72%, `lpc4` 173.23% / 174.14%, with
+the raw cycle counts and the instrument named in each row's `source`) and refuses
+any kind whose cost it has not measured — including, today, `verbatim` and
+`constant`, which the row names but which this target has never timed. The
+arithmetic is self-checked (`check_rows`, before any packing): each row's percent
+is re-derived from its own cycle count and the frame's own budget, and a
+mismatched denominator or a transcribed digit stops the run. The budget is the
+**32,768 Hz playback timer's** frame (1,048,576 cycles for 2048 samples), which is
+the denominator every figure in `flac-docs/measurements.md` uses; using the
+stream's own 32,000 Hz period would have overstated the headroom by 2.4% and made
+the packer's percentages not comparable to the product ROM's 37.83%/38.04%.
+
+**What the three refusal legs refuse, named honestly.** `lpc_at_product_profile`
+packs the `-l 4` arm of the 157-frame reference clip — 1.4M samples of real
+libFLAC LPC decisions, not a hand-built bit pattern, though the underlying PCM is
+the synthesized test signal rather than music — and is convicted twice, by the
+`-l 0` profile cap and by the measured 174.14%. `rate_44100_at_32000_target`
+starts from a committed real encode (the crate's own `s2` fixture, 96 kHz stereo),
+re-encoded at 44,100 Hz with `--no-seektable` so the stream-level and the
+frame-level rate readings are each contradicted independently, and says so twice.
+`eight_bit_at_16bit` is a real 8-bit encode, refused because the container's
+depth list is `[16]` — and the interesting half is that its `-l 0` subframes land
+on **VERBATIM**: with FIXED removed by `-l 0`, verbatim is what libFLAC has left,
+and verbatim is a kind this target has never measured. A new depth would not be a
+header change; it would be an unmeasured cost. No `.gfp` is written for any
+refusal, and the test asserts that too.
+
+**A side probe, deliberately not finished.** C1 requires no stale scaffold records
+in this crate. A grep for `todo!()` in `crates/flac-lite/src/` returned five hits
+before this section's edits, **every one of them in a doc comment and not one in
+a body** — the records were out of date, not the code. They are gone now; the
+places that said it were `lib.rs` (three), `format.rs`, `subframe.rs` and
+`driver.rs`, and the crate README said it twice more (its "remaining `todo!()`"
+paragraph and the file tree's "scaffold: todo!()" row) next to a Next-steps
+paragraph that still listed landed work as outstanding. One of the five was the
+crate-wide `#![allow(dead_code, unused_variables)]`, whose comment
+still said "REMOVE once implementations land". The honest way to answer that was
+a probe: delete the attribute and build every gated feature combination. Five
+items need it, all cfg-conditional names whose other arm is what a given build
+compiles — `bits::peek_at`'s `end`, the `crc8_bit` position the `crc-check` arm
+is the only reader of, `subframe`'s `order_u8` binding, `subframe::integrate_fixed`
+(live under `--no-default-features` and under `cfg(test)`, dead in the default
+i32 build), and a test-local `pos` in `bits`. The probe also surfaced something
+the attribute was never doing: an integration test is its own crate, so a
+crate-level allow never reached `tests/`, and one unused `lens` there already
+appears in three arms of `flac-gates`. Fixing the six means editing source in the
+shipped path, which owes a control build and a section table this PR does not
+have; the list is recorded where the attribute lives, so the next pass is a
+mechanical one rather than a re-derivation.
+
+**And the image-hash claim that pass broke, measured rather than hand-waved.**
+After those comment edits, rebuilding the two product ROMs no longer reproduces
+the control SHA-256s: **8 bytes differ** in `flac-integration.gba` (at
+75,565 / 75,581 / 75,597 and at 1,068,761 / 1,068,793 / 1,068,809 / 1,068,825 /
+1,068,841) and **9** in the default-kernel image. Every one is a single byte
+inside a run of 16-byte records that alternate a ROM pointer (`0x0801_165e`,
+`0x0801_1875`…) with two small integers, and the changed byte is always the first
+of that pair, moving by +1 or +7: those are `Location` constants — the line
+numbers that ride next to a panic's file-name string — shifted by exactly the
+lines the doc edits added above them. No instruction moved, and nothing about
+execution did. The point is not that this particular delta is harmless; it is
+that **whole-image identity does not survive an edit to a comment**, so the
+"byte-identical image" control that a change like the packer's gets for free is
+not a claim any later pass inherits — and when it breaks, a `cmp -l` listing plus
+the record stride around the changed offset attributes it in minutes without
+needing a section table, which is the same reason `objdump` output belongs in the
+record and a hash alone does not.
+
+**Owed by the rest of 6b-2.** `SEEKTABLE` interpretation and
+`Frames::anchored(n)` — the half of this row that the fixtures deliberately do
+not touch, since the GBA product path never needs random access and the packed
+container has no seek table. And the decision the paid equality enables: retiring
+`scripts/gen_gafp_blob.py` as the generator of the product asset, which is now a
+refactor under a gate rather than a change of format. Two fixture axes stay open
+and are recorded in `crates/flac-lite/tests/README.md`: 1024-sample blocks, and
+packed CONSTANT/VERBATIM/escape-shaped and higher-order-LPC assets (the highest
+LPC order any real-stream table here carries is 8).
 
 ## Item 7 — playback: the real-time claim (C2)
 
