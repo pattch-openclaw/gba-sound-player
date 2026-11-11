@@ -65,17 +65,19 @@ Per 2048-sample frame at 32,768 Hz: **62.5 ms = 1,048,750 cycles**.
 
 | stage | figure | source | share of frame |
 |---|---:|---|---:|
-| decode, kernel + i32, worst frame | 445,558 c ≈ 26.6 ms | **hardware** (6a-7b, two units) | 42.72% |
+| decode, kernel + i32, worst frame | 398,923 c ≈ 23.8 ms | **hardware, product path** (6b-1, two units) | 38.04% |
 | convert | 14.1 ms | mGBA, 10,512 Hz pass, **word-copy era** | 22.6% |
 | push (ring copy + credit, CS) | 12.7 ms | same pass, same era | 20.3% |
-| **gross, on paper** | | | **≈85.6%** |
+| **gross, on paper** | | | **≈80.9%** |
 
 Both consequences are work items, not caveats. The producer figures are **stale** —
 a different rate, the pre-kernel decode path, the word-copy era — so they are
 re-measured at the target rate on hardware (item 7's first PR). And the remaining
-margin is **≈14%, ≈8.7 ms**, which is where the mixer, the IRQ handler and the
+margin is **≈19%, ≈11.9 ms**, which is where the mixer, the IRQ handler and the
 feeder have to live: C2 will be decided by that margin, not by the gross. A 20%
-error in the producer stages alone would consume it.
+error in the producer stages alone would consume it. (The margin grew from
+≈8.7 ms when 6b-1 measured the *product* path on hardware: 38.04% worst rather
+than the instrument's 42.72%.)
 
 ## Status at a glance (2026-11-10, `main` after 6a-7b merged)
 
@@ -199,11 +201,13 @@ decode half (the kernel carried into a product ROM, 6b), or C2's playback half
   any claim is made by scaling an mGBA cycle count. Until then a *rule* replaces the
   probe: see "mGBA numbers are derated" in the ordering rules.
 
-- **6b-1 landed 2026-11-10** (facade onto `scan`, `rice-arm` carried into the
-  product ROM `flac-integration`): C1's facade exists, the product path decodes at
-  **37.82% mean / 38.03% worst** of the 32,768 Hz frame under mGBA with the pin
-  matched, and the `scan` seam measured **byte-identical** in the product image.
-  Owed: the unit reading of both A/B builds. **Next, in order:** **6b-2** (real
+- **6b-1 landed and measured on hardware, 2026-11-10** (facade onto `scan`,
+  `rice-arm` carried into the product ROM `flac-integration`): C1's facade exists,
+  the product path decodes at **37.83% mean / 38.04% worst** of the 32,768 Hz frame
+  **on a GBA 001 and a GBA SP, identical to the cycle**, pin matched, and mGBA
+  agrees with hardware to **0.055%** on that leg (the default kernel's +4.03% is
+  the 6a-7b shortfall, now localized). The `scan` seam is byte-identical in the
+  product image. **Next, in order:** **6b-2** (real
   GAFP packer, manifest, pack-time profile that refuses LPC at the target rate),
   **6b-3** (32,768 Hz rate-play through a real manifest), then **item 7**
   (playback: the real-time claim). Not started: 6a-8 (untriggered, and now further
@@ -1265,9 +1269,24 @@ Both legs match the perf gate's pin exactly
 are from proven bytes. The kernel's advantage reproduces through the product path
 at **3.93×**. These are lower than the instrument's 39.74% for the same kernel,
 which is expected: the instrument's arm carries its own call shape and state;
-what matters here is that the *product* path is not slower. mGBA understates
-hardware by 3.7–6.9% (6a-7b), so ~39–41% is the hardware expectation until a
-unit says otherwise.
+what matters here is that the *product* path is not slower.
+
+**Measured on hardware, both builds, GBA 001 and GBA SP (owner, 2026-11-10),
+identical on both units to the cycle:**
+
+| build | mGBA mean | hardware mean | Δ | hardware % budget (mean / worst) |
+|---|---:|---:|---:|---:|
+| `rice-arm` | 396,492 | **396,709** | **+0.055%** | **37.83% / 38.04%** |
+| `TableCountKernel` | 1,559,312 | **1,622,116** | **+4.03%** | 154.67% / 155.45% |
+
+**The ARM path is priced correctly by mGBA — 0.055%, *not* the 3.7–6.9% of
+6a-7b.** That is the sharpest fact this rung produced, and it narrows Q13 without
+a probe: the shortfall lives in the leg whose time is spent fetching instructions
+from cartridge ROM (the default kernel's Thumb codeword loop), not in the
+IWRAM-resident kernel, and not in a global clock, timer or calibration term. It
+also means the product planning number is a *hardware* number: **decode is 38.04%
+worst**, 2.63× headroom, and the kernel's advantage through the product path is
+**4.09×** on silicon (3.93× in mGBA).
 
 **A trap the pin caught.** The repository's FNV-1a 64 uses a **non-standard
 offset basis** (`0xCBF43CE95DE684B7`, not `0xCBF29CE484222325`) in both

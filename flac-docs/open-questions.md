@@ -536,6 +536,17 @@ It becomes blocking only if a product path ever needs the last 6% — or if a
 *scaling* claim is made from cycle counts, because the shortfall is per-leg and
 would not cancel.
 
+**Narrowed by 6b-1's hardware run (2026-11-10) — without a probe.** The product ROM
+was measured on a GBA 001 and a GBA SP with both kernels: `rice-arm` came back
+**+0.055%** over mGBA (396,492 → 396,709) and `TableCountKernel` **+4.03%**
+(1,559,312 → 1,622,116). Same binary, same walk, same reader, same timer. So the
+shortfall is not a clock, timer or calibration term and not "the model is 6% off
+everywhere": it attaches to the leg whose time is dominated by **fetching
+instructions from cartridge ROM** (the default kernel's Thumb codeword loop), while
+the IWRAM-resident kernel is priced essentially exactly. What is left is the split
+between mGBA's ROM-fetch model and the prefetch/data interaction, and whether a
+mask-ROM cart differs from this flashcart — neither changes a decision today.
+
 **Parked by decision, 2026-11-10.** The project owner set two acceptance criteria
 (`plan-of-record.md` §"Acceptance criteria"): C1, `flac-lite` stands alone as a
 `no_std` crate ready for its own repository; C2, `flac-lite-gba` decodes *and plays
