@@ -102,10 +102,14 @@
 # `frame_exact_count_from_declarations` is the frame count a reader
 # can derive from the stream's OWN declarations -- a fixed block size
 # plus a known sample total -- and nothing else: ceil(total / block)
-# with the short tail included. It equals the frame count on the four
-# seekable fixtures and `none` on the unseekable one, which is the
-# measured form of the point item 4b exists for: three of the five
-# streams here state where their audio ends and one states nothing.
+# with the short tail included. It equals the frame count on the five
+# fixtures that state a sample total, and `none` on the one that states
+# none -- which is the measured form of the point item 4b exists for:
+# five of the six streams here state where their audio ends and one
+# states nothing. The sixth, `s6_seekpoints_8k_mono`, is fixed block size
+# with a stated total, and is therefore the first fixture here whose
+# SEEKTABLE points can be resolved to frame positions by arithmetic at
+# all (see the seek rows below).
 # `pcm_interleaved_values`, `pcm_fnv1a64` and `pcm_md5` come from
 # `flac -d`'s output, not from this crate: the whole-file decode the
 # frame walk produces has a pin, and `pcm_md5` equaling
@@ -121,6 +125,47 @@
 # its own streaminfo. That is what makes the 24-bit fixture's refusal
 # unarguable: no caller-supplied default could talk a decoder into
 # reading those frames, because the frames themselves say 24.
+#
+# The `seek_*` rows are section 8.5, and they exist on the two fixtures
+# that carry a SEEKTABLE block (s2, one point from the encoder; s6, eight
+# points from `metaflac --add-seekpoint`, including the short last frame).
+# A seek table is a list of 18-byte entries -- first sample number of a
+# target frame, byte offset of that frame, sample count of that frame --
+# and the one thing to get wrong in it is what the offset is relative to.
+# Measured, on both fixtures: it is RELATIVE TO THE FIRST BYTE AFTER THE
+# METADATA, not to the start of the file (point 0 of every table here says
+# 0, and frame 0 is never at byte 0 -- for s6, 234). Generation refuses to
+# write unless every real point's offset plus `frame_data_offset` lands on
+# the offset the proven frame filter reports for the frame whose first
+# sample number the point names, and unless `frame_samples` equals that
+# frame's block size. `seek_points_frame_indices` is that frame index,
+# counted by the walk; for a fixed-blocksize stream it is also checked
+# against sample_number / max_blocksize, which is the derivation the crate
+# makes, and generation refuses to write if the two disagree.
+#
+# Ordering and placeholders: real points must be strictly ascending, and
+# every entry whose sample number is all-ones (a placeholder) must come
+# after all of them -- which is what the format states and, measured, what
+# the reference writer does: `metaflac`'s own help says a placeholder
+# 'always goes at the end of the SEEKTABLE', and it drops out-of-range
+# requests and exact duplicates instead of writing them. A payload whose
+# length is not a multiple of 18 cannot be enumerated at all; that IS
+# refused by the reference tools too ('FLAC__METADATA_CHAIN_STATUS_BAD_',
+# exit 1), which is the only seek-table malformation they refuse: unsorted,
+# duplicate, out-of-range and not-a-frame-start points are all accepted by
+# `flac -t` and printed by `metaflac --list` without complaint, because
+# libFLAC's DECODER ignores the table unless asked to seek. This crate
+# reads the table, so it refuses them; the cases no tool will produce are
+# built by hand in src/stream.rs' own tests, and measured tool behaviour
+# for each is in FLAC.md's split-proposal entry.
+# `seek_points_tail_pcm_fnv1a64` is, for each real point, the FNV-1a-64
+# of every sample from that point's first sample to the end of the
+# stream -- over `flac -d`'s output. That is the pin an ANCHORED walk is
+# checked against in tests/scan_frame_walk_layout.rs: a seek is only
+# correct if the samples after an anchor are the samples after it in a
+# full decode. Generation refuses to write if two different points hash
+# the same tail, because then the pins could not tell a walk started at
+# the wrong one apart.
 
 stream_vector s1_plain_8k_mono
 note two-block container: streaminfo first, a real (empty) Vorbis comment carrying the last-metadata-block flag. No padding, no seektable: --no-padding/--no-seektable are encoder options, so this is libFLAC's own output, not a hand-trimmed file. Also the host of the frame-number FORM mutation (`mutation number-form-overlong`): a frame header of this real stream rewritten with its number in each longer form, both CRCs recomputed — the only witness here that pins what the reference decoder does with a non-minimal form, as opposed to what libFLAC writes.
@@ -197,7 +242,7 @@ mutation_form4_reference_exit 0
 reference_decoder_accepts_nonminimal_forms true
 
 stream_vector s2_seekable_96k_stereo
-note four-block container: every real block type this encoder emits, three of them skipped by length. A walk that only knows streaminfo cannot reach the frames; this is the walk.
+note four-block container: every real block type this encoder emits, three of them skipped by length. A walk that only knows streaminfo cannot reach the frames; this is the walk. The SEEKTABLE is the encoder's own, and it is the one-point case: sample_number 0, stream_offset 0, frame_samples = the declared max blocksize. Pointing at frame 0 with an offset of 0 is what proves the offset in a table is relative to the frame region and not to the file (this fixture's frame_data_offset is 176).
 encode_command flac -1 -f -s -P 64 -b 4608 -m s2_seekable_96k_stereo.wav -o s2_seekable_96k_stereo.flac
 fixture s2_seekable_96k_stereo.flac
 fixture_len 16488
@@ -259,6 +304,19 @@ pcm_interleaved_values 19200
 pcm_fnv1a64 17855214114877165645
 pcm_md5 5f89028d9197af68825649750823e1a2
 pcm_bytes_len 38400
+seektable_block_offset 42
+seektable_length 18
+seektable_points_total 1
+seektable_points_real 1
+seektable_points_placeholder 0
+seek_placeholder_indices none
+seek_placeholder_other_fields_zero true
+seek_points_sample_numbers 0
+seek_points_stream_offsets 0
+seek_points_frame_samples 4608
+seek_points_frame_indices 0
+seek_points_frame_offsets 176
+seek_points_tail_pcm_fnv1a64 17855214114877165645
 
 stream_vector s3_wide_48001hz_b3000
 note header width OUTSIDE our packer's 48..=72-bit profile at frame 0: 48001 Hz has no 4-bit sample-rate code (0b1101 appends a 16-bit Hz value, section 9.1.7) and 3000 samples has no 4-bit block-size code (0b0111 appends a 16-bit size-1, section 9.1.6). Both appended forms sit AFTER the coded frame number (Table 13's column order — the same order frame_vectors.py's parser follows), so the FIRST header is 32+8+16+16+8 = 80 bits and both frames here carry 3000/1801, i.e. the 16-bit form twice. Two frames are enough: an appended value form is not tied to frame count, and this is the widest real header this repo commits. Anything wider also needs the frame NUMBER to reach two octets (128+ frames) — measured on a 2.1M-frame synthetic stream (-b 257, 44100 Hz) a single stream contained widths of 80, 88, 96 and 104 bits; that file is not committed (multi-megabyte for a width rule). The format's own ceiling, 128 bits — a 6-octet coded number (the most the 31-bit frame-number bound allows) plus both appended forms plus the CRC — is therefore witnessed by a computed synthetic header in the Rust suite, not by a fixture. Measured: this encode needs no --lax (same as the uncommon-rate streams gen_frame_vectors.sh already encodes) — a wide header is not the same thing as an unstreamable stream. If a future libFLAC stops using the 16-bit forms here, the census below refuses to write.
@@ -441,3 +499,79 @@ pcm_interleaved_values 1200
 pcm_fnv1a64 5888246922117345972
 pcm_md5 6fbeacf13af62e01b246b6fe7387590f
 pcm_bytes_len 2400
+
+stream_vector s6_seekpoints_8k_mono
+note the seek-table fixture (section 8.5), and the only one of these files that a metadata tool has edited. 6000 samples at 8 kHz in 512-sample fixed-LPC frames (-l 0, the predictor profile this repo's packer uses, so these are the frames the product would carry): twelve frames, the last one 368 samples. That tail is the reason for the size: it is the frame a seek table is most likely to get wrong, because its sample count is not max_blocksize and a reader that sized a frame from the declared maximum ends up one frame off. Nine --add-seekpoint requests, deliberately not in order. Measured, what comes back is eight entries: seven real plus one placeholder. So the tool sorted them, snapped an off-boundary request (2600) DOWN to the frame that contains it (2560), dropped requests past the last sample (12000) and exact duplicates (2048 twice, and 0), and wrote the placeholder it was asked for (X) LAST - its own help states a placeholder always goes at the end of the table, which is the rule the reader here enforces. Two things measured as NOT reachable from this tool: a placeholder for an out-of-range request (those are dropped), and a second placeholder. Snapping a request onto an EXISTING point does produce one - measured on a copy of s2, asking for 512, 3200 and 4096 in a 4608-sample-block stream turns all three into placeholders because they all land on the point at 0 - but that case is left out of the committed fixtures because it would rewrite s2, and the two-placeholder case with it; both are built by hand in the reader's own unit tests, which is where this repo puts a shape no real encoder produced.
+encode_command flac -1 -f -s --no-padding -l 0 -b 512 s6_seekpoints_8k_mono.wav -o s6_seekpoints_8k_mono.flac
+fixture s6_seekpoints_8k_mono.flac
+fixture_len 5260
+fixture_fnv1a64 3146862805121552384
+encoder_vendor reference libFLAC 1.5.0 20250211
+block_count 3
+block 0 type 0(STREAMINFO) last false length 34
+block 1 type 3(SEEKTABLE) last false length 144
+block 2 type 4(VORBIS_COMMENT) last true length 40
+frame_data_offset 234
+streaminfo_minimum_blocksize 512
+streaminfo_maximum_blocksize 512
+streaminfo_minimum_framesize 313
+streaminfo_maximum_framesize 430
+streaminfo_sample_rate_hz 8000
+streaminfo_channels 1
+streaminfo_bits_per_sample 16
+streaminfo_total_samples 6000
+streaminfo_md5 6603217d468f81f30293693993385e7d
+frame_count 12
+frame_number_forms_checked 12
+frame_number_forms_all_minimal true
+scan_frame_starts_strict 12
+scan_frame_starts_all_forms_allowed 12
+frame_header_widths_bits 48 64
+max_frame_header_width_bits 64
+first_frame_hex FF F8 94 08 00 20
+first_frame_header_bits 48
+first_frame_number 0
+first_frame_blocksize 512
+first_frame_sample_rate_hz 8000
+first_frame_bits_per_sample 16
+first_frame_subframes 1
+first_frame_decorrelation none
+last_frame_offset 4947
+last_frame_number 11
+last_frame_header_bits 64
+last_frame_blocksize 368
+last_frame_bytes_to_region_end 313
+frame_region_len 5026
+frame_offsets 234 664 1092 1521 1949 2377 2805 3234 3662 4089 4519 4947
+frame_bytes 430 428 429 428 428 428 429 428 427 430 428 313
+frame_header_bits 48 48 48 48 48 48 48 48 48 48 48 64
+frame_blocksizes 512 512 512 512 512 512 512 512 512 512 512 368
+frame_footer_gaps_bits 23 23 17 23 16 20 16 17 21 22 19 23
+footer_padding_frames 10
+footer_slip_positions_sync_shape 3
+footer_slip_positions_strict_headers 0
+footer_byte_truncation_positions 11
+footer_byte_truncation_sync_shape 1
+footer_byte_truncation_strict_headers 0
+frame_numbers 0 1 2 3 4 5 6 7 8 9 10 11
+frame_sample_size_codes 4 4 4 4 4 4 4 4 4 4 4 4
+frame_exact_count_from_declarations 12
+scan_frame_starts_sync_shape_only 13
+scan_frame_starts_fields_only 12
+pcm_interleaved_values 6000
+pcm_fnv1a64 18195267382617178175
+pcm_md5 6603217d468f81f30293693993385e7d
+pcm_bytes_len 12000
+seektable_block_offset 42
+seektable_length 144
+seektable_points_total 8
+seektable_points_real 7
+seektable_points_placeholder 1
+seek_placeholder_indices 7
+seek_placeholder_other_fields_zero true
+seek_points_sample_numbers 0 1024 2048 2560 3584 4608 5632
+seek_points_stream_offsets 0 858 1715 2143 3000 3855 4713
+seek_points_frame_samples 512 512 512 512 512 512 368
+seek_points_frame_indices 0 2 4 5 7 9 11
+seek_points_frame_offsets 234 1092 1949 2377 3234 4089 4947
+seek_points_tail_pcm_fnv1a64 18195267382617178175 4144580563483705094 2448574468292932906 229165475872780305 11141154637056362072 12250443045036049434 11696858062027661686

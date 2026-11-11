@@ -5,9 +5,10 @@
 //! `residual::rice_unmap` (3a), `residual::decode_rice_partition_with` (3b), and
 //! `residual::decode_residual_with` (3c) — the step 3d integrators
 //! ([`PredictorState::fill`], the FIXED cascade, the LPC dot product), and
-//! the step 3e composition [`decode_subframe`]. What remains `todo!()`
-//! here: nothing — frame-level wiring (`frame::decode_frame`, stereo
-//! decorrelation, footer) is 3f.
+//! the step 3e composition [`decode_subframe`]. Nothing in this module is
+//! unimplemented: frame-level wiring (`frame::decode_frame`, stereo
+//! decorrelation, footer) landed as step 3f, and every leg here is
+//! witnessed by the generated tables under `tests/`, not only by hand-cut bits.
 //!
 //! A subframe is one channel's worth of samples for one frame. Layout:
 //!

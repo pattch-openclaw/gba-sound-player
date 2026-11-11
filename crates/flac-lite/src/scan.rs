@@ -106,9 +106,11 @@
 //! * §8.2's `minframesize`/`maxframesize` bound a frame's *byte length*; they do
 //!   not say how many frames there are, and this crate does not pretend
 //!   otherwise ([`crate::stream::StreamInfo::frame_sizes_known`]).
-//! * §8.3's `SEEKTABLE` gives `(sample number, byte offset)` **points**, not a
-//!   frame count; interpreting it is out of scope here — see "Not a seek
-//!   strategy" below.
+//! * §8.5's `SEEKTABLE` gives `(sample number, byte offset)` **points**, not a
+//!   frame count; reading it and the fixed-block number line lives in
+//!   [`crate::stream::SeekTable`] and [`crate::stream::FixedBlockNumbering`], and
+//!   this walk consumes a point's offset/frame number when a caller anchors with
+//!   one — see "Not a seek strategy" below.
 //! * §8.2's `MD5` would *verify* a sample count, but only once every sample has
 //!   been read, so it cannot say where the stream ends while you are inside it.
 //!   Where it is set, the reference decoder's output hashes to it bit for bit
@@ -160,14 +162,18 @@
 //! says nothing about the 22 bits behind it, which is where the block size,
 //! sample rate, channel and depth tables live.
 //!
-//! The committed fixtures make the same point from the other side. On all five,
-//! every leg of the ladder — sync shape, field validation without CRC, full
+//! The committed fixtures make the same point from the other side. On five of the
+//! six, every leg of the ladder — sync shape, field validation without CRC, full
 //! strict validation, and strict validation with non-minimal number forms allowed
 //! — counts exactly the real frames, because a 1095-byte frame region has no room
-//! to hide a false start. The fixtures therefore prove the strict filter is exact
-//! on real streams, and do **not** show false-start pressure; that is measured in
-//! longer material, and the table header says so, so nobody reads those rows as
-//! "false starts do not happen". The constructed shapes (bytes that are not a
+//! to hide a false start. On `s6_seekpoints_8k_mono` the bare sync-shape leg finds
+//! 13 candidates for 12 frames — the previous frame's CRC-16 byte `0xFF` immediately
+//! before a real sync, refused by the reserved bit and field validation — the first
+//! local instance of the over-match the table header records. The fixtures therefore
+//! prove the strict filter is exact on real streams, and do **not** show false-start
+//! pressure; that is measured in longer material, and the table header says so, so
+//! nobody reads those rows as "false starts do not happen". The constructed shapes
+//! (bytes that are not a
 //! frame start, a region that does not begin on one, trailing junk, a frame cut
 //! at several boundaries) are witnessed over hand-cut regions in unit tests, per
 //! the rule in `tests/README.md`.
@@ -186,10 +192,12 @@
 //! Every real encode measured here carries coded frame numbers **exactly
 //! `0..N-1` in stream order** — the harness asserts it across 979 frames
 //! (`scripts/frame_vectors.py`), and `stream_vectors.txt` carries the rows
-//! (`frame_numbers 0 1 2 …`). That is a measured property of encoders, not a
-//! quote; §9.1.5's other arm (a *sample* number, under variable blocking) is
-//! refused inside [`crate::frame::FrameHeader::parse`] before that field is read,
-//! because variable blocking is outside this crate's profile.
+//! (`frame_numbers 0 1 2 …`). That is both a measured property of encoders and
+//! RFC 9639 §9.1.5's MUST: a frame number equals the number of frames preceding
+//! the frame, so a conformant stream starts at 0. §9.1.5's other arm (a *sample*
+//! number, under variable blocking) is refused inside
+//! [`crate::frame::FrameHeader::parse`] before that field is read, because
+//! variable blocking is outside this crate's profile.
 //!
 //! For a walk that knows where it stands, the sequence is a free and strict
 //! filter, and [`Frames`] applies it **before any sample is written**: a frame
@@ -209,18 +217,19 @@
 //! `format::Manifest`' frame-offset index, whose shape `tests/frame_run_loop.rs`
 //! already drives. `scan` is two things, and both are real:
 //!
-//! * how an ordinary `.flac` file is decoded at all — the files `flac` writes
-//!   contain no `SEEKTABLE`, and none is needed;
+//! * how an ordinary `.flac` file is decoded at all — a seek table is not needed
+//!   for a front-to-back decode (and when an encoder writes one, the stream layer
+//!   reads it separately);
 //! * how a *table-backed* walk re-anchors when a table's offset turns out to be
 //!   wrong — the recovery path [`crate::frame`]'s contract already names ("the
 //!   frame is dead — caller re-seeks"), for the case where there is no table to
 //!   re-seek from.
 //!
-//! Item 6's packer side is where a table gets written. If that turns out to be a
-//! real `SEEKTABLE`, reusing a stream's own seek points becomes a second anchor
-//! source for the same walk, and interpreting §8.3 becomes its own change.
-//! Nothing here forecloses that: [`Frames::anchored`] is the seam, and it takes a
-//! sample-accurate byte offset the format itself wrote in one test below.
+//! The packer side and the table read have landed (6b-2): [`crate::stream::SeekTable`]
+//! and [`crate::stream::FixedBlockNumbering`] interpret a real §8.5 table and its
+//! sample/frame numbers, and [`Frames::anchored`] is the seam that consumes a
+//! point's frame number and byte offset. The walk itself still does not search for
+//! or interpret a table on its own; it starts at the region a caller hands it.
 //!
 //! ## Buffers, allocation, and the tail frame
 //!
@@ -295,9 +304,10 @@
 //!
 //! ## What this module is not yet
 //!
-//! Not `Decoder`/`format::Manifest` rewiring — that is a later item, and the
-//! manifest path (`tests/frame_run_loop.rs`) is untouched by this one. Not
-//! `SEEKTABLE` interpretation. Not a `minframesize`/`maxframesize` prefilter (the
+//! Not a second `Decoder` facade — the manifest facade landed on this walk
+//! (6b-1), and this module is its frame source. Not seek-table reading or
+//! sample/frame arithmetic — `stream::SeekTable` and `FixedBlockNumbering` own
+//! those. Not a `minframesize`/`maxframesize` prefilter (the
 //! fields are bounds on one frame's length, and using them as one would be a
 //! claim about encoders this crate has not measured). Not an end-of-input
 //! *reader*: like every layer here it works on bytes in hand, and feeding it a
@@ -620,11 +630,18 @@ impl<'a> Frames<'a> {
     /// range, a hand-cut slice of a file.
     ///
     /// `defaults` and `bounds` are the caller's to supply — for a packed blob,
-    /// `format::Manifest`' (item 6); for a range taken from a real stream, a
-    /// `SEEKTABLE` entry's sample number is the anchor to pass to
-    /// [`Frames::anchored`]. With no anchor the walk still enforces contiguity
-    /// (each frame's number follows the last one); it cannot say that the frame
-    /// it found *should* have been number 7.
+    /// `format::Manifest` (6b-1); for a range taken from a real stream, the
+    /// frame a `SEEKTABLE` entry names supplies both. An entry's byte offset is
+    /// relative to the first byte after the metadata, so the region to hand this
+    /// constructor starts there; its
+    /// [`crate::stream::SeekPoint::frame_number`] is the coded frame number RFC
+    /// 9639 §9.1.5 says the frame header carries, exactly what
+    /// [`Frames::anchored`] wants. §9.1.5 requires that number to equal the
+    /// number of frames preceding the frame, so a conformant whole stream starts
+    /// at frame 0; a nonzero first coded number is a non-seekable/mutilated
+    /// stream, not a separate base to add. With no anchor the walk still enforces
+    /// contiguity (each frame's number follows the last one); it cannot say that
+    /// the frame it found *should* have been number 7.
     pub fn region(region: &'a [u8], defaults: &StreamDefaults, bounds: StreamBounds) -> Self {
         Self {
             region,
@@ -636,8 +653,12 @@ impl<'a> Frames<'a> {
         }
     }
 
-    /// Anchor the walk's frame numbering at `first_frame_number`, for a region
-    /// whose first frame's position in the stream is known. Builder-style.
+    /// Anchor the walk's frame numbering at `first_frame_number`, the coded
+    /// number the region's first frame carries. A conformant whole stream starts
+    /// at 0, and a seek point's
+    /// [`crate::stream::SeekPoint::frame_number`] is the same number; the
+    /// builder-style form also lets recovery use the number a mutilated region's
+    /// first header actually states.
     pub fn anchored(mut self, first_frame_number: u64) -> Self {
         self.expect_number = Some(first_frame_number);
         self
@@ -839,7 +860,7 @@ impl<'a> Frames<'a> {
     /// measured at 1223 sync-shaped candidates for 979 real frames. That is what
     /// makes this recovery rather than a loop body: nothing in the steady-state
     /// walk searches ([`Frames::next_frame`]), and a real-time caller keeps a
-    /// rescan **out of the pull loop** — item 6's facade re-anchors at the seam,
+    /// rescan **out of the pull loop** — the manifest facade re-anchors at the seam,
     /// charged to the seek whose offset was wrong rather than to a frame's budget.
     /// `resync` is deliberately caller-invoked for that reason; a walk that called
     /// it after every rejection would be paying a rescan inside the audio path.

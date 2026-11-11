@@ -1,11 +1,12 @@
 //! Residual coding: partitioned Rice / Rice2 / escape-record residual.
 //!
-//! SCAFFOLD STATE (2026-09-11): the residual decode path is complete —
+//! Landed (2026-09-11): the residual decode path is complete —
 //! [`rice_unmap`] (step 3a), [`decode_rice_partition_with`] (step 3b), and
 //! [`decode_residual`] (step 3c: the §9.2.7 header, per-partition sample
-//! counts, and the escape/Rice dispatch). What remains for step 3 is the
-//! subframe/frame composition (`subframe::decode_subframe`, integrators,
-//! `frame::decode_frame`), not the residual.
+//! counts, and the escape/Rice dispatch). The subframe/frame composition this
+//! header once listed as remaining (`subframe::decode_subframe`, integrators,
+//! `frame::decode_frame`) landed in step 3d–3f and is witnessed by the committed
+//! subframe/frame tables.
 //!
 //! Every subframe (FIXED or LPC) ends with a residual. This is the hottest code
 //! path in the decoder — it decodes the bulk of the bits — so it is where the

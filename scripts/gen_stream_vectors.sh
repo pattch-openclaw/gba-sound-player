@@ -3,7 +3,7 @@
 # fixtures and their pinned expectations.
 #
 # Writes:
-#   crates/flac-lite/tests/fixtures/*.flac   five real FLAC files, verbatim
+#   crates/flac-lite/tests/fixtures/*.flac   six real FLAC files, verbatim
 #   crates/flac-lite/tests/stream_vectors.txt  what each one declares, as rows
 #
 # tests/stream_metadata_layout.rs asserts flac_lite::stream::parse (-> StreamFacts)
@@ -22,12 +22,17 @@
 # scripts/stream_vectors.py; the frame rows come from frame_vectors.py's
 # proven strict frame filter. Three independent readings of the same spec.
 #
-# What the five streams are for (their `note` rows say it in full): a two-block
+# What the six streams are for (their `note` rows say it in full): a two-block
 # container, a four-block container with every real block type this encoder
 # emits, a stream whose FIRST frame header is 80 bits (outside our packer's
 # 48..=72-bit profile — a wide header is not an unstreamable stream), a valid
-# 24-bit stream this decoder cannot carry, and a raw-through-a-pipe encode that
-# declares no total sample count, no frame sizes and no MD5.
+# 24-bit stream this decoder cannot carry, a raw-through-a-pipe encode that
+# declares no total sample count, no frame sizes and no MD5, and a multi-point
+# SEEKTABLE written by `metaflac --add-seekpoint`: points requested out of order
+# and sorted by the tool, one request snapped down to the containing frame
+# boundary, one past the end dropped, a placeholder entry, and one point naming
+# a short last frame (368 samples where the declared maximum block size says
+# 512).
 #
 # The encodes themselves live in stream_vectors.py next to the encode_command
 # rows, so a row cannot drift away from the command that produced the bytes.

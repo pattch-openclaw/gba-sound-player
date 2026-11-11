@@ -261,9 +261,10 @@ not at decode time, and the `EncodeProfile` wording still has to obey Correction
 offset table in favour of a real manifest and isolates the opposite failure: that the
 throwaway harness was load-bearing in ways nobody wrote down. Its witnesses are the
 `rate-*` flow as it has actually been run before — assets staged, ROM built,
-measured — through the manifest instead of a hand-computed index, plus the seek
-witness via `SEEKTABLE` + `Frames::anchored(n)` (which 4b left as an explicit seam,
-not an omission). Ordering items that never ran: the rate-sweep re-run on the
+measured — through the manifest instead of a hand-computed index. The seek
+witness is no longer 6b-3 work: `SEEKTABLE` + `Frames::anchored(n)` landed in 6b-2
+as a stream-side seam, and the product path still has no random access. Ordering
+items that never ran: the rate-sweep re-run on the
 stacked path, and E5's hardware arbitration — which is also the only thing that can
 turn the standing "no GBA real-time claim" line into a claim. Every verdict line in
 every arm of every image in these docs still prints `OVER BUDGET`.

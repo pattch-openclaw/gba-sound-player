@@ -133,6 +133,28 @@ def crc8(raw):
     return crc
 
 
+def crc16(raw):
+    """RFC 9639 9.3 frame footer: init 0, poly x^16 + x^15 + x^2 + 1 (shift
+    register 0x8005), no reflection, no final xor — the same byte-fed LFSR as
+    crates/flac-lite's `bits::crc16`, table-free for the same reason (a 64K
+    table is ROM the GBA cannot spend).
+
+    Two facts that were measured, not assumed (crates/flac-lite/src/bits.rs,
+    2026-11-03): the init is 0x0000, not the 0xFFFF this family is often
+    documented with — no init in the full 0..=0xFFFF sweep reproduces the
+    stored footers otherwise — and the window is FRAME-WIDE: sync code through
+    the padding bits, CRC bytes excluded, i.e. `crc16(header + body)` equals
+    the stored footer while `crc16(body)` does not. The derived check value for
+    b"123456789" is 0xFEE8."""
+    crc = 0
+    for byte in raw:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x8005) & 0xFFFF if crc & 0x8000 else \
+                (crc << 1) & 0xFFFF
+    return crc
+
+
 # ---------------------------------------------------------------- synthesis
 
 def tri(index, period):

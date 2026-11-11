@@ -302,7 +302,7 @@ impl<'a> BitReader<'a> {
     /// only be a frame number if overlongs are admitted).
     ///
     /// What it is NOT, measured: a reduction in false frame starts. On these
-    /// five fixtures `scan_frame_starts_strict` equals
+    /// six fixtures `scan_frame_starts_strict` equals
     /// `scan_frame_starts_all_forms_allowed` — the rule removes zero candidate
     /// frame starts from real audio bytes. The scan safety the frame layer has
     /// comes from the field validation and the header CRC-8, not from this

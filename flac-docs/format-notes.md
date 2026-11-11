@@ -156,6 +156,17 @@ cascade into the roadmap:
 3. **The profile wording is fixed** (see below): "max predictor order ≤ N,
    `-l 0` for FIXED-only", never "FIXED order 0–4".
 
+### Correction 4 — `-l 0` is FIXED-only, not FIXED-0 (2026-11-11)
+
+Correction 3 fixed the `-l` reading, but "`-l 0` for FIXED-only" was then read by
+the packer plan as "FIXED-0". It is not: `-l 0` disables LPC, and libFLAC still
+chooses FIXED orders 1–4 from the signal. Measured on real material in
+[`playback-results.md`](playback-results.md): the `-l 0` arm emitted
+`constant0 x10` plus `fixed0 x3` and `fixed1/2`. The packer's product guard is
+therefore **FIXED-0-only** in practice; `scripts/gafp_pack.py`'s
+`MEASURED_DECODE` has no FIXED-1..4 rows, and CONSTANT/VERBATIM are also
+unmeasured there. `-l 0` is an LPC switch, not a fixed-order guarantee.
+
 ### The final frame is legitimately short
 
 A track's last frame carries a **smaller blocksize** than STREAMINFO's maximum:
@@ -301,7 +312,7 @@ pins it; none is a recall. Tests live in `crates/flac-lite/tests/`, generators i
 |---|---|
 | Real frame headers are **6 to 9 bytes** wide. `parse` accepts 48..=120 bits (`MIN_HEADER_BITS` / `MAX_ACCEPTED_HEADER_BITS`); the widest legal *spelling* is 128 bits, and a 7-octet coded number cannot occur in a fixed-blocksize stream (§9.1.5 caps the frame number at 31 bits / 6 bytes). | `tests/fixtures/s3_wide_48001hz_b3000.flac` — a valid stream whose first header is **80 bits**; 48/80/120-bit headers witnessed end to end |
 | Non-minimal coded-number forms are refused. This is a **deliberate divergence**: `flac -d` accepts a real stream whose frame number is spelled longer once both CRCs are recomputed; libFLAC itself never writes one. Keeping the rule preserves the value→form-width relation the width bounds are derived from. | `tests/stream_vectors.txt` `mutation number-form-overlong` rows + the generator's per-fixture census |
-| The stream layer is: `fLaC` magic, §8.1 metadata-block chain (borrowed, streaming, reserved types skipped by length, forbidden type refused), §8.2 streaminfo, then `frame_data_offset`. | `tests/stream_metadata_layout.rs` over five real fixtures: two-block, seektable+padding, 80-bit header, real 24-bit stream (refused), unseekable encode with no total/frame sizes/MD5 |
+| The stream layer is: `fLaC` magic, §8.1 metadata-block chain (borrowed, streaming, reserved types skipped by length, forbidden type refused), §8.2 streaminfo, then `frame_data_offset`. | `tests/stream_metadata_layout.rs` over six real fixtures: two-block, seektable+padding, real multi-point seek table, 80-bit header, real 24-bit stream (refused), unseekable encode with no total/frame sizes/MD5 |
 | An `EncodeProfile` is enforcible only as **max predictor order plus a fixed/LPC flag** — never as "reject LPC", and never as a subframe-kind census. | Correction 3 below; the rate flow's real-material census (silence encodes CONSTANT even under `-l 0`) |
 
 ## Prior assumptions that did not survive measurement

@@ -20,9 +20,11 @@ It can be used **independently** as a `no_std`, pure-Rust FLAC decoding crate, a
 it is **ready to be separated into its own repository**. In checkable form:
 
 - no `todo!()` anywhere in `src/`, and a facade a consumer who has never heard of
-  this repository can drive: bytes → frames → samples. Today `decoder::Decoder`,
-  `format::Manifest`, `Blocksize::samples` and `EncodeProfile::validate` are still
-  scaffold, so C1 is **not** met;
+  this repository can drive: bytes → frames → samples. That clause is met as of
+  6b-1 (2026-11-10): `decoder::Decoder`, `format::Manifest`,
+  `Blocksize::samples` and `EncodeProfile::validate` all landed, and the facade is
+  a shell over `scan::Frames`. The extraction itself is a decision, not missing
+  implementation;
 - the crate's existing claims hold with nothing scaffolding-shaped in the way:
   `core` + `alloc` only, zero dependencies, zero allocation on the decode path,
   `#![deny(unsafe_code)]`, bit-exact against `flac -d`;
@@ -45,9 +47,11 @@ checkable form:
 - the decode half is already measured on hardware (42.48% mean / **42.72% worst**),
   so what is unproven is the *combination* — decode + convert + push + mixer/DMA
   inside one 62.5 ms frame;
-- **FIXED-only by construction.** LPC is **174.14%** of the 32 kHz frame on
-  hardware (decode alone), so the pack-time encode profile must refuse what the
-  player cannot play. The `EncodeProfile` guard is part of C2, not a nicety;
+- **FIXED-0 by construction.** LPC is **174.14%** of the 32 kHz frame on
+  hardware (decode alone), and only FIXED-0 has a measured row; `-l 0` disables
+  LPC but does not force the fixed order. The pack-time encode profile must refuse
+  FIXED-1..4 and any unmeasured residual shape. The `EncodeProfile` guard is part
+  of C2, not a nicety;
 - the acceptance run is on a GBA 001 **and** a GBA SP, and its verdict is
   **underrun-free playback**, not a cycle count.
 
@@ -65,7 +69,7 @@ Per 2048-sample frame at 32,768 Hz: **62.5 ms = 1,048,750 cycles**.
 
 | stage | figure | source | share of frame |
 |---|---:|---|---:|
-| decode, kernel + i32, worst frame | 398,923 c ≈ 23.8 ms | **hardware, product path** (6b-1, two units) | 38.04% |
+| decode, kernel + i32, worst frame | **398,255 c ≈ 23.8 ms** | **hardware, product path** (6b-2 pt 2's image; GBA 001 + GBA SP, identical) | **37.974%** |
 | convert | 14.1 ms | mGBA, 10,512 Hz pass, **word-copy era** | 22.6% |
 | push (ring copy + credit, CS) | 12.7 ms | same pass, same era | 20.3% |
 | **gross, on paper** | | | **≈80.9%** |
@@ -77,15 +81,18 @@ margin is **≈19%, ≈11.9 ms**, which is where the mixer, the IRQ handler and 
 feeder have to live: C2 will be decided by that margin, not by the gross. A 20%
 error in the producer stages alone would consume it. (The margin grew from
 ≈8.7 ms when 6b-1 measured the *product* path on hardware: 38.04% worst rather
-than the instrument's 42.72%.)
+than the instrument's 42.72%, and a hair wider again at 6b-2 pt 2's product image
+(**37.974%**, ≈19.1% left) — that PR's library change moved the product image's
+code layout, so the row above carries its reading and 6b-1's 38.04% stays attached
+to the bytes it was read from.)
 
-## Status at a glance (2026-11-10, `main` after 6a-7b merged)
+## Status at a glance (2026-11-11, after 6b-2)
 
 **The plan is now judged only against C1 and C2 above.** Item 6a is closed — the
-overlay exists, the kernel is in it, the decode half of C2 is measured on two units
-— and everything still open is either C1 (`flac-lite`'s facade and manifest), C2's
-decode half (the kernel carried into a product ROM, 6b), or C2's playback half
-(item 7).
+overlay exists, the kernel is in it, the decode half of C2 is measured on two units.
+C1's facade/manifest clause landed with 6b-1; what remains is C2's playback half
+(item 7). The 6b decode/product half is landed (the kernel in a product ROM, the
+real packer, the seek table and the anchored walk).
 
 - **Landed:** the Phase-1 decode path through `decode_frame`; the
   stream layer; the per-frame `driver`; CRC verification behind `crc-check`; the
@@ -207,9 +214,21 @@ decode half (the kernel carried into a product ROM, 6b), or C2's playback half
   **on a GBA 001 and a GBA SP, identical to the cycle**, pin matched, and mGBA
   agrees with hardware to **0.055%** on that leg (the default kernel's +4.03% is
   the 6a-7b shortfall, now localized). The `scan` seam is byte-identical in the
-  product image. **Next, in order:** **6b-2** (real
-  GAFP packer, manifest, pack-time profile that refuses LPC at the target rate),
-  **6b-3** (32,768 Hz rate-play through a real manifest), then **item 7**
+  product image. **6b-2's first half landed 2026-11-11** (the real `GAFP` writer
+  `scripts/gafp_pack.py`, its fixture/facts generator, `tests/gafp_asset_facts.rs`
+  and the `gafp-pack-check` gate): the packer's bytes are byte-identical to the
+  6b-1 stand-in's committed product blob, so there is one container definition and
+  the pack-time profile guard is now gated rather than drafted — see that item's
+  section. **6b-2's second half landed 2026-11-11** (`stream::SeekTable` over real
+  §8.5 tables, a `Frames::anchored` walk started from a seek point, a sixth
+  reference-tool fixture, and the stand-in decision — *keep it, as the tie between
+  the spike's asset and the product's*): none of the added code reaches a ROM, yet
+  both product images' bytes moved, so both were re-read on silicon — the shipping
+  `rice-arm` path at **37.765% mean / 37.974% worst** on a GBA 001 and a GBA SP,
+  identical to the cycle on both units, and the `TableCountKernel` control image
+  **+7.09% slower on hardware**, which makes mGBA's +7.90% a real silicon cost and
+  not an emulator artifact. See that section. **Next, in order:** **6b-3** (32,768
+  Hz rate-play through a real manifest), then **item 7**
   (playback: the real-time claim). Not started: 6a-8 (untriggered, and now further
   parked by C1/C2) and the parked Q13 probe.
 
@@ -1205,7 +1224,7 @@ through a real manifest.
 | PR | Scope | Witness | Failure it isolates |
 |---|---|---|---|
 | **6b-1** ✅ | **Landed 2026-11-10.** `stream` → frame source → `decoder::Decoder` rewired onto `scan::Frames`. Inherits `Frames` / `StreamBounds` / `ConsumedFrame` / `resync` — **not** a third frame loop. Turns `scan` on in a ROM-shaped build for the first time. **And carries `rice-arm` into that ROM** — the one-line placement 6a-5 assigned to this rung, so the first ROM built after this PR decodes with the kernel instead of `TableCountKernel`. | Codegen: the walk's cost read from the product image's own symbols; bit-exactness through the walk against the file-level walk; **the kernel's win re-read in the product ROM** (mGBA here, a unit by the owner) | that the walk's measured cost was argued-as-free and the facade pays it — and that the kernel's win lives in an instrument but never in a product |
-| **6b-2** | `scripts/pack_flac.sh` real implementation (GAFP writer), `format::Manifest` parse, `EncodeProfile::validate` at pack time, `SEEKTABLE` interpretation + `Frames::anchored(n)`. **The profile refuses what the target rate cannot play** — at 32,768 Hz on hardware that is LPC (174.14% of the frame, decode alone) — so C2's constraint is enforced by the packer rather than discovered by the player. | Bit-exact decode through a real manifest; profile validation convicted at pack time **on a real LPC clip as well as a synthetic one**; the seek witness `frame_run_loop.rs` already holds the reverse-order half of | that the pack-time profile guard the whole design leans on is decorative — and that a 32 kHz build quietly ships LPC assets that cannot play |
+| **6b-2** ✅ | **Landed 2026-11-11, in two halves** — pt 1 the writer, its fixtures and `gafp-pack-check`; pt 2 the `SEEKTABLE` read, the `anchored` walk and the stand-in decision. The GAFP writer is `scripts/gafp_pack.py`; `pack_flac.sh` remains the unimplemented profile front-end and now says so. Plus `format::Manifest` parse, `EncodeProfile::validate` at pack time, `SEEKTABLE` interpretation + `Frames::anchored(n)`. **The profile refuses what the target rate cannot play** — at 32,768 Hz on hardware that is LPC (174.14% of the frame, decode alone) — so C2's constraint is enforced by the packer rather than discovered by the player. | Bit-exact decode through a real manifest; profile validation convicted at pack time **on a real LPC clip as well as a synthetic one**; the seek witness `frame_run_loop.rs` already holds the reverse-order half of | that the pack-time profile guard the whole design leans on is decorative — and that a 32 kHz build quietly ships LPC assets that cannot play |
 | **6b-3** | The rate-play path on a real manifest **at 32,768 Hz**; the spike's generated offset table retires. This is the first product ROM that names the overlay crate. | The `rate-*` flow as it has been run before — assets staged, ROM built, measured — now through the manifest at the target rate | that the throwaway harness was load-bearing in ways nobody wrote down |
 
 **Out of 6b, explicitly:** mixer/DMA and `agb` integration, 24-bit decode, `unsafe`
@@ -1309,8 +1328,597 @@ arms and the second bare-metal target (`gafp-check` added to the gate);
 with the spike now enabling `instrument`; `make check` clean;
 `make native-flac-rom` and `native-flac-rom-default-kernel` both build and fix.
 
-**Owed.** The product ROM's reading **on a unit** (both builds, one run each;
-the owner's step), and 6b-2.
+**Owed.** The product ROM's reading **on a unit** (both builds, one run each; the
+owner's step) — **delivered 2026-11-10**, both builds, both units, in the hardware
+table above; and 6b-2 — **landed 2026-11-11**, in two halves, whose library change
+superseded the bytes of these two images and re-read both on silicon in its own
+row.
+
+### 6b-2, first half — landed: one container definition, and a guard that reads frames (2026-11-11)
+
+**What is in the tree.** `scripts/gafp_pack.py` is the real `GAFP` writer. It
+takes a `.flac` (or a WAV, which it encodes itself through libFLAC at the
+profile's flags), walks every frame of the result with the strict reader in
+`scripts/frame_vectors.py`, then walks **every subframe slot inside that** —
+§9.2.5's partition boundaries, Rice parameters and codeword lengths, warm-ups,
+LPC precision/shift/coefficients, the bps+1 mid/side slot width, escape records,
+each footer CRC-16 — and only then writes the container. The offset table is
+where that walk says the frames begin; nothing in the header is inferred from
+`--blocksize`. It reads its own bytes back before calling the pack done
+(`audit_blob`: magic, version, every manifest field, the table it just wrote
+re-read and required strictly increasing with its first entry pointing at the byte
+after the header, the region compared byte-for-byte against the source's frames,
+then every frame re-parsed for sync and header CRC-8, its length re-matched
+against what the walk recorded, its number and block size checked, and its footer
+CRC-16 recomputed). Where the source PCM is in hand — a WAV input, or a re-encode
+the packer did itself — it also decodes that source with `flac -d` and compares
+sample-for-sample against the PCM it generated, unless `--no-verify-pcm` says
+otherwise; a `.flac` handed in already has no such comparison to make, and the
+facts table says so by carrying no PCM rows for that run rather than by inventing
+a source. `scripts/gen_gafp_fixtures.py` packs the crate's own
+test assets with it and emits `crates/flac-lite/tests/gafp_asset_vectors.txt`;
+`crates/flac-lite/tests/gafp_asset_facts.rs` reads those blobs and that table
+back through `Manifest`, `scan::Frames` and `Decoder`. The gate is
+`make gafp-pack-check`, now a prerequisite of `flac-gates`.
+
+**1. The control, before any edit.** `make flac-gates` green across every
+configuration (1379 passed / 3 ignored / 75 test binaries) and both product images
+built from that state: `flac-integration.gba`
+`12732380a0aa1543…`, `flac-integration-default-kernel.gba`
+`2b108d290d44cfcf…`. Both are still on disk and are the reference for the next
+paragraph.
+
+**2. No shipped byte moved — that is this change's section table.** Rebuilding
+both ROMs after the change reproduces **both SHA-256s exactly**. There is nothing
+to attribute symbol by symbol because nothing was linked differently: no file
+under `crates/flac-lite/src/` or `crates/flac-lite-gba/src/` changed, the
+embedded `.gfp` is the same bytes (which the new gate proves from the packer's
+side rather than from a second run of the same generator), and the `nm` anchors
+are 6b-1's by identity. No `cargo clean` control was run, and none is asked for
+here: the images being bit-identical is the stronger statement for a change whose
+Rust half is a test file and a `[[test]]` stanza. That claim is scoped to
+**this** change, and the paragraph two further down is the reason it has to be:
+the C1 doc-record pass edited comments inside those same files, and it broke the
+image hash. Named, because a row that says "the hash broke" without saying to what
+is not much of a record: rebuilt at the repo path, 6b-1's images are the pair above
+and the post-doc-pass images are `46c231163c09…` (1,072,860 B) and `06746b84ea8d…`
+(1,071,032 B) — **the same byte counts, different bytes**, the panic-`Location` line
+numbers again. Nothing executable differs: both pairs time to the identical cycle
+totals (62,249,317 and 244,812,048) and the same PCM pin, which is what lets 6b-1's
+hardware row stand as the reference for 6b-2 pt 2's control. (6b-2 pt 1's commit
+message asserted byte-identity with 6b-1's images, which this paragraph already
+contradicts; the message has been corrected on the branch.)
+
+**3. Gate counts, with the new configuration named as a new gate.** The first
+attempt at the aggregate **failed**, and the reason is worth keeping: the new
+suite consumes `scan::Frames` and `Manifest::bounds`, which is
+`#[cfg(feature = "scan")]`, and `Cargo.toml` had no `[[test]]` stanza for it — so
+`make flac-test` compiled it under default features and died with E0432/E0599
+(`/tmp/flac-gates-6b2.log`). The fix is the pattern this tree already uses for
+`scan_frame_walk_layout.rs` (`required-features = ["scan"]`) and
+`rice_two_mechanism_differential.rs` (`["rice-hybrid"]`); the alternative —
+leaving the suite out of the aggregate — is how a witness becomes a file. After
+it: `flac-gates` green, **1403 passed / 0 failed / 3 ignored across 79 test
+binaries** (6b-1's record was 1379 / 3 / 75). The +24 is 6 × 4 — `flac-test-scan`,
+the `crc-check,scan` arm, the three-feature arm, and `gafp-pack-check`'s own named
+leg — and `make flac-test`'s count is unchanged, which is the point of the
+stanza. `gafp-pack-check` is a **new** gate, not an edit to `gafp-check`, which
+still guards the product blob through the stand-in; `flac-gates` is the changed
+aggregate, and this is its first leg that needs `flac`/`metaflac` on PATH (every
+other leg reads tables and blobs generated earlier and committed). `make check`
+clean (exit 0). `make flac-portable-check` green for `thumbv6m-none-eabi`.
+`make test-rom` **not run**, and the reason is the paragraph above: it would be
+looking at the same binary it last saw.
+
+**The equality the stand-in was owed, paid.** The packer was run over the
+FIXED-0 reference clip re-synthesized and re-encoded in a temp dir (the
+`.flac` is a generator input, never a tracked file — only the frame/PCM regions
+under `examples/flac_spike/assets/` are committed), and compared against
+`examples/flac_integration/assets/spike_l0.gfp`, the blob `gafp-check` guards and
+`flac-rom` embeds. **Byte-identical: 865,996 bytes, 157 frames, first difference
+none.** That matters because the two derivations are not the same derivation: the
+stand-in reads offsets out of `examples/flac_spike/src/assets.rs`, which the perf
+gate generated from the frame table, while the packer re-derives every length from
+where its own walk exits, verifies every footer CRC-16 (314 subframe slots
+censused, `fixed0 x314`), and computes the max-FIXED-order byte from the subframes
+rather than from the `-l` flag. Two independent derivations landing on one byte
+string is what makes `GAFP` one definition instead of two, which was the whole
+point of the "stand-in" paragraph above. `scripts/pack_flac.sh` is still a stub —
+but its six-step plan (normalize to profile, *verify only profile-conforming
+frames*, strip metadata, index by strict header parse + CRC-8 rather than by sync
+scan, emit, round-trip against `flac -d`) is the shape this implements, including
+its own corrections: `-l` is `--max-lpc-order` and not a fixed-predictor cap, and
+the last frame is legitimately shorter. The remaining step for that file is to
+become the front-end.
+
+**4. Mutation witness for the new suite.** Six tests, one per claim the
+packed-asset path makes, and each mutation was applied to the *generated table*,
+not to the Rust — the suite's job is to convict the table and the crate together:
+
+| Mutation | Result |
+|---|---|
+| None (honest green) | ✅ 6 passed — all four blobs' offsets, lengths, CRCs and PCM match the packer's record |
+| Last frame's recorded CRC-16 `35d5` → `35d4` | ❌ `the_offset_table_and_a_walk_of_the_region_agree_frame_by_frame`: "frame 2's bytes are not the bytes whose CRC-16 the packer recorded" |
+| One per-frame `pcm_fnv1a64` | ❌ `every_blob_decodes_to_the_pcm_the_reference_decoder_produced`: "frame 0 does not decode to the samples `flac -d` produced for it" |
+| An `lpc` subframe row → `fixed` | ❌ `one_pcm_three_blobs_and_the_field_that_cannot_tell_them_apart`: "six LPC-4 subframes, no FIXED ones" |
+| A frame's `blob_offset` +1 | ❌ both `the_manifest_says_what_the_packer_recorded` and `the_table_and_its_blobs_are_all_here` (and the walk's `cursor() > end` abort fires before it) |
+| The record's `max_fixed_order=0` → `2` | ❌ `the_manifest_says_what_the_packer_recorded`: "the recorded max FIXED order" |
+| The LPC asset's relaxations → `none` | ❌ `one_pcm_three_blobs_…`: the test that asserts it was built with **two** guards relaxed, because the profile limit and the measured cost are two facts |
+
+Restoring the table from the copy at `/tmp/gav.orig` returned the suite to green,
+and the generator revalidated green ("4 blobs match their committed bytes, 3
+refusal legs still refused with their stated reasons, table matches").
+
+**The trap, and it is the one the row was about.** The header's max-FIXED-order
+byte reads **`0` for an all-LPC stream**, and it is not wrong: an all-LPC stream
+has no FIXED subframe above order zero. The fixture set makes that concrete —
+three of the four blobs are the *same 5,000 samples* encoded three ways
+(independent stereo, mid/side, and `-l 4`), so they carry **one PCM pin and three
+frame sets**, all three manifests say `0`, `EncodeProfile::validate` accepts all
+three including under a hand-built `max_fixed_order: 0` profile, and all three
+decode bit-exactly. The `-l 4` arm of the 157-frame reference clip is the same
+trap at product scale: the walk censuses `lpc3 x2, lpc4 x312` while
+`max_fixed_order_of(…)` returns 0. So the field is a *recording*, not a guard —
+C2's guard is the packer's census plus the measured cost of the kind, and nothing
+on the decoder's side can supply it. That is why the packer carries a measured
+table (6a-7b's rows: `fixed0` 42.48% / 42.72%, `lpc4` 173.23% / 174.14%, with
+the raw cycle counts and the instrument named in each row's `source`) and refuses
+any kind whose cost it has not measured — including, today, `verbatim` and
+`constant`, which the row names but which this target has never timed. The
+arithmetic is self-checked (`check_rows`, before any packing): each row's percent
+is re-derived from its own cycle count and the frame's own budget, and a
+mismatched denominator or a transcribed digit stops the run. The budget is the
+**32,768 Hz playback timer's** frame (1,048,576 cycles for 2048 samples), which is
+the denominator every figure in `flac-docs/measurements.md` uses; using the
+stream's own 32,000 Hz period would have overstated the headroom by 2.4% and made
+the packer's percentages not comparable to the product ROM's 37.83%/38.04%.
+
+**Correction, 2026-11-11: the product guard is FIXED-0, not merely FIXED-only.**
+`-l 0` disables LPC; libFLAC still chooses FIXED orders 1–4 from the signal, and
+only FIXED-0 has a measured row. So the product profile refuses FIXED-1..4 (and
+CONSTANT/VERBATIM) as unmeasured before writing anything; the default guard also
+keys the measured row to the residual envelope it was taken on (one partition, no
+wasted bits, no escape partition, Rice parameter ≤ 10), because the kind/order
+alone does not describe the per-codeword cost. `check_guard_shapes` asserts that
+policy at every pack, and the four committed assets are inside that envelope. The
+remaining axes — FIXED-1..4 and the wider residual shapes — are open measurements,
+not features the guard silently accepts.
+
+**What the three refusal legs refuse, named honestly.** `lpc_at_product_profile`
+packs the `-l 4` arm of the 157-frame reference clip — 1.4M samples of real
+libFLAC LPC decisions, not a hand-built bit pattern, though the underlying PCM is
+the synthesized test signal rather than music — and is convicted twice, by the
+`-l 0` profile cap and by the measured 174.14%. `rate_44100_at_32000_target`
+starts from a committed real encode (the crate's own `s2` fixture, 96 kHz stereo),
+re-encoded at 44,100 Hz with `--no-seektable` so the stream-level and the
+frame-level rate readings are each contradicted independently, and says so twice.
+`eight_bit_at_16bit` is a real 8-bit encode, refused because the container's
+depth list is `[16]` — and the interesting half is that its `-l 0` subframes land
+on **VERBATIM**: with FIXED removed by `-l 0`, verbatim is what libFLAC has left,
+and verbatim is a kind this target has never measured. A new depth would not be a
+header change; it would be an unmeasured cost. No `.gfp` is written for any
+refusal, and the test asserts that too.
+
+**A side probe, deliberately not finished.** C1 requires no stale scaffold records
+in this crate. A grep for `todo!()` in `crates/flac-lite/src/` returned five hits
+before this section's edits, **every one of them in a doc comment and not one in
+a body** — the records were out of date, not the code. They are gone now; the
+places that said it were `lib.rs` (three), `format.rs`, `subframe.rs` and
+`driver.rs`, and the crate README said it twice more (its "remaining `todo!()`"
+paragraph and the file tree's "scaffold: todo!()" row) next to a Next-steps
+paragraph that still listed landed work as outstanding. One of the five was the
+crate-wide `#![allow(dead_code, unused_variables)]`, whose comment
+still said "REMOVE once implementations land". The honest way to answer that was
+a probe: delete the attribute and build every gated feature combination. Five
+items need it, all cfg-conditional names whose other arm is what a given build
+compiles — `bits::peek_at`'s `end`, the `crc8_bit` position the `crc-check` arm
+is the only reader of, `subframe`'s `order_u8` binding, `subframe::integrate_fixed`
+(live under `--no-default-features` and under `cfg(test)`, dead in the default
+i32 build), and a test-local `pos` in `bits`. The probe also surfaced something
+the attribute was never doing: an integration test is its own crate, so a
+crate-level allow never reached `tests/`, and one unused `lens` there already
+appears in three arms of `flac-gates`. Fixing the six means editing source in the
+shipped path, which owes a control build and a section table this PR does not
+have; the list is recorded where the attribute lives, so the next pass is a
+mechanical one rather than a re-derivation.
+
+**And the image-hash claim that pass broke, measured rather than hand-waved.**
+After those comment edits, rebuilding the two product ROMs no longer reproduces
+the control SHA-256s: **8 bytes differ** in `flac-integration.gba` (at
+75,565 / 75,581 / 75,597 and at 1,068,761 / 1,068,793 / 1,068,809 / 1,068,825 /
+1,068,841) and **9** in the default-kernel image. Every one is a single byte
+inside a run of 16-byte records that alternate a ROM pointer (`0x0801_165e`,
+`0x0801_1875`…) with two small integers, and the changed byte is always the first
+of that pair, moving by +1 or +7: those are `Location` constants — the line
+numbers that ride next to a panic's file-name string — shifted by exactly the
+lines the doc edits added above them. No instruction moved, and nothing about
+execution did. The point is not that this particular delta is harmless; it is
+that **whole-image identity does not survive an edit to a comment**, so the
+"byte-identical image" control that a change like the packer's gets for free is
+not a claim any later pass inherits — and when it breaks, a `cmp -l` listing plus
+the record stride around the changed offset attributes it in minutes without
+needing a section table, which is the same reason `objdump` output belongs in the
+record and a hash alone does not.
+
+**Owed by the rest of 6b-2.** `SEEKTABLE` interpretation and
+`Frames::anchored(n)` — the half of this row that the fixtures deliberately do
+not touch, since the GBA product path never needs random access and the packed
+container has no seek table — plus the decision the paid equality enables about
+`scripts/gen_gafp_blob.py`. Both landed below one section down; the decision is
+*"keep it, for a different job than it was doing"*, and the reasoning is there
+rather than here. Two fixture axes from this paragraph stay open and are recorded
+in `crates/flac-lite/tests/README.md`: 1024-sample blocks, and packed
+CONSTANT/VERBATIM/escape-shaped and higher-order-LPC assets (the highest LPC order
+any real-stream table here carries is 8). They are joined by three more that the
+seek-table work opened, listed at the end of that section.
+
+### 6b-2, second half — landed: the seek table read, and a walk that starts from one (2026-11-11)
+
+**What this half was.** RFC 9639 §8.5 read out of real files, and a frame walk
+that begins at a seek point instead of at byte zero — the seam `scan::Frames::
+anchored(n)` already existed for, and which nothing had used. The GBA product path
+still needs neither: a packed GAFP has no seek table, and the ROM decodes a
+manifest, not a container. That is exactly why this half is about the *reading*:
+an item that the product never exercises is only safe if a fixture and a gate say
+what it means.
+
+**The fixture question came first, and it decided to add a sixth file.** Nothing
+committed here had a multi-point seek table: `s2_seekable_96k_stereo` carries one
+point, for sample 0, which is enough to test a block walk and no part of enough to
+test a *seek* — one point cannot be wrong about which frame it names without
+agreeing with every other reading. So the table gained
+`s6_seekpoints_8k_mono`: 6,000 samples at 8 kHz, encoded
+`flac -1 -f -s --no-padding -l 0 -b 512`, then edited with `metaflac
+--add-seekpoint` — the reference tool's own output, not a hand-spliced table,
+which is the rule for committed fixtures here (hand-built tables belong in the
+`src/` unit tests, and the shapes only they can make are used there — see the
+refusal table below). The file is 5,260 bytes: blocks
+`STREAMINFO, SEEKTABLE, VORBIS_COMMENT`, `frame_data_offset` **234**, 12 frames,
+a 144-byte table of **8 entries — 7 real points and one placeholder**, and a last
+frame of **368 samples in a stream whose `max_blocksize` says 512**. That last
+frame is why this fixture and not a variant of an existing one: a reader that
+takes a frame's length from the declared maximum is wrong at that frame and only
+there, and a seek table with a point *on* it is the only way to ask the question.
+
+The five existing fixtures did not move: `git diff` over `tests/fixtures/` after
+the regeneration is empty, and `scripts/gen_stream_vectors.sh` reproduces all
+five byte for byte. `tests/stream_metadata_layout.rs` asserts the table covers
+**six** fixtures and refuses one it cannot embed — a fixture named by the table
+but not read by the suite is a fixture whose facts are not being checked.
+
+**What `metaflac --add-seekpoint` was measured to do.** The requests were written
+deliberately out of order and with awkward values in it, at 8 kHz with 512-sample
+fixed blocks:
+
+| asked | what landed in the table |
+|---|---|
+| `5632 0 2048 4608 3584 1024 2560` | sorted ascending — the tool orders the table, the encoder does not |
+| `2600` | **2560**: snapped down to the first sample of the containing frame |
+| `12000` | dropped — past the end of the audio |
+| `2048` twice, and `0` | one entry each: exact duplicate requests are dropped |
+| `X` | written as the **last** entry: `sample_number=0xFFFFFFFFFFFFFFFF`, `stream_offset=0`, `frame_samples=0` |
+| (rendering) | `metaflac --list` prints a placeholder as the bare word `PLACEHOLDER` and hides its other two fields |
+
+Two things follow, and both are now rows in the table rather than assumptions: a
+table's **entry count exists only as `length / 18`** (§8.5's Table 6 carries no
+count), and a placeholder's other fields are **not recoverable from the reference
+tool's own rendering** — so the generator pins `seek_placeholder_other_fields_zero`
+as a measured fact read from the bytes, and the cross-check against `metaflac`
+compares *which entries are placeholders*, never what a placeholder holds.
+
+**What the reference tools refuse, and what they accept.** Each shape below was
+built by splicing bytes into a real file and asking both tools (probes under
+`/tmp/st/measure_*.py`, recorded here because they changed what the crate does):
+
+| table shape | `flac -t` | `metaflac --list` | `flac-lite` |
+|---|---|---|---|
+| payload 19 bytes | exit 1, `ERROR while decoding metadata` | exit 1, `FLAC__METADATA_CHAIN_STATUS_BAD_METADATA` | `SeekTableLength` |
+| payload 0 bytes | 0 | `seek points: 0` | accepted; `find()` answers `None` |
+| two byte-identical type-3 blocks | 0 | prints **both** tables | `DuplicateSeekTable` |
+| placeholder before the real points | 0 | renders it at index 0 and carries on | `SeekTableOrder { at }` |
+| two real points, same sample number | 0 | renders both | `SeekTableOrder { at }` |
+| two placeholders | 0 | both, at the end | accepted |
+
+The asymmetry is the deliberate one, and it is the same rule the rest of this
+layer runs on: libFLAC's *decoder* does not consult the seek table unless asked to
+seek, so a table it never reads cannot hurt it — which is why a duplicate table
+passes `flac -t` at exit 0, exactly as duplicate `VORBIS_COMMENT` and `PADDING`
+blocks do (measured in 6b-1's row). A reader that *uses* the table has no such
+luxury: with two tables, "the anchor" is undefined; with a placeholder in the
+middle or two points naming one sample, "the last point at or before *n*" is
+undefined. So the real points must be strictly ascending and the placeholders must
+all come after them — `metaflac`'s own help says placeholders "always go at the
+end", and every file it writes obeys — and a payload that is not a whole number of
+18-byte entries is a container fault rather than a truncation, because there is no
+count field to appeal to and the last entry has no defined end. That is also the
+one shape the tools refuse in the same words, quoted above.
+
+**The API: a view, not a list.** `stream::SeekTable` borrows the metadata block's
+payload and reads it at fixed stride: `len()` is `payload.len() / SEEKPOINT_LEN`,
+`point(i)` bounds-checks without wrapping, `find(sample)` answers the last **real**
+point at or before a target (`None` for a target before the first real point — the
+first point is not an anchor for it), and `seek_table(stream)` returns
+`Ok(None)` when the stream has no table, because "no seek table" is a complete
+stream and not an error. Nothing is materialised: this is the same
+no-allocation boundary that made the crate decline an arbitrary metadata block
+list, and it is why `SEEKPOINT_LEN` is a named constant — the entry size is what
+makes a payload enumerable at all.
+
+**The two quantities a seek point carries, and the one a walk needs.** A point's
+`stream_offset` counts from the **first byte after the metadata**, not from the
+start of the file: point 0 of both `s6` and `s2` carries offset 0 while the frame
+it names is 234 and 176 bytes in. Read as a file offset the point lands between
+frames, and both suites show that reading refused — 4a, because the resolved byte
+does not name a frame start; 4b, because `Frames` refuses the byte and has written
+**no samples** when it does.
+
+The other quantity is settled by RFC 9639 §9.1.5, not by a convention here.
+`SeekPoint::frame_number()` (implemented by `FixedBlockNumbering`, which owns the
+block size and declared end) converts the seek point's sample number to the coded
+frame number. §9.1.5 says a coded frame number **MUST equal the number of frames
+preceding the frame**, so a conformant whole stream starts at frame 0; the sample
+number is `frame_number * block_size`, and `first_sample / block_size` is already
+the frame number `Frames::anchored(n)` wants. There is no
+`first_frame_number + frame_index` composition: a nonzero first coded number is a
+stream for which §9.1.5 says seeking is not reliably possible (a mutilated/
+recovery case), not a second base to add. The 4b test now asserts the fixture rows
+start at 0 and takes its anchor from `frame_numbers[target]`; the recovery builder
+still accepts the number a mutilated region's first header states.
+
+**Correction, 2026-11-11, after reading §9.1.5 in full.** The earlier paragraph
+called the quotient a *position* and proposed composing it with a first-frame
+number. That was an inference from a phrase about mutilated streams, not the
+RFC's rule: the coded number is required to equal the number of preceding frames,
+so the first frame of a conformant stream is 0. `FixedBlockNumbering` now states
+the two-direction arithmetic in one place (`frame_number_for_sample`,
+`first_sample_for_frame`, block size, declared total/frame count), and both
+provider suites use it rather than re-deriving the division.
+
+**Four readings of every real point, in the generator.** For each fixture with a
+table: an independent 18-byte parse in Python; `metaflac --list`'s rendering; the
+strict frame walk from `frame_vectors.py`; and, for a fixed-blocksize stream, the
+arithmetic. All four must agree, and each point is additionally pinned against the
+walk it claims to describe — `frame_samples` equals that frame's actual block size
+(the 368 case again), `frame_data_offset + stream_offset` equals the frame's real
+offset, and the byte there begins with a frame sync code. Then the part only a
+decoded fixture can supply: for every real point, the FNV-1a-64 of the reference
+decoder's PCM **from that point's first sample to the end of the file**
+(`seek_points_tail_pcm_fnv1a64`). The generator refuses to write the table if two
+points share a tail hash: a pin that cannot tell two anchors apart is not a pin.
+
+**The tests, and what each one is for.**
+
+* `src/stream.rs`'s `tests::seek_table_shape` (9 tests, hand-built tables) —
+  the rules no encoder here produces: field order and endianness (`0xDEAD_BEEF…`
+  in the middle catches a reader that treats the two u64s as interchangeable),
+  bounded indexing, the non-multiple-of-18 refusal, the empty table, the
+  placeholder distinguished by sample number alone and nothing else (one below it
+  is a real point), every ordering refusal in the table above, and
+  `frame_number`'s refusals (variable blocking, a point that is not a frame
+  start, and a point at/past the declared total/frame count) plus its one
+  legitimate extension: a point whose `frame_samples` disagrees with the stream's
+  blocking is still an anchor, because that field is a record and not a claim
+  about the whole stream.
+* `stream_metadata_layout::every_seek_table_is_read_as_the_tools_and_the_frame_walk_render_it`
+  — the real fixtures: the helper agrees with an explicit `Blocks` walk, the view
+  is exactly the block payload, the counts and the placeholder indices match
+  `metaflac`, every real point's three fields match the rows, `frame_number`
+  matches the frame the walk counts, and the wrong-base reading is named as not a
+  frame start.
+* `scan_frame_walk_layout::a_seek_point_starts_a_walk_that_finishes_the_stream_at_the_right_sample`
+  — the point of the item: for every real point, anchor the walk at that frame and
+  finish the stream. Both off-by-one anchors are refused **before any sample is
+  written** (`FrameOutOfSequence` carrying the expected and found numbers), the
+  wrong-base byte is refused with the cursor unmoved and `decoded().frames == 0`,
+  every frame the suffix walk produces has the offset, number, **byte length** and
+  block size the whole-region rows say it has (a walk that starts mid-stream has
+  no licence to frame it differently), and the decoded suffix hashes to the
+  recorded tail pin — including the last-point case, where one frame of 368
+  samples is the whole remaining audio. The lookup-driven path (`find(total−1)`) is
+  walked too, so the test is not only driving anchors it chose by hand.
+
+**Mutation witness — four rows of the table, lied to one at a time.** Same
+discipline as 6b-1's: the lie goes into the *table*, never into the Rust, and the
+answer is which test convicts.
+
+| Mutation (all in `s6`'s rows) | Convicted by |
+|---|---|
+| a point's `stream_offsets` +1 (4713→4714) | 4a only: "point 6's stream offset" — 4b reads the table's own bytes, not that row, and stays green |
+| a point's `frame_indices` 5→6 | **both**: 4b "point 3" (the anchor it would have used), 4a "point 3 (sample 2560) names frame 5; counting frame starts found 6" |
+| a point's tail PCM hash, last digit +1 | 4b only: "decoding from sample 0 produced audio that is not the reference decoder's from that sample to the end of the file" — 4a reads no PCM |
+| `seek_placeholder_indices 7` → `none` | 4a only: "the placeholder index list is not one entry per placeholder" |
+| honest green (no mutation) | 25 passed across the two suites, 0 failed |
+
+Which suite owns which row is the finding: the container reading owns the table's
+*contents*, the walk owns what the table *does*, and neither can substitute for
+the other. A suite that read every row would be one reading, not three.
+
+**A fact about the frame filter that this fixture is the first to show locally.**
+On five of the six frame regions the bare two-byte sync shape matches exactly the
+real frames; on `s6` it finds **13** candidates for 12 frames. (The over-match on
+longer material — 1.1× to 9.4×, 204 candidates for 157 frames — has been in the
+table's header for two sections.) The 4b suite now re-derives that count from the
+same bytes, isolates the single extra byte, and names where it came from: it is
+the **last byte of the frame before a real frame start** — that frame's own
+CRC-16 footer happens to end in `0xFF` — standing immediately in front of the next
+frame's sync code, so a reader that took a matching pair as a boundary would have
+been one byte short of the frame it was aiming at, and the field check is what
+refuses it: read at that position the pair is `FF FF`, whose reserved bit (§9.1)
+is set. The strict leg still returns exactly 12. The suite refuses to keep this as
+a count it repeats: if the fixture stopped showing it, the test says so instead of
+quietly witnessing nothing.
+
+**The gates.** `make flac-gates` green: 1,476 host tests across 72 test binaries,
+0 failed, 3 ignored, all gated feature combinations and the second bare-metal
+target. `make native-flac-rom native-flac-rom-default-kernel` builds both images.
+
+**And the product images moved, so both were measured against a control.** This
+row's library changes are test- and API-side only, so the claim "nothing reached
+the ROM" is exactly the kind this plan has been burned on before (6b-1's row
+recorded 8 changed bytes from a *comment* edit — the panic `Location` line numbers
+that ride beside the file-name string). Control built from 6b-2 pt 1 in the same
+tree, same commands:
+
+| image | bytes | sha-256 | `.text` | `.rodata` | `.iwram` |
+|---|---|---|---|---|---|
+| `flac-integration.gba` — 6b-2 pt 1 (control) | 1,072,860 | `46c23116…` | 70,468 | 999,576 | 2,036 |
+| — this half added | 1,070,928 (−1,932) | `e859f7bc…` | 68,532 (−1,936) | 999,580 (+4) | 2,036 |
+| `flac-integration-default-kernel.gba` — control | 1,071,032 | `06746b84…` | *(not captured)* | | |
+| — this half added | 1,068,132 (−2,900) | `193dd44a…` | *(not captured)* | | |
+
+**A ROM hash is only reproducible at its build path.** The same 6b-1 source
+rebuilt in a `git worktree` at `/tmp/wt6b1` comes out 1,072,660 B against
+1,072,860 B here — 200 bytes of pure build-directory length, because six
+**absolute source paths** ride in the image inside panic-`Location` strings
+(`strings -a <rom> | grep home/sam` counts them). Nothing executable moved, and the
+two builds time to the identical cycle total. So every hash in this section is a
+(commit, build-directory) pair, built at the repository path, and a hash recorded
+without its path is not re-checkable by anyone else — which is worth saying out
+loud because this file records a fair number of hashes.
+
+Both images, run headless (`timeout -k 5 45 mgba-test-runner <rom>`), each image
+twice, and each image's two runs identical to the cycle:
+
+| image | kernel | mean c/frame | worst c/frame | proof |
+|---|---|---|---|---|
+| control | `rice-arm` (product) | **396,492** | 398,703 | `pcm_fnv=0x54C7B356621B6E15`, `verdict PASSED` |
+| this half | `rice-arm` (product) | 395,850 (**−0.16%**) | 398,037 | same pin, `verdict PASSED` |
+| control | `TableCountKernel` (6b-1's A/B control) | **1,559,312** | 1,567,136 | same pin, `verdict PASSED` |
+| this half | `TableCountKernel` | 1,682,460 (**+7.90%**) | 1,690,900 | same pin, `verdict PASSED` |
+
+The control was not taken on trust: 6b-1's own merge (`654c7f8`) was checked out
+and built, in a worktree and at the repo path, and reproduces the mGBA figures
+6b-1 recorded **to the cycle total** (62,249,317 / 244,812,048) — so the two
+columns are one environment and the comparison is a comparison rather than a
+recollection. Neither image decodes differently: same frames, same samples, same
+PCM pin, same verdict.
+
+**Then the two new images went to silicon** (owner's run, 2026-11-11, GBA 001 and
+GBA SP; **all four readings identical on both units to the cycle**, every screen
+`157 frames`, `PASS`, blue, `pcm_fnv=0x54C7B356621B6E15`):
+
+| image | kernel | hardware mean | hardware worst | hardware vs mGBA | hardware vs 6b-1's reading |
+|---|---|---|---|---|---|
+| this half | `rice-arm` (product) | **396,066** (37.765%) | **398,255** (37.974%) | **+0.055%** | **−0.162%** |
+| 6b-1 / pt 1 | `rice-arm` | 396,709 (37.83%) | 398,923 (38.04%) | +0.055% | the reference |
+| this half | `TableCountKernel` | **1,737,135** (165.638%) | 1,745,843 (166.468%) | **+3.25%** | **+7.09%** |
+| 6b-1 / pt 1 | `TableCountKernel` | 1,622,116 (154.67%) | (155.45%) | +4.03% | the reference |
+
+Three things come out of that, and the third is the one that changes a rule.
+
+* **The product path's small win is real, and mGBA predicted it almost exactly**
+  (Q13 was parked precisely because this leg's answer did not depend on it, and the
+  park holds): −0.1619% in mGBA, −0.1621% on the units. The shipping number
+  improves to **37.765% mean / 37.974% worst**, 2.63× headroom, 193.4 c/sample —
+  so this PR does not
+  weaken C2's decode claim; it slightly strengthens it, and the claim is now pinned
+  to an image whose hash is in this file.
+* **The instrument kernel's +7.90% is not an emulator artifact**: +7.09% on
+  silicon, ≈1.74 M c/frame, 166% of a frame. Nothing in the plan depends on the
+  default kernel being *fast* — it is the A/B control, and it was already over
+  budget — but 6b-1's recorded control readings (1,622,116 / 154.67%) are now
+  superseded as the current baseline, and the kernel's advantage read through the
+  product path becomes **4.39× on hardware** (was 4.09×) and 4.25× in mGBA (was
+  3.93×) — a ratio that moved because the *slow* leg got slower, which is exactly
+  why it is quoted per image.
+* **The emulator's per-leg gap is itself a per-image fact.** The ARM leg's gap is
+  a constant: +0.055% at 6b-1's bytes, +0.055% at these. The Thumb leg's is not:
+  +4.03% then, **+3.25%** now — it moved *down* by 0.78 pp while that same leg's
+  cycles moved *up* by 7%. So the derating rule ("mGBA numbers are derated, not
+  trusted, for anything memory-heavy") gains a half: mGBA is a good **screen** for a
+  layout shift — it got both directions right and both magnitudes to within 0.8 pp —
+  but a per-leg derate may not be inherited across images, because the layout change
+  moved the derate.
+
+**Why the bytes moved, as far as the ELF supports saying.** `nm -C` over the new
+image finds **no** symbol from `flac_lite::stream` and none matching `seek`: the
+added API is not in the ROM, and cannot be — the ROM reads a `GAFP` manifest and
+never a FLAC container. What changed is rustc's cloning of the hot bit reader. At
+the control, `BitReader::read_bits` exists as three specialised copies (432 + 464
++ 588 B), `frame::resolve_sample_rate` is 1,144 B and `residual::decode_residual_
+with` is 2,976 B; in the new image `read_bits` is two copies (424 + 576) and
+`rice_quotient` appears as a third out-of-line copy (348 B), while
+`resolve_sample_rate` falls to 222 B and `decode_residual_with` to 1,956 B.
+Summed over the symbol table that is −1,948 B against a measured `.text` delta of
+−1,936 B; alignment carries the difference. A one-file probe attributed the first
+356 B of it to the three new `Error` variants alone — with `size_of::<Error>()`
+**unchanged at 24 B / align 8 on both sides**, which is the instructive part: what
+a `Result`-returning function's ABI depends on is not only the error type's size
+but its discriminant range.
+
+**What that is worth to the plan.** The shipping path got 0.16% faster and the
+instrument kernel 7.9% slower, in mGBA, from library code that is not in either
+image — and the units said 0.16% and 7.09%, so the whole effect is silicon and not
+emulator. That is the 6a-7x finding one layer down: the leg whose time is
+instruction fetch moves on layout, and it moves by an amount the emulator prices
+slightly wrongly *and in a way that changes per image*. The rule to carry forward is
+therefore two sentences, and the hardware row above is what the first one costs to
+satisfy: (i) **cycle pins in this file are per-image facts** — any PR touching
+`bits`, `subframe`, `residual`, `frame` or `Error` owes a control build and both
+kernels' readings, as 6b-1's row did; and (ii) **an inherited per-leg mGBA derate is
+not one of the things a pin carries** — re-read the leg if the derate matters to the
+claim. Here the answer to both was "the product path is fine", which was not known
+before it was measured.
+
+**The decision about the 6b-1 stand-in: keep it, and change what it is for.**
+6b-1 wrote `scripts/gen_gafp_blob.py` as a stand-in and recorded that it owed a
+differential; 6b-2 pt 1 paid it (`gafp-pack-check` step 1: the real packer builds
+the perf clip from its own source PCM and the result is byte-identical to
+`examples/flac_integration/assets/spike_l0.gfp`). Retiring it as *the writer of
+the product asset* is therefore safe — and it is still not the right move, for a
+reason that only shows up once the equality is paid: the stand-in is no longer the
+interesting thing, but it is load-bearing under a different name. It builds the
+product blob **out of the spike track's own committed frame table**
+(`examples/flac_spike/src/assets.rs`), so it is the gate that says *the asset the
+ROM decodes is still the asset the perf spike measured*. Every cycle figure in
+6a-7x and 6b-1 — including the four rows immediately above — is a measurement of
+the ROM because of that tie, and deleting the tie would leave two committed frame
+sets (the spike's, the product's) with nothing comparing them. The packer does not
+supply it: it re-derives frames from an encode of synthesized PCM, which is a
+different path to the same bytes and cannot say the two committed sets still
+agree.
+
+So the roles are now written down where they live rather than inferred:
+**`scripts/gafp_pack.py` is the writer** — it is the thing that produces a GAFP
+from audio, it is the thing `gafp-check`'s byte-identity is checked against, and
+`scripts/pack_flac.sh` is its front-end when one is wanted.
+**`scripts/gen_gafp_blob.py` is the tie** — an encoder-free reading of the
+committed frames behind the product asset, and the generator of the ROM's pin
+constants (`src/gafp_pin.rs`). Full retirement still has a defined shape and is
+owed to a later PR, and what it would take is now on the record: commit the perf
+clip as a `.flac` (so the packer can pack it as it stands, with no encoder in the
+gate), move `gafp_pin.rs` generation onto the packer's own walk, and — the part
+that is not a refactor — replace the spike-table tie with something that still
+proves the ROM's asset and the spike's asset are one asset. Nothing in this half
+of 6b-2 needed to settle that, and pretending otherwise would have traded a
+working cross-check for a smaller script count.
+
+**Two stale records corrected in the same pass, because they were the ones a
+reader would act on.** `scripts/pack_flac.sh`'s header and its runtime message
+still announced that the GAFP format contract "is settled; the implementation is
+not" — six weeks after the packer landed and entered the gates. It remains exactly
+what it was: the unimplemented profile-driven front-end, called by nothing,
+writing nothing; what changed is the sentence a reader meets first, which now says
+where the implemented thing lives (`scripts/gafp_pack.py`, gated by
+`gafp-pack-check`) and why the wrapper was not bolted on when the packer arrived —
+asserting a stream against the measured decode path and negotiating a stream into
+it are two jobs. The Makefile's `gafp-pack-check` header used to describe
+`gen_gafp_blob.py` as a stand-in whose retirement "6b-2 makes deliberately rather
+than by drift"; it now points at the decision above.
+
+**Open axes this half leaves.** The two 6b-2 pt 1 carried (1024-sample blocks;
+packed CONSTANT/VERBATIM/escape-shaped and higher-order-LPC assets, the highest
+LPC order any real-stream table here carrying is 8), plus three the seek work
+exposed: a **variable-blocksize** stream with a seek table, where the byte-offset
+half is useful and the arithmetic half is refused — nothing here shows the
+accepted half; a nonzero first frame number is **not** a seek fixture: §9.1.5's
+MUST makes it non-conformant and says seeking there is not reliably possible, so
+it belongs to the recovery path (`Frames::anchored`), not to the table's number
+line;
+and a fixture that **edits an existing table** rather than writing a new one
+(`metaflac --delete-all-points` + `--add-seekpoint` on a copy of `s2` was probed
+and produced several placeholders — recorded as a measurement, not committed,
+because it would have rewritten a fixture five other suites read).
 
 ## Item 7 — playback: the real-time claim (C2)
 
@@ -1325,7 +1933,7 @@ they are ~43% of the frame against decode's 42.72%.
 |---|---|---|---|
 | **7-1** | **Re-measure the producer at the target rate.** The 10,512 Hz producer pass (convert / push / wait / closure) repeated at 32,768 Hz with the kernel in the decode slot. Measurement only — no new product code. | Per-stage shares on **hardware**, same-image, with the rate pass's own discipline (`closure underflows 0`, shares read relatively, the clean image's audit as the wall authority) | that C2's margin is inherited arithmetic from a different rate and a pre-kernel decoder — the ~85.6% gross and the ~8.7 ms left are estimates, not observations |
 | **7-2** | **The shipping playback path.** `agb`'s mixer/DMA, or a written argument for why the custom IRQ feeder is the shipping path. Replaces the throwaway harness the rate track has been leaning on. | Bit-exact PCM into the FIFO plus an audibility check on hardware; underruns **counted**, not eyeballed | that the throwaway feeder was load-bearing in ways nobody wrote down (the rate track's own lesson, one layer up) |
-| **7-3** | **The acceptance run.** 2048-sample frames at 32,768 Hz, FIXED-only assets (enforced by 6b-2's pack-time profile), GBA 001 **and** GBA SP, two runs each. | **Underruns = 0**, plus 7-1's stage shares on the same image | that C2 is claimed from a mean and a projection rather than from playback on a unit |
+| **7-3** | **The acceptance run.** 2048-sample frames at 32,768 Hz, FIXED-0 assets (enforced by 6b-2's pack-time profile), GBA 001 **and** GBA SP, two runs each. | **Underruns = 0**, plus 7-1's stage shares on the same image | that C2 is claimed from a mean and a projection rather than from playback on a unit |
 
 **C2 is met when 7-3 passes on both units**, and not before. "Decodes within
 budget" was already true at 42.72% and is not the claim; it is the precondition.
@@ -1514,7 +2122,13 @@ Four paragraphs, every PR, no exceptions:
   where one exists; where none exists — today that is the producer's convert/push
   stages — carry the mGBA figure with a **+7% derating** and say so in the record.
   The shortfall is per-leg and does not cancel, so one arm's mGBA number may not be
-  scaled onto another arm either.
+  scaled onto another arm either. **6b-2 pt 2 re-read both legs at new bytes and
+  the gap itself moved**: the kernel leg is +0.055% on hardware at 6b-1's image and
+  +0.055% at pt 2's (a constant), while the Thumb default-kernel leg was +4.03% and
+  is now +3.25% — down 0.78 pp on the same leg whose cycles rose 7%. So a per-leg
+  derate is a property of an image, not of a leg: mGBA is a reliable *screen* for a
+  layout change (it got both directions right, and both magnitudes to within
+  0.8 pp), but a derate is not inherited across images.
 - **Criteria before attribution.** C1 and C2 are the definition of done; a
   measurement that does not decide one of them waits behind the work that does. This
   is why the data-read probe is parked (Q13) and why 6a-8 stays untriggered.

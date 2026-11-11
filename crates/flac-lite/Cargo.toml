@@ -7,15 +7,11 @@ license = "MIT"
 keywords = ["flac", "audio", "no_std", "decoder", "bare-metal"]
 categories = ["multimedia::audio", "no-std"]
 
-# STATE (2026-11-06): the Phase 1 decode path is complete through
-# frame::decode_frame, and the per-frame loop over a borrowed frame index
-# landed as src/driver.rs (narrow copy of the spike's proven driver, split
-# PR-ladder item 4). Split-ladder item 5 is open: the Rice kernel seam
-# (`residual::RiceKernel`) landed in PR 2, the window-domain bridge on `bits`
-# landed inert in PR 1, and the second kernel — `src/rice_hybrid.rs`, the
-# portable hybrid twin — landed behind its own feature in PR 3, unwired and not
-# the default. todo!() remains for the manifest-driven decoder facade and
-# format::Manifest. Authoritative state: src/lib.rs crate docs.
+# STATE (2026-11-11): the Phase 1 decode path is complete through
+# frame::decode_frame; `driver` is the instrument's per-frame loop; `format::Manifest`,
+# the manifest facade and `scan` landed with 6b-1; the real GAFP packer,
+# `stream::SeekTable`, `FixedBlockNumbering` and `Frames::anchored` landed with
+# 6b-2. No `todo!()` remains in the shipped path. Authoritative state: src/lib.rs.
 # Roadmap: ../../FLAC.md "Phased plan" + "split proposal".
 
 [dependencies]
@@ -79,7 +75,7 @@ strict-profile = []
 crc-check = []
 # The frame walk (`scan::Frames`) and the recovery scan (`scan::next_frame_start`).
 # Off by default, for the same reason the two verification features are: it is
-# code a GBA ROM should not carry until item 6 rewires the facade onto it. It
+# code a GBA ROM should carry only when a product path opts in (6b-1 did). It
 # changes nothing about what is *accepted* or *found* — it decides only whether
 # the walk exists in a build.
 #
@@ -94,8 +90,8 @@ crc-check = []
 # measurements in FLAC.md already record (E2a/E6 name the same phenomenon); here it
 # is visible without an emulator. `.rodata` (the embedded samples), `.iwram` and
 # `.ewram` do not change size either way, though `.rodata`'s contents move with the
-# code. So the gate defers that cost to item 6 — where the E-anchor baselines get
-# re-recorded anyway — it does not remove it.
+# code. The gate leaves that cost to the image that opts in, where the E-anchor
+# baselines are re-recorded anyway; it does not remove it.
 scan = []
 # The portable hybrid Rice kernel (`rice_hybrid::HybridRiceKernel`) — split-
 # ladder item 5 PR 3's second `residual::RiceKernel` implementor. Off by
@@ -153,6 +149,18 @@ required-features = ["scan"]
 # facade is a shell over the walk.
 [[test]]
 name = "decoder_manifest_walk"
+required-features = ["scan"]
+
+# [6b-2] The packer's witness: the GAFP blobs and the facts table that
+# `scripts/gafp_pack.py` writes (via `scripts/gen_gafp_fixtures.py`), read back
+# through `Manifest`, `scan::Frames` and `Decoder`. Needs `scan` for the same
+# reason the two above do — the module it walks is not in a default build — and
+# it is the suite that makes the committed `tests/gfp/*.gfp` fixtures mean
+# something rather than merely exist. `make flac-test-scan` runs it;
+# `make gafp-pack-check` is what pins those fixtures to the packer that wrote
+# them.
+[[test]]
+name = "gafp_asset_facts"
 required-features = ["scan"]
 
 # [6b-1] `driver` is the instrument's loop, gated so the default library build

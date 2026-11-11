@@ -2,7 +2,7 @@
 //! of real `libFLAC` files.
 //!
 //! Table: `tests/stream_vectors.txt` (regenerate:
-//! `scripts/gen_stream_vectors.sh`). Five committed fixtures under
+//! `scripts/gen_stream_vectors.sh`). Six committed fixtures under
 //! `tests/fixtures/`, each byte-for-byte what `flac` 1.5.0 wrote. Every
 //! expectation in that table comes from `metaflac --list` — the reference
 //! tool's own block list and field values — cross-checked at generation time
@@ -21,7 +21,10 @@
 //!   * `s2_seekable_96k_stereo` — four blocks (`STREAMINFO`, `SEEKTABLE`,
 //!     `VORBIS_COMMENT`, `PADDING`), every real block type the encoder emits: a
 //!     block walk that must skip by length rather than interpret, and a
-//!     `frame_data_offset` 176 bytes in;
+//!     `frame_data_offset` 176 bytes in. Its table is the smallest real §8.5 one
+//!     there is — a single point, for sample 0, with a stream offset of 0 — which
+//!     is what makes the base of those offsets visible: the point carries 0 while
+//!     the frame it names is 176 bytes into the file;
 //!   * `s3_wide_48001hz_b3000` — a real 80-bit frame header: the first frame of
 //!     a real stream whose width is outside this packer's 48..=72-bit profile,
 //!     which is why `frame`'s old `debug_assert!((48..=72))` had to become
@@ -32,11 +35,26 @@
 //!   * `s5_unseekable_total_unknown` — the same audio fed as raw PCM through a
 //!     pipe: `total_samples`, both frame sizes and the MD5 are all "not known",
 //!     and the frame count is still 10. Item 4b's end-of-stream rule cannot be
-//!     "count frames from `total_samples`", and this is the fixture that says so.
+//!     "count frames from `total_samples`", and this is the fixture that says so;
+//!   * `s6_seekpoints_8k_mono` — the multi-point §8.5 table `metaflac
+//!     --add-seekpoint` writes: eight entries, seven real and one placeholder,
+//!     requested out of order and sorted by the tool, one request snapped down to
+//!     the containing frame boundary, one beyond the end dropped, and one point
+//!     naming the **short last frame** of a fixed-blocksize stream (368 samples
+//!     where `max_blocksize` says 512). A seek table with one point tests the
+//!     container; a table whose points land on the middle and the end of the
+//!     audio is the only thing in this repo that can say whether a reader found
+//!     the right *frame* — see
+//!     `every_seek_table_is_read_as_the_tools_and_the_frame_walk_render_it`
+//!     here, and
+//!     `a_seek_point_starts_a_walk_that_finishes_the_stream_at_the_right_sample`
+//!     in item 4b's suite, where the same points drive real walks.
 //!
 //! The module-level unit tests in `src/stream.rs` cover the *rules* no encoder
 //! here produces (a chain that never sets the last flag, a duplicate
-//! `STREAMINFO`, type 127, a 120-bit synthetic header). This file covers the
+//! `STREAMINFO`, type 127, a 120-bit synthetic header, and the seek-table shapes
+//! the reference tools accept and this crate declines: a second table, a
+//! placeholder among the real points, points out of order). This file covers the
 //! bytes a real encoder does produce. Both are needed: one is a rule the format
 //! states, the other is a rule the format actually ships.
 //!
@@ -75,6 +93,7 @@ fn fixture_bytes(name: &str) -> &'static [u8] {
         "s5_unseekable_total_unknown.flac" => {
             include_bytes!("fixtures/s5_unseekable_total_unknown.flac")
         }
+        "s6_seekpoints_8k_mono.flac" => include_bytes!("fixtures/s6_seekpoints_8k_mono.flac"),
         other => panic!(
             "the table names a fixture this test does not embed: {other}\n\
              add it to fixture_bytes() (and, if it witnesses a new rule, add an \
@@ -260,8 +279,10 @@ fn the_stream_layer_agrees_with_the_reference_tool_on_every_fixture() {
     let vectors = load_vectors();
     assert_eq!(
         vectors.len(),
-        5,
-        "the table must cover the five fixtures the generator is defined to produce"
+        6,
+        "the table must cover the six fixtures the generator is defined to \
+         produce — and a fixture the table names that this suite does not read \
+         is a fixture whose facts are not being checked"
     );
     for v in &vectors {
         let bytes = v.fixture();
@@ -1341,5 +1362,384 @@ fn a_frame_number_in_a_longer_form_is_refused_here_and_accepted_there() {
         "true",
         "{}: the summary row must say what the per-form rows say",
         v.label
+    );
+}
+
+// ------------------------------------------------------------- the seek table
+
+/// A row of space-separated numbers, read as the list it is. Rows whose length
+/// carries meaning (one entry per frame, one per real seek point) have their
+/// length checked where they are read, so a short row fails at the row.
+fn nums(v: &Vector, key: &str) -> Vec<u64> {
+    v.raw(key)
+        .split_whitespace()
+        .map(|w| {
+            w.parse()
+                .unwrap_or_else(|e| panic!("{}: {key:?} row has a non-number {w:?}: {e}", v.label))
+        })
+        .collect()
+}
+
+/// The frame-position rows, with the length the frame count says they have.
+fn per_frame(v: &Vector, key: &str) -> Vec<u64> {
+    let want = v.num("frame_count") as usize;
+    let got = nums(v, key);
+    assert_eq!(
+        got.len(),
+        want,
+        "{}: {key:?} has {} entries where the stream has {want} frames",
+        v.label,
+        got.len()
+    );
+    got
+}
+
+/// §8.5 / §8.5.1 read against everything the generator already holds twice: its
+/// own fixed-stride parse of the block payload, and `metaflac --list`'s
+/// `point N: sample_number=…, stream_offset=…, frame_samples=…` (which renders a
+/// placeholder as the bare word `PLACEHOLDER` and prints none of its fields).
+/// And against the frame filter's `frame_offsets` / `frame_blocksizes` rows,
+/// which came from parsing every frame header in the region — so a point's
+/// claims can be compared with where the frames actually are.
+///
+/// Three of a seek table's facts are not stored in it and have to be derived:
+/// how many points there are (from the block's length, because §8.5.1's layout
+/// is a fixed 18 bytes and that is the only thing that makes a seek table
+/// enumerable), which frame a point names (arithmetic on the sample number,
+/// sound only where the block size is fixed), and which absolute byte its offset
+/// points at (relative to the first byte after the metadata — checked here, not
+/// assumed: point 0 carries 0 while the first frame is hundreds of bytes in).
+#[test]
+fn every_seek_table_is_read_as_the_tools_and_the_frame_walk_render_it() {
+    let mut with_table = 0usize;
+    for v in load_vectors() {
+        // Whether this stream has a table must be the same answer from two
+        // places before anything is read from it: the block-list rows, and
+        // whether the generator wrote the seek rows at all.
+        let has_rows = v.rows.contains_key("seektable_points_total");
+        let listed = v
+            .blocks
+            .iter()
+            .any(|b| b.block_type == stream::TYPE_SEEKTABLE);
+        assert_eq!(
+            has_rows, listed,
+            "{}: the block list and the seek rows disagree about whether this \
+             stream has a seek table",
+            v.label
+        );
+        if !has_rows {
+            assert!(
+                stream::seek_table(v.fixture())
+                    .expect("a valid chain")
+                    .is_none(),
+                "{}: the block list has no SEEKTABLE and the chain walk found \
+                 one anyway — a type this suite does not know is being mistaken \
+                 for one",
+                v.label
+            );
+            continue;
+        }
+        with_table += 1;
+        let bytes = v.fixture();
+        let facts = parsed(&v);
+
+        // The block, from the chain walk's own view of the real header bytes,
+        // against the block-list rows that metaflac's output produced.
+        let want_block = v
+            .blocks
+            .iter()
+            .find(|b| b.block_type == stream::TYPE_SEEKTABLE)
+            .expect("checked above");
+        let mut walk = Blocks::new(bytes).expect("a valid stream");
+        let mut found: Vec<stream::MetadataBlock> = Vec::new();
+        while let Some(b) = walk.next_block().expect("a valid chain") {
+            if b.block_type == stream::TYPE_SEEKTABLE {
+                found.push(b);
+            }
+        }
+        assert_eq!(
+            found.len(),
+            1,
+            "{}: the chain walk found {} SEEKTABLE blocks where the block list \
+             has one — and a second one is a refusal this crate makes on \
+             purpose, so it must not silently pick one",
+            v.label,
+            found.len()
+        );
+        let block = found[0];
+        assert_eq!(
+            block.offset as u64,
+            v.num("seektable_block_offset"),
+            "{}: the seek table is not where the rows say it is",
+            v.label
+        );
+        assert_eq!(
+            block.length as u64,
+            v.num("seektable_length"),
+            "{}: the seek table's payload length",
+            v.label
+        );
+        assert_eq!(block.length, want_block.length, "block length row");
+
+        // The convenience entry point is allowed no rule of its own: the
+        // payload it hands back is the block's payload, byte for byte.
+        let table = stream::seek_table(bytes)
+            .expect("a valid stream's table")
+            .expect("this fixture has one");
+        let payload = block.payload(bytes).expect("the block is inside the file");
+        assert_eq!(table.payload(), payload, "not the block's payload");
+        assert_eq!(
+            table.payload().len(),
+            block.length,
+            "the payload includes something beyond the block's bytes"
+        );
+
+        // The count, from the payload's length alone: there is no count field.
+        let total = v.num("seektable_points_total") as usize;
+        assert_eq!(table.len(), total, "entry count implied by the length");
+        assert_eq!(
+            table.payload().len(),
+            stream::SEEKPOINT_LEN * total,
+            "{}: {} points at {} bytes each is not the payload this stream has",
+            v.label,
+            total,
+            stream::SEEKPOINT_LEN
+        );
+        assert_eq!(!table.is_empty(), total > 0, "is_empty()");
+        assert_eq!(
+            table.point(total),
+            None,
+            "indexing one past the last point is bounded"
+        );
+
+        // The points, in table order. These lists are the generator's parse of
+        // the block payload and metaflac's rendering of it — generation refuses
+        // to write the table unless those two agree, field for field, for every
+        // real point.
+        let sample_numbers = nums(&v, "seek_points_sample_numbers");
+        let stream_offsets = nums(&v, "seek_points_stream_offsets");
+        let point_frame_samples = nums(&v, "seek_points_frame_samples");
+        let want_frame_number = nums(&v, "seek_points_frame_indices");
+        let want_absolute = nums(&v, "seek_points_frame_offsets");
+        let frame_offsets = per_frame(&v, "frame_offsets");
+        let frame_sizes = per_frame(&v, "frame_blocksizes");
+        let n_real = v.num("seektable_points_real") as usize;
+        let n_placeholder = v.num("seektable_points_placeholder") as usize;
+        for list in [
+            &sample_numbers,
+            &stream_offsets,
+            &point_frame_samples,
+            &want_frame_number,
+            &want_absolute,
+        ] {
+            assert_eq!(
+                list.len(),
+                n_real,
+                "{}: a per-point row does not have one entry per real point",
+                v.label
+            );
+        }
+        assert_eq!(
+            n_real + n_placeholder,
+            total,
+            "{}: real points plus placeholders is not the point count",
+            v.label
+        );
+        let placeholders: Vec<usize> = if v.raw("seek_placeholder_indices") == "none" {
+            Vec::new()
+        } else {
+            nums(&v, "seek_placeholder_indices")
+                .into_iter()
+                .map(|i| i as usize)
+                .collect()
+        };
+        assert_eq!(
+            placeholders.len(),
+            n_placeholder,
+            "{}: the placeholder index list is not one entry per placeholder — \
+             metaflac prints a placeholder as a bare word and hides every field \
+             it has, so this list is the only rendering of them there is",
+            v.label
+        );
+
+        let mut real = 0usize;
+        let mut placeholders_seen = 0usize;
+        for i in 0..table.len() {
+            let p = table.point(i).expect("an index inside the table");
+            if p.is_placeholder() {
+                placeholders_seen += 1;
+                assert!(
+                    placeholders.contains(&i),
+                    "{}: entry {i} is a placeholder by its sample number, but \
+                     the placeholder list the tools produced does not name it",
+                    v.label
+                );
+                assert_eq!(
+                    p.first_sample,
+                    stream::SEEKPOINT_PLACEHOLDER,
+                    "a placeholder is a placeholder by this field alone"
+                );
+                if v.raw("seek_placeholder_other_fields_zero") == "true" {
+                    assert_eq!(
+                        (p.frame_offset, u64::from(p.frame_samples)),
+                        (0, 0),
+                        "{}: the row says the reference writer zeroed a \
+                         placeholder's other fields; the bytes say otherwise. \
+                         Table 7 calls those fields undefined, and the crate \
+                         does not read them — this row is a record of what the \
+                         tool wrote, not a rule",
+                        v.label
+                    );
+                }
+                assert_eq!(
+                    p.frame_number(&facts.info),
+                    None,
+                    "{}: a placeholder names no sample, so it names no frame",
+                    v.label
+                );
+                continue;
+            }
+            assert!(
+                !placeholders.contains(&i),
+                "{}: entry {i} is listed as a placeholder but is not one",
+                v.label
+            );
+            // Placeholders have to come after every real point (see the parser's
+            // docs), so the n-th real point is the n-th entry. Reading that back
+            // is what pins the parser's ordering refusal against a real table.
+            assert_eq!(
+                i,
+                real,
+                "{}: entry {i} is real while {} earlier entries were \
+                 placeholders — a table whose placeholders sit among its real \
+                 points is one this crate refuses",
+                v.label,
+                i - real
+            );
+            let j = real;
+            assert_eq!(
+                p.first_sample, sample_numbers[j],
+                "{}: point {i}'s sample number",
+                v.label
+            );
+            assert_eq!(
+                p.frame_offset, stream_offsets[j],
+                "{}: point {i}'s stream offset",
+                v.label
+            );
+            assert_eq!(
+                u64::from(p.frame_samples),
+                point_frame_samples[j],
+                "{}: point {i}'s frame sample count",
+                v.label
+            );
+
+            // Which frame the point names: the number line's frame number,
+            // against the generator's count of frame starts. The row key keeps
+            // the generator's historical `frame_indices` name; the value is the
+            // coded frame number RFC 9639 §9.1.5 defines, and for these
+            // conformant streams it equals the frame-list index.
+            let frame_number = p.frame_number(&facts.info).expect(
+                "both fixtures with a table state a total and a fixed \
+                         block size, so a sample number has a frame number",
+            );
+            assert_eq!(
+                frame_number, want_frame_number[j],
+                "{}: point {i} (sample {}) names frame {frame_number}; counting \
+                 frame starts found {}",
+                v.label, p.first_sample, want_frame_number[j]
+            );
+            assert!(
+                frame_number < frame_sizes.len() as u64,
+                "{}: point {i} names frame {frame_number} of {} frames",
+                v.label,
+                frame_sizes.len()
+            );
+            assert_eq!(
+                u64::from(p.frame_samples),
+                frame_sizes[frame_number as usize],
+                "{}: point {i} claims {} samples and the frame it names carries \
+                 {} — §8.5.1's frame_samples is not decoration, and this is the \
+                 fixture where a short final frame would be where a decoder that \
+                 inferred the length from the declared maximum went wrong",
+                v.label,
+                p.frame_samples,
+                frame_sizes[frame_number as usize]
+            );
+
+            // The base: the table's offsets count from the first byte after the
+            // metadata. `frame_offsets` is absolute, from the frame filter.
+            let absolute = facts.frame_data_offset as u64 + p.frame_offset;
+            assert_eq!(
+                absolute, want_absolute[j],
+                "{}: point {i}'s offset resolved to {absolute}, the table says {}",
+                v.label, want_absolute[j]
+            );
+            assert_eq!(
+                absolute, frame_offsets[frame_number as usize],
+                "{}: the byte this point aims at is not where the frame it \
+                 names begins",
+                v.label
+            );
+            assert_eq!(
+                bytes[absolute as usize] & 0xFE,
+                0xFE,
+                "{}: the byte a real point aims at does not begin with a frame \
+                 sync code (§8.1)",
+                v.label
+            );
+            // And what the wrong reading would do. Taken as a file offset, this
+            // entry would point at a byte that is not any frame's start in this
+            // stream — wrong by the whole container, not by one byte. (If that
+            // ever stopped being true of a fixture, this leg would stop being
+            // able to tell the two readings apart, and it says so.)
+            assert!(
+                !frame_offsets.contains(&p.frame_offset),
+                "{}: point {i}'s offset read from the start of the file ({}) \
+                 would have named a frame start",
+                v.label,
+                p.frame_offset
+            );
+            real += 1;
+        }
+        assert_eq!(real, n_real, "{}: real point count", v.label);
+        assert_eq!(placeholders_seen, n_placeholder, "placeholder count");
+
+        // A lookup, for every sample the table's own points bracket: the last
+        // real point at or before it — not the first one after, and not a
+        // placeholder. The probe set comes from the rows.
+        let declared = v.num("streaminfo_total_samples");
+        for (j, &start) in sample_numbers.iter().enumerate() {
+            let stop = sample_numbers
+                .get(j + 1)
+                .copied()
+                .unwrap_or(declared.max(start + 1));
+            for probe in [start, start + 1, stop - 1, declared - 1] {
+                if probe < start || probe >= stop || probe >= declared {
+                    continue;
+                }
+                let (at, p) = table
+                    .find(probe)
+                    .unwrap_or_else(|| panic!("{}: no anchor for sample {probe}", v.label));
+                assert_eq!(
+                    at, j,
+                    "{}: a seek to sample {probe} answered entry {at}, which is \
+                     not the last one at or before it",
+                    v.label
+                );
+                assert_eq!(p.first_sample, start, "the anchor's own sample");
+                assert!(
+                    !p.is_placeholder(),
+                    "{}: a lookup returned a placeholder, which names no sample",
+                    v.label
+                );
+            }
+        }
+    }
+    assert!(
+        with_table > 0,
+        "no fixture in the table has a seek table — the §8.5 rows this test \
+         reads would be gone from the table, and a section with no witness is \
+         not a section that was built"
     );
 }

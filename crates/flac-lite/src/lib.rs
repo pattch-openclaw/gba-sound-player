@@ -88,11 +88,12 @@
 //! a real stream broke — is replaced by derived bounds
 //! ([`frame::MIN_HEADER_BITS`], [`frame::MAX_ACCEPTED_HEADER_BITS`]), with 48-,
 //! 80- and 120-bit headers witnessed end to end. Witness: `stream`'s unit tests
-//! plus `tests/stream_metadata_layout.rs` over five real libFLAC fixtures in
+//! plus `tests/stream_metadata_layout.rs` over six real libFLAC fixtures in
 //! `tests/fixtures/` and the generated table `tests/stream_vectors.txt`
 //! (`scripts/gen_stream_vectors.sh`): a two-block container, a four-block
-//! seektable+padding container, a real 80-bit frame header, a real 24-bit
-//! stream (refused as `UnsupportedSampleSize`), and an unseekable encode that
+//! seektable+padding container, a real multi-point seek table, a real 80-bit
+//! frame header, a real 24-bit stream (refused as `UnsupportedSampleSize`), and
+//! an unseekable encode that
 //! declares no total sample count, no frame sizes and no MD5 — which is why
 //! `stream::StreamInfo::exact_frame_count` is defined only for the
 //! fixed-blocksize/known-total case. The metadata layer also confirms what the
@@ -100,10 +101,15 @@
 //! 9639 §8.1 defines a metadata block as
 //! a 4-byte header plus exactly `length` bytes, with no CRC trailer, and the
 //! format's only CRCs are the frame header (§9.1.8) and frame footer (§9.3)
-//! — both implemented above. What still `todo!()`: the
-//! `decoder` facade — whose frame source is a `Manifest`, so it will be a
-//! thin shell over `driver`, not a second loop — and `format::Manifest`;
-//! `format::Blocksize::samples` and `EncodeProfile::validate`.
+//! — both implemented above. What has landed since that sentence was written:
+//! `format::Manifest`, `format::Blocksize::samples`, `EncodeProfile::validate`,
+//! and the `decoder` facade — item 6b-1 (2026-11-10) made that facade a thin
+//! shell over `scan` rather than over `driver`, exactly as predicted here, and it
+//! added no third frame loop. Item 6b-2 (2026-11-11) made the container real from
+//! the packer's side (`scripts/gafp_pack.py`), then landed `stream::SeekTable`,
+//! the fixed-block number line (`FixedBlockNumbering`) and `Frames::anchored`.
+//! Seeking is not on the GBA product path, which reads a manifest and has no
+//! random access; the stream-side code is a separate, tested seam.
 //! Item 4's **second half — the frame walk — landed as the `scan` module and its
 //! feature of the same name**, and it
 //! answers the two questions 4a left open: how a reader gets from one frame to
@@ -141,7 +147,7 @@
 //! the bytes is the end of the stream** — §6's "last byte of the last frame, and
 //! thus of the whole stream" is the only end every FLAC stream has, while
 //! everything else the format offers (§8.2's `total_samples`, the fixed-blocksize
-//! frame count 4a derives, §8.2's MD5, §8.3's seek points, §8.2's frame-size
+//! frame count 4a derives, §8.2's MD5, §8.5's seek points, §8.2's frame-size
 //! fields) is a cross-check or does not exist for this stream; a walk reads to
 //! the end of its region and then *checks* the walk against what the stream
 //! declared, which is one code path for seekable and unseekable streams alike.
@@ -162,13 +168,16 @@
 //! for a range whose position is known, and enforced **before any sample is
 //! written**. Witness: `scan`'s unit tests, which claim only the walk's state
 //! machine and caller contract over hand-cut regions, plus
-//! `tests/scan_frame_walk_layout.rs` over the same five fixtures and the extended
+//! `tests/scan_frame_walk_layout.rs` over the same six fixtures and the extended
 //! `tests/stream_vectors.txt` (`frame_offsets`, `frame_bytes`, `frame_header_bits`,
 //! `frame_blocksizes`, `frame_footer_gaps_bits`, `footer_padding_frames` and the
 //! four `footer_*_positions_*` counts, `frame_numbers`,
 //! `frame_sample_size_codes`, `frame_region_len`,
 //! `frame_exact_count_from_declarations`, the three `scan_frame_starts_*` counts,
-//! and the reference-decoder PCM rows `pcm_md5` / `pcm_fnv1a64` for the 16-bit
+//! the `seek_points_*` rows — a real §8.5 table's points, the frame each one
+//! names, and the reference decoder's PCM from that sample to the end of the file,
+//! which is what a walk started from a seek point has to reproduce — and the
+//! reference-decoder PCM rows `pcm_md5` / `pcm_fnv1a64` for the 16-bit
 //! fixtures).
 //! **The depth boundary applies to locating frames exactly as much as to decoding
 //! them**, and that is stated rather than hidden: `s4` (a valid 24-bit encode)
@@ -186,23 +195,25 @@
 //! (`make flac-test-scan` runs its suite; `make flac-portable-check` is the only
 //! gate that compiles the walk for a non-thumbv4t target). Two reasons, both
 //! measured rather than assumed. (1) A GBA ROM should not carry the walk until
-//! item 6 rewires the facade onto it: with `scan` off, the E instrument's sections
+//! the product path wants it: with `scan` off, the E instrument's sections
 //! are byte-identical to the 4a build; with it on, `.text` is **+3,120 B** while
 //! **no `scan` symbol appears in the image at all** — the walk links for nothing,
 //! but its presence in the rlib changes how LLVM inlines the decode path it shares
 //! a codegen unit with (`crates/flac-lite/Cargo.toml` and
-//! [`../../../FLAC.md`](../../../../FLAC.md) carry the numbers). So the gate defers
-//! that cost to the change that will re-anchor the instrument anyway; it does not
-//! remove it. (2) Nothing in `scan` is a *profile* layer, so nothing in it belongs
-//! in a build that has no use for a walk: it neither defines nor relaxes a profile,
+//! [`../../../FLAC.md`](../../../../FLAC.md) carry the numbers). The product ROM now
+//! opts in (6b-1) and carries that measured cost; the gate made it a feature
+//! decision rather than removing it. (2) Nothing in `scan` is a *profile* layer,
+//! so nothing in it belongs in a build that has no use for a walk: it neither
+//! defines nor relaxes a profile,
 //! and every frame-shape refusal it reports arrives through `frame::parse` — the
 //! `s4` refusal above is that check, not a scan one. The walk adds no block-size or
 //! sample-rate claim of its own to enforce, which is why `s3`'s 3000-sample blocks
 //! (a block size that is not a power of two, and a declared maximum larger than the
 //! 1801 samples its last frame actually carries) walk and decode bit-exactly
 //! instead of being refused as off-profile. A packer profile is asserted where a
-//! manifest pins one ([`format::Manifest`], [`format::EncodeProfile`]) — item 6's
-//! seam, which is also where the profile-anchored measurements get re-pinned.
+//! manifest pins one ([`format::Manifest`], [`format::EncodeProfile`]) — the
+//! product seam opened by 6b-1/6b-2, which is also where the profile-anchored
+//! measurements get re-pinned.
 //! the module layout, types, and signatures are the contract the
 //! implementation fills in (FLAC.md → phased plan, step 4 onward).
 //! Design rationale and the decision to write this at all live in
@@ -229,21 +240,30 @@
 //! ## Decode pipeline
 //!
 //! ```text
-//! frame source          borrowed decode inputs. Today: driver::FrameSource
-//!                       (frame index + region + stream defaults). The GAFP
-//!                       manifest and the stream-scan cursor are *other*
-//!                       sources for the same loop, not new loops.
+//! frame source          borrowed decode inputs. There are two, and which one a
+//!                       build links is a feature decision:
+//!                         · `format::Manifest` + `scan::Frames` — the product
+//!                           path, behind `scan` (item 6b-1). No index in front
+//!                           of the frames: each frame ends itself.
+//!                         · `driver::FrameSource` (frame index + region +
+//!                           stream defaults) — behind `instrument`, the
+//!                           measurement path, kept because every E-series cycle
+//!                           anchor is attributable to that file's text.
+//!                       Two *sources for the same loop*, not two loops.
 //!   └─ driver           per-frame loop: index offset → fresh cursor → frame.
-//!                       `decoder::Decoder` is the manifest-shaped facade over
-//!                       this — still scaffold (Phase 2 step 6).
+//!                       `decoder::Decoder` is the manifest-shaped facade — it
+//!                       landed on `scan` (6b-1), not here, and there is no
+//!                       third loop anywhere in the crate.
 //!        └─ frame       frame header → N subframes
 //!             ├─ subframe CONSTANT | VERBATIM | FIXED(0..4) | LPC(<=32)
 //!             │    └─ residual  partitioned Rice | Rice2 | escape
 //!             └─ stereo   mid/side, left/side, right/side  (stereo only)
 //!
-//! scan (item 4b — a *second* frame source, with no index; it decodes through
+//! scan (item 4b — the second frame source, with no index; it decodes through
 //!   the same layers below and reads the file level through stream). Behind the
-//!   `scan` feature, OFF by default: nothing here links it until item 6 does.
+//!   `scan` feature, OFF by default *in this crate*: the walk's cost is measured
+//!   (+3,120 B of `.text`), so the images that want it opt in and the ones that
+//!   do not are not made to carry it.
 //!   └─ scan             frame walk: one frame's own fields end it (bit cursor,
 //!                       `frame_bytes` witnessed per frame against the generated
 //!                       table), and the end of the region is the end of the
@@ -304,8 +324,24 @@
 // Everything else still fails the build.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-// SCAFFOLD-ONLY: silence dead-code/unused noise while bodies are `todo!()`.
-// REMOVE this allow once implementations land.
+// Still load-bearing, and now named rather than assumed: probed 2026-11-11 by
+// deleting this attribute and building every gated feature combination, which
+// added five warnings, each one a cfg-conditional name whose other arm is what a
+// given build compiles — `bits::peek_at`'s `end` binding, the `crc8_bit`
+// position in the frame-header parse (read only by the `crc-check` arm), the
+// `order_u8` pattern binding in `subframe` (used only by the width arm that is
+// compiled out), `subframe::integrate_fixed` (live under `--no-default-features`
+// and under `cfg(test)`, dead in the default i32-integrator build), and a
+// test-local `pos` in `bits`. Note the scope this attribute does *not* have: an
+// integration test is its own crate, so a crate-level allow never covered
+// `tests/`, and one unused variable there (`lens`, in
+// `tests/scan_frame_walk_layout.rs`) already shows up in three arms of
+// `make flac-gates` today. None of the six is a design problem. What *is* a cost
+// is that this attribute is crate-wide, so it silences genuine dead code as
+// well: C1's closure pass gives each item its own `cfg`, fixes that test
+// variable, and deletes this line. That pass edits source, so it owes its own
+// control build and section table; 6b-2's packer work touched no Rust in the
+// shipped path, so this stopped at measuring rather than fixing.
 #![allow(dead_code, unused_variables)]
 
 pub mod bits;
@@ -333,8 +369,9 @@ pub mod residual;
 // deferral: the on-target cycle reading the pre-registered flip rule was gated on
 // came back slower (+42.6 / +42.7 cycles per decoded sample, +9.71% / +2.64% mean
 // per frame, 314/314 frames), so the rule's "does not flip" arm is the one that
-// applies and this module stays the portable alternative item 6 lifts and rewrites
-// in asm. What the feature decides is only whether a build *carries* it: a measured
+// applies and this module stays the portable alternative; the ARM realization
+// would have to supersede it, and the measured flip declined. What the feature
+// decides is only whether a build *carries* it: a measured
 // +2,984 B on the calibration instrument with the feature on and **no hybrid
 // symbol in the image at all** — the same second-implementor effect 4b recorded
 // for the walk, so the reason for the gate and its measured cost live in
@@ -427,6 +464,60 @@ pub enum Error {
     /// streaminfo metadata block per FLAC stream"), and the reference decoder's
     /// own words are "more than one STREAMINFO found".
     DuplicateStreamInfo,
+    /// A §8.5 seek table whose payload implies no table: its length is not a
+    /// whole number of 18-byte seek points, against §8.5's "the number of seek
+    /// points is implied by the size described in the metadata block header,
+    /// i.e., equal to size / 18". This is the one seek-table shape the format
+    /// has no reading for, and the one the reference tools refuse in the same
+    /// words — measured on a 19-byte table: `metaflac` "ERROR: reading
+    /// metadata, status = \"FLAC__METADATA_CHAIN_STATUS_BAD_METADATA\"", exit 1;
+    /// `flac -t` "ERROR while decoding metadata", exit 1. A *zero*-length table
+    /// is not this error (§8.5's Table 6 says "zero or more seek points"), and
+    /// neither is any other odd byte count the tools might carry: the multiple
+    /// of 18 is the whole rule.
+    SeekTableLength,
+    /// A §8.5 seek table whose entries are not a usable list: real points not
+    /// strictly ascending by sample number (§8.5.1: points "MUST be sorted in
+    /// ascending order by sample number" and "MUST be unique by sample number,
+    /// with the exception of placeholder points" — one check covers both), or a
+    /// real point after a placeholder (§8.5.1: "there MAY be any number of
+    /// placeholder points, but they MUST all occur at the end of the table").
+    /// `at` is the entry index where the rule first breaks, because the entry
+    /// *is* the diagnosis: a caller with a table half of which is usable can say
+    /// which half. No reference tool produces this shape — measured, an
+    /// unsorted, duplicated, out-of-range or not-a-frame-start table passes
+    /// `flac -t` and `metaflac --list` without a word, because libFLAC's decoder
+    /// consults the table only when asked to seek — so this is a refusal this
+    /// crate makes *because* it reads the table, and the measurements behind it
+    /// are recorded in FLAC.md's split-proposal entry.
+    SeekTableOrder {
+        /// Index of the entry that broke the rule.
+        at: usize,
+    },
+    /// A §8.5 seek point whose byte offset does not lie inside the stream's frame
+    /// region: it is at or past the end of the bytes after the last metadata
+    /// block. The payload alone cannot expose this — a seek table's offsets are
+    /// relative to the first frame byte, and that base is a property of the
+    /// container, not the block — so [`stream::SeekTable::parse`] accepts the
+    /// table and [`stream::seek_table`] applies this check once it knows where
+    /// the frames begin. libFLAC's decoder only consults a table when asked to
+    /// seek, so the metadata tools are not the place this can be caught; this
+    /// crate uses the offset, so a point that cannot name a byte in the frame
+    /// region is refused before a caller can slice past the end.
+    SeekTableOffset {
+        /// Index of the entry whose offset is outside the region.
+        at: usize,
+    },
+    /// More than one §8.5 seek table: "There MUST NOT be more than one seek
+    /// table metadata block in a stream". Unlike §8.2's single-streaminfo rule,
+    /// the reference chain validator does NOT enforce this one — measured, a file
+    /// with a second, byte-identical type 3 block passes `flac -t` at exit 0 and
+    /// `metaflac --list` prints both tables — so this refusal joins the ordering
+    /// refusals above as a rule this crate makes because it *uses* the table
+    /// rather than one the reference tools make. (The same asymmetry as
+    /// duplicate VORBIS_COMMENT and PADDING blocks, which the tools also accept;
+    /// §8.2's streaminfo rule is the only block-count rule they enforce.)
+    DuplicateSeekTable,
 }
 
 /// Crate-local result alias; avoids importing `std::result` anywhere.

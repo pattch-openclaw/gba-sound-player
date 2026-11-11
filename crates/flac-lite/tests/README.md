@@ -20,18 +20,25 @@ tautology; these are not.
 | `subframe_body_vectors.txt` | subframe bodies per type (CONSTANT/VERBATIM/FIXED/LPC + wasted bits) | same script → `frame_vectors.py emit_bodies` | `flac` 1.5.0 + independent Bits walk + `flac -d` PCM |
 | `stream_vectors.txt` | per-file: the §8.1 block chain, every §8.2 `STREAMINFO` field, `frame_data_offset`, the frame region and **every frame's own byte length / header width / block size / footer-gap bits / number / sample-size code**, where a mis-counted footer would
 land (the count of frames carrying padding, and whether the strict filter or only
-the bare sync shape matches at those positions), the header-width census, frame-number **form** censuses, the frame-start filter ladder (sync shape only → fields only → strict), what the stream's own declarations can say about its frame count, one number-form mutation + `flac -d` exit codes, and the decoded PCM's MD5/FNV-1a64 | `scripts/gen_stream_vectors.sh` | `metaflac --list` + **three** independent Python readings (§8 structure; §9.1 field/scan filtering with and without the minimal-form rule; a per-frame walk of the subframe bodies that derives each frame's length from its own fields) + `flac -d` PCM for the 16-bit fixtures |
-| `fixtures/s1…s5_*.flac` | the five streams the table describes, byte-for-byte what `flac` 1.5.0 wrote | same script (`stream_vectors.py emit`) | `flac` 1.5.0 (the encode commands live in the script next to each `encode_command` row) |
+the bare sync shape matches at those positions), the header-width census, frame-number **form** censuses, the frame-start filter ladder (sync shape only → fields only → strict), what the stream's own declarations can say about its frame count, one number-form mutation + `flac -d` exit codes, the §8.5 seek table wherever a fixture has one (its block, every real point's three fields, which entries are placeholders, which frame each real point names, and the FNV-1a-64 of the reference decoder's PCM from that point's sample to the end of the file), and the decoded PCM's MD5/FNV-1a64 | `scripts/gen_stream_vectors.sh` | `metaflac --list` + **three** independent Python readings (§8 structure; §9.1 field/scan filtering with and without the minimal-form rule; a per-frame walk of the subframe bodies that derives each frame's length from its own fields) + `flac -d` PCM for the 16-bit fixtures |
+| `fixtures/s1…s6_*.flac` | the six streams the table describes, byte-for-byte what `flac` 1.5.0 wrote | same script (`stream_vectors.py emit`) | `flac` 1.5.0 (the encode commands live in the script next to each `encode_command` row) |
+| `gafp_asset_vectors.txt` | what the **packer** recorded for the four packed assets below: every manifest field, every offset-table entry, every frame's length and footer CRC-16, its subframe census slot by slot, per-frame and whole-blob PCM pins, and the three pack-time **refusals** with the reason printed | `scripts/gen_gafp_fixtures.py --check` (which drives `scripts/gafp_pack.py`) | the packer's own strict frame/subframe walk + `flac` 1.5.0 encode + `flac -d` PCM |
+| `gfp/p0…x1.gfp` | the four packed GAFP assets that table describes, byte-for-byte what the packer wrote | same generator | `scripts/gafp_pack.py` (the real GAFP writer, item 6b-2) |
 
 Each fixture's *reason for existing* is in the table's `note` rows and in the
 module docs of the suite that reads it — `tests/stream_metadata_layout.rs`
-explains `s1…s5` (two-block container, every real block type, a real 80-bit
+explains `s1…s6` (two-block container, every real block type, a real 80-bit
 header, a valid 24-bit stream, a stream that declares nothing about its own
-length). The same table is read a second way by
+length, a real multi-point seek table). The same table is read a second way by
 `tests/scan_frame_walk_layout.rs` (item 4b's frame walk): it asks the crate to
 walk those frames with no index, and compares every frame start, byte length,
 header width, block size, frame number and every sample against the rows — plus
-the PCM hash, which came out of `flac -d`. It also takes the table's
+the PCM hash, which came out of `flac -d`. It also starts walks **from the seek
+table's own points**: the byte an entry names once the container's length is
+added to it, the frame number that byte's frame actually carries, the audio from
+there to the end of the file (hashed from `flac -d`'s output for exactly that
+suffix), and the refusal of both a wrong anchor and the usual wrong reading of an
+offset — every one of them before a single sample is written. It also takes the table's
 byte-truncation positions (where a walk that rounded a non-byte-aligned frame end
 *down* would stand) and asks this crate's own frame filter each one: it must
 refuse that position and report the real frame's start, and the count of positions
@@ -95,23 +102,69 @@ module's own unit tests (`src/rice_hybrid.rs`) are paired with in the sense that
 they pin the legs the real corpus does not reach; neither set of tests reads the
 other's inputs.
 
-## The `.gfp` fixtures that are still planned
+## The packed `.gfp` fixtures: what is written, and what is refused (item 6b-2)
 
-The original gate plan targeted the crate's own packed container. Nothing here
-uses `.gfp` yet, and that plan is superseded for correctness work by the real
-`.flac` tables above; the `.gfp` fixtures remain relevant to the
-`format::Manifest` facade step:
+The crate's own packed container was always meant to have fixtures, and now it
+does. `gfp/` holds four blobs written by `scripts/gafp_pack.py` — the real GAFP
+writer, not the 6b-1 stand-in generator — over PCM that `scripts/frame_vectors.py`
+synthesizes with integer arithmetic only, encoded by `flac` 1.5.0.
+`gafp_asset_vectors.txt` is the facts table the same packer emits beside them,
+and `tests/gafp_asset_facts.rs` reads both back through `Manifest`,
+`scan::Frames` and `Decoder`: every offset-table entry compared with where a
+strict decode walk actually lands, every frame's footer CRC-16 recomputed from the
+bytes the packer put in the region, and the PCM checked against the `flac -d` pins
+frame by frame so a wrong frame names itself. `scripts/gen_gafp_fixtures.py` is
+the generator; `make gafp-pack-check` is the gate that runs it in `--check` mode
+and also requires the packer's bytes to equal the committed **product** blob
+(`examples/flac_integration/assets/spike_l0.gfp`) byte for byte.
 
-| Fixture | Profile axis under test |
+The names carry the profile facts, because the profile is what these fixtures are
+for: `p` = accepted at the product profile, `x` = accepted only because a guard was
+relaxed, then the predictor kind, channel count, target rate and block size.
+
+| File | What it covers |
 |---|---|
-| `mono_32k_b2048_f2.gfp` | mono, FIXED low order |
-| `stereo_32k_b2048_midside.gfp` | mid/side decorrelation |
-| `stereo_32k_b1024_indep.gfp` | independent stereo, smaller block |
-| `const_silence.gfp` | CONSTANT subframes (leading/trailing silence) |
-| `verbatim_burst.gfp` | VERBATIM subframes (incompressible burst) |
-| `escape_partition.gfp` | residual escape records (order 0b1111) |
-| `lpc_order14.gfp` | full LPC — decoder-correctness only, not in target profile |
-| `8bit.gfp` | 8-bit streams (experimental path) |
+| `gfp/p0_fixed0_mono_32k_b2048.gfp` | mono, FIXED-0, and a **904-sample final frame** (5,000 samples in 2048-sample blocks — the ragged tail is the point) |
+| `gfp/p2_fixed0_stereo_32k_b2048.gfp` | independent stereo, same PCM |
+| `gfp/p3_fixed0_midside_32k_b2048.gfp` | mid/side: the side slot coded at bps + 1 and decorrelated back |
+| `gfp/x1_lpc_stereo_32k_b2048.gfp` | real **LPC-4** subframes — written only under `--allow-lpc --allow-over-budget`, and recorded as NON-PRODUCT |
+| `gafp_asset_vectors.txt` | the packer's record of all four, plus three refusal rows |
+
+The three stereo blobs are **one 5,000-sample source encoded three ways**, so they
+carry one PCM pin and three different frame sets. That is deliberate, and it is the
+reason the set exists: the header's max-FIXED-order byte reads `0` for all three —
+including the all-LPC one, where it is *not* a mistake, because an all-LPC stream
+genuinely has no FIXED subframe of order above zero — and
+`format::EncodeProfile::validate` accepts all three, including under a hand-made
+`max_fixed_order: 0` profile. Decoded, all three are correct and identical.
+Nothing on this side of the line can tell the 42.48%-of-the-frame asset from the
+174.14%-of-the-frame one; the pack-time subframe census can, and the fixture
+records which guard did the work and what the measured cost was. Item 6b-2 of
+`flac-docs/plan-of-record.md` has the numbers and the refusal text.
+
+**Still planned, and not covered by the four above:** 1024-sample blocks
+(`stereo_32k_b1024_indep` in the original plan), CONSTANT and VERBATIM
+subframe shapes as *packed* assets, an escaped residual partition
+(`order 0b1111`), and a packed `lpc_order14.gfp`: `x1` reaches order 4, the
+highest LPC order any real-stream table here carries is **8**
+(`subframe_body_vectors.txt`), so orders above 8 are untested against anything an
+encoder actually wrote. Two
+entries from that original list are instead answered by refusal rows, and that is
+the honest state rather than an oversight: an 8-bit stream is refused at pack time
+(`bits per sample 8 is outside the container's [16]`, and its `-l 0` subframes
+land on VERBATIM, a predictor kind this target has never measured — so the answer
+is a refusal naming an unmeasured kind, not a guessed figure), and 44.1 kHz is
+refused at a 32,000 Hz target by both the stream-level and the frame-level
+reading. Neither is an asset this crate is expected to play.
+
+**The product guard is FIXED-0 and envelope-limited, not merely FIXED-only**
+(measured 2026-11-11). `-l 0` disables LPC; libFLAC still chooses FIXED orders
+1–4 from the signal, and those orders (like CONSTANT/VERBATIM, a partition order
+above 0, wasted bits, an escape partition, or Rice p > 10) have no measured row
+at the product target. The packer refuses them as unmeasured and writes nothing;
+`--allow-unmeasured` writes a NON-PRODUCT blob and records the waiver. The four
+committed assets sit inside the measured shape: one partition, `wasted=0`, no
+escapes, Rice p ≤ 10 and FIXED-0 (the LPC one uses the over-budget waiver).
 
 Hand-built bit patterns for `bits::BitReader` stay as `#[cfg(test)]` unit tests
 inside `src/` — `std` is reachable to unit tests only through the host harness,

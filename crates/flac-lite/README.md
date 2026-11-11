@@ -55,7 +55,8 @@ in debug, skippable in release"; gate: `make flac-test-crc`. The frame walk is
 behind a gate of the same shape — `scan`, off by default, `make flac-test-scan`
 the gate — but for the opposite reason from `crc-check`: not to skip work the
 release path cannot afford, so that a GBA ROM does not link the walk at all
-until item 6 rewires the facade onto it. Measured, not argued: with `scan` off,
+until a product path opts in (6b-1 did; the cost stayed measured). Measured, not
+argued: with `scan` off,
 the instrument's `.text`, `.rodata`, `.iwram` and `.ewram` are byte for byte
 the 4a image; with it on, `.text` is +3,120 B and the image contains no walk
 symbol — a second consumer of the decode path changes what the inliner does to
@@ -79,7 +80,7 @@ per decoded sample slower** than the incumbent on the same instrument (+9.71% FI
 layout-noise band), with its tables pinned in `.iwram` at the very slots the
 incumbent's occupy, and both images producing bit-identical PCM. `flac-docs/measurements.md`, item 5
 PR 4, carries the table and the reading. So the module stays exactly where PR 3 put
-it — the portable alternative, and the thing item 6 lifts and rewrites in asm —
+it — the portable alternative, and the thing the ARM realization supersedes —
 because the algorithm's win belongs to the ARM realization (E10: −349/−348
 cyc/sample), not to a portable Rust form of it.
 Why a feature rather than a module: measured on the same instrument, with
@@ -94,9 +95,15 @@ second-instantiator effect 4b measured for `scan`, one rung closer to the
 decoder, and it is why the twin's equivalence witness (a four-way differential
 over real libFLAC partitions, `tests/rice_two_mechanism_differential.rs`) is the
 thing that carries this PR rather than a perf claim: this PR makes none.
-Remaining
-`todo!()`: the manifest-driven `decoder` facade — which will be a thin shell
-over `driver`, not a second loop — and `format::Manifest`.
+That
+`todo!()` list closed on 2026-11-10 (item 6b-1): the manifest-driven `decoder`
+facade and `format::Manifest` both landed, the facade is a shell over the walk
+rather than a second loop, and the walk's measured cost is what keeps it a
+feature. `format::Blocksize::samples` and `EncodeProfile::validate` landed with
+them. Item 6b-2's second half (2026-11-11) then landed `stream::SeekTable`, the
+fixed-block number line (`FixedBlockNumbering`) and `Frames::anchored(n)`. None
+of that is on the GBA product path: the ROM reads a manifest and has no random
+access to give.
 
 The file-level entry point landed next (split-ladder item 4a, 2026-11-04):
 `stream::parse` reads a real `.flac` file's `fLaC` signature, the RFC 9639
@@ -168,9 +175,12 @@ or by handing the walk no bound at all — and `Error::BufferTooSmall` says they
 are shorter than **this frame's own header** asked. Same position in the walk,
 same "nothing read, nothing written"; `s2`'s second subframe is the per-frame
 case, because whether a frame carries two subframes is that frame's channel code
-rather than the stream's declared channel count. What is deliberately *not* here: `SEEKTABLE` interpretation (the
-walker skips it by length; random access is item 6's `format::Manifest`), any
-end-of-stream claim based on declared counts, and a rewired `Decoder` facade.
+rather than the stream's declared channel count. What is deliberately *not* here:
+`SEEKTABLE` reading and frame-number arithmetic — those live in
+`stream::SeekTable` and `stream::FixedBlockNumbering`; this walk consumes a
+point's offset and frame number when a caller anchors with one. Also not here: an
+end-of-stream claim based on declared counts, or a second per-frame loop (the
+manifest facade is a shell over this walk).
 Roadmap: [`../../flac-docs/plan-of-record.md`](../../flac-docs/plan-of-record.md).
 
 ```
@@ -192,8 +202,11 @@ crates/flac-lite/
 │                     shared, from the perf spike's proven driver)
 ├── src/scan.rs       frame walk with no index: a frame ends itself, the bytes
 │                     end the stream (`Frames`, `StreamBounds`, `resync`) —
-│                     behind `feature = "scan"`, off by default until item 6
-├── src/decoder.rs    manifest-shaped facade (scaffold: todo!())
+│                     behind `feature = "scan"`, off by default in this crate
+│                     because the walk's `.text` cost is measured; the item 6b-1
+│                     product ROM opts in, and so does the facade below
+├── src/decoder.rs    manifest-shaped facade: a shell over `scan::Frames`, one
+│                     loop (exists only where `scan` does)
 └── tests/README.md   committed libFLAC vector tables + layout/decode suites
 ```
 
@@ -201,7 +214,8 @@ crates/flac-lite/
 
 The gates, run from this directory (or `make flac-test` / `make flac-test-wide`
 / `make flac-test-scan` / `make flac-test-crc` / `make flac-test-rice` /
-`make flac-gates` / `make flac-portable-check` from the repo root; the root
+`make flac-gates` / `make flac-portable-check` / `make gafp-check` /
+`make gafp-pack-check` from the repo root; the root
 Makefile is the keeper).
 **All need explicit flags — this is not optional verbosity**, see the config-leak
 note below.
@@ -253,6 +267,19 @@ cargo +nightly test -Zbuild-std= --target "$HOST" --features rice-hybrid
 cargo +nightly check --release --target thumbv4t-none-eabi -Zbuild-std=core,alloc \
   --no-default-features
 cargo +nightly test -Zbuild-std= --target "$HOST" --no-default-features
+
+# GATE 7 — the packed container, from the packer's own side (`make gafp-pack-check`,
+# item 6b-2). Unlike every gate above, this one *runs* libFLAC: it re-synthesizes
+# and re-encodes the reference clip, packs it with `scripts/gafp_pack.py`, and
+# requires the result to be byte-identical to the committed product blob
+# (`examples/flac_integration/assets/spike_l0.gfp`, the blob `gafp-check` guards
+# and `flac-rom` embeds) — a comparison, not a write. Then it re-runs the crate's
+# own fixture generator in `--check` mode (`scripts/gen_gafp_fixtures.py`, which
+# writes `tests/gfp/*.gfp` and `tests/gafp_asset_vectors.txt`) including the three
+# pack-time refusal legs, and finally runs `tests/gafp_asset_facts.rs`, which is
+# `required-features = ["scan"]`, over those bytes through `Manifest`,
+# `scan::Frames` and `Decoder`. Nothing in it is generated by the crate.
+cd ../.. && make gafp-pack-check
 ```
 
 ### ⚠️ The `.cargo/config.toml` leak (verified 2026-08-30)
@@ -300,7 +327,11 @@ Adding a dependency requires re-verifying gate #1.
 ## GAFP container format (contract — product-side container work)
 
 `GAFP` = **G**BA **F**LAC **P**ack. One blob per track, `include_bytes!`-able as a
-`&'static [u8]`, produced offline by `scripts/pack_flac.sh`. All integers
+`&'static [u8]`, written offline by `scripts/gafp_pack.py` (the real writer, item
+6b-2, 2026-11-11); `scripts/pack_flac.sh` is still the stub whose six-step plan
+that script implements. Until 6b-2 the committed product blob came from the 6b-1
+stand-in generator, and the two agree **byte for byte** on that blob — which is
+what keeps this from being a format with two definitions. All integers
 **little-endian** (GBA-native; the manifest is our header, not FLAC's).
 
 ```
@@ -319,6 +350,26 @@ offset  size   field
 0x1C    4*N    frame offset table: u32 offsets, relative to blob start, ascending
         —      raw FLAC frames, concatenated, in order
 ```
+
+Two of those fields are **records, not guards**, and item 6b-2 measured why that
+matters (2026-11-11):
+
+- `bits per sample` is validated by the *parser* as `8 | 16`, while the *encode
+  profile* allows `[16]`. Those are different checks on purpose: the container
+  states what it is, the profile states what may be packed. Today the packer
+  refuses an 8-bit encode — and the half of that refusal worth knowing is that a
+  `-l 0` 8-bit stream lands on **VERBATIM** subframes, a predictor kind this
+  target has never measured. A new depth is not a header change; it is an
+  unmeasured cost.
+- `max fixed predictor order used` is the maximum over the FIXED subframes the
+  encode actually emitted, derived from the packer's frame walk — never from the
+  `-l` flag or from STREAMINFO. An all-LPC stream reads `0` there, correctly. The
+  crate's own fixture set makes the consequence concrete
+  (`tests/gfp/x1_lpc_stereo_32k_b2048.gfp`, described in `tests/README.md`): that
+  all-LPC asset and two FIXED-0 assets that decode to the *same PCM* all carry
+  `0`, and `EncodeProfile::validate` accepts all three. C2's real guard is the
+  packer's subframe census plus the measured cost of the kinds it finds, not this
+  byte.
 
 Deliberately **absent**, versus a standard `.flac`:
 
@@ -361,18 +412,37 @@ The decoder only needs to handle what our encoder is allowed to produce:
   order; `-l 4` emits real LPC-4 subframes (measured: `lpc4` ×156/157 frames), and
   FIXED-only is `-l 0`. The `strict-profile` switch is therefore "order > 4",
   not "is LPC". See flac-docs/format-notes.md → "Correction 3".
+  ⚠️ Corrected 2026-11-11: **`-l 0` is not FIXED-0.** It disables LPC; libFLAC
+  still chooses FIXED orders 1–4 from the signal, and only FIXED-0 has a measured
+  row in `scripts/gafp_pack.py::MEASURED_DECODE`. The packer's product guard is
+  therefore FIXED-0-only in practice and refuses FIXED-1..4 (and CONSTANT/
+  VERBATIM) as unmeasured; say that, rather than calling the product profile
+  "FIXED-only".
 - partitioned Rice / Rice2 residuals; escaped partitions supported
 - stereo: independent **and** mid/side (`-m`); left-side, right-side
 - no metadata blocks other than what the manifest replaces
 
-Reference encode command (the packer will run this):
+Reference encode command. Since 6b-2 the packer **does** run this shape: `-l`,
+`-b` and the mid/side switch come from the profile it was given, `-s` and an
+`flac -t` self-check wrap the call, a profile it knows it cannot honour is refused
+before it encodes, and an off-profile *result* is refused before any `.gfp` byte
+is written. Note which arm the packer picks by default: the command below is the
+order-ceiling arm, while the packer's default is the **LPC-disabled** one (`-l 0`).
+That is not the same as **FIXED-0**: only FIXED-0 has a measured product row, so a
+`-l 0` encode that libFLAC decides to code as FIXED-1..4 is refused as unmeasured
+until someone measures it. `-l 4` at this target measures 174.14% of the frame on
+hardware — `--allow-lpc` is what writes an LPC asset at all, and it marks the
+result NON-PRODUCT:
 
 ```sh
 flac -1 -f -l 4 -b 2048 -m input.wav
 ```
 
-For the FIXED-only arm of the perf gate (a materially different stream — see the
-note above): `flac -1 -f -l 0 -b 2048 -m input.wav`.
+For the LPC-disabled arm of the perf gate (a materially different stream — see the
+note above): `flac -1 -f -l 0 -b 2048 -m input.wav`. Its product acceptability still
+depends on the resulting FIXED order being 0 and the residual shape staying inside
+the measured envelope (one partition, no wasted bits, no escape partitions, Rice
+parameter ≤ 10).
 For 65,536 Hz: add `--lax` (that rate is outside FLAC's streamable subset, so
 every frame then carries sample-rate code `0b0000` = "from stream", which the
 decoder resolves via `frame::StreamDefaults`).
@@ -408,8 +478,17 @@ The roadmap is a single list in
 source of truth for outstanding work). Phase 1's decode path through
 `frame::decode_frame` is complete (`src/lib.rs` carries the per-module state),
 the frame loop landed as `driver` on 2026-11-04, the stream layer landed the same
-day (`stream::parse` → `StreamFacts` + `frame_data_offset`), and the table-less
-`scan` walk is in behind its feature. Outstanding: the `decoder` facade (a shell
-over `driver` + a frame source), `format::Manifest` + the real packer, and the
-remaining overlay/width work in item 6. Architecture and the delivered
+day (`stream::parse` → `StreamFacts` + `frame_data_offset`), the table-less
+`scan` walk is in behind its feature, the `decoder` facade and `format::Manifest`
+landed with item 6b-1 on 2026-11-10 (the facade is a shell over the walk; there
+is no third loop), and the real packer landed with 6b-2's first half on
+2026-11-11, followed by the seek table, fixed-block number line and anchored
+walk. Outstanding in this crate, from that plan: the now-safe retirement of the
+stand-in generator, the fixture axes
+`tests/README.md` names, and the crate-wide `dead_code` allow probed on
+2026-11-11 — five lib-side items it currently silences, plus one unused variable
+in `tests/scan_frame_walk_layout.rs` that it has *never* silenced (an integration
+test is its own crate, so a crate-level allow never reached `tests/`). The full
+list is in `src/lib.rs`. The product-side remainder — 32,768 Hz rate-play
+through a real manifest, and playback — is item 6b-3 and item 7. Architecture and the delivered
 portability ladder: [flac-docs/architecture.md](../../flac-docs/architecture.md).
