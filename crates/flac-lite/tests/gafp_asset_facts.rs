@@ -60,7 +60,7 @@
 
 #![forbid(unsafe_code)]
 
-use flac_lite::format::{DEFAULT_PROFILE, EncodeProfile, HEADER_LEN};
+use flac_lite::format::{ChannelConfig, DEFAULT_PROFILE, EncodeProfile, HEADER_LEN};
 use flac_lite::scan::Frames;
 use flac_lite::{Decoder, FrameBuffers, Manifest, PredictorState};
 
@@ -96,8 +96,18 @@ fn blob_bytes(name: &str) -> &'static [u8] {
 /// the Rust side — which is precisely the point of the fixture.
 #[derive(Debug, Clone)]
 struct SlotRow {
+    slot: u64,
     kind: String,
     order: u64,
+    wasted: u64,
+    sample_bits: u64,
+    lpc_precision: Option<u64>,
+    lpc_shift: Option<i64>,
+    partitions: u64,
+    max_rice_param: u64,
+    escaped: u64,
+    raw_bits: u64,
+    codewords: u64,
     entry_bit: u64,
     exit_bit: u64,
 }
@@ -115,6 +125,7 @@ struct FrameRow {
     rate: u64,
     subframes: u64,
     bps: u64,
+    decorrelation: String,
     header_bits: u64,
     exit_bit: u64,
     padded: u64,
@@ -193,6 +204,32 @@ fn num(row: &str, key: &str) -> u64 {
     field(row, key)
         .parse()
         .unwrap_or_else(|_| panic!("`{key}` is not a number in: {row}"))
+}
+
+/// An optional `key=none` field, the shape `lpc_precision`/`lpc_shift` use for
+/// non-LPC subframes.
+fn opt_num(row: &str, key: &str) -> Option<u64> {
+    let raw = field(row, key);
+    if raw == "none" {
+        None
+    } else {
+        Some(
+            raw.parse()
+                .unwrap_or_else(|_| panic!("`{key}` is not a number or `none` in: {row}")),
+        )
+    }
+}
+
+fn opt_i64(row: &str, key: &str) -> Option<i64> {
+    let raw = field(row, key);
+    if raw == "none" {
+        None
+    } else {
+        Some(
+            raw.parse()
+                .unwrap_or_else(|_| panic!("`{key}` is not a signed number or `none` in: {row}")),
+        )
+    }
 }
 
 /// `0x…` as the PCM and CRC pins are written.
@@ -291,6 +328,7 @@ fn load() -> (Vec<Blob>, Vec<Refusal>) {
                 rate: num(row, "rate"),
                 subframes: num(row, "subframes"),
                 bps: num(row, "bps"),
+                decorrelation: field(row, "decorrelation").to_string(),
                 header_bits: num(row, "header_bits"),
                 exit_bit: num(row, "exit_bit"),
                 padded: num(row, "padded"),
@@ -303,8 +341,18 @@ fn load() -> (Vec<Blob>, Vec<Refusal>) {
             });
         } else if let Some(row) = line.strip_prefix("subframe ") {
             target.slots.push(SlotRow {
+                slot: num(row, "slot"),
                 kind: field(row, "kind").to_string(),
                 order: num(row, "order"),
+                wasted: num(row, "wasted"),
+                sample_bits: num(row, "sample_bits"),
+                lpc_precision: opt_num(row, "lpc_precision"),
+                lpc_shift: opt_i64(row, "lpc_shift"),
+                partitions: num(row, "partitions"),
+                max_rice_param: num(row, "max_rice_param"),
+                escaped: num(row, "escaped"),
+                raw_bits: num(row, "raw_bits"),
+                codewords: num(row, "codewords"),
                 entry_bit: num(row, "entry_bit"),
                 exit_bit: num(row, "exit_bit"),
             });
@@ -595,6 +643,181 @@ fn the_bit_positions_start_and_end_where_the_headers_and_footer_say() {
 }
 
 #[test]
+fn the_subframe_rows_are_internally_consistent_with_their_frames() {
+    let (blobs, _) = load();
+    for b in &blobs {
+        let mut at = 0usize;
+        for f in &b.frames {
+            let side_slot = match f.decorrelation.as_str() {
+                "none" => None,
+                "mid-side" | "left-side" => Some(1usize),
+                "side-right" => Some(0usize),
+                other => panic!(
+                    "{}: frame {}: unknown decorrelation {other:?}",
+                    b.name, f.index
+                ),
+            };
+            for j in 0..f.subframes as usize {
+                let s = &b.slots[at + j];
+                assert_eq!(
+                    s.slot as usize, j,
+                    "{}: frame {} slot rows out of order",
+                    b.name, f.index
+                );
+                let side = side_slot == Some(j);
+                let width = f.bps + if side { 1 } else { 0 };
+                assert!(
+                    s.wasted < width,
+                    "{}: frame {} slot {j}: wasted {} >= width {width}",
+                    b.name,
+                    f.index,
+                    s.wasted
+                );
+                assert_eq!(
+                    s.sample_bits,
+                    width - s.wasted,
+                    "{}: frame {} slot {j}: sample_bits is not width-wasted",
+                    b.name,
+                    f.index
+                );
+                assert!(
+                    s.sample_bits > 0,
+                    "{}: frame {} slot {j}: zero-width subframe",
+                    b.name,
+                    f.index
+                );
+                match s.kind.as_str() {
+                    "constant" | "verbatim" => {
+                        assert_eq!(s.order, 0, "{}: frame {} slot {j}", b.name, f.index);
+                        assert_eq!(
+                            (
+                                s.partitions,
+                                s.max_rice_param,
+                                s.escaped,
+                                s.raw_bits,
+                                s.codewords
+                            ),
+                            (0, 0, 0, 0, 0),
+                            "{}: frame {} slot {j}: a non-residual kind carries residual facts",
+                            b.name,
+                            f.index
+                        );
+                        assert!(
+                            s.lpc_precision.is_none() && s.lpc_shift.is_none(),
+                            "{}: frame {} slot {j}: a non-LPC kind carries LPC facts",
+                            b.name,
+                            f.index
+                        );
+                    }
+                    "fixed" | "lpc" => {
+                        if s.kind == "fixed" {
+                            assert!(
+                                s.order <= 4,
+                                "{}: frame {} slot {j}: FIXED order {} > 4",
+                                b.name,
+                                f.index,
+                                s.order
+                            );
+                        } else {
+                            assert!(
+                                (1..=32).contains(&s.order),
+                                "{}: frame {} slot {j}: LPC order {} outside 1..=32",
+                                b.name,
+                                f.index,
+                                s.order
+                            );
+                        }
+                        assert!(
+                            s.partitions >= 1 && s.partitions.is_power_of_two(),
+                            "{}: frame {} slot {j}: partitions {} is not a power of two",
+                            b.name,
+                            f.index,
+                            s.partitions
+                        );
+                        assert_eq!(
+                            f.blocksize % s.partitions,
+                            0,
+                            "{}: frame {} slot {j}: {} samples do not divide into {} partitions",
+                            b.name,
+                            f.index,
+                            f.blocksize,
+                            s.partitions
+                        );
+                        let per = f.blocksize / s.partitions;
+                        assert!(
+                            per >= s.order,
+                            "{}: frame {} slot {j}: {per}-sample partition is shorter than order {}",
+                            b.name,
+                            f.index,
+                            s.order
+                        );
+                        assert!(
+                            s.max_rice_param <= 30,
+                            "{}: frame {} slot {j}: Rice parameter {} > 30",
+                            b.name,
+                            f.index,
+                            s.max_rice_param
+                        );
+                        assert!(
+                            s.escaped <= s.partitions,
+                            "{}: frame {} slot {j}: {} escapes in {} partitions",
+                            b.name,
+                            f.index,
+                            s.escaped,
+                            s.partitions
+                        );
+                        assert!(
+                            s.raw_bits <= 31,
+                            "{}: frame {} slot {j}: raw width {} > 31",
+                            b.name,
+                            f.index,
+                            s.raw_bits
+                        );
+                        assert!(
+                            s.codewords <= f.blocksize - s.order,
+                            "{}: frame {} slot {j}: {} codewords for {} samples after warm-up",
+                            b.name,
+                            f.index,
+                            s.codewords,
+                            f.blocksize - s.order
+                        );
+                        if s.kind == "lpc" {
+                            assert!(
+                                s.lpc_precision.is_some_and(|p| (1..=15).contains(&p)),
+                                "{}: frame {} slot {j}: LPC precision {:?} outside 1..=15",
+                                b.name,
+                                f.index,
+                                s.lpc_precision
+                            );
+                            assert!(
+                                s.lpc_shift.is_some_and(|sh| sh >= 0),
+                                "{}: frame {} slot {j}: LPC shift {:?} is negative/missing",
+                                b.name,
+                                f.index,
+                                s.lpc_shift
+                            );
+                        } else {
+                            assert!(
+                                s.lpc_precision.is_none() && s.lpc_shift.is_none(),
+                                "{}: frame {} slot {j}: FIXED kind carries LPC facts",
+                                b.name,
+                                f.index
+                            );
+                        }
+                    }
+                    other => panic!(
+                        "{}: frame {} slot {j}: unknown subframe kind {other:?}",
+                        b.name, f.index
+                    ),
+                }
+            }
+            at += f.subframes as usize;
+        }
+        assert_eq!(at, b.slots.len(), "{}: slot cursor", b.name);
+    }
+}
+
+#[test]
 fn the_manifest_says_what_the_packer_recorded() {
     let (blobs, _) = load();
     for b in &blobs {
@@ -750,6 +973,17 @@ fn the_offset_table_and_a_walk_of_the_region_agree_frame_by_frame() {
                 got.header.channels.subframe_count() as u64,
                 f.subframes,
                 "{}: frame {i}'s own subframe count",
+                b.name
+            );
+            let want_decorrelation = match got.header.channels {
+                ChannelConfig::Independent { .. } => "none",
+                ChannelConfig::MidSide => "mid-side",
+                ChannelConfig::LeftSide => "left-side",
+                ChannelConfig::RightSide => "side-right",
+            };
+            assert_eq!(
+                f.decorrelation, want_decorrelation,
+                "{}: frame {i}'s channel assignment",
                 b.name
             );
             // The footer, computed here over the bytes the packer put into the
