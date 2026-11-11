@@ -240,9 +240,21 @@ MEASURED_DECODE = {
 # A transcription slip in a row like these is the failure mode that matters, so
 # every row is re-derived at run time: `cycles_mean / budget_cycles` must land on
 # `mean_pct`. It is not a hypothetical guard — writing this file got the
-# denominator wrong on the first pass (32,000 Hz gives 1,073,742 cycles; the
-# figures in this repository are stated against 1,048,576, and the difference is
-# 2.4%: enough to move 42.49% to 41.49% and hide nothing). Percent.
+# denominator wrong on the first pass (32,000 Hz gives 1,073,742 cycles at this
+# script's clock, against 1,048,576 for the 32,768 Hz timer the product uses: a
+# 2.4% difference, enough to move 42.49% to 41.49% and hide nothing). Percent.
+#
+# One honest caveat about the tolerance below: this file budgets with the exact
+# 2^24 Hz clock, while the instrument budgets with `stats.rs::GBA_CLOCK_HZ =
+# 16_780_000`, i.e. 1,048,750 cycles for the same frame — the number every
+# `verdict:` line and every published share in flac-docs/measurements.md and
+# perf-results.md is divided by. The two denominators differ by 174 cycles
+# (0.0166%), which is under this 0.1 pp tolerance, so a row copied from either
+# source re-derives and passes here; e.g. 445,558 c re-derives to 42.49% against
+# this budget against the 42.48% a rounded-clock reading gives. That is why rows
+# are cited by source and condition, and why the reconciliation of the two clocks
+# is written down in flac-docs/method-and-gates.md before item 7-1 puts new
+# shares on the same table.
 ROW_CONSISTENCY_TOLERANCE_PCT = 0.1
 
 
@@ -253,19 +265,23 @@ ROW_CONSISTENCY_TOLERANCE_PCT = 0.1
 # this bar is a necessary, not a sufficient, condition for C2.
 DECODE_SHARE_LIMIT_PCT = 50.0
 
-# What a "frame" is in cycles. The GBA runs at 16.78 MHz = 2^24 cycles/s, and a
-# frame of `blocksize` samples at a playback rate of `r` is `blocksize / r`
-# seconds, i.e. 2^24 * blocksize / r cycles.
+# What a "frame" is in cycles. The GBA's clock is exactly 2^24 = 16,777,216
+# cycles/s — the rounded "16.78 MHz" that `stats.rs::GBA_CLOCK_HZ` budgets with
+# is 0.0166% wider, see the note on the tolerance above — and a frame of
+# `blocksize` samples at a playback rate of `r` is `blocksize / r` seconds, i.e.
+# 2^24 * blocksize / r cycles.
 #
 # The playback rate is not the stream rate, and for the one configuration that
 # has a measured C2 path they differ: a 32,000 Hz asset is played by the product
 # path on a 32,768 Hz timer, whose frame period is 2^20 = 1,048,576 cycles —
 # 2.4% *tighter* than the stream's own period of 1,073,742. Every percentage in
-# flac-docs/measurements.md for the C2 clip is stated against 32,768 Hz for
-# exactly that reason, so the guard uses the same denominator; how samples are
-# paced across that difference is item 7-1's measurement, not a pack-time
-# question. A stream rate with no entry here is budgeted at its own rate — and
-# has no measured row either, so it is refused as unmeasured anyway.
+# flac-docs/measurements.md for the C2 clip is stated *at* 32,768 Hz for exactly
+# that reason, and divided by the rounded-clock budget, which is 174 cycles
+# looser; the rate is the shared thing, the denominator is the one this script
+# has to state for itself. How samples are paced across that difference is item
+# 7-1's measurement, not a pack-time question. A stream rate with no entry here
+# is budgeted at its own rate — and has no measured row either, so it is refused
+# as unmeasured anyway.
 GBA_CYCLES_PER_SECOND = 16777216
 PLAYBACK_RATE_FOR_STREAM = {32000: 32768}
 

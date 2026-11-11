@@ -426,9 +426,10 @@ flac-rom: gafp-check format
 	@echo "FLAC ROM built: $(FLAC_ROM) (product path: manifest facade + ArmRiceKernel)"
 
 # The 6b-1 A/B: the *same* ROM source with the core's default kernel instead of
-# the overlay's, so the kernel's instantiation is the only difference. Its
-# witness is section-level (`make flac-rom-ab` prints both) plus the hardware
-# pair; the build here is what a cycle reading on a unit needs.
+# the overlay's, so the kernel's instantiation is the only difference. Its witness
+# is section-level — `readelf -S` on both images, compared by hand (there is no
+# `flac-rom-ab` target: that name was written here before it was ever added) —
+# plus the hardware pair; the build here is what a cycle reading on a unit needs.
 flac-rom-default-kernel: gafp-check format
 	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --no-default-features
 	agb-gbafix $(FLAC_CRATE_DIR)/$(FLAC_CRATE_BIN) -o $(FLAC_ROM_DEFAULT_KERNEL)

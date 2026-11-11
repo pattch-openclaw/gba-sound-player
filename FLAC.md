@@ -16,11 +16,18 @@ judged only against these, and full detail is in
   off-by-default features or to the overlay crate. The no-`todo!()`/facade clause
   closed with 6b-1; the facade is `decoder::Decoder` over `scan::Frames`.
 - **C2 — `flac-lite-gba` decodes *and plays back*, in real time, at 32 kHz, on a
-  GBA.** The decode half is measured on hardware (42.72% worst of the 32,768 Hz
-  frame); the claim is the *combination* — decode + convert + push + mixer/DMA in one
+  GBA.** The decode half is measured on hardware on the product path — **37.974%
+  worst** of the 32,768 Hz frame (6b-2 pt 2, GBA 001/SP identical; the
+  instrument's own hardware row is 42.48% / 42.72%, 6a-7b). The claim is the
+  *combination* — decode + convert + push + mixer/DMA in one
   62.5 ms frame, underrun-free, on a GBA 001 and a GBA SP, with FIXED-0 assets
-  enforced at pack time (`-l 0` is LPC-disabled, not a fixed-order guarantee). Per the producer record the arithmetic is ≈85.6% of the
-  frame, i.e. ≈8.7 ms of margin, and that margin is what item 7 has to prove.
+  enforced at pack time (`-l 0` is LPC-disabled, not a fixed-order guarantee). The paper arithmetic reads ≈80.9% of the
+  frame, ≈11.9 ms of nominal margin — but two of its three inputs are stale (the
+  convert/push figures are 10,512 Hz, pre-kernel, mGBA-era), which is why 7-1
+  re-measures them instead of trusting the sum, and why **no real-time claim of any
+  kind is made here until 7-3 passes: two runs on each unit with underruns counted
+  and zero.** (An earlier revision of this paragraph read ≈85.6% / ≈8.7 ms, from
+  the pre-6a-7b numbers.)
 
 The 3.7–6.9% mGBA-versus-silicon shortfall (Q13) is **parked by decision**: it would
 explain a number that is already measured on hardware, and C2 is judged on hardware
@@ -29,7 +36,9 @@ derating** instead of a probe.
 
 **Status in one line:** the decoder is complete and bit-exact; the playback harness
 plays real music at 10,512 Hz with correct tempo and pitch (audibly verified); the
-**shipped** path is still over budget at full rate (167% of the 32,768 Hz frame);
+**shipped** path — the core's default `TableCountKernel` — is still over budget at
+full rate (167% of the 32,768 Hz frame: that is the pre-kernel product reading, and
+the control re-read inside the 6b-1/6b-2 product images lands at 154.7%);
 and the ARM kernel — landed, witnessed on mGBA's ARM7TDMI, measured through the
 shipped seam — now decodes FIXED at **48.3% of the 32,768 Hz budget** (worst frame
 48.5%), **2.9× faster than it was a day earlier, from one section directive**.
@@ -56,6 +65,26 @@ shortfall 6a-7b found attaches to the *default* kernel's ROM-fetch-heavy path
 (+4.03% in the same run), not to the kernel the product path ships. Decode now has
 **2.63× headroom**, and C2's arithmetic reads ≈80.9% of the frame with ≈11.9 ms
 left for the mixer and feeder.
+
+**6b-2 then re-read that same product path through the real packer and a real
+manifest (2026-11-11): 396,066 mean / 398,255 worst c/frame = 37.765% / 37.974% of
+the 32,768 Hz frame**, GBA 001 and GBA SP, identical, PCM pin matched, with the
+`TableCountKernel` control re-read on the same image at ≈154.7% — i.e. the kernel
+is worth about 4× on the product path, and the walk/manifest work cost nothing
+measurable.** The shape of the arithmetic did not move: decode carries ~2.6×
+headroom and it is the **margin** that decides C2, whose convert/push inputs are
+still stale 10,512 Hz pre-kernel mGBA numbers — which is why item 7-1 is a
+measurement step and not a spreadsheet edit.
+
+What has *not* changed across any of those rows: **no image in this repository
+makes sound above 10,512 Hz.** At the product rate every `verdict:` line in every
+arm prints OVER BUDGET, because there is no 32,768 Hz playback path at all — the
+only rig that plays is the throwaway spike. That is item **6b-3**, and C2 is
+claimed only at item **7-3**: 2048-sample frames at 32,768 Hz, FIXED-0, both
+units, two runs each, underruns counted and equal to zero. And nothing built at
+`main` after that PR has been run on hardware or on mGBA at all; the re-read table
+in [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) ("Re-read at
+HEAD") is the bridge from those rows to the current tree.
 
 **6a-7b measured the instrument on silicon: GBA 001 and GBA SP, two runs each, all four
 runs identical to the cycle.** Two results. The decode path is
@@ -106,7 +135,10 @@ what the next one would otherwise have blamed:
 
 What this is **not**: a product claim. It is *decode only*; the producer's convert +
 push stages (~7.7 ms combined) are not in these windows; the shipped default
-(`TableCountKernel`) is untouched at 167% and no product path names `rice-arm`; and
+(`TableCountKernel`) is untouched at 167% and no product path names `rice-arm` *(true
+as written at the time of this record, and superseded since: 6b-1 put `rice-arm` in
+the product ROM, and the product-path hardware rows — 37.83%/38.04% at 6b-1,
+37.765%/37.974% at 6b-2 pt 2 — are in "Where performance stands" below)*; and
 **E5 — hardware arbitration — is now measured**: the ROM→IWRAM fetch pricing is
 hardware, not mGBA's model (GBA 001 and GBA SP reproduce mGBA within 2
 cycles/call; ratio 3.94). The full real-time claim still needs the kernel-level
@@ -161,9 +193,15 @@ survive implementation: [`flac-docs/architecture.md`](flac-docs/architecture.md)
 ## Where performance stands
 
 The real-time budget at 2048-sample frames and 32,768 Hz is
-**1,048,750 cycles/frame ≈ 512 cycles/sample**. Decode cost is paid per sample;
-the budget is granted per second — which is why lowering the sample rate is a
-lever at all.
+**1,048,750 cycles/frame ≈ 512 cycles/sample** — that is the instrument's
+rounded-clock budget (`stats.rs::GBA_CLOCK_HZ = 16_780_000`), which every
+`verdict:` line and published share in this document and the ledgers divides by;
+on the GBA's exact 2^24 Hz clock the same frame period is 1,048,576 cycles =
+exactly 512 c/sample, 0.0166% tighter, which changes no verdict here but is why a
+share quoted to three decimals needs its denominator named
+([`flac-docs/method-and-gates.md`](flac-docs/method-and-gates.md), "The real-time
+budget")). Decode cost is paid per sample; the budget is granted per second —
+which is why lowering the sample rate is a lever at all.
 
 | Path | FIXED mean | LPC mean | Landed? |
 |---|---|---|---|
@@ -175,6 +213,7 @@ lever at all.
 | **Kernel + IWRAM + i32 on hardware (6a-7b, GBA 001/SP)** | **42.48% (worst 42.72%)** | **173.23% (worst 174.14%)** | **measured, decode only** |
 | **Product path on hardware (6b-1, GBA 001/SP, `rice-arm`)** | **37.83% (worst 38.04%)** | — (kernel leg, FIXED clip) | **measured, product path** |
 | Product path on hardware, default kernel (6b-1 control) | 154.67% (worst 155.45%) | — | measured; this is the shipped default path |
+| **Product path on hardware through the real packer + real manifest (6b-2 pt 2, GBA 001/SP, `rice-arm`)** | **37.765% (worst 37.974%)** | — (kernel leg, FIXED-0 clip) | **measured, product path — the row of record**; belongs to `1e5974c`'s bytes, `main`'s images (+32 B) have never been run |
 
 At 10,512 Hz, real music, on today's path: **FIXED fits** (73.9% mean, 78.3%
 worst) and **LPC does not** (183.9% / 211.6%). Full-rate FIXED first came in budget
@@ -194,11 +233,13 @@ ledger: [`flac-docs/measurements.md`](flac-docs/measurements.md).
 One line per rung; the full plan, bars and invariants are in
 [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md).
 
-**The live order (2026-11-10), each step against C1/C2:**
+**The live order (2026-11-10), each step against C1/C2** — 6b-1 and both halves of
+6b-2 have since landed (2026-11-10 / 2026-11-11); the ordering rule below is
+unchanged, and the per-rung state lives in the plan of record:
 
-1. **6b-1** — facade onto `scan::Frames` **and** `rice-arm` carried into a product
+1. **6b-1** *(landed 2026-11-10)* — facade onto `scan::Frames` **and** `rice-arm` carried into a product
    ROM (the placement 6a-5 assigned here). Serves C1 and C2's decode half.
-2. **6b-2** — the real GAFP packer, `format::Manifest`, and a pack-time profile that
+2. **6b-2** *(landed 2026-11-11, both halves)* — the real GAFP packer, `format::Manifest`, and a pack-time profile that
    refuses LPC at the target rate (174.14% of a 32 kHz frame on hardware).
 3. **6b-3** — rate-play at 32,768 Hz through a real manifest; the first product ROM
    naming the overlay crate.
@@ -278,8 +319,24 @@ One line per rung; the full plan, bars and invariants are in
   nothing. `driver` is demoted behind `instrument` + `doc(hidden)`. Owed: the
   unit reading of both A/B builds. Record:
   [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md).
-- **6b-2** — the real GAFP packer, `format::Manifest` at pack time, and a profile
-  that refuses at pack what the target rate cannot play (LPC at 32 kHz).
+- ~~**6b-2** — the real GAFP packer, `format::Manifest` at pack time, and a profile
+  that refuses at pack what the target rate cannot play (LPC at 32 kHz).~~
+  **Landed 2026-11-11, both halves.** First half: `scripts/gafp_pack.py` is the
+  writer — frame region byte-identical to what libFLAC produced, offset table
+  re-derived by the walk that reads every frame, and a profile guard that refuses
+  before it writes (LPC at 32 kHz, off-target rate, 8-bit), gated by
+  `make gafp-pack-check` against the committed product asset byte for byte. Second
+  half: the seek table read from real files, the fixed-block number line, and
+  `Frames::anchored(n)` to start a walk at a seek point — and the product path
+  re-read through that manifest at **396,066 / 398,255 c/frame = 37.765% mean /
+  37.974% worst** on both units, identical, which is the row of record. Owed by
+  that half and named in the plan: the fixture axes `tests/README.md` lists, the
+  cost axes the packer refuses rather than prices (FIXED-1..4, wider residual
+  shapes), and the written shape of `gen_gafp_blob.py`'s retirement.
+- **6b-3** — rate-play at 32,768 Hz through a real manifest: the first product ROM
+  that makes sound at the target rate, driven by the manifest rather than the
+  spike's generated offset table, and the thing item 7-1's stage timings have to be
+  taken on. Nothing above 10,512 Hz has ever made sound in this repository.
 - **Rate sweep** — the cross-rate profiling sweep on the improved decoder, which
   produces the "which rates become feasible" guidelines from measurement.
 

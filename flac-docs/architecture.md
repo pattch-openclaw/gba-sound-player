@@ -80,9 +80,13 @@ crates/flac-lite/          portable core: no_std, zero deps, zero alloc
   residual.rs              partitioned Rice/Rice2/escape, RiceKernel seam
   stereo.rs                mid-side, left-side, right-side decorrelation
   driver.rs                per-frame loop over a borrowed frame index
-  decoder.rs               facade shell — still todo!() (needs a frame source)
-  format.rs                sample-rate/channel helpers; Manifest, Blocksize::samples
-                           and EncodeProfile::validate still todo!()
+  decoder.rs               the facade: `Decoder::new(&Manifest)` + `decode_next_with::<K>`;
+                           a shell over `scan::Frames`, deliberately not a third loop
+                           (6b-1, 2026-11-10 — the facade `todo!()`s are closed)
+  format.rs                the `GAFP`/manifest layer: `Manifest` (parse, `frame_region`,
+                           `blocksize`, `max_fixed_order`, stream defaults, bounds),
+                           `Blocksize::samples`, `EncodeProfile::validate`,
+                           `StreamInfo::from_stream` — all landed (6b-1/6b-2)
   scan.rs                  table-less frame walk + resync (feature `scan`)
   rice_hybrid.rs           portable hybrid Rice twin (feature `rice-hybrid`)
 
@@ -121,15 +125,24 @@ covered. `strict-profile` is the exception — it is declared and unimplemented.
 | `crc-check` | verifies header CRC-8 and footer CRC-16 instead of consuming them | `flac-test-crc` |
 | `scan` | compiles the table-less frame walk | `flac-test-scan` |
 | `rice-hybrid` | compiles the portable hybrid Rice twin | `flac-test-rice` |
-| `strict-profile` | *declared*: rejects frames outside the constrained encode profile | **not implemented** — `format::EncodeProfile::validate` is still `todo!()`, and no gate builds the feature. Product-side work (6b-2) |
+| `strict-profile` | Holds a manifest to `format::DEFAULT_PROFILE` — blocksize, bits per sample, and the recorded maximum FIXED order — plus the per-frame order refusal that stays in `subframe`. **Implemented**: `EncodeProfile::validate` has a body and `Decoder::new` calls it under `cfg!(feature = "strict-profile")`. | **no gate builds the feature** — `validate()` itself is tested directly (`tests/decoder_manifest_walk.rs`, `tests/gafp_asset_facts.rs`), but the `cfg`'d call site inside `Decoder::new` has never been compiled by any gate, and the product ROM does not enable it (`flac_integration` builds `iwram-pin, scan` + `arm-kernel`). That is deliberate per 6b-2: the profile guarantee moved to pack time, where the packer *measures* the frames instead of trusting a header, and a profile-strict runtime re-check is optional insurance. If one is ever wanted, a gate leg is owed first. |
 | `rice-twin` (overlay) | forwards to `flac-lite/rice-hybrid`; exposes the out-of-crate arm | `overlay-test-twin` |
 | `rice-arm` (overlay) | assembles `asm/rice_partition.s`, declares the FFI and `KernelAbi`, owns the three tables — correct-only, nothing names it as a default | `overlay-test-arm` (host contract, 15 arms) + `overlay-kernel-test` (8 device arms) + `overlay-objdump` |
 | `iwram-pin` (overlay) | forwards to `flac-lite/iwram-pin`; pins the overlay's three tables and the core's `LEADING_ONES` | `overlay-kernel-rom`, whose own test asserts the runtime addresses are inside `.iwram` |
 
-The `decoder` facade and the `format` items above are the remaining `todo!()`s; the
-`GAFP` byte contract is specified in [`../crates/flac-lite/README.md`](../crates/flac-lite/README.md)
-and `scripts/pack_flac.sh` is still a documented stub. The spike's generated
-per-frame offset table is the deliberate stand-in.
+**These are landed, not outstanding.** The `decoder` facade and the `format` items
+above went in with 6b-1 (2026-11-10) and the packer/seek-table work with 6b-2
+(2026-11-11); the crate's `todo!()` list is closed and `crates/flac-lite/README.md`
+plus `src/lib.rs` carry what is genuinely still open inside it. What remains in
+this area: `scripts/pack_flac.sh` is still the documented stub (its header records
+what landed around it), the *spike* still builds on a generated per-frame offset
+table as its stand-in, and `gen_gafp_blob.py` is still the hand-authoring generator
+that `gafp-check` pins byte for byte — with `gafp_pack.py` now being the real
+packer, retiring that generator is a safe but unwritten step. The product path no
+longer depends on any of the stand-ins: `examples/flac_integration` reads the
+manifest out of the embedded blob and walks the frames from it. The open product
+work in this area is item **6b-3** — 32,768 Hz rate-play through that manifest —
+not the facade.
 
 **One experiment runs inside the tree, and it is the exception that proves the
 `experiments/` rule.** 6a-5b needed the *same image* to contain both the landed ARM

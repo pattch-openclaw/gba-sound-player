@@ -27,10 +27,13 @@ every target and gate below has been run green on this host.
 
 # 1. every ROM, built + linked + fixed with the host toolchain
 make native-rom native-flac-rom native-spike-rom native-opus-rom native-kernel-rom
+#    the product image's A/B control (same ROM, core's default kernel): native-flac-rom-default-kernel
 
 # 2. every gate
 make test          # test-rom (ROM #[test_case] suite in headless mGBA) + flac-test
-make flac-gates    # all six crates/flac-lite configurations + both combination arms
+make flac-gates    # every flac-lite configuration (incl. --no-default-features), both
+                   # combination arms, and the two gafp legs — the pack-check leg runs
+                   # the real packer, so it needs `flac` + `metaflac` on PATH
 make spike-test kernel-test opus-test
 
 # 3. the formatting gate, after any build (builds run `cargo fmt` as a pre-step)
@@ -54,6 +57,7 @@ build that reformatted your tree is fine — run `make check` before committing.
 | `*-rom` (ROM fixing) | `cargo install agb-gbafix --version 0.25.0 --locked` (pinned: it rewrites the ROM header, so it is part of the ROM bytes records compare by sha) |
 | `make test-rom` only | `mgba-test-runner` — run the setup script above (it builds agb's test runner; it needs `cmake`, `pkg-config`, zlib, libelf headers and libclang) |
 | Host gates | nothing beyond the pinned channel + `rust-src`: they run on the **host** triple, not the GBA target |
+| `make flac-gates`'s `gafp-pack-check` leg, and anything that runs `scripts/gafp_pack.py` / `gen_gafp_fixtures.py` | **`flac` + `metaflac` on PATH** (libFLAC tools). Without them the leg fails at the fixture step, not in the decoder, and the failure is not a decode regression — check this before bisecting a red `flac-gates`. `gafp-check` alone (byte-comparison of the committed blob) needs only Python. |
 
 `make help` prints the resolved toolchain; `toolchain-check` fails fast with install
 instructions rather than half-running a gate.
@@ -107,17 +111,26 @@ instructions rather than half-running a gate.
    `cargo test --target thumbv4t-none-eabi` "passes" without running anything. Always go
    through `make test-rom`, which sets `CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER`.
 
-## What green looks like (measured 2026-11-06, this host)
+## What green looks like (measured 2026-11-11 on `main`, this host; the older set was measured 2026-11-06)
 
 - Toolchain: `rustc 1.100.0-nightly (a69a63265 2026-09-03)` + `rust-src`, `agb-gbafix`
   0.25.0, `mgba-test-runner` from agb v0.25.0 (mGBA 0.10.5 built by `mgba-sys`) — that
   rustc is the instance `rust-toolchain.toml` now pins as `nightly-2026-09-04`.
-- ROMs built natively: `gba-sound-player.gba`, `flac-integration.gba`, `flac-spike.gba`,
-  `opus-spike.gba`, `ctor-probe.gba`, `arm-kernels.gba`, `flac-rate-spike.gba`,
-  `flac-rate-play.gba`. All gitignored; `git status` stays clean.
-- Gates: `flac-gates` **1169 passed / 6 ignored** across the six configurations plus both
-  combination arms; `flac-test` alone 178 passed / 1 ignored; `spike-test` 25;
-  `kernel-test` 20; `opus-test` 28; `rate-test` 46; `test-rom` 0 cases (exit 0);
+- ROMs built natively: `gba-sound-player.gba`, `flac-integration.gba` and its A/B
+  control `flac-integration-default-kernel.gba`, `flac-spike.gba`, `opus-spike.gba`,
+  `ctor-probe.gba`, `arm-kernels.gba`, `flac-rate-spike.gba`, `flac-rate-play.gba`.
+  All gitignored; `git status` stays clean. The product pair is 1,070,960 B /
+  1,068,164 B at `main` (`db003f4b…` / `57405056…`) — hashes are only comparable at
+  the same build path, so never quote one across machines.
+- Gates: `flac-gates` **1,498 passed / 0 failed / 3 ignored across 72 test binaries**
+  (eight `cargo test` invocations: the five feature configurations, the two combination
+  arms, `gafp_asset_facts`; plus `flac-portable-check`, `gafp-check`, `gafp-pack-check`).
+  The per-arm counts are in `flac-docs/plan-of-record.md` §"Baselines to hold", including
+  the same-command run at `1e5974c` that reproduces the older **1,476 / 3** — count the
+  *aggregate plus the arms*, not `test result:` lines (the aggregate also prints empty
+  `Doc-tests` lines). `flac-test` alone 202. Not re-run today, measured 2026-11-06 on
+  this host and treat as unverified at `main`: `spike-test` 25, `kernel-test` 20,
+  `opus-test` 28, `rate-test` 46. Re-run today: `test-rom` 0 cases (exit 0);
   `make check` clean.
 - Timing honesty: with warm target dirs a ROM rebuild is sub-second and the whole gate
   set is a couple of minutes; the first build after `make clean` pays the `-Zbuild-std`

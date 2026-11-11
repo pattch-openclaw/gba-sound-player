@@ -1469,9 +1469,22 @@ arithmetic is self-checked (`check_rows`, before any packing): each row's percen
 is re-derived from its own cycle count and the frame's own budget, and a
 mismatched denominator or a transcribed digit stops the run. The budget is the
 **32,768 Hz playback timer's** frame (1,048,576 cycles for 2048 samples), which is
-the denominator every figure in `flac-docs/measurements.md` uses; using the
-stream's own 32,000 Hz period would have overstated the headroom by 2.4% and made
-the packer's percentages not comparable to the product ROM's 37.83%/38.04%.
+the rate every figure in `flac-docs/measurements.md` is stated at — but **not the
+number the ledger divides by**. The ledger's budget row is 1,048,750 cycles
+(`flac-docs/method-and-gates.md`: `2048 / 32768 s × 16.78 MHz`, and
+`flac-docs/measurements.md` heads its condition table with the same 1,048,750),
+which is a *rounded-clock* derivation; the GBA's clock is exactly 2^24 Hz, so the
+same frame period is exactly **2^20 = 1,048,576**. This record's own shares are
+divided by 1,048,750 (398,255 → 37.974%; against 2^20 it is 37.981%), so the file
+now quotes the exact denominator and publishes against the rounded one. The gap is
+174 cycles, 0.0166%, worth ≤0.007 pp on any share here — no verdict in this file
+turns on it — but it is two things at once: a share quoted to three decimals is
+denominator-dependent, and `check_rows`'s 0.1 pp tolerance is *looser* than the
+gap, so the guard passes its own 42.48% row against the 1,048,576 it cites (which
+re-derives to 42.49%). Item 7-1 adds another column of shares; decide the
+denominator before then. Using the stream's own 32,000 Hz period would have
+overstated the headroom by 2.4% and made the packer's percentages not comparable
+to the product ROM's 37.83%/38.04%.
 
 **Correction, 2026-11-11: the product guard is FIXED-0, not merely FIXED-only.**
 `-l 0` disables LPC; libFLAC still chooses FIXED orders 1–4 from the signal, and
@@ -1776,6 +1789,84 @@ two builds time to the identical cycle total. So every hash in this section is a
 without its path is not re-checkable by anyone else — which is worth saying out
 loud because this file records a fair number of hashes.
 
+**Re-read at HEAD, and it holds.** Re-built at this same repository path, on the
+same pinned `nightly-2026-09-04`, warm target dirs, with the pre-change control
+taken the way this plan asks — the same tree at `1e5974c`, so the only variable is
+the three follow-up commits (`7a07cbb`, `1b6e493`, `968139d`). The rows above are
+reproducible to the hash: nothing in this record was mis-transcribed.
+
+| image | `1e5974c` (the rows above) | `main` (the follow-ups) | delta |
+|---|---|---|---|
+| `flac-integration.gba` | 1,070,928 B `e859f7bc…` | 1,070,960 B `db003f4b…` | **+32 B** |
+| — `.text` / `.rodata` / `.iwram` / `.ewram` / `.bss` | 68,532 / 999,580 / 2,036 / 400 / 20 | 68,548 / 999,596 / 2,036 / 400 / 20 | +16 / +16 / 0 / 0 / 0 |
+| `flac-integration-default-kernel.gba` | 1,068,132 B `193dd44a…` | 1,068,164 B `57405056…` | **+32 B** |
+
++32 B in *both* arms, `.iwram` unmoved, `arm_rice_partition` still at `0x0300022c`
+with `CTZ8`/`REV8` at `0x030005f4`/`0x030006f4` and the core's `LEADING_ONES` at
+`0x030004d4` — all four inside `.iwram`, witnessed by `nm` on the pre-`gbafix`
+ELF at `main`. The follow-ups edit seven library files — `format.rs`, `scan.rs`,
+`stream.rs`, `driver.rs`, `lib.rs`, `residual.rs`, `rice_hybrid.rs` — plus the test files and fixture rows that read them, and every image in this item
+links that library code,
+so "test- and API-side only, nothing reached the ROM" is *not* what happened; the
+honest version is that it reached the image as 32 B (0.003%): +16 B of `.text`, +16 B
+of `.rodata`, `.iwram` unmoved — and no cycle change anyone has measured, because
+`main` has been run nowhere. **The consequence is the one that matters for item 7:
+every cycle row in this record — mGBA and hardware — belongs to `1e5974c`'s bytes.**
+Ruled on the day it was measured, by the owner: **32 B is not material** — 32 B on a
+1.07 MB image whose `.text` is 68 KB is not a change that owes its own hardware tip
+before it can be believed — with the caveat that the growth was suspected to be "the
+seek bits added". That part is measured, and it is **not** the mechanism, which this
+file already established once: `nm` carries no `flac_lite::stream`, `seek` or
+`FrameNumber` symbol at `1e5974c` or at `main` (re-checked while taking this row:
+zero matches in 254 defined symbols), because the ROM reads a `GAFP` manifest and
+never a FLAC container, so the seek API cannot be in the image at all. The mechanism
+is the one 6b-2's own `nm -C` investigation named — rustc re-cloning the hot bit
+reader — and that shape is still present at `main`: `BitReader::read_bits` plus a
+second clone `read_bits.783` and an out-of-line `rice_quotient`. So the row is
+recorded and not chased: the ruling and the mechanism agree that this is below the
+level that needs its own reading, and item 7-1 re-reads both arms at the 32 kHz
+product profile anyway, which is where current bytes get their numbers. What is
+deliberately *not* measured is a per-commit split of the 32 B: the three follow-ups
+touch seven library files, and splitting the growth would need a build at each commit
+— not run, because the ruling made it moot.
+
+**One trap in taking that section witness, hit on the way here.** Both arms build
+the *same binary name* into the same target dir, so
+`examples/flac_integration/target/thumbv4t-none-eabi/release/flac-integration` holds
+whichever arm was built **last** — and the two differ measurably: `.iwram` is 2,036 B
+(`0x7f4`) with the kernel and 812 B (`0x32c`) without, a 1,224 B gap that is exactly
+the thing a witness is supposed to confirm. Running `make native-flac-rom
+native-flac-rom-default-kernel` therefore leaves a control-shaped ELF sitting in the
+path a product witness would read, which is how a reader can conclude the kernel is
+missing from an image that contains it. Read the ELF between the two builds, or
+re-run `make native-flac-rom` immediately before the witness — the `.gba` outputs are
+distinct and correct even when the ELF is not, so a size/hash check on the ROMs will
+not reveal the mix-up.
+
+**The gates, both sides.** `make flac-gates` at `1e5974c` on this host reproduces
+the record's **1,476 passed / 0 failed / 3 ignored across 72 test binaries**
+(7 lib unittests + 65 integration binaries) exactly, and at `main` it is green at
+**1,498 / 0 / 3** across the same 72 binaries. The +22 is the follow-ups, and it
+is spread, not concentrated: `flac-test` 200→**202**, `flac-test-wide`
+182→**184**, `flac-test-crc` 190→**192**, `flac-test-scan` 233→**237**,
+`flac-test-rice` 203→**205**, `gafp_asset_facts` 6→**8**, `crc-check,scan`
+223→**227**, `crc-check,scan,rice-hybrid` 239→**243** (the `+1 ignored` in each
+scan-flavoured arm is unchanged). Diffing the two runs test-name by test-name
+accounts for the 22 exactly — 29 added test-executions, 7 removed:
+three unit tests under `stream::tests::seek_table_shape` (two new —
+`a_seek_offset_outside_the_frame_region_is_refused`,
+`fixed_block_numbering_owns_both_directions` — and one renamed away from
+`frame_index_needs_fixed_blocking_…` to `frame_number_needs_…`), each running in
+the seven lib-unittest configurations, is +14; two new `gafp_asset_facts` tests
+(`the_bit_positions_start_and_end_where_the_headers_and_footer_say`,
+`the_subframe_rows_are_internally_consistent_with_their_frames`) in the four
+invocations that build that binary is +8. Note what that diff says about the
+code: those three unit tests compile in the `instrument`, no-default-features,
+`crc-check` and `rice-hybrid` arms too — `stream`'s seek-table work is not
+`scan`-gated — and the follow-ups edited library files that every image in this
+item links, which is the +32 B. Nothing else about the tree's state moved:
+`make check` clean, `make test-rom` still green and still `Running 0 tests`.
+
 Both images, run headless (`timeout -k 5 45 mgba-test-runner <rom>`), each image
 twice, and each image's two runs identical to the cycle:
 
@@ -2023,7 +2114,9 @@ hardware claim — mGBA on this host, and E5's arbitration owns that line.
 ## Baselines to hold
 
 Held byte-identically through item 5 PR 4 and 6a-1/6a-2/6a-3; **6a-6 moves the
-counts and the default instrument** (its delta is the rung's record, above):
+counts and the default instrument** (its delta is the rung's record, above). **The
+table below is the 6a-era baseline and is kept as one**; the live counts at
+`main` are in the superseding table after it, measured 2026-11-11:
 
 | Gate | Count |
 |---|---|
@@ -2034,11 +2127,40 @@ counts and the default instrument** (its delta is the rung's record, above):
 | `flac-test-rice` | 199 + 1 |
 | `crc-check,scan` | 206 + 1 |
 | `crc-check,scan,rice-hybrid` | 222 + 1 |
-| `flac-gates` | **1,377 passed + 6 ignored** |
+| `flac-gates` | **1,377 passed + 6 ignored** *(6a-era; see the note below)* |
 | `spike-test` | 15 + 10 |
 | `item6a7-test` | 15 + 1 + 10 |
 | `kernel-test` | 20 |
 | `flac-portable-check`, `make check` | green |
+
+**Superseding counts at `main` (`e3d377e`), measured 2026-11-11 on the agent host
+at the repository path**, warm target dirs, pinned `nightly-2026-09-04`; the same
+command run at `1e5974c` on this host reproduces the 1,476 row, which is what
+makes the per-arm deltas below trustworthy rather than remembered:
+
+| Arm | `1e5974c` | `main` |
+|---|---|---|
+| `flac-test` (`--features instrument`) | 200 + 0 | **202 + 0** |
+| `flac-test-wide` (`--no-default-features`) | 182 + 0 | **184 + 0** |
+| `flac-test-crc` (`crc-check`) | 190 + 0 | **192 + 0** |
+| `flac-test-scan` (`scan,instrument`) | 233 + 1 | **237 + 1** |
+| `flac-test-rice` (`rice-hybrid`) | 203 + 0 | **205 + 0** |
+| `gafp_asset_facts` (the named leg of `gafp-pack-check`) | 6 + 0 | **8 + 0** |
+| `crc-check,scan` | 223 + 1 | **227 + 1** |
+| `crc-check,scan,rice-hybrid` | 239 + 1 | **243 + 1** |
+| **`flac-gates` aggregate** | 1,476 passed / 3 ignored / 72 binaries | **1,498 / 0 failed / 3 ignored / 72 binaries** |
+| Product images | `flac-integration.gba` 1,070,928 B `e859f7bc…`; `…-default-kernel.gba` 1,068,132 B `193dd44a…` | **1,070,960 B `db003f4b…`; 1,068,164 B `57405056…`** |
+
+The `+0`/`+1` is ignored tests; the aggregate also prints 7 empty `Doc-tests
+flac_lite` result lines, which is normal and is not one of the 72. Note the shape
+of that table: the arms that gain `+2` are the ones whose *only* added tests are
+the three `stream::tests::seek_table_shape` unit tests — they compile in every
+arm, `scan` is not required for them — and the arms that gain `+4` are exactly the
+four invocations that build the `gafp_asset_facts` binary. So the drift is in
+library code (`stream.rs`) plus the packer's own fact suite, and the library half
+is also why both product images grew 32 B. Rebuild both at `main` with
+`make native-flac-rom native-flac-rom-default-kernel` before quoting any cycle
+figure against them: they have never been run on hardware or mGBA.
 
 Images in the configuration a ROM links: `.text` **46,008 B** (`f0f88c33d150…`) ·
 `.rodata` 1,829,760 B · `.iwram` 812 B · `.ewram` 368 B · `.entrypoint` 380 B;

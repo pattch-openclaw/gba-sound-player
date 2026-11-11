@@ -20,8 +20,27 @@ The one rule everything else is a special case of:
 At the initial profile — 2048-sample frames at 32,768 Hz — the budget per frame is
 
 ```text
-2048 / 32768 s × 16.78 MHz ≈ 1,048,750 cycles/frame ≈ 512 cycles/sample
+2048 / 32768 s × 16,780,000  = 1,048,750 cycles/frame = 512.0849609375 c/sample   ← the ledger's
+2048 / 32768 s × 2^24        = 1,048,576 cycles/frame = 512 c/sample               ← the exact one
 ```
+
+**Two clocks are in use in this tree, and the row above is the difference.** The
+instrument budgets with `stats.rs::GBA_CLOCK_HZ = 16_780_000` — the rounded "16.78
+MHz" — so 1,048,750 is what `real_time_budget()` computes, what every `verdict:`
+line in every ROM compares against, and what the `perf-results.md` /
+`measurements.md` tables divide by; that arithmetic is itself under test
+(`real_time_budget_matches_the_plan_arithmetic`). `scripts/gafp_pack.py` budgets
+with `GBA_CYCLES_PER_SECOND = 16_777_216` = 2^24, which is the GBA's actual clock
+and what an `Hz32768` timer really divides: 512 cycles per sample, 2^20 per
+2048-sample frame. `examples/flac_spike/src/stats.rs` does not carry 2^24, so a
+reader who takes the instrument's constant to the hardware gets a budget 174 cycles
+too generous (0.0166%). Nothing decided changes — every bar here is two decimal
+places away from a decision — but it does mean a share quoted to three decimals is
+denominator-dependent (398,255 c is 37.974% of the rounded budget and 37.981% of
+the exact one), and the packer's 0.1 pp row-consistency tolerance is wider than
+that gap. Item 7-1 puts new shares on the same table; pick one clock before then
+and the record's correction in `plan-of-record.md` (2026-11-11) is where the two
+are currently reconciled in prose.
 
 The budget scales 1-for-1 with sample rate while per-frame decode work barely
 moves, which is why the rate track exists at all:
@@ -158,9 +177,12 @@ under `examples/flac_spike/experiments/<name>/`.
 | `make flac-test-crc` | Same, `--features crc-check`: header CRC-8 + footer CRC-16 verification, both accept and reject paths. |
 | `make flac-test-scan` | Same, `--features scan`: the frame walk + `tests/scan_frame_walk_layout.rs` (`required-features = ["scan"]`). |
 | `make flac-test-rice` | Same, `--features rice-hybrid`: the two-mechanism differential. |
+| `make native-flac-rom-default-kernel` | 6b-1's A/B control: the same ROM source built `--no-default-features`, i.e. `arm-kernel` off, so the identical decode runs through the core's `TableCountKernel`. It is what makes the kernel swap a same-source pair rather than two unrelated ROMs (`flac-integration-default-kernel.gba`). |
 | `make flac-portable-check` | A **second** bare-metal target (`thumbv7em-none-eabi`) compiles, `--features scan,rice-hybrid`, `iwram-pin` off. Compile only — **no non-GBA performance claim exists**. |
-| `make flac-gates` | The aggregate: seven configurations plus the combination arms (1,377 passed / 6 ignored after 6a-6). |
-| `make native-flac-rom` | The decoder bundles into a bootable ROM (`examples/flac_integration/`), links and fixes. Build sanity, not audio. |
+| `make gafp-check` | The committed product blob's tripwire: `scripts/gen_gafp_blob.py --check` re-assembles it in memory and compares byte for byte with `examples/flac_integration/assets/spike_l0.gfp`. No encoder needed. It also runs as a prerequisite of `flac-rom`, so no product image is built over a blob that no longer matches its generator. |
+| `make gafp-pack-check` | 6b-2's writer gate, three legs: `scripts/gafp_pack.py` reproduces the committed product blob **byte for byte**; `gen_gafp_fixtures.py --check` regenerates the fixture set and its three **refusal** legs (LPC at the product profile, 44.1 kHz at a 32 kHz target, 8-bit) and asserts each one refuses; and `crates/flac-lite/tests/gafp_asset_facts.rs` (`--features scan,instrument --test gafp_asset_facts`, 8 tests) reads every fact row back through the facade — 2 tests per row, one of them the negative, the row contradicting the header it came from. Needs `flac` + `metaflac` on PATH: this is the leg that fails in a CI image without libFLAC tools, and it is not a decoder regression. |
+| `make flac-gates` | The aggregate: `flac-test` + `flac-test-wide` + `flac-test-crc` + `flac-test-scan` + `flac-test-rice` + `flac-portable-check` + `gafp-check` + `gafp-pack-check`, plus the two combination arms (`crc-check,scan` and `crc-check,scan,rice-hybrid`). Counts move with the tree, so they are recorded per landing rather than here: at `main` (2026-11-11) it is **1,498 passed / 0 failed / 3 ignored across 72 test binaries** — the per-arm table is in `plan-of-record.md`, "Baselines to hold". It is the only aggregate that needs `flac`/`metaflac` on PATH, because the `gafp-pack-check` leg really runs the packer. |
+| `make native-flac-rom` | **The product image** (`examples/flac_integration/` → `flac-integration.gba`): embeds the committed `GAFP` asset, parses its manifest, decodes through the facade with `flac-lite-gba`'s `ArmRiceKernel`, verifies against the pinned PCM, then times a second pass. Pairs with `native-flac-rom-default-kernel` above. **Builds and verifies; it makes no sound** — no mixer or DMA feeder in this image yet (item 7-2). |
 | `make spike-test` / `native-spike-rom` | The measurement instrument: host witness over the exact embedded bytes, then on-target decode proof and cycle harness. |
 | `make item6a5-test` / `item6a5-arms-rom` / `item6a5-asm-rom` | Item 6a-5's arms: every kernel (default, Rust mechanism, ARM embodiment) decodes the committed clips to the pinned PCM and agrees with the control frame window by frame window on the host, and the two arm images time them through the product call path (three-way and product-shape). Arm features are off in every other build. |
 | `make item6a7-test` / `item6a7-rom` | Item 6a-7's width + stack image: the vendored pre-6a-6 i64 path (`src/wide.rs`) decodes the committed clips to the reference PCM and agrees with the i32 control frame by frame on the host; the ROM times `ctrl` (i32), `wide` (i64) and `asm` (kernel+i32) in one calibration. `item6a7-test` 26; the default `spike-test` and image are unchanged. |

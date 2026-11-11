@@ -50,6 +50,18 @@ body is reachable the table *relocates* to `0x0300042c` with its bytes unchanged
 the 6a-3 section table, arms T/H); so no reader should treat `0x0300022c` as a
 scheme-wide constant, and no kernel-check may hard-code it.
 
+**Checked again today (2026-11-11, `main`, `nm` on the pre-`gbafix` ELF of
+`make native-flac-rom`).** The product image *does* now name a second mechanism, and
+the whole point of that caveat has arrived: the IWRAM witness in the shipping image
+reads `arm_rice_partition` **0x0300022c**, the core's `LEADING_ONES`
+**0x030004d4**, and the overlay's `CTZ8`/`REV8` **0x030005f4**/**0x030006f4**, inside
+a 2,036 B `.iwram`. The address that paragraph above used for `LEADING_ONES` is now
+held by the ARM kernel body, and the table has moved again from the `0x0300042c` the
+6a-3 arms recorded. Anyone re-witnessing an anchor should read these from their own
+build, not from any file. The gate aggregate for the same tree is 1,498 passed /
+3 ignored (the per-arm table, and the 1,476 → 1,498 attribution, are in
+[`plan-of-record.md`](plan-of-record.md) §"Baselines to hold").
+
 ## The questions
 
 ### Q1 — Is the ARM kernel *right* through the seam on the device, and on whose tables?
