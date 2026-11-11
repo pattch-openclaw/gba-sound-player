@@ -31,6 +31,10 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+mod text;
+
 use agb::display::Rgb;
 use flac_lite::bits::BitReader;
 use flac_lite::{DecodedFrame, Decoder, FrameBuffers, Manifest};
@@ -473,6 +477,7 @@ fn main(mut gba: agb::Gba) -> ! {
 
     let proof = proof_pass();
     let mut pass = bit_pass && proof.is_some();
+    let mut reading: Option<(u64, u64, u64, usize)> = None; // mean, worst, frames
 
     if let Some(proof) = &proof {
         let mut timers = gba.timers.timers();
@@ -482,6 +487,7 @@ fn main(mut gba: agb::Gba) -> ! {
                 let mean = sum / frames as u64;
                 let mean_x1000 = pct_x1000_u64(mean);
                 let worst_x1000 = pct_x1000_u64(u64::from(worst));
+                reading = Some((mean, u64::from(worst), u64::from(mean_x1000), frames));
                 agb::println!(
                     "[flac-rom] timing: frames={} total={} cycles mean={} c/frame worst={} c/frame",
                     frames,
@@ -524,8 +530,53 @@ fn main(mut gba: agb::Gba) -> ! {
         proof.is_some()
     );
 
-    loop {
-        let frame = gfx.frame();
-        frame.commit();
+    // The numbers, on the screen: serial exists on emulators, not on a stock
+    // unit. Same string the log carries, so the two channels cannot disagree.
+    use alloc::format;
+    use alloc::string::String;
+    let mut screen = String::new();
+    screen.push_str("FLAC INTEGRATION\n");
+    screen.push_str(&format!(
+        "K {}\n",
+        if cfg!(feature = "arm-kernel") {
+            "rice-arm"
+        } else {
+            "default"
+        }
+    ));
+    match reading {
+        Some((mean, worst, mean_x1000, frames)) => {
+            screen.push_str(&format!(
+                "mean {} {}.{:03}%\n",
+                mean,
+                mean_x1000 / 1000,
+                mean_x1000 % 1000
+            ));
+            screen.push_str(&format!(
+                "worst {} {}.{:03}%\n",
+                worst,
+                pct_x1000_u64(worst) / 1000,
+                pct_x1000_u64(worst) % 1000
+            ));
+            screen.push_str(&format!("{} frames\n", frames));
+        }
+        None => screen.push_str("timing VOID\n"),
     }
+    screen.push_str(if pass { "PASS" } else { "FAIL" });
+    for line in screen.lines() {
+        agb::println!("[flac-rom] screen| {}", line);
+    }
+    let fit = text::measure(&screen);
+    agb::println!(
+        "[flac-rom] fit: lines={} right={} bottom={} fits={}",
+        fit.lines,
+        fit.right,
+        fit.bottom,
+        fit.fits()
+    );
+    text::show(&mut gfx, &screen, color);
+
+    // Present nothing after `show`: a commit from a fresh frame disables the
+    // background it just painted (6a-7b's hardware finding).
+    loop {}
 }
