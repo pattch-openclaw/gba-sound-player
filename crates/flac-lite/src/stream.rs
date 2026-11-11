@@ -125,7 +125,9 @@ pub const BLOCK_HEADER_LEN: usize = 4;
 /// the only length accepted for type 0.
 pub const STREAMINFO_LEN: usize = 34;
 
-/// §8.1: metadata block type 0 (streaminfo). The only type this crate reads.
+/// §8.1: metadata block type 0 (streaminfo). The only type [`parse`]
+/// requires; type 3 is read too, but only through [`seek_table`], because a
+/// stream without one is a complete stream (§8.5).
 pub const TYPE_STREAMINFO: u8 = 0;
 
 /// §8.1: the type value that is forbidden outright ("A value of 127 … is
@@ -631,6 +633,392 @@ pub fn frame_data_offset(stream: &[u8]) -> Result<usize> {
     }
 }
 
+// ---------------------------------------------------------------- §8.5 ----
+
+/// §8.5: "Each seek point takes 18 bytes, so a seek table with 1% resolution
+/// within a stream adds less than 2 kilobytes of data. The number of seek
+/// points is implied by the size described in the metadata block header, i.e.,
+/// equal to size / 18."
+///
+/// That sentence is the whole reason the constant exists: a seek table carries
+/// no count field, so a payload whose length is not a whole multiple of 18
+/// implies no table at all — and a reader that took `size / 18` and ignored the
+/// remainder would be inventing where the last entry ends. Measured: that is
+/// also the only seek-table malformation the reference tools refuse outright
+/// (`metaflac` on a 19-byte table: `ERROR: reading metadata, status =
+/// "FLAC__METADATA_CHAIN_STATUS_BAD_METADATA"`, exit 1; `flac -t`: "ERROR while
+/// decoding metadata", exit 1), which is what makes it a container fault rather
+/// than a table nobody happened to sort well.
+pub const SEEKPOINT_LEN: usize = 18;
+
+/// §8.5.1 Table 7, first field: "Sample number of the first sample in the
+/// target frame or 0xFFFFFFFFFFFFFFFF for a placeholder point." §8.5 adds that
+/// a placeholder "will be ignored by decoders but can be used to reserve space
+/// for future seek point insertion".
+///
+/// The all-ones sample number is the *only* thing that makes an entry a
+/// placeholder — nothing else in the entry is reserved. The notes to §8.5.1 say
+/// the other two fields of a placeholder are undefined, and nothing here reads
+/// them. What they happen to hold is a measured fact, not a rule: on
+/// `s6_seekpoints_8k_mono` the placeholder's bytes are 16 zero bytes
+/// (`seek_placeholder_other_fields_zero true`), and the table file records that
+/// rather than assuming it, because `metaflac --list` renders the entry as the
+/// bare word `PLACEHOLDER` and prints neither field.
+pub const SEEKPOINT_PLACEHOLDER: u64 = u64::MAX;
+
+/// §8.1's metadata block type 3, defined by §8.5. "There MUST NOT be more than
+/// one seek table metadata block in a stream", which [`seek_table`] enforces the
+/// same way [`parse`] enforces §8.2's single-streaminfo rule.
+pub const TYPE_SEEKTABLE: u8 = 3;
+
+/// Read one 18-byte entry from `e`, Table 7's field order — all big-endian
+/// (§8.1: the metadata types are "coded most-significant bit first", and unlike
+/// the frame layer this block has no little-endian anywhere in it; the
+/// `metaflac` rendering the tables pin agrees field for field). Panic-free by
+/// construction: `e` must be exactly [`SEEKPOINT_LEN`] bytes, and a caller that
+/// slices a payload into [`core::slice::chunks_exact`] gets that length for
+/// free.
+fn seek_point(e: &[u8]) -> Option<SeekPoint> {
+    if e.len() != SEEKPOINT_LEN {
+        return None;
+    }
+    let first = e.get(..8)?.try_into().ok()?;
+    let offset = e.get(8..16)?.try_into().ok()?;
+    let samples = e.get(16..)?.try_into().ok()?;
+    Some(SeekPoint {
+        first_sample: u64::from_be_bytes(first),
+        frame_offset: u64::from_be_bytes(offset),
+        frame_samples: u16::from_be_bytes(samples),
+    })
+}
+
+/// One entry of a §8.5 seek table, exactly as its 18 bytes state it. The
+/// interpretation lives in [`SeekTable`] (which entries are usable at all) and
+/// in [`SeekPoint::frame_index`] (what this entry means for a walk); this type
+/// adds nothing to the bytes and drops nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeekPoint {
+    /// Table 7: "Sample number of the first sample in the target frame or
+    /// 0xFFFFFFFFFFFFFFFF for a placeholder point."
+    ///
+    /// Interchannel samples (§8.2's wording for sample numbers applies here
+    /// too): channel 0 and channel 1 of the same instant are one sample number.
+    /// `metaflac`'s `--add-seekpoint` help says the same thing about its own
+    /// point syntax, and the fixtures are all mono, so the difference never
+    /// shows up in the rows — it is stated because a two-channel caller that
+    /// multiplied a sample number by its channel count to index PCM would be
+    /// off by the channel count.
+    pub first_sample: u64,
+    /// Table 7: "Offset (in bytes) from the first byte of the first frame
+    /// header to the first byte of the target frame's header."
+    ///
+    /// That base is exactly what [`frame_data_offset`] answers, and it is not
+    /// the start of the file — the fact everything else about a seek table turns
+    /// on, and measured on both fixtures that carry one: on
+    /// `s6_seekpoints_8k_mono` the first point says 0 while the first frame
+    /// begins at byte 234 (that fixture's `frame_data_offset` row), and s2's
+    /// single point says 0 against a `frame_data_offset` of 176. Adding the two
+    /// is what makes the number usable; `tests/scan_frame_walk_layout.rs` pins
+    /// the sum against the frame offsets the proven filter reports, and
+    /// `tests/stream_metadata_layout.rs` refuses a table whose offsets are read
+    /// from the start of the file instead — the wrong reading moves every point
+    /// by 234 bytes, which is not off-by-one but off-by-a-container.
+    ///
+    /// §8.5.1's last note also matters for this repo's packed path: "the sample
+    /// offsets are those of an unmuxed FLAC stream. The offsets MUST NOT be
+    /// updated on muxing to reflect the new offsets of FLAC frames in a
+    /// container." A GAFP blob may therefore carry a copied table (and item
+    /// 6b-3 may choose to) but may not silently rewrite its numbers — which is
+    /// part of why the packed path's own answer stays
+    /// [`crate::format::Manifest`]'s frame index.
+    pub frame_offset: u64,
+    /// Table 7: "Number of samples in the target frame."
+    ///
+    /// The target frame's own count, so the entry naming a stream's last frame
+    /// carries that short tail's length rather than the declared maximum:
+    /// measured, s6's last point says 368 and every point naming a full frame
+    /// says 512, which is also exactly the declared `max_blocksize`. (The
+    /// pre-RFC phrasing of this field — "the fixed block size", which "MUST
+    /// equal the maximum blocksize for the entire stream" unless the target is
+    /// the last block — is a *stricter* statement than Table 7's, and these
+    /// fixed-blocksize fixtures satisfy both. A variable-blocksize stream could
+    /// tell them apart; none of the fixtures is one, so this crate takes
+    /// Table 7's wording and no other.)
+    ///
+    /// Nothing in this crate uses it to frame anything. A frame's block size
+    /// comes from its own header (§9.1.5), which is what makes a wrong value
+    /// here a wrong note rather than a wrong sample — witnessed in
+    /// `tests/scan_frame_walk_layout.rs`, where s6's last point is rewritten
+    /// from 368 to 999 and the walk from that same offset still produces the
+    /// 368 samples the reference decoder produces.
+    pub frame_samples: u16,
+}
+
+impl SeekPoint {
+    /// "A seek placeholder entry uses '0xFFFFFFFFFFFFFFFF' … for the sample
+    /// number value" (§8.5). The other two fields of a placeholder are
+    /// undefined and are never consulted.
+    #[inline]
+    #[must_use]
+    pub fn is_placeholder(&self) -> bool {
+        self.first_sample == SEEKPOINT_PLACEHOLDER
+    }
+
+    /// Which frame this point names, as a position in the stream's audio: 0 for
+    /// its first frame, 1 for the next, and so on. Only derivable for a stream
+    /// whose block size is fixed — `first_sample / max_blocksize`, with the
+    /// short tail included, which is the same arithmetic
+    /// [`StreamInfo::exact_frame_count`] uses — and refused otherwise:
+    ///
+    /// * a placeholder names no frame, so it has no index;
+    /// * a variable-blocksize stream has no divisor. Its own seek points are
+    ///   still perfectly usable for a byte-level seek — [`Self::frame_offset`]
+    ///   is the whole answer for that — but no arithmetic maps a sample number
+    ///   to a frame position without the frames themselves, and a table gives
+    ///   each *target* frame's sample count, not the counts of the frames
+    ///   before it. §9.1.5 is the reason this crate could not walk such a
+    ///   stream anyway (its sample-numbered form is refused at the frame
+    ///   layer), and the point is stated so that a future reader of a real
+    ///   variable-blocksize file knows which half of the table still works;
+    /// * a point at or past the stream's own frame count names no frame, where
+    ///   the stream declares a count at all
+    ///   ([`StreamInfo::exact_frame_count`]). Measured, a real writer does not
+    ///   write such points — `metaflac --add-seekpoint=12000` on a 6000-sample
+    ///   stream drops the request instead — but a hand-edited table can hold
+    ///   one, and `flac -t` waves it through (FLAC.md's split-proposal entry
+    ///   records the measurements); refusing it here is what keeps
+    ///   [`crate::scan::Frames`]'s buffer requirement honest, because a walk
+    ///   told to start past the end has nothing to read.
+    ///
+    /// ## Position, not frame number
+    ///
+    /// [`crate::scan::Frames::anchored`] wants a frame **number**, and §9.1.5
+    /// allows a stream — a "mutilated contiguous" one especially — to number
+    /// its frames from something other than 0. A position is not a number, and
+    /// no metadata block states the first frame's number: it is in the first
+    /// frame header. The two are the same for a stream that numbers from 0,
+    /// which is what every encoder writes and what every fixture here does
+    /// (`first_frame_number 0` in the stream vectors table), and a caller with
+    /// a substream composes them: `first_frame_number + frame_index`.
+    /// `tests/scan_frame_walk_layout.rs` does exactly that composition rather
+    /// than assuming 0, and pins that an anchor one off is refused before the
+    /// frame is decoded, so a wrong table entry cannot become a wrong sample.
+    #[inline]
+    #[must_use]
+    pub fn frame_index(&self, info: &StreamInfo) -> Option<u64> {
+        if self.is_placeholder() || !info.is_fixed_blocksize() {
+            return None;
+        }
+        let index = self.first_sample / u64::from(info.max_blocksize);
+        if let Some(count) = info.exact_frame_count() {
+            if index >= u64::try_from(count).unwrap_or(u64::MAX) {
+                return None;
+            }
+        }
+        Some(index)
+    }
+}
+
+/// A §8.5 seek table: the payload of a type 3 block, borrowed, read as a
+/// fixed-stride list.
+///
+/// This is the shape the module's "no allocation, and no block list" rule
+/// allowed after all, and better than the caller-provided array that note
+/// sketched: a seek table's payload *is* its representation, so a view of it is
+/// total — no capacity to size, no count to keep in step, nothing copied. The
+/// consequence is honest and worth stating: [`SeekTable`] borrows, so a caller
+/// must keep the bytes alive for as long as it holds one. On this target the
+/// bytes are a ROM asset, so that is the normal case; if a rung ever wants a
+/// table that outlives its file, the caller-provided array stays available and
+/// nothing here prevents it.
+///
+/// [`Self::parse`] checks §8.5.1's ordering rules once, on the whole table, and
+/// after that the entries are read on demand. Why here when libFLAC tolerates
+/// their absence (FLAC.md's split-proposal entry, measured): the same reason
+/// the module enforces §8.2's MUST NOT values and §8.1's flags — this crate
+/// *uses* the field. A frame index or byte offset that is wrong does not fail
+/// at the table; it fails at a sample hundreds of kilobytes later, or not at
+/// all.
+#[derive(Clone, Copy, Debug)]
+pub struct SeekTable<'a> {
+    payload: &'a [u8],
+    points: usize,
+}
+
+impl<'a> SeekTable<'a> {
+    /// Read and validate a seek table from a block payload.
+    ///
+    /// [`Error::SeekTableLength`] if the payload is not a whole number of
+    /// entries; [`Error::SeekTableOrder`] with the index of the entry that
+    /// broke the first of §8.5.1's notes it came to:
+    ///
+    /// * "Seek points within a table MUST be sorted in ascending order by
+    ///   sample number" and "MUST be unique by sample number, with the
+    ///   exception of placeholder points" — one check, strictly ascending real
+    ///   sample numbers;
+    /// * "there MAY be any number of placeholder points, but they MUST all
+    ///   occur at the end of the table" — so a real point after a placeholder
+    ///   is refused. The reference writer puts them there on its own
+    ///   (`metaflac`'s help: a placeholder "always goes at the end of the
+    ///   SEEKTABLE", and it did, from out-of-order requests), which is why no
+    ///   fixture shows the refusal; it is witnessed in this module's own tests,
+    ///   where a table can be built by hand.
+    ///
+    /// An empty payload is not an error: §8.5's Table 6 says "Zero or more seek
+    /// points", and libFLAC accepts the zero-length block (measured: a
+    /// zero-length type 3 block spliced into s6's chain leaves `metaflac --list`
+    /// printing "seek points: 0" and `flac -t` exiting 0 — the same verdict as
+    /// the hand-built one in this module's tests). [`Self::find`] answers None
+    /// for such a table, which is the same thing the reader would do with no
+    /// table at all.
+    pub fn parse(payload: &'a [u8]) -> Result<Self> {
+        if payload.len() % SEEKPOINT_LEN != 0 {
+            return Err(Error::SeekTableLength);
+        }
+        let mut last_real: Option<u64> = None;
+        let mut placeholders = false;
+        let mut points = 0usize;
+        // `chunks_exact`, because the length check above is what makes every
+        // chunk an entry and the count below is the same count the format
+        // derives from the block header's size field.
+        for (index, entry) in payload.chunks_exact(SEEKPOINT_LEN).enumerate() {
+            let Some(point) = seek_point(entry) else {
+                return Err(Error::SeekTableLength);
+            };
+            points += 1;
+            if point.is_placeholder() {
+                placeholders = true;
+                continue;
+            }
+            if placeholders || last_real.is_some_and(|p| point.first_sample <= p) {
+                return Err(Error::SeekTableOrder { at: index });
+            }
+            last_real = Some(point.first_sample);
+        }
+        Ok(Self { payload, points })
+    }
+
+    /// Total entries, placeholders included — §8.5's `size / 18`.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.points
+    }
+
+    /// A table with no entries at all, which the format permits and which
+    /// behaves, for every reader here, like having no table.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.points == 0
+    }
+
+    /// Entry `i` of the table, exactly as the bytes state it — placeholder
+    /// included, because a placeholder is an entry and a caller counting
+    /// against a row of table positions needs the same indexing the generator
+    /// used ([`SeekPoint::is_placeholder`] is how a caller tells them apart).
+    /// None past the end; no arithmetic in this function can overflow, because
+    /// the product is checked.
+    #[inline]
+    #[must_use]
+    pub fn point(&self, i: usize) -> Option<SeekPoint> {
+        let at = i.checked_mul(SEEKPOINT_LEN)?;
+        let end = at.checked_add(SEEKPOINT_LEN)?;
+        seek_point(self.payload.get(at..end)?)
+    }
+
+    /// The point a seek to sample `sample` starts from: the last real point
+    /// whose first sample is at or before it, as its table index and its
+    /// fields. None when no real point reaches that far, which for a table that
+    /// passed [`Self::parse`] means either a table of nothing but placeholders
+    /// or a target before the table's first point.
+    ///
+    /// That rule is the only reading a list of frame positions can have: the
+    /// table says where frames begin, so the best answer for a sample in the
+    /// middle of the stream is the last frame start at or before it. The
+    /// format's own use of the table is the decoder's — §8.5 calls a
+    /// placeholder one that "will be ignored by decoders", and Table 7's notes
+    /// put the real points first — so placeholders are skipped rather than
+    /// considered, and `parse` has guaranteed nothing real follows the first
+    /// one.
+    ///
+    /// Linear, deliberately. A table is 18 bytes an entry and the target is one
+    /// point per user action; the fixture tables have 1 and 7 entries, and
+    /// §8.5's own recommendation is 100 — 1.8 KB, scanned in less time than it
+    /// takes to decode one frame of the audio, which is the thing a seek is
+    /// trying to avoid doing. `Self::point` is the only accessor, so a future
+    /// hot path that wants a binary search can have one without changing what
+    /// this returns.
+    #[must_use]
+    pub fn find(&self, sample: u64) -> Option<(usize, SeekPoint)> {
+        let mut best = None;
+        for i in 0..self.points {
+            let Some(point) = self.point(i) else {
+                break;
+            };
+            if point.is_placeholder() {
+                break;
+            }
+            if point.first_sample > sample {
+                break;
+            }
+            best = Some((i, point));
+        }
+        best
+    }
+
+    /// The raw payload, for a caller that wants to hash or copy it. Nothing in
+    /// this crate does either; it is here so the table has the same shape
+    /// [`MetadataBlock::payload`] has when a test wants to compare bytes.
+    #[inline]
+    #[must_use]
+    pub fn payload(&self) -> &'a [u8] {
+        self.payload
+    }
+}
+
+/// Find and interpret the §8.5 seek table of a `.flac` stream, if it has one.
+///
+/// A separate entry point rather than a field of [`StreamFacts`], because the
+/// format treats the table as an optimization rather than a requirement: "It is
+/// possible to seek to any given sample in a FLAC stream without a seek table,
+/// but the delay can be unpredictable" (§8.5). Measured, most encodes have
+/// none: `flac -1 --no-padding` on a 0.75-second stream writes no seek table at
+/// all, and four of the six fixtures here have none for one reason or another.
+/// So absence is `Ok(None)`, not an error — and the packed path has its own
+/// answer anyway ([`crate::format::Manifest`]'s frame index), which is why
+/// nothing in this crate calls this function yet.
+///
+/// Walks the chain to the end even after finding a table, for the same reason
+/// [`parse`] does: a chain that stops early is refused even when the interesting
+/// block was already in hand — except when it *is* the interesting one: an
+/// out-of-range type 3 block is still refused, because a table cannot be used
+/// from bytes the chain cannot show. [`Error::DuplicateSeekTable`] for a second
+/// one (§8.5: "There MUST NOT be more than one seek table metadata block in a
+/// stream").
+pub fn seek_table(stream: &[u8]) -> Result<Option<SeekTable<'_>>> {
+    let mut walk = Blocks::new(stream)?;
+    let mut found: Option<MetadataBlock> = None;
+    loop {
+        let Some(block) = walk.next_block()? else {
+            return Err(Error::MetadataTruncated);
+        };
+        if block.block_type == TYPE_SEEKTABLE {
+            if found.is_some() {
+                return Err(Error::DuplicateSeekTable);
+            }
+            found = Some(block);
+        }
+        if block.is_last {
+            let Some(block) = found else {
+                return Ok(None);
+            };
+            let payload = block.payload(stream).ok_or(Error::MetadataTruncated)?;
+            return SeekTable::parse(payload).map(Some);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Test-only: the structural tests assemble byte sequences, which needs a
@@ -689,6 +1077,7 @@ mod tests {
         for (kind, is_last, payload) in blocks {
             let number: u8 = match *kind {
                 "streaminfo" => TYPE_STREAMINFO,
+                "seektable" => TYPE_SEEKTABLE,
                 "padding" => 1,
                 "reserved" => 7,
                 "reserved126" => 126,
@@ -1408,6 +1797,460 @@ mod tests {
                     reader.bit_position()
                 );
             }
+        }
+    }
+
+    // ---------------------------------------------------------------- §8.5 --
+    //
+    // The shape of a seek table. Every case here is hand-packed, which is what
+    // makes these tests about the *rules* rather than about a file: the values
+    // of a real table are pinned against the reference tools in
+    // `tests/stream_metadata_layout.rs`, and the shapes below are the ones no
+    // real encoder produced (two seek table blocks, a placeholder first, a
+    // duplicated sample number, an odd payload length). Measured verdicts for
+    // each of those shapes are recorded in the docs above and in FLAC.md's
+    // split-proposal entry: `flac -t` and `metaflac --list` accept every one of
+    // them except a payload that is not a multiple of 18 bytes.
+    mod seek_table_shape {
+        use super::*;
+
+        /// Table 7's three fields, packed. A test helper, not a decoder.
+        fn entry(sample: u64, offset: u64, frame_samples: u16) -> [u8; SEEKPOINT_LEN] {
+            let mut e = [0u8; SEEKPOINT_LEN];
+            e[..8].copy_from_slice(&sample.to_be_bytes());
+            e[8..16].copy_from_slice(&offset.to_be_bytes());
+            e[16..].copy_from_slice(&frame_samples.to_be_bytes());
+            e
+        }
+
+        fn table(entries: &[[u8; SEEKPOINT_LEN]]) -> Vec<u8> {
+            let mut v = Vec::new();
+            for e in entries {
+                v.extend_from_slice(e);
+            }
+            v
+        }
+
+        /// The eight-entry table `s6_seekpoints_8k_mono` really carries, packed
+        /// by hand: same numbers, different provenance. Used only where a shape
+        /// needs a realistic table to sit inside (a placeholder at the end of
+        /// seven real points); the real file's numbers are pinned against the
+        /// tools in the layout suite.
+        fn s6_shaped() -> Vec<u8> {
+            table(&[
+                entry(0, 0, 512),
+                entry(1024, 858, 512),
+                entry(2048, 1715, 512),
+                entry(2560, 2143, 512),
+                entry(3584, 3000, 512),
+                entry(4608, 3855, 512),
+                entry(5632, 4713, 368),
+                entry(SEEKPOINT_PLACEHOLDER, 0, 0),
+            ])
+        }
+
+        /// A fixed-blocksize 512-sample stream of 6000 samples — s6's own
+        /// declarations, hand-packed. The frame count follows: 12.
+        fn fixed512(total: u64) -> StreamInfo {
+            StreamInfo::parse(&table3(512, 512, 8000, 1, 16, total)).unwrap()
+        }
+
+        #[test]
+        fn the_entry_count_is_implied_by_the_payload_length_alone() {
+            // §8.5: "The number of seek points is implied by the size described
+            // in the metadata block header, i.e., equal to size / 18." There is
+            // no count field in the block, which is why the entry size is a
+            // constant rather than a detail.
+            let bytes = s6_shaped();
+            let t = SeekTable::parse(&bytes).unwrap();
+            assert_eq!(t.len(), 8);
+            assert_eq!(t.len(), bytes.len() / SEEKPOINT_LEN);
+            assert!(!t.is_empty());
+
+            // Field order and width, read out of one deliberately asymmetric
+            // entry: the three fields must not be able to trade places, and all
+            // three are big-endian (§8.1 — "most significant bit first" — and
+            // unlike the frame layer, no little-endian anywhere in the
+            // metadata). 0xDEAD_BEEF_DEAD_BEEF in the middle is what catches a
+            // reader that assumed the two u64s were interchangeable.
+            let one = table(&[entry(0x0123_4567_89AB_CDEF, 0xDEAD_BEEF_DEAD_BEEF, 0x1234)]);
+            let p = SeekTable::parse(&one).unwrap().point(0).unwrap();
+            assert_eq!(
+                p,
+                SeekPoint {
+                    first_sample: 0x0123_4567_89AB_CDEF,
+                    frame_offset: 0xDEAD_BEEF_DEAD_BEEF,
+                    frame_samples: 0x1234,
+                }
+            );
+
+            // Indexing is bounded, and the multiplication that finds an entry
+            // cannot wrap: an index past the end and the largest possible index
+            // both answer None rather than reading the next asset.
+            assert!(SeekTable::parse(&bytes).unwrap().point(8).is_none());
+            assert!(
+                SeekTable::parse(&bytes)
+                    .unwrap()
+                    .point(usize::MAX)
+                    .is_none()
+            );
+        }
+
+        #[test]
+        fn a_payload_that_is_not_a_whole_number_of_entries_is_refused() {
+            // Not "read what fits": with no count field, a leftover byte is a
+            // table whose last entry has no defined end. Measured: this is also
+            // the only seek-table shape the reference tools refuse outright —
+            // a 19-byte payload gives `metaflac` "ERROR: reading metadata,
+            // status = \"FLAC__METADATA_CHAIN_STATUS_BAD_METADATA\"" (exit 1)
+            // and `flac -t` "ERROR while decoding metadata" (exit 1).
+            const ZEROS: [u8; 145] = [0u8; 145];
+            for len in [1usize, 17, 19, 35, 37, 145] {
+                let bytes = &ZEROS[..len];
+                assert_eq!(
+                    SeekTable::parse(&bytes).err(),
+                    Some(Error::SeekTableLength),
+                    "a {len}-byte payload implies no table"
+                );
+            }
+        }
+
+        #[test]
+        fn an_empty_table_is_a_table_and_behaves_like_having_none() {
+            // §8.5's Table 6: "Zero or more seek points". Measured: a
+            // zero-length type 3 block spliced into s6's chain leaves
+            // `metaflac --list` printing "seek points: 0" and `flac -t` at
+            // exit 0 — so this is accepted rather than refused, and what it
+            // means to a reader has to be stated: nothing to seek from.
+            let t = SeekTable::parse(&[]).unwrap();
+            assert!(t.is_empty());
+            assert_eq!(t.len(), 0);
+            assert!(t.point(0).is_none());
+            assert!(t.find(0).is_none());
+            assert!(t.find(u64::MAX).is_none());
+        }
+
+        #[test]
+        fn a_placeholder_is_made_by_the_sample_number_and_by_nothing_else() {
+            // §8.5.1 Table 7: 0xFFFFFFFFFFFFFFFF in the first field, and the
+            // notes to §8.5.1: "For placeholder points, the second and third
+            // field values are undefined." So the other two fields are reported
+            // as the bytes have them and interpreted as nothing — measured,
+            // libFLAC accepts a placeholder carrying 12 and 3 (its own writer
+            // happens to put zeros, which `s6`'s rows record as a fact).
+            let bytes = table(&[entry(SEEKPOINT_PLACEHOLDER, 12, 3)]);
+            let p = SeekTable::parse(&bytes).unwrap().point(0).unwrap();
+            assert!(p.is_placeholder());
+            assert_eq!(
+                p,
+                SeekPoint {
+                    first_sample: SEEKPOINT_PLACEHOLDER,
+                    frame_offset: 12,
+                    frame_samples: 3,
+                }
+            );
+            // One below the placeholder value is a real point — the reserved
+            // value is one value, not a range. (It is also a sample number no
+            // FLAC stream of 64-bit samples would reach by accident.)
+            let near = table(&[entry(SEEKPOINT_PLACEHOLDER - 1, 12, 3)]);
+            assert!(
+                !SeekTable::parse(&near)
+                    .unwrap()
+                    .point(0)
+                    .unwrap()
+                    .is_placeholder()
+            );
+        }
+
+        #[test]
+        fn real_points_must_be_strictly_ascending_and_the_refusal_names_one() {
+            // §8.5.1's notes 2 and 3 are one check here: sorted ascending AND
+            // unique is the same as strictly ascending. `at` names the entry
+            // where the rule breaks, because "the table is unusable" is a
+            // smaller statement than "the table is unusable from entry 2 on".
+            // Measured: none of these shapes is refused by the reference tools
+            // (`flac -t` exits 0 for an unsorted table and for a duplicated
+            // sample number, and `metaflac --list` prints them without a word),
+            // because libFLAC's decoder never consults the table unless asked to
+            // seek. This crate reads it, so it refuses.
+            for (why, entries) in [
+                ("descending", &[entry(1024, 858, 512), entry(0, 0, 512)][..]),
+                (
+                    "exact duplicate sample number",
+                    &[entry(0, 0, 512), entry(0, 858, 512)][..],
+                ),
+                (
+                    "three points, the third out of order",
+                    &[
+                        entry(0, 0, 512),
+                        entry(2048, 1715, 512),
+                        entry(1024, 858, 512),
+                    ][..],
+                ),
+            ] {
+                let bytes = table(entries);
+                let at = match SeekTable::parse(&bytes).err() {
+                    Some(Error::SeekTableOrder { at }) => at,
+                    other => panic!("{why}: got {other:?}"),
+                };
+                assert_eq!(at, entries.len() - 1, "{why}");
+            }
+            // The ascending case, including the last-frame point whose sample
+            // count is the short tail's (Table 7's third field is the target
+            // frame's own sample count, and s6's real table carries 368 there).
+            assert!(SeekTable::parse(&s6_shaped()).is_ok());
+        }
+
+        #[test]
+        fn every_placeholder_has_to_come_after_every_real_point() {
+            // §8.5.1's note 4: "there MAY be any number of placeholder points,
+            // but they MUST all occur at the end of the table." So two
+            // placeholders are fine (measured: a hand-built s6 with a second
+            // one passes `flac -t` at exit 0), and one ahead of a real point is
+            // not (measured: that too passes `flac -t`, and `metaflac --list`
+            // renders it as `point 0: PLACEHOLDER` — the tool neither reorders
+            // nor complains; only its own writer puts them last, from
+            // out-of-order requests, which is why no fixture shows this).
+            let two_at_the_end = table(&[
+                entry(0, 0, 512),
+                entry(1024, 858, 512),
+                entry(SEEKPOINT_PLACEHOLDER, 0, 0),
+                entry(SEEKPOINT_PLACEHOLDER, 0, 0),
+            ]);
+            assert_eq!(SeekTable::parse(&two_at_the_end).unwrap().len(), 4);
+
+            let first_is_a_placeholder =
+                table(&[entry(SEEKPOINT_PLACEHOLDER, 0, 0), entry(0, 0, 512)]);
+            assert_eq!(
+                SeekTable::parse(&first_is_a_placeholder).err(),
+                Some(Error::SeekTableOrder { at: 1 }),
+                "a real point after a placeholder breaks the ordering rule at the real point"
+            );
+
+            let middle = table(&[
+                entry(0, 0, 512),
+                entry(SEEKPOINT_PLACEHOLDER, 0, 0),
+                entry(1024, 858, 512),
+                entry(SEEKPOINT_PLACEHOLDER, 0, 0),
+            ]);
+            assert_eq!(
+                SeekTable::parse(&middle).err(),
+                Some(Error::SeekTableOrder { at: 2 })
+            );
+
+            // A table of nothing but placeholders is ordered, and useless —
+            // which is what `find` has to report rather than inventing.
+            let only_placeholders = table(&[
+                entry(SEEKPOINT_PLACEHOLDER, 0, 0),
+                entry(SEEKPOINT_PLACEHOLDER, 0, 0),
+            ]);
+            let t = SeekTable::parse(&only_placeholders).unwrap();
+            assert_eq!(t.len(), 2);
+            assert!(t.find(0).is_none());
+        }
+
+        #[test]
+        fn find_gives_the_last_real_point_at_or_before_the_target() {
+            // The one reading a list of frame positions supports: jump to the
+            // last frame start that is not past where you want. Placeholders
+            // are skipped (§8.5: a placeholder "will be ignored by
+            // decoders"), and nothing past the last real point is considered.
+            let bytes = s6_shaped();
+            let t = SeekTable::parse(&bytes).unwrap();
+            for (sample, want) in [
+                (0u64, 0usize),
+                (1, 0),
+                (511, 0),
+                (1023, 0),
+                (1024, 1),
+                (2047, 1),
+                (2560, 3),
+                (5999, 6),
+                (6000, 6),
+                (u64::MAX - 1, 6),
+            ] {
+                let (at, p) = t.find(sample).unwrap();
+                assert_eq!(at, want, "a seek to sample {sample}");
+                assert_eq!(at, t.find(sample).unwrap().0);
+                assert!(!p.is_placeholder(), "a placeholder is not a seek target");
+                assert!(p.first_sample <= sample, "a point past the target");
+            }
+            // The last point of a table names the tail frame, and its sample
+            // count is not the declared maximum — the case a decoder that sized
+            // a frame from `max_blocksize` gets wrong, and the reason this
+            // fixture exists.
+            let (at, last) = t.find(5999).unwrap();
+            assert_eq!((at, last.frame_samples), (6, 368));
+
+            // A target before the first point has no anchor: the honest answer
+            // is None, not the first point (which would start the walk ahead of
+            // where the caller asked to be).
+            let starts_late = table(&[entry(1024, 858, 512), entry(2048, 1715, 512)]);
+            assert!(SeekTable::parse(&starts_late).unwrap().find(1023).is_none());
+        }
+
+        #[test]
+        fn frame_index_needs_fixed_blocking_and_a_frame_that_the_stream_states() {
+            let info = fixed512(6000);
+            assert_eq!(info.exact_frame_count(), Some(12));
+            let bytes = s6_shaped();
+            let t = SeekTable::parse(&bytes).unwrap();
+            // s6's real points, and the frame each names. The short tail's
+            // point is index 11, the last frame, not 12 — the division floors,
+            // which is what makes a table point at a tail frame land inside the
+            // stream instead of past it.
+            for (i, want) in [
+                (0usize, 0u64),
+                (1, 2),
+                (2, 4),
+                (3, 5),
+                (4, 7),
+                (5, 9),
+                (6, 11),
+            ] {
+                let p = t.point(i).unwrap();
+                assert_eq!(p.frame_index(&info), Some(want), "point {i}");
+            }
+            assert_eq!(t.point(7).unwrap().frame_index(&info), None); // placeholder
+
+            // A point at or past the stream's own frame count names no frame.
+            // Measured: a real writer does not write one (`metaflac
+            // --add-seekpoint=12000` on a 6000-sample stream drops the
+            // request), but `flac -t` accepts such a point when one is put in
+            // by hand, so refusing it here is this crate's claim, and it is the
+            // claim that keeps a walk's buffer bound honest.
+            let past = table(&[entry(6144, 4713, 512)]);
+            assert_eq!(
+                SeekTable::parse(&past)
+                    .unwrap()
+                    .point(0)
+                    .unwrap()
+                    .frame_index(&info),
+                None
+            );
+            let last_valid = table(&[entry(5632, 4713, 368)]);
+            assert_eq!(
+                SeekTable::parse(&last_valid)
+                    .unwrap()
+                    .point(0)
+                    .unwrap()
+                    .frame_index(&info),
+                Some(11)
+            );
+
+            // Not fixed-blocksize: no divisor exists, and a table's third field
+            // gives each target frame's own count, not the counts of the frames
+            // before it. The byte offset is still the whole answer for a
+            // byte-level seek, and `SeekPoint::frame_offset` carries it.
+            // (This crate refuses such streams at the frame layer, §9.1.5.)
+            let variable = StreamInfo::parse(&table3(512, 1024, 8000, 1, 16, 6000)).unwrap();
+            assert!(!variable.is_fixed_blocksize());
+            assert_eq!(t.point(0).unwrap().frame_index(&variable), None);
+
+            // A stream that declares no sample total (`s5`'s shape) has no frame
+            // count to check a point against, so the division is all there is.
+            // Stating this as a limit rather than hiding it: the point is not
+            // known to be bad here, and item 4b's end-of-input rule is what
+            // catches a walk that turns out to have been told to start past the
+            // audio.
+            let unknown = fixed512(0);
+            assert_eq!(unknown.exact_frame_count(), None);
+            assert_eq!(
+                SeekTable::parse(&past)
+                    .unwrap()
+                    .point(0)
+                    .unwrap()
+                    .frame_index(&unknown),
+                Some(12)
+            );
+        }
+
+        #[test]
+        fn no_table_is_not_an_error_and_a_second_one_is() {
+            let info = table3(512, 512, 8000, 1, 16, 6000);
+            let points = s6_shaped();
+
+            // Absence: four of the six stream fixtures have no SEEKTABLE at all
+            // (three because their encode passed --no-seektable, one because the
+            // encoder had no point to write at that length). A stream without a
+            // table is a complete stream — §8.5: "It is possible to seek to any
+            // given sample in a FLAC stream without a seek table, but the delay
+            // can be unpredictable".
+            let no_table = stream_with(&[("streaminfo", true, &info)]);
+            assert_eq!(seek_table(&no_table).unwrap().map(|t| t.len()), None);
+
+            // Presence, through the convenience entry point.
+            let with_table =
+                stream_with(&[("streaminfo", false, &info), ("seektable", true, &points)]);
+            let via_helper = seek_table(&with_table).unwrap().expect("a table");
+            assert_eq!(via_helper.len(), 8);
+            assert_eq!(via_helper.payload(), points.as_slice());
+            // …and the explicit walk reaches the same eight entries, which is
+            // what makes the helper a convenience rather than a second reader.
+            let mut walk = Blocks::new(&with_table).unwrap();
+            let mut explicit = None;
+            while let Some(b) = walk.next_block().unwrap() {
+                if b.block_type == TYPE_SEEKTABLE {
+                    explicit = Some(SeekTable::parse(b.payload(&with_table).unwrap()).unwrap());
+                }
+                if b.is_last {
+                    break;
+                }
+            }
+            assert_eq!(
+                explicit.map(|t| t.len()),
+                Some(via_helper.len()),
+                "the helper and the walk disagree about how many entries the table has"
+            );
+            // …and about the entries themselves: comparing one read at each end
+            // of the table, because a difference in how the two slice the
+            // payload shows up as an entry that is off by whole entries.
+            assert_eq!(explicit.map(|t| t.point(0)), Some(via_helper.point(0)));
+            assert_eq!(explicit.map(|t| t.point(7)), Some(via_helper.point(7)));
+            assert_eq!(explicit.map(|t| t.find(2600)), Some(via_helper.find(2600)));
+
+            // Two tables: §8.5's "MUST NOT". Measured: the reference tools let
+            // it through (a duplicated type 3 block gives `flac -t` exit 0 and
+            // `metaflac --list` prints both tables), so this is a rule this
+            // crate adds because it reads the table — the way duplicate
+            // VORBIS_COMMENT and PADDING blocks are accepted by them and are
+            // likewise this crate's to notice.
+            let two = stream_with(&[
+                ("streaminfo", false, &info),
+                ("seektable", false, &points),
+                ("seektable", true, &points),
+            ]);
+            assert_eq!(seek_table(&two).err(), Some(Error::DuplicateSeekTable));
+
+            // A table is still bounded by the chain that carries it: a block
+            // whose declared length runs past the end of the bytes is a
+            // truncated stream whether or not the interesting block was already
+            // in hand. (Same rule as `parse`, same reasoning: a chain that
+            // stops early has no audio after it either, and this entry point
+            // does not get to pretend otherwise.)
+            let mut cut = with_table.clone();
+            let mut walk = Blocks::new(&cut).unwrap();
+            let table_block = loop {
+                let b = walk
+                    .next_block()
+                    .unwrap()
+                    .expect("the chain is intact here");
+                if b.block_type == TYPE_SEEKTABLE {
+                    break b;
+                }
+            };
+            let end = table_block.span().unwrap().1;
+            cut.truncate(end - 1);
+            assert_eq!(seek_table(&cut).err(), Some(Error::MetadataTruncated));
+
+            // A bad table is refused at this entry point too — the shape that
+            // has no reading, and the one the reference tools refuse in the
+            // same words.
+            let odd = stream_with(&[
+                ("streaminfo", false, &info),
+                ("seektable", true, &points[..points.len() - 1]),
+            ]);
+            assert_eq!(seek_table(&odd).err(), Some(Error::SeekTableLength));
         }
     }
 }

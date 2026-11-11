@@ -620,9 +620,19 @@ impl<'a> Frames<'a> {
     /// range, a hand-cut slice of a file.
     ///
     /// `defaults` and `bounds` are the caller's to supply — for a packed blob,
-    /// `format::Manifest`' (item 6); for a range taken from a real stream, a
-    /// `SEEKTABLE` entry's sample number is the anchor to pass to
-    /// [`Frames::anchored`]. With no anchor the walk still enforces contiguity
+    /// `format::Manifest`' (item 6); for a range taken from a real stream, the
+    /// frame that a `SEEKTABLE` entry names decides the anchor. Note the two
+    /// different quantities: an entry's byte offset is relative to the first byte
+    /// after the metadata, so the region to hand this constructor starts there
+    /// (see [`crate::stream::SeekPoint`]'s field docs), and its
+    /// [`crate::stream::SeekPoint::frame_index`] is a *position* in the stream's
+    /// frame sequence, whereas [`Frames::anchored`] wants that sequence's
+    /// *number*, which §9.1.5 lets a stream start anywhere it likes. A caller
+    /// reading a whole file composes `first_frame_number + frame_index`; for a
+    /// file whose frames are numbered from 0 the two are the same number, and
+    /// every fixture in this repo is such a file, which is exactly why the
+    /// distinction is easy to get away with wrongly until one is not. With no
+    /// anchor the walk still enforces contiguity
     /// (each frame's number follows the last one); it cannot say that the frame
     /// it found *should* have been number 7.
     pub fn region(region: &'a [u8], defaults: &StreamDefaults, bounds: StreamBounds) -> Self {

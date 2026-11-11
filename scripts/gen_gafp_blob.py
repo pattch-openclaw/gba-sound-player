@@ -1,23 +1,36 @@
 #!/usr/bin/env python3
-"""Generate the stand-in GAFP blob the integration ROM decodes.
+"""Generate the GAFP blob the integration ROM decodes, from the spike's frames.
 
-**This is 6b-1's stand-in, not the packer.** `scripts/pack_flac.sh` is still a
-stub; the real GAFP writer is 6b-2's rung. What this script produces is a blob
-whose *frames* are real libFLAC output (the committed perf-gate clip) and whose
-header/table are assembled here from the spike's own committed, fail-closed
-generated table — so the container contract gets exercised on real encoder bytes
-without pretending the packer exists.
+**It began as 6b-1's stand-in, and the debt that framing carried is paid.** The
+real GAFP writer is `scripts/gafp_pack.py` (6b-2 pt 1), and `scripts/pack_flac.sh`
+is its front-end. `gafp-pack-check` step 1 is the differential this script used to
+promise: it packs the perf clip's own source PCM with the real packer and compares
+against the committed blob — `IDENTICAL: /tmp/gafp-pack-XXXX/spike_l0.gfp`. One
+container, two independent paths to it, byte for byte.
 
-Two consequences, both deliberate and both written down in the plan of record:
+What this script is now is not a stand-in but a **tie**: it reads the perf spike's
+own committed, fail-closed generated frame table
+(`examples/flac_spike/src/assets.rs`, written by `gen_spike_assets.sh` after a
+strict frame-by-frame walk, footer-gap rule included) and writes the product
+asset's bytes and pinned constants from those frames. That makes it the only gate
+saying the asset the ROM decodes **is** the asset 6a-2 measured — and every cycle
+figure in the plan of record's 6a-7x and 6b-1 rows is a measurement of that asset.
+The packer does not supply the tie: encoding synthesized PCM is a different path to
+the same bytes, and cannot say the two committed frame tables still agree. So its
+differences from a `gafp_pack.py` invocation are deliberate, not left over:
 
-  * **6b-2 owes a byte-identical GAFP for the same input.** That turns this
-    stand-in from a blind spot into a differential: if the real packer and this
-    agree byte for byte on the same frames, the container has one definition
-    rather than two.
-  * **The offsets are read, not re-derived.** They come from
-    `examples/flac_spike/src/assets.rs`, which `gen_spike_assets.sh` writes after
-    a strict frame-by-frame walk (footer-gap rule included). Re-scanning here
-    would be a second, weaker implementation of the same measurement.
+  * **the offsets are read, not re-derived** — they come from the spike table, and
+    re-scanning the clip here would be a second, weaker implementation of the same
+    measurement (and would drop the tie entirely); and
+  * **no encoder is involved** — which is what lets a host without `flac` still
+    prove the ROM's asset against the spike's.
+
+Full retirement is a later PR with a defined shape, not this one: commit the perf
+clip as a `.flac` so the packer can pack it as it stands, move `gafp_pin.rs`
+generation onto the packer's own walk, and — the part that is not a refactor —
+replace the spike-table tie with anything that still proves, from two sources, that
+one asset is being measured and played. See `flac-docs/plan-of-record.md`, item
+6b-2's second half, "The decision about the 6b-1 stand-in".
 
 Outputs (both committed inputs to `flac-integration`):
 

@@ -1,13 +1,32 @@
 #!/usr/bin/env bash
-# pack_flac.sh — STUB. Not implemented (scaffold pass, 2026-08-30).
+# pack_flac.sh — the profile-driven front-end. Still not implemented
+# (scaffold pass, 2026-08-30; this header corrected 2026-11-11).
 #
 # Purpose: turn a normal source audio file into a `GAFP` blob (manifest + raw
 # FLAC frames) that crates/flac-lite can decode directly out of ROM. See
 # crates/flac-lite/README.md for the byte layout this must produce, and
 # ../../FLAC.md for why the container exists at all.
 #
-# The format contract is settled; the implementation is not. Do not use this in
-# a build until it exits 0 and its output passes the decoder fixture tests.
+# What HAS landed since this stub was written (6b-2 pt 1): the format contract
+# itself is implemented and gated. `scripts/gafp_pack.py` packs a real `.flac`
+# into a `.gfp` — frame region byte-identical, offset table re-derived by a walk
+# that reads every frame, refuses before writing anything when a stream is not on
+# the measured decode path — and `make gafp-pack-check` proves it rebuilds the
+# committed product asset byte for byte. That script is the thing under test, so
+# it takes an already-encoded `.flac` and asserts the profile rather than
+# establishing one.
+#
+# What this script would be, and still is not: the operator-facing front-end —
+# take a `.wav`, normalize it to the target profile (the `-l` / `-b` / `--rate` /
+# `--lax` rules in the usage text below, which are measurements rather than
+# guesses now), encode, pack, and refuse out loud when the profile cannot be met.
+# Those are two different jobs — one asserts a stream against the decode path, the
+# other negotiates a stream into it — which is why the wrapper was not bolted onto
+# the packer when the packer landed. See flac-docs/plan-of-record.md item 6b-2.
+#
+# Until then: nothing in any build or gate calls this script, and it changes no
+# bytes. `flac-rom`'s asset comes from `scripts/gen_gafp_blob.py`; the packer's
+# equality with that asset is what `gafp-pack-check` holds.
 
 set -euo pipefail
 
@@ -59,7 +78,9 @@ case "${1:-}" in
   -h|--help|"") usage; exit 2 ;;
 esac
 
-echo "error: pack_flac.sh is a scaffold stub — the GAFP packer is not implemented yet." >&2
-echo "       See FLAC.md 'Next steps' item 2. Nothing was written." >&2
+echo "error: pack_flac.sh is still a scaffold stub — it normalizes and packs nothing," >&2
+echo "       and it wrote no file. The GAFP format contract itself is implemented" >&2
+echo "       and gated: scripts/gafp_pack.py (make gafp-pack-check). This script's" >&2
+echo "       job is the step before it — see flac-docs/plan-of-record.md item 6b-2." >&2
 usage >&2
 exit 2

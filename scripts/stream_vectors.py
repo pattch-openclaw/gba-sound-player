@@ -102,6 +102,30 @@ Generation-time invariants (fail-closed, `check_stream`):
     libFLAC never writes one; the crate refuses them anyway, as a policy
     choice of the format's canonical reading. That divergence is what the
     `mutation*` rows pin.
+  * the SEEKTABLE block (§8.5; its entry layout is §8.5.1 Table 7), wherever
+    a fixture has one, is read by a third reading in this file
+    (`read_seektable`, fixed-size entries, no allocation)
+    and MUST agree with `metaflac --list`'s own rendering entry by entry, in
+    table order — real points field for field, placeholders by their
+    classification (metaflac renders a placeholder as the bare word
+    `PLACEHOLDER`, so its other two fields are not comparable; they are
+    recorded as a row instead). At most one SEEKTABLE per file (§8.5: "There
+    MUST NOT be more than one seek table metadata block in a stream").
+    Its payload length MUST be a multiple of the 18-byte entry size, its real
+    points MUST be strictly ascending in sample number, and every placeholder
+    MUST come after every real point — which is what the format states and,
+    measured, what `metaflac` writes (it documents a placeholder as "always
+    goes at the end"). Every real point MUST name a frame that exists in the
+    frame walk: `stream_offset` (which is relative to the FIRST BYTE AFTER THE
+    METADATA, not to the start of the file — measured, and the fact the whole
+    block turns on) plus `frame_data_offset` MUST equal that frame's offset,
+    and `frame_samples` MUST equal that frame's block size. `s6` exists to
+    witness that a seek table can name the short last frame, and its
+    `seek_*` rows are what `tests/stream_metadata_layout.rs` and the anchored
+    walk in `tests/scan_frame_walk_layout.rs` assert. Where a point names
+    frame k, the generator records k as derived from the WALK; the crate
+    derives it from `sample_number / max_blocksize`. Two derivations, one
+    number — the same shape as the frame-length check above.
 
 Determinism: source PCM is synthesized with integer arithmetic only (no float,
 no RNG — the same helpers as frame_vectors.py), so the WAVs are byte-identical
@@ -154,9 +178,15 @@ FIXTURES = [
                 "{wav}"],
         blocks=[("STREAMINFO", False), ("SEEKTABLE", False),
                 ("VORBIS_COMMENT", False), ("PADDING", True)],
+        seek_points=dict(total=1, real=1, placeholder=0),
         note="four-block container: every real block type this encoder emits, "
              "three of them skipped by length. A walk that only knows "
-             "streaminfo cannot reach the frames; this is the walk.",
+             "streaminfo cannot reach the frames; this is the walk. The "
+             "SEEKTABLE is the encoder's own, and it is the one-point case: "
+             "sample_number 0, stream_offset 0, frame_samples = the declared "
+             "max blocksize. Pointing at frame 0 with an offset of 0 is what "
+             "proves the offset in a table is relative to the frame region and "
+             "not to the file (this fixture's frame_data_offset is 176).",
     ),
     dict(
         name="s3_wide_48001hz_b3000",
@@ -219,6 +249,46 @@ FIXTURES = [
              "total_samples (measured, libFLAC 1.5.0). Only raw-in-pipe/pipe-out "
              "produces a stream that genuinely declares nothing.",
     ),
+    dict(
+        name="s6_seekpoints_8k_mono",
+        wav="s6_seekpoints_8k_mono.wav",
+        encode=["flac", "-1", "-f", "-s", "--no-padding", "-l", "0",
+                "-b", "512", "{wav}"],
+        post=[["metaflac", "--add-seekpoint=5632", "--add-seekpoint=2048",
+               "--add-seekpoint=1024", "--add-seekpoint=X",
+               "--add-seekpoint=4608", "--add-seekpoint=2600",
+               "--add-seekpoint=3584", "--add-seekpoint=12000",
+               "--add-seekpoint=2048", "--add-seekpoint=0", "{flac}"]],
+        blocks=[("STREAMINFO", False), ("SEEKTABLE", False),
+                ("VORBIS_COMMENT", True)],
+        seek_points=dict(total=8, real=7, placeholder=1),
+        note="the seek-table fixture (section 8.5), and the only one of these "
+             "files that a metadata tool has edited. 6000 samples at 8 kHz in "
+             "512-sample fixed-LPC frames (-l 0, the predictor profile this "
+             "repo's packer uses, so these are the frames the product would "
+             "carry): twelve frames, the last one 368 samples. That tail is the "
+             "reason for the size: it is the frame a seek table is most likely "
+             "to get wrong, because its sample count is not max_blocksize and a "
+             "reader that sized a frame from the declared maximum ends up one "
+             "frame off. Nine --add-seekpoint requests, deliberately not in "
+             "order. Measured, what comes back is eight entries: seven real "
+             "plus one placeholder. So the tool sorted them, snapped an "
+             "off-boundary request (2600) DOWN to the frame that contains it "
+             "(2560), dropped requests past the last sample (12000) and exact "
+             "duplicates (2048 twice, and 0), and wrote the placeholder it was "
+             "asked for (X) LAST - its own help states a placeholder always "
+             "goes at the end of the table, which is the rule the reader here "
+             "enforces. Two things measured as NOT reachable from this tool: a "
+             "placeholder for an out-of-range request (those are dropped), and "
+             "a second placeholder. Snapping a request onto an EXISTING point "
+             "does produce one - measured on a copy of s2, asking for 512, 3200 "
+             "and 4096 in a 4608-sample-block stream turns all three into "
+             "placeholders because they all land on the point at 0 - but that "
+             "case is left out of the committed fixtures because it would "
+             "rewrite s2, and the two-placeholder case with it; both are built "
+             "by hand in the reader's own unit tests, which is where this repo "
+             "puts a shape no real encoder produced.",
+    ),
 ]
 
 # Low-rate partials: periods in samples chosen for an 8 kHz source (100-400 Hz
@@ -236,6 +306,31 @@ STREAMINFO_FIELDS = [
     ("total_samples", 36),
 ]
 STREAMINFO_LEN = 34  # 272 bits including the 128-bit MD5 (Table 3)
+
+# Section 8.5 / 8.5.1 Table 7: a seek table is zero or more fixed-size seek
+# points, and "the number of seek points is implied by the size described in the
+# metadata block header, i.e., equal to size / 18" (8.5) -- there is no count
+# field, so the entry size is what makes a payload enumerable at all. Table 7's
+# three fields, quoted: "Sample number of the first sample in the target frame
+# or 0xFFFFFFFFFFFFFFFF for a placeholder point" (64 bits), "Offset (in bytes)
+# from the first byte of the first frame header to the first byte of the target
+# frame's header" (64 bits), and "Number of samples in the target frame" (16
+# bits). The middle one is the fact everything else turns on, and the quoted
+# base -- the first frame header, not the start of the file -- is the same
+# number frame_data_offset gives a reader: measured, point 0 of a real table
+# carries 0 while frame 0 sits 234 bytes into s6. Nothing but the sample number
+# is reserved: for a placeholder, "the second and third field values are
+# undefined" per the notes to 8.5.1, so a reader must not interpret them, and
+# the rows record what the bytes happen to hold as a measurement. The entry
+# size is therefore a named constant here for the same reason STREAMINFO_LEN
+# is: the reader below and the crate's have to agree on it, and the fixture
+# rows are what compare them. The ordering rules (points "MUST be sorted in
+# ascending order by sample number", "MUST be unique by sample number, with the
+# exception of placeholder points", and "there MAY be any number of placeholder
+# points, but they MUST all occur at the end of the table") are checked in
+# check_seektable below and in the crate's reader.
+SEEKPOINT_LEN = 18
+SEEKPLACEHOLDER = (1 << 64) - 1
 
 # How metaflac labels each field in --list output, in Table 3's order.
 METAFLAC_FIELDS = [
@@ -568,12 +663,22 @@ def synth(dst):
     write_wav16(os.path.join(dst, "s3_wide_48001hz_b3000.wav"), 48001, 1,
                 mono_48k)
     write_wav24(os.path.join(dst, "s4_24bit_8k_mono.wav"), 8000, mono_8k)
+    # s6's source: 6000 samples of the same 8 kHz material. At -b 512 that is
+    # twelve frames, 11 full and one 368-sample tail — long enough that a frame
+    # number needs more than one frame to exist, and long enough to have a seek
+    # table worth reading (the four fixtures above are 0.1 s files: their
+    # tables, where they have one at all, hold a single point).
+    seek_8k = fv.synth_pcm(0.75, 8000, PARTIALS_8K, 61, 3, 30, 0,
+                           mono=True, exact=6000)
+    write_wav16(os.path.join(dst, "s6_seekpoints_8k_mono.wav"), 8000, 1,
+                seek_8k)
     # s5's source is the SAME 1200 samples, as bare samples: the container is
     # what differs, and that is the whole point of the fixture.
     with open(os.path.join(dst, "s5_unseekable_total_unknown.raw"), "wb") as raw:
         raw.write(struct.pack("<%dh" % len(mono_8k), *mono_8k))
-    print("   synthesized 4 short WAVs + 1 raw sample stream (8k mono, 96k "
-          "stereo, 48001Hz, 24-bit, and s1's PCM as bare s16le) in %s" % dst)
+    print("   synthesized 5 short WAVs + 1 raw sample stream (8k mono, 96k "
+          "stereo, 48001Hz, 24-bit, 8k mono again at 6000 samples for the "
+          "seek-table fixture, and s1's PCM as bare s16le) in %s" % dst)
 
 
 # ---------------------------------------------------------------- independent
@@ -652,9 +757,66 @@ def metaflac_list(path):
             current["length"] = int(value.split()[0])
         elif key == "vendor string":
             info["vendor"] = value
+        elif key == "seek points":
+            # metaflac's own count line, for a type 3 block: "seek points: N".
+            current["seek_point_count"] = int(value.split()[0])
+        elif key.startswith("point ") and current.get("type") == 3:
+            # "point 4: sample_number=3584, stream_offset=3000, frame_samples=512"
+            # and, for a placeholder, "point 7: PLACEHOLDER" — the tool hides
+            # the entry's other two fields, so the only thing the two readings
+            # can compare for a placeholder is that both call it one.
+            if value == "PLACEHOLDER":
+                current.setdefault("seek_points", []).append(
+                    dict(placeholder=True))
+            else:
+                fields = dict(part.split("=", 1) for part in value.split(", "))
+                current.setdefault("seek_points", []).append(dict(
+                    placeholder=False,
+                    sample_number=int(fields["sample_number"]),
+                    stream_offset=int(fields["stream_offset"]),
+                    frame_samples=int(fields["frame_samples"])))
         elif key in METAFLAC_FIELDS:
             info[key] = value
     return blocks, info
+
+
+def read_seektable(payload):
+    """Section 8.5, read as a list of fixed-size entries — a third reading of
+    that section: not metaflac's, not the crate's, not the encoder's.
+
+    Per entry: the first sample number of the target frame (64 bits), the byte
+    offset of that frame (64 bits) — measured to be relative to the first byte
+    AFTER the metadata, not to the start of the file, which is the fact every
+    number below turns on — and the number of samples in that frame (16 bits).
+
+    A payload whose length is not a whole number of entries cannot be
+    enumerated at all, so this refuses rather than reading floor(n/18) entries
+    and calling the remainder unseen. That is not a policy choice about a value;
+    it is the absence of a table. Measured: it is also the only seek-table
+    malformation libFLAC's own metadata reader refuses (`metaflac --list` on an
+    18n+1-byte table: 'ERROR: reading metadata, status =
+    FLAC__METADATA_CHAIN_STATUS_BAD_METADATA', exit 1; `flac -t` likewise).
+
+    Ordering is NOT checked here — this function returns the entries as written.
+    What a valid table may look like is `check_seektable`'s business, and the
+    crate's reader states its own rules.
+    """
+    if len(payload) % SEEKPOINT_LEN:
+        raise AssertionError(
+            "seektable payload is %d bytes, section 8.5's entries are %d "
+            "bytes: no whole table" % (len(payload), SEEKPOINT_LEN))
+    points = []
+    for i in range(len(payload) // SEEKPOINT_LEN):
+        e = payload[i * SEEKPOINT_LEN:(i + 1) * SEEKPOINT_LEN]
+        sample = int.from_bytes(e[0:8], "big")
+        points.append(dict(
+            index=i,
+            sample_number=sample,
+            stream_offset=int.from_bytes(e[8:16], "big"),
+            frame_samples=int.from_bytes(e[16:18], "big"),
+            placeholder=sample == SEEKPLACEHOLDER,
+        ))
+    return points
 
 
 # ---------------------------------------------------------------- validation
@@ -675,7 +837,166 @@ def encode_all(src):
             else:
                 subprocess.run(argv + ["-o", os.path.basename(flac)], cwd=src,
                                check=True)
-        print("   encoded %s" % os.path.basename(flac))
+        # A fixture may edit its own container afterwards — the only way to get
+        # a real SEEKTABLE with more than the one point an encoder chooses to
+        # write. `metaflac` writes it, so the table in the committed bytes is
+        # still a real tool's output, not a hand-packed one (the rule in
+        # tests/README.md). The requests are part of the fixture spec above,
+        # verbatim, for the same reason `encode` is: the shape of the table is
+        # decided by those arguments, and a row that describes a table nobody
+        # asked for is not a witness.
+        for argv in spec.get("post", []):
+            subprocess.run([a.format(flac=os.path.basename(flac)) for a in argv],
+                           cwd=src, check=True)
+        print("   encoded %s%s" % (os.path.basename(flac),
+                                   " (+%d metadata edits)" % len(spec.get("post", []))
+                                   if spec.get("post") else ""))
+
+
+def check_seektable(name, spec, blocks, mblocks, frame_data_offset, info, frames):
+    """The seek table of one fixture, read and cross-checked four ways.
+
+    Returns None where the fixture has no SEEKTABLE block, and otherwise a
+    dict of what to pin. Four of the six fixtures have no such block: s1, s3,
+    s4 and s5 pass --no-seektable; s2's encode writes a one-point table by
+    itself; and s6's encode writes none at all (measured: for a 0.75-second
+    stream at this block size libFLAC has no point to write, and passing -P is
+    what makes a one-point table appear) before metaflac adds the block. The
+    four ways:
+
+      1. `read_seektable` here — a third reading of section 8.5;
+      2. `metaflac --list`'s own rendering of the same block, entry by entry in
+         table order (the tool's numbers, which is what makes them pins);
+      3. the frame walk — every real point has to name a frame that EXISTS,
+         both by byte offset and by sample count. A seek table whose offsets do
+         not land on frames is not a wrong number, it is a wrong SEEK, and this
+         is the only place in this repo where that can be caught before a
+         decoder follows it;
+      4. for a fixed-blocksize stream, the arithmetic the crate will use
+         (`sample_number / max_blocksize`), which must land on the same frame
+         index the walk derived by counting. Two derivations, one number — the
+         same shape as the `frame_bytes` double derivation above.
+
+    The ordering rules asserted here are section 8.5's own, and they are the
+    ones `crates/flac-lite/src/stream.rs::SeekTable::parse` enforces: real
+    points strictly ascending by sample number, and every placeholder after
+    every real point. `metaflac`'s help states the second as a property of its
+    writer (a placeholder "always goes at the end of the SEEKTABLE"); the
+    fixtures do not contain a violation of either, so the refusals are witnessed
+    in the crate's own unit tests, where a table can be built by hand.
+    """
+    tables = [b for b in blocks if b["type"] == 3]
+    assert len(tables) <= 1, \
+        "%s: section 8.1 allows at most one SEEKTABLE block, this file has %d" % (
+            name, len(tables))
+    want = spec.get("seek_points")
+    assert bool(tables) == (want is not None), \
+        "%s: SEEKTABLE presence is %s, the fixture spec asks for %s" % (
+            name, bool(tables), "a table" if want else "none")
+    if not tables:
+        return None
+
+    table = tables[0]
+    points = read_seektable(table["payload"])
+    assert table["length"] == len(points) * SEEKPOINT_LEN, \
+        "%s: block length %d, %d entries of %d bytes" % (
+            name, table["length"], len(points), SEEKPOINT_LEN)
+
+    # 2. metaflac's rendering, in order.
+    mine_tool = [b for b in mblocks if b["type"] == 3]
+    assert len(mine_tool) == 1, "%s: metaflac lists %d SEEKTABLE blocks" % (
+        name, len(mine_tool))
+    theirs = mine_tool[0].get("seek_points")
+    assert theirs is not None, "%s: metaflac printed no seek points for a " \
+        "SEEKTABLE block it just listed" % name
+    assert mine_tool[0].get("seek_point_count", len(theirs)) == len(theirs) == \
+        len(points), \
+        "%s: entry count %d vs metaflac's %d (its own count line says %s)" % (
+            name, len(points), len(theirs),
+            mine_tool[0].get("seek_point_count"))
+    for i, (p, t) in enumerate(zip(points, theirs)):
+        assert p["placeholder"] == t["placeholder"], \
+            "%s: entry %d is a placeholder here and not there (or the reverse)" % (
+                name, i)
+        if p["placeholder"]:
+            continue
+        for field in ("sample_number", "stream_offset", "frame_samples"):
+            assert p[field] == t[field], \
+                "%s: entry %d %s is %d here, %d in metaflac's rendering" % (
+                    name, i, field, p[field], t[field])
+
+    # section 8.5's ordering rules, stated as the checks the crate also makes.
+    real = [p for p in points if not p["placeholder"]]
+    placeholders = [p for p in points if p["placeholder"]]
+    if want:
+        assert len(points) == want["total"] and len(real) == want["real"] and \
+            len(placeholders) == want["placeholder"], \
+            "%s: table has %d entries (%d real, %d placeholder), the spec asks " \
+            "for %s" % (name, len(points), len(real), len(placeholders), want)
+    for a, b in zip(real, real[1:]):
+        assert b["sample_number"] > a["sample_number"], \
+            "%s: seek points are not strictly ascending: %d then %d" % (
+                name, a["sample_number"], b["sample_number"])
+    if placeholders:
+        last_real = max((p["index"] for p in real), default=-1)
+        assert all(p["index"] > last_real for p in placeholders), \
+            "%s: a placeholder at %s precedes a real point at %d" % (
+                name, [p["index"] for p in placeholders], last_real)
+
+    # 3. every real point names a frame that exists, and 4. the arithmetic the
+    # crate will use lands on the same one.
+    frame_starts, frame_abs_offsets = [], []
+    running = 0
+    for f in frames:
+        frame_starts.append(running)
+        frame_abs_offsets.append(f["offset"])
+        running += f["blocksize"]
+    assert sorted(frame_abs_offsets) == frame_abs_offsets and \
+        len(set(frame_abs_offsets)) == len(frame_abs_offsets), \
+        "%s: the frame walk is not a tiling: %r" % (name, frame_abs_offsets[:8])
+    by_sample = {s: k for k, s in enumerate(frame_starts)}
+    for p in real:
+        k = by_sample.get(p["sample_number"])
+        assert k is not None, \
+            "%s: seek point %d names sample %d, which is not where any frame " \
+            "begins (frame starts: %s)" % (
+                name, p["index"], p["sample_number"], frame_starts[:6])
+        frame = frames[k]
+        assert p["stream_offset"] + frame_data_offset == frame["offset"], \
+            "%s: seek point %d says the frame at sample %d starts at byte %d " \
+            "relative to the end of the metadata (%d absolute); the frame walk " \
+            "says byte %d — the offset is NOT file-relative, and if it were " \
+            "this is where that would show" % (
+                name, p["index"], p["sample_number"], p["stream_offset"],
+                p["stream_offset"] + frame_data_offset, frame["offset"])
+        assert p["frame_samples"] == frame["blocksize"], \
+            "%s: seek point %d declares a frame of %d samples; frame %d " \
+            "carries %d" % (name, p["index"], p["frame_samples"], k,
+                            frame["blocksize"])
+        p["frame_index"] = k
+        if info["minimum_blocksize"] == info["maximum_blocksize"]:
+            derived = p["sample_number"] // info["maximum_blocksize"]
+            assert derived == k, \
+                "%s: sample %d // max_blocksize %d = %d, the walk says frame " \
+                "%d — the division the crate derives from cannot be used here" % (
+                    name, p["sample_number"], info["maximum_blocksize"],
+                    derived, k)
+            p["derived_frame_index"] = derived
+
+    return dict(
+        offset=table["offset"],
+        length=table["length"],
+        points=points,
+        real=real,
+        placeholders=placeholders,
+        # Whether a real writer zeroes the fields it is not using. Measured on
+        # the tool's own bytes; metaflac's rendering hides them, so only this
+        # reading can see them (the s2 measurement: the placeholder points its
+        # table grew by snapping requests onto the point at 0 all carry 0/0).
+        placeholder_fields_zero=all(
+            p["stream_offset"] == 0 and p["frame_samples"] == 0
+            for p in placeholders),
+    )
 
 
 def check_stream(spec, path, data):
@@ -892,6 +1213,11 @@ def check_stream(spec, path, data):
             "%s: tail frame is %d samples, total_samples says otherwise" % (
                 name, blocksizes[-1])
 
+    # Section 8.5, cross-checked against the block list, the tool's rendering
+    # and the frame walk. It does not need the audio; the per-point PCM pins are
+    # attached below, where the reference decode happens.
+    seek = check_seektable(name, spec, blocks, mblocks, off, info, frames)
+
     # The audio itself, from the reference DECODER, and the stream's own MD5
     # checked against it: section 8.2's MD5 field is the MD5 of the UNENCODED
     # PCM, so the fixture's declared value and `flac -d`'s output meeting is a
@@ -919,6 +1245,27 @@ def check_stream(spec, path, data):
                 "knowing about" % name
         pcm_rows = dict(values=len(pcm), bytes=packed, md5=digest,
                         pcm_fnv=fv.fnv1a64(packed))
+        if seek is not None:
+            # One pin per REAL seek point: the FNV-1a-64 of every sample from
+            # that point's first sample to the end of the stream, over the
+            # reference decoder's own output. A walk started at an anchor can
+            # only be checked against something, and that something is the same
+            # suffix of the same decode: the rows say that the samples after an
+            # anchor are the samples after it in a full decode, which is the
+            # only claim a seek needs to satisfy that no other suite here makes.
+            # Sample numbers are interchannel sample frames, so the value index
+            # is frame * channels (mono here, but the arithmetic is stated).
+            channels = info["channels_minus_one"] + 1
+            seek["tails"] = [
+                fv.fnv1a64(struct.pack(
+                    "<%dh" % (len(pcm) - p["sample_number"] * channels),
+                    *pcm[p["sample_number"] * channels:]))
+                for p in seek["real"]
+            ]
+            assert len(seek["tails"]) == len(set(seek["tails"])), \
+                "%s: two different seek points hash the same tail — the pins " \
+                "would not be able to tell a walk that started at the wrong one" \
+                % name
 
     # The number-FORM witness: one real frame, its number spelled in three
     # longer forms, both CRCs recomputed. See mutate_number_form().
@@ -984,7 +1331,7 @@ def check_stream(spec, path, data):
         footer_early_positions_sync_shape=early_shape,
         footer_early_positions_strict_headers=early_headers,
         derived_frame_count=derived, exact_frame_count=derivable,
-        pcm=pcm_rows, mutation=mutation,
+        pcm=pcm_rows, mutation=mutation, seek=seek,
     )
 
 
@@ -1115,10 +1462,14 @@ def emit(src, fixture_dir, out_path):
         "# `frame_exact_count_from_declarations` is the frame count a reader",
         "# can derive from the stream's OWN declarations -- a fixed block size",
         "# plus a known sample total -- and nothing else: ceil(total / block)",
-        "# with the short tail included. It equals the frame count on the four",
-        "# seekable fixtures and `none` on the unseekable one, which is the",
-        "# measured form of the point item 4b exists for: three of the five",
-        "# streams here state where their audio ends and one states nothing.",
+        "# with the short tail included. It equals the frame count on the five",
+        "# fixtures that state a sample total, and `none` on the one that states",
+        "# none -- which is the measured form of the point item 4b exists for:",
+        "# five of the six streams here state where their audio ends and one",
+        "# states nothing. The sixth, `s6_seekpoints_8k_mono`, is fixed block size",
+        "# with a stated total, and is therefore the first fixture here whose",
+        "# SEEKTABLE points can be resolved to frame positions by arithmetic at",
+        "# all (see the seek rows below).",
         "# `pcm_interleaved_values`, `pcm_fnv1a64` and `pcm_md5` come from",
         "# `flac -d`'s output, not from this crate: the whole-file decode the",
         "# frame walk produces has a pin, and `pcm_md5` equaling",
@@ -1134,6 +1485,47 @@ def emit(src, fixture_dir, out_path):
         "# its own streaminfo. That is what makes the 24-bit fixture's refusal",
         "# unarguable: no caller-supplied default could talk a decoder into",
         "# reading those frames, because the frames themselves say 24.",
+        "#",
+        "# The `seek_*` rows are section 8.5, and they exist on the two fixtures",
+        "# that carry a SEEKTABLE block (s2, one point from the encoder; s6, eight",
+        "# points from `metaflac --add-seekpoint`, including the short last frame).",
+        "# A seek table is a list of 18-byte entries -- first sample number of a",
+        "# target frame, byte offset of that frame, sample count of that frame --",
+        "# and the one thing to get wrong in it is what the offset is relative to.",
+        "# Measured, on both fixtures: it is RELATIVE TO THE FIRST BYTE AFTER THE",
+        "# METADATA, not to the start of the file (point 0 of every table here says",
+        "# 0, and frame 0 is never at byte 0 -- for s6, 234). Generation refuses to",
+        "# write unless every real point's offset plus `frame_data_offset` lands on",
+        "# the offset the proven frame filter reports for the frame whose first",
+        "# sample number the point names, and unless `frame_samples` equals that",
+        "# frame's block size. `seek_points_frame_indices` is that frame index,",
+        "# counted by the walk; for a fixed-blocksize stream it is also checked",
+        "# against sample_number / max_blocksize, which is the derivation the crate",
+        "# makes, and generation refuses to write if the two disagree.",
+        "#",
+        "# Ordering and placeholders: real points must be strictly ascending, and",
+        "# every entry whose sample number is all-ones (a placeholder) must come",
+        "# after all of them -- which is what the format states and, measured, what",
+        "# the reference writer does: `metaflac`'s own help says a placeholder",
+        "# 'always goes at the end of the SEEKTABLE', and it drops out-of-range",
+        "# requests and exact duplicates instead of writing them. A payload whose",
+        "# length is not a multiple of 18 cannot be enumerated at all; that IS",
+        "# refused by the reference tools too ('FLAC__METADATA_CHAIN_STATUS_BAD_',",
+        "# exit 1), which is the only seek-table malformation they refuse: unsorted,",
+        "# duplicate, out-of-range and not-a-frame-start points are all accepted by",
+        "# `flac -t` and printed by `metaflac --list` without complaint, because",
+        "# libFLAC's DECODER ignores the table unless asked to seek. This crate",
+        "# reads the table, so it refuses them; the cases no tool will produce are",
+        "# built by hand in src/stream.rs' own tests, and measured tool behaviour",
+        "# for each is in FLAC.md's split-proposal entry.",
+        "# `seek_points_tail_pcm_fnv1a64` is, for each real point, the FNV-1a-64",
+        "# of every sample from that point's first sample to the end of the",
+        "# stream -- over `flac -d`'s output. That is the pin an ANCHORED walk is",
+        "# checked against in tests/scan_frame_walk_layout.rs: a seek is only",
+        "# correct if the samples after an anchor are the samples after it in a",
+        "# full decode. Generation refuses to write if two different points hash",
+        "# the same tail, because then the pins could not tell a walk started at",
+        "# the wrong one apart.",
         "",
     ]
     for spec, data, checked in rows:
@@ -1247,6 +1639,49 @@ def emit(src, fixture_dir, out_path):
                 "pcm_md5 %s" % pcm["md5"],
                 "pcm_bytes_len %d" % len(pcm["bytes"]),
             ]
+        if checked["seek"]:
+            st, real, ph = checked["seek"], checked["seek"]["real"], \
+                checked["seek"]["placeholders"]
+            joined = lambda xs: " ".join(str(x) for x in xs) or "none"  # noqa: E731
+            lines += [
+                # ---- section 8.5. Read by `read_seektable` here, pinned by
+                # `metaflac --list`'s own rendering, cross-checked against the
+                # frame walk. None of it comes from the crate.
+                "seektable_block_offset %d" % st["offset"],
+                "seektable_length %d" % st["length"],
+                "seektable_points_total %d" % len(st["points"]),
+                "seektable_points_real %d" % len(real),
+                "seektable_points_placeholder %d" % len(ph),
+                "seek_placeholder_indices %s" % joined(
+                    p["index"] for p in ph),
+                # Whether the writer zeroed the fields a placeholder is not
+                # using. metaflac's rendering hides them, so this reading is the
+                # only one that can see them; the crate ignores them, because
+                # nothing in the format makes a placeholder's offset or sample
+                # count mean anything.
+                "seek_placeholder_other_fields_zero %s" % (
+                    "true" if st["placeholder_fields_zero"] else "false"),
+                "seek_points_sample_numbers %s" % joined(
+                    p["sample_number"] for p in real),
+                # As the BYTES say, i.e. relative to the first byte after the
+                # metadata -- not to the start of the file. Generation has
+                # already proved these land on frames (see check_seektable).
+                "seek_points_stream_offsets %s" % joined(
+                    p["stream_offset"] for p in real),
+                "seek_points_frame_samples %s" % joined(
+                    p["frame_samples"] for p in real),
+                # The frame each point names, counted by the frame walk -- and,
+                # for a fixed-blocksize stream, independently required to equal
+                # sample_number // max_blocksize, which is the crate's own
+                # derivation. Two readings, and the row is the walk's.
+                "seek_points_frame_indices %s" % joined(
+                    p["frame_index"] for p in real),
+                "seek_points_frame_offsets %s" % joined(
+                    frames[p["frame_index"]]["offset"] for p in real),
+            ]
+            if "tails" in st:
+                lines.append("seek_points_tail_pcm_fnv1a64 %s" % joined(
+                    st["tails"]))
         lines.append("")
         if checked["mutation"]:
             m = checked["mutation"]

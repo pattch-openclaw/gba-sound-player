@@ -165,13 +165,16 @@
 //! for a range whose position is known, and enforced **before any sample is
 //! written**. Witness: `scan`'s unit tests, which claim only the walk's state
 //! machine and caller contract over hand-cut regions, plus
-//! `tests/scan_frame_walk_layout.rs` over the same five fixtures and the extended
+//! `tests/scan_frame_walk_layout.rs` over the same six fixtures and the extended
 //! `tests/stream_vectors.txt` (`frame_offsets`, `frame_bytes`, `frame_header_bits`,
 //! `frame_blocksizes`, `frame_footer_gaps_bits`, `footer_padding_frames` and the
 //! four `footer_*_positions_*` counts, `frame_numbers`,
 //! `frame_sample_size_codes`, `frame_region_len`,
 //! `frame_exact_count_from_declarations`, the three `scan_frame_starts_*` counts,
-//! and the reference-decoder PCM rows `pcm_md5` / `pcm_fnv1a64` for the 16-bit
+//! the `seek_points_*` rows — a real §8.5 table's points, the frame each one
+//! names, and the reference decoder's PCM from that sample to the end of the file,
+//! which is what a walk started from a seek point has to reproduce — and the
+//! reference-decoder PCM rows `pcm_md5` / `pcm_fnv1a64` for the 16-bit
 //! fixtures).
 //! **The depth boundary applies to locating frames exactly as much as to decoding
 //! them**, and that is stated rather than hidden: `s4` (a valid 24-bit encode)
@@ -455,6 +458,46 @@ pub enum Error {
     /// streaminfo metadata block per FLAC stream"), and the reference decoder's
     /// own words are "more than one STREAMINFO found".
     DuplicateStreamInfo,
+    /// A §8.5 seek table whose payload implies no table: its length is not a
+    /// whole number of 18-byte seek points, against §8.5's "the number of seek
+    /// points is implied by the size described in the metadata block header,
+    /// i.e., equal to size / 18". This is the one seek-table shape the format
+    /// has no reading for, and the one the reference tools refuse in the same
+    /// words — measured on a 19-byte table: `metaflac` "ERROR: reading
+    /// metadata, status = \"FLAC__METADATA_CHAIN_STATUS_BAD_METADATA\"", exit 1;
+    /// `flac -t` "ERROR while decoding metadata", exit 1. A *zero*-length table
+    /// is not this error (§8.5's Table 6 says "zero or more seek points"), and
+    /// neither is any other odd byte count the tools might carry: the multiple
+    /// of 18 is the whole rule.
+    SeekTableLength,
+    /// A §8.5 seek table whose entries are not a usable list: real points not
+    /// strictly ascending by sample number (§8.5.1: points "MUST be sorted in
+    /// ascending order by sample number" and "MUST be unique by sample number,
+    /// with the exception of placeholder points" — one check covers both), or a
+    /// real point after a placeholder (§8.5.1: "there MAY be any number of
+    /// placeholder points, but they MUST all occur at the end of the table").
+    /// `at` is the entry index where the rule first breaks, because the entry
+    /// *is* the diagnosis: a caller with a table half of which is usable can say
+    /// which half. No reference tool produces this shape — measured, an
+    /// unsorted, duplicated, out-of-range or not-a-frame-start table passes
+    /// `flac -t` and `metaflac --list` without a word, because libFLAC's decoder
+    /// consults the table only when asked to seek — so this is a refusal this
+    /// crate makes *because* it reads the table, and the measurements behind it
+    /// are recorded in FLAC.md's split-proposal entry.
+    SeekTableOrder {
+        /// Index of the entry that broke the rule.
+        at: usize,
+    },
+    /// More than one §8.5 seek table: "There MUST NOT be more than one seek
+    /// table metadata block in a stream". Unlike §8.2's single-streaminfo rule,
+    /// the reference chain validator does NOT enforce this one — measured, a file
+    /// with a second, byte-identical type 3 block passes `flac -t` at exit 0 and
+    /// `metaflac --list` prints both tables — so this refusal joins the ordering
+    /// refusals above as a rule this crate makes because it *uses* the table
+    /// rather than one the reference tools make. (The same asymmetry as
+    /// duplicate VORBIS_COMMENT and PADDING blocks, which the tools also accept;
+    /// §8.2's streaminfo rule is the only block-count rule they enforce.)
+    DuplicateSeekTable,
 }
 
 /// Crate-local result alias; avoids importing `std::result` anywhere.

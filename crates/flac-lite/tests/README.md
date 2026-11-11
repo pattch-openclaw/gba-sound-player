@@ -20,20 +20,25 @@ tautology; these are not.
 | `subframe_body_vectors.txt` | subframe bodies per type (CONSTANT/VERBATIM/FIXED/LPC + wasted bits) | same script → `frame_vectors.py emit_bodies` | `flac` 1.5.0 + independent Bits walk + `flac -d` PCM |
 | `stream_vectors.txt` | per-file: the §8.1 block chain, every §8.2 `STREAMINFO` field, `frame_data_offset`, the frame region and **every frame's own byte length / header width / block size / footer-gap bits / number / sample-size code**, where a mis-counted footer would
 land (the count of frames carrying padding, and whether the strict filter or only
-the bare sync shape matches at those positions), the header-width census, frame-number **form** censuses, the frame-start filter ladder (sync shape only → fields only → strict), what the stream's own declarations can say about its frame count, one number-form mutation + `flac -d` exit codes, and the decoded PCM's MD5/FNV-1a64 | `scripts/gen_stream_vectors.sh` | `metaflac --list` + **three** independent Python readings (§8 structure; §9.1 field/scan filtering with and without the minimal-form rule; a per-frame walk of the subframe bodies that derives each frame's length from its own fields) + `flac -d` PCM for the 16-bit fixtures |
-| `fixtures/s1…s5_*.flac` | the five streams the table describes, byte-for-byte what `flac` 1.5.0 wrote | same script (`stream_vectors.py emit`) | `flac` 1.5.0 (the encode commands live in the script next to each `encode_command` row) |
+the bare sync shape matches at those positions), the header-width census, frame-number **form** censuses, the frame-start filter ladder (sync shape only → fields only → strict), what the stream's own declarations can say about its frame count, one number-form mutation + `flac -d` exit codes, the §8.5 seek table wherever a fixture has one (its block, every real point's three fields, which entries are placeholders, which frame each real point names, and the FNV-1a-64 of the reference decoder's PCM from that point's sample to the end of the file), and the decoded PCM's MD5/FNV-1a64 | `scripts/gen_stream_vectors.sh` | `metaflac --list` + **three** independent Python readings (§8 structure; §9.1 field/scan filtering with and without the minimal-form rule; a per-frame walk of the subframe bodies that derives each frame's length from its own fields) + `flac -d` PCM for the 16-bit fixtures |
+| `fixtures/s1…s6_*.flac` | the six streams the table describes, byte-for-byte what `flac` 1.5.0 wrote | same script (`stream_vectors.py emit`) | `flac` 1.5.0 (the encode commands live in the script next to each `encode_command` row) |
 | `gafp_asset_vectors.txt` | what the **packer** recorded for the four packed assets below: every manifest field, every offset-table entry, every frame's length and footer CRC-16, its subframe census slot by slot, per-frame and whole-blob PCM pins, and the three pack-time **refusals** with the reason printed | `scripts/gen_gafp_fixtures.py --check` (which drives `scripts/gafp_pack.py`) | the packer's own strict frame/subframe walk + `flac` 1.5.0 encode + `flac -d` PCM |
 | `gfp/p0…x1.gfp` | the four packed GAFP assets that table describes, byte-for-byte what the packer wrote | same generator | `scripts/gafp_pack.py` (the real GAFP writer, item 6b-2) |
 
 Each fixture's *reason for existing* is in the table's `note` rows and in the
 module docs of the suite that reads it — `tests/stream_metadata_layout.rs`
-explains `s1…s5` (two-block container, every real block type, a real 80-bit
+explains `s1…s6` (two-block container, every real block type, a real 80-bit
 header, a valid 24-bit stream, a stream that declares nothing about its own
-length). The same table is read a second way by
+length, a real multi-point seek table). The same table is read a second way by
 `tests/scan_frame_walk_layout.rs` (item 4b's frame walk): it asks the crate to
 walk those frames with no index, and compares every frame start, byte length,
 header width, block size, frame number and every sample against the rows — plus
-the PCM hash, which came out of `flac -d`. It also takes the table's
+the PCM hash, which came out of `flac -d`. It also starts walks **from the seek
+table's own points**: the byte an entry names once the container's length is
+added to it, the frame number that byte's frame actually carries, the audio from
+there to the end of the file (hashed from `flac -d`'s output for exactly that
+suffix), and the refusal of both a wrong anchor and the usual wrong reading of an
+offset — every one of them before a single sample is written. It also takes the table's
 byte-truncation positions (where a walk that rounded a non-byte-aligned frame end
 *down* would stand) and asks this crate's own frame filter each one: it must
 refuse that position and report the real frame's start, and the count of positions

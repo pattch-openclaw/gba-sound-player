@@ -27,17 +27,33 @@
 //!                                  whole region by the generator: sync shape
 //!                                  only, fields without the header CRC, strict,
 //!                                  and strict with the number-form rule
-//!                                  relaxed. On these five regions all four legs
-//!                                  equal the frame count — the regions hold no
-//!                                  false candidates, and the table says so. The
-//!                                  measurement where the legs separate (1223
-//!                                  candidates for 979 real frames) is in longer
-//!                                  material, recorded in `src/lib.rs`. Note
+//!                                  relaxed. On five of these six regions all
+//!                                  four legs equal the frame count — those
+//!                                  regions hold no false candidates. On
+//!                                  s6_seekpoints_8k_mono the two-byte sync-shape
+//!                                  leg finds 13 candidates for 12 frames: the
+//!                                  smallest material in this repo where the legs
+//!                                  part at all, and a reason the Rust-side
+//!                                  assertions below are inequalities. The larger
+//!                                  measurement (1223 candidates for 979 real
+//!                                  frames) is in longer material, recorded in
+//!                                  `src/lib.rs`. Note
 //!                                  also that the generator's filter accepts
 //!                                  every sample-size code, so its count for s4
 //!                                  is 10 while this crate's is 0: see
 //!                                  `the_depth_boundary_applies_to_locating_
 //!                                  frames_as_much_as_to_decoding_them`.
+//! seek_points_*                    the REAL points of a §8.5 seek table: the
+//!                                  sample each one names, the byte offset the
+//!                                  table carries (relative to the first byte
+//!                                  after the metadata), which frame the
+//!                                  generator's own frame walk counted that
+//!                                  sample to, and the FNV-1a-64 of the
+//!                                  reference decoder's PCM from that sample to
+//!                                  the end of the file — which last is what a
+//!                                  walk started from that point has to
+//!                                  reproduce, and the only definition of a
+//!                                  correct seek this suite can check
 //! frame_exact_count_from_declarations
 //!                                  what the stream's OWN declarations can say
 //!                                  about where its audio ends — `none` where
@@ -85,6 +101,7 @@ fn fixture_bytes(name: &str) -> &'static [u8] {
         "s5_unseekable_total_unknown.flac" => {
             include_bytes!("fixtures/s5_unseekable_total_unknown.flac")
         }
+        "s6_seekpoints_8k_mono.flac" => include_bytes!("fixtures/s6_seekpoints_8k_mono.flac"),
         other => panic!(
             "the table names a fixture this test does not embed: {other}\n\
              add it to fixture_bytes() (and, if it witnesses a new rule, add an \
@@ -139,6 +156,31 @@ impl Vector {
             items.len(),
             n,
             "{}: `{key}` has {} entries for {} frames",
+            self.name,
+            items.len(),
+            n
+        );
+        items
+    }
+
+    /// A per-SEEK-POINT row as a list, length-checked against the number of REAL
+    /// points the table says this stream has. Placeholders have no rows: the
+    /// tool renders one as a bare word and prints none of its fields, so there
+    /// is nothing to compare field by field.
+    fn per_point(&self, key: &str) -> Vec<u64> {
+        let items: Vec<u64> = self
+            .raw(key)
+            .split_whitespace()
+            .map(|v| {
+                v.parse()
+                    .unwrap_or_else(|_| panic!("{}: `{key}` item {v:?} is not a number", self.name))
+            })
+            .collect();
+        let n = self.num("seektable_points_real") as usize;
+        assert_eq!(
+            items.len(),
+            n,
+            "{}: `{key}` has {} entries for {} real seek points",
             self.name,
             items.len(),
             n
@@ -593,16 +635,86 @@ fn the_frame_start_filter_finds_exactly_the_frames_a_stream_has() {
         // and `scan_frame_starts_sync_shape_only` count the WIDER tests a player
         // might be tempted to run — field checks without the header's CRC-8, and
         // the bare two-byte sync shape. Our filter is at least as strict as both,
-        // so its count can only be smaller. On these five fixtures every leg
-        // gives the frame count (the generator asserts that set inclusion before
-        // it writes the table), and these two assertions are equalities today;
-        // they are written as inequalities because the day a fixture contains a
-        // false start, they stop being equalities and this test keeps passing
-        // for the right reason. Longer material is where the legs part company:
+        // so its count can only be smaller. On five of these six fixtures every
+        // leg gives the frame count (the generator asserts that set inclusion
+        // before it writes the table); on `s6` the two-byte leg finds one
+        // candidate too many, which is what makes these inequalities the right
+        // shape rather than a defensive one — the day a fixture contains a false
+        // start they keep passing for the reason they were written. The other
+        // measurement of the same thing is in longer material:
         // `tests/stream_vectors.txt`'s own header records sync shape
         // over-matching by 1.3x to 12x (204 candidates for 157 frames), which is
         // the measurement that says a player may not treat sync shape as frame
         // location — and `src/scan.rs`'s `Frames` never does.
+        if v.name == "s6_seekpoints_8k_mono" {
+            assert!(
+                v.num("scan_frame_starts_sync_shape_only") > v.num("frame_count"),
+                "{}: this leg names the one fixture in this repo small enough \
+                 to show the filter legs part; the fixture stopped showing it \
+                 and the row says otherwise",
+                v.name
+            );
+            // The same two-byte test the generator counted, run here over the
+            // same bytes, so the difference between the rows is a thing this
+            // suite can point at instead of a number it repeats.
+            let two_byte: Vec<usize> = (0..region.len() - 1)
+                .filter(|&p| region[p] == 0xFF && (region[p + 1] & 0xF8) == 0xF8)
+                .collect();
+            assert_eq!(
+                two_byte.len(),
+                v.num("scan_frame_starts_sync_shape_only") as usize,
+                "{}: the generator's sync-shape leg, re-run on its own bytes",
+                v.name
+            );
+            let extra: Vec<usize> = two_byte
+                .into_iter()
+                .filter(|p| !found.contains(p))
+                .collect();
+            assert_eq!(
+                extra.len(),
+                1,
+                "{}: {} sync-shaped bytes that are not frames",
+                v.name,
+                extra.len()
+            );
+            // …and where that one byte came from: it is the LAST byte of the
+            // frame before a real frame start — that frame's own footer CRC-16,
+            // which happens to be 0xFF — standing immediately in front of the
+            // next frame's real sync code. A reader that treated two matching
+            // bytes as a frame boundary would have been exactly one byte short of
+            // the frame it was aiming at, and the field check is what refuses it:
+            // at that position the second byte is the first byte of the real sync,
+            // so the pair reads as `FF FF`, whose reserved bit (§9.1) is set.
+            let at = extra[0];
+            let next = *found
+                .iter()
+                .find(|o| **o > at)
+                .expect("a real frame start after the false candidate");
+            assert_eq!(
+                at + 1,
+                next,
+                "{}: the false sync candidate at {at} is not one byte before a \
+                 real frame start ({next})",
+                v.name
+            );
+            let prev = found.iter().position(|o| *o == next).unwrap() - 1;
+            assert_eq!(
+                want[prev] + v.per_frame("frame_bytes")[prev] as usize - 1,
+                at,
+                "{}: the false candidate is not the last byte of frame {prev}",
+                v.name
+            );
+            assert_eq!(region[at], 0xFF, "and it is that byte");
+        } else {
+            assert_eq!(
+                v.num("scan_frame_starts_sync_shape_only"),
+                v.num("frame_count"),
+                "{}: this fixture now has a false sync candidate, which changes \
+                 what the leg above witnesses — name it in the `parted` list and \
+                 argue about it",
+                v.name
+            );
+        }
         assert!(
             (found.len() as u64) <= v.num("scan_frame_starts_fields_only"),
             "{}: {} starts passed the crate's strict filter but the field-only \
@@ -730,7 +842,7 @@ fn the_depth_boundary_applies_to_locating_frames_as_much_as_to_decoding_them() {
         "a refused frame wrote no sample"
     );
 
-    // And the measured reach of `StreamDefaults`: for depth, these five streams
+    // And the measured reach of `StreamDefaults`: for depth, these six streams
     // never use it. No frame of any fixture carries code `0b000` ("the depth is
     // only in STREAMINFO"), so across every real encode in this suite the value
     // a profile check sees is the frame's own statement, and a caller's defaults
@@ -931,7 +1043,7 @@ fn the_buffers_a_walk_asks_for_come_from_the_stream_and_from_the_frame() {
 
 // --------------------------------------------------- what a stream can't say
 
-/// One of these five streams was encoded through a pipe, so its STREAMINFO
+/// One of these six streams was encoded through a pipe, so its STREAMINFO
 /// carries the format's "unknown" sentinels: no sample count, no MD5. It is
 /// otherwise indistinguishable — same audio, same frames, same bytes from the
 /// first frame on — and `flac -t` says it is a valid file.
@@ -1703,8 +1815,9 @@ fn at_the_end_of_a_region_the_walk_reports_what_the_bytes_and_claims_support() {
 ///
 /// §12 closes a frame with zero-padding to a byte boundary and *then* the
 /// CRC-16, so a walk that treated the footer as exactly 16 bits is short by the
-/// padding on every frame the table counts in `footer_padding_frames` — 23 of
-/// the 35 frames in these five fixtures. The table records what such a reader
+/// padding on every frame the table counts in `footer_padding_frames` — most of
+/// the frames of every fixture in this suite, short tail included. The table
+/// records what such a reader
 /// would then find standing where it stands, two ways: at its **bit** cursor's
 /// position (short by the padding) and at its **byte** cursor's position if it
 /// rounded a non-byte-aligned end *down* instead of up (`end - 1`). Both rows
@@ -1953,8 +2066,30 @@ fn the_frame_count_claim_is_checked_after_the_sample_count_claim() {
         let mut state: [PredictorState; 2] = Default::default();
         let mut walk = scan::Frames::region(region, &table_defaults(v), real);
         for i in 0..n {
-            walk.next_frame(&mut left, &mut right, &mut state)
-                .unwrap_or_else(|e| panic!("{}: frame {i}: {e:?}", v.name));
+            let f = walk
+                .next_frame(&mut left, &mut right, &mut state)
+                .unwrap_or_else(|e| panic!("{}: frame {i}: {e:?}", v.name))
+                .unwrap_or_else(|| panic!("{}: the walk ended before frame {i}", v.name));
+            // What the control leg is really controlling for: a walk handed the
+            // stream's own claims must still frame those bytes exactly as the
+            // frame filter does. A claim decides when the walk complains; it is
+            // not allowed to decide where a frame begins or how long it is.
+            assert_eq!(
+                f.offset, offs[i],
+                "{}: frame {i} starts elsewhere once the walk was handed a claim",
+                v.name
+            );
+            assert_eq!(
+                f.bytes, lens[i] as usize,
+                "{}: frame {i} is {} bytes under a claim and {} in the frame \
+                 filter's reading",
+                v.name, f.bytes, lens[i]
+            );
+            assert_eq!(
+                f.samples as u64, blocks[i],
+                "{}: frame {i}'s block size under a claim",
+                v.name
+            );
         }
         assert!(
             matches!(walk.next_frame(&mut left, &mut right, &mut state), Ok(None)),
@@ -2052,5 +2187,425 @@ fn the_frame_count_claim_is_checked_after_the_sample_count_claim() {
         "no fixture in the table states enough to derive a frame count; the \
          claim-staging half of this test is no longer exercised and the arm it \
          witnesses would go untested again"
+    );
+}
+
+// ------------------------------------------------- walking from a seek point
+
+/// What `Frames::anchored` is FOR: starting a walk somewhere that is not the
+/// beginning of the stream.
+///
+/// A `SEEKTABLE` entry hands a player two things it can act on, and getting
+/// either one wrong is not a crash — it is audio from the wrong place, which
+/// nobody hears. So both are pinned here against the fixture's own rows:
+///
+/// * **the byte.** `stream_offset` counts from the first byte after the
+///   metadata, not from the start of the file. `frame_offsets` (absolute, from
+///   the frame filter) and `seek_points_frame_offsets` (what the point resolves
+///   to) are the two rows that say so; read as a raw file offset, a point would
+///   land on a byte that is not any frame's start in this stream — and the walk
+///   is shown refusing such a byte, having written no samples.
+/// * **the number.** [`stream::SeekPoint::frame_index`] is a *position* in the
+///   stream's frame sequence, and [`scan::Frames::anchored`] wants that
+///   sequence's *number*, which §9.1.5 lets a stream start anywhere it likes. For
+///   these fixtures the `frame_numbers` row is that number, so the composition
+///   this test anchors with is the row's, not an assumption of contiguity — and
+///   the contiguity those rows would have to have for `first + position` to work
+///   is asserted from the rows too.
+///
+/// The claim that makes a seek a seek, though, is the audio: from an anchor to
+/// the end of the region, the samples a walk decodes have to be the samples
+/// `flac -d` produced from that sample to the end of the file. The
+/// `seek_points_tail_pcm_fnv1a64` rows are that suffix, hashed from the
+/// reference decoder's own output; hashing the walk's samples the same way is
+/// the only way this suite can say "the seek landed on the right sample" rather
+/// than "the seek landed on a frame boundary".
+#[test]
+fn a_seek_point_starts_a_walk_that_finishes_the_stream_at_the_right_sample() {
+    let mut sought = 0usize;
+    for v in load_vectors() {
+        if !v.has("seek_points_stream_offsets") {
+            continue;
+        }
+        // `PcmPin` hashes samples as 16-bit little-endian, which is the encoding
+        // `pcm_*` rows carry, and s4's are not that. Its framing is witnessed
+        // elsewhere in this suite; its audio is not comparable here.
+        if v.bits_per_sample() == 24 {
+            continue;
+        }
+        sought += 1;
+        let bytes = v.fixture();
+        let facts = stream::parse(bytes).expect("a valid stream");
+        let base = facts.frame_data_offset;
+        let declared = v.raw("streaminfo_total_samples").parse::<u64>().expect(
+            "a stream with a seek table that states no total would make \
+                     the sample-count half of this test unstatable",
+        );
+        let table = stream::seek_table(bytes)
+            .expect("a valid stream's table")
+            .expect("this fixture has one");
+
+        let offs = v.region_offsets(base);
+        let lens = v.per_frame("frame_bytes");
+        let numbers = v.per_frame("frame_numbers");
+        let blocksizes = v.per_frame("frame_blocksizes");
+        let n = offs.len();
+        let first_number = v.num("first_frame_number");
+        assert_eq!(
+            numbers.iter().copied().collect::<Vec<_>>(),
+            (0..n as u64).map(|i| first_number + i).collect::<Vec<_>>(),
+            "{}: these frames are not numbered contiguously from {}, so \
+             `first_frame_number + position` is not a rule this test may use",
+            v.name,
+            first_number
+        );
+
+        let sample_numbers = v.per_point("seek_points_sample_numbers");
+        let want_index = v.per_point("seek_points_frame_indices");
+        let tails = v.per_point("seek_points_tail_pcm_fnv1a64");
+        let n_real = v.num("seektable_points_real") as usize;
+        assert_eq!(sample_numbers.len(), n_real, "one row entry per point");
+
+        for j in 0..n_real {
+            // Real points are the leading entries (the parser refuses tables
+            // where they are not, and 4a's suite reads that back here).
+            let p = table.point(j).expect("an index inside the table");
+            assert!(!p.is_placeholder(), "{}: entry {j}", v.name);
+            assert_eq!(
+                p.first_sample, sample_numbers[j],
+                "{}: point {j} is at a sample the rows do not name",
+                v.name
+            );
+            let target = p
+                .frame_index(&facts.info)
+                .expect("a fixed-blocksize stream that states its total");
+            assert_eq!(target, want_index[j], "{}: point {j}", v.name);
+            assert!(
+                (target as usize) < n,
+                "{}: point {j} names frame {target} of {n}",
+                v.name
+            );
+
+            // The byte. The table's offsets are relative to `base`; the frame
+            // filter's are not, and this is where the two coordinate systems
+            // meet — for a walk, region-relative, exactly what `next_frame`
+            // reports in `ConsumedFrame::offset`.
+            let at = p.frame_offset as usize;
+            assert_eq!(
+                file_offset(&facts, at),
+                file_offset(&facts, offs[target as usize]),
+                "{}: point {j} (stream offset {at}) does not resolve to the \
+                 byte where frame {target} begins",
+                v.name,
+            );
+            let suffix = &bytes[base + at..];
+            assert_eq!(
+                suffix.len(),
+                v.num("frame_region_len") as usize - at,
+                "{}: the range a seek hands a walk is not the rest of the region",
+                v.name
+            );
+
+            // The number. A position is not a number: the anchor is the number
+            // the target frame carries, and the row says what that is.
+            let anchor = numbers[target as usize];
+
+            // A wrong number is refused before anything is decoded. The frame
+            // the walk starts on is the right frame — a seek that landed on the
+            // right byte with the wrong anchor must not silently renumber it.
+            {
+                let (mut l, mut r) = caller_buffers(&v, &facts);
+                let mut state: [PredictorState; 2] = Default::default();
+                let mut walk =
+                    scan::Frames::region(suffix, &table_defaults(&v), scan::StreamBounds::NOTHING)
+                        .anchored(anchor + 1);
+                match walk.next_frame(&mut l, &mut r, &mut state) {
+                    Err(scan::Error::FrameOutOfSequence {
+                        offset,
+                        expected,
+                        found,
+                    }) => assert_eq!(
+                        (offset, expected, found),
+                        (0, anchor + 1, anchor),
+                        "{}: point {j}: an anchor one past the frame the walk \
+                         was handed was expected to refuse it by name",
+                        v.name
+                    ),
+                    other => panic!(
+                        "{}: point {j}: an anchor of {} on a region starting at \
+                         frame {target} (number {}) should have been refused as \
+                         out of sequence, got {other:?}",
+                        v.name,
+                        anchor + 1,
+                        anchor
+                    ),
+                }
+                assert_eq!(walk.cursor(), 0, "the refusal left the cursor put");
+                assert_eq!(walk.decoded().frames, 0);
+                assert_eq!(walk.decoded().samples, 0);
+                if anchor > first_number {
+                    let mut walk = scan::Frames::region(
+                        suffix,
+                        &table_defaults(&v),
+                        scan::StreamBounds::NOTHING,
+                    )
+                    .anchored(anchor - 1);
+                    let e = walk
+                        .next_frame(&mut l, &mut r, &mut state)
+                        .expect_err("an anchor one before is refused too");
+                    assert!(
+                        matches!(
+                            e,
+                            scan::Error::FrameOutOfSequence {
+                                expected,
+                                found,
+                                ..
+                            } if expected + 1 == found
+                        ),
+                        "{}: point {j}: an anchor one before names both numbers: {e:?}",
+                        v.name
+                    );
+                    assert_eq!(walk.decoded().samples, 0);
+                }
+            }
+
+            // The wrong reading of the offset — the one every seek gets wrong the
+            // first time: treating a table offset as a file offset. It lands
+            // between frames, and the walk says so without writing a sample.
+            {
+                let (mut l, mut r) = caller_buffers(&v, &facts);
+                let mut state: [PredictorState; 2] = Default::default();
+                let misread = &bytes[at..];
+                let mut walk =
+                    scan::Frames::region(misread, &table_defaults(&v), scan::StreamBounds::NOTHING)
+                        .anchored(anchor);
+                let e = walk
+                    .next_frame(&mut l, &mut r, &mut state)
+                    .expect_err("a table offset is not a file offset");
+                assert!(
+                    matches!(e, scan::Error::Decode(_)),
+                    "{}: point {j}: reading the offset from the start of the \
+                     file ({at}) instead of from {} landed the walk somewhere \
+                     that the frame layer accepted: {e:?}",
+                    v.name,
+                    base
+                );
+                assert_eq!(
+                    walk.cursor(),
+                    0,
+                    "{}: the refusal of a misread offset moved the walk",
+                    v.name
+                );
+                assert_eq!(walk.decoded().samples, 0, "and decoded nothing");
+            }
+
+            // The walk itself: from the anchor to the end of the region, every
+            // frame matching the rows for it, ending on the region's last byte,
+            // carrying exactly the samples between the point and the end of the
+            // stream — and hashing to the same value as the reference decoder's
+            // output for that suffix.
+            let (mut left, mut right) = caller_buffers(&v, &facts);
+            let mut state: [PredictorState; 2] = Default::default();
+            let mut walk =
+                scan::Frames::region(suffix, &table_defaults(&v), scan::StreamBounds::NOTHING)
+                    .anchored(anchor);
+            assert_eq!(
+                walk.expect_number(),
+                Some(anchor),
+                "{}: an anchored walk should report the anchor it was given",
+                v.name
+            );
+            assert_eq!(
+                walk.region_len(),
+                suffix.len(),
+                "{}: the walk was handed a different range than the seek names",
+                v.name
+            );
+            let mut pcm = PcmPin::new();
+            for i in target as usize..n {
+                let f = walk
+                    .next_frame(&mut left, &mut right, &mut state)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "{}: point {j}: frame {i} after anchoring at {anchor}: {e:?}",
+                            v.name
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        panic!("{}: point {j}: the walk ended before frame {i}", v.name)
+                    });
+                // `ConsumedFrame::offset` is in the coordinates of the region
+                // THIS walk was handed, which start at the seek point; the
+                // frame filter's row is in the whole region's. Adding the seek's
+                // own offset is the same reconciliation `region_offsets` does,
+                // and it is what lets the two be compared at all.
+                assert_eq!(
+                    f.offset + at,
+                    offs[i],
+                    "{}: point {j}: frame {i} is at region offset {}, the frame \
+                     filter says {}",
+                    v.name,
+                    f.offset + at,
+                    offs[i]
+                );
+                assert_eq!(
+                    f.number, numbers[i],
+                    "{}: point {j}: frame {i}'s number",
+                    v.name
+                );
+                assert_eq!(
+                    f.bytes, lens[i] as usize,
+                    "{}: point {j}: frame {i} is {} bytes here and {} in the \
+                     whole-region walk: a walk that starts in the middle of a \
+                     stream has no licence to frame it differently",
+                    v.name, f.bytes, lens[i]
+                );
+                assert_eq!(
+                    f.samples as u64, blocksizes[i],
+                    "{}: point {j}: frame {i}",
+                    v.name
+                );
+                pcm.push(&f, &left, &right);
+            }
+            assert!(
+                walk.next_frame(&mut left, &mut right, &mut state)
+                    .expect("the rest of the region is whole frames")
+                    .is_none(),
+                "{}: point {j}: the walk did not end at the end of the region",
+                v.name
+            );
+            assert_eq!(
+                walk.cursor(),
+                suffix.len(),
+                "{}: point {j}: the walk stopped {} bytes short",
+                v.name,
+                suffix.len() - walk.cursor()
+            );
+            assert_eq!(walk.decoded().frames, n - target as usize);
+            let expected_samples: u64 = blocksizes[target as usize..].iter().sum();
+            assert_eq!(
+                walk.decoded().samples as u64,
+                expected_samples,
+                "{}: point {j}: the frames after it carry {expected_samples} \
+                 samples",
+                v.name
+            );
+            // The sample the table points at, in the stream's own numbering: a
+            // seek to sample N decodes from N, not from the start of the frame
+            // that contains it — which, for a table whose points are frame
+            // starts by definition (§8.5.1), is the same statement. The
+            // arithmetic only holds because a point IS a frame start; that is
+            // what the total-samples identity below is checking.
+            assert_eq!(
+                expected_samples,
+                declared - p.first_sample,
+                "{}: point {j} claims sample {}, and the frames from {} to the \
+                 end of this stream carry {expected_samples} samples — the point \
+                 does not name the start of a frame the walk can count to the end",
+                v.name,
+                p.first_sample,
+                target
+            );
+            assert_eq!(
+                pcm.values as u64,
+                expected_samples * v.channels() as u64,
+                "{}: point {j}: the samples hashed are not the samples decoded",
+                v.name
+            );
+            assert_eq!(
+                pcm.hash, tails[j],
+                "{}: point {j}: decoding from sample {} produced audio that is \
+                 not the reference decoder's from that sample to the end of the \
+                 file — the row is that suffix hashed from `flac -d`'s output",
+                v.name, p.first_sample
+            );
+
+            // When the point names the stream's LAST frame, this is the seek
+            // into a short tail: the frame carries fewer samples than the stream
+            // declares as its maximum block size, which is exactly where a
+            // decoder that sized a frame from the declared maximum would have
+            // put samples in the buffer that the stream never had. The point
+            // itself states the real count (§8.5.1's `frame_samples`), the walk
+            // reports it per frame, and the rows agree with both.
+            if target as usize + 1 == n {
+                let last = blocksizes[target as usize];
+                let declared_max = v.num("streaminfo_maximum_blocksize");
+                assert!(
+                    last < declared_max,
+                    "{}: point {j} names this stream's last frame, which is \
+                     {} samples in a stream declaring a maximum of {declared_max} \
+                     — this leg exists to witness a short tail, and this fixture \
+                     no longer has one",
+                    v.name,
+                    last
+                );
+                assert_eq!(
+                    u64::from(p.frame_samples),
+                    last,
+                    "{}: point {j}'s own frame_samples disagrees with the frame \
+                     the walk decoded",
+                    v.name
+                );
+                assert_eq!(
+                    last,
+                    declared - p.first_sample,
+                    "{}: the tail frame does not end the stream's sample count",
+                    v.name
+                );
+                assert_eq!(
+                    walk.decoded().frames,
+                    1,
+                    "{}: a seek into a stream's last frame decoded more than it",
+                    v.name
+                );
+            }
+        }
+
+        // A lookup, driving a walk: the row-derived last-sample probe resolves
+        // through `find` to a real point, and the walk started from THAT anchor
+        // reproduces the same tail hash. Nothing in this path is index-based.
+        if let Some((at, p)) = table.find(declared - 1) {
+            assert_eq!(
+                at,
+                n_real - 1,
+                "{}: a seek to the stream's last sample answered point {at}",
+                v.name
+            );
+            let j = at;
+            let suffix = &bytes[base + p.frame_offset as usize..];
+            let target = p
+                .frame_index(&facts.info)
+                .expect("a fixed-blocksize stream that states its total");
+            let anchor = numbers[target as usize];
+            let (mut left, mut right) = caller_buffers(&v, &facts);
+            let mut state: [PredictorState; 2] = Default::default();
+            let mut walk =
+                scan::Frames::region(suffix, &table_defaults(&v), scan::StreamBounds::NOTHING)
+                    .anchored(anchor);
+            let mut pcm = PcmPin::new();
+            while let Some(f) = walk
+                .next_frame(&mut left, &mut right, &mut state)
+                .expect("a walk from a real anchor")
+            {
+                pcm.push(&f, &left, &right);
+            }
+            assert!(
+                walk.at_end(),
+                "{}: a lookup-driven walk stopped short",
+                v.name
+            );
+            assert_eq!(
+                pcm.hash, tails[j],
+                "{}: a walk driven by a lookup did not reproduce the tail it \
+                 looked up",
+                v.name
+            );
+        }
+    }
+    assert!(
+        sought > 0,
+        "no fixture in the table has a seek table: this test would pass by \
+         doing nothing, and an anchored walk that was never anchored to a real \
+         seek point witnesses nothing"
     );
 }

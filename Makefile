@@ -474,10 +474,13 @@ gafp-check: toolchain-check
 #      quietly stopped being built would otherwise still read as a green.
 #
 # It stays a separate target from `gafp-check`, which still describes the
-# committed product blob through the 6b-1 stand-in and is what `flac-rom`
-# depends on. With leg 1 green, the two agree byte for byte, so retiring the
-# stand-in is a refactor with a safety net rather than a change of format — a
-# decision 6b-2 makes deliberately rather than by drift.
+# committed product blob through `scripts/gen_gafp_blob.py` and is what `flac-rom`
+# depends on — and that is now a decided role rather than a stand-in waiting to be
+# retired: reading the 6a-2 spike's own committed frames is what makes that script
+# the only gate saying the asset the ROM plays is the asset the spike measured,
+# which the packer's other path to the same bytes cannot say. The script's header
+# carries the same statement; full retirement is a later PR with a shape, spelled
+# out in plan-of-record.md item 6b-2's second half.
 gafp-pack-check: toolchain-check
 	@command -v flac >/dev/null && command -v metaflac >/dev/null || \
 	  { echo "gafp-pack-check needs flac and metaflac on PATH (the reference encoder, decoder and block lister)"; exit 1; }
