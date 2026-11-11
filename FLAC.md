@@ -258,8 +258,17 @@ One line per rung; the full plan, bars and invariants are in
   decode figure is already a hardware measurement and the acceptance run is on
   hardware — so it waits. Q13 keeps the trigger; a **+7% derating** on mGBA
   memory-heavy figures stands in for it meanwhile.
-- **6b** — the container: the facade rewired onto `scan`, the real GAFP packer and
-  manifest, and the rate-play path through a real manifest.
+- ~~**6b-1** — the facade onto `scan`, and `rice-arm` carried into a product ROM.~~
+  **Landed 2026-11-10.** `Decoder`/`FrameBuffers`/`DecodedFrame` exist as a shell
+  over the walk; `examples/flac_integration` is the product ROM and decodes the
+  embedded clip with the ARM kernel at **396,659 c/frame = 37.82% mean / 38.03%
+  worst** of the 32,768 Hz frame, pin matched (mGBA). The `scan` seam is
+  **byte-identical** in that image, so the kernel's generic parameter costs
+  nothing. `driver` is demoted behind `instrument` + `doc(hidden)`. Owed: the
+  unit reading of both A/B builds. Record:
+  [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md).
+- **6b-2** — the real GAFP packer, `format::Manifest` at pack time, and a profile
+  that refuses at pack what the target rate cannot play (LPC at 32 kHz).
 - **Rate sweep** — the cross-rate profiling sweep on the improved decoder, which
   produces the "which rates become feasible" guidelines from measurement.
 

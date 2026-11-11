@@ -199,12 +199,15 @@ decode half (the kernel carried into a product ROM, 6b), or C2's playback half
   any claim is made by scaling an mGBA cycle count. Until then a *rule* replaces the
   probe: see "mGBA numbers are derated" in the ordering rules.
 
-- **Next, in order:** **6b-1** (facade onto `scan` **and** `rice-arm` carried into a
-  product ROM — the placement 6a-5 assigned here), **6b-2** (real GAFP packer,
-  manifest, pack-time profile that refuses LPC at the target rate), **6b-3**
-  (32,768 Hz rate-play through a real manifest), then **item 7** (playback: the
-  real-time claim). Not started: 6a-8 (untriggered, and now further parked by C1/C2)
-  and the parked Q13 probe.
+- **6b-1 landed 2026-11-10** (facade onto `scan`, `rice-arm` carried into the
+  product ROM `flac-integration`): C1's facade exists, the product path decodes at
+  **37.82% mean / 38.03% worst** of the 32,768 Hz frame under mGBA with the pin
+  matched, and the `scan` seam measured **byte-identical** in the product image.
+  Owed: the unit reading of both A/B builds. **Next, in order:** **6b-2** (real
+  GAFP packer, manifest, pack-time profile that refuses LPC at the target rate),
+  **6b-3** (32,768 Hz rate-play through a real manifest), then **item 7**
+  (playback: the real-time claim). Not started: 6a-8 (untriggered, and now further
+  parked by C1/C2) and the parked Q13 probe.
 
 ## Item 6a — the overlay (the realization)
 
@@ -1197,7 +1200,7 @@ through a real manifest.
 
 | PR | Scope | Witness | Failure it isolates |
 |---|---|---|---|
-| **6b-1** | `stream` → frame source → `decoder::Decoder` rewired onto `scan::Frames`. Inherits `Frames` / `StreamBounds` / `ConsumedFrame` / `resync` — **not** a third frame loop. Turns `scan` on in a ROM-shaped build for the first time. **And carries `rice-arm` into that ROM** — the one-line placement 6a-5 assigned to this rung, so the first ROM built after this PR decodes with the kernel instead of `TableCountKernel`. | Codegen: the +3,120 B charged and attributed symbol by symbol; E anchors re-pinned; bit-exactness through the walk; and the decode leg re-read **on hardware**, not in mGBA | that the walk's measured cost was argued-as-free and the facade pays it — and that the kernel's win lives in an instrument but never in a product |
+| **6b-1** ✅ | **Landed 2026-11-10.** `stream` → frame source → `decoder::Decoder` rewired onto `scan::Frames`. Inherits `Frames` / `StreamBounds` / `ConsumedFrame` / `resync` — **not** a third frame loop. Turns `scan` on in a ROM-shaped build for the first time. **And carries `rice-arm` into that ROM** — the one-line placement 6a-5 assigned to this rung, so the first ROM built after this PR decodes with the kernel instead of `TableCountKernel`. | Codegen: the walk's cost read from the product image's own symbols; bit-exactness through the walk against the file-level walk; **the kernel's win re-read in the product ROM** (mGBA here, a unit by the owner) | that the walk's measured cost was argued-as-free and the facade pays it — and that the kernel's win lives in an instrument but never in a product |
 | **6b-2** | `scripts/pack_flac.sh` real implementation (GAFP writer), `format::Manifest` parse, `EncodeProfile::validate` at pack time, `SEEKTABLE` interpretation + `Frames::anchored(n)`. **The profile refuses what the target rate cannot play** — at 32,768 Hz on hardware that is LPC (174.14% of the frame, decode alone) — so C2's constraint is enforced by the packer rather than discovered by the player. | Bit-exact decode through a real manifest; profile validation convicted at pack time **on a real LPC clip as well as a synthetic one**; the seek witness `frame_run_loop.rs` already holds the reverse-order half of | that the pack-time profile guard the whole design leans on is decorative — and that a 32 kHz build quietly ships LPC assets that cannot play |
 | **6b-3** | The rate-play path on a real manifest **at 32,768 Hz**; the spike's generated offset table retires. This is the first product ROM that names the overlay crate. | The `rate-*` flow as it has been run before — assets staged, ROM built, measured — now through the manifest at the target rate | that the throwaway harness was load-bearing in ways nobody wrote down |
 
@@ -1205,6 +1208,90 @@ through a real manifest.
 of any kind, and any **underrun-free playback claim** — 6b's verdict is "the
 container works and the kernel is in the ROM". The playback claim is **item 7's**,
 and C2 is not met until 7-3 passes.
+
+### 6b-1 — landed: the facade, and the kernel in a product ROM (2026-11-10)
+
+**What landed.** `format::Manifest` parses the `GAFP` contract and validates it;
+`decoder::Decoder` / `FrameBuffers` / `DecodedFrame` exist and are a **shell over
+`scan::Frames`** (no third frame loop); `Frames::next_frame_with<K>` is the seam
+that lets a product name its kernel by type; `driver` is demoted behind
+`instrument` + `#[doc(hidden)]` with its deprecation intent written down; and
+`examples/flac_integration` is now the **product ROM** — it embeds a generated
+`GAFP` blob, parses it, decodes all 157 frames with `rice-arm`, matches the perf
+gate's PCM pin, and times a second pass on the same bytes.
+
+**Three findings worth the ink.**
+
+1. **The scaffold's facade signature was unsatisfiable**, and the fix is a
+   contract improvement rather than a workaround: `decode_next` returns
+   `DecodedFrame<'b>` where `'b` is the *borrow of the buffers*, not the scratch
+   allocation's lifetime. A frame's samples are valid until the next call, which
+   is exactly the double-buffer hand-off a mixer needs — and the borrow checker
+   now enforces it instead of a doc comment.
+2. **The offset table cannot be `&[u32]`.** The blob is a `&[u8]` with alignment
+   1, so a `u32` view is an unaligned cast (UB, and this crate is
+   `deny(unsafe_code)`); `align_to` is safe but returns an *empty* middle on a
+   misaligned slice — a seek table that silently empties itself. The manifest
+   holds the raw little-endian bytes and decodes each entry on access; parsing
+   proved length and monotonicity, so every accessor stays total.
+3. **The first timed pass priced the instrument, not the decoder.** Timing the
+   proof pass reported **1.95 M c/frame** for a kernel the perf gate measures at
+   0.42 M; the window was including the per-sample FNV fold. Split into a
+   correctness pass and a timed pass — the perf gate's own two-pass shape — and
+   the numbers land where they belong. Recorded because it is the kind of 5× a
+   single-pass "convenience" hides.
+
+**The `scan` seam costs nothing in a product image (the 5(A) condition).**
+Measured as an A/B on the *same* ROM: the facade calling
+`next_frame_with::<TableCountKernel>` (the generic entry) versus the pre-seam
+shape where the facade calls the non-generic `next_frame` and the walk's
+delegation does the rest. Every loadable section is **byte-identical** — `.text`
+**49,056 B** `7c7d580ccbb4…`, `.iwram` 812 B `690ba38594d3…`, `.rodata`
+990,512 B `898fb8849509…`. Identical sections mean identical code at identical
+addresses, so the generic parameter cannot cost a cycle in a single-instantiation
+ROM: the two ends of the seam are `#[inline]` delegations (`frame::decode_frame`
+already delegated to `decode_frame_with::<TableCountKernel>` before this rung).
+
+**The product ROM's own reading** (`flac-integration.gba`, mGBA, one pass per
+kernel, same source, `--no-default-features` for the control):
+
+| build | kernel | mean c/frame | worst c/frame | mean % | worst % |
+|---|---|---:|---:|---:|---:|
+| default | `rice-arm` | **396,659** | **398,867** | **37.82%** | **38.03%** |
+| `--no-default-features` | `TableCountKernel` | 1,559,303 | 1,567,127 | 148.68% | 149.43% |
+
+Both legs match the perf gate's pin exactly
+(`0x54C7B356621B6E15`, the FNV of the committed reference PCM), so the numbers
+are from proven bytes. The kernel's advantage reproduces through the product path
+at **3.93×**. These are lower than the instrument's 39.74% for the same kernel,
+which is expected: the instrument's arm carries its own call shape and state;
+what matters here is that the *product* path is not slower. mGBA understates
+hardware by 3.7–6.9% (6a-7b), so ~39–41% is the hardware expectation until a
+unit says otherwise.
+
+**A trap the pin caught.** The repository's FNV-1a 64 uses a **non-standard
+offset basis** (`0xCBF43CE95DE684B7`, not `0xCBF29CE484222325`) in both
+`scripts/frame_vectors.py` and `examples/flac_spike/src/checksum.rs`. The first
+ROM used the standard basis and went red on a *correct* decode. The generator now
+cross-checks the borrowed pin against the committed reference PCM and fails
+closed if they disagree, and the ROM carries the constant with a comment saying
+it is the house variant.
+
+**The blob is a stand-in, and 6b-2 owes its equality.**
+`scripts/gen_gafp_blob.py` assembles the header + table from the perf gate's
+committed, fail-closed generated table; `scripts/pack_flac.sh` is still a stub.
+6b-2's real packer must emit a **byte-identical** `GAFP` for the same frames —
+that is what turns this stand-in into a differential instead of a second
+definition.
+
+**Gates.** `flac-gates` green across all six configurations plus both combination
+arms and the second bare-metal target (`gafp-check` added to the gate);
+`flac-test` 143 lib; `flac-test-scan` 151 + the facade's 6; `spike-test` 15 + 10
+with the spike now enabling `instrument`; `make check` clean;
+`make native-flac-rom` and `native-flac-rom-default-kernel` both build and fix.
+
+**Owed.** The product ROM's reading **on a unit** (both builds, one run each;
+the owner's step), and 6b-2.
 
 ## Item 7 — playback: the real-time claim (C2)
 
