@@ -780,15 +780,24 @@ impl SeekPoint {
     ///   stream anyway (its sample-numbered form is refused at the frame
     ///   layer), and the point is stated so that a future reader of a real
     ///   variable-blocksize file knows which half of the table still works;
-    /// * a point at or past the stream's own frame count names no frame, where
-    ///   the stream declares a count at all
-    ///   ([`StreamInfo::exact_frame_count`]). Measured, a real writer does not
-    ///   write such points — `metaflac --add-seekpoint=12000` on a 6000-sample
-    ///   stream drops the request instead — but a hand-edited table can hold
-    ///   one, and `flac -t` waves it through (FLAC.md's split-proposal entry
-    ///   records the measurements); refusing it here is what keeps
+    /// * a point whose sample number is not a frame boundary in a fixed-blocksize
+    ///   stream (`first_sample % max_blocksize != 0`) names no frame in this
+    ///   stream. §8.5.1 defines the first field as "sample number of the first
+    ///   sample in the target frame", so a hand-edited point inside a frame —
+    ///   including one in the short final frame — is refused rather than
+    ///   silently anchored to the frame that contains it;
+    /// * a point at or past the stream's declared total sample count names no
+    ///   frame, where the stream declares a total
+    ///   ([`StreamInfo::total_samples_declared`]). Measured, a real writer does
+    ///   not write such points — `metaflac --add-seekpoint=12000` on a
+    ///   6000-sample stream drops the request instead — but a hand-edited table
+    ///   can hold one, and `flac -t` waves it through (FLAC.md's split-proposal
+    ///   entry records the measurements); refusing it here is what keeps
     ///   [`crate::scan::Frames`]'s buffer requirement honest, because a walk
-    ///   told to start past the end has nothing to read.
+    ///   told to start past the end has nothing to read. The arithmetic index
+    ///   check alone is not enough: a point at `total_samples` in a stream with
+    ///   a short tail is not a frame start, and a full-block stream's
+    ///   `total_samples` is itself a multiple of `max_blocksize`.
     ///
     /// ## Position, not frame number
     ///
@@ -809,7 +818,25 @@ impl SeekPoint {
         if self.is_placeholder() || !info.is_fixed_blocksize() {
             return None;
         }
-        let index = self.first_sample / u64::from(info.max_blocksize);
+        let blocksize = u64::from(info.max_blocksize);
+        // A real seek point always names a frame *start*, never a sample inside
+        // a frame. This check is what makes a hand-edited point in the short
+        // final frame (`first_sample == total_samples - 1`, say) an error
+        // instead of an anchor to the frame that happens to contain it.
+        if blocksize == 0 || self.first_sample % blocksize != 0 {
+            return None;
+        }
+        // Where the stream declares its total, a point at or beyond it names no
+        // frame at all. The index check below is equivalent only when the
+        // stream has no short tail; checking the sample itself is the honest
+        // form and also covers a full-block stream whose total is a block
+        // multiple.
+        if let Some(total) = info.total_samples_declared() {
+            if self.first_sample >= total {
+                return None;
+            }
+        }
+        let index = self.first_sample / blocksize;
         if let Some(count) = info.exact_frame_count() {
             if index >= u64::try_from(count).unwrap_or(u64::MAX) {
                 return None;
@@ -975,6 +1002,37 @@ impl<'a> SeekTable<'a> {
     pub fn payload(&self) -> &'a [u8] {
         self.payload
     }
+
+    /// Check that every real point's byte offset lies inside a frame region of
+    /// `region_len` bytes. [`Self::parse`] cannot make this check because the
+    /// payload alone does not say where the frame region begins; [`seek_table`]
+    /// does, and calls this before returning the view.
+    ///
+    /// A placeholder has no target and is skipped. An offset equal to
+    /// `region_len` is past the last byte — there is no frame there — so it is
+    /// refused too. The check is deliberately only about the byte being inside
+    /// the region: whether the offset lands on a frame *header* needs the frame
+    /// layer, and a caller that intends to walk from the point gets that refusal
+    /// from [`crate::scan::Frames`] with its cursor unmoved.
+    fn validate_offsets(&self, region_len: usize) -> Result<()> {
+        for i in 0..self.points {
+            // `point` only fails for an index past the payload; `points` was
+            // computed from that same payload, so this is the same "cannot
+            // happen" branch `SeekTable::parse` already refuses.
+            let Some(point) = self.point(i) else {
+                return Err(Error::SeekTableLength);
+            };
+            if point.is_placeholder() {
+                continue;
+            }
+            let in_region =
+                usize::try_from(point.frame_offset).is_ok_and(|offset| offset < region_len);
+            if !in_region {
+                return Err(Error::SeekTableOffset { at: i });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Find and interpret the §8.5 seek table of a `.flac` stream, if it has one.
@@ -995,7 +1053,8 @@ impl<'a> SeekTable<'a> {
 /// out-of-range type 3 block is still refused, because a table cannot be used
 /// from bytes the chain cannot show. [`Error::DuplicateSeekTable`] for a second
 /// one (§8.5: "There MUST NOT be more than one seek table metadata block in a
-/// stream").
+/// stream"), and [`Error::SeekTableOffset`] for a real point whose byte offset
+/// falls outside the frame region the chain ends at.
 pub fn seek_table(stream: &[u8]) -> Result<Option<SeekTable<'_>>> {
     let mut walk = Blocks::new(stream)?;
     let mut found: Option<MetadataBlock> = None;
@@ -1014,7 +1073,13 @@ pub fn seek_table(stream: &[u8]) -> Result<Option<SeekTable<'_>>> {
                 return Ok(None);
             };
             let payload = block.payload(stream).ok_or(Error::MetadataTruncated)?;
-            return SeekTable::parse(payload).map(Some);
+            let table = SeekTable::parse(payload)?;
+            // `walk.cursor()` is the first byte after this last metadata block,
+            // i.e. the start of the frame region. Validating here is the only
+            // place the table and the container are both in hand.
+            let region_len = stream.len().saturating_sub(walk.cursor());
+            table.validate_offsets(region_len)?;
+            return Ok(Some(table));
         }
     }
 }
@@ -2138,6 +2203,23 @@ mod tests {
                 Some(11)
             );
 
+            // A real point is a frame start, not just an index inside the
+            // stream. The short tail begins at 5632 and ends at 6000; a point
+            // anywhere else in that frame (or at the declared total) must not
+            // be rounded down to frame 11 and silently anchored there.
+            for sample in [5633u64, 5999, 6000, 6001, 6143] {
+                let bad = table(&[entry(sample, 4713, 512)]);
+                assert_eq!(
+                    SeekTable::parse(&bad)
+                        .unwrap()
+                        .point(0)
+                        .unwrap()
+                        .frame_index(&info),
+                    None,
+                    "sample {sample} is inside/past the tail, not a frame start"
+                );
+            }
+
             // Not fixed-blocksize: no divisor exists, and a table's third field
             // gives each target frame's own count, not the counts of the frames
             // before it. The byte offset is still the whole answer for a
@@ -2163,6 +2245,17 @@ mod tests {
                     .frame_index(&unknown),
                 Some(12)
             );
+            // …but the frame-start rule is still checkable without a total, so
+            // a point inside a frame is refused even there.
+            let mid_frame = table(&[entry(5633, 4713, 512)]);
+            assert_eq!(
+                SeekTable::parse(&mid_frame)
+                    .unwrap()
+                    .point(0)
+                    .unwrap()
+                    .frame_index(&unknown),
+                None
+            );
         }
 
         #[test]
@@ -2179,9 +2272,13 @@ mod tests {
             let no_table = stream_with(&[("streaminfo", true, &info)]);
             assert_eq!(seek_table(&no_table).unwrap().map(|t| t.len()), None);
 
-            // Presence, through the convenience entry point.
-            let with_table =
+            // Presence, through the convenience entry point. The frame region
+            // has to be long enough that the table's last offset (4713) is
+            // inside it; `seek_table` bounds-checks every real offset now, and
+            // a metadata-only stream is the refusal tested separately below.
+            let mut with_table =
                 stream_with(&[("streaminfo", false, &info), ("seektable", true, &points)]);
+            with_table.extend_from_slice(&[0u8; 6000]);
             let via_helper = seek_table(&with_table).unwrap().expect("a table");
             assert_eq!(via_helper.len(), 8);
             assert_eq!(via_helper.payload(), points.as_slice());
@@ -2251,6 +2348,31 @@ mod tests {
                 ("seektable", true, &points[..points.len() - 1]),
             ]);
             assert_eq!(seek_table(&odd).err(), Some(Error::SeekTableLength));
+        }
+
+        #[test]
+        fn a_seek_offset_outside_the_frame_region_is_refused() {
+            let info = table3(512, 512, 8000, 1, 16, 6000);
+            let points = s6_shaped();
+
+            // A metadata-only stream has no frame region at all, so even the
+            // first real point's offset cannot name a frame start.
+            let no_frames =
+                stream_with(&[("streaminfo", false, &info), ("seektable", true, &points)]);
+            assert_eq!(
+                seek_table(&no_frames).err(),
+                Some(Error::SeekTableOffset { at: 0 })
+            );
+
+            // With a 100-byte region, point 0 (offset 0) is inside it and point
+            // 1 (offset 858) is not: the refusal names the first point that is
+            // outside, not the table as a whole.
+            let mut short = no_frames;
+            short.extend_from_slice(&[0u8; 100]);
+            assert_eq!(
+                seek_table(&short).err(),
+                Some(Error::SeekTableOffset { at: 1 })
+            );
         }
     }
 }

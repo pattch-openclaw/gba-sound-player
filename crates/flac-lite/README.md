@@ -406,6 +406,12 @@ The decoder only needs to handle what our encoder is allowed to produce:
   order; `-l 4` emits real LPC-4 subframes (measured: `lpc4` ×156/157 frames), and
   FIXED-only is `-l 0`. The `strict-profile` switch is therefore "order > 4",
   not "is LPC". See flac-docs/format-notes.md → "Correction 3".
+  ⚠️ Corrected 2026-11-11: **`-l 0` is not FIXED-0.** It disables LPC; libFLAC
+  still chooses FIXED orders 1–4 from the signal, and only FIXED-0 has a measured
+  row in `scripts/gafp_pack.py::MEASURED_DECODE`. The packer's product guard is
+  therefore FIXED-0-only in practice and refuses FIXED-1..4 (and CONSTANT/
+  VERBATIM) as unmeasured; say that, rather than calling the product profile
+  "FIXED-only".
 - partitioned Rice / Rice2 residuals; escaped partitions supported
 - stereo: independent **and** mid/side (`-m`); left-side, right-side
 - no metadata blocks other than what the manifest replaces
@@ -415,17 +421,22 @@ Reference encode command. Since 6b-2 the packer **does** run this shape: `-l`,
 `flac -t` self-check wrap the call, a profile it knows it cannot honour is refused
 before it encodes, and an off-profile *result* is refused before any `.gfp` byte
 is written. Note which arm the packer picks by default: the command below is the
-order-ceiling arm, while the packer's default is the **FIXED-only** one (`-l 0`),
-because `-l 4` at this target measures 174.14% of the frame on hardware —
-`--allow-lpc` is what writes an LPC asset at all, and it marks the result
-NON-PRODUCT:
+order-ceiling arm, while the packer's default is the **LPC-disabled** one (`-l 0`).
+That is not the same as **FIXED-0**: only FIXED-0 has a measured product row, so a
+`-l 0` encode that libFLAC decides to code as FIXED-1..4 is refused as unmeasured
+until someone measures it. `-l 4` at this target measures 174.14% of the frame on
+hardware — `--allow-lpc` is what writes an LPC asset at all, and it marks the
+result NON-PRODUCT:
 
 ```sh
 flac -1 -f -l 4 -b 2048 -m input.wav
 ```
 
-For the FIXED-only arm of the perf gate (a materially different stream — see the
-note above): `flac -1 -f -l 0 -b 2048 -m input.wav`.
+For the LPC-disabled arm of the perf gate (a materially different stream — see the
+note above): `flac -1 -f -l 0 -b 2048 -m input.wav`. Its product acceptability still
+depends on the resulting FIXED order being 0 and the residual shape staying inside
+the measured envelope (one partition, no wasted bits, no escape partitions, Rice
+parameter ≤ 10).
 For 65,536 Hz: add `--lax` (that rate is outside FLAC's streamable subset, so
 every frame then carries sample-rate code `0b0000` = "from stream", which the
 decoder resolves via `frame::StreamDefaults`).

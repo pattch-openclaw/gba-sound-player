@@ -488,6 +488,20 @@ pub enum Error {
         /// Index of the entry that broke the rule.
         at: usize,
     },
+    /// A §8.5 seek point whose byte offset does not lie inside the stream's frame
+    /// region: it is at or past the end of the bytes after the last metadata
+    /// block. The payload alone cannot expose this — a seek table's offsets are
+    /// relative to the first frame byte, and that base is a property of the
+    /// container, not the block — so [`stream::SeekTable::parse`] accepts the
+    /// table and [`stream::seek_table`] applies this check once it knows where
+    /// the frames begin. libFLAC's decoder only consults a table when asked to
+    /// seek, so the metadata tools are not the place this can be caught; this
+    /// crate uses the offset, so a point that cannot name a byte in the frame
+    /// region is refused before a caller can slice past the end.
+    SeekTableOffset {
+        /// Index of the entry whose offset is outside the region.
+        at: usize,
+    },
     /// More than one §8.5 seek table: "There MUST NOT be more than one seek
     /// table metadata block in a stream". Unlike §8.2's single-streaminfo rule,
     /// the reference chain validator does NOT enforce this one — measured, a file

@@ -16,10 +16,13 @@
 # row per frame and a `subframe` row per slot. Offsets in `region_offset` are RELATIVE TO THE START OF THE FRAME
 # REGION -- that is what `Manifest::frame_region()` hands a caller -- and
 # `blob_offset` is the absolute position, i.e. the value written to the offset
-# table. No field value in a data row contains a space or an `=`, with one
-# deliberate exception: `reason=`, which is quoted packer output and is therefore
-# always the LAST field of its row. Prose lives in comment lines, so a reader in
-# Rust can parse this without a parser.
+# table. The bit fields (`header_bits`, `entry_bit`, `exit_bit`, `padded`,
+# `end_bit`) are ABSOLUTE bit positions in the source `.flac`, which includes the
+# metadata before the frame region; they are not region-relative. No field value
+# in a data row contains a space or an `=`, with one deliberate exception:
+# `reason=`, which is quoted packer output and is therefore always the LAST field
+# of its row. Prose lives in comment lines, so a reader in Rust can parse this
+# without a parser.
 #
 # `pcm_fnv1a64` / `pcm_first` / `pcm_last` are the REFERENCE decoder's samples,
 # hashed in the order and width the existing tables use: interleaved left-then-
@@ -69,11 +72,11 @@ verdict decision=accept product=true
 # note: fixed0 x3: measured 42.48% mean / 42.72% worst of the 1048576-cycle frame (445558 cycles for 2048 samples at the 32768 Hz playback timer, for a 32000 Hz stream) — flac-docs/measurements.md, 6a-7b on hardware, `asm` arm, GBA 001 + GBA SP, two runs each, identical to the cycle: 445,558 c/frame = 217.56 c/sample, 42.48% mean / 42.72% worst of the 32,768 Hz frame. Kernel-only: the 6b-1 product ROM measures the same clip end to end at 37.83% mean / 38.04% worst through the manifest facade, and both figures are inside the bar this module states.
 blob name=p0_fixed0_mono_32k_b2048.gfp sha256=4ea25c75daabc974ec761268866bcc427d2281ce4525d831412fd9b61e92c6f7 bytes=6888 frames=3 rate=32000 blocksize=2048 channels=1 bps=16 max_fixed_order=0 total_samples=5000 frame_data=40 pcm_fnv1a64=0x43F69BE04A156814 pcm_values=5000 pcm_bytes_len=10000 pcm_first=-715 pcm_last=-286
 frame index=0 number=0 blob_offset=40 region_offset=0 bytes=2801 blocksize=2048 rate=32000 subframes=1 bps=16 decorrelation=none header_bits=48 exit_bit=88820 padded=88824 end_bit=88840 crc16=b479 pcm_fnv1a64=0x0AF814E23FD23FDF pcm_values=2048 pcm_first=-715 pcm_last=-86
-subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2048 entry_bit=66481 exit_bit=88820
+subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2048 entry_bit=66480 exit_bit=88820
 frame index=1 number=1 blob_offset=2841 region_offset=2801 bytes=2803 blocksize=2048 rate=32000 subframes=1 bps=16 decorrelation=none header_bits=48 exit_bit=111246 padded=111248 end_bit=111264 crc16=5fcc pcm_fnv1a64=0x48F59E15B72AF8CB pcm_values=2048 pcm_first=-569 pcm_last=51
-subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2048 entry_bit=88889 exit_bit=111246
+subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2048 entry_bit=88888 exit_bit=111246
 frame index=2 number=2 blob_offset=5644 region_offset=5604 bytes=1244 blocksize=904 rate=32000 subframes=1 bps=16 decorrelation=none header_bits=64 exit_bit=121200 padded=121200 end_bit=121216 crc16=35d5 pcm_fnv1a64=0x65A52F4704A4ED60 pcm_values=904 pcm_first=-432 pcm_last=-286
-subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=904 entry_bit=111329 exit_bit=121200
+subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=904 entry_bit=111328 exit_bit=121200
 
 # source: stereo_5000.wav
 # flags: --channels 2 -L 0 --no-midside
@@ -87,14 +90,14 @@ verdict decision=accept product=true
 # note: fixed0 x6: measured 42.48% mean / 42.72% worst of the 1048576-cycle frame (445558 cycles for 2048 samples at the 32768 Hz playback timer, for a 32000 Hz stream) — flac-docs/measurements.md, 6a-7b on hardware, `asm` arm, GBA 001 + GBA SP, two runs each, identical to the cycle: 445,558 c/frame = 217.56 c/sample, 42.48% mean / 42.72% worst of the 32,768 Hz frame. Kernel-only: the 6b-1 product ROM measures the same clip end to end at 37.83% mean / 38.04% worst through the manifest facade, and both figures are inside the bar this module states.
 blob name=p2_fixed0_stereo_32k_b2048.gfp sha256=48a739122441fed8f8dbfa41684c6e7431a89a47f28d0070d41e4b5a803aad8b bytes=13892 frames=3 rate=32000 blocksize=2048 channels=2 bps=16 max_fixed_order=0 total_samples=5000 frame_data=40 pcm_fnv1a64=0x5F33347D7EA22C9B pcm_values=10000 pcm_bytes_len=20000 pcm_first=-1115:291 pcm_last=-423:129
 frame index=0 number=0 blob_offset=40 region_offset=0 bytes=5669 blocksize=2048 rate=32000 subframes=2 bps=16 decorrelation=none header_bits=48 exit_bit=111765 padded=111768 end_bit=111784 crc16=708a pcm_fnv1a64=0x800383661F314B81 pcm_values=4096 pcm_first=-1115:291 pcm_last=137:-148
-subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2048 entry_bit=66481 exit_bit=89122
-subframe slot=1 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2048 entry_bit=89123 exit_bit=111765
+subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2048 entry_bit=66480 exit_bit=89122
+subframe slot=1 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2048 entry_bit=89122 exit_bit=111765
 frame index=1 number=1 blob_offset=5709 region_offset=5669 bytes=5669 blocksize=2048 rate=32000 subframes=2 bps=16 decorrelation=none header_bits=48 exit_bit=157120 padded=157120 end_bit=157136 crc16=e3c9 pcm_fnv1a64=0x7C027454C4F43341 pcm_values=4096 pcm_first=-548:473 pcm_last=-106:23
-subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2048 entry_bit=111833 exit_bit=134480
-subframe slot=1 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2048 entry_bit=134481 exit_bit=157120
+subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2048 entry_bit=111832 exit_bit=134480
+subframe slot=1 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2048 entry_bit=134480 exit_bit=157120
 frame index=2 number=2 blob_offset=11378 region_offset=11338 bytes=2514 blocksize=904 rate=32000 subframes=2 bps=16 decorrelation=none header_bits=64 exit_bit=177230 padded=177232 end_bit=177248 crc16=39ab pcm_fnv1a64=0x62B2EEB1A7A2E42F pcm_values=1808 pcm_first=-791:644 pcm_last=-423:129
-subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=904 entry_bit=157201 exit_bit=167221
-subframe slot=1 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=904 entry_bit=167222 exit_bit=177230
+subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=904 entry_bit=157200 exit_bit=167221
+subframe slot=1 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=904 entry_bit=167221 exit_bit=177230
 
 # source: stereo_5000.wav
 # flags: --channels 2 -L 0
@@ -108,14 +111,14 @@ verdict decision=accept product=true
 # note: fixed0 x6: measured 42.48% mean / 42.72% worst of the 1048576-cycle frame (445558 cycles for 2048 samples at the 32768 Hz playback timer, for a 32000 Hz stream) — flac-docs/measurements.md, 6a-7b on hardware, `asm` arm, GBA 001 + GBA SP, two runs each, identical to the cycle: 445,558 c/frame = 217.56 c/sample, 42.48% mean / 42.72% worst of the 32,768 Hz frame. Kernel-only: the 6b-1 product ROM measures the same clip end to end at 37.83% mean / 38.04% worst through the manifest facade, and both figures are inside the bar this module states.
 blob name=p3_fixed0_midside_32k_b2048.gfp sha256=8af43e534033aba2b27944cb730f6095ae1763e6459fb1eb54d73f91df1852a0 bytes=13570 frames=3 rate=32000 blocksize=2048 channels=2 bps=16 max_fixed_order=0 total_samples=5000 frame_data=40 pcm_fnv1a64=0x5F33347D7EA22C9B pcm_values=10000 pcm_bytes_len=20000 pcm_first=-1115:291 pcm_last=-423:129
 frame index=0 number=0 blob_offset=40 region_offset=0 bytes=5538 blocksize=2048 rate=32000 subframes=2 bps=16 decorrelation=mid-side header_bits=48 exit_bit=110719 padded=110720 end_bit=110736 crc16=084b pcm_fnv1a64=0x800383661F314B81 pcm_values=4096 pcm_first=-1115:291 pcm_last=137:-148
-subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=8 escaped=0 raw_bits=0 codewords=2048 entry_bit=66481 exit_bit=86188
-subframe slot=1 kind=fixed order=0 wasted=0 sample_bits=17 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=10 escaped=0 raw_bits=0 codewords=2048 entry_bit=86189 exit_bit=110719
+subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=8 escaped=0 raw_bits=0 codewords=2048 entry_bit=66480 exit_bit=86188
+subframe slot=1 kind=fixed order=0 wasted=0 sample_bits=17 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=10 escaped=0 raw_bits=0 codewords=2048 entry_bit=86188 exit_bit=110719
 frame index=1 number=1 blob_offset=5578 region_offset=5538 bytes=5536 blocksize=2048 rate=32000 subframes=2 bps=16 decorrelation=mid-side header_bits=48 exit_bit=155008 padded=155008 end_bit=155024 crc16=0ced pcm_fnv1a64=0x7C027454C4F43341 pcm_values=4096 pcm_first=-548:473 pcm_last=-106:23
-subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=8 escaped=0 raw_bits=0 codewords=2048 entry_bit=110785 exit_bit=130488
-subframe slot=1 kind=fixed order=0 wasted=0 sample_bits=17 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=10 escaped=0 raw_bits=0 codewords=2048 entry_bit=130489 exit_bit=155008
+subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=8 escaped=0 raw_bits=0 codewords=2048 entry_bit=110784 exit_bit=130488
+subframe slot=1 kind=fixed order=0 wasted=0 sample_bits=17 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=10 escaped=0 raw_bits=0 codewords=2048 entry_bit=130488 exit_bit=155008
 frame index=2 number=2 blob_offset=11114 region_offset=11074 bytes=2456 blocksize=904 rate=32000 subframes=2 bps=16 decorrelation=mid-side header_bits=64 exit_bit=174649 padded=174656 end_bit=174672 crc16=0be9 pcm_fnv1a64=0x62B2EEB1A7A2E42F pcm_values=1808 pcm_first=-791:644 pcm_last=-423:129
-subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=8 escaped=0 raw_bits=0 codewords=904 entry_bit=155089 exit_bit=163796
-subframe slot=1 kind=fixed order=0 wasted=0 sample_bits=17 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=10 escaped=0 raw_bits=0 codewords=904 entry_bit=163797 exit_bit=174649
+subframe slot=0 kind=fixed order=0 wasted=0 sample_bits=16 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=8 escaped=0 raw_bits=0 codewords=904 entry_bit=155088 exit_bit=163796
+subframe slot=1 kind=fixed order=0 wasted=0 sample_bits=17 lpc_precision=none lpc_shift=none partitions=1 max_rice_param=10 escaped=0 raw_bits=0 codewords=904 entry_bit=163796 exit_bit=174649
 
 # source: stereo_5000.wav
 # flags: --channels 2 -L 4 --allow-lpc --allow-over-budget
@@ -129,11 +132,11 @@ verdict decision=accept product=false
 # note: cost bar WAIVED by --allow-over-budget for lpc4 x6: measured 173.23% mean / 174.14% worst of the 1048576-cycle frame (1816753 cycles for 2048 samples at the 32768 Hz playback timer, for a 32000 Hz stream) — flac-docs/measurements.md, 6a-7b on hardware, `asm` arm, same instrument and same frames as the row above, `-l 4` arm: 1,816,753 c/frame = 173.23% mean / 174.14% worst. That arm's census is lpc4 x312 + lpc3 x2, so this is a CLIP mean and a LOWER bound on what the LPC kind alone costs per frame. Over budget by itself, before the producer's other stages exist. This blob is not a C2 candidate, and the facts table records the waiver.
 blob name=x1_lpc_stereo_32k_b2048.gfp sha256=77eb444e18ad343d2c3ef99db4aeb1e6ea2d9e9eb9527065943fbb97cf909115 bytes=13114 frames=3 rate=32000 blocksize=2048 channels=2 bps=16 max_fixed_order=0 total_samples=5000 frame_data=40 pcm_fnv1a64=0x5F33347D7EA22C9B pcm_values=10000 pcm_bytes_len=20000 pcm_first=-1115:291 pcm_last=-423:129
 frame index=0 number=0 blob_offset=40 region_offset=0 bytes=5345 blocksize=2048 rate=32000 subframes=2 bps=16 decorrelation=mid-side header_bits=48 exit_bit=109175 padded=109176 end_bit=109192 crc16=87a8 pcm_fnv1a64=0x800383661F314B81 pcm_values=4096 pcm_first=-1115:291 pcm_last=137:-148
-subframe slot=0 kind=lpc order=4 wasted=0 sample_bits=16 lpc_precision=11 lpc_shift=11 partitions=1 max_rice_param=7 escaped=0 raw_bits=0 codewords=2044 entry_bit=66545 exit_bit=85777
-subframe slot=1 kind=lpc order=4 wasted=0 sample_bits=17 lpc_precision=11 lpc_shift=11 partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2044 entry_bit=85846 exit_bit=109175
+subframe slot=0 kind=lpc order=4 wasted=0 sample_bits=16 lpc_precision=11 lpc_shift=11 partitions=1 max_rice_param=7 escaped=0 raw_bits=0 codewords=2044 entry_bit=66480 exit_bit=85777
+subframe slot=1 kind=lpc order=4 wasted=0 sample_bits=17 lpc_precision=11 lpc_shift=11 partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2044 entry_bit=85777 exit_bit=109175
 frame index=1 number=1 blob_offset=5385 region_offset=5345 bytes=5346 blocksize=2048 rate=32000 subframes=2 bps=16 decorrelation=mid-side header_bits=48 exit_bit=151941 padded=151944 end_bit=151960 crc16=5165 pcm_fnv1a64=0x7C027454C4F43341 pcm_values=4096 pcm_first=-548:473 pcm_last=-106:23
-subframe slot=0 kind=lpc order=4 wasted=0 sample_bits=16 lpc_precision=11 lpc_shift=11 partitions=1 max_rice_param=7 escaped=0 raw_bits=0 codewords=2044 entry_bit=109305 exit_bit=128556
-subframe slot=1 kind=lpc order=4 wasted=0 sample_bits=17 lpc_precision=11 lpc_shift=11 partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2044 entry_bit=128625 exit_bit=151941
+subframe slot=0 kind=lpc order=4 wasted=0 sample_bits=16 lpc_precision=11 lpc_shift=11 partitions=1 max_rice_param=7 escaped=0 raw_bits=0 codewords=2044 entry_bit=109240 exit_bit=128556
+subframe slot=1 kind=lpc order=4 wasted=0 sample_bits=17 lpc_precision=11 lpc_shift=11 partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=2044 entry_bit=128556 exit_bit=151941
 frame index=2 number=2 blob_offset=10731 region_offset=10691 bytes=2383 blocksize=904 rate=32000 subframes=2 bps=16 decorrelation=mid-side header_bits=64 exit_bit=171006 padded=171008 end_bit=171024 crc16=ecf8 pcm_fnv1a64=0x62B2EEB1A7A2E42F pcm_values=1808 pcm_first=-791:644 pcm_last=-423:129
-subframe slot=0 kind=lpc order=4 wasted=0 sample_bits=16 lpc_precision=11 lpc_shift=11 partitions=1 max_rice_param=7 escaped=0 raw_bits=0 codewords=900 entry_bit=152089 exit_bit=160597
-subframe slot=1 kind=lpc order=4 wasted=0 sample_bits=17 lpc_precision=11 lpc_shift=11 partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=900 entry_bit=160666 exit_bit=171006
+subframe slot=0 kind=lpc order=4 wasted=0 sample_bits=16 lpc_precision=11 lpc_shift=11 partitions=1 max_rice_param=7 escaped=0 raw_bits=0 codewords=900 entry_bit=152024 exit_bit=160597
+subframe slot=1 kind=lpc order=4 wasted=0 sample_bits=17 lpc_precision=11 lpc_shift=11 partitions=1 max_rice_param=9 escaped=0 raw_bits=0 codewords=900 entry_bit=160597 exit_bit=171006

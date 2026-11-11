@@ -1469,6 +1469,17 @@ the denominator every figure in `flac-docs/measurements.md` uses; using the
 stream's own 32,000 Hz period would have overstated the headroom by 2.4% and made
 the packer's percentages not comparable to the product ROM's 37.83%/38.04%.
 
+**Correction, 2026-11-11: the product guard is FIXED-0, not merely FIXED-only.**
+`-l 0` disables LPC; libFLAC still chooses FIXED orders 1–4 from the signal, and
+only FIXED-0 has a measured row. So the product profile refuses FIXED-1..4 (and
+CONSTANT/VERBATIM) as unmeasured before writing anything; the default guard also
+keys the measured row to the residual envelope it was taken on (one partition, no
+wasted bits, no escape partition, Rice parameter ≤ 10), because the kind/order
+alone does not describe the per-codeword cost. `check_guard_shapes` asserts that
+policy at every pack, and the four committed assets are inside that envelope. The
+remaining axes — FIXED-1..4 and the wider residual shapes — are open measurements,
+not features the guard silently accepts.
+
 **What the three refusal legs refuse, named honestly.** `lpc_at_product_profile`
 packs the `-l 4` arm of the 157-frame reference clip — 1.4M samples of real
 libFLAC LPC decisions, not a hand-built bit pattern, though the underlying PCM is

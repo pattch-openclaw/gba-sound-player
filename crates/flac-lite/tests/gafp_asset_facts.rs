@@ -98,6 +98,8 @@ fn blob_bytes(name: &str) -> &'static [u8] {
 struct SlotRow {
     kind: String,
     order: u64,
+    entry_bit: u64,
+    exit_bit: u64,
 }
 
 /// One `frame` row: the packer's walk of one frame, plus the reference decoder's
@@ -113,6 +115,10 @@ struct FrameRow {
     rate: u64,
     subframes: u64,
     bps: u64,
+    header_bits: u64,
+    exit_bit: u64,
+    padded: u64,
+    end_bit: u64,
     crc16: u64,
     pcm_fnv: u64,
     pcm_values: u64,
@@ -285,6 +291,10 @@ fn load() -> (Vec<Blob>, Vec<Refusal>) {
                 rate: num(row, "rate"),
                 subframes: num(row, "subframes"),
                 bps: num(row, "bps"),
+                header_bits: num(row, "header_bits"),
+                exit_bit: num(row, "exit_bit"),
+                padded: num(row, "padded"),
+                end_bit: num(row, "end_bit"),
                 crc16: hex(row, "crc16"),
                 pcm_fnv: hex(row, "pcm_fnv1a64"),
                 pcm_values: num(row, "pcm_values"),
@@ -295,6 +305,8 @@ fn load() -> (Vec<Blob>, Vec<Refusal>) {
             target.slots.push(SlotRow {
                 kind: field(row, "kind").to_string(),
                 order: num(row, "order"),
+                entry_bit: num(row, "entry_bit"),
+                exit_bit: num(row, "exit_bit"),
             });
         } else {
             panic!("unrecognised table row: {line}");
@@ -516,6 +528,69 @@ fn the_table_and_its_blobs_are_all_here() {
             "{}: the subframe walk does not cover every slot of every frame",
             b.name
         );
+    }
+}
+
+#[test]
+fn the_bit_positions_start_and_end_where_the_headers_and_footer_say() {
+    let (blobs, _) = load();
+    for b in &blobs {
+        let mut slot = 0usize;
+        for f in &b.frames {
+            // `entry_bit`/`exit_bit`/`padded`/`end_bit` are absolute source-file
+            // bit positions (metadata included), so the frame's start bit is
+            // recovered by subtracting its byte length. This is the assertion
+            // that would have caught the first version's `b.pos - 7`, which was
+            // recorded after the warm-up skip and was not the subframe start.
+            let frame_start_bit = f.end_bit - f.bytes * 8;
+            let first = &b.slots[slot];
+            assert_eq!(
+                first.entry_bit,
+                frame_start_bit + f.header_bits,
+                "{}: frame {} slot 0 starts at bit {}, not frame_start+header",
+                b.name,
+                f.index,
+                first.entry_bit
+            );
+            let mut previous_exit = first.exit_bit;
+            for j in 0..f.subframes as usize {
+                let s = &b.slots[slot + j];
+                if j > 0 {
+                    assert_eq!(
+                        s.entry_bit, previous_exit,
+                        "{}: frame {} slot {j} does not begin where the previous slot ended",
+                        b.name, f.index
+                    );
+                }
+                assert!(
+                    s.exit_bit >= s.entry_bit,
+                    "{}: frame {} slot {j} has a negative extent",
+                    b.name,
+                    f.index
+                );
+                previous_exit = s.exit_bit;
+            }
+            assert_eq!(
+                previous_exit, f.exit_bit,
+                "{}: frame {} exit_bit is not its last slot's exit",
+                b.name, f.index
+            );
+            let want_padded = f.exit_bit + (8 - f.exit_bit % 8) % 8;
+            assert_eq!(
+                f.padded, want_padded,
+                "{}: frame {} is not byte-padded from its last subframe bit",
+                b.name, f.index
+            );
+            assert_eq!(
+                f.end_bit - f.padded,
+                16,
+                "{}: frame {} is not padded-to-byte + 16-bit footer",
+                b.name,
+                f.index
+            );
+            slot += f.subframes as usize;
+        }
+        assert_eq!(slot, b.slots.len(), "{}: slot cursor", b.name);
     }
 }
 

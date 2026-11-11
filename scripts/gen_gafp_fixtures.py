@@ -244,10 +244,13 @@ TABLE_HEADER = """# flac-lite GAFP asset facts -- GENERATED
 # row per frame and a `subframe` row per slot. Offsets in `region_offset` are RELATIVE TO THE START OF THE FRAME
 # REGION -- that is what `Manifest::frame_region()` hands a caller -- and
 # `blob_offset` is the absolute position, i.e. the value written to the offset
-# table. No field value in a data row contains a space or an `=`, with one
-# deliberate exception: `reason=`, which is quoted packer output and is therefore
-# always the LAST field of its row. Prose lives in comment lines, so a reader in
-# Rust can parse this without a parser.
+# table. The bit fields (`header_bits`, `entry_bit`, `exit_bit`, `padded`,
+# `end_bit`) are ABSOLUTE bit positions in the source `.flac`, which includes the
+# metadata before the frame region; they are not region-relative. No field value
+# in a data row contains a space or an `=`, with one deliberate exception:
+# `reason=`, which is quoted packer output and is therefore always the LAST field
+# of its row. Prose lives in comment lines, so a reader in Rust can parse this
+# without a parser.
 #
 # `pcm_fnv1a64` / `pcm_first` / `pcm_last` are the REFERENCE decoder's samples,
 # hashed in the order and width the existing tables use: interleaved left-then-

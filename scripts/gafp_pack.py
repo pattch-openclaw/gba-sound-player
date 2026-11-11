@@ -53,11 +53,13 @@ Usage:
 Options:
   -r, --rate HZ            target sample rate            (default 32000)
   -b, --blocksize N        samples per subframe, fixed   (default 2048)
-  -L, --max-lpc-order N    libFLAC `-l` value            (default 0 = FIXED-only)
+  -L, --max-lpc-order N    libFLAC `-l` value            (default 0 = LPC disabled;
+                           the measured product rows cover FIXED-0 only)
       --allow-lpc          let real LPC subframes above `-L` through the profile
                            guard (a NON-PRODUCT blob)
-      --allow-unmeasured   let predictor kinds with no measured figure at the
-                           target rate through the guard (a NON-PRODUCT blob)
+      --allow-unmeasured   let predictor kinds or residual shapes with no
+                           measured figure at the target rate through the guard
+                           (a NON-PRODUCT blob)
       --allow-over-budget  let a predictor kind that IS measured and IS over the
                            measured-cost bar through the guard (a NON-PRODUCT
                            blob)
@@ -80,17 +82,23 @@ different questions, and a build that means one must not quietly get another:
     Asking for `-l 4` at a rate where the measured row is over budget is refused
     by `preflight` before a single byte is encoded — the request itself is the
     thing that cannot be satisfied on this target.
-  * `--allow-unmeasured` is for a predictor kind this table has no row for at all.
-    Unmeasured is not the same as safe; the plan says so, so the default is to
-    refuse and name the nearest measured row instead of inventing a figure.
+  * `--allow-unmeasured` is for a predictor kind this table has no row for, or a
+    residual shape outside the envelope its row was measured on. Unmeasured is not
+    the same as safe; the plan says so, so the default is to refuse and name the
+    nearest measured row instead of inventing a figure.
   * `--allow-over-budget` is for a kind that HAS been measured on hardware at this
     target and is over the decode-half bar — `-l 4` at 32 kHz/2048 is 174.14% of
-    the frame for the decode half alone, which is why C2 says FIXED-only.
+    the frame for the decode half alone, which is why C2 says FIXED-only. Note
+    the measured product row is FIXED-0: `-l 0` disables LPC, but libFLAC still
+    chooses FIXED orders 1-4 from the signal, and those orders have no measured
+    row here. A real track that lands on FIXED-1..4 is therefore refused, not
+    silently played; the product profile is FIXED-0-only in practice.
 
 Whether a blob is a product asset is derived (`Profile.is_product`), not requested:
 the C2 profile is the default rate, the default block size and `-l 0`, with no
 relaxation. Mono, independent-stereo and mid/side assets built at that profile are
-all product assets; a `-L 4` asset is not, with or without a relaxation flag. Each
+all product assets *if their frames are FIXED-0 and inside the measured residual
+envelope*; a `-L 4` asset is not, with or without a relaxation flag. Each
 relaxation that was used is recorded in the facts table (`blob relaxations=...`),
 so a NON-PRODUCT blob says so in the file that describes it.
 
@@ -171,6 +179,13 @@ BPS_ALLOWED = (16,)
 # too, because "not yet measured" is not "fits". `--allow-unmeasured` says
 # otherwise out loud, and the output is then reported as a NON-PRODUCT blob.
 #
+# The rows are FIXED-0 and LPC-4 only. `-l 0` disables LPC, not libFLAC's FIXED
+# order choice: FIXED-1..4 have no row and are refused. Each row also states the
+# residual envelope it was measured on (partition count, wasted bits, escape
+# partitions, Rice parameter), and the guard refuses a stream outside it — the
+# per-codeword loop is most of the cost, so the kind/order alone cannot inherit
+# the figure.
+#
 # Sources: flac-docs/measurements.md, "6a-7b on hardware: the stack and the
 # shortfall" (GBA 001 + GBA SP, two runs each, all four identical to the cycle;
 # the `asm` arm of that table is the `rice-arm` kernel the product path uses, and
@@ -189,6 +204,16 @@ MEASURED_DECODE = {
         worst_pct=42.72,
         cycles_mean=445558,
         budget_cycles=1048576,
+        # The residual envelope this row was measured on: one partition, no
+        # wasted bits, no escape partition, and Rice parameters no larger than
+        # 10. The predictor kind/order alone is not enough to inherit a decode
+        # measurement — the residual walk is where most of the time goes — so a
+        # stream outside this envelope is treated as unmeasured rather than
+        # allowed to borrow this row. These are the largest values in the
+        # measured clip, not a second measurement; anything wider is refused
+        # until it is measured.
+        residual=dict(partitions_max=1, wasted_max=0, escaped_max=0,
+                      rice_param_max=10),
         src=("flac-docs/measurements.md, 6a-7b on hardware, `asm` arm, GBA 001 "
              "+ GBA SP, two runs each, identical to the cycle: 445,558 c/frame "
              "= 217.56 c/sample, 42.48% mean / 42.72% worst of the 32,768 Hz "
@@ -201,6 +226,8 @@ MEASURED_DECODE = {
         worst_pct=174.14,
         cycles_mean=1816753,
         budget_cycles=1048576,
+        residual=dict(partitions_max=1, wasted_max=0, escaped_max=0,
+                      rice_param_max=10),
         src=("flac-docs/measurements.md, 6a-7b on hardware, `asm` arm, same "
              "instrument and same frames as the row above, `-l 4` arm: "
              "1,816,753 c/frame = 173.23% mean / 174.14% worst. That arm's "
@@ -270,6 +297,43 @@ def check_rows():
     return bad
 
 
+def check_guard_shapes():
+    """Prove the guard's FIXED-0 and residual-envelope decisions without an
+    encoder. This is a self-check, not a substitute for a hardware row: it asserts
+    the *policy* that has no measured figure yet — FIXED-1..4 and shapes outside
+    the measured envelope must be refused, while the measured FIXED-0 shape must
+    be accepted — so a later edit cannot silently widen the guard."""
+    info = {"sample_rate": 32000, "bits-per-sample": 16, "channels": 2,
+            "maximum blocksize": 2048, "total samples": 2048}
+    profile = Profile()
+
+    def slot(kind, order, partitions=1, wasted=0, escaped=0, rice=10):
+        return dict(kind=kind, order=order, partitions=partitions,
+                    wasted=wasted, escaped=escaped, max_rice_param=rice)
+
+    def verdict(s):
+        frame = dict(number=0, blocksize=2048, rate=32000, channels=2,
+                     crc_ok=True, subframes=[s])
+        return profile_verdict(info, [frame], profile)
+
+    ok, reasons, _ = verdict(slot("fixed", 0))
+    assert ok, "the measured FIXED-0 shape must stay accepted: %s" % reasons
+    for name, s, needle in [
+        ("FIXED-1", slot("fixed", 1), "no measured decode figure"),
+        ("partition order > 0", slot("fixed", 0, partitions=2),
+         "residual shape outside the measured row"),
+        ("wasted bits", slot("fixed", 0, wasted=1),
+         "residual shape outside the measured row"),
+        ("escape partition", slot("fixed", 0, escaped=1),
+         "residual shape outside the measured row"),
+        ("Rice p > 10", slot("fixed", 0, rice=11),
+         "residual shape outside the measured row"),
+    ]:
+        ok, reasons, _ = verdict(s)
+        assert not ok and any(needle in r for r in reasons), \
+            "%s should be refused with %r, got %s" % (name, needle, reasons)
+
+
 # Sample rates the container may carry, and the reason 44,100 is not among the
 # ones the packer will build a product blob at: `crates/flac-lite` implements the
 # eight standard 4-bit rate codes, and the 32 kHz target is the only one with a
@@ -301,7 +365,12 @@ class Profile(object):
         built at `-L 4` is not a product asset whether or not anyone passed a
         relaxation flag, and a mono or independent-stereo asset built at the
         defaults IS — mid/side versus independent L/R is not a product axis, and
-        neither is channel count, which is why neither appears here."""
+        neither is channel count, which is why neither appears here.
+
+        This says what was *requested*, not what libFLAC emitted: `-l 0` is not
+        FIXED-0, so `profile_verdict` still has to see the frames. A stream that
+        lands on FIXED-1..4 or outside the measured residual envelope is refused
+        by the default guard and never reaches a product blob."""
         return (self.rate == DEFAULT_RATE
                 and self.blocksize == DEFAULT_BLOCKSIZE
                 and self.max_lpc_order == DEFAULT_MAX_LPC_ORDER
@@ -484,6 +553,7 @@ def walk_subframe(b, blocksize, sample_bits):
     sample" and anything else meaning `count` Rice codewords of unary-quotient +
     `param` remainder bits.
     """
+    entry_bit = b.pos
     if b.read(1) != 0:
         raise SystemExit("gafp_pack: subframe pad bit set")
     code = b.read(6)
@@ -510,7 +580,7 @@ def walk_subframe(b, blocksize, sample_bits):
     facts = dict(kind=kind, order=order, wasted=wasted, sample_bits=width,
                  lpc_precision=None, lpc_shift=None, partitions=0,
                  max_rice_param=0, escaped=0, raw_bits=0, codewords=0,
-                 entry_bit=b.pos - 7, exit_bit=b.pos)
+                 entry_bit=entry_bit, exit_bit=b.pos)
     if kind == "constant":
         b.skip(width)
     elif kind == "verbatim":
@@ -582,6 +652,30 @@ def frame_census(facts):
     return tally
 
 
+def residual_census(facts):
+    """Worst residual shape seen for each (kind, order) in the asset.
+
+    `MEASURED_DECODE` records a decode cost for a predictor kind/order *at a
+    residual shape*: partitions, wasted bits, escape partitions and Rice
+    parameters all move the per-codeword loop. The guard therefore compares the
+    asset's worst slot against the row's `residual` envelope instead of letting
+    the kind/order alone inherit the measurement.
+    """
+    out = {}
+    for frame in facts:
+        for s in frame["subframes"]:
+            key = (s["kind"], s["order"] if s["kind"] in ("fixed", "lpc") else 0)
+            row = out.setdefault(key, dict(count=0, partitions=0, wasted=0,
+                                           escaped=0, max_rice_param=0))
+            row["count"] += 1
+            row["partitions"] = max(row["partitions"], s["partitions"])
+            row["wasted"] = max(row["wasted"], s["wasted"])
+            row["escaped"] = max(row["escaped"], s["escaped"])
+            row["max_rice_param"] = max(row["max_rice_param"],
+                                        s["max_rice_param"])
+    return out
+
+
 def nearest_measured(rate, blocksize, kind, order):
     """The closest measured row, so a refusal names the figure a reader would
     compare with: same rate and block size first, then the same predictor kind,
@@ -602,6 +696,7 @@ def profile_verdict(info, facts, profile):
     reasons = []
     report = []
     census = frame_census(facts)
+    residual = residual_census(facts)
     frames = facts
 
     def bad(msg):
@@ -667,6 +762,11 @@ def profile_verdict(info, facts, profile):
                              % (near_key[0], near_key[1], near_key[2],
                                 near_key[3], nrow["mean_pct"],
                                 nrow["worst_pct"]))
+                if kind == "fixed" and order > 0:
+                    hint += (". FIXED orders 1-4 are not measured at this target: "
+                             "`-l 0` disables LPC but does not force libFLAC's "
+                             "FIXED order choice, so the product profile is "
+                             "FIXED-0-only, not merely FIXED-only")
                 bad("%s x%d: %s; measure it or pass --allow-unmeasured"
                     % (label, count, hint))
             else:
@@ -675,6 +775,41 @@ def profile_verdict(info, facts, profile):
                               "NOT a product blob" % (label, count, profile.rate,
                                                       profile.blocksize))
             continue
+        # A measured row is valid only for the residual shape it was measured
+        # on. `row["residual"]` is the envelope from the clip in the row's
+        # source; anything wider is unmeasured and must be refused (or waived
+        # by `--allow-unmeasured`, which marks the blob NON-PRODUCT).
+        shape = residual.get((kind, order))
+        limit = row.get("residual")
+        if shape is not None and limit is not None:
+            over = []
+            if shape["partitions"] > limit["partitions_max"]:
+                over.append("partitions %d > %d"
+                            % (shape["partitions"], limit["partitions_max"]))
+            if shape["wasted"] > limit["wasted_max"]:
+                over.append("wasted=%d > %d"
+                            % (shape["wasted"], limit["wasted_max"]))
+            if shape["escaped"] > limit["escaped_max"]:
+                over.append("escaped partitions %d > %d"
+                            % (shape["escaped"], limit["escaped_max"]))
+            if shape["max_rice_param"] > limit["rice_param_max"]:
+                over.append("max Rice parameter %d > %d"
+                            % (shape["max_rice_param"],
+                               limit["rice_param_max"]))
+            if over:
+                msg = ("%s x%d: residual shape outside the measured row: %s. "
+                       "The measured row covers partitions <= %d, wasted <= %d, "
+                       "escape partitions <= %d and Rice parameter <= %d; "
+                       "measure this shape or pass --allow-unmeasured"
+                       % (label, count, ", ".join(over),
+                          limit["partitions_max"], limit["wasted_max"],
+                          limit["escaped_max"], limit["rice_param_max"]))
+                if profile.allow_unmeasured:
+                    report.append("%s — accepted only because "
+                                  "--allow-unmeasured was passed; this is NOT "
+                                  "a product blob" % msg)
+                else:
+                    bad(msg)
         verdict = ("measured %.2f%% mean / %.2f%% worst of the %d-cycle frame "
                    "(%d cycles for %d samples at the %d Hz playback timer, for a "
                    "%d Hz stream) — %s"
@@ -722,10 +857,11 @@ def preflight(profile):
             "encode may emit real LPC subframes, and LPC at %d Hz with %d-sample "
             "frames measures %.2f%% mean / %.2f%% worst of the frame on hardware "
             "— decode alone, before the producer's other stages. FIXED-only is "
-            "`-l 0`; pass --allow-lpc to build a NON-PRODUCT blob anyway, and "
-            "note that a kind measured over the decode-half bar needs "
-            "--allow-over-budget as well: the profile limit and the measured cost "
-            "are different questions."
+            "`-l 0`, but the measured product row is FIXED-0: `-l 0` disables "
+            "LPC, not libFLAC's FIXED order choice. Pass --allow-lpc to build a "
+            "NON-PRODUCT blob anyway, and note that a kind measured over the "
+            "decode-half bar needs --allow-over-budget as well: the profile limit "
+            "and the measured cost are different questions."
             % (profile.max_lpc_order, profile.rate, profile.blocksize,
                row["mean_pct"], row["worst_pct"]))
 
@@ -1056,6 +1192,10 @@ def main(argv):
     src, out = positional
     for b in check_rows():
         raise SystemExit("gafp_pack: MEASURED_DECODE does not check out: %s" % b)
+    try:
+        check_guard_shapes()
+    except AssertionError as e:
+        raise SystemExit("gafp_pack: guard self-check failed: %s" % e)
     if not os.path.exists(src):
         raise SystemExit("gafp_pack: no such input: %s" % src)
     ext = os.path.splitext(src)[1].lower()

@@ -157,6 +157,15 @@ is a refusal naming an unmeasured kind, not a guessed figure), and 44.1 kHz is
 refused at a 32,000 Hz target by both the stream-level and the frame-level
 reading. Neither is an asset this crate is expected to play.
 
+**The product guard is FIXED-0 and envelope-limited, not merely FIXED-only**
+(measured 2026-11-11). `-l 0` disables LPC; libFLAC still chooses FIXED orders
+1–4 from the signal, and those orders (like CONSTANT/VERBATIM, a partition order
+above 0, wasted bits, an escape partition, or Rice p > 10) have no measured row
+at the product target. The packer refuses them as unmeasured and writes nothing;
+`--allow-unmeasured` writes a NON-PRODUCT blob and records the waiver. The four
+committed assets sit inside the measured shape: one partition, `wasted=0`, no
+escapes, Rice p ≤ 10 and FIXED-0 (the LPC one uses the over-budget waiver).
+
 Hand-built bit patterns for `bits::BitReader` stay as `#[cfg(test)]` unit tests
 inside `src/` — `std` is reachable to unit tests only through the host harness,
 so they stay `core`-only and assert on explicit values.
