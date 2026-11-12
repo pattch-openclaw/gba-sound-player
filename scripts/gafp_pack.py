@@ -283,6 +283,14 @@ DECODE_SHARE_LIMIT_PCT = 50.0
 # is budgeted at its own rate — and has no measured row either, so it is refused
 # as unmeasured anyway.
 GBA_CYCLES_PER_SECOND = 16777216
+# `TODO(Q14, BLOCKING)` — ruled 2026-11-11 by the project owner: a stream is encoded at
+# the rate it will be played at, and the player does not reinterpret a declared rate to
+# fit the clock. This entry is 6b-3's measurement bridge (1.024x = +41.06 cents of
+# pitch), **not** a product path: it comes out when the asset is encoded at 32,768 Hz
+# (plan item 7-0), and the identity mapping is all that should remain here. Until that
+# exists, a 32,768 Hz asset packs only under `--allow-unmeasured`, because
+# `MEASURED_DECODE` holds no row keyed `(32768, 2048, ...)` — and that row is 7-1's
+# hardware read, not a number this script may invent.
 PLAYBACK_RATE_FOR_STREAM = {32000: 32768}
 
 
