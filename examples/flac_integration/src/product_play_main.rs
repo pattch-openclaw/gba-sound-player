@@ -1615,29 +1615,42 @@ mod rom {
 
         // The shares. Work share is the real-time number; the wait is what the
         // pacer left idle and is deliberately not in it.
+        //
+        // Every term here is divided by the SAME denominator — the frame count —
+        // because the terms have to add up to the total they are printed beside.
+        // The stage rows above are per-*window* means over `n` fed-phase windows,
+        // and a window mean over a frame budget is not a frame's share: 426,327 c
+        // is 40.657% of a frame, but there are 152 decode windows for 157 frames,
+        // so decode *contributes* 39.363% of the run's real time. The first
+        // version of this line mixed the two denominators and printed four terms
+        // summing to 53.441% next to a total of 53.062% (2026-11-11, corrected the
+        // same day; the feeder term was worse than that, dividing a period's cost
+        // by a frame's budget). Nothing measured changed — only where the
+        // divisions happen.
         let work_per_frame = (ledger.work_sum() + feed_sum) / frames;
-        let decode_per_frame = ledger.stages[1].mean();
+        let decode_per_frame = ledger.stages[1].sum / frames;
+        let convert_per_frame = ledger.stages[2].sum / frames;
+        let push_per_frame = ledger.stages[3].sum / frames;
+        let feed_per_frame = feed_sum / frames;
+        // The four per-frame integers can truncate to a sum a few cycles under the
+        // total, so the parts are printed with their own sum rather than a reader
+        // being left to find the 4-cycle gap.
+        let parts_per_frame =
+            decode_per_frame + convert_per_frame + push_per_frame + feed_per_frame;
         agb::println!(
-            "[pp-rom] budget: work/frame={} c = {}.{:03}% (decode {}.{:03}% convert {}.{:03}% push {}.{:03}% feeder {}.{:03}%) of a {} c frame",
+            "[pp-rom] budget: work/frame={} c = {}.{:03}% (per-frame shares: decode {}.{:03}% convert {}.{:03}% push {}.{:03}% feeder {}.{:03}%; parts sum to {} c, the gap is per-part integer truncation) of a {} c frame",
             work_per_frame,
             ledger.pct_x1000(work_per_frame) / 1000,
             ledger.pct_x1000(work_per_frame) % 1000,
-            ledger.pct_x1000(ledger.stages[1].mean()) / 1000,
-            ledger.pct_x1000(ledger.stages[1].mean()) % 1000,
-            ledger.pct_x1000(ledger.stages[2].mean()) / 1000,
-            ledger.pct_x1000(ledger.stages[2].mean()) % 1000,
-            ledger.pct_x1000(ledger.stages[3].mean()) / 1000,
-            ledger.pct_x1000(ledger.stages[3].mean()) % 1000,
-            ledger.pct_x1000(if serviced == 0 {
-                0
-            } else {
-                feed_sum / u64::from(serviced)
-            }) / 1000,
-            ledger.pct_x1000(if serviced == 0 {
-                0
-            } else {
-                feed_sum / u64::from(serviced)
-            }) % 1000,
+            ledger.pct_x1000(decode_per_frame) / 1000,
+            ledger.pct_x1000(decode_per_frame) % 1000,
+            ledger.pct_x1000(convert_per_frame) / 1000,
+            ledger.pct_x1000(convert_per_frame) % 1000,
+            ledger.pct_x1000(push_per_frame) / 1000,
+            ledger.pct_x1000(push_per_frame) % 1000,
+            ledger.pct_x1000(feed_per_frame) / 1000,
+            ledger.pct_x1000(feed_per_frame) % 1000,
+            parts_per_frame,
             ledger.frame_budget
         );
         agb::println!(

@@ -37,10 +37,11 @@
 //! lead itself peaks at the ring's 36.
 //! A **sustained overage** — the producer costing more than its share forever,
 //! which is what a wrong clock assumption or a slower part would mean — is bounded
-//! by *throughput*: 157.3% of the measured cost with no ring in the picture, 196.0%
-//! with this one. So a deep ring is worth ~39 points of sustained overage and then
-//! nothing further, while being worth a great deal of stall — the two numbers are
-//! nowhere near each other, which is why [`sustained_overage_tolerance`] and
+//! by *throughput*: 153.6% of the measured cost with no ring in the picture, 191.3%
+//! with this one (178.8% at the hardware derate). So a deep ring is worth ~38 points
+//! of sustained overage and then nothing further, while being worth a great deal of
+//! stall — the two numbers are nowhere near each other, which is why
+//! [`sustained_overage_tolerance`] and
 //! [`burst_stall_tolerance`] measure them separately instead of quoting one
 //! "generous margin" figure that would mean whichever of the two the reader
 //! happened to need.
@@ -131,23 +132,32 @@ fn decoded_frames(manifest: &Manifest<'_>) -> Vec<FrameBytes> {
 // The cost envelope, read off a run
 // ---------------------------------------------------------------------------
 
-/// The producer's own work per frame, in audio cycles, as the 2026-11-11 mGBA run
-/// of `product-play.gba` reported it: decode 426,327 + convert 113,586 + push
-/// 15,280 = 555,193 mean, **less** the period boundaries nested inside those
-/// windows (538 of them, at 5,194 c of feeder each = 2,794,572 over 152 windows =
-/// 18,385 per window), because that time belongs to the interrupt, not to the
-/// producer.
-///
-/// That subtraction is the attribution the ROM prints itself. It is an estimate —
-/// an interrupt's entry cost is not separable from the work it interrupted — which
-/// is why the unattributed figure is charged too, in [`MEASURED_RAW`], and why
-/// nothing here turns on the difference.
-const MEASURED: u64 = 536_808;
+// The envelope is **derived from the run's own sums**, not transcribed from its
+// printed means. A transcribed figure is the failure mode this project has already
+// paid for once (the hand-computed FNV vector, `method-and-gates.md`'s false-green
+// catalogue), and the first version of this block was a transcription that got the
+// attribution wrong: it priced 538 period boundaries because 538 is the count the
+// *closure* line reports across all four stages, while only 159 of them fall inside
+// the three windows whose sums it was subtracting them from (the other 379 are in
+// `wait`, which is not part of producer work). Derived from the sums below, the two
+// figures cannot drift apart again, and `the_envelope_is_the_runs_own_sums` checks
+// the derivation against the ROM's printed means.
 
-/// The same envelope with the nesting left in — the ROM's raw stage means. Charged
-/// as a second scenario so the attribution's effect on the conclusion is visible
-/// rather than assumed away.
-const MEASURED_RAW: u64 = 555_193;
+/// The 2026-11-11 mGBA run of `product-play.gba`, `[pp-rom] stages`, as the sums and
+/// counts the ROM printed. Means are recomputed here; nothing is copied.
+const DECODE_SUM: u64 = 64_801_816;
+const CONVERT_SUM: u64 = 17_265_217;
+const PUSH_SUM: u64 = 2_322_620;
+/// Fed-phase windows: the frames decoded with the audio running. 152 = the 157
+/// frames less the 5 the prefill decoded before arming; the consumer's tail (one
+/// period, 240 real samples) is not a decode window at all.
+const STAGE_WINDOWS: u64 = 152;
+/// Period boundaries that fell **inside the decode windows** — the only ones
+/// nested in producer work. `convert` and `push` report `boundaries_in=0`.
+const DECODE_BOUNDARIES_INSIDE: u64 = 159;
+/// The same run's feeder: total over 571 serviced periods.
+const FEEDER_SUM: u64 = 2_966_019;
+const PERIODS_SERVICED: u64 = 571;
 
 /// The feeder's own cost per period, from the same run: the mean of 571 measured
 /// samples. It is deducted from each period's budget because the model charges the
@@ -159,7 +169,30 @@ const MEASURED_RAW: u64 = 555_193;
 /// it — and it does not delay the interrupt handler, which is why the model treats
 /// only the handler's cycles as scarce. That is not a simplification for the
 /// model's convenience; it is how a single core with interrupts enabled behaves.
-const FEEDER_PER_PERIOD: u64 = 5_194;
+const FEEDER_PER_PERIOD: u64 = FEEDER_SUM / PERIODS_SERVICED;
+
+/// One stage's mean over a fed-phase window, from its sum.
+const fn window_mean(sum: u64) -> u64 {
+    sum / STAGE_WINDOWS
+}
+
+/// The producer's own work per frame with the nesting left in: the three stage
+/// means added, which is exactly what the ROM's "decode + convert + push" line
+/// says (426,327 + 113,586 + 15,280 = 555,193).
+const MEASURED_RAW: u64 =
+    window_mean(DECODE_SUM) + window_mean(CONVERT_SUM) + window_mean(PUSH_SUM);
+
+/// The same envelope with the boundaries nested inside those windows priced out of
+/// it, because that time belongs to the interrupt, not to the producer: 555,193 −
+/// (159/152) × 5,194 = 549,760.
+///
+/// That subtraction is the attribution the ROM prints itself, and it is the same
+/// arithmetic — 426,327 − (159/152) × 5,194 = 420,894 — that the record quotes as
+/// this image's isolated decode estimate. It is an estimate: an interrupt's entry
+/// cost is not separable from the work it interrupted, which is why the
+/// unattributed figure is charged too, in [`MEASURED_RAW`], and why nothing here
+/// turns on the difference.
+const MEASURED: u64 = MEASURED_RAW - FEEDER_PER_PERIOD * DECODE_BOUNDARIES_INSIDE / STAGE_WINDOWS;
 
 /// The plan's standing hardware derate for memory-heavy stages, applied as a second
 /// scenario wherever a claim is meant to survive silicon. It is a *measured* ratio
@@ -586,6 +619,64 @@ fn manifest_and_geometry_agree() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// The judgement
+// ---------------------------------------------------------------------------
+
+/// The cost envelope the rest of these tests are charged is the run's own sums, and
+/// the derivation is arithmetic a reader can re-do from the log: the three stage
+/// means add to 555,193 as printed, the 159 boundaries inside the decode windows
+/// price out at (159/152) × 5,194 = 5,433, and 426,327 − 5,433 = 420,894 is the
+/// same image's quoted isolated decode estimate.
+///
+/// This test exists because the block it guards was a transcription first, and the
+/// transcription was wrong in the permissive direction — it charged the model 2.4%
+/// less than the ROM's own arithmetic says the producer costs (2026-11-11).
+#[test]
+fn the_envelope_is_the_runs_own_sums() {
+    assert_eq!(
+        window_mean(DECODE_SUM),
+        426_327,
+        "the ROM printed this mean"
+    );
+    assert_eq!(
+        window_mean(CONVERT_SUM),
+        113_586,
+        "the ROM printed this mean"
+    );
+    assert_eq!(window_mean(PUSH_SUM), 15_280, "the ROM printed this mean");
+    assert_eq!(FEEDER_PER_PERIOD, 5_194, "2,966,019 / 571, as printed");
+    assert_eq!(MEASURED_RAW, 555_193, "the ROM's decode + convert + push");
+
+    // The attribution, computed the way the ROM computes it (its own per-window
+    // `inside` over its own `n`), against the constant this file charges.
+    let nested = FEEDER_PER_PERIOD * DECODE_BOUNDARIES_INSIDE / STAGE_WINDOWS;
+    assert_eq!(nested, 5_433);
+    assert_eq!(MEASURED, 549_760);
+    let isolated_decode = window_mean(DECODE_SUM) - nested;
+    assert_eq!(
+        isolated_decode, 420_894,
+        "this is the number the 6b-3 record quotes as the image's own attributed decode estimate; if it moves, the two records have parted company"
+    );
+
+    // And the direction of the correction, so a future edit that re-inflates the
+    // envelope has to argue with a number rather than with prose.
+    assert!(
+        MEASURED < MEASURED_RAW,
+        "the attribution can only ever remove interrupt time from producer cost"
+    );
+    println!(
+        "model/envelope: raw {} c/frame, nesting {} ({} boundaries over {} windows at {} c), attributed {} c/frame = {:.3}% of the raw — and the pricing of a frame's deadline is unchanged either way, which is the test below",
+        MEASURED_RAW,
+        nested,
+        DECODE_BOUNDARIES_INSIDE,
+        STAGE_WINDOWS,
+        FEEDER_PER_PERIOD,
+        MEASURED,
+        MEASURED as f64 * 100.0 / MEASURED_RAW as f64
+    );
+}
+
 /// The "cannot drift" claim, witnessed structurally: the model instantiates the
 /// shipped ring *type* at the shipped capacity, with the chunk size and the DMA
 /// word count the geometry declares. If `geometry.rs` and the register block ever
@@ -725,8 +816,8 @@ fn floor_matches_the_roms_watermark() {
     // `ceil(target / frame_len) * frame_len`. From there, one chunk leaves the ring
     // into the prime and one more is taken by the first period before the first
     // fed-phase push can happen (the producer cannot start a frame before its
-    // credit arrives, and one period's worth is not enough for a 536,808-cycle
-    // frame). That is the whole of the arithmetic, and it comes out at the number
+    // credit arrives, and one period's worth is not enough for a frame that costs
+    // several). That is the whole of the arithmetic, and it comes out at the number
     // the ROM measured — sample for sample, from an independent implementation.
     let block = usize::from(manifest.blocksize());
     let prefill_actual = (geo::PREFILL_SAMPLES + block - 1) / block * block;

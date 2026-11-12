@@ -116,8 +116,9 @@ pub const CHUNK_SAMPLES: usize = 560;
 ///   So the prefill choice puts a floor under the depth choice before any cost is
 ///   considered, and the two knobs are one decision rather than two.
 /// - **What depth buys against a *sustained* overage is real and finite.** With
-///   no ring in the picture the producer fails at 157.3% of the measured cost;
-///   with this ring it fails at 196.0%. The refill is therefore worth ~39 points
+///   no ring in the picture the producer fails at 153.6% of the measured cost;
+///   with this ring it fails at 191.3% (178.8% against the hardware derate). The
+///   refill is therefore worth ~38 points
 ///   of sustained overage — a purchase, not an infinite cushion
 ///   (`sustained_overage_tolerance` bisects both).
 /// - **What depth buys in the regime a decoder actually operates in is time.** A
