@@ -139,6 +139,16 @@ and measured first: the house FNV-1a is 64-bit, ARM7TDMI has no 64-bit multiply,
 `RingFeed`'s byte copy remains the host-witnessed bridge; the residual gap is stated in
 `measurements.md`'s played-form row. 11 host tests; image `ba237039e394330f…`, 1,085,604 B.)*
 
+*(Verification/hygiene, 2026-11-12: 12 host tests now — `worst_frame_burst_does_not_starve`
+charges the guarded 565,939 c at every fed-phase position and finds no underrun — plus
+period-bounded wait/drain loops, a measured-window `Stage::mean`, release `convert_frame`
+length checks, `REARM_GRACE_SAMPLES`/`max_delay_samples`, `58.51 periods/s` on the armed
+line, and the Q14 asset check as an explicit `PRODUCT_STREAM_RATES` allow-list. Image
+`694126d4…`, 1,085,804 B; audio numbers within 72 cycles, verdict unchanged. The rate
+clarification is docs-only: `agb` plays 10,512 / 18,157 / 32,768 Hz, a stream may declare
+any table rate or 16-bit Hz, the exhaustive declarable sweep is cheap, and
+identity-or-refusal in the packer/player is 7-0's.)*
+
 **And on the same day it was measured, the rate it was measured at was ruled out
 (Q14).** That image plays a stream that *declares* 32,000 Hz on a 32,768 Hz clock. The
 project owner's ruling: a stream is encoded at the rate it is played at, and the player

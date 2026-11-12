@@ -590,7 +590,16 @@ before an asset at the right rate existed. It carries a bold `TODO(Q14, BLOCKING
 greppable as `TODO(Q14` — and its mechanical guard is
 `ruled_rate_policy_allows_one_bridge_and_no_more` (`make product-play-test`), which
 computes the ratio instead of quoting it (**1.024× = 41.06 cents**) and refuses any
-*further* rate reinterpretation. Consequence, stated where it costs something: the
+*further* rate reinterpretation.
+
+**Two rate sets, not one — and the sweep is over the declarable one.** `agb` 0.25's
+mixer can play **10,512 / 18,157 / 32,768 Hz**, and the product geometry is 32,768; a FLAC
+*stream* can declare any of the format's 4-bit table rates or a 16-bit Hz value. The Q14
+rule is about the declared stream rate, so the exhaustive guard is a sweep over the
+declarable set (`0..=65535` plus the table values, 65,536 cheap host calls), not over agb's
+three clocks. 6b-3 keeps its sampled refusal list as the interim guard; the behaviour
+change — identity-or-refusal in the packer and the player — is 7-0's, so the exhaustive
+loop is described here rather than added. Consequence, stated where it costs something: the
 asset this repository currently ships, `examples/flac_integration/assets/spike_l0.gfp`,
 declares 32,000 Hz and is therefore **not a product asset**. 6b-3's record, `FLAC.md`
 and C2 all say so now.

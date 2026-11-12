@@ -248,8 +248,19 @@ pub fn convert_frame(
 ) -> Result<(), i32> {
     let n = left.len();
     let stereo = !right.is_empty();
-    debug_assert_eq!(dst_l.len(), n);
-    debug_assert!(!stereo || (dst_r.len() == n && right.len() == n));
+    // Contract errors are release-checked, not debug-only: a short destination
+    // would silently leave stale scratch bytes in the frame that `push_bytes`
+    // then credits as audio. All current callers pass exact windows; this is the
+    // guard for the next one.
+    assert_eq!(
+        dst_l.len(),
+        n,
+        "convert_frame: left destination is not the frame length"
+    );
+    assert!(
+        !stereo || (dst_r.len() == n && right.len() == n),
+        "convert_frame: right destination is not the frame length"
+    );
     fit_gate(left, right)?;
     if stereo {
         pack_fifo(right, dst_r);

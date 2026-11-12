@@ -291,6 +291,12 @@ GBA_CYCLES_PER_SECOND = 16777216
 # exists, a 32,768 Hz asset packs only under `--allow-unmeasured`, because
 # `MEASURED_DECODE` holds no row keyed `(32768, 2048, ...)` — and that row is 7-1's
 # hardware read, not a number this script may invent.
+# The keys are *declared stream* rates, not agb's three *playback* rates
+# (10,512 / 18,157 / 32,768; the product geometry is 32,768). A stream may
+# declare any FLAC table rate or a 16-bit Hz value. The Q14 sweep is over that
+# declarable set (0..=65535 plus the table), which is cheap; 7-0 replaces this
+# table with identity-or-refusal. The player is already stricter than this
+# fallback: `geometry::playback_rate_for_stream` refuses every unlisted rate.
 PLAYBACK_RATE_FOR_STREAM = {32000: 32768}
 
 

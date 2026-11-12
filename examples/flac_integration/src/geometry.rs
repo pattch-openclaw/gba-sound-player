@@ -225,6 +225,16 @@ pub const DMA_WORDS: u16 = (CHUNK_SAMPLES / 4) as u16;
 /// the product carries a true 32,768 Hz stream and the `32_000` arm below is not a
 /// shipping path.**
 ///
+/// **Two rate sets, not one.** `agb` 0.25 can *play* 10,512 / 18,157 / 32,768 Hz,
+/// and the product geometry is built for 32,768. A FLAC **stream** can declare any
+/// of the format's 4-bit table rates or a 16-bit Hz value, and this function maps
+/// that *declared* rate. The Q14 guard is therefore about the declarable stream
+/// rates, not about agb's three clocks: the exhaustive form is a host sweep over
+/// `0..=65535` plus the table values (65,536 cheap calls), and it is described here
+/// rather than added in 6b-3 because the behaviour it protects —
+/// identity-or-refusal in the packer and the player — is item 7-0's. 6b-3's sampled
+/// refusal list is the interim guard.
+///
 /// **`TODO(Q14, BLOCKING)` — delete the `32_000` arm when the 32,768 product asset
 /// exists, and add nothing to this table before then.** Unblocking is four steps and
 /// none of them are format work: resample the source to 32,768, encode it at the
@@ -256,12 +266,6 @@ pub fn playback_rate_for_stream(stream_rate_hz: u32) -> Option<u32> {
         _ => None,
     }
 }
-
-/// The cycles-per-sample the audio timeline itself allows: 512. Anything the
-/// producer spends per sample beyond this is a debt the ring can cover once but
-/// not repeatedly. Named so the model and the ROM say the same thing in the same
-/// unit.
-pub const AUDIO_BUDGET_CYCLES_PER_SAMPLE: u32 = TICKS_PER_SAMPLE;
 
 // ---------------------------------------------------------------------------
 // Compile-time pins: every transcription above is checkable here

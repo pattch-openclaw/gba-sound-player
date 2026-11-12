@@ -282,7 +282,7 @@ mod rom {
     /// reloads it; one after it has already replayed part of the old buffer
     /// (inserted samples) and splices mid-waveform (the pop the first hardware
     /// reading of this field heard, 2026-10-19).
-    const REARM_GRACE_TICKS: u32 = geo::REARM_GRACE_SAMPLES as u32;
+    const REARM_GRACE_SAMPLES: u32 = geo::REARM_GRACE_SAMPLES as u32;
 
     /// agb `hw.rs`'s sound-DMA control word: destination fixed (2<<5) | repeat
     /// (1<<9) | transfer words (1<<10) | sound-FIFO start timing (3<<12) |
@@ -375,12 +375,12 @@ mod rom {
         coalesced: u32,
         max_period_gap: u16,
         /// Gap-1 entries whose `TM1_DATA` says the IRQ sat more than
-        /// `REARM_GRACE_TICKS` past the overflow: the repeat DMA had already
+        /// `REARM_GRACE_SAMPLES` past the overflow: the repeat DMA had already
         /// reloaded the old source, so this period replays a tail and splices
         /// mid-waveform. A late re-arm *inside* the grace is harmless and is not
         /// counted.
         late_servicings: u32,
-        max_delay_ticks: u32,
+        max_delay_samples: u32,
         // --- The feeder's own cost: the ring copy, the DMA re-arm, the FIFO
         // enables. It competes with the producer for the same core, so it belongs
         // in the duty-cycle arithmetic rather than in a footnote.
@@ -398,7 +398,7 @@ mod rom {
         coalesced: 0,
         max_period_gap: 0,
         late_servicings: 0,
-        max_delay_ticks: 0,
+        max_delay_samples: 0,
         feed_cycles_sum: 0,
         feed_cycles_worst: 0,
     }));
@@ -669,10 +669,10 @@ mod rom {
         // A gap > 1 means TM1_DATA re-wrapped past a whole period, so the
         // coalesced count already owns that case; only gap-1 entries time a
         // sub-period lateness, which is the late-splice event.
-        if gap == 1 && delay > REARM_GRACE_TICKS {
+        if gap == 1 && delay > REARM_GRACE_SAMPLES {
             stats.late_servicings += 1;
-            if delay > stats.max_delay_ticks {
-                stats.max_delay_ticks = delay;
+            if delay > stats.max_delay_samples {
+                stats.max_delay_samples = delay;
             }
         }
         stats.serviced += 1;
@@ -789,10 +789,14 @@ mod rom {
         }
 
         fn mean(&self) -> u64 {
-            if self.n == 0 {
+            // A void window is in `n` (it happened) but not in `sum` (it was not
+            // priced). Dividing by `n` would bias the mean low; divide by what was
+            // actually measured.
+            let measured = self.n.saturating_sub(self.void);
+            if measured == 0 {
                 0
             } else {
-                self.sum / u64::from(self.n)
+                self.sum / u64::from(measured)
             }
         }
     }
@@ -1127,12 +1131,15 @@ mod rom {
         /// held while waiting would deadlock against the feeder's own borrow in IRQ
         /// context (the harness records catching that in review, before compile).
         ///
-        /// The loop is bounded so that a wedge fails visibly instead of hanging.
-        /// The bound is far above any wait this geometry can produce — the deepest
-        /// legitimate wait is one frame's drain, ~2,048 samples = 1,048,576
-        /// cycles, and one iteration of this loop is a few hundred cycles.
+        /// The loop is bounded in *periods* so that a wedge fails visibly instead
+        /// of hanging: the deepest legitimate wait is one frame's drain (~2,048
+        /// samples = 1,048,576 cycles), and the bound is the ring's depth plus two
+        /// frames' worth of polling headroom. A few hundred cycles per iteration
+        /// puts it well under a second; the previous `8_000_000` was "until the
+        /// outer timeout", not a bound.
         fn wait_for_room(&self) -> bool {
-            for _ in 0..8_000_000u32 {
+            let bound = (RING_SAMPLES / CHUNK + 2) * 4096;
+            for _ in 0..bound {
                 let enough = critical_section::with(|cs| {
                     let feed = FEED.borrow_ref(cs);
                     let free = feed.free_samples();
@@ -1338,9 +1345,11 @@ mod rom {
         let _handler = unsafe { add_interrupt_handler(Interrupt::Timer1, feeder) };
         arm_audio_chain(timers);
         producer.ledger.audio_start = unsafe { audio_cycles() };
+        let periods_x100 = geo::PLAYBACK_RATE_HZ * 100 / CHUNK as u32;
         agb::println!(
-            "[pp-rom] armed: {} periods/s of {} cycles, frame budget {} cycles; IE=0x{:04X} IME={} (witness: only the timer1 bit should be set)",
-            geo::PLAYBACK_RATE_HZ / CHUNK as u32,
+            "[pp-rom] armed: {}.{:02} periods/s of {} cycles, frame budget {} cycles; IE=0x{:04X} IME={} (witness: only the timer1 bit should be set)",
+            periods_x100 / 100,
+            periods_x100 % 100,
             PERIOD_CYCLES,
             producer.ledger.frame_budget,
             unsafe { io_read_u16(REG_IE) },
@@ -1391,6 +1400,10 @@ mod rom {
         // `consumed` reaches `pushed` exactly when the last real sample has been
         // handed to the DMA.
         producer.ledger.audio_drain_start = unsafe { audio_cycles() };
+        // The drain can legitimately last the ring's whole depth: 36 periods at
+        // 286,720 cycles. Bound the spin in periods (with headroom) so a wedged
+        // consumer fails visibly rather than waiting for the harness timeout.
+        let max_polls = (RING_SAMPLES / CHUNK + 2) as u64 * 8192;
         let mut polls = 0u64;
         let drained = loop {
             let done = critical_section::with(|cs| {
@@ -1400,7 +1413,7 @@ mod rom {
                 done
             });
             polls += 1;
-            if done || polls > u64::from(u32::MAX) {
+            if done || polls > max_polls {
                 break done;
             }
         };
@@ -1700,7 +1713,7 @@ mod rom {
                 s.coalesced,
                 u32::from(s.max_period_gap),
                 s.late_servicings,
-                s.max_delay_ticks,
+                s.max_delay_samples,
                 s.feed_cycles_sum,
                 s.feed_cycles_worst,
                 *CLOCK_REFUSALS.borrow_ref(cs),
@@ -1729,7 +1742,7 @@ mod rom {
             max_gap,
             late,
             max_delay,
-            REARM_GRACE_TICKS,
+            REARM_GRACE_SAMPLES,
             tail_periods,
             tail_real
         );
@@ -2014,7 +2027,6 @@ mod rom {
             fit.bottom,
             fit.fits()
         );
-        let _ = stage;
         crate::text::show(gfx, text_body, if pass { COLOR_PASS } else { COLOR_FAIL });
     }
 }

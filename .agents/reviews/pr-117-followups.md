@@ -12,10 +12,10 @@ note, not a product record; the dated measurements belong in `flac-docs/`.
 | 2 | No FIFO/played-bytes witness (`pcm MATCH` is decode-only) | Fix in this PR | **Done in step 2** |
 | 3 | Clock-refusal path re-enters `STATS` and panics | Fix in this PR | **Done in step 1** (and widened to the clock read itself — see below) |
 | 4 | ARM-mode policy not host-testable | **Deferred.** Owner: the ARM-mode optimizations being host-untestable by design is fine; e2e is the intended witness. Do not extract the policy for test coverage. | Closed unless a concrete bug needs it |
-| 5 | Q14 guard is a sampled list / no Python guard | **Docs-only for now.** Owner: `PLAYBACK_RATE_FOR_STREAM` should not be an open question — we know the playback rates `agb` supports. Clarify the distinction in the docs; do not add the exhaustive sweep in this PR. | **Step 3 (docs)** |
-| 6 | Host model has no variance/burst test | Add the test | **Step 3** |
+| 5 | Q14 guard is a sampled list / no Python guard | **Docs-only for now.** Clarify the two rate sets (agb's playback rates vs declarable stream rates) and describe the cheap exhaustive sweep; do not add it. | **Done in step 3 (docs)** |
+| 6 | Host model has no variance/burst test | Add the test | **Done in step 3** |
 | 7 | Screen does not flag the scaffolding | Add it | **Done in step 1** (`rate 32000>32768 scaffold`, `Q14 SCAFFOLD` log) |
-| 8 | Smaller fixes (`finished` ordering, IRQ IF, units, `Stage` void mean, bounds, `convert_frame` length, cosmetics) | Address | `finished`/IRQ ordering **done in step 1**; the rest in **step 3** |
+| 8 | Smaller fixes (`finished` ordering, IRQ IF, units, `Stage` void mean, bounds, `convert_frame` length, cosmetics) | Address | **Done** (ordering in step 1; the rest in step 3) |
 
 ## Step 1 — verdict integrity (working tree, 2026-11-12)
 
@@ -80,22 +80,32 @@ rules), `flac-docs/plan-of-record.md` (two dated notes), `flac-docs/open-questio
   `ba237039e394330f…`, 1,085,604 B; run `PASSED (ledger=true, audit=true, pcm=true,
   fifo=true)` with FIFO MATCH.
 
-## Step 3 — the rest
+## Step 3 — verification and hygiene — done (working tree)
 
-- **#5 docs-only:** distinguish `agb`'s playback rates (`Hz10512/18157/32768`) from the
-  FLAC **stream** rates a file may declare; `playback_rate_for_stream` is about the latter.
-  The exhaustive sweep is cheap (65,536 iterations + the FLAC table) but is not being added
-  now; describe it in the docs and leave the behaviour/packer rewrite to 7-0.
-- **#6 model burst test:** add a `burst: Option<(usize, u64)>` to `Settings`/`run` and
-  charge the measured `max_work` (565,874 c on the guarded build) on each frame position;
-  assert zero underruns. Keep the credit gate and document it as a conservative
-  idealization.
-- **#8 remaining:** `REARM_GRACE_TICKS`/`max_delay_ticks` are samples — rename;
-  `Stage::note` mean divides by `n` including `void` — track `measured_n`; bound the
-  drain/wait loops in periods; `convert_frame` release length check; remove
-  `let _ = stage`; fix the `armed: 58 periods/s` truncation.
-- **Q14 test shape** (PR review focus #2): decide allow-list vs self-retiring assert; the
-  flip itself is 7-0's.
+- **#5 docs-only rate clarification.** `geometry.rs` (`playback_rate_for_stream`),
+  `scripts/gafp_pack.py` and `flac-docs/open-questions.md` now say the two sets
+  explicitly: `agb` 0.25 can *play* 10,512 / 18,157 / 32,768 Hz (the product geometry is
+  32,768), while a FLAC *stream* may declare any table rate or a 16-bit Hz value. The Q14
+  guard is about the declarable stream rate; the exhaustive form is a cheap host sweep
+  over `0..=65535` plus the table (65,536 calls). It is **described, not added** — the
+  identity-or-refusal behaviour in the packer/player is 7-0's.
+- **#6 model burst test.** `Settings`/`Sim` carry an optional `(index, cycles)` burst;
+  `worst_frame_burst_does_not_starve` charges the guarded build's 565,939 c at every
+  fed-phase frame position and asserts `underruns == 0`, the ledger closes and the lead
+  stays above a period. Suite is **12 tests**.
+- **#8 remaining.** `REARM_GRACE_SAMPLES` / `max_delay_samples` (samples, not ticks);
+  `Stage::mean` divides by measured windows (void excluded); the wait/drain loops are
+  bounded in periods instead of "until the outer timeout"; `convert_frame` release-checks
+  destination lengths; the dead `let _ = stage` is gone; the armed line prints
+  `58.51 periods/s`; the unused `AUDIO_BUDGET_CYCLES_PER_SAMPLE` is removed.
+- **Q14 test shape.** The asset assert is now an explicit `PRODUCT_STREAM_RATES`
+  allow-list (the 32,000 bridge is absent); 7-0 flips one line rather than deleting a red
+  `assert_ne!`. The sampled refusal list is unchanged (the exhaustive sweep is docs-only,
+  per #5).
+- Verification: `make check` clean; `make product-play-test` 12/12; ROM
+  `694126d406eb9b2a…`, 1,085,804 B; two identical runs, `PASSED (… fifo=true)`,
+  `fit: lines=9 … fits=true`; audio numbers within 1-72 cycles (work/frame 559,848 =
+  53.391%, worst 565,867 = 53.965%).
 
 ## Out of scope (follow-up PRs)
 

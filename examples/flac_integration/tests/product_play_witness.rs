@@ -252,6 +252,10 @@ struct Settings {
     work_per_frame: u64,
     feeder_per_period: u64,
     prefill_chunks: usize,
+    /// One frame charged a different cost, for the variance test: `(index, cycles)`.
+    /// The mean-cost replay is the geometry test; this is what says a single frame
+    /// at the ROM's measured worst still has a ring under it.
+    burst: Option<(usize, u64)>,
 }
 
 impl Settings {
@@ -261,6 +265,7 @@ impl Settings {
             work_per_frame,
             feeder_per_period: FEEDER_PER_PERIOD,
             prefill_chunks: geo::PREFILL_CHUNKS,
+            burst: None,
         }
     }
 
@@ -294,6 +299,8 @@ struct Sim<'f> {
     /// Passed in from the manifest, never from the frames themselves — see
     /// [`flow_control_floor_is_the_declared_blocksize`].
     reserve: usize,
+    /// One frame's cost override, from [`Settings::burst`].
+    burst: Option<(usize, u64)>,
     /// Watermark, recorded at the ROM's instants: before and after each push,
     /// inside the same critical section.
     min_lead: usize,
@@ -318,7 +325,11 @@ impl<'f> Sim<'f> {
                 out_of_room = true;
                 return (out_of_room, out_of_credit);
             }
-            if self.credit < work {
+            let cost = match self.burst {
+                Some((index, cycles)) if index == self.next_frame => cycles,
+                _ => work,
+            };
+            if self.credit < cost {
                 out_of_credit = true;
                 return (out_of_room, out_of_credit);
             }
@@ -336,7 +347,7 @@ impl<'f> Sim<'f> {
             if self.record {
                 self.max_lead = self.max_lead.max(ring.ready());
             }
-            self.credit -= work;
+            self.credit -= cost;
             self.next_frame += 1;
         }
     }
@@ -418,6 +429,7 @@ fn run<const R: usize>(
         finished: frames.is_empty(),
         push_ceiling: None,
         reserve,
+        burst: settings.burst,
         min_lead: usize::MAX,
         max_lead: 0,
         record: false,
@@ -864,6 +876,49 @@ fn zero_underflow_at_the_measured_cost_and_at_the_derate() {
     }
 }
 
+/// A single frame at the ROM's measured worst must still be absorbed.
+///
+/// The mean-cost replay above is what the geometry is sized by; this is the
+/// variance test it does not cover. `ROM_WORST_WORK` is the worst single frame's
+/// decode+convert+push from the guarded product-play build (565,939 c), charged
+/// at every *fed-phase* position in turn. The prefill frames are skipped: the ROM
+/// does not time them and the model charges prefill with zero credit, so a burst
+/// there is a different (and uninteresting) scenario.
+#[test]
+fn worst_frame_burst_does_not_starve() {
+    let manifest = Manifest::parse(BLOB).expect("parses");
+    let frames = decoded_frames(&manifest);
+    let total = usize::try_from(manifest.total_samples()).unwrap();
+    let block = usize::from(manifest.blocksize());
+    let prefill_frames = (geo::PREFILL_SAMPLES + block - 1) / block;
+    const ROM_WORST_WORK: u64 = 565_939;
+    for at in prefill_frames..frames.len() {
+        let settings = Settings {
+            burst: Some((at, ROM_WORST_WORK)),
+            ..Settings::shipped(MEASURED)
+        };
+        let out = run::<{ geo::RING_SAMPLES }>(&settings, &frames, total);
+        assert_eq!(
+            out.underruns, 0,
+            "a {} c frame at fed position {} must not starve the ring (consumed {}/{})",
+            ROM_WORST_WORK, at, out.consumed, total
+        );
+        assert_eq!(
+            out.consumed, total,
+            "the ledger must close at position {at}"
+        );
+        assert!(
+            out.min_lead >= geo::CHUNK_SAMPLES,
+            "the lead must stay above a period at position {at}"
+        );
+    }
+    println!(
+        "model/burst: {} c charged at every one of the {} fed-phase positions -> underruns=0, lead >= one period at every position",
+        ROM_WORST_WORK,
+        frames.len() - prefill_frames
+    );
+}
+
 /// The floor the ROM observed, derived — and the reason the flow control asks for
 /// the *declared* blocksize rather than the frame it is about to decode.
 #[test]
@@ -1086,6 +1141,7 @@ fn burst_stall_tolerance() {
         work_per_frame: u64::MAX / 4,
         feeder_per_period: FEEDER_PER_PERIOD,
         prefill_chunks: geo::PREFILL_CHUNKS,
+        burst: None,
     };
     let out = run::<{ geo::RING_SAMPLES }>(&settings, &frames, total);
     let periods_the_prefill_carries = geo::PREFILL_SAMPLES / geo::CHUNK_SAMPLES;
@@ -1199,6 +1255,7 @@ fn sizing_scans_for_both_geometry_knobs() {
                         work_per_frame: work,
                         feeder_per_period: FEEDER_PER_PERIOD,
                         prefill_chunks: geo::PREFILL_CHUNKS,
+                        burst: None,
                     },
                     &frames,
                     total,
@@ -1236,6 +1293,7 @@ fn sizing_scans_for_both_geometry_knobs() {
                     work_per_frame: work,
                     feeder_per_period: FEEDER_PER_PERIOD,
                     prefill_chunks: P,
+                    burst: None,
                 },
                 &frames,
                 total,
@@ -1312,6 +1370,12 @@ fn sizing_scans_for_both_geometry_knobs() {
 /// the `32_000` arm in `src/geometry.rs` comes out and this test is rewritten to
 /// assert the identity rule alone. The final assert below is expected to go red at
 /// exactly that moment; that is what it is for.
+/// The stream rates a *product* asset may declare. The 32,000 bridge is
+/// deliberately absent: 7-0 adds 32,768 here and removes the bridge from
+/// `geometry.rs`. Written as an allow-list rather than `assert_ne!` so the
+/// flip is one line in one place, not a red test someone deletes in a hurry.
+const PRODUCT_STREAM_RATES: &[u32] = &[geo::PLAYBACK_RATE_HZ];
+
 #[test]
 fn ruled_rate_policy_allows_one_bridge_and_no_more() {
     // The product arm: a stream that declares the target rate is played at it.
@@ -1354,12 +1418,14 @@ fn ruled_rate_policy_allows_one_bridge_and_no_more() {
     );
 
     // And the disqualification is about the asset in this tree, not about an abstract
-    // one: the shipped blob declares a rate that is not the rate it is played at.
+    // one: the shipped blob declares a rate that is not in the product allow-list.
+    // This is the line 7-0 flips: add 32,768 to `PRODUCT_STREAM_RATES` and remove the
+    // bridge, and this assertion becomes the product check rather than the tripwire.
     let manifest = Manifest::parse(BLOB).expect("the shipped blob parses");
-    assert_ne!(
-        manifest.sample_rate_hz(),
-        geo::PLAYBACK_RATE_HZ,
-        "the asset currently shipped is the one the ruling disqualifies; this assert \
-         going red is the sound of 7-0 landing"
+    assert!(
+        !PRODUCT_STREAM_RATES.contains(&manifest.sample_rate_hz()),
+        "the asset currently shipped declares {} Hz, which the product allow-list must \
+         not contain until 7-0 lands (7-0 adds 32,768 here and this assert goes green)",
+        manifest.sample_rate_hz()
     );
 }
