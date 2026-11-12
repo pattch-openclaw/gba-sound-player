@@ -571,3 +571,153 @@ written here rather than implied:** a product path that needs the last 6%, or an
 claim derived by scaling an mGBA cycle count. Until then the working substitute is
 the **+7% derating** rule on mGBA figures for memory-heavy paths
 (`plan-of-record.md` §"Ordering rules").
+
+---
+
+### Q14 — Is the 2.4% pitch shift part of the product, or an accident of the rate contract?
+
+**RULED 2026-11-11 by the project owner, and the ruling is BLOCKING for the product:**
+*a stream is encoded at the rate it will be played at, and the player does not
+reinterpret a declared rate to fit the clock.* "Is 41 cents acceptable" was the
+question; the answer is no — in itself, not "not yet" and not "not unless the run is
+clean". So the product path carries a true 32,768 Hz stream, and the
+`32000 → 32768` mapping this question was opened about
+(`scripts/gafp_pack.py::PLAYBACK_RATE_FOR_STREAM`, mirrored by
+`geometry.rs::playback_rate_for_stream`) is **not a shipping path**: it is 6b-3's
+measurement bridge, kept only because the play path had to be built and measured
+before an asset at the right rate existed. It carries a bold `TODO(Q14, BLOCKING)` in
+`examples/flac_integration/src/geometry.rs` and in the ROM's own module docs —
+greppable as `TODO(Q14` — and its mechanical guard is
+`ruled_rate_policy_allows_one_bridge_and_no_more` (`make product-play-test`), which
+computes the ratio instead of quoting it (**1.024× = 41.06 cents**) and refuses any
+*further* rate reinterpretation.
+
+**Two rate sets, not one — and the sweep is over the declarable one.** `agb` 0.25's
+mixer can play **10,512 / 18,157 / 32,768 Hz**, and the product geometry is 32,768; a FLAC
+*stream* can declare any of the format's 4-bit table rates or a 16-bit Hz value. The Q14
+rule is about the declared stream rate, so the exhaustive guard is a sweep over the
+declarable set (`0..=65535` plus the table values, 65,536 cheap host calls), not over agb's
+three clocks. 6b-3 keeps its sampled refusal list as the interim guard; the behaviour
+change — identity-or-refusal in the packer and the player — is 7-0's, so the exhaustive
+loop is described here rather than added. Consequence, stated where it costs something: the
+asset this repository currently ships, `examples/flac_integration/assets/spike_l0.gfp`,
+declares 32,000 Hz and is therefore **not a product asset**. 6b-3's record, `FLAC.md`
+and C2 all say so now.
+
+**And the root cause is named too, because a ruling without it would leave the shape that
+produced the bridge intact.** The mistake was never the *value* 32,000 — it is one of FLAC's
+table rates, and 6a-7b's rows were honestly measured on an encode at it. The mistake was
+making that rate the fixture and measurement target while the plan's only clock is 32,768,
+and letting `gafp_pack.py` key `MEASURED_DECODE` by the **stream** rate while
+`frame_budget_cycles()` takes the frame budget from the **playback** rate: keying cost on a
+variable the cost does not depend on (the rate probe measured it at −20 c/frame, the
+instrument's own floor) is exactly what forced the fixture to 32,000, the rows to
+32,000-keys, and the bridge into being load-bearing. So 7-0's scope is structural, and says
+so now: cost re-keyed onto blocksize, predictor kind/order and residual envelope; the sample
+rate demoted from a lookup dimension to a *validity check*; the missing rate clause added to
+`crates/flac-lite`'s `EncodeProfile`, which guards blocksize, FIXED order, LPC and bit depth
+and has no rate field at all; identity-or-refusal in both the packer and the player; and a
+pitch witness, because a digest cannot see this defect — the samples are the same bytes. The
+full inventory of where 32,000 lives and which uses are legitimate, plus the two retarget
+traps (sample-period fixtures preserving the pitch error; 128/125 being exact but ffmpeg's
+`-ar` being float), are in `plan-of-record.md`'s "Q14 follow-up" section, summarised in
+`FLAC.md`. What all of it protects is the failure mode this project must never ship: audio
+arriving pitch-shifted away from what was encoded.
+
+**Opened by:** 6b-3 (2026-11-11), and by the packer before it.
+`scripts/gafp_pack.py` declares `PLAYBACK_RATE_FOR_STREAM = {32000: 32768}` and
+`examples/flac_integration/src/geometry.rs::playback_rate_for_stream` implements the
+same mapping, so the shipped asset — a **32,000 Hz** FLAC stream — is consumed by a
+**32,768 Hz** clock. The first product-play run says it out loud on its own serial
+line: `rate: stream 32000 Hz -> playback 32768 Hz … the stream's own nominal period
+would be 1073741`. Nothing in these docs contains a decision that this is *allowed*.
+
+**What it costs, both halves measured rather than estimated.** Playback runs
+**1.024× fast** — about **41 cents** sharp, comfortably audible to anyone comparing
+the GBA against the file they encoded, and enough to fail a tuning-fork check. And the
+producer's real-time budget is **2.4% tighter** than the stream asks for: the frame's
+period is 1,048,576 cycles at the clock the player actually runs, where the stream's
+own period would be 1,073,741. So the mismatch is not free in either direction; it
+buys the only rate the hardware speaks and it charges pitch plus a tighter deadline.
+**Measured since, and the second half is smaller than it looked:** the tighter deadline
+prices nothing at current cost levels. The frame deadline is 1,048,576 cycles either
+way — no instrument here budgets from the declared rate — the worst frame's work is
+59.4% of it in both arms of that probe (the pre-median clock's reading; the current
+image prints 53.964%), and a run against a stream that *declares* 32,768 has an
+`audio_span` digit-for-digit identical to the shipped one. It would bite only if
+work/frame approached the period. The pitch half stands unchanged.
+
+**Why it is a question rather than a defect.** Some resolution is forced: `agb`'s
+`Frequency` enum offers 32,768 Hz (and the other divisor rates), not 32,000, and the
+GBA's FIFO rate is a timer divider. The options, with what is already known about
+each:
+
+- **Encode at 32,768 Hz so the stream *is* the playback rate.** This is the bullet
+  that used to read "the encoder will simply do it". It is now measured (2026-11-11,
+  `measurements.md`, the 6b-3 rate row), and it survives with two corrections and one
+  reversal. What is free, measured: 32,768 is representable — the 4-bit rate table has
+  no entry for it, so the stream spells the rate as `0b0000` plus a stream default,
+  which changes **no frame length** (the shipped blob re-spelled that way is the same
+  865,996 bytes), or as `0b1101` plus a 16-bit Hz field, which is what `flac` itself
+  emits when simply asked and which costs 2 B/frame. `flac-lite` plays such a stream to
+  a **bit-identical PCM**, with the same `571/571` period audit, the same
+  `min_lead 9120`, zero underflows, and cycle counts that do not separate from the
+  shipped asset's at the instrument's floor. The corrections: "zero runtime cost" is
+  honest written as ±0.2% system / 0.005% decode-only, and "the packer's table changes"
+  understates what it takes — `gafp_pack` refuses the re-spelled asset for want of a row
+  keyed `(32768, 2048, fixed, 0)`, and every row it carries is a **hardware** figure, so
+  filling that key is a 7-1 hardware read rather than a transcription. The reversal: this
+  option fixes the pitch no better and no worse than relabelling does — measured, a
+  re-spelled stream changes no sample at all. The 41 cents lives in the resample step,
+  so the pipeline work is resample-at-32,768 → encode at the product profile → measure
+  the new key; and for a given playing time such a stream carries 2.4% more samples,
+  hence ≈2.4% more blob bytes (arithmetic, not measurement). What it forfeits is still
+  nothing *measured* — which is why it stays first, and why the honest status now is
+  that the runtime half of this question is closed and the product half is not.
+  **Ruled, 2026-11-11: this option is the product path.** What remains of it is work
+  (item 7-0), not decision.
+- **A nearest-programmable clock at 32,000.** Arithmetic from `agb`'s own formula
+  (`hw.rs`: `set_overflow_amount((16777216 / frequency) as u16)`, where the overflow
+  amount *is* the period in 2^24-scaled ticks): 2^24 / 32,000 = **524.288**, so the
+  nearest is 524 → **32,017.6 Hz**, 0.055% sharp ≈ **0.95 cents** — a thousand times
+  closer than the present 41. The cost is that the geometry's exact arithmetic dies:
+  512 cycles/sample and the compile-time pins in `geometry.rs` were chosen because the
+  number was an integer. Not run, not measured; it is arithmetic, and it belongs to
+  7-2's "is this the shipping path" decision rather than to this row. The measurement
+  above changes this option's ranking, not its arithmetic: an asset encoded at the
+  playback rate buys 0 cents with the integer arithmetic intact, so this one is now
+  cheaper only in the narrow sense that it re-uses the asset that exists.
+  **Ruled out 2026-11-11 by the same ruling:** it is a smaller reinterpretation, not
+  an end to one — 0.95 cents is still a stream played at a rate it does not declare —
+  and it spends the exact integer arithmetic the geometry's pins are built on.
+- **Resample in the player.** A new per-sample cost on the hot path, unmeasured, at a
+  point where the producer's measured work is 53.390% of a frame (53.062% on the pre-guard instrument) — payable in
+  principle, and the price is unknown. Not forbidden by the ruling in the way the
+  mapping above is (rate conversion changes the rate rather than reinterpreting it),
+  but not chosen either: the plan takes the encode-side route, because the place to
+  pay for a rate change is where it is free — at a desk, offline — and because this
+  option would put unmeasured work into the one path this project has measured as
+  tight. It stays unmeasured, and it is not the plan.
+
+**What is left is not a decision, it is an item.** The decision half closed on
+2026-11-11, so the remaining work is recorded as **7-0** in `plan-of-record.md`:
+resample the source to 32,768 Hz, encode it at the product profile (FIXED-0, 2048-sample
+frames, the residual shapes the guard admits), and land a **pitch witness** in the same
+PR — a tone fixture, because nothing in the existing gate set can see a pitch shift: the
+pinned PCM digest is byte-identical for the correct-rate asset and the reinterpreted
+one, which is precisely how a 41-cent error walked through every gate this asset has
+been through. 7-1 owns the hardware row at `(32768, 2048, fixed, 0)` that
+`gafp_pack`'s guard keys its product path on; that row is a silicon read, and the
+mGBA pair in this question's rows cannot fill it. The ordering is forced by the guard:
+the packer will build a 32,768 blob only under `--allow-unmeasured` with its
+`this is NOT a product blob` note attached, and the way that note comes off is 7-1's
+measurement, not anything obtainable at a desk.
+
+**Who owned it, and who owns the work now.** Until 2026-11-11 this was 7-2's call to
+make alongside the shipping-path decision. The ruling removes the call; what is left
+belongs to 7-0 (the 32,768 encode and the pitch witness) and 7-1 (the hardware row at
+the new key), and 7-2 inherits a real asset rather than an open question. Half the
+witness was already in before the ruling: representability, both rate spellings and
+their byte cost, the decoder's behaviour, bit-exactness against the pinned PCM and the
+cost (`measurements.md`, the 6b-3 rate row) — which is what makes the ruling affordable
+to accept: it costs pipeline work, not a redesign.

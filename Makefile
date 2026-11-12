@@ -10,6 +10,7 @@
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check gafp-check \
+        product-play-rom native-product-play-rom product-play-test \
         flac-rom-default-kernel native-flac-rom-default-kernel spike-test opus-test kernel-test \
         overlay-check overlay-check-arm overlay-test overlay-test-twin overlay-test-arm overlay-objdump \
         overlay-kernel-rom native-overlay-kernel-rom podman-overlay-kernel-rom overlay-kernel-test podman-overlay-kernel-test \
@@ -264,7 +265,22 @@ FLAC_CRATE_DIR := examples/flac_integration
 # Absolute manifest path for the flac-lite host gate (see `flac-test`: the gate
 # runs from outside the repo so the root's cargo config is not inherited).
 FLAC_CRATE_DIR_MANIFEST := $(abspath crates/flac-lite/Cargo.toml)
+# The manifest of the crate that builds the product ROMs, for the same reason the
+# host gates above use a manifest path and a neutral cwd: the repository-root
+# .cargo/config.toml sets `[unstable] build-std` and a default ARM target, and a
+# host-target test built under it gets a rebuilt-from-source `core` that collides
+# with the toolchain's prebuilt one ("duplicate lang item `sized`"). Running from
+# $(GATE_NEUTRAL_CWD) is how every other host gate here sidesteps that;
+# product-play-test is a host gate too, so it takes the same route.
+FLAC_INTEGRATION_MANIFEST := $(abspath examples/flac_integration/Cargo.toml)
 FLAC_CRATE_BIN := target/$(TARGET)/release/flac-integration
+# Plan item 6b-3 (2026-11-11): the product PLAYBACK ROM. A second binary of the
+# same crate as $(FLAC_ROM) — same blob, same kernel, same pins, same lockfile —
+# and the first image in this repository built to make sound at the target rate
+# rather than to measure a decode. Its judge is a counted underflow, not a
+# percentage; see `examples/flac_integration/src/product_play_main.rs`.
+PRODUCT_PLAY_ROM := product-play.gba
+PRODUCT_PLAY_BIN := $(FLAC_CRATE_DIR)/target/$(TARGET)/release/product-play
 # The perf-gate spike ROM crate (examples/flac_spike/) — Phase 1 step 4, see
 # FLAC.md "Perf gate spike". Its host witness gate runs the same out-of-tree
 # --manifest-path way as flac-test (cargo config leak; FLAC.md).
@@ -437,6 +453,52 @@ flac-rom-default-kernel: gafp-check format
 
 native-flac-rom-default-kernel: flac-rom-default-kernel
 	@echo "native-flac-rom-default-kernel done: $(FLAC_ROM_DEFAULT_KERNEL)"
+
+# ---------------------------------------------------------------------------
+# PLAN ITEM 6b-3 — THE PRODUCT PLAYBACK PATH AT THE TARGET RATE (2026-11-11)
+#
+# `flac-rom` answers "can this frame be decoded inside a 32,768 Hz frame?". That
+# question is answered and pinned (37.765% mean / 37.974% worst on hardware).
+# C2's question is the one after it: can the frame be decoded, converted, pushed
+# and *heard* with zero underruns, on a real unit. Nothing in this tree has ever
+# made sound above 10,512 Hz, so this target is the first headless witness that
+# the product protocol runs at all at 32,768 Hz — through the shipped GAFP
+# manifest, not the throwaway harness's generated offset table.
+#
+# No link-script machinery: agb's build script writes its own `gba.ld` into
+# OUT_DIR and adds that directory to the linker search path, which is the only
+# reason the inherited `-Tgba.ld` resolves from a standalone crate directory at
+# all. This ROM's ~43 kB of ring and DMA buffers therefore sit in stock EWRAM
+# (256 kB, of which the image asks for 43 kB) — there is no custom script in this
+# repository, whatever an earlier note claimed. That placement has a cycle cost
+# (`flac-rom` measures the EWRAM per-byte penalty at 3.482 c/B); the playback ROM
+# measures its own decode stage in situ precisely so that cost is counted rather
+# than assumed, and the ring is the first knob to turn if the reading says it is
+# large.
+# ---------------------------------------------------------------------------
+
+product-play-rom: gafp-check format
+	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin product-play
+	agb-gbafix $(PRODUCT_PLAY_BIN) -o $(PRODUCT_PLAY_ROM)
+	@echo "product-play ROM built: $(PRODUCT_PLAY_ROM) — run it with 'timeout -k 5 120 $(GBA_TEST_RUNNER) $(PRODUCT_PLAY_ROM)' and read the [pp-rom] log"
+	@echo "  (a passing run ends in 'verdict PASSED — screen BLUE' and then loops forever, so the timeout kills it and exits 124: read the log, not the status)"
+
+native-product-play-rom: product-play-rom
+	@echo "native-product-play-rom done: $(PRODUCT_PLAY_ROM)"
+
+# The host model behind the geometry: it replays the real frame sequence through
+# the SAME ring implementation and the SAME constants the ROM compiles (both come
+# from src/lib.rs), and it is where the flow-control rule and the buffer sizing
+# are justified instead of asserted. Separate from `rate-test` and `spike-test`
+# deliberately — those count the throwaway harness's witnesses, and this gate
+# grows as the product path's does.
+product-play-test:
+	@test $$(find $(FLAC_CRATE_DIR)/tests -name 'product_play_witness.rs' | wc -l) -eq 1 \
+	  || { echo "product-play-test: examples/flac_integration/tests/product_play_witness.rs is missing — the host model for this geometry has to exist before the geometry can be claimed"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --release --manifest-path $(FLAC_INTEGRATION_MANIFEST) --target $(HOST_TRIPLE) --test product_play_witness
+	@echo "product-play-test passed: the product geometry's ring, flow control and sizing are modelled on the host against the shipped manifest"
 
 # The generated blob's tripwire: rebuild it in memory and compare with the
 # committed copy. No encoder needed — it is assembled from committed generator

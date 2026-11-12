@@ -36,6 +36,13 @@ derating** instead of a probe.
 
 **Status in one line:** the decoder is complete and bit-exact; the playback harness
 plays real music at 10,512 Hz with correct tempo and pitch (audibly verified); the
+first product-play image runs that whole path at the full 32,768 Hz with zero
+underflows and a period audit that is part of the verdict, but **in mGBA headless only — never on hardware — so it is not a playback
+claim**; and the asset it plays is **not a product asset either** — it declares 32,000 Hz,
+and Q14 was ruled on 2026-11-11 that a stream is encoded at the rate it is played at, so
+1.024× (41.06 cents) disqualifies it however clean the run (6b-3; the
+re-encode is item **7-0**, and `TODO(Q14, BLOCKING)` greps in
+`examples/flac_integration/src/geometry.rs`); the
 **shipped** path — the core's default `TableCountKernel` — is still over budget at
 full rate (167% of the 32,768 Hz frame: that is the pre-kernel product reading, and
 the control re-read inside the 6b-1/6b-2 product images lands at 154.7%);
@@ -79,12 +86,127 @@ measurement step and not a spreadsheet edit.
 What has *not* changed across any of those rows: **no image in this repository
 makes sound above 10,512 Hz.** At the product rate every `verdict:` line in every
 arm prints OVER BUDGET, because there is no 32,768 Hz playback path at all — the
-only rig that plays is the throwaway spike. That is item **6b-3**, and C2 is
+only rig that plays is the throwaway spike. *(True as written at the time of this
+record, and now narrowed: 6b-3 landed at the headless level on 2026-11-11, and
+`product-play.gba` runs the whole product path — decode, stereo convert, ping-pong
+FIFO, a hand-built timer/DMA/IRQ feeder — at 32,768 Hz with `underflows=0`,
+`571/571` periods serviced and the PCM pin matched, in **mGBA only**. So "makes sound
+above 10,512 Hz" is still true of hardware, and "there is no 32,768 Hz playback path"
+is not: there is one, and it has never been on silicon.)* That was item **6b-3** — now
+landed at the headless level — and C2 is
 claimed only at item **7-3**: 2048-sample frames at 32,768 Hz, FIXED-0, both
-units, two runs each, underruns counted and equal to zero. And nothing built at
+units, two runs each, underruns counted and equal to zero — and, since Q14 was ruled on
+2026-11-11, at a rate the **stream declares** as well as a clock that plays it. The asset
+in `assets/` does not declare it, so 7-0 owns re-encoding it and the 32,768 Hz image 7-3
+will be judged on is not the one 6b-3 built. And nothing built at
 `main` after that PR has been run on hardware or on mGBA at all; the re-read table
 in [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) ("Re-read at
-HEAD") is the bridge from those rows to the current tree.
+HEAD") is the bridge from those rows to the current tree. *(Stale as a description of
+state: the images this tree builds have been run — the product path on GBA 001 and a
+GBA SP at 6b-1/6b-2, and the 6b-3 pair in mGBA only; every such run is a row in
+[`flac-docs/measurements.md`](flac-docs/measurements.md). What survives is the
+warning: a *later* HEAD owes its own re-read rather than inheriting one.)*
+
+**What that path plays at is fixed by the hardware and the library, not chosen here, and
+it is 8-bit.** The GBA's two direct-sound channels are 8-bit signed FIFO channels fed by
+DMA; the only freedom is the rate the refill timer runs at, and `agb` 0.25 narrows even
+that to three: `Frequency::{Hz10512, Hz18157, Hz32768}`. So the (rate, depth) grid this
+product can occupy is a handful of points, and the one item 7 is built for is
+**32,768 Hz / 8-bit** — which is why `playback::convert_frame` ends in `fifo_byte`'s
+`(sample >> 8) as u8` (agb's own WAV-converter and mixer convention, two's complement),
+why `SOUNDBIAS` is left in agb's 8-bit / 65,536 Hz PWM mode, and why `geometry`'s chunk
+is 560 **bytes** per channel = 140 DMA words. Consequence for reading every pin in this
+file: the 16-bit digests (`fnv_pcm`, `gafp_pin::FNV_PCM`, `fold_i16le_stereo`) are
+**decode** witnesses and say nothing about what the speaker plays. The product-play image
+now folds the 8-bit FIFO bytes too: `gafp_pin::FNV_FIFO_L/R`, over the converted stream,
+in its post-audio proof pass, gated as `fifo` in the verdict. Folding the same bytes on the
+push path was tried and measured first — the house FNV-1a is 64-bit and ARM7TDMI has no
+64-bit multiply, so 4,096 FIFO bytes/frame costs ≈800,000 cycles and the run failed at
+128.178% work/frame (`measurements.md`, the 6b-3 played-form row). The residual gap is
+stated: this is the converter's output for the same frames, not a capture of the DMA/DAC,
+and `RingFeed`'s byte copy is the host-witnessed bridge in between.
+This is a property of the target, not an open question — no pitch or timbre claim in this
+file is about depth, and the ~48 dB that 8-bit truncation implies (with no dither, because
+none is specified) is the product's floor rather than a defect to be fixed at item 7.
+
+**One question the rate mapping raised was measured, and then ruled (Q14, 2026-11-11).**
+The shipped asset is a **32,000 Hz** stream consumed by a **32,768 Hz** clock, so playback
+runs **1.024× fast, 41.06 cents sharp**. The cost half of that question measured as free:
+a stream that declares 32,768 Hz is representable two ways (there is no 4-bit rate code
+for it), `flac-lite` plays one to a bit-identical PCM with the same flow-control floor,
+the two product images' cycle counts do not separate from the shipped asset's at the
+instrument's floor, and the 2.4% deadline tightening prices nothing at current cost
+levels because the frame deadline is the player's clock either way.
+
+**The ruling, same day, by the project owner: a stream is encoded at the rate it will be
+played at, and the player does not reinterpret a declared rate to fit the clock.** The 41
+cents is not acceptable in itself — zero underflows, a matched PCM digest and a 571/571
+period audit do not buy it back — and the rule is general, which also rules out the
+nearest-programmable-clock route (a smaller reinterpretation is still one). So: the
+product asset moves to a resample-at-32,768 encode at the product profile (item **7-0**,
+which now comes **before** 7-1), the `32_000 → 32_768` bridge in
+`examples/flac_integration/src/geometry.rs` (`RATE_BRIDGE`, and the `playback_rate_for_stream`
+arm that reads it) is marked **`TODO(Q14, BLOCKING)`** as the
+measurement bridge it always was, and the guard against drifting back is a test —
+`ruled_rate_policy_allows_one_bridge_and_no_more` — that computes the cents rather than
+quoting them and refuses any further reinterpretation. Two things stay open and both are
+work: the measured row at the key the encode profile asks for, `(32768, 2048, fixed, 0)`,
+whose proper instrument is hardware (**7-1**), and a **pitch witness** — a tone fixture,
+which does not exist and which belongs with 7-0, because no gate in this repository can
+currently see a pitch shift at all: the pinned PCM digest of a correctly-encoded asset and
+of a reinterpreted one is the *same bytes*, and that is exactly how 41 cents cleared every
+gate this asset has been through. The numbers are the 6b-3 rate row in
+[`flac-docs/measurements.md`](flac-docs/measurements.md).
+
+**Measuring at 32,000 Hz was a mistake, and it is named here as one.** The *value* is fine:
+32,000 is one of FLAC's four-bit table rates, and 6a-7b's hardware rows were honestly
+taken on an encode at it — nobody can un-measure them, and `crates/flac-lite` has to know
+that code forever. What was wrong is making that rate the target the fixtures, the packer's
+default profile and the only measured decode-cost rows were all built at, while the only
+clock in the plan is 32,768 Hz: `scripts/gafp_pack.py` keyed its cost table by the *stream*
+rate and took the frame budget from the *playback* rate. One table, two rates, and a
+fixture forced to match the half that appears in the key — which is what made
+`32_000 → 32_768` load-bearing instead of absurd. A rate no piece of this project has ever
+played audio at ended up owning the product's only measured cost figures.
+
+**The failure mode being ruled out is the worst one this project has: audio coming back
+resampled or pitch-shifted away from what was encoded.** For an effort whose entire point is
+playing audio back correctly, 1.024× / **41.06 cents** is a correctness failure, not a
+matter of taste — and it is the one failure mode none of C2's other clauses can see, because
+a pinned PCM digest is a function of the samples, and the samples are identical whether they
+were authored for 32,000 Hz or for 32,768 Hz. A run may service 571 hardware periods,
+push and consume every sample and match its pin, and still come back 41 cents sharp. That is
+not a hypothetical: it is this asset, at every gate it has been through.
+
+**The fix, and what makes it stick.** One clock end to end: a stream is authored, encoded and
+declared at the rate the timer will run at, and the sample rate stops being a lookup
+dimension anywhere in the toolchain. `gafp_pack.py`'s `MEASURED_DECODE` gets re-keyed onto
+what decode cost actually depends on — blocksize, predictor kind and order, the residual
+envelope — which the rate probe measured directly rather than argued: relabelling 32,000 Hz
+to 32,768 Hz moved decode-only cost by **−20 c/frame**, the instrument's own floor. The rate
+becomes a *validity check* on the manifest instead, and that check belongs in
+`crates/flac-lite`'s `EncodeProfile`, which today guards blocksize, FIXED order, full LPC
+and bits-per-sample and has **no rate field at all** — the gap that let a mapping exist
+where a refusal should have been. The invariant is not new to this repository: the rate
+harness has held it throughout (`examples/flac_spike/src/rate_main.rs:27`, "encode rate ==
+playback rate per FRAME"; `scripts/frame_vectors.py:1930-1931`, a fixture outside that
+domain is refused outright), so 7-0 is porting an existing rule into the product path, and
+the two tables — `examples/flac_integration/src/geometry.rs::RATE_BRIDGE`
+(the `32_000` bridge, which `playback_rate_for_stream` reads) and
+`scripts/gafp_pack.py::PLAYBACK_RATE_FOR_STREAM` — leave with it,
+identity-or-refusal behind. And because nothing
+in the present gate set can see a pitch shift, 7-0's witness measures pitch: the implied Hz
+of the *decoded* PCM, by integer autocorrelation at integer lags with no float anywhere,
+plus a negative leg that authors a tone at 32,000 Hz and packs it as a 32,768 Hz asset, so a
+reinterpretation arrives red instead of hiding behind a matched digest. Two traps come with
+the retarget and are written up in
+[`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) under "Q14 follow-up", which
+also carries the full inventory of where 32,000 legitimately belongs — the spec rate table,
+ordinary codec test data, and the historical rows, all of which stay: the fixture generator
+specifies its tones in sample *periods*, so re-synthesising "the same" fixture at 32,768 Hz
+leaves the played pitch exactly where the defect is; and 32,768/32,000 is exactly 128/125,
+so an exact resample exists, but ffmpeg's `-ar` is float and float would break every byte
+pin in the repository — the same class of defect as the 6a-2 float-trig incident.
 
 **6a-7b measured the instrument on silicon: GBA 001 and GBA SP, two runs each, all four
 runs identical to the cycle.** Two results. The decode path is
@@ -241,11 +363,21 @@ unchanged, and the per-rung state lives in the plan of record:
    ROM (the placement 6a-5 assigned here). Serves C1 and C2's decode half.
 2. **6b-2** *(landed 2026-11-11, both halves)* — the real GAFP packer, `format::Manifest`, and a pack-time profile that
    refuses LPC at the target rate (174.14% of a 32 kHz frame on hardware).
-3. **6b-3** — rate-play at 32,768 Hz through a real manifest; the first product ROM
-   naming the overlay crate.
-4. **7-1 / 7-2 / 7-3** — re-measure the producer at 32 kHz on hardware, land the
-   shipping mixer/DMA path, then the acceptance run: underruns = 0 on both units.
-   **C2 is met at 7-3.**
+3. ~~**6b-3** — rate-play at 32,768 Hz through a real manifest; the first product ROM
+   naming the overlay crate.~~ *(Landed 2026-11-11 **at the headless level only**,
+   as landed: `product-play.gba` plus a host model of the same geometry — 571/571
+   periods serviced, zero underflows, PCM pin matched, in mGBA. What it does not close:
+   hardware, which is 7-1, and whether its hand-built timer/DMA/IRQ feeder is the
+   shipping path, which is 7-2. The question that second one would have owned — Q14, the
+   41-cent pitch shift — was ruled the same day this landed, and its answer changed what
+   this item is: the asset it plays declares 32,000 Hz, so it is measurement scaffolding
+   and not a product asset.)*
+4. **7-0**, then **7-1 / 7-2 / 7-3** — re-encode the product asset at 32,768 Hz, the rate
+   it is played at (Q14, ruled 2026-11-11), with a pitch witness in the same PR; then
+   re-measure the producer at 32 kHz on hardware against *that* asset, land the shipping
+   mixer/DMA path, and run the acceptance test: underruns = 0 on both units.
+   **C2 is met at 7-3**, and C2 now says in terms that the stream declares the rate it is
+   played at.
 5. **Parked:** Q13's data-read probe, and 6a-8. Re-open Q13 only if a product path
    needs the last 6% or a claim is made by scaling an mGBA cycle count.
 
@@ -333,10 +465,20 @@ unchanged, and the per-rung state lives in the plan of record:
   that half and named in the plan: the fixture axes `tests/README.md` lists, the
   cost axes the packer refuses rather than prices (FIXED-1..4, wider residual
   shapes), and the written shape of `gen_gafp_blob.py`'s retirement.
-- **6b-3** — rate-play at 32,768 Hz through a real manifest: the first product ROM
+- ~~**6b-3** — rate-play at 32,768 Hz through a real manifest: the first product ROM
   that makes sound at the target rate, driven by the manifest rather than the
   spike's generated offset table, and the thing item 7-1's stage timings have to be
-  taken on. Nothing above 10,512 Hz has ever made sound in this repository.
+  taken on. Nothing above 10,512 Hz has ever made sound in this repository.~~
+  *(Landed 2026-11-11 at the headless level. The image runs the target
+  rate and the whole product path — decode, convert, FIFO, a hand-built feeder — with
+  zero underflows and the PCM pin matched, but only ever in mGBA: nothing above 10,512
+  Hz has ever been* heard *in this repository, and the plan's record of 6b-3 says so in
+  those terms. It carries a second and sharper limit now: the asset it plays declares
+  32,000 Hz, and Q14 — ruled the same day — is that a stream is encoded at the rate it is
+  played at, so this image is measurement scaffolding and **7-0** owns the asset. Item 7-1
+  takes its stage timings on that image, not this one; 7-2 owns
+  whether this feeder is the shipping path. Numbers: the 6b-3 rows in
+  [`flac-docs/measurements.md`](flac-docs/measurements.md).)*
 - **Rate sweep** — the cross-rate profiling sweep on the improved decoder, which
   produces the "which rates become feasible" guidelines from measurement.
 

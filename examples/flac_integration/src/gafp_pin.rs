@@ -4,7 +4,10 @@
 //! gate's committed, host-witnessed pins so the ROM's correctness claim
 //! rests on a value something else already proved. `FNV_PCM` is
 //! `flac_spike::assets::L0_FIXED.fnv_pcm`: FNV-1a 64 over the clip's
-//! interleaved i16 little-endian stereo PCM as `flac -d` produced it.
+//! interleaved i16 little-endian stereo PCM as `flac -d` produced it — the
+//! **decode** witness. `FNV_FIFO_L` / `FNV_FIFO_R` are FNV-1a 64 over each
+//! channel's 8-bit FIFO bytes, `(sample >> 8) as u8`, in stream order — the
+//! **played-form** witness the product-play ROM folds in its post-audio proof.
 
 /// Frames in the blob (the manifest's frame count must equal this).
 pub const FRAMES: usize = 157;
@@ -12,8 +15,14 @@ pub const FRAMES: usize = 157;
 /// Interchannel samples per channel in the blob.
 pub const SAMPLES: u64 = 320000;
 
-/// The reference PCM pin.
+/// The reference PCM pin (decode witness; i16 interleaved).
 pub const FNV_PCM: u64 = 0x54C7B356621B6E15;
+
+/// Left channel's 8-bit FIFO bytes, in stream order (played-form witness).
+pub const FNV_FIFO_L: u64 = 0x7CC75F50B4DF75EC;
+
+/// Right channel's 8-bit FIFO bytes, in stream order (played-form witness).
+pub const FNV_FIFO_R: u64 = 0x916BA1AF3B1F4342;
 
 /// Highest FIXED predictor order the packer recorded for this clip.
 pub const MAX_FIXED_ORDER: u8 = 0;

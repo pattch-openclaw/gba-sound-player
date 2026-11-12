@@ -283,6 +283,22 @@ DECODE_SHARE_LIMIT_PCT = 50.0
 # is budgeted at its own rate — and has no measured row either, so it is refused
 # as unmeasured anyway.
 GBA_CYCLES_PER_SECOND = 16777216
+# `TODO(Q14, BLOCKING)` — ruled 2026-11-11 by the project owner: a stream is encoded at
+# the rate it will be played at, and the player does not reinterpret a declared rate to
+# fit the clock. This entry is 6b-3's measurement bridge (1.024x = +41.06 cents of
+# pitch), **not** a product path: it comes out when the asset is encoded at 32,768 Hz
+# (plan item 7-0). The player's half of the same bridge is `geometry::RATE_BRIDGE`,
+# which 7-0 sets to `None`; this table loses its entry in the same change, and the
+# identity mapping is all that should remain here. Until that
+# exists, a 32,768 Hz asset packs only under `--allow-unmeasured`, because
+# `MEASURED_DECODE` holds no row keyed `(32768, 2048, ...)` — and that row is 7-1's
+# hardware read, not a number this script may invent.
+# The keys are *declared stream* rates, not agb's three *playback* rates
+# (10,512 / 18,157 / 32,768; the product geometry is 32,768). A stream may
+# declare any FLAC table rate or a 16-bit Hz value. The Q14 sweep is over that
+# declarable set (0..=65535 plus the table), which is cheap; 7-0 replaces this
+# table with identity-or-refusal. The player is already stricter than this
+# fallback: `geometry::playback_rate_for_stream` refuses every unlisted rate.
 PLAYBACK_RATE_FOR_STREAM = {32000: 32768}
 
 

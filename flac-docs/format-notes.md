@@ -78,7 +78,18 @@ right all along, which is what pinned it):
 default — see the profile section below. (Rates that *do* have uncommon-code
 representations — measured 56000 as `0b1100`, 48001 as `0b1101`, 10010 as
 `0b1110` — encode **without** `--lax`, unlike 65,536, which has no code at all.
-Both paths now carry golden vectors.)
+Both paths now carry golden vectors.) **32,768 Hz is in the same family**: no 4-bit
+code (`0b1000` is 32,000, and there is no other table entry near it), so it travels
+either as `0b1101` + the exact 16-bit Hz — what `flac` 1.5.0 emits when simply asked
+for 32,768, at **2 bytes per frame** — or as `0b0000` + a 32,768 stream default, at
+**zero** size cost. The second spelling was measured end to end on the product path:
+a re-wrap of the shipped 157 frames that way is the same 865,996 bytes, passes
+`flac -t`, and decodes to the shipped PCM bit for bit — `measurements.md`, the 6b-3
+rate row, and Q14. The probe that measured both spellings is committed
+(`examples/flac_spike/experiments/rate-respell-32768/`), and so is the trap: `flac -t`
+**exits 0 while printing one warning per frame** when the blocksize fields are written
+the wrong way, so a re-wrap check that trusts the exit status passes a stream the
+decoder is misreading.
 
 **Channel assignment**: `0b0000` mono · `0b0001` L/R · `0b0010..0b0111` 3–8
 channels · `0b1000` left/side · `0b1001` side/right · `0b1010` mid/side ·
@@ -340,6 +351,7 @@ that read like documentation, which is what made it survive review.
 | Uncommon sample rate is stored as 8 \| 16 \| **24** bits | §9.1.7: 8-bit kHz, 16-bit Hz, 16-bit Hz÷10 — **never 24-bit** | §9.1.7 + libFLAC 1.5.0 encodes of 56000/48001/10010 Hz; a 24-bit read strands the cursor 8 bits short of the CRC-8 |
 | Blocksize codes `0b1110..0b1111` are "reserved"; `144·2ᵛ` starts at `0b0101` | Table 14: `0b0010..0b0101` are the `144·2ᵛ` family, and `0b1110`/`0b1111` are **16384/32768** | Table 14 while writing the blocksize table test; the Python oracle had it right, the prose did not |
 | Real headers are 6 or 7 bytes (asserted over the golden set) | **6 to 9** bytes: the uncommon blocksize/rate octets lengthen the header | Regenerating vectors with the tail/rate streams — the old assertion failed immediately, which is what it was for |
+| A hand-written STREAMINFO may record the short tail in its min/max blocksize fields | libFLAC records the **full-block** extremes — 2048/2048 for a 2048-block stream whose last block is 512 — and `total_samples` is what carries the short tail. Writing 512/2048 instead makes the reference decoder treat the stream as variable-blocksize and print `sample or frame number does not increase correctly` for every frame — **as a warning: `flac -t` still exits 0**, so the status is not the test | `flac -t` over a re-wrap of the shipped 157 frames, both ways: 157 warnings vs `ok`. Also: `flac -d` writes a 44-byte RIFF header whatever the output file is named, so hashing the file rather than its `data` chunk turns a bit-exact decode into a false mismatch |
 | LPC `precision_bits` rides in the subframe-type field (`0b00`→15-bit, `0b01`→16-bit) | The type field carries **no** precision. §9.2.6 Table 22: `u(4)` = precision−1 (0b1111 forbidden) sits in the **body**, after the warm-up samples, then `s(5)` shift, then coefficients | Reading §9.2.6 to implement `SubframeType::parse`; confirmed by walking the field at the real cursor on `-l 4` encodes |
 | `SubframeType::parse` reads the type field "plus the order bits that follow" | Nothing follows. Order lives *inside* the 6-bit code: FIXED = v−8, LPC = v−31 (Table 19) | Table 19 while writing `parse` — reading trailing order bits would strand the cursor inside the wasted-bits run |
 | Subframe layout `[type][warm-up][wasted bits][residual]` | `[type][wasted bits][warm-up][residual]` — wasted precedes warm-up, and must: warm-up width is `subframe bps × order`, and subframe bps = frame bps − wasted | §9.2.5/§9.2.6 width formulas while placing `parse`'s exit cursor |
