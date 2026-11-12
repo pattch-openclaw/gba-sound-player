@@ -107,6 +107,22 @@ GBA SP at 6b-1/6b-2, and the 6b-3 pair in mGBA only; every such run is a row in
 [`flac-docs/measurements.md`](flac-docs/measurements.md). What survives is the
 warning: a *later* HEAD owes its own re-read rather than inheriting one.)*
 
+**What that path plays at is fixed by the hardware and the library, not chosen here, and
+it is 8-bit.** The GBA's two direct-sound channels are 8-bit signed FIFO channels fed by
+DMA; the only freedom is the rate the refill timer runs at, and `agb` 0.25 narrows even
+that to three: `Frequency::{Hz10512, Hz18157, Hz32768}`. So the (rate, depth) grid this
+product can occupy is a handful of points, and the one item 7 is built for is
+**32,768 Hz / 8-bit** — which is why `playback::convert_frame` ends in `fifo_byte`'s
+`(sample >> 8) as u8` (agb's own WAV-converter and mixer convention, two's complement),
+why `SOUNDBIAS` is left in agb's 8-bit / 65,536 Hz PWM mode, and why `geometry`'s chunk
+is 560 **bytes** per channel = 140 DMA words. Consequence for reading every pin in this
+file: the 16-bit digests (`fnv_pcm`, `gafp_pin::FNV_PCM`, `fold_i16le_stereo`) are
+**decode** witnesses and say nothing about what the speaker plays. A gate that ever wants
+to witness the *played* audio has to fold the 8-bit FIFO bytes, not the decoded samples.
+This is a property of the target, not an open question — no pitch or timbre claim in this
+file is about depth, and the ~48 dB that 8-bit truncation implies (with no dither, because
+none is specified) is the product's floor rather than a defect to be fixed at item 7.
+
 **One question the rate mapping raised was measured, and then ruled (Q14, 2026-11-11).**
 The shipped asset is a **32,000 Hz** stream consumed by a **32,768 Hz** clock, so playback
 runs **1.024× fast, 41.06 cents sharp**. The cost half of that question measured as free:

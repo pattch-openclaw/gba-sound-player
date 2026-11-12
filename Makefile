@@ -481,6 +481,7 @@ product-play-rom: gafp-check format
 	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin product-play
 	agb-gbafix $(PRODUCT_PLAY_BIN) -o $(PRODUCT_PLAY_ROM)
 	@echo "product-play ROM built: $(PRODUCT_PLAY_ROM) — run it with 'timeout -k 5 120 $(GBA_TEST_RUNNER) $(PRODUCT_PLAY_ROM)' and read the [pp-rom] log"
+	@echo "  (a passing run ends in 'verdict PASSED — screen BLUE' and then loops forever, so the timeout kills it and exits 124: read the log, not the status)"
 
 native-product-play-rom: product-play-rom
 	@echo "native-product-play-rom done: $(PRODUCT_PLAY_ROM)"
