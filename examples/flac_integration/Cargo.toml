@@ -26,7 +26,10 @@ edition = "2024"
 # the baseline ROM is unaffected if this experiment breaks.
 
 [dependencies]
-agb = "0.25.0"
+# The decoder itself is platform-free, so it is a plain dependency: the host model
+# in tests/ uses the same one the ROMs do, which is the only reason a host-side
+# claim about the product geometry means anything about hardware at all.
+#
 # `iwram-pin`: this GBA ROM opts in to the core's .iwram pin (off by default
 # in the core since 2026-11-02; split-proposal ladder step 2).
 # `scan`: 6b-1 made the manifest facade a shell over the frame walk, so this is
@@ -38,6 +41,16 @@ flac-lite = { path = "../../crates/flac-lite", features = ["iwram-pin", "scan"] 
 # path to name `rice-arm` — before this rung the kernel existed only in an
 # instrument (6a-4/6a-5). Optional so the codegen A/B can build the same ROM
 # with the default kernel and nothing else changed.
+#
+# ARM-only, and that is not packaging taste: `agb` (and `critical-section` through
+# it) cannot compile for the host at all — agb enables portable-atomic's
+# `unsafe-assume-single-core`, which is a hard `compile_error!` off ARM. Putting
+# the platform bindings under `cfg(target_arch = "arm")` is what makes
+# `make product-play-test` able to build this crate's library for the host: the
+# library is platform-free by design (see src/lib.rs), and the dependency graph
+# now says the same thing the source does.
+[target.'cfg(target_arch = "arm")'.dependencies]
+agb = "0.25.0"
 flac-lite-gba = { path = "../../crates/flac-lite-gba", optional = true }
 
 [features]
@@ -51,6 +64,25 @@ arm-kernel = ["dep:flac-lite-gba", "flac-lite-gba/rice-arm", "flac-lite-gba/iwra
 [[bin]]
 name = "flac-integration"
 path = "src/main.rs"
+
+# Plan item 6b-3: the product playback path at 32,768 Hz. A second binary of the
+# same crate on purpose, not a third example crate and not a modification of
+# `main.rs`: the two images must share one feature table, one lockfile, one
+# linker-script convention and one set of pins, so that the playback claim and the
+# decode claim cannot be built from different things.
+#
+# It uses the linker script `agb`'s own build script writes into OUT_DIR and the
+# inherited `-Tgba.ld` — there is deliberately no `product_play.ld` in this
+# repository, and an early draft that passed one failed at link time
+# (`rust-lld: error: cannot find linker script product_play.ld`). The ring and
+# ping-pong buffers need no special placement: the stock script puts them in EWRAM
+# (`.bss` at 02000190, 0xa6b0 bytes in the current image), which is where a
+# 40 kB ring belongs anyway. What the placement *does* cost is decode speed, and
+# that is measured rather than assumed — see the `decode cross-check` line in the
+# run report.
+[[bin]]
+name = "product-play"
+path = "src/product_play_main.rs"
 
 [workspace]
 
