@@ -29,8 +29,8 @@
 //! own mixer or from the GBA's clock. In register terms this ROM programs what
 //! `agb::sound::mixer` would program for `Frequency::Hz32768`: timer0 reloaded
 //! with `0 − 16777216/32768` (agb `sound/mixer/hw.rs:100`), a cascaded timer1
-//! reloaded with `0 − 560` and interrupting (`mixer/sw_mixer.rs:167-171`), and a
-//! a sound-FIFO DMA to a fixed destination in repeat mode, re-armed once per period
+//! reloaded with `0 − 560` and interrupting (`mixer/sw_mixer.rs:167-171`), and the
+//! sound-FIFO DMA to a fixed destination in repeat mode, re-armed once per period
 //! from a 140-word buffer, FIFO A on DMA1
 //! and FIFO B on DMA2 (`hw.rs`'s pairing, which the rate ROM's first draft got
 //! one channel wrong and Sam's ears caught, 2026-10-19). The mixer-domain
@@ -168,7 +168,9 @@
 //! for a 32,000 Hz stream, so their nominal period is 1,073,741 cycles while this
 //! timer's is 1,048,576 — 2.4 % tighter. [`geometry::frame_cycles`] already prices
 //! the tighter one, so nothing here is discounted, and the same probe measured that
-//! the tightening costs nothing at current work levels (worst frame 59.4 % either way).
+//! the tightening costs nothing at current work levels (worst frame 59.4 % in both
+//! arms of that probe — the pre-median clock, so that is its reading and not this
+//! image's; this image's worst frame is 53.965 %).
 //!
 //! ## What this ROM deliberately does not do
 //!
@@ -779,19 +781,25 @@ mod rom {
     impl Stage {
         fn note(&mut self, cycles: u32, boundaries: u16) {
             self.n += 1;
-            self.inside += u32::from(boundaries);
             // A window over half the counter's range is not a measurement: at
             // this rate that is ~4 s, longer than any stage here can legitimately
-            // run, so it means the clock was read wrong (or wrapped).
+            // run, so it means the clock was read wrong (or wrapped). A void window
+            // counts in `n` (it happened) but is excluded from `sum`, `inside`,
+            // `worst` and `best` — none of them is a price, and it fails the verdict
+            // anyway, so no quoted number ever contains one.
             if cycles >= u32::MAX / 2 {
                 self.void += 1;
                 return;
             }
+            self.inside += u32::from(boundaries);
             self.sum += u64::from(cycles);
-            if self.n == 1 || cycles > self.worst {
+            // The first *measured* window sets both extremes, not the first window
+            // seen: a void one would otherwise leave `best` pinned at 0 forever.
+            let measured = self.n - self.void;
+            if measured == 1 || cycles > self.worst {
                 self.worst = cycles;
             }
-            if self.n == 1 || cycles < self.best {
+            if measured == 1 || cycles < self.best {
                 self.best = cycles;
             }
         }
@@ -1058,10 +1066,15 @@ mod rom {
             Ok(pushed)
         }
 
-        /// One frame: decode, convert, push. The whole clip's worth of flow
-        /// control and accounting, so the prefill and the fed phase run the same
-        /// code and cannot drift. The caller decides when to call it; this decides
-        /// what one frame is.
+        /// One frame of the **prefill**: decode, convert, push, with no stage windows
+        /// (the prefill is not timed — see the module docs) and no flow-control wait
+        /// (the ring is empty, so there is always room). The fed phase is
+        /// [`Producer::fed_frame`], which shares the same `decode_one` /
+        /// `convert_frame` / `push_bytes` seam but wraps each step in a measured window
+        /// and waits for room first. The two are deliberately separate functions and
+        /// not one: their error paths and their bookkeeping differ, and the aliasing
+        /// rule (one critical section per push, never across a wait) is easier to see
+        /// twice than to thread through a flag.
         fn decode_and_push(&mut self) -> Result<usize, Halt> {
             let frame = match decode_one(&mut self.decoder, &mut self.bufs) {
                 Ok(Some(f)) => f,
@@ -1355,7 +1368,7 @@ mod rom {
         producer.ledger.audio_start = unsafe { audio_cycles() };
         let periods_x100 = geo::PLAYBACK_RATE_HZ * 100 / CHUNK as u32;
         agb::println!(
-            "[pp-rom] armed: {}.{:02} periods/s of {} cycles, frame budget {} cycles; IE=0x{:04X} IME={} (witness: only the timer1 bit should be set)",
+            "[pp-rom] armed: {}.{:02} periods/s of {} cycles, frame budget {} cycles; IE=0x{:04X} IME={} (witness: timer1 is set and no other timer bit is — agb keeps VBlank, which is not part of the audio chain)",
             periods_x100 / 100,
             periods_x100 % 100,
             PERIOD_CYCLES,

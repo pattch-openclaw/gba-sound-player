@@ -130,12 +130,21 @@ pub const CHUNK_SAMPLES: usize = 560;
 ///   longer prefill (`PREFILL_SAMPLES` + one frame's reserve = 11,008 samples).
 ///   So the prefill choice puts a floor under the depth choice before any cost is
 ///   considered, and the two knobs are one decision rather than two.
-/// - **What depth buys against a *sustained* overage is real and finite.** With
-///   no ring in the picture the producer fails at 152.9% of the measured cost;
-///   with this ring it fails at 190.6% (178.1% against the hardware derate). The
-///   refill is therefore worth ~38 points
-///   of sustained overage — a purchase, not an infinite cushion
-///   (`sustained_overage_tolerance` bisects both).
+/// - **What depth buys against a *sustained* overage is nothing; against a
+///   *transient* it is time.** A frame of audio is 3.657 periods of this clock
+///   (`frame_cycles(2048) / PERIOD_CYCLES`, and the fraction is the point), so a
+///   producer that keeps up forever can spend at most
+///   `(PERIOD_CYCLES − feeder) × 3.657` cycles per frame — **186.5%** of the measured
+///   cost — and that ceiling is a property of the clock, not of [`RING_CHUNKS`]: a
+///   bounded buffer cannot pay a permanent deficit. What a deep ring can do is spend
+///   its lead *once*, which on the shipped 9.766 s clip shows up as **4.1 points** of
+///   extra overage above the ceiling (190.6% of the measured cost; 178.1% at the
+///   derate), and shrinks as the clip lengthens — the same search on a clip twice as
+///   long lands at 188.2% (`sustained_overage_tolerance` runs both). An earlier
+///   version of this comment — and of that test — divided `frame_cycles` by
+///   `PERIOD_CYCLES` as integers, quoted the truncated 3-period bound as 152.9%, and
+///   so credited the ring with "~38 points" of sustained overage. It buys transient
+///   tolerance, which is measured next door at 17 periods in hand.
 /// - **What depth buys in the regime a decoder actually operates in is time.** A
 ///   transient costs the lead in hand, and at this rate the lead in hand *is* a
 ///   period count: stop the producer entirely and the ring is holding 17 periods'
@@ -217,6 +226,17 @@ pub const DMA_WORDS: u16 = (CHUNK_SAMPLES / 4) as u16;
 // The stream rate vs the playback rate
 // ---------------------------------------------------------------------------
 
+/// The **only** rate reinterpretation this tree carries, as `(declared, played)`.
+///
+/// `Some((32_000, PLAYBACK_RATE_HZ))` is 6b-3's measurement bridge, ruled not a
+/// product path on 2026-11-11 (Q14). **`TODO(Q14, BLOCKING)` — item 7-0 sets this to
+/// `None`,** which removes the mapping and leaves the identity rule alone. It is a
+/// named constant rather than a `match` arm for one reason: the guard in
+/// `tests/product_play_witness.rs` reads the tree's actual bridge from here instead of
+/// inferring one from a mapping it would then have to `unwrap`, so 7-0 is green at
+/// both ends of its own edit and red only if it lands half-way.
+pub const RATE_BRIDGE: Option<(u32, u32)> = Some((32_000, PLAYBACK_RATE_HZ));
+
 /// The playback rate this *stream* rate is played at. **For the product there is one
 /// legitimate answer and it is the stream's own rate; every other entry on this table
 /// is scaffolding** (Q14, ruled 2026-11-11 — the block below is the ruling).
@@ -236,12 +256,14 @@ pub const DMA_WORDS: u16 = (CHUNK_SAMPLES / 4) as u16;
 /// above prices the tight one. No instrument in this repository budgets from the
 /// declared rate — every share here is divided by the timer's frame — and the
 /// 2026-11-11 rate probe measured that the tightening prices nothing at current
-/// cost levels: same `audio_span`, same period count, worst frame 59.4% either way.
+/// cost levels: same `audio_span`, same period count, worst frame 59.4% in both arms
+/// of that probe (it ran on the pre-median clock, so 59.4% is that instrument's
+/// reading and not this image's — the current image prints 53.965%).
 ///
 /// **RULED (Q14, 2026-11-11, by the project owner): a stream is encoded at the rate
 /// it is played at, and the player does not reinterpret a declared rate to fit the
 /// clock. The 41 cents this mapping buys is not acceptable in any circumstances, so
-/// the product carries a true 32,768 Hz stream and the `32_000` arm below is not a
+/// the product carries a true 32,768 Hz stream and the bridge above is not a
 /// shipping path.**
 ///
 /// **Two rate sets, not one.** `agb` 0.25 can *play* 10,512 / 18,157 / 32,768 Hz,
@@ -258,8 +280,8 @@ pub const DMA_WORDS: u16 = (CHUNK_SAMPLES / 4) as u16;
 /// not product rates. Exactness of the division is a property of the clock, not a
 /// ruling about the stream.
 ///
-/// **`TODO(Q14, BLOCKING)` — delete the `32_000` arm when the 32,768 product asset
-/// exists, and add nothing to this table before then.** Unblocking is four steps and
+/// **`TODO(Q14, BLOCKING)` — set [`RATE_BRIDGE`] to `None` when the 32,768 product
+/// asset exists, and add nothing to this table before then.** Unblocking is four steps and
 /// none of them are format work: resample the source to 32,768, encode it at the
 /// product profile, measure on hardware the row `(32768, 2048, fixed, 0)` that
 /// `gafp_pack`'s guard asks for (7-1), and re-run the play path against the result —
@@ -278,14 +300,13 @@ pub const DMA_WORDS: u16 = (CHUNK_SAMPLES / 4) as u16;
 /// obstacle; the pipeline and the pitch are. `flac-docs/measurements.md`, the 6b-3
 /// rate row; `flac-docs/open-questions.md`, Q14; `flac-docs/plan-of-record.md`, 7-0.
 pub fn playback_rate_for_stream(stream_rate_hz: u32) -> Option<u32> {
-    match stream_rate_hz {
-        // **`TODO(Q14, BLOCKING)`** — this is the measurement bridge, not a product
-        // path: it buys 2.4% of speed and 41.06 cents of pitch. Ruled out on
-        // 2026-11-11; it stays only until 7-0 replaces the asset, and it is deleted
-        // here when that lands.
-        32_000 => Some(32_768),
+    match RATE_BRIDGE {
+        // **`TODO(Q14, BLOCKING)`** — the measurement bridge, not a product path: it
+        // buys 2.4% of speed and 41.06 cents of pitch. Ruled out on 2026-11-11; it
+        // leaves when `RATE_BRIDGE` becomes `None` and the 32,768 Hz asset lands (7-0).
+        Some((declared, played)) if stream_rate_hz == declared => Some(played),
         // A stream that already declares the target rate needs no mapping.
-        PLAYBACK_RATE_HZ => Some(PLAYBACK_RATE_HZ),
+        _ if stream_rate_hz == PLAYBACK_RATE_HZ => Some(PLAYBACK_RATE_HZ),
         _ => None,
     }
 }

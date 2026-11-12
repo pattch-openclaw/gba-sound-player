@@ -144,8 +144,9 @@ cents is not acceptable in itself — zero underflows, a matched PCM digest and 
 period audit do not buy it back — and the rule is general, which also rules out the
 nearest-programmable-clock route (a smaller reinterpretation is still one). So: the
 product asset moves to a resample-at-32,768 encode at the product profile (item **7-0**,
-which now comes **before** 7-1), the `32_000 → 32_768` arm in
-`examples/flac_integration/src/geometry.rs` is marked **`TODO(Q14, BLOCKING)`** as the
+which now comes **before** 7-1), the `32_000 → 32_768` bridge in
+`examples/flac_integration/src/geometry.rs` (`RATE_BRIDGE`, and the `playback_rate_for_stream`
+arm that reads it) is marked **`TODO(Q14, BLOCKING)`** as the
 measurement bridge it always was, and the guard against drifting back is a test —
 `ruled_rate_policy_allows_one_bridge_and_no_more` — that computes the cents rather than
 quoting them and refuses any further reinterpretation. Two things stay open and both are
@@ -190,8 +191,9 @@ where a refusal should have been. The invariant is not new to this repository: t
 harness has held it throughout (`examples/flac_spike/src/rate_main.rs:27`, "encode rate ==
 playback rate per FRAME"; `scripts/frame_vectors.py:1930-1931`, a fixture outside that
 domain is refused outright), so 7-0 is porting an existing rule into the product path, and
-the two tables — `examples/flac_integration/src/geometry.rs::playback_rate_for_stream`
-(the `32_000` arm) and `scripts/gafp_pack.py::PLAYBACK_RATE_FOR_STREAM` — leave with it,
+the two tables — `examples/flac_integration/src/geometry.rs::RATE_BRIDGE`
+(the `32_000` bridge, which `playback_rate_for_stream` reads) and
+`scripts/gafp_pack.py::PLAYBACK_RATE_FOR_STREAM` — leave with it,
 identity-or-refusal behind. And because nothing
 in the present gate set can see a pitch shift, 7-0's witness measures pitch: the implied Hz
 of the *decoded* PCM, by integer autocorrelation at integer lags with no float anywhere,

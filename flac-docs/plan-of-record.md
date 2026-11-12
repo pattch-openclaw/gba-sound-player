@@ -151,16 +151,20 @@ identity-or-refusal in the packer/player is 7-0's.)*
 
 *(Report hygiene, 2026-11-12: the host model's cost envelope was still the **2026-11-11**
 image's, three builds after it was written. It is now re-read from the image the tree
-builds — decode 65,079,938 + convert 17,331,888 + push 2,263,016 over 152 windows =
+builds (and then re-read once more after the arithmetic pass below, from `c0d3ac36…`:
+**557,022 raw / 551,159 attributed / 422,248 decode** — the figures the model uses now;
+the numbers in this paragraph are the pass that first fixed the staleness) — decode
+65,079,938 + convert 17,331,888 + push 2,263,016 over 152 windows =
 **557,070 raw**, less 159 boundaries at that run's own 5,641 c = **551,170 attributed** —
 and its decode half then derives **422,257**, which is the `isolated_estimate` that same
 image prints on its own `attribution:` line, so the two instruments now agree on that
 figure instead of disagreeing by 1,363 c against the older build. The sustained ceilings
-belong to whichever envelope is charged, so they move with it: **152.9% / 190.6% /
-178.1%** (absolute throughput bound 843,237 c/frame) where the 2026-11-11 image gave
-153.6% / 191.3% / 178.8% — 0.26% lower percentages over a 0.26% higher envelope, the
-ring's purchase unchanged at 377 per mille, the depth and prefill cliffs unchanged at 20
-and 1 chunks. No conclusion of 6b-3's moves. What the pass adds is traceability with a
+belong to whichever envelope is charged, so they move with it: the clock's own bound is
+**186.5%** of the measured cost (**1,027,946 c/frame**), the shipped clip survives to
+**190.6%** and a clip twice as long to **188.2%**, and the derate puts the shipped-clip
+figure at **178.1%** — the ring adds **4.1 points** of *time*, not 38 points of throughput
+(see correction 4). The depth and prefill cliffs are unchanged at 20 and 1 chunks. No
+conclusion of 6b-3's moves. What the pass adds is traceability with a
 stated limit: the constants now name the run they were read from, and
 `the_envelope_is_the_runs_own_sums` locks the sums, means, boundary charge and attributed
 estimate to each other, so a half-edited envelope fails the gate — but no host test reads
@@ -181,7 +185,7 @@ project owner's ruling: a stream is encoded at the rate it is played at, and the
 does not reinterpret a declared rate to fit the clock — 1.024× is **41.06 cents**, and no
 period audit buys that back. So `examples/flac_integration/assets/spike_l0.gfp` is **not
 a product asset**, 6b-3 is infrastructure rather than a product path, the
-`32000 → 32768` arm in `geometry.rs` carries a `TODO(Q14, BLOCKING)`, and item 7's first
+`32000 → 32768` mapping in `geometry.rs` (`RATE_BRIDGE`) carries a `TODO(Q14, BLOCKING)`, and item 7's first
 PR is an asset at the rate it will be played at (**7-0**). Nothing measured in 6b-3 is
 wasted by the ruling — the rate probe measured a stream *declaring* 32,768 decoding
 bit-identically at the same flow-control floor and the same cost — but the sequence in
@@ -2130,7 +2134,7 @@ shipped 32,000 Hz asset on a 32,768 Hz clock. The project owner ruled on 2026-11
 that a stream is encoded at the rate it is played at and the player does not
 reinterpret a declared rate: **1.024× is 41.06 cents**, and zero underflows, a matched
 PCM digest and a 571/571 period audit do not buy that back. So the asset in `assets/`
-is **not a product asset**, `geometry.rs`'s `32_000` arm is measurement scaffolding with
+is **not a product asset**, `geometry.rs`'s `RATE_BRIDGE` is measurement scaffolding with
 a `TODO(Q14, BLOCKING)` on it, and the guard against ever drifting back is
 `ruled_rate_policy_allows_one_bridge_and_no_more`, which computes the cents instead of
 quoting them and refuses any further reinterpretation. What 6b-3 established — the play
@@ -2225,7 +2229,7 @@ model measures two tolerances that the plan and `geometry.rs` had been treating 
 
 | the question | the answer, measured |
 |---|---|
-| how much of a **sustained** producer overage survives? | **152.9%** of the measured cost with no ring in the picture; **190.6%** with the shipped one (178.1% at the hardware derate) — at the envelope the current image prints. The 2026-11-11 image's envelope gave 153.6% / 191.3% / 178.8%; a percentage of "the measured cost" belongs to the envelope under it, so the pair travels together. Either way the ring's refill buys ~38 points of sustained overage and then nothing. |
+| how much of a **sustained** producer overage survives? | **186.5%** of the measured cost, and that is the clock's own throughput bound — `(PERIOD_CYCLES − feeder) × 3.657` = **1,027,946 c/frame** — which ring depth cannot move: a bounded buffer cannot pay a permanent deficit. With the shipped ring the *shipped clip* survives to **190.6%** (**4.1 points** of lead spent once; 178.1% at the hardware derate) and a clip twice as long to **188.2%**, so the ring's purchase is time, not throughput and it shrinks with clip length. |
 | how long can the producer **stop**? | **17 periods of audio in hand** at the shipped geometry — the quantised prefill of 10,240 less the prime of 560 — with the **18th period the first with nothing to take**. The lead ceiling is two numbers, not one: the deepest lead at which the flow control will still **start** a frame is **32 periods** (`(ring − declared blocksize)/period`, because it holds a frame's worth free before decoding), while a frame already started pushes its 2,048 samples into that reserve, so the lead **peaks** at 35 chunks in the ROM and at the ring's full 36 in the model. |
 | what is the smallest ring that carries the measured cost (plus the standing derate)? | **20 chunks**, and 20 is not a cost answer: below it the geometry cannot prefill at all. The 16-chunk prefill sets the floor under the depth (`8,960 + 2,048 = 11,008` samples), so the two knobs are one decision. |
 | what is the smallest prefill that carries it? | **1 chunk** (lead floor 368 samples). Prefill costs boot time; depth costs 40 kB of EWRAM. That is why the prefill is set high and the depth is the number worth arguing about. |
@@ -2235,7 +2239,8 @@ is 17 periods in hand with starvation at the 18th, and the 32 that appears in th
 arithmetic is the lead at which a frame
 will still be *started*, not a depth the lead reaches — the observed peaks are 35 and
 36), "a deep ring buys tolerance for a sustained
-overage" (it buys ~38 points of it, not an unbounded amount), and "the minimum prefill
+overage" (it does not: the ceiling is the clock's 186.5% however deep the ring, and depth
+buys 4.1 points of *time* on this clip, less on a longer one), and "the minimum prefill
 lands near 2 chunks" (it is 1). `geometry.rs` now cites the measurements instead of the
 assertions.
 
@@ -2276,16 +2281,17 @@ record only survives by writing down.
    carried the 2026-11-11 image's sums through three later builds of the same geometry,
    so it was charging a producer that no longer existed while its own name promised it
    was the run's sums. Re-read from the image this tree builds (`694126d406eb9b2a…`, the
-   row `measurements.md` carries as current): 65,079,938 + 17,331,888 + 2,263,016 over
+   row `measurements.md` then carried as current): 65,079,938 + 17,331,888 + 2,263,016 over
    152 windows = **557,070 raw**, less 159 boundaries at 5,641 c = **551,170
    attributed**, and the decode half derives 428,157 − 5,900 = **422,257** — the
    `isolated_estimate` that image prints for itself, so the ROM and the model now derive
    that one number identically (against 420,894 on the earlier image, which its own rows
-   keep). The ceilings in the table above are therefore re-stated at **152.9% / 190.6%
-   / 178.1%** with an absolute throughput bound of 843,237 c/frame: the percentages are
-   0.26% lower because the envelope beneath them is 0.26% higher, the ring's purchase is
-   unchanged at 377 per mille, and the depth/prefill cliffs stay at 20 and 1 chunks. No
-   conclusion turns on that either. The mechanism and its limit are worth stating: the
+   keep). The ceilings in the table above were briefly re-stated at 152.9% / 190.6% /
+   178.1% with an absolute throughput bound of 843,237 c/frame, and the ring's purchase at
+   377 per mille; **those three numbers were a truncation error and are superseded by
+   correction 4 below.** The depth/prefill cliffs stay at 20 and 1 chunks. No
+   conclusion turns on the envelope re-read either way. The mechanism and its limit are
+   worth stating: the
    constants are now tied to a *named* run of the image the tree builds, and the test
    locks the sums, means, boundary charge and attributed estimate to each other, so a
    half-edited envelope fails — but no host test reads a ROM log, so a build that moves
@@ -2296,6 +2302,29 @@ record only survives by writing down.
    constants from it — is written against 7-1 in the sequence table. The record's rows for
    the superseded images keep their own figures, exactly as the `.gba` hash-pin rule in
    `measurements.md` requires.
+4. *The sustained-overage ceiling, and with it the ring's purchase (2026-11-12, the
+   arithmetic pass).* Items 2 and 3 fixed which **envelope** was charged; the arithmetic
+   on top of it was still wrong. `frame_cycles(2048) / PERIOD_CYCLES` is **3.657** periods
+   per frame, but the test divided as integers and used 3, so the "no ring in the
+   picture" bound it printed was `281,079 × 3 = 843,237 c/frame = 152.9%` of the measured
+   cost. The honest bound is `281,079 × 1,048,576 / 286,720 =` **1,027,946 c/frame =
+   186.5%** — 18% higher, which is exactly the fraction of a frame's cycles the truncation
+   dropped. That changes what the ring is credited with: the shipped clip survives to
+   190.6% and a doubled one to 188.2%, so depth buys **41 per mille = 4.1 points** of
+   overage, not the "377 per mille / ~38 points" the record carried — and it buys them as
+   *time*, a one-off lead, not as throughput, which a bounded buffer cannot provide at any
+   depth. `sustained_overage_tolerance` now multiplies before dividing and bisects two
+   clip lengths, asserting both that the tolerance falls and that it never goes below the
+   clock's ceiling. The old assertion could not catch the error because it compared the
+   measured tolerance against the same truncated bound (`lo >= bound` was trivially true);
+   the pitfall is written into `measurements.md`. No geometry decision moves — the depth
+   cliff is still 20 chunks because it is prefill-bound, the prefill cliff is 1, and the
+   transient answer is still the measured 17 periods in hand — which is why this is a
+   test-and-record correction rather than a redesign. The model's envelope is re-read once
+   more from the image this pass builds (`c0d3ac36e4580a7c…`): 65,073,008 + 17,331,966 +
+   2,262,520 over 152 windows = **557,022 raw**, less 158 boundaries at 5,641 c =
+   **551,159 attributed**, decode half **422,248** — the figure that image prints for
+   itself.
 
 **What 6b-3 does not say.** It is not C2, and the gap is not narrow: this image has
 been run on **no hardware**, its stage shares are mGBA system-path numbers, and the
@@ -2399,7 +2428,7 @@ ports the invariant the rest of the tree already enforces.
 
 | where | what it is doing | 7-0 action |
 |---|---|---|
-| `examples/flac_integration/src/geometry.rs::playback_rate_for_stream` (the `32_000` arm), `scripts/gafp_pack.py::PLAYBACK_RATE_FOR_STREAM`, and their guard `examples/flac_integration/tests/product_play_witness.rs::ruled_rate_policy_allows_one_bridge_and_no_more` — its `PRODUCT_STREAM_RATES` allow-list and its `.expect("the bridge is still in the tree; 7-0 removes it")` | the bridge itself, plus the arithmetic the guard learned from it | delete the arm and the table entry, and the `expect` goes red at exactly that moment — that is the tripwire. The allow-list assert is written as **one** condition (the asset in this tree is allowed exactly when no bridge is present), so a 7-0 that lands half of it is red, and when both halves land the same assert *is* the product rule: identity for a declared-rate match, refusal for everything else. Cited by symbol, not by line: the earlier version of this row cited a line and an `assert_ne!` that this PR's own next commit had already moved |
+| `examples/flac_integration/src/geometry.rs::RATE_BRIDGE` (the `32_000` bridge; also what `playback_rate_for_stream` reads), `scripts/gafp_pack.py::PLAYBACK_RATE_FOR_STREAM`, and their guard `examples/flac_integration/tests/product_play_witness.rs::ruled_rate_policy_allows_one_bridge_and_no_more` — its `PRODUCT_STREAM_RATES` allow-list and its `RECORDED_BRIDGE` pin | the bridge itself, plus the arithmetic the guard learned from it | set `RATE_BRIDGE` to `None` and delete the table entry, and the assert is green in both end states — nothing has to be deleted to un-red it. The allow-list assert is written as **one** condition (the asset in this tree is allowed exactly when no bridge is present), so a 7-0 that lands half of it is red, and when both halves land the same assert *is* the product rule: identity for a declared-rate match, refusal for everything else. Cited by symbol, not by line: the earlier version of this row cited a line and an `assert_ne!` that this PR's own next commit had already moved |
 | `scripts/gafp_pack.py` `MEASURED_DECODE` (its two product-profile rows) with `playback_rate()` / `frame_budget_cycles()` | the stream rate as a cost key, the playback rate as the denominator | re-key to blocksize + predictor + residual envelope; rate becomes a validity check; the budget comes from the one constant clock, which also settles the 2^24-vs-16,780,000 dual denominator 7-1 already owns |
 | `scripts/gafp_pack.py::DEFAULT_RATE = 32000` (and the rationale comment above it), and `check_guard_shapes()` (including the `32000` its own self-witness hard-codes) | 32,000 as the default target — and the guard's own self-witness hard-coding it, so a retarget silently stops witnessing the real target | the default becomes the device's rate; the self-check derives its rate from the profile so it can never again be pinned to a stale one |
 | `crates/flac-lite/src/format.rs::EncodeProfile` (`:507-522`), `DEFAULT_PROFILE` (`:524-530`) | no rate clause at all — the library never checks the rate of the stream it is guarding | add an allowed-rates clause to the profile; the example-side mapping then has nothing left to map |
@@ -2480,7 +2509,7 @@ they are ~43% of the frame against decode's 42.72%.
 
 | PR | Scope | Witness | Failure it isolates |
 |---|---|---|---|
-| **7-0** | **The asset at the rate it will be played at.** Q14 was ruled on 2026-11-11: a stream is encoded at the rate it is played at, and the player does not reinterpret a declared rate to fit the clock. So: re-author the fixture at 32,768 Hz — from Hz, not by reusing the sample periods in `frame_vectors.py:263`, which would leave the played pitch exactly where the defect is — and encode it at the product profile (FIXED-0, 2048-sample frames, the residual shapes the guard admits: a fresh census, not this asset's; and an explicitly short final frame, because 10 s at 32,768 Hz is exactly 160 full frames and the short-frame witness would otherwise stop running). Take the `32_000` arm out of `geometry.rs` and the `32000` entry out of `gafp_pack.py`'s `PLAYBACK_RATE_FOR_STREAM`, leaving identity-or-refusal. Take the sample rate out of `MEASURED_DECODE`'s key, so cost is keyed by blocksize, predictor kind/order and residual envelope — the variables the 6b-3 rate probe showed cost actually depends on — with the rate becoming a *validity check* on the manifest instead, and one constant clock in the arithmetic rather than two. Put the missing rate clause into `crates/flac-lite`'s `EncodeProfile`, which today checks blocksize, FIXED order, LPC and bit depth and never the rate of the stream it is guarding. The full inventory of where 32,000 lives and which uses are legitimate, the two traps (sample-period fixtures; 128/125 is an exact ratio but ffmpeg's `-ar` is float and float breaks every byte pin here), and the probe showing that real material censuses FIXED 1-4 and so is a profile decision rather than a pipeline swap, are in the "Q14 follow-up" section that closes the 6b-3 record, immediately above this table. It will pack at first only under `--allow-unmeasured`, and that is the honest state rather than a shortcut: the `this is NOT a product blob` note comes off when 7-1's row exists. For the same playing time such a stream carries 2.4% more samples, so expect ~2.4% more blob — arithmetic, and worth measuring rather than assuming. | A **pitch witness in the same PR**: a tone whose implied pitch is measured out of the *decoded* PCM by integer autocorrelation at integer lags (no float — that is the defect class the 6a-2 float-trig incident is about) and checked against the rate the stream declares, plus the negative leg that authors the same tone at 32,000 Hz and packs it as a 32,768 asset, so a reinterpretation is witnessed red rather than assumed caught. Nothing in the present gate set can see a pitch shift at all — the pinned digest of a 32,000 Hz asset and of a reinterpreted one are the *same bytes*, which is how 41 cents passed every gate this asset has been through. Plus the profile guard with no relaxation flags, and `ruled_rate_policy_allows_one_bridge_and_no_more` failing exactly once at the first half of this item — its `.expect("the bridge is still in the tree; 7-0 removes it")` is the tripwire that goes red when the arm is deleted — while its `PRODUCT_STREAM_RATES` allow-list assert, written as one condition (the asset is allowed exactly when no bridge is present), goes red on any **half**-landed 7-0 and becomes the product's identity-or-refusal check once both halves have landed. | That every gate 6b-3's asset cleared was deaf to its one real defect — and that 7-1 and 7-3 would otherwise be run against an asset the product cannot ship. |
+| **7-0** | **The asset at the rate it will be played at.** Q14 was ruled on 2026-11-11: a stream is encoded at the rate it is played at, and the player does not reinterpret a declared rate to fit the clock. So: re-author the fixture at 32,768 Hz — from Hz, not by reusing the sample periods in `frame_vectors.py:263`, which would leave the played pitch exactly where the defect is — and encode it at the product profile (FIXED-0, 2048-sample frames, the residual shapes the guard admits: a fresh census, not this asset's; and an explicitly short final frame, because 10 s at 32,768 Hz is exactly 160 full frames and the short-frame witness would otherwise stop running). Take the `32_000` arm out of `geometry.rs` — set `RATE_BRIDGE` to `None` — and the `32000` entry out of `gafp_pack.py`'s `PLAYBACK_RATE_FOR_STREAM`, leaving identity-or-refusal. Take the sample rate out of `MEASURED_DECODE`'s key, so cost is keyed by blocksize, predictor kind/order and residual envelope — the variables the 6b-3 rate probe showed cost actually depends on — with the rate becoming a *validity check* on the manifest instead, and one constant clock in the arithmetic rather than two. Put the missing rate clause into `crates/flac-lite`'s `EncodeProfile`, which today checks blocksize, FIXED order, LPC and bit depth and never the rate of the stream it is guarding. The full inventory of where 32,000 lives and which uses are legitimate, the two traps (sample-period fixtures; 128/125 is an exact ratio but ffmpeg's `-ar` is float and float breaks every byte pin here), and the probe showing that real material censuses FIXED 1-4 and so is a profile decision rather than a pipeline swap, are in the "Q14 follow-up" section that closes the 6b-3 record, immediately above this table. It will pack at first only under `--allow-unmeasured`, and that is the honest state rather than a shortcut: the `this is NOT a product blob` note comes off when 7-1's row exists. For the same playing time such a stream carries 2.4% more samples, so expect ~2.4% more blob — arithmetic, and worth measuring rather than assuming. | A **pitch witness in the same PR**: a tone whose implied pitch is measured out of the *decoded* PCM by integer autocorrelation at integer lags (no float — that is the defect class the 6a-2 float-trig incident is about) and checked against the rate the stream declares, plus the negative leg that authors the same tone at 32,000 Hz and packs it as a 32,768 asset, so a reinterpretation is witnessed red rather than assumed caught. Nothing in the present gate set can see a pitch shift at all — the pinned digest of a 32,000 Hz asset and of a reinterpreted one are the *same bytes*, which is how 41 cents passed every gate this asset has been through. Plus the profile guard with no relaxation flags, and `ruled_rate_policy_allows_one_bridge_and_no_more` failing exactly once at the first half of this item — its `.expect("the bridge is still in the tree; 7-0 removes it")` is the tripwire that goes red when the arm is deleted — while its `PRODUCT_STREAM_RATES` allow-list assert, written as one condition (the asset is allowed exactly when no bridge is present), goes red on any **half**-landed 7-0 and becomes the product's identity-or-refusal check once both halves have landed. | That every gate 6b-3's asset cleared was deaf to its one real defect — and that 7-1 and 7-3 would otherwise be run against an asset the product cannot ship. |
 | **7-1** | **Re-measure the producer at the target rate.** The 10,512 Hz producer pass (convert / push / wait / closure) repeated at 32,768 Hz with the kernel in the decode slot. Measurement only — no new product code, and it runs against **7-0's** asset.
 **It also re-runs `make product-play-test` against that asset**: the geometry's own
 answers are asset-shaped — the sizing scans' depth cliff (20 chunks) and prefill cliff

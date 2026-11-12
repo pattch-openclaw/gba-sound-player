@@ -37,14 +37,17 @@
 //! lead itself peaks at the ring's 36.
 //! A **sustained overage** — the producer costing more than its share forever,
 //! which is what a wrong clock assumption or a slower part would mean — is bounded
-//! by *throughput*: 152.9% of the measured cost with no ring in the picture, 190.6%
-//! with this one (178.1% at the hardware derate). So a deep ring is worth ~38 points
-//! of sustained overage and then nothing further, while being worth a great deal of
-//! stall — the two numbers are nowhere near each other, which is why
-//! [`sustained_overage_tolerance`] and
-//! [`burst_stall_tolerance`] measure them separately instead of quoting one
-//! "generous margin" figure that would mean whichever of the two the reader
-//! happened to need.
+//! by *throughput*, and by nothing else: a frame of audio is
+//! `frame_cycles / PERIOD_CYCLES` = **3.657** periods of the mixer clock, so a
+//! producer that keeps up forever may spend `(PERIOD_CYCLES − feeder) × 3.657`
+//! cycles per frame — **186.5%** of the measured cost. Ring depth does not move that
+//! number, because a bounded buffer cannot pay a permanent deficit; what depth buys
+//! is *time*, its lead spent once, which on the shipped 9.766 s clip shows up as a
+//! few points of overage above the ceiling (190.6%, 178.1% at the hardware derate)
+//! and shrinks as the clip lengthens. [`sustained_overage_tolerance`] measures the
+//! clip and a doubled one; [`burst_stall_tolerance`] measures the transient that the
+//! depth *is* worth. The two are juxtaposed rather than averaged because their
+//! mechanisms differ: one is the clock, the other is the lead in hand.
 //!
 //! ## What the model cannot see
 //!
@@ -71,11 +74,14 @@
 //! ## Where the cost figures come from
 //!
 //! From a run, not an estimate: `product-play.gba` as this tree builds it — sha
-//! `750d01e97800de95…`, the image `flac-docs/measurements.md` carries as its current
-//! 6b-3 row — run under mGBA, whose serial log gives [`MEASURED`] and
-//! [`FEEDER_PER_PERIOD`]. That image's log `diff`s **byte-identical** to the run of
-//! `694126d406eb9b2a…` it follows (the change between them is comments and these
-//! constants), so the sums below are what both printed. The envelope is tied to the bytes
+//! `c0d3ac36e4580a7c…`, the image this pass rebuilt after correcting the sustained-overage
+//! arithmetic, the rate guard's shape and a handful of instrument descriptions — run under
+//! mGBA, whose serial log gives [`MEASURED`] and [`FEEDER_PER_PERIOD`]. Its ledger, period
+//! audit, `min_lead`/`max_lead`, PCM and FIFO pins are the same as `750d01e97800de95…`'s
+//! run; the stage sums and the attribution moved by a few tens of cycles because a string
+//! and the code around it changed length, not because the player's work did (work/frame
+//! 559,800 vs 559,848, one period boundary moved from the decode windows to a push window).
+//! The envelope is tied to the bytes
 //! the ROM is built from on purpose: when a code change moves that image's `stages` line,
 //! this block has to be re-read from a fresh run in the same change. Be exact about what
 //! witnesses that: no host test reads a ROM log, so [`the_envelope_is_the_runs_own_sums`]
@@ -155,30 +161,30 @@ fn decoded_frames(manifest: &Manifest<'_>) -> Vec<FrameBytes> {
 // paid for once (the hand-computed FNV vector, `method-and-gates.md`'s false-green
 // catalogue), and the first version of this block was a transcription that got the
 // attribution wrong: it priced 538 period boundaries because 538 is the count the
-// *closure* line reports across all four stages, while only 159 of them fall inside
-// the three windows whose sums it was subtracting them from (the other 379 are in
-// `wait`, which is not part of producer work). Derived from the sums below, the two
-// figures cannot drift apart again, and `the_envelope_is_the_runs_own_sums` checks
-// the derivation against the ROM's printed means.
+// *closure* line reports across all four stages, while only 158 of them fall inside
+// the decode windows whose sums it was subtracting them from (379 are in `wait` and
+// one in `push`, and neither belongs in a decode window's subtraction). Derived from
+// the sums below, the two figures cannot drift apart again, and
+// `the_envelope_is_the_runs_own_sums` checks the derivation against the ROM's printed
+// means.
 
-/// The current image's mGBA run — `750d01e97800de95…`, byte-identical to the log of
-/// `694126d406eb9b2a…` before it — `[pp-rom] stages`, as the sums
+/// The current image's mGBA run — `c0d3ac36e4580a7c…` — `[pp-rom] stages`, as the sums
 /// and counts that run printed. Means are recomputed here; nothing is copied. Re-read
 /// these five from a fresh run whenever ROM code changes: the sums are the only honest
 /// source, and the test named in the header re-checks them against the means that same
 /// run prints.
-const DECODE_SUM: u64 = 65_079_938;
-const CONVERT_SUM: u64 = 17_331_888;
-const PUSH_SUM: u64 = 2_263_016;
+const DECODE_SUM: u64 = 65_073_008;
+const CONVERT_SUM: u64 = 17_331_966;
+const PUSH_SUM: u64 = 2_262_520;
 /// Fed-phase windows: the frames decoded with the audio running. 152 = the 157
 /// frames less the 5 the prefill decoded before arming; the consumer's tail (one
 /// period, 240 real samples) is not a decode window at all.
 const STAGE_WINDOWS: u64 = 152;
 /// Period boundaries that fell **inside the decode windows** — the only ones
 /// nested in producer work. `convert` and `push` report `boundaries_in=0`.
-const DECODE_BOUNDARIES_INSIDE: u64 = 159;
+const DECODE_BOUNDARIES_INSIDE: u64 = 158;
 /// The same run's feeder: total over 571 serviced periods.
-const FEEDER_SUM: u64 = 3_221_393;
+const FEEDER_SUM: u64 = 3_221_180;
 const PERIODS_SERVICED: u64 = 571;
 
 /// The feeder's own cost per period, from the same run: the mean of 571 measured
@@ -200,23 +206,26 @@ const fn window_mean(sum: u64) -> u64 {
 
 /// The producer's own work per frame with the nesting left in: the three stage
 /// means added, which is exactly what the ROM's "decode + convert + push" line
-/// says (428,157 + 114,025 + 14,888 = 557,070).
+/// says (428,111 + 114,026 + 14,885 = 557,022).
 const MEASURED_RAW: u64 =
     window_mean(DECODE_SUM) + window_mean(CONVERT_SUM) + window_mean(PUSH_SUM);
 
 /// The same envelope with the boundaries nested inside those windows priced out of
-/// it, because that time belongs to the interrupt, not to the producer: 557,070 −
-/// (159/152) × 5,641 = 551,170.
+/// it, because that time belongs to the interrupt, not to the producer: 557,022 −
+/// (158/152) × 5,641 = 551,159.
 ///
 /// That subtraction is the attribution the ROM prints itself, and it is the same
-/// arithmetic — 428,157 − (159/152) × 5,641 = 422,257 — which is the very
+/// arithmetic — 428,111 − (158/152) × 5,641 = 422,248 — which is the very
 /// `isolated_estimate` that image prints on its `attribution:` line, so the model and
-/// the ROM derive that one figure identically. The earlier image in this lineage
-/// (`5dc7869…`) printed 420,894 by the same arithmetic, and the record's rows for that
-/// image keep that figure. It is an estimate: an interrupt's entry
-/// cost is not separable from the work it interrupted, which is why the
-/// unattributed figure is charged too, in [`MEASURED_RAW`], and why nothing here
-/// turns on the difference.
+/// the ROM derive that one figure identically. One period boundary landed in a `push`
+/// window this run, and this envelope prices only the decode windows' nesting, so the
+/// model is charged ~37 c/frame more than the ROM's fully attributed producer figure —
+/// the conservative direction, and it moves nothing. The earlier images in this lineage
+/// (`5dc7869…`, `750d01e9…`) printed 420,894 and 422,257 by the same arithmetic, and the
+/// record's rows for those images keep those figures. It is an estimate: an interrupt's
+/// entry cost is not separable from the work it interrupted, which is why the
+/// unattributed figure is charged too, in [`MEASURED_RAW`], and why nothing here turns
+/// on the difference.
 const MEASURED: u64 = MEASURED_RAW - FEEDER_PER_PERIOD * DECODE_BOUNDARIES_INSIDE / STAGE_WINDOWS;
 
 /// The plan's standing hardware derate for memory-heavy stages, applied as a second
@@ -726,8 +735,8 @@ fn fifo_pins_match_the_converted_stream() {
 
 /// The cost envelope the rest of these tests are charged is the run's own sums, and
 /// the derivation is arithmetic a reader can re-do from the log: the three stage
-/// means add to 557,070 as printed, the 159 boundaries inside the decode windows
-/// price out at (159/152) × 5,641 = 5,900, and 428,157 − 5,900 = 422,257 is the
+/// means add to 557,022 as printed, the 158 boundaries inside the decode windows
+/// price out at (158/152) × 5,641 = 5,863, and 428,111 − 5,863 = 422,248 is the
 /// `isolated_estimate` that same image prints for itself.
 ///
 /// This test exists because the block it guards was a transcription first, and the
@@ -739,27 +748,27 @@ fn fifo_pins_match_the_converted_stream() {
 fn the_envelope_is_the_runs_own_sums() {
     assert_eq!(
         window_mean(DECODE_SUM),
-        428_157,
+        428_111,
         "the ROM printed this mean"
     );
     assert_eq!(
         window_mean(CONVERT_SUM),
-        114_025,
+        114_026,
         "the ROM printed this mean"
     );
-    assert_eq!(window_mean(PUSH_SUM), 14_888, "the ROM printed this mean");
-    assert_eq!(FEEDER_PER_PERIOD, 5_641, "3,221,393 / 571, as printed");
-    assert_eq!(MEASURED_RAW, 557_070, "the ROM's decode + convert + push");
+    assert_eq!(window_mean(PUSH_SUM), 14_885, "the ROM printed this mean");
+    assert_eq!(FEEDER_PER_PERIOD, 5_641, "3,221,180 / 571, as printed");
+    assert_eq!(MEASURED_RAW, 557_022, "the ROM's decode + convert + push");
 
     // The attribution, computed the way the ROM computes it (its own per-window
     // `inside` over its own `n`), against the constant this file charges.
     let nested = FEEDER_PER_PERIOD * DECODE_BOUNDARIES_INSIDE / STAGE_WINDOWS;
-    assert_eq!(nested, 5_900);
-    assert_eq!(MEASURED, 551_170);
+    assert_eq!(nested, 5_863);
+    assert_eq!(MEASURED, 551_159);
     let isolated_decode = window_mean(DECODE_SUM) - nested;
     assert_eq!(
-        isolated_decode, 422_257,
-        "the image prints `attribution: decode ... isolated_estimate=422257` itself; the \
+        isolated_decode, 422_248,
+        "the image prints `attribution: decode ... isolated_estimate=422248` itself; the \
          model derives that number from the same sums, and if it moves the two records \
          have parted company"
     );
@@ -910,7 +919,7 @@ fn zero_underflow_at_the_measured_cost_and_at_the_derate() {
 /// variance test it does not cover. `ROM_WORST_WORK` is the **largest** worst-frame
 /// decode+convert+push any recorded build of this geometry has reported — 565,939 c,
 /// the played-form row in `flac-docs/measurements.md`; the image this tree builds
-/// measures 565,867 c, and runs of a single image differ by up to 72 c. Charging the
+/// measures 565,859 c, and runs of a single image differ by up to 72 c. Charging the
 /// largest recorded value, rather than transcribing whichever log was read last, is the
 /// conservative direction and the one that does not rot when the image is rebuilt. It
 /// is charged at every *fed-phase* position in turn. The prefill frames are skipped: the ROM
@@ -1053,31 +1062,21 @@ fn flow_control_floor_is_the_declared_blocksize() {
 // 3. what the geometry is actually worth
 // ---------------------------------------------------------------------------
 
-/// How much more the producer can cost, *for the whole clip*, before an underrun
-/// appears.
+/// The largest producer cost, in per mille of `base`, that survives the whole of
+/// `frames` with no underrun. Bisection in integers, so no float enters the search.
 ///
-/// This is the number a wrong clock assumption, a slower part, or a profile
-/// relaxation would spend, and it is not the same number as the burst tolerance in
-/// [`burst_stall_tolerance`]. The mechanism is throughput: past some multiplier the
-/// producer can no longer deliver its 0.2734 frames per period, and from there the
-/// ring loses a little every period. Its depth buys a specific and computable
-/// amount of that — the refill — which is why the answer is larger than the
-/// throughput-only bound and not unboundably larger.
-#[test]
-fn sustained_overage_tolerance() {
-    let manifest = Manifest::parse(BLOB).expect("parses");
-    let frames = decoded_frames(&manifest);
-    let total = usize::try_from(manifest.total_samples()).unwrap();
-
-    // Bisection in per-mille, so no float enters the search.
+/// It is a function rather than three hand-copied loops because the interesting
+/// comparison is between *scenarios* — measured, derated, and a clip twice as long —
+/// and hand-copying is how the earlier version of this test ended up printing a
+/// ceiling it had truncated with integer division.
+fn tolerate_per_mille(frames: &[FrameBytes], total: usize, base: u64) -> u64 {
     let survives = |work: u64| -> bool {
-        let out = run::<{ geo::RING_SAMPLES }>(&Settings::shipped(work), &frames, total);
+        let out = run::<{ geo::RING_SAMPLES }>(&Settings::shipped(work), frames, total);
         out.underruns == 0 && out.consumed == total
     };
-
     let mut lo: u64 = 1_000;
     let mut hi: u64 = 1_000;
-    while survives(MEASURED * hi / 1000) {
+    while survives(base * hi / 1000) {
         lo = hi;
         hi *= 2;
         assert!(
@@ -1087,62 +1086,103 @@ fn sustained_overage_tolerance() {
     }
     while hi - lo > 10 {
         let mid = (lo + hi) / 2;
-        if survives(MEASURED * mid / 1000) {
+        if survives(base * mid / 1000) {
             lo = mid;
         } else {
             hi = mid;
         }
     }
+    lo
+}
+
+/// How much more the producer can cost before an underrun appears — and the two
+/// different quantities that answer for two different clip lengths.
+///
+/// This is the number a wrong clock assumption, a slower part, or a profile
+/// relaxation would spend, and it is not the same number as the burst tolerance in
+/// [`burst_stall_tolerance`]. The mechanism is throughput, and the arithmetic is a
+/// fraction: a frame of audio is `frame_cycles / PERIOD_CYCLES` = **3.657** periods of
+/// the mixer clock (not 3 — the fraction is the whole point), so a producer that keeps
+/// up forever may spend `(PERIOD_CYCLES − feeder) × 3.657` cycles per frame, i.e.
+/// **186.5%** of the measured cost. That ceiling is a property of the clock; **no ring
+/// depth can move it**, because a bounded buffer cannot pay a permanent deficit.
+///
+/// What the ring can buy is *time* — its lead, spent once. On the shipped 9.766 s clip
+/// that is worth a few points of overage above the ceiling; double the clip and it is
+/// worth less, because the lead is fixed and the deficit is not. This test measures the
+/// first and the trend of the last. An earlier version divided `frame_cycles` by
+/// `PERIOD_CYCLES` as integers, quoted the truncated 3-period bound as 152.9%, and so
+/// reported the ring's one-off lead as "~38 points of sustained overage".
+#[test]
+fn sustained_overage_tolerance() {
+    let manifest = Manifest::parse(BLOB).expect("parses");
+    let frames = decoded_frames(&manifest);
+    let total = usize::try_from(manifest.total_samples()).unwrap();
+
+    // The ceiling that needs no simulation, computed as the fraction it is. Multiply
+    // before dividing: `frame_cycles / PERIOD_CYCLES` truncated to 3 periods per frame
+    // is 18% of a frame's cycles thrown away, which is exactly the error the first
+    // version made.
+    let throughput_bound = (u64::from(geo::PERIOD_CYCLES) - FEEDER_PER_PERIOD)
+        * u64::from(geo::frame_cycles(2048))
+        / u64::from(geo::PERIOD_CYCLES);
+    let ceiling = throughput_bound * 1000 / MEASURED;
+    println!(
+        "model/sustained: throughput-only ceiling (no ring in the picture, and no depth can move it) = {} c/frame = {} per mille of the measured {}; a frame is {}/{} = 3.657 periods",
+        throughput_bound,
+        ceiling,
+        MEASURED,
+        geo::frame_cycles(2048),
+        geo::PERIOD_CYCLES
+    );
+
+    let lo = tolerate_per_mille(&frames, total, MEASURED);
     // The same search at the derate, because a tolerance measured on an emulator is
     // a tolerance of the emulator.
-    let derated_work = Settings::derate(MEASURED);
-    let survives_dera = |work: u64| -> bool {
-        let out = run::<{ geo::RING_SAMPLES }>(&Settings::shipped(work), &frames, total);
-        out.underruns == 0 && out.consumed == total
-    };
-    let mut dlo: u64 = 1_000;
-    let mut dhi: u64 = 1_000;
-    while survives_dera(derated_work * dhi / 1000) {
-        dlo = dhi;
-        dhi *= 2;
-        assert!(dhi < 100_000);
-    }
-    while dhi - dlo > 10 {
-        let mid = (dlo + dhi) / 2;
-        if survives_dera(derated_work * mid / 1000) {
-            dlo = mid;
-        } else {
-            dhi = mid;
-        }
-    }
-
-    // And the bound that needs no simulation: the producer is handed
-    // `PERIOD_CYCLES - feeder` cycles per period, and owes a frame every
-    // `frame_cycles / PERIOD_CYCLES` periods. That is a pure-throughput ceiling on
-    // the cost, at which the ring never fills and never empties.
-    let periods_per_frame = u64::from(geo::frame_cycles(2048)) / u64::from(geo::PERIOD_CYCLES);
-    let throughput_bound = (u64::from(geo::PERIOD_CYCLES) - FEEDER_PER_PERIOD) * periods_per_frame;
+    let dlo = tolerate_per_mille(&frames, total, Settings::derate(MEASURED));
     println!(
-        "model/sustained: throughput-only ceiling (no ring in the picture) = {} c/frame = {} per mille of the measured {}",
-        throughput_bound,
-        throughput_bound * 1000 / MEASURED,
-        MEASURED
-    );
-    println!(
-        "model/sustained: with the shipped ring, measured cost survives up to {} per mille ({:.1}% over); at the hardware derate, up to {} per mille over the derated cost — the excess over the ceiling above is exactly what the ring's refill buys, and it is finite",
+        "model/sustained: at the shipped clip the measured cost survives up to {} per mille over budget ({} points of the measured cost: {} per mille is the clock's ceiling, {} per mille is the ring's lead being spent); at the hardware derate, up to {} per mille over the derated cost",
         lo,
         (lo - 1000) as f64 / 10.0,
+        ceiling,
+        lo.saturating_sub(ceiling),
         dlo
     );
-    let _ = MEASURED * lo / 1000;
+
+    // The same search on a clip twice as long: the ring's contribution must shrink,
+    // because it is a fixed number of cycles of lead covering a deficit that grows with
+    // the clip. A bounded ring buys time, not throughput — if this ever stops falling,
+    // the model is claiming the second while measuring the first.
+    let long_frames: Vec<FrameBytes> = frames.iter().chain(frames.iter()).cloned().collect();
+    let long_total: usize = long_frames.iter().map(|(l, _)| l.len()).sum();
+    let llo = tolerate_per_mille(&long_frames, long_total, MEASURED);
+    println!(
+        "model/sustained: at twice the clip ({:.2} s) the same search lands at {} per mille — {} per mille of the ring's help spent, and the trend is the arithmetic: the lead is fixed, the deficit is not",
+        long_total as f64 / f64::from(geo::PLAYBACK_RATE_HZ),
+        llo,
+        lo - llo
+    );
+
     assert!(
         lo >= 1_500,
-        "the shipped geometry must survive at least a 50% sustained overage of the measured producer cost; found {} per mille",
+        "the shipped geometry must survive at least a 50% overage of the measured producer cost; found {} per mille",
         lo
     );
     assert!(
-        lo >= throughput_bound * 1000 / MEASURED,
-        "a ring can only ever buy more than the throughput ceiling, never less — if this fails the model and the ceiling are describing different players"
+        lo >= ceiling,
+        "a ring can never do worse than the clock's own throughput ceiling — if this fails the model and the ceiling are describing different players"
+    );
+    assert!(
+        llo < lo,
+        "the ring's purchase is time, not throughput: a doubled clip must tolerate strictly less overage (1x = {} per mille, 2x = {} per mille)",
+        lo,
+        llo
+    );
+    assert!(
+        llo >= ceiling,
+        "even a doubled clip cannot fall below the clock's ceiling ({} per mille); found {}",
+        ceiling,
+        llo
     );
     assert!(
         dlo >= 1_400,
@@ -1390,11 +1430,20 @@ fn sizing_scans_for_both_geometry_knobs() {
 }
 
 /// The stream rates a **product** asset may declare. The 32,000 bridge is deliberately
-/// absent from it: 7-0 adds 32,768 here and removes the bridge from `geometry.rs`, in
-/// either order — the assert in the test below is red if only one of the two lands.
-/// Written as an allow-list rather than a `!=` so that the flip is one line in one place,
-/// not a red test somebody deletes in a hurry.
+/// absent from it: 7-0 adds 32,768 here and sets `geometry::RATE_BRIDGE` to `None`, in
+/// either order — the assert below is red if only one of the two lands. Written as an
+/// allow-list rather than a `!=` so that the flip is one line in one place, not a red
+/// test somebody deletes in a hurry.
 const PRODUCT_STREAM_RATES: &[u32] = &[geo::PLAYBACK_RATE_HZ];
+
+/// The one bridge on record, as `(declared, played)` — independent of whether the tree
+/// still carries it.
+///
+/// Deliberately a literal rather than a read of `geometry::RATE_BRIDGE`: the cents below
+/// are a fact about the asset that was measured on 2026-11-11, and the pin has to survive
+/// 7-0 deleting the mapping, or the number that says *why* the ruling was made would
+/// disappear with the arm.
+const RECORDED_BRIDGE: (u32, u32) = (32_000, geo::PLAYBACK_RATE_HZ);
 
 /// Q14, **ruled** by the project owner on 2026-11-11: a stream is encoded at the rate
 /// it is played at, and the player does not reinterpret a declared rate to fit a
@@ -1406,15 +1455,15 @@ const PRODUCT_STREAM_RATES: &[u32] = &[geo::PLAYBACK_RATE_HZ];
 /// asset in this tree is the disqualified one.
 ///
 /// **`TODO(Q14, BLOCKING)`** — when the 32,768 Hz product asset lands (plan item 7-0),
-/// the `32_000` arm in `src/geometry.rs` comes out and `32_768` joins
-/// `PRODUCT_STREAM_RATES` above; what remains is the identity rule alone. What goes red
-/// at the moment the arm is deleted is the
-/// `.expect("the bridge is still in the tree; 7-0 removes it")` below — that is the
-/// tripwire, and it fires on the first commit of 7-0 that removes the arm. The
-/// allow-list is written so it cannot be satisfied half-way: it asserts that the asset
-/// in this tree is allowed *exactly when* the bridge is gone. So a 7-0 that flips one
-/// of the two and not the other is red, and neither half can be deleted as a test that
-/// seems to be in the way.
+/// `geometry::RATE_BRIDGE` becomes `None` and `32_768` joins `PRODUCT_STREAM_RATES`
+/// above; what remains is the identity rule alone. The guard is one condition,
+/// `declared_allowed == bridge_is_gone`, so it is **green in both end states** — the
+/// shipped, disqualified one and the completed 7-0 one — and red only if 7-0 lands
+/// half-way (an asset on the allow-list while a bridge still maps, or the bridge gone
+/// with nothing on the allow-list). Nothing here has to be deleted in a hurry to make
+/// 7-0 green: the bridge's presence is *read* from `geometry::RATE_BRIDGE` rather than
+/// unwrapped out of the mapping, and the cents are pinned against `RECORDED_BRIDGE`,
+/// which does not move when the tree does.
 #[test]
 fn ruled_rate_policy_allows_one_bridge_and_no_more() {
     // The product arm: a stream that declares the target rate is played at it.
@@ -1446,40 +1495,63 @@ fn ruled_rate_policy_allows_one_bridge_and_no_more() {
         );
     }
 
-    // The one bridge, and its price, computed rather than transcribed. This `expect`
-    // is the tripwire 7-0 is meant to trip.
-    let bridge_in_tree = geo::playback_rate_for_stream(32_000).is_some();
-    let played = geo::playback_rate_for_stream(32_000)
-        .expect("the bridge is still in the tree; 7-0 removes it");
-    let ratio = f64::from(played) / 32_000.0;
+    // The one bridge, and its price, computed from the *record* rather than from the
+    // tree's current mapping, so the pin is still checked after 7-0 removes the arm.
+    let (declared, played) = RECORDED_BRIDGE;
+    let ratio = f64::from(played) / f64::from(declared);
     let cents = 1200.0 * ratio.log2();
     println!(
-        "q14: the bridge plays a 32,000 Hz stream at {} Hz = {}x = {:.2} cents sharp. \
+        "q14: the recorded bridge plays a {} Hz stream at {} Hz = {}x = {:.2} cents sharp. \
          TODO(Q14, BLOCKING): ruled out as a product path 2026-11-11; 7-0 owns the \
          encode at 32,768 and 7-1 owns the hardware row at (32768, 2048, fixed, 0).",
-        played, ratio, cents
+        declared, played, ratio, cents
     );
-    assert_eq!(played, 32_768);
     assert!(
         (cents - 41.06).abs() < 0.01,
         "1.024x is 41.06 cents — pinned so that no future record can call it a rounding \
          error or a semitone; it is neither, and it is disqualifying"
     );
 
+    // The tree may carry at most this one bridge, and if it carries one it must be this
+    // pair — a second pair would be a second pitch shift, which is the thing the ruling
+    // forbids. With no bridge in the tree, the recorded declared rate must be refused
+    // outright: that is "identity-or-refusal" as code, and it is 7-0's end state.
+    let bridge = geo::RATE_BRIDGE;
+    match bridge {
+        Some(pair) => {
+            assert_eq!(
+                pair, RECORDED_BRIDGE,
+                "the only reinterpretation on record is 32,000 -> 32,768; a second pair is \
+                 a second pitch shift, and Q14 refuses those on their size, not their direction"
+            );
+            assert_eq!(
+                geo::playback_rate_for_stream(pair.0),
+                Some(pair.1),
+                "`RATE_BRIDGE` must be the mapping the player actually applies — a constant \
+                 that disagrees with the function is a guard reading the wrong tree"
+            );
+        }
+        None => assert_eq!(
+            geo::playback_rate_for_stream(declared),
+            None,
+            "with no bridge in the tree, a {} Hz stream must be refused rather than mapped",
+            declared
+        ),
+    }
+
     // And the disqualification is about the asset in this tree, not an abstract one,
-    // stated as a single condition rather than two separate ones: an asset is allowed
-    // to be played exactly when there is no bridge needed to play it. Today the shipped
-    // blob declares 32,000 Hz, the allow-list refuses it, and the bridge is in the
-    // tree — the disqualified state, described rather than asserted away. When 7-0
-    // lands, 32,768 joins `PRODUCT_STREAM_RATES` and the arm above goes away, and this
-    // same condition is the product rule. Half-landing it — a rate on the allow-list
-    // while a bridge still maps, or the arm deleted with nothing on the allow-list —
-    // is red here, which is what it is for.
+    // stated as a single condition: an asset is allowed to be played exactly when there
+    // is no bridge needed to play it. Today the shipped blob declares 32,000 Hz, the
+    // allow-list refuses it, and the bridge is in the tree — the disqualified state,
+    // described rather than asserted away. When 7-0 lands, 32,768 joins
+    // `PRODUCT_STREAM_RATES` and the bridge goes, and this same condition is the product
+    // rule. Half-landing it — a rate on the allow-list while a bridge still maps, or the
+    // bridge gone with nothing on the allow-list — is red here, which is what it is for.
     let manifest = Manifest::parse(BLOB).expect("the shipped blob parses");
     let declared_allowed = PRODUCT_STREAM_RATES.contains(&manifest.sample_rate_hz());
     assert_eq!(
         declared_allowed,
-        !bridge_in_tree,
+        bridge.is_none(),
         "the asset shipped in this tree declares {} Hz; the product allow-list {} it and \
          the rate bridge {} — an asset may be played only where no reinterpretation of \
          its declared rate is needed to play it (Q14)",
@@ -1489,7 +1561,7 @@ fn ruled_rate_policy_allows_one_bridge_and_no_more() {
         } else {
             "refuses"
         },
-        if bridge_in_tree {
+        if bridge.is_some() {
             "is still present"
         } else {
             "is gone"

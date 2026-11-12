@@ -287,7 +287,9 @@ GBA_CYCLES_PER_SECOND = 16777216
 # the rate it will be played at, and the player does not reinterpret a declared rate to
 # fit the clock. This entry is 6b-3's measurement bridge (1.024x = +41.06 cents of
 # pitch), **not** a product path: it comes out when the asset is encoded at 32,768 Hz
-# (plan item 7-0), and the identity mapping is all that should remain here. Until that
+# (plan item 7-0). The player's half of the same bridge is `geometry::RATE_BRIDGE`,
+# which 7-0 sets to `None`; this table loses its entry in the same change, and the
+# identity mapping is all that should remain here. Until that
 # exists, a 32,768 Hz asset packs only under `--allow-unmeasured`, because
 # `MEASURED_DECODE` holds no row keyed `(32768, 2048, ...)` — and that row is 7-1's
 # hardware read, not a number this script may invent.

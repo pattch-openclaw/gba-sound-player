@@ -138,7 +138,10 @@ was done:
   commit had moved. Rewritten as one condition — `declared_allowed == !bridge_in_tree` —
   so the shipped state and the completed-7-0 state are both green and a **half**-landed 7-0
   is red; the refusal list now samples 8,192 / 16,384 / 65,536, the other rates dividing
-  2^24. Records now cite symbols, not lines.
+  2^24. Records now cite symbols, not lines. *Step 5 finished what that condition was
+  reaching for: the `.expect` still made the completed-7-0 state red, so the bridge is now
+  a named constant (`geometry::RATE_BRIDGE`) read by both sides, and the cents are pinned
+  against a `RECORDED_BRIDGE` literal.*
 - **Two arithmetic slips in prose** (conclusions unaffected): decode stage shares quoted
   as 40.835% / 41.655% were 152 window means over a 157-frame budget — the same
   denominator class this branch already corrected, and not this image's figures (it prints
@@ -175,10 +178,60 @@ section map, and its headless log is **byte-identical** to the `694126d406eb9b2a
 `verdict PASSED (… fifo=true)`, exit 124 by design). The decode-only pair is unchanged at
 `f73097c144fe4157…` / `aecae6ef815d48c0…`. Working tree clean before and after.
 
+## Step 5 — the sustained-overage arithmetic, the guard's shape, four nits (2026-11-12)
+
+A closing review pass found one substantive defect and several description errors that
+step 4 had recorded as fixed but that the code still contradicted.
+
+- **The sustained-overage ceiling was truncated.** `frame_cycles(2048) / PERIOD_CYCLES` is
+  **3.657** periods per frame, but the test divided as integers and used 3, so the "no ring
+  in the picture" bound printed **843,237 c/frame = 152.9%** of the measured cost instead
+  of `281,079 × 1,048,576 / 286,720 =` **1,027,946 = 186.5%** — 18% of a frame's cycles
+  dropped, and with them the conclusion: the ring was credited with **~38 points (377 per
+  mille) of *sustained* overage**. A bounded buffer cannot buy sustained throughput. The
+  shipped clip survives to 190.6% and a clip twice as long to 188.2%, so depth buys **41
+  per mille = 4.1 points** of lead spent once. `sustained_overage_tolerance` now
+  multiplies before dividing, factors the bisection into `tolerate_per_mille`, and bisects
+  both clip lengths, asserting the tolerance *falls* and never goes below the ceiling (the
+  old assertion could not catch it: it compared the tolerance to the same truncated
+  bound). Geometry decisions unchanged — depth cliff 20 chunks, prefill cliff 1, stall 17
+  periods — so the fix is to the test and the records, not the geometry.
+- **The Q14 tripwire left the `.expect`.** `geometry::RATE_BRIDGE` is one named
+  `Option<(u32, u32)>` that both `playback_rate_for_stream` and the guard read, and the
+  41.06 cents are pinned against a `RECORDED_BRIDGE` literal that survives the arm's
+  removal. `PRODUCT_STREAM_RATES` crossed with `bridge.is_none()` is therefore green in
+  both end states and red only if 7-0 lands half-way; 7-0's edit is that constant to
+  `None` plus one allow-list entry, and nothing has to be deleted in a hurry.
+- **Four descriptions fixed, as owed:** the `armed:` witness no longer claims "only the
+  timer1 bit should be set" while printing `IE=0x0011` (VBlank is agb's, and the line now
+  says so); `decode_and_push` no longer claims the fed phase "runs the same code" when
+  `fed_frame` is a separate function (it shares the `decode_one`/`convert_frame`/
+  `push_bytes` seam, which is what is now claimed); the rate probe's **59.4%** worst frame
+  is labelled as the pre-median instrument's reading in all four places (this image prints
+  53.964%); and the "and a / a sound-FIFO" duplication is gone. `Stage::note` additionally
+  excludes a void window from `inside`/`worst`/`best` as well as from `sum`.
+- **The image and the envelope moved, and the record says why.** The ROM's translation unit
+  changed (one string and several comments), so `product-play.gba` is now
+  **`c0d3ac36e4580a7c…`, 1,085,868 B**; the stage windows moved by tens of cycles because
+  of layout, so the host model's envelope is re-read from this build — 65,073,008 +
+  17,331,966 + 2,262,520 over 152 windows = **557,022 raw**, less 158 boundaries at 5,641 c
+  = **551,159 attributed**, decode half **422,248** — and
+  `the_envelope_is_the_runs_own_sums` pins it. Ledger, audit, watermarks, PCM and FIFO pins
+  and the verdict are unchanged.
+
+Verification of this pass: `make product-play-test` **12/12**; `make check` clean; rebuilt
+`product-play.gba` **`c0d3ac36e4580a7c…`, 1,085,868 B**; one headless run: 571/571 periods,
+`underflows=0`, 0 coalesced/late, tail 1/240, `min_lead 9120`, `max_lead 19600`, PCM and
+FIFO MATCH, `verdict PASSED (ledger=true, audit=true, pcm=true, fifo=true)`, `fit: lines=9
+… fits=true`, exit 124 by design. Its diff against the previous image's log is the
+`armed:` witness line plus the stage/attribution jitter above — no audit, digest or ledger
+field moved. The decode-only pair is unchanged at `f73097c144fe4157…` /
+`aecae6ef815d48c0…`.
+
 ## Out of scope (follow-up PRs)
 
-- 7-0: 32,768 Hz asset/resample/pitch witness, delete the `32_000` arm, re-key
-  `MEASURED_DECODE`, `EncodeProfile` rate clause, identity-or-refusal in the packer.
+- 7-0: 32,768 Hz asset/resample/pitch witness, set `geometry::RATE_BRIDGE` to `None`,
+  re-key `MEASURED_DECODE`, `EncodeProfile` rate clause, identity-or-refusal in the packer.
 - 7-1: hardware row `(32768, 2048, fixed, 0)`, remove `--allow-unmeasured`, silicon
   re-read of the shares.
 - 7-2: whether the hand-built timer/DMA/IRQ feeder ships.

@@ -642,7 +642,8 @@ buys the only rate the hardware speaks and it charges pitch plus a tighter deadl
 **Measured since, and the second half is smaller than it looked:** the tighter deadline
 prices nothing at current cost levels. The frame deadline is 1,048,576 cycles either
 way — no instrument here budgets from the declared rate — the worst frame's work is
-59.4% of it either way, and a run against a stream that *declares* 32,768 has an
+59.4% of it in both arms of that probe (the pre-median clock's reading; the current
+image prints 53.964%), and a run against a stream that *declares* 32,768 has an
 `audio_span` digit-for-digit identical to the shipped one. It would bite only if
 work/frame approached the period. The pitch half stands unchanged.
 
