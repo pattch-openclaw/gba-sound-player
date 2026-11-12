@@ -128,6 +128,25 @@ wasted by the ruling — the rate probe measured a stream *declaring* 32,768 dec
 bit-identically at the same flow-control floor and the same cost — but the sequence in
 front of 7-1 changed, and it is written into item 7 rather than left to be inferred.
 
+**And the root cause gets named, because it is the part worth keeping.** The mistake was not
+the *value* 32,000 — it is one of FLAC's table rates, and the 6a-7b rows were honestly
+measured on an encode at it — it was making that rate the fixture and measurement target
+while the plan's only clock is 32,768, and letting `scripts/gafp_pack.py` key its cost
+table by the *stream* rate while the frame budget came from the *playback* rate. A pitch
+shift is also the one failure mode C2's other clauses cannot see: a pinned PCM digest is
+the same bytes whether the samples were authored for 32,000 or for 32,768. That matters
+more here than it would elsewhere, because the goal of the whole effort is playing audio
+back correctly — **1.024×, 41.06 cents, is a correctness failure, not a tuning
+preference.** So 7-0's fix is structural, not tables-and-arithmetic: one clock end to end;
+cost keyed by blocksize, predictor order and residual envelope, which is what the 6b-3 rate
+probe showed the cost actually depends on; the rate demoted from a lookup dimension to a
+validity check, with the missing rate clause added to `crates/flac-lite`'s `EncodeProfile`
+— which today checks blocksize, FIXED order, LPC and bit depth and never the rate; and a
+pitch witness, so the drift cannot come back unobserved. The inventory of every place the
+number lives, and the two traps (sample-period fixtures that would preserve the pitch
+error; the 128/125 conversion being exact but float in ffmpeg) are in the "Q14 follow-up" section that
+closes the 6b-3 record.
+
 - **Landed:** the Phase-1 decode path through `decode_frame`; the
   stream layer; the per-frame `driver`; CRC verification behind `crc-check`; the
   table-less `scan` walk (feature, off); the `RiceKernel` seam (item 5, all four
@@ -2195,6 +2214,135 @@ not negotiable, so the product asset will be encoded at 32,768 (7-0), and the ro
 `measurements.md`, the 6b-3 rate row; the blocking TODO is `TODO(Q14, BLOCKING)` in
 `examples/flac_integration/src/geometry.rs`.
 
+### Q14 follow-up, same day: 32,000 Hz was the wrong rate to measure at, and what 7-0's fix has to include
+
+**Stated plainly: choosing 32,000 Hz as the rate to build fixtures at and measure at was a
+mistake.** The *value* is not a mistake — 32,000 is one of FLAC's four-bit table rates
+(`crates/flac-lite/src/format.rs:85`, mirrored by `scripts/frame_vectors.py:73`), and the
+6a-7b hardware rows are facts taken on a 32,000 Hz encode; nobody can un-measure them.
+What was wrong is treating that rate as this project's target while the only clock in the
+plan is 32,768 Hz. It is what created `PLAYBACK_RATE_FOR_STREAM`, and it is why the
+fixture family, the packer's default profile, and the only measured decode-cost rows in
+the repository are all keyed to a rate that **no piece of this project has ever played
+audio at**.
+
+**The failure mode that mistake allows is the worst one this project can have.** Audio that
+comes back resampled or pitch-shifted away from what was encoded — here 1.024×, **41.06
+cents** — is a correctness failure, not a matter of taste: the point of the whole effort is
+to play audio back correctly. It is also the one failure mode none of C2's other clauses
+catches. A run may service 571 of 571 hardware periods, push and consume every sample,
+match a pinned PCM digest and still be 41 cents sharp, because a digest is a function of
+the samples and the samples are identical whether they were authored for 32,000 Hz or for
+32,768 Hz. That is exactly what happened, at every gate this asset has been through —
+which is why 7-0's witness has to measure pitch and not bytes.
+
+**Where the mistake actually lives: a cost table keyed on the wrong rate.**
+`scripts/gafp_pack.py`'s `MEASURED_DECODE` is keyed `(stream rate, blocksize, kind,
+order)` while `frame_budget_cycles()` takes its denominator from the *playback* rate via
+`playback_rate()`. One table, two different rates in it. And the 6b-3 rate probe measured
+that the decoder is insensitive to the rate that appears in the key: relabelling the
+shipped frames from 32,000 Hz to 32,768 Hz moved decode-only cost by **−20 c/frame
+(0.005%)**, and inside the player the two readings do not separate at this resolution — same `min_lead
+9120`, same `audio_span 163,722,350`, a +415 c/frame decode delta against a closure residual
+that moved 131,822 cycles by the image's own account. Keying cost on something the
+cost does not depend on is what forced the fixture to be 32,000, which forced the hardware
+rows to be 32,000-keyed, which made the bridge load-bearing. **The fix is structural, not
+tables-and-arithmetic: cost is keyed by what it actually depends on — blocksize, predictor
+kind and order, and the residual envelope — and the sample rate stops being a lookup
+dimension at all.** The rate becomes a *validity check* instead: a stream must declare the
+rate the device plays at, and anything else is refused rather than mapped. One clock end to
+end — in the encode, in the container, and in the arithmetic. (The plan's and the packer's
+many `(32768, 2048, fixed, 0)` spellings describe the *current* key and stay accurate until
+7-0 changes it; the fact 7-1 fills is the same fact either way.)
+
+**The gap that let the bridge exist at all.** `crates/flac-lite`'s `EncodeProfile` and
+`DEFAULT_PROFILE` (`format.rs:507-522`, `:524-530`) have **no rate field**: the manifest-side
+guard checks blocksizes, FIXED order, full LPC and bits-per-sample and never the thing the
+ruling is about. The invariant was only ever enforced outside the crate — in a dict in the
+packer and an `Option`-returning table in one example. It belongs in the profile, so no ROM
+that validates a manifest can accept a stream it is not built to play, and
+`playback_rate_for_stream` reduces to "the declared rate, or refuse". This is not a new
+rule to invent: the rate harness already holds it. `examples/flac_spike/src/rate_main.rs:27`
+records it as "{10512, 18157, 32768}, encode rate == playback rate per FRAME", and
+`scripts/frame_vectors.py:1930-1931` asserts exactly that domain and refuses a fixture
+outside it. The product path is the only place in this repository with two rates, and 7-0
+ports the invariant the rest of the tree already enforces.
+
+**The inventory, and what happens to each kind of use.** (Grep the number, the code
+`0b1000`, and the phrase "32 kHz" and this is all of it.)
+
+| where | what it is doing | 7-0 action |
+|---|---|---|
+| `examples/flac_integration/src/geometry.rs:252`, `scripts/gafp_pack.py:294`, and their guard test `tests/product_play_witness.rs:1160` with its self-retiring `assert_ne!` at `:1203` | the bridge itself, plus the arithmetic the guard learned from it | delete the arm and the table entry; rewrite the guard to assert identity and refusal, keeping its `assert_ne!` tripwire so a second mapping is still caught |
+| `scripts/gafp_pack.py` `MEASURED_DECODE` (`:202, :224`) with `playback_rate()` / `frame_budget_cycles()` (`:294-303`) | the stream rate as a cost key, the playback rate as the denominator | re-key to blocksize + predictor + residual envelope; rate becomes a validity check; the budget comes from the one constant clock, which also settles the 2^24-vs-16,780,000 dual denominator 7-1 already owns |
+| `scripts/gafp_pack.py:365` `DEFAULT_RATE = 32000` (with `:54` and the rationale comment at `:361-364`), and `check_guard_shapes()` (`:330, :339`) | 32,000 as the default target — and the guard's own self-witness hard-coding it, so a retarget silently stops witnessing the real target | the default becomes the device's rate; the self-check derives its rate from the profile so it can never again be pinned to a stale one |
+| `crates/flac-lite/src/format.rs::EncodeProfile` (`:507-522`), `DEFAULT_PROFILE` (`:524-530`) | no rate clause at all — the library never checks the rate of the stream it is guarding | add an allowed-rates clause to the profile; the example-side mapping then has nothing left to map |
+| `examples/flac_integration/src/product_play_main.rs:891-912` | the match on the mapping, and the two budgets printed side by side | keep the refusal; the second budget line goes with the second rate |
+| fixture inputs: `scripts/frame_vectors.py:361-445` (`synth()` writes the whole fixture family at 32,000 — 21 call sites), `:263` `PARTIALS_32K` (named for the rate), `:1682` the generator's own `== (2, 16, 32000)` self-check, `:668-670` the 320,000-sample tail arithmetic; `scripts/gen_gafp_fixtures.py:86, :198-214`, including the refusal fixture `rate_44100_at_32000_target` (`:152-154`) whose message string is asserted verbatim by `crates/flac-lite/tests/gafp_asset_facts.rs:1300-1305, :1338`; `scripts/pack_flac.sh:39`; `scripts/measure_warmup_semantics.py:153` | 32,000 baked into the fixtures, the guard fixtures and their expected strings | retarget to the device's rate, with the two traps below; the 44.1 kHz refusal fixture's target and message move with it |
+| generated pins: `examples/flac_spike/src/assets.rs:76, :79, :722, :725` (`sample_rate_hz: 32000`, `total_samples: 320000`), `examples/flac_integration/src/gafp_pin.rs:13` (`SAMPLES = 320000`, i.e. 10 s at 32,000) | pins that encode the old rate as an arithmetic constant | regenerate — never hand-edit. Every downstream digest moves; that is expected, and the 32,000-era pins stay in the records as history |
+| `format.rs:85, :183, :217`; `frame_vectors.py:73`; arbitrary test values (`driver.rs:370`, `scan.rs:931, :1229`, `tests/frame_header_layout.rs:363, :554, :602`); `examples/flac_spike/src/stats.rs:217, :223` (a budget function taking its rate as a parameter — and whose comment already keeps the *stricter* 32,768 arithmetic on purpose); every mention in `FLAC.md` and `flac-docs/` | the FLAC spec table, codec test data, arithmetic helpers, and the historical record | **leave alone.** These are not product constants, and deleting them would be the over-correction — the spec table in particular has to know 32,000 forever |
+
+**Two traps 7-0 has to not walk into, both found today.**
+
+1. **The generator defines tones in sample periods, not in Hz.** `frame_vectors.py:263` is
+   `PARTIALS_32K = [(period_in_samples, weight)]`, and `tri()` (`:160`) works `index %
+   period`. So re-synthesising "the same" fixture at 32,768 leaves the decoded waveform
+   byte-similar and the played pitch *exactly where the defect is*: period 128 is 256 Hz at
+   32,768 whether it was authored at 32,000 or at 32,768. Re-synthesising without
+   re-deriving the partials re-creates the 41 cents with a new header on it — and a pitch
+   witness built at the new rate would report 256 Hz as correct and agree with itself.
+   Because `tri` needs an integer period, "specify it in Hz" is not either free or trivial:
+   32,768/period is a round Hz only for power-of-two periods, and moving the partial set
+   moves what libFLAC's encoder chooser picks — which is exactly what the generator's own
+   comment warns about (`:258-262`: 192 is in the set deliberately because non-periodic
+   partials "push the encoder toward LPC", and "pinning every period to a divisor would
+   quietly change the encoder's choices"). That property is why the fixture exists. So 7-0
+   picks between re-deriving the partial set at the new rate **and re-running the census to
+   prove FIXED-0 is still what libFLAC picks**, or a genuinely integer rate conversion
+   (below).
+2. **The conversion is exactly 128/125, and it is not free.** 32,768/32,000 = 1.024 =
+   128/125 exactly, so an exact rational resample exists (upsample by 128, decimate by
+   125). But the pipeline's current resampler is ffmpeg's `-ar`, passed by
+   `gafp_pack.py`'s `normalise()` (`:466-471`),
+   which is float, and float breaks the property every pin in this project rests on —
+   `frame_vectors.py:38` states it as the generator's own contract ("Determinism: the
+   source PCM is synthesized with integer arithmetic only (no float…)") and `:163-164` its
+   purpose ("byte-identical on any platform"). **If a conversion is done, do it as an
+   integer polyphase in the generator** — the same rule the 6a-2 work learned the hard way
+   when a float `sincosf` disagreed with every host pin.
+
+**One measured consequence for anyone who wants a real clip rather than a tone (host probe,
+2026-11-11; nothing committed, so the method is spelled out).** Slice 10 s from each
+`assets/sound/*.wav` (`bioluminescent.wav` at 96 kHz → ffmpeg to 32,768 Hz s16; `test.wav`
+is natively 32,768 Hz, 8-bit u8, 258.6 s), encode with the shipped product recipe
+(`flac -1 -l 0 -b 2048 -m`, libFLAC 1.5.0), then `gafp_pack.py --fnv-ref … --pcm-ref …`.
+Both encode **correctly declaring 32,768 Hz** — so the rate fix works on real material —
+and both are then **refused by the profile**: `bioluminescent_10s.flac` census
+`fixed1 ×72, fixed2 ×173, fixed3 ×71, fixed4 ×4` (805,661 B), `test_10s.flac` census
+`fixed1 ×122, fixed2 ×198` (229,113 B), each refused as `no measured decode figure for
+(32768 Hz, 2048-sample frames, fixed1)`. A real-audio product clip is therefore not a
+pipeline swap: it is a **widening of the product profile to the predictor shapes real music
+actually uses**, which needs 7-1-style rows for FIXED 1-4 before it is allowed. Worth
+recording now, before anyone discovers it as a deadline. Also note the shape change that
+follows from the rate: 10 s at 32,768 Hz is 327,680 samples, exactly **160** × 2,048 — a
+full tail — where the current asset is 156 full frames plus a **512-sample** final frame
+(320,000 = 156 × 2048 + 512; the same shape `frame_vectors.py:668-670` warns the walk
+about, because filtering candidates on STREAMINFO's maximum blocksize drops the last frame
+of every track whose length is not a whole multiple of the block). That 512-sample frame is
+what keeps the short-frame path exercised at the target rate. 7-0 should choose an explicit
+short final frame rather than discover that its new asset has no short frames at all.
+
+**And the witness that makes the next asset unable to drift the same way.** Not a digest —
+implied pitch. A tone whose period is exact at both rates (period 64: 32,768/64 = 512 Hz,
+32,000/64 = 500 Hz), measured out of the *decoded* PCM by integer autocorrelation at
+integer lags, with no float anywhere (a float would re-import the exact defect class the
+6a-2 float-trig incident is about). Positive leg: the decoded period implies Hz == the
+declared rate. Negative leg, which is the one that matters: synthesise the same period-64
+wave **authored at 32,000**, pack it as if it were a 32,768 asset, and watch the implied
+512 Hz refuse against the 500 Hz the source was built for — 41.06 cents, red. That leg is
+the same shape as `gen_gafp_fixtures.py`'s `rate_44100_at_32000_target` refusal legs, and
+it is the only gate in this repository that can see a reinterpretation arriving.
+
 ## Item 7 — playback: the real-time claim (C2)
 
 Item 6b makes the frame path real and puts the kernel in the ROM. Item 7 is what
@@ -2206,7 +2354,7 @@ they are ~43% of the frame against decode's 42.72%.
 
 | PR | Scope | Witness | Failure it isolates |
 |---|---|---|---|
-| **7-0** | **The asset at the rate it will be played at.** Q14 was ruled on 2026-11-11: a stream is encoded at the rate it is played at, and the player does not reinterpret a declared rate to fit the clock. So: resample the source to 32,768 Hz, encode it at the product profile (FIXED-0, 2048-sample frames, the residual shapes the guard admits — a fresh census, not this asset's), repoint `scripts/gafp_pack.py`'s `PLAYBACK_RATE_FOR_STREAM` at the identity, and take the `32_000` arm out of `geometry.rs`. It will pack at first only under `--allow-unmeasured`, and that is the honest state rather than a shortcut: the `this is NOT a product blob` note comes off when 7-1's row exists. For the same playing time such a stream carries 2.4% more samples, so expect ~2.4% more blob — arithmetic, and worth measuring rather than assuming. | A **pitch witness in the same PR**: a tone fixture whose fundamental is checkable in the decoded PCM. Nothing in the present gate set can see a pitch shift at all — the pinned digest of a 32,000 Hz asset and of a reinterpreted one are the *same bytes*, which is how 41 cents passed every gate this asset has been through. Plus the profile guard with no relaxation flags, and `ruled_rate_policy_allows_one_bridge_and_no_more` going red exactly once, when the bridge is deleted. | That every gate 6b-3's asset cleared was deaf to its one real defect — and that 7-1 and 7-3 would otherwise be run against an asset the product cannot ship. |
+| **7-0** | **The asset at the rate it will be played at.** Q14 was ruled on 2026-11-11: a stream is encoded at the rate it is played at, and the player does not reinterpret a declared rate to fit the clock. So: re-author the fixture at 32,768 Hz — from Hz, not by reusing the sample periods in `frame_vectors.py:263`, which would leave the played pitch exactly where the defect is — and encode it at the product profile (FIXED-0, 2048-sample frames, the residual shapes the guard admits: a fresh census, not this asset's; and an explicitly short final frame, because 10 s at 32,768 Hz is exactly 160 full frames and the short-frame witness would otherwise stop running). Take the `32_000` arm out of `geometry.rs` and the `32000` entry out of `gafp_pack.py`'s `PLAYBACK_RATE_FOR_STREAM`, leaving identity-or-refusal. Take the sample rate out of `MEASURED_DECODE`'s key, so cost is keyed by blocksize, predictor kind/order and residual envelope — the variables the 6b-3 rate probe showed cost actually depends on — with the rate becoming a *validity check* on the manifest instead, and one constant clock in the arithmetic rather than two. Put the missing rate clause into `crates/flac-lite`'s `EncodeProfile`, which today checks blocksize, FIXED order, LPC and bit depth and never the rate of the stream it is guarding. The full inventory of where 32,000 lives and which uses are legitimate, the two traps (sample-period fixtures; 128/125 is an exact ratio but ffmpeg's `-ar` is float and float breaks every byte pin here), and the probe showing that real material censuses FIXED 1-4 and so is a profile decision rather than a pipeline swap, are in the "Q14 follow-up" section that closes the 6b-3 record, immediately above this table. It will pack at first only under `--allow-unmeasured`, and that is the honest state rather than a shortcut: the `this is NOT a product blob` note comes off when 7-1's row exists. For the same playing time such a stream carries 2.4% more samples, so expect ~2.4% more blob — arithmetic, and worth measuring rather than assuming. | A **pitch witness in the same PR**: a tone whose implied pitch is measured out of the *decoded* PCM by integer autocorrelation at integer lags (no float — that is the defect class the 6a-2 float-trig incident is about) and checked against the rate the stream declares, plus the negative leg that authors the same tone at 32,000 Hz and packs it as a 32,768 asset, so a reinterpretation is witnessed red rather than assumed caught. Nothing in the present gate set can see a pitch shift at all — the pinned digest of a 32,000 Hz asset and of a reinterpreted one are the *same bytes*, which is how 41 cents passed every gate this asset has been through. Plus the profile guard with no relaxation flags, and `ruled_rate_policy_allows_one_bridge_and_no_more` going red exactly once, when the bridge is deleted. | That every gate 6b-3's asset cleared was deaf to its one real defect — and that 7-1 and 7-3 would otherwise be run against an asset the product cannot ship. |
 | **7-1** | **Re-measure the producer at the target rate.** The 10,512 Hz producer pass (convert / push / wait / closure) repeated at 32,768 Hz with the kernel in the decode slot. Measurement only — no new product code, and it runs against **7-0's** asset. | Per-stage shares on **hardware**, same-image, with the rate pass's own discipline (`closure underflows 0`, shares read relatively, the clean image's audit as the wall authority, and the same run's decode figure recorded against `(32768, 2048, fixed, 0)`, which is the key `gafp_pack`'s guard is missing — 7-1's numbers are what take the non-product note off 7-0's asset) | that C2's margin is inherited arithmetic from a different rate and a pre-kernel decoder — the ~85.6% gross and the ~8.7 ms left are estimates, not observations, and that 6b-3's 53.062% envelope is an mGBA figure for an asset the ruling disqualifies |
 | **7-2** | **The shipping playback path.** `agb`'s mixer/DMA, or a written argument for why the custom IRQ feeder is the shipping path. Replaces the throwaway harness the rate track has been leaning on. | Bit-exact PCM into the FIFO plus an audibility check on hardware; underruns **counted**, not eyeballed | that the throwaway feeder was load-bearing in ways nobody wrote down (the rate track's own lesson, one layer up) |
 | **7-3** | **The acceptance run.** 2048-sample frames at 32,768 Hz, FIXED-0 assets (enforced by 6b-2's pack-time profile), GBA 001 **and** GBA SP, two runs each. | **Underruns = 0**, plus 7-1's stage shares on the same image | that C2 is claimed from a mean and a projection rather than from playback on a unit |

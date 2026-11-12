@@ -595,6 +595,26 @@ asset this repository currently ships, `examples/flac_integration/assets/spike_l
 declares 32,000 Hz and is therefore **not a product asset**. 6b-3's record, `FLAC.md`
 and C2 all say so now.
 
+**And the root cause is named too, because a ruling without it would leave the shape that
+produced the bridge intact.** The mistake was never the *value* 32,000 — it is one of FLAC's
+table rates, and 6a-7b's rows were honestly measured on an encode at it. The mistake was
+making that rate the fixture and measurement target while the plan's only clock is 32,768,
+and letting `gafp_pack.py` key `MEASURED_DECODE` by the **stream** rate while
+`frame_budget_cycles()` takes the frame budget from the **playback** rate: keying cost on a
+variable the cost does not depend on (the rate probe measured it at −20 c/frame, the
+instrument's own floor) is exactly what forced the fixture to 32,000, the rows to
+32,000-keys, and the bridge into being load-bearing. So 7-0's scope is structural, and says
+so now: cost re-keyed onto blocksize, predictor kind/order and residual envelope; the sample
+rate demoted from a lookup dimension to a *validity check*; the missing rate clause added to
+`crates/flac-lite`'s `EncodeProfile`, which guards blocksize, FIXED order, LPC and bit depth
+and has no rate field at all; identity-or-refusal in both the packer and the player; and a
+pitch witness, because a digest cannot see this defect — the samples are the same bytes. The
+full inventory of where 32,000 lives and which uses are legitimate, plus the two retarget
+traps (sample-period fixtures preserving the pitch error; 128/125 being exact but ffmpeg's
+`-ar` being float), are in `plan-of-record.md`'s "Q14 follow-up" section, summarised in
+`FLAC.md`. What all of it protects is the failure mode this project must never ship: audio
+arriving pitch-shifted away from what was encoded.
+
 **Opened by:** 6b-3 (2026-11-11), and by the packer before it.
 `scripts/gafp_pack.py` declares `PLAYBACK_RATE_FOR_STREAM = {32000: 32768}` and
 `examples/flac_integration/src/geometry.rs::playback_rate_for_stream` implements the

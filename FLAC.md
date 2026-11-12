@@ -135,6 +135,54 @@ of a reinterpreted one is the *same bytes*, and that is exactly how 41 cents cle
 gate this asset has been through. The numbers are the 6b-3 rate row in
 [`flac-docs/measurements.md`](flac-docs/measurements.md).
 
+**Measuring at 32,000 Hz was a mistake, and it is named here as one.** The *value* is fine:
+32,000 is one of FLAC's four-bit table rates, and 6a-7b's hardware rows were honestly
+taken on an encode at it — nobody can un-measure them, and `crates/flac-lite` has to know
+that code forever. What was wrong is making that rate the target the fixtures, the packer's
+default profile and the only measured decode-cost rows were all built at, while the only
+clock in the plan is 32,768 Hz: `scripts/gafp_pack.py` keyed its cost table by the *stream*
+rate and took the frame budget from the *playback* rate. One table, two rates, and a
+fixture forced to match the half that appears in the key — which is what made
+`32_000 → 32_768` load-bearing instead of absurd. A rate no piece of this project has ever
+played audio at ended up owning the product's only measured cost figures.
+
+**The failure mode being ruled out is the worst one this project has: audio coming back
+resampled or pitch-shifted away from what was encoded.** For an effort whose entire point is
+playing audio back correctly, 1.024× / **41.06 cents** is a correctness failure, not a
+matter of taste — and it is the one failure mode none of C2's other clauses can see, because
+a pinned PCM digest is a function of the samples, and the samples are identical whether they
+were authored for 32,000 Hz or for 32,768 Hz. A run may service 571 hardware periods,
+push and consume every sample and match its pin, and still come back 41 cents sharp. That is
+not a hypothetical: it is this asset, at every gate it has been through.
+
+**The fix, and what makes it stick.** One clock end to end: a stream is authored, encoded and
+declared at the rate the timer will run at, and the sample rate stops being a lookup
+dimension anywhere in the toolchain. `gafp_pack.py`'s `MEASURED_DECODE` gets re-keyed onto
+what decode cost actually depends on — blocksize, predictor kind and order, the residual
+envelope — which the rate probe measured directly rather than argued: relabelling 32,000 Hz
+to 32,768 Hz moved decode-only cost by **−20 c/frame**, the instrument's own floor. The rate
+becomes a *validity check* on the manifest instead, and that check belongs in
+`crates/flac-lite`'s `EncodeProfile`, which today guards blocksize, FIXED order, full LPC
+and bits-per-sample and has **no rate field at all** — the gap that let a mapping exist
+where a refusal should have been. The invariant is not new to this repository: the rate
+harness has held it throughout (`examples/flac_spike/src/rate_main.rs:27`, "encode rate ==
+playback rate per FRAME"; `scripts/frame_vectors.py:1930-1931`, a fixture outside that
+domain is refused outright), so 7-0 is porting an existing rule into the product path, and
+the two tables — `examples/flac_integration/src/geometry.rs:252`,
+`scripts/gafp_pack.py:294` — leave with it, identity-or-refusal behind. And because nothing
+in the present gate set can see a pitch shift, 7-0's witness measures pitch: the implied Hz
+of the *decoded* PCM, by integer autocorrelation at integer lags with no float anywhere,
+plus a negative leg that authors a tone at 32,000 Hz and packs it as a 32,768 Hz asset, so a
+reinterpretation arrives red instead of hiding behind a matched digest. Two traps come with
+the retarget and are written up in
+[`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) under "Q14 follow-up", which
+also carries the full inventory of where 32,000 legitimately belongs — the spec rate table,
+ordinary codec test data, and the historical rows, all of which stay: the fixture generator
+specifies its tones in sample *periods*, so re-synthesising "the same" fixture at 32,768 Hz
+leaves the played pitch exactly where the defect is; and 32,768/32,000 is exactly 128/125,
+so an exact resample exists, but ffmpeg's `-ar` is float and float would break every byte
+pin in the repository — the same class of defect as the 6a-2 float-trig incident.
+
 **6a-7b measured the instrument on silicon: GBA 001 and GBA SP, two runs each, all four
 runs identical to the cycle.** Two results. The decode path is
 **bit-exact on hardware** — the blue `harness_ok` backdrop means both PCM pins, the
