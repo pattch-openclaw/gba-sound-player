@@ -37,10 +37,10 @@ derating** instead of a probe.
 **Status in one line:** the decoder is complete and bit-exact; the playback harness
 plays real music at 10,512 Hz with correct tempo and pitch (audibly verified); the
 first product-play image runs that whole path at the full 32,768 Hz with zero
-underflows, but **in mGBA headless only — never on hardware — so it is not a playback
+underflows and a period audit that is part of the verdict, but **in mGBA headless only — never on hardware — so it is not a playback
 claim**; and the asset it plays is **not a product asset either** — it declares 32,000 Hz,
 and Q14 was ruled on 2026-11-11 that a stream is encoded at the rate it is played at, so
-1.024× (41.06 cents) disqualifies it however clean the run (6b-3, uncommitted; the
+1.024× (41.06 cents) disqualifies it however clean the run (6b-3; the
 re-encode is item **7-0**, and `TODO(Q14, BLOCKING)` greps in
 `examples/flac_integration/src/geometry.rs`); the
 **shipped** path — the core's default `TableCountKernel` — is still over budget at
@@ -93,7 +93,7 @@ FIFO, a hand-built timer/DMA/IRQ feeder — at 32,768 Hz with `underflows=0`,
 `571/571` periods serviced and the PCM pin matched, in **mGBA only**. So "makes sound
 above 10,512 Hz" is still true of hardware, and "there is no 32,768 Hz playback path"
 is not: there is one, and it has never been on silicon.)* That was item **6b-3** — now
-landed at the headless level, uncommitted — and C2 is
+landed at the headless level — and C2 is
 claimed only at item **7-3**: 2048-sample frames at 32,768 Hz, FIXED-0, both
 units, two runs each, underruns counted and equal to zero — and, since Q14 was ruled on
 2026-11-11, at a rate the **stream declares** as well as a clock that plays it. The asset
@@ -117,8 +117,14 @@ product can occupy is a handful of points, and the one item 7 is built for is
 why `SOUNDBIAS` is left in agb's 8-bit / 65,536 Hz PWM mode, and why `geometry`'s chunk
 is 560 **bytes** per channel = 140 DMA words. Consequence for reading every pin in this
 file: the 16-bit digests (`fnv_pcm`, `gafp_pin::FNV_PCM`, `fold_i16le_stereo`) are
-**decode** witnesses and say nothing about what the speaker plays. A gate that ever wants
-to witness the *played* audio has to fold the 8-bit FIFO bytes, not the decoded samples.
+**decode** witnesses and say nothing about what the speaker plays. The product-play image
+now folds the 8-bit FIFO bytes too: `gafp_pin::FNV_FIFO_L/R`, over the converted stream,
+in its post-audio proof pass, gated as `fifo` in the verdict. Folding the same bytes on the
+push path was tried and measured first — the house FNV-1a is 64-bit and ARM7TDMI has no
+64-bit multiply, so 4,096 FIFO bytes/frame costs ≈800,000 cycles and the run failed at
+128.178% work/frame (`measurements.md`, the 6b-3 played-form row). The residual gap is
+stated: this is the converter's output for the same frames, not a capture of the DMA/DAC,
+and `RingFeed`'s byte copy is the host-witnessed bridge in between.
 This is a property of the target, not an open question — no pitch or timbre claim in this
 file is about depth, and the ~48 dB that 8-bit truncation implies (with no dither, because
 none is specified) is the product's floor rather than a defect to be fixed at item 7.
@@ -356,7 +362,7 @@ unchanged, and the per-rung state lives in the plan of record:
    refuses LPC at the target rate (174.14% of a 32 kHz frame on hardware).
 3. ~~**6b-3** — rate-play at 32,768 Hz through a real manifest; the first product ROM
    naming the overlay crate.~~ *(Landed 2026-11-11 **at the headless level only**,
-   uncommitted: `product-play.gba` plus a host model of the same geometry — 571/571
+   as landed: `product-play.gba` plus a host model of the same geometry — 571/571
    periods serviced, zero underflows, PCM pin matched, in mGBA. What it does not close:
    hardware, which is 7-1, and whether its hand-built timer/DMA/IRQ feeder is the
    shipping path, which is 7-2. The question that second one would have owned — Q14, the
@@ -460,7 +466,7 @@ unchanged, and the per-rung state lives in the plan of record:
   that makes sound at the target rate, driven by the manifest rather than the
   spike's generated offset table, and the thing item 7-1's stage timings have to be
   taken on. Nothing above 10,512 Hz has ever made sound in this repository.~~
-  *(Landed 2026-11-11 at the headless level, uncommitted. The image runs the target
+  *(Landed 2026-11-11 at the headless level. The image runs the target
   rate and the whole product path — decode, convert, FIFO, a hand-built feeder — with
   zero underflows and the PCM pin matched, but only ever in mGBA: nothing above 10,512
   Hz has ever been* heard *in this repository, and the plan's record of 6b-3 says so in

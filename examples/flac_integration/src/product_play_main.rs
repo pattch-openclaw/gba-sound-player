@@ -58,8 +58,8 @@
 //! Composite, that is a cycle counter whose unit *is* audio time: 512 cycles per
 //! sample, 286,720 per period, 1,048,576 per 2,048-sample frame — the exact
 //! `2^20` [`geometry::frame_cycles`] prices. See [`audio_cycles`] for why the
-//! read is a retry loop and why a torn snapshot cannot be mistaken for a good
-//! one. This replaces the free-running pair (`src/main.rs`'s `Counter`) that every
+//! read is a median-of-three retry loop and why a single torn snapshot cannot be
+//! mistaken for a good one. This replaces the free-running pair (`src/main.rs`'s `Counter`) that every
 //! earlier timing row used; that instrument and this one agree to within a
 //! bounded offset because both count CPU cycles at divider /1 — but this one
 //! cannot drift from the audio, because it *is* the audio's clock. Deliberate
@@ -103,7 +103,7 @@
 //!
 //! ## The judge
 //!
-//! Three things have to hold, and all three are counted rather than argued:
+//! Four things have to hold, and all four are counted rather than argued:
 //!
 //! 1. `underflows = 0` — every period got a whole chunk from the ring
 //!    ([`playback::RingFeed::take_chunk`] consumes only what it copies, so
@@ -111,13 +111,26 @@
 //! 2. `pushed = consumed = 320,000` — the whole clip reached the DMA exactly once
 //!    and in order, and the one short period at the end is a classified `Tail`,
 //!    not a hole;
-//! 3. `pcm MATCH` — the bytes this image played are the bytes `flac -d` produces,
-//!    pinned at pack time ([`gafp_pin::FNV_PCM`]).
+//! 3. `pcm MATCH` — the samples the proof pass decodes are the samples `flac -d`
+//!    produces, pinned at pack time ([`gafp_pin::FNV_PCM`]). This is a **decode**
+//!    witness: the fold is over the interleaved i16 PCM, not the 8-bit FIFO bytes the
+//!    DMA plays, so it says nothing about the played signal (`FLAC.md`, the played
+//!    form is 8-bit);
+//! 4. `fifo MATCH` — the 8-bit FIFO bytes of the same converted frames fold to
+//!    [`gafp_pin::FNV_FIFO_L`] / [`gafp_pin::FNV_FIFO_R`], the played-form witness.
+//!    It is a separate pin from `pcm MATCH` on purpose: the decode witness and the
+//!    played-form witness describe the same stream and must not be conflated. The
+//!    fold covers the source samples handed to the ring, not the zero-padded `Tail`,
+//!    and it runs in the post-audio proof pass because the push-path version was
+//!    measured too expensive (the 64-bit FNV costs ~800,000 c/frame on ARM7TDMI).
 //!
-//! Supporting evidence, reported and not required by the verdict: the period audit
-//! (coalesced overflows, services later than the 16-sample DMA grace), the
-//! minimum ring lead seen at any producer instant, and the largest single frame's
-//! work against the period it has to hide inside.
+//! The period audit is **part of the verdict**, not supporting evidence: a
+//! coalesced overflow (a full-buffer replay), a service later than the 16-sample
+//! DMA grace (a mid-waveform splice), a refused audio-clock read (the instrument
+//! cannot vouch for the shares) and more than one classified tail period all fail
+//! the run. `over_period` and `min_lead` stay advisory — a frame over its own
+//! period is what the ring is for — and so does the largest single frame's work
+//! against the period it has to hide inside.
 //!
 //! ## Rate — and why this asset is not a product asset
 //!
@@ -133,7 +146,9 @@
 //! `tests/product_play_witness.rs::ruled_rate_policy_allows_one_bridge_and_no_more` —
 //! and that has been ruled
 //! unacceptable in itself — clean period audit, zero underflows and bit-exact PCM do
-//! not buy it back.
+//! not buy it back. The screen carries that fact (`rate 32000>32768 scaffold`) and
+//! the log carries a `Q14 SCAFFOLD` line, because on a stock unit the screen is the
+//! record a run gets.
 //!
 //! **`TODO(Q14, BLOCKING)`: the blocking work is a 32,768 Hz encode of the product
 //! asset, not any change to this image** (`flac-docs/plan-of-record.md`, 7-0; the
@@ -200,7 +215,7 @@ mod rom {
     use flac_integration::checksum::{Fnv1a64, fold_i16le_stereo};
     use flac_integration::geometry as geo;
     use flac_integration::{gafp_pin, playback};
-    use playback::{Chunk, RingFeed, convert_frame};
+    use playback::{Chunk, RingFeed, convert_frame, fold_bytes};
 
     /// The clip: the same FIXED-0 asset `gafp-check` guards and `flac-rom`
     /// decodes. Nothing here is generated for this ROM — the manifest, the frame
@@ -371,9 +386,6 @@ mod rom {
         // in the duty-cycle arithmetic rather than in a footnote.
         feed_cycles_sum: u64,
         feed_cycles_worst: u32,
-        /// Handler entries where the audio clock read was refused four times —
-        /// the instrument refusing to pretend.
-        clock_refusals: u32,
     }
 
     static STATS: Mutex<RefCell<Stats>> = Mutex::new(RefCell::new(Stats {
@@ -389,8 +401,24 @@ mod rom {
         max_delay_ticks: 0,
         feed_cycles_sum: 0,
         feed_cycles_worst: 0,
-        clock_refusals: 0,
     }));
+
+    /// Clock refusals, in their own Mutex on purpose: [`audio_cycles`] is called
+    /// from the feeder while `STATS` is already mutably borrowed, so counting a
+    /// refusal through `STATS` re-enters that `RefCell` and panics in IRQ context
+    /// — on exactly the path that is supposed to report the failure. A refusal is
+    /// "no median of three readable snapshots in six attempts", and it fails the
+    /// verdict (see `main`); the fallback value is diagnostic only.
+    static CLOCK_REFUSALS: Mutex<RefCell<u32>> = Mutex::new(RefCell::new(0));
+
+    /// The last accepted audio-cycle value. [`audio_cycles`] refuses a candidate
+    /// below it: the timers are cascaded, and a snapshot can read TM1 from the new
+    /// period while TM2 still carries the old count, which yields a value a period
+    /// low. Time cannot go backwards, so a median below the last accepted value is
+    /// a torn read: the read is refused, and the run fails. This is what keeps a
+    /// stage window from wrapping to ~2^32 and being silently counted as `void`
+    /// (or, worse, shrinking by a period).
+    static LAST_CYCLES: Mutex<RefCell<u32>> = Mutex::new(RefCell::new(0));
 
     // -------------------------------------------------------------- io, clock
 
@@ -426,37 +454,78 @@ mod rom {
     /// Read the audio chain as one cycle count: the unit is the CPU cycle, and it
     /// advances at exactly the rate the audio is being played.
     ///
-    /// Each counter is read twice and the pair accepted only if the low counters
-    /// did not decrease and the period register did not move. A boundary always
-    /// *decreases* the register that rolled, because every timer reloads with its
-    /// own negative latch — that is what makes this timebase repeat at all, and it
-    /// is why a torn read cannot silently read low: it reads *absurdly* low or
-    /// high, and it is rejected. One read pair cannot span two boundaries of the
-    /// same level (512 cycles per sample against a read sequence of ~10² cycles).
-    /// A rejected pair is retried; four refusals means the instrument is wrong,
-    /// not unlucky, so the last snapshot is returned and the refusal is counted
-    /// where the report will show it.
+    /// Each snapshot reads the three counters twice and accepts it only if the low
+    /// counters did not decrease and the period register did not move. A boundary
+    /// always *decreases* the register that rolled, because every timer reloads
+    /// with its own negative latch — that is what makes this timebase repeat. The
+    /// snapshot is also rejected if TM1/TM0 are outside their per-period range (a
+    /// read below the reload). That in-pair test is necessary but not sufficient:
+    /// the timers are cascaded, and a snapshot can catch TM1 after its reload while
+    /// TM2 still carries the old period (a value a period low) or the reverse (a
+    /// period high) with every in-pair test satisfied. So three accepted snapshots
+    /// are taken and their **median** is used — one outlier is the observed failure
+    /// mode — and the median must also be no lower than the last accepted value,
+    /// because audio time cannot go backwards. Six attempts are allowed; failing to
+    /// get three valid snapshots (or a monotonic median) is a refusal, which fails
+    /// the verdict: a run whose clock cannot be trusted cannot vouch for its own
+    /// shares.
     ///
     /// # Safety
     /// only fixed I/O ports are read. The chain must be running for the value to
     /// mean audio time; [`play`] arms it before the first read.
     unsafe fn audio_cycles() -> u32 {
-        let mut t0 = 0u16;
-        let mut t1 = 0u16;
-        let mut t2 = 0u16;
-        for _ in 0..4 {
-            t0 = unsafe { io_read_u16(REG_TM0_DATA) };
-            t1 = unsafe { io_read_u16(REG_TM1_DATA) };
-            t2 = unsafe { io_read_u16(REG_TM2_DATA) };
+        let last = critical_section::with(|cs| *LAST_CYCLES.borrow_ref(cs));
+        let mut valid = [0u32; 3];
+        let mut n = 0usize;
+        for _ in 0..6 {
+            let t0 = unsafe { io_read_u16(REG_TM0_DATA) };
+            let t1 = unsafe { io_read_u16(REG_TM1_DATA) };
+            let t2 = unsafe { io_read_u16(REG_TM2_DATA) };
             let after0 = unsafe { io_read_u16(REG_TM0_DATA) };
             let after1 = unsafe { io_read_u16(REG_TM1_DATA) };
             let after2 = unsafe { io_read_u16(REG_TM2_DATA) };
-            if t2 == after2 && t1 <= after1 && t0 <= after0 {
-                return cycles_of(t2, t1, t0);
+            let in_period = u32::from(t1.wrapping_sub(TM1_RELOAD));
+            let in_sample = u32::from(t0.wrapping_sub(TM0_RELOAD));
+            if t2 == after2
+                && t1 <= after1
+                && t0 <= after0
+                && in_period < CHUNK as u32
+                && in_sample < TICKS_PER_SAMPLE
+            {
+                valid[n] = cycles_of(t2, t1, t0);
+                n += 1;
+                if n == 3 {
+                    break;
+                }
             }
         }
-        critical_section::with(|cs| STATS.borrow_ref_mut(cs).clock_refusals += 1);
-        cycles_of(t2, t1, t0)
+        if n < 3 {
+            critical_section::with(|cs| *CLOCK_REFUSALS.borrow_ref_mut(cs) += 1);
+            return last;
+        }
+        // Median of three: a cascaded snapshot can carry TM1 from the new period
+        // while TM2 still says the old one (a value a period low) or the reverse
+        // (a period high). One outlier is the observed failure mode, so the median
+        // discards it; the three reads are within a few hundred cycles of each
+        // other and the median is biased low by about half a read sequence, which
+        // is the instrument's own floor.
+        let (mut a, mut b, mut c) = (valid[0], valid[1], valid[2]);
+        if a > b {
+            core::mem::swap(&mut a, &mut b);
+        }
+        if b > c {
+            core::mem::swap(&mut b, &mut c);
+        }
+        if a > b {
+            core::mem::swap(&mut a, &mut b);
+        }
+        let cycles = b;
+        if cycles < last {
+            critical_section::with(|cs| *CLOCK_REFUSALS.borrow_ref_mut(cs) += 1);
+            return last;
+        }
+        critical_section::with(|cs| *LAST_CYCLES.borrow_ref_mut(cs) = cycles);
+        cycles
     }
 
     /// The period register alone: one read, and the number of mixer periods
@@ -925,6 +994,13 @@ mod rom {
             blocksize,
             u64::from(geo::MIXER_TICK_HZ) * u64::from(blocksize) / u64::from(stream_rate)
         );
+        if stream_rate != geo::PLAYBACK_RATE_HZ {
+            agb::println!(
+                "[pp-rom] Q14 SCAFFOLD: stream {} Hz is played at {} Hz — pitch-shifted, NOT a product asset",
+                stream_rate,
+                geo::PLAYBACK_RATE_HZ
+            );
+        }
         Some(manifest)
     }
 
@@ -939,6 +1015,11 @@ mod rom {
         scratch_l: Vec<u8>,
         scratch_r: Vec<u8>,
         blocksize_max: usize,
+        /// The manifest's total sample count. Used to set `STATS.finished` in the
+        /// same critical section as the final push, so the feeder cannot see the
+        /// ring empty with the flag still false and charge the classified tail as
+        /// an underflow.
+        total_samples: usize,
         ledger: &'b mut Ledger,
     }
 
@@ -1000,9 +1081,19 @@ mod rom {
                 );
                 return Err(Halt::Failed("convert"));
             }
+            // The `finished` flag is set in the *same* critical section as the
+            // final push. Setting it after the producer loop leaves a window in
+            // which the feeder can see an empty ring while the flag is still
+            // false and count the final short chunk as an underflow.
             let outcome = critical_section::with(|cs| {
-                FEED.borrow_ref_mut(cs)
-                    .push_bytes(&self.scratch_l[..n], &self.scratch_r[..n])
+                let pushed = {
+                    let mut feed = FEED.borrow_ref_mut(cs);
+                    feed.push_bytes(&self.scratch_l[..n], &self.scratch_r[..n])
+                };
+                if pushed.is_ok() && FEED.borrow_ref(cs).pushed() == self.total_samples {
+                    STATS.borrow_ref_mut(cs).finished = true;
+                }
+                pushed
             });
             if let Err(e) = outcome {
                 // Named rather than swallowed: the ring's own numbers are what a
@@ -1100,12 +1191,17 @@ mod rom {
             // only instant at which the ring's watermark means anything: the
             // feeder cannot take or add between the reads.
             let (lead_before, lead_after, outcome) = critical_section::with(|cs| {
-                let mut feed = FEED.borrow_ref_mut(cs);
-                let before = feed.ready();
-                let pushed = feed.push_bytes(&self.scratch_l[..n], &self.scratch_r[..n]);
-                (before, feed.ready(), pushed)
+                let (before, after, pushed) = {
+                    let mut feed = FEED.borrow_ref_mut(cs);
+                    let before = feed.ready();
+                    let pushed = feed.push_bytes(&self.scratch_l[..n], &self.scratch_r[..n]);
+                    (before, feed.ready(), pushed)
+                };
+                if pushed.is_ok() && FEED.borrow_ref(cs).pushed() == self.total_samples {
+                    STATS.borrow_ref_mut(cs).finished = true;
+                }
+                (before, after, pushed)
             });
-            let (t4, p4) = unsafe { (audio_cycles(), periods_elapsed()) };
             if let Err(e) = outcome {
                 agb::println!(
                     "[pp-rom] FAIL push refused at frame {}: {:?} (room was demanded for {} samples before the frame was decoded)",
@@ -1115,6 +1211,7 @@ mod rom {
                 );
                 return Err(Halt::Failed("push"));
             }
+            let (t4, p4) = unsafe { (audio_cycles(), periods_elapsed()) };
 
             let l = &mut *self.ledger;
             l.stages[0].note(t1.wrapping_sub(t0), p1.wrapping_sub(p0));
@@ -1230,10 +1327,16 @@ mod rom {
         }
 
         enable_sound();
-        arm_audio_chain(timers);
+        // Clear a stale Timer1 IF *before* the source is enabled: registering the
+        // handler sets the IE bit, and a pending bit left by the boot path would
+        // enter the feeder before the chain has a period to serve. Writing 1 to
+        // the IF bit clears it. The first real overflow is 560 samples away, so
+        // installing the handler before arming loses no period.
+        unsafe { io_write_u16(REG_IF, 1 << 4) };
         // SAFETY: the handler allocates nothing, logs nothing and touches only the
         // statics above — agb's interrupt-handler contract.
         let _handler = unsafe { add_interrupt_handler(Interrupt::Timer1, feeder) };
+        arm_audio_chain(timers);
         producer.ledger.audio_start = unsafe { audio_cycles() };
         agb::println!(
             "[pp-rom] armed: {} periods/s of {} cycles, frame budget {} cycles; IE=0x{:04X} IME={} (witness: only the timer1 bit should be set)",
@@ -1271,9 +1374,11 @@ mod rom {
             halt_reason = Some("frame count");
         }
 
-        // From here a short chunk is a classified tail. The flag is set by the
-        // producer and read by the handler at entry; the ordering is what the
-        // critical section is for.
+        // Belt and braces: the producer already sets this in the same critical
+        // section as the final push (see `Producer::decode_and_push`), so a
+        // short chunk is a classified tail from that instant. This covers a
+        // producer that stopped without pushing (an error path) and is
+        // idempotent otherwise.
         critical_section::with(|cs| STATS.borrow_ref_mut(cs).finished = true);
         producer.ledger.audio_producer_end = unsafe { audio_cycles() };
         agb::println!(
@@ -1334,20 +1439,24 @@ mod rom {
     /// pin. Not timed, for the reason `src/main.rs` records: a window that
     /// contains the fold is pricing the fold (1.95 M c/frame measured for a kernel
     /// the instrument measures at 0.42 M).
-    fn proof() -> bool {
+    fn proof() -> (bool, bool) {
         let Some(manifest) = manifest() else {
-            return false;
+            return (false, false);
         };
         let Ok(mut decoder) = Decoder::new(&manifest) else {
             agb::println!("[pp-rom] FAIL proof: decoder refused");
-            return false;
+            return (false, false);
         };
         let capacity = FrameBuffers::required_len(&manifest);
         let mut left: Vec<i32> = vec![0i32; capacity];
         let mut right: Vec<i32> = vec![0i32; capacity];
         let mut bufs = FrameBuffers::new(&mut left, &mut right);
+        let mut scratch_l: Vec<u8> = vec![0u8; capacity];
+        let mut scratch_r: Vec<u8> = vec![0u8; capacity];
 
         let mut hash = Fnv1a64::new();
+        let mut fifo_l = Fnv1a64::new();
+        let mut fifo_r = Fnv1a64::new();
         let mut frames = 0usize;
         let mut samples = 0u64;
         loop {
@@ -1355,20 +1464,33 @@ mod rom {
                 Ok(Some(frame)) => {
                     if fold_i16le_stereo(&mut hash, frame.left, frame.right).is_err() {
                         agb::println!("[pp-rom] FAIL proof: sample outside the i16 profile");
-                        return false;
+                        return (false, false);
                     }
+                    let n = frame.left.len();
+                    if convert_frame(
+                        frame.left,
+                        frame.right,
+                        &mut scratch_l[..n],
+                        &mut scratch_r[..n],
+                    )
+                    .is_err()
+                    {
+                        agb::println!("[pp-rom] FAIL proof: FIFO conversion rejected a sample");
+                        return (false, false);
+                    }
+                    fold_bytes(&mut fifo_l, &mut fifo_r, &scratch_l[..n], &scratch_r[..n]);
                     frames += 1;
                     samples += frame.left.len() as u64;
                 }
                 Ok(None) => break,
                 Err(e) => {
                     agb::println!("[pp-rom] FAIL proof decode: {:?}", e);
-                    return false;
+                    return (false, false);
                 }
             }
         }
         let pcm = hash.finish();
-        let ok =
+        let pcm_ok =
             frames == gafp_pin::FRAMES && samples == gafp_pin::SAMPLES && pcm == gafp_pin::FNV_PCM;
         agb::println!(
             "[pp-rom] proof: frames={} samples={} pcm_fnv=0x{:016X} expected=0x{:016X} [{}]",
@@ -1376,9 +1498,27 @@ mod rom {
             samples,
             pcm,
             gafp_pin::FNV_PCM,
-            if ok { "MATCH" } else { "MISMATCH" }
+            if pcm_ok { "MATCH" } else { "MISMATCH" }
         );
-        ok
+        // The played-form pin, over the same converted frames. This cannot be
+        // folded on the push path: the house FNV-1a is 64-bit, ARM7TDMI has no
+        // 64-bit multiply, and folding 4,096 bytes/frame there costs ~800,000
+        // cycles/frame — measured, and it blew the period budget (128%). The
+        // proof pass is after the audio and is not timed, so it can afford it.
+        // `RingFeed::push_bytes`/`take_chunk` are the copy that carries these
+        // bytes to the DMA, and they are byte-witnessed on the host.
+        let fifo_l_pin = fifo_l.finish();
+        let fifo_r_pin = fifo_r.finish();
+        let fifo_ok = fifo_l_pin == gafp_pin::FNV_FIFO_L && fifo_r_pin == gafp_pin::FNV_FIFO_R;
+        agb::println!(
+            "[pp-rom] fifo proof: L=0x{:016X} R=0x{:016X} expected L=0x{:016X} R=0x{:016X} [{}]",
+            fifo_l_pin,
+            fifo_r_pin,
+            gafp_pin::FNV_FIFO_L,
+            gafp_pin::FNV_FIFO_R,
+            if fifo_ok { "MATCH" } else { "MISMATCH" }
+        );
+        (pcm_ok, fifo_ok)
     }
 
     // ------------------------------------------------------------------ main
@@ -1410,11 +1550,12 @@ mod rom {
         );
 
         let Some(manifest) = manifest() else {
-            report(&mut gfx, false, "manifest refused", None, None);
+            report(&mut gfx, false, "manifest refused", None, None, None);
             loop {}
         };
         let capacity = FrameBuffers::required_len(&manifest);
         let total_frames = manifest.frame_count();
+        let stream_rate = manifest.sample_rate_hz();
         let total_samples = usize::try_from(manifest.total_samples()).unwrap_or(usize::MAX);
 
         let mut ledger = Ledger::new(u32::from(manifest.blocksize()));
@@ -1422,7 +1563,14 @@ mod rom {
         let mut right: Vec<i32> = vec![0i32; capacity];
         let bufs = FrameBuffers::new(&mut left, &mut right);
         let Ok(decoder) = Decoder::new(&manifest) else {
-            report(&mut gfx, false, "decoder refused", Some(&ledger), None);
+            report(
+                &mut gfx,
+                false,
+                "decoder refused",
+                Some(&ledger),
+                None,
+                None,
+            );
             loop {}
         };
         // The producer is consumed by `play`: it owns the only mutable borrow of
@@ -1436,6 +1584,7 @@ mod rom {
             // add, which is what the ring must have room for *before* a frame is
             // decoded. See `Producer::wait_for_room`.
             blocksize_max: capacity,
+            total_samples,
             ledger: &mut ledger,
         };
 
@@ -1473,23 +1622,55 @@ mod rom {
             && consumed == pushed
             && ledger.frames == total_frames
             && pushed != 0;
-        let pcm_ok = proof();
-        let pass = ledger_ok && pcm_ok;
+        // The audit is part of the verdict, not supporting evidence: a coalesced
+        // overflow is a full-buffer replay, a late service is a mid-waveform
+        // splice, and a refused clock read means the instrument cannot vouch for
+        // the shares. At most one tail period is expected (zero if the clip ends
+        // exactly on a period boundary). `over_period` and `min_lead` stay
+        // advisory: a frame over its own period is what the ring is for.
+        let (audit_coalesced, audit_late, audit_tails, clock_refusals) =
+            critical_section::with(|cs| {
+                let s = STATS.borrow_ref(cs);
+                (
+                    s.coalesced,
+                    s.late_servicings,
+                    s.tail_periods,
+                    *CLOCK_REFUSALS.borrow_ref(cs),
+                )
+            });
+        // A `void` window is a clock read the instrument refused to price (a
+        // window that wrapped, or a stage whose read was rejected). It is part of
+        // the audit for the same reason: a share built from a void window is not a
+        // measurement.
+        let stages_void: u32 =
+            ledger.stages.iter().map(|s| s.void).sum::<u32>() + ledger.paced.void;
+        let audit_ok = audit_coalesced == 0
+            && audit_late == 0
+            && audit_tails <= 1
+            && clock_refusals == 0
+            && stages_void == 0;
+        let (pcm_ok, fifo_ok) = proof();
+        let pass = ledger_ok && audit_ok && pcm_ok && fifo_ok;
 
         report(
             &mut gfx,
             pass,
             "playback",
             Some(&ledger),
-            Some((pushed, consumed, underflows, ledger_ok, pcm_ok)),
+            Some((
+                pushed, consumed, underflows, ledger_ok, audit_ok, pcm_ok, fifo_ok,
+            )),
+            Some((stream_rate, geo::PLAYBACK_RATE_HZ)),
         );
         gfx.set_background_palette_colour(0, 0, if pass { COLOR_PASS } else { COLOR_FAIL });
         agb::eprintln!(
-            "[pp-rom] verdict {} — screen {} (ledger={}, pcm={})",
+            "[pp-rom] verdict {} — screen {} (ledger={}, audit={}, pcm={}, fifo={})",
             if pass { "PASSED" } else { "FAILED" },
             if pass { "BLUE" } else { "RED" },
             ledger_ok,
-            pcm_ok
+            audit_ok,
+            pcm_ok,
+            fifo_ok
         );
         // Present nothing after `show` — `text`'s module docs say why, and 6a-7b's
         // hardware run is the evidence.
@@ -1505,7 +1686,8 @@ mod rom {
         pass: bool,
         stage: &str,
         ledger: Option<&Ledger>,
-        ledger_counts: Option<(usize, usize, u32, bool, bool)>,
+        ledger_counts: Option<(usize, usize, u32, bool, bool, bool, bool)>,
+        rates: Option<(u32, u32)>,
     ) {
         let stats = critical_section::with(|cs| {
             let s = STATS.borrow_ref(cs);
@@ -1521,7 +1703,7 @@ mod rom {
                 s.max_delay_ticks,
                 s.feed_cycles_sum,
                 s.feed_cycles_worst,
-                s.clock_refusals,
+                *CLOCK_REFUSALS.borrow_ref(cs),
             )
         });
         let (
@@ -1596,7 +1778,7 @@ mod rom {
             feed_worst
         );
         agb::println!(
-            "[pp-rom]   clock refusals (four rejected read pairs): {}",
+            "[pp-rom]   clock refusals (no median of three in six attempts): {}",
             clock_refusals
         );
 
@@ -1627,6 +1809,13 @@ mod rom {
         // same day; the feeder term was worse than that, dividing a period's cost
         // by a frame's budget). Nothing measured changed — only where the
         // divisions happen.
+        //
+        // The denominator is the *whole run's* frame count, so this is a whole-clip
+        // average: the five prefill frames are not timed, and the drain's feeder
+        // periods are included. The fed-phase duty cycle is ~1.7 points higher
+        // (~54.8%, ~574,700 c/frame), and that is the figure to quote as the
+        // steady-state real-time load; the printed number is the run's share of
+        // audio time, not the steady-state margin.
         let work_per_frame = (ledger.work_sum() + feed_sum) / frames;
         let decode_per_frame = ledger.stages[1].sum / frames;
         let convert_per_frame = ledger.stages[2].sum / frames;
@@ -1728,16 +1917,15 @@ mod rom {
         let drain_tail = u64::from(ledger.audio_end.wrapping_sub(ledger.audio_drain_start));
         let stages = ledger.stages_sum();
         let gaps = audio_span as i64 - stages as i64 - drain_tail as i64;
-        let read_pairs = u64::from(ledger.paced.n) * 5 + u64::from(serviced) * 2 + 8;
+        let read_pairs = (u64::from(ledger.paced.n) * 5 + u64::from(serviced) * 2 + 8) * 3;
         agb::println!(
-            "[pp-rom] closure (disjoint): audio_span={} stages={} drain_spin={} gaps={} — gaps are the {} clock read-pairs between windows plus the pre-arm span and the loop's bookkeeping; read-pairs alone bound at ~{} cycles, and one accepted read can quantise high by up to a period ({} cycles), so a small nonzero value is the instrument, not a lost term",
+            "[pp-rom] closure (disjoint): audio_span={} stages={} drain_spin={} gaps={} — gaps are the {} clock read-pairs between windows plus the pre-arm span and the loop's bookkeeping; read-pairs alone bound at ~{} cycles (three snapshots per read), and the median is biased low by about half a read sequence, so a small nonzero value is the instrument, not a lost term",
             audio_span,
             stages,
             drain_tail,
             gaps,
             read_pairs,
-            read_pairs * 60,
-            PERIOD_CYCLES
+            read_pairs * 60
         );
         agb::println!(
             "[pp-rom] closure (nested, not additive): feeder={} of which the {} boundaries inside producer stages fall inside stage windows at ~{} c each",
@@ -1760,13 +1948,20 @@ mod rom {
         // verdict a hardware run reads is actually legible.
         let mut screen_text = String::new();
         screen_text.push_str("PRODUCT PLAY 32768\n");
-        if let Some((pushed, consumed, underflows, ledger_ok, pcm_ok)) = ledger_counts {
+        if let Some((pushed, consumed, underflows, ledger_ok, audit_ok, pcm_ok, fifo_ok)) =
+            ledger_counts
+        {
             screen_text.push_str(&format!(
-                "fr {} und {} {}{}\n",
+                "fr {} und {} pcm {} fifo {}\n",
                 ledger.frames,
                 underflows,
-                if ledger_ok { "ledg ok " } else { "ledg NO " },
-                if pcm_ok { "pcm ok" } else { "pcm NO" }
+                if pcm_ok { "ok" } else { "NO" },
+                if fifo_ok { "ok" } else { "NO" }
+            ));
+            screen_text.push_str(&format!(
+                "ledg {} aud {}\n",
+                if ledger_ok { "ok" } else { "NO" },
+                if audit_ok { "ok" } else { "NO" }
             ));
             screen_text.push_str(&format!("push {} cons {}\n", pushed, consumed));
             screen_text.push_str(&format!(
@@ -1786,6 +1981,11 @@ mod rom {
                 "replay {} late {} tail {}\n",
                 coalesced, late, tail_periods
             ));
+            if let Some((stream, played)) = rates {
+                if stream != played {
+                    screen_text.push_str(&format!("rate {}>{} scaffold\n", stream, played));
+                }
+            }
         }
         screen_text.push_str(stage);
         screen(gfx, pass, stage, &mut screen_text);

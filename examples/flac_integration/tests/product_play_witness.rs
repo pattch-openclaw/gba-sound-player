@@ -82,9 +82,10 @@
 
 use flac_lite::{Decoder, FrameBuffers, Manifest};
 
+use flac_integration::checksum::{Fnv1a64, fold_i16le_stereo};
 use flac_integration::gafp_pin;
 use flac_integration::geometry as geo;
-use flac_integration::playback::{Chunk, RingFeed, convert_frame};
+use flac_integration::playback::{Chunk, RingFeed, convert_frame, fold_bytes};
 
 /// The shipped product asset, read from this crate's own `assets/` — the same
 /// bytes `gafp-check` guards, `flac-rom` embeds and `product-play-rom` plays. Not
@@ -616,6 +617,70 @@ fn manifest_and_geometry_agree() {
     println!(
         "model/frames: every frame {} samples except the last ({}); the walk supplies the lengths, and no offset table exists on either side",
         block, last
+    );
+}
+
+/// The played-form pin, witnessed on the host against the same converted frames
+/// the ROM pushes.
+///
+/// `decoded_frames` already runs the real `convert_frame`, so folding its bytes
+/// per channel with the shared `fold_bytes` is the host twin of the ROM's
+/// post-audio proof fold. The same frames are then decoded once more and folded through the i16
+/// interleave to confirm the two pins describe one stream — the decode witness
+/// (`FNV_PCM`) and the played-form witness (`FNV_FIFO_L/R`) cannot part company
+/// without this test going red.
+#[test]
+fn fifo_pins_match_the_converted_stream() {
+    let manifest = Manifest::parse(BLOB).expect("the shipped blob parses");
+    let frames = decoded_frames(&manifest);
+
+    let mut hl = Fnv1a64::new();
+    let mut hr = Fnv1a64::new();
+    for (l, r) in &frames {
+        fold_bytes(&mut hl, &mut hr, l, r);
+    }
+    assert_eq!(
+        hl.finish(),
+        gafp_pin::FNV_FIFO_L,
+        "the left channel's pushed FIFO bytes must hash to the generated pin"
+    );
+    assert_eq!(
+        hr.finish(),
+        gafp_pin::FNV_FIFO_R,
+        "the right channel's pushed FIFO bytes must hash to the generated pin"
+    );
+
+    // The same decoded stream's i16 form is the decode pin. A separate decode
+    // keeps `decoded_frames`' return shape (the rest of this file indexes it),
+    // and 157 frames is cheap on the host.
+    let mut decoder = Decoder::new(&manifest).expect("the shipped manifest must build a decoder");
+    let capacity = FrameBuffers::required_len(&manifest);
+    let mut left = vec![0i32; capacity];
+    let mut right = vec![0i32; capacity];
+    let mut bufs = FrameBuffers::new(&mut left, &mut right);
+    let mut pcm = Fnv1a64::new();
+    let mut n = 0usize;
+    loop {
+        match decoder
+            .decode_next(&mut bufs)
+            .expect("the shipped blob decodes on the host")
+        {
+            Some(frame) => {
+                fold_i16le_stereo(&mut pcm, frame.left, frame.right)
+                    .expect("the shipped blob is inside the i16 profile");
+                n += frame.left.len();
+            }
+            None => break,
+        }
+    }
+    assert_eq!(n as u64, gafp_pin::SAMPLES);
+    assert_eq!(pcm.finish(), gafp_pin::FNV_PCM);
+    println!(
+        "model/fifo: {} converted frames fold to L=0x{:016X} R=0x{:016X}; the same stream's i16 fold is 0x{:016X}",
+        frames.len(),
+        hl.finish(),
+        hr.finish(),
+        pcm.finish()
     );
 }
 

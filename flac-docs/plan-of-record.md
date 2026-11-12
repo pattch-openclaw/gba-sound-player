@@ -119,6 +119,26 @@ for it. **None of that is C2**: 7-3 has not been run on this image on any unit, 
 the stage shares are mGBA system-path numbers — which is precisely what 7-1 exists
 to re-read on silicon.
 
+*(Verdict-integrity pass, 2026-11-12 — the shares and the worst frame in the paragraph
+above are the pre-guard record and are superseded. The period audit is now part of the
+verdict (coalesced / late / clock refusal / tail / void all fail the run), `audio_cycles`
+is a median of three snapshots with a monotonic check, and the screen and log carry the
+Q14 scaffolding state. The rebuilt image `fe00b590…` (1,084,572 B) prints **work/frame
+559,845 c = 53.390%** and worst frame **565,874 c = 53.965%**; the old **59.367%** and its
+79,922-cycle push window were an instrument artefact — a cascaded timer read with TM1 in
+the new period and TM2 still in the old one, which the median now rejects. The ledger
+(571/571, 0 underflows, 0 coalesced, tail 1/240), `min_lead 9120`, PCM MATCH and the
+verdict are unchanged; see `measurements.md`'s 6b-3 verdict-integrity row.)*
+
+*(Played-form witness, 2026-11-12: `gafp_pin.rs` now carries `FNV_FIFO_L` /
+`FNV_FIFO_R` over each channel's 8-bit converted stream, and the ROM folds them in the
+post-audio proof pass and gates `fifo` in the verdict. Folding on the push path was tried
+and measured first: the house FNV-1a is 64-bit, ARM7TDMI has no 64-bit multiply, and the
+4,096 FIFO bytes of a frame cost ≈800,000 cycles — push stage 816,714 c/frame, work/frame
+**128.178%**, 154 underflows — so the witness was moved off the real-time path.
+`RingFeed`'s byte copy remains the host-witnessed bridge; the residual gap is stated in
+`measurements.md`'s played-form row. 11 host tests; image `ba237039e394330f…`, 1,085,604 B.)*
+
 **And on the same day it was measured, the rate it was measured at was ruled out
 (Q14).** That image plays a stream that *declares* 32,000 Hz on a 32,768 Hz clock. The
 project owner's ruling: a stream is encoded at the rate it is played at, and the player
@@ -2101,7 +2121,7 @@ ARM — and the ROM binaries are cfg-gated, which is why the host model can exis
 rebuilt image is byte-identical to the pre-restructuring one: same hash, which is how
 we know the portability work moved no product code.
 
-**What the run says (mGBA, one 100-second run, `5dc7869…`).** The full record is in
+**What the run says (mGBA, one headless run of the 9.766 s clip, `5dc7869…`).** The full record is in
 `measurements.md`; the load-bearing lines:
 
 ```
@@ -2115,6 +2135,12 @@ budget: work/frame=556405 c = 53.062% (per-frame shares: decode 39.362%
         1048576 c frame
 worst single frame's WORK: 622517 c = 59.367%; frames over their own period: 0
 ```
+
+*(Verdict-integrity rebuild, 2026-11-12: the guarded image prints `work/frame=559845 c =
+53.390%` and `worst single frame's WORK: 565874 c = 53.965%`. The 622,517 / 59.367% line
+above is the pre-guard instrument and is superseded: its 79,922-cycle push window is the
+torn cascaded-timer read the median-of-three clock now rejects. Every other line in the
+block — the feed ledger, the period audit, the watermark — reproduces.)*
 
 The short final period is classified `Tail`, not an underflow, and counted separately:
 one period of 240 real samples at the end of a 320,000-sample ledger is arithmetic, not

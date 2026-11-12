@@ -100,6 +100,29 @@ def fnv1a64(data):
     return h
 
 
+def fifo_pins(pcm, channels):
+    """The played-form pins: FNV-1a 64 over each channel's 8-bit FIFO bytes.
+
+    `pcm` is the committed `flac -d` output — interleaved i16 little-endian
+    stereo — and the FIFO byte is `(sample >> 8) as u8`, the same arithmetic
+    truncation `playback::fifo_byte` implements and agb's converter uses. The
+    two channel streams are concatenated in frame order, which is exactly what
+    the ROM's `fold_bytes` sees as it pushes each converted frame.
+    """
+    if channels != 2:
+        raise SystemExit("gen_gafp_blob: the FIFO pins are stereo-shaped")
+    if len(pcm) % 4 != 0:
+        raise SystemExit("gen_gafp_blob: PCM length is not whole stereo sample pairs")
+    left = bytearray()
+    right = bytearray()
+    for i in range(0, len(pcm), 4):
+        l = int.from_bytes(pcm[i : i + 2], "little", signed=True)
+        r = int.from_bytes(pcm[i + 2 : i + 4], "little", signed=True)
+        left.append((l >> 8) & 0xFF)
+        right.append((r >> 8) & 0xFF)
+    return fnv1a64(left), fnv1a64(right)
+
+
 def build():
     assets = open(SPIKE_ASSETS_RS, "r", encoding="utf-8").read()
     frames, fnv_pcm, channels, bps, rate = parse_l0(assets)
@@ -123,6 +146,12 @@ def build():
         )
 
     total_samples = sum(bs for _, bs in frames)
+    if len(reference) != total_samples * 4:
+        raise SystemExit(
+            "gen_gafp_blob: the reference PCM is not %d interleaved stereo i16 samples"
+            % total_samples
+        )
+    fnv_fifo_l, fnv_fifo_r = fifo_pins(reference, channels)
     table_end = HEADER_LEN + 4 * len(frames)
     blob = bytearray(table_end + len(region))
 
@@ -147,7 +176,10 @@ def build():
         "//! gate's committed, host-witnessed pins so the ROM's correctness claim\n"
         "//! rests on a value something else already proved. `FNV_PCM` is\n"
         "//! `flac_spike::assets::L0_FIXED.fnv_pcm`: FNV-1a 64 over the clip's\n"
-        "//! interleaved i16 little-endian stereo PCM as `flac -d` produced it.\n"
+        "//! interleaved i16 little-endian stereo PCM as `flac -d` produced it — the\n"
+        "//! **decode** witness. `FNV_FIFO_L` / `FNV_FIFO_R` are FNV-1a 64 over each\n"
+        "//! channel's 8-bit FIFO bytes, `(sample >> 8) as u8`, in stream order — the\n"
+        "//! **played-form** witness the product-play ROM folds in its post-audio proof.\n"
         "\n"
         "/// Frames in the blob (the manifest's frame count must equal this).\n"
         f"pub const FRAMES: usize = {len(frames)};\n"
@@ -155,8 +187,14 @@ def build():
         "/// Interchannel samples per channel in the blob.\n"
         f"pub const SAMPLES: u64 = {total_samples};\n"
         "\n"
-        "/// The reference PCM pin.\n"
+        "/// The reference PCM pin (decode witness; i16 interleaved).\n"
         f"pub const FNV_PCM: u64 = 0x{fnv_pcm:016X};\n"
+        "\n"
+        "/// Left channel's 8-bit FIFO bytes, in stream order (played-form witness).\n"
+        f"pub const FNV_FIFO_L: u64 = 0x{fnv_fifo_l:016X};\n"
+        "\n"
+        "/// Right channel's 8-bit FIFO bytes, in stream order (played-form witness).\n"
+        f"pub const FNV_FIFO_R: u64 = 0x{fnv_fifo_r:016X};\n"
         "\n"
         "/// Highest FIXED predictor order the packer recorded for this clip.\n"
         f"pub const MAX_FIXED_ORDER: u8 = {max_fixed_order};\n"

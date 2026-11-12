@@ -681,7 +681,7 @@ each:
   an end to one — 0.95 cents is still a stream played at a rate it does not declare —
   and it spends the exact integer arithmetic the geometry's pins are built on.
 - **Resample in the player.** A new per-sample cost on the hot path, unmeasured, at a
-  point where the producer's measured work is 53.062% of a frame — payable in
+  point where the producer's measured work is 53.390% of a frame (53.062% on the pre-guard instrument) — payable in
   principle, and the price is unknown. Not forbidden by the ruling in the way the
   mapping above is (rate conversion changes the rate rather than reinterpreting it),
   but not chosen either: the plan takes the encode-side route, because the place to
