@@ -37,8 +37,8 @@
 //! lead itself peaks at the ring's 36.
 //! A **sustained overage** — the producer costing more than its share forever,
 //! which is what a wrong clock assumption or a slower part would mean — is bounded
-//! by *throughput*: 153.6% of the measured cost with no ring in the picture, 191.3%
-//! with this one (178.8% at the hardware derate). So a deep ring is worth ~38 points
+//! by *throughput*: 152.9% of the measured cost with no ring in the picture, 190.6%
+//! with this one (178.1% at the hardware derate). So a deep ring is worth ~38 points
 //! of sustained overage and then nothing further, while being worth a great deal of
 //! stall — the two numbers are nowhere near each other, which is why
 //! [`sustained_overage_tolerance`] and
@@ -70,9 +70,26 @@
 //!
 //! ## Where the cost figures come from
 //!
-//! From a run, not an estimate: `product-play.gba` built on 2026-11-11 under mGBA —
-//! the first image in this repository to play at the target rate — whose serial log
-//! gives [`MEASURED`] and [`FEEDER_PER_PERIOD`]. Those are mGBA's numbers, and the
+//! From a run, not an estimate: `product-play.gba` as this tree builds it — sha
+//! `750d01e97800de95…`, the image `flac-docs/measurements.md` carries as its current
+//! 6b-3 row — run under mGBA, whose serial log gives [`MEASURED`] and
+//! [`FEEDER_PER_PERIOD`]. That image's log `diff`s **byte-identical** to the run of
+//! `694126d406eb9b2a…` it follows (the change between them is comments and these
+//! constants), so the sums below are what both printed. The envelope is tied to the bytes
+//! the ROM is built from on purpose: when a code change moves that image's `stages` line,
+//! this block has to be re-read from a fresh run in the same change. Be exact about what
+//! witnesses that: no host test reads a ROM log, so [`the_envelope_is_the_runs_own_sums`]
+//! cannot notice a wholly-stale envelope — what it catches is a *part*-re-read, because it
+//! locks the sums, means, boundary charge and attributed estimate to each other and to the
+//! `isolated_estimate` the image prints. Drift is therefore caught by the ledger rule (a
+//! record row cites the image that printed its numbers) until those printed lines are
+//! pinned as a fixture and derived from, which the plan writes against 7-1. (The envelope
+//! this block first carried came from the 2026-11-11
+//! image `5dc786951b91b356…`, the first in this repository to play at the target rate:
+//! 555,193 raw / 549,760 attributed / 420,894 isolated decode. That stays in the
+//! record as *that* image's row; this block no longer quotes it, and the ceilings the
+//! geometry prose quotes belong to whichever envelope is in force here.) Those are
+//! mGBA's numbers, and the
 //! plan's standing assumption is that memory-heavy stages run ~7% slower on silicon
 //! (measured for the kernel A/B, `flac-docs/measurements.md`), so the central
 //! claims are run again at that derate. A model that only passed at the emulator's
@@ -144,11 +161,15 @@ fn decoded_frames(manifest: &Manifest<'_>) -> Vec<FrameBytes> {
 // figures cannot drift apart again, and `the_envelope_is_the_runs_own_sums` checks
 // the derivation against the ROM's printed means.
 
-/// The 2026-11-11 mGBA run of `product-play.gba`, `[pp-rom] stages`, as the sums and
-/// counts the ROM printed. Means are recomputed here; nothing is copied.
-const DECODE_SUM: u64 = 64_801_816;
-const CONVERT_SUM: u64 = 17_265_217;
-const PUSH_SUM: u64 = 2_322_620;
+/// The current image's mGBA run — `750d01e97800de95…`, byte-identical to the log of
+/// `694126d406eb9b2a…` before it — `[pp-rom] stages`, as the sums
+/// and counts that run printed. Means are recomputed here; nothing is copied. Re-read
+/// these five from a fresh run whenever ROM code changes: the sums are the only honest
+/// source, and the test named in the header re-checks them against the means that same
+/// run prints.
+const DECODE_SUM: u64 = 65_079_938;
+const CONVERT_SUM: u64 = 17_331_888;
+const PUSH_SUM: u64 = 2_263_016;
 /// Fed-phase windows: the frames decoded with the audio running. 152 = the 157
 /// frames less the 5 the prefill decoded before arming; the consumer's tail (one
 /// period, 240 real samples) is not a decode window at all.
@@ -157,7 +178,7 @@ const STAGE_WINDOWS: u64 = 152;
 /// nested in producer work. `convert` and `push` report `boundaries_in=0`.
 const DECODE_BOUNDARIES_INSIDE: u64 = 159;
 /// The same run's feeder: total over 571 serviced periods.
-const FEEDER_SUM: u64 = 2_966_019;
+const FEEDER_SUM: u64 = 3_221_393;
 const PERIODS_SERVICED: u64 = 571;
 
 /// The feeder's own cost per period, from the same run: the mean of 571 measured
@@ -179,17 +200,20 @@ const fn window_mean(sum: u64) -> u64 {
 
 /// The producer's own work per frame with the nesting left in: the three stage
 /// means added, which is exactly what the ROM's "decode + convert + push" line
-/// says (426,327 + 113,586 + 15,280 = 555,193).
+/// says (428,157 + 114,025 + 14,888 = 557,070).
 const MEASURED_RAW: u64 =
     window_mean(DECODE_SUM) + window_mean(CONVERT_SUM) + window_mean(PUSH_SUM);
 
 /// The same envelope with the boundaries nested inside those windows priced out of
-/// it, because that time belongs to the interrupt, not to the producer: 555,193 −
-/// (159/152) × 5,194 = 549,760.
+/// it, because that time belongs to the interrupt, not to the producer: 557,070 −
+/// (159/152) × 5,641 = 551,170.
 ///
 /// That subtraction is the attribution the ROM prints itself, and it is the same
-/// arithmetic — 426,327 − (159/152) × 5,194 = 420,894 — that the record quotes as
-/// this image's isolated decode estimate. It is an estimate: an interrupt's entry
+/// arithmetic — 428,157 − (159/152) × 5,641 = 422,257 — which is the very
+/// `isolated_estimate` that image prints on its `attribution:` line, so the model and
+/// the ROM derive that one figure identically. The earlier image in this lineage
+/// (`5dc7869…`) printed 420,894 by the same arithmetic, and the record's rows for that
+/// image keep that figure. It is an estimate: an interrupt's entry
 /// cost is not separable from the work it interrupted, which is why the
 /// unattributed figure is charged too, in [`MEASURED_RAW`], and why nothing here
 /// turns on the difference.
@@ -202,7 +226,7 @@ const MEASURED: u64 = MEASURED_RAW - FEEDER_PER_PERIOD * DECODE_BOUNDARIES_INSID
 /// deliberately blunt penalty, not a claim about the mechanism behind it.
 const HARDWARE_DERATE_PERCENT: u64 = 7;
 
-/// The 2026-11-11 mGBA run's observed ring watermark, for the model to compare
+/// The ring watermark the current image's run observed, for the model to compare
 /// against: the minimum lead seen immediately before a push, and the maximum seen
 /// immediately after one.
 const ROM_OBSERVED_MIN_LEAD: usize = 9_120;
@@ -702,38 +726,42 @@ fn fifo_pins_match_the_converted_stream() {
 
 /// The cost envelope the rest of these tests are charged is the run's own sums, and
 /// the derivation is arithmetic a reader can re-do from the log: the three stage
-/// means add to 555,193 as printed, the 159 boundaries inside the decode windows
-/// price out at (159/152) × 5,194 = 5,433, and 426,327 − 5,433 = 420,894 is the
-/// same image's quoted isolated decode estimate.
+/// means add to 557,070 as printed, the 159 boundaries inside the decode windows
+/// price out at (159/152) × 5,641 = 5,900, and 428,157 − 5,900 = 422,257 is the
+/// `isolated_estimate` that same image prints for itself.
 ///
 /// This test exists because the block it guards was a transcription first, and the
 /// transcription was wrong in the permissive direction — it charged the model 2.4%
-/// less than the ROM's own arithmetic says the producer costs (2026-11-11).
+/// less than the ROM's own arithmetic says the producer costs (the 2026-11-11 image).
+/// Its second job is the one that earned its keep on 2026-11-12: the envelope had by
+/// then been left behind by three later builds, and this is the check that says so.
 #[test]
 fn the_envelope_is_the_runs_own_sums() {
     assert_eq!(
         window_mean(DECODE_SUM),
-        426_327,
+        428_157,
         "the ROM printed this mean"
     );
     assert_eq!(
         window_mean(CONVERT_SUM),
-        113_586,
+        114_025,
         "the ROM printed this mean"
     );
-    assert_eq!(window_mean(PUSH_SUM), 15_280, "the ROM printed this mean");
-    assert_eq!(FEEDER_PER_PERIOD, 5_194, "2,966,019 / 571, as printed");
-    assert_eq!(MEASURED_RAW, 555_193, "the ROM's decode + convert + push");
+    assert_eq!(window_mean(PUSH_SUM), 14_888, "the ROM printed this mean");
+    assert_eq!(FEEDER_PER_PERIOD, 5_641, "3,221,393 / 571, as printed");
+    assert_eq!(MEASURED_RAW, 557_070, "the ROM's decode + convert + push");
 
     // The attribution, computed the way the ROM computes it (its own per-window
     // `inside` over its own `n`), against the constant this file charges.
     let nested = FEEDER_PER_PERIOD * DECODE_BOUNDARIES_INSIDE / STAGE_WINDOWS;
-    assert_eq!(nested, 5_433);
-    assert_eq!(MEASURED, 549_760);
+    assert_eq!(nested, 5_900);
+    assert_eq!(MEASURED, 551_170);
     let isolated_decode = window_mean(DECODE_SUM) - nested;
     assert_eq!(
-        isolated_decode, 420_894,
-        "this is the number the 6b-3 record quotes as the image's own attributed decode estimate; if it moves, the two records have parted company"
+        isolated_decode, 422_257,
+        "the image prints `attribution: decode ... isolated_estimate=422257` itself; the \
+         model derives that number from the same sums, and if it moves the two records \
+         have parted company"
     );
 
     // And the direction of the correction, so a future edit that re-inflates the
@@ -879,9 +907,13 @@ fn zero_underflow_at_the_measured_cost_and_at_the_derate() {
 /// A single frame at the ROM's measured worst must still be absorbed.
 ///
 /// The mean-cost replay above is what the geometry is sized by; this is the
-/// variance test it does not cover. `ROM_WORST_WORK` is the worst single frame's
-/// decode+convert+push from the guarded product-play build (565,939 c), charged
-/// at every *fed-phase* position in turn. The prefill frames are skipped: the ROM
+/// variance test it does not cover. `ROM_WORST_WORK` is the **largest** worst-frame
+/// decode+convert+push any recorded build of this geometry has reported — 565,939 c,
+/// the played-form row in `flac-docs/measurements.md`; the image this tree builds
+/// measures 565,867 c, and runs of a single image differ by up to 72 c. Charging the
+/// largest recorded value, rather than transcribing whichever log was read last, is the
+/// conservative direction and the one that does not rot when the image is rebuilt. It
+/// is charged at every *fed-phase* position in turn. The prefill frames are skipped: the ROM
 /// does not time them and the model charges prefill with zero credit, so a burst
 /// there is a different (and uninteresting) scenario.
 #[test]
@@ -891,7 +923,7 @@ fn worst_frame_burst_does_not_starve() {
     let total = usize::try_from(manifest.total_samples()).unwrap();
     let block = usize::from(manifest.blocksize());
     let prefill_frames = (geo::PREFILL_SAMPLES + block - 1) / block;
-    const ROM_WORST_WORK: u64 = 565_939;
+    const ROM_WORST_WORK: u64 = 565_939; // the largest recorded; see the doc above
     for at in prefill_frames..frames.len() {
         let settings = Settings {
             burst: Some((at, ROM_WORST_WORK)),
@@ -928,7 +960,7 @@ fn floor_matches_the_roms_watermark() {
     let total = usize::try_from(manifest.total_samples()).unwrap();
     let out = run::<{ geo::RING_SAMPLES }>(&Settings::shipped(MEASURED), &frames, total);
     println!(
-        "model/floor: predicted min_lead={} max_lead={}; the 2026-11-11 ROM run observed min_lead={} max_lead={}",
+        "model/floor: predicted min_lead={} max_lead={}; the current image's run observed min_lead={} max_lead={}",
         out.min_lead, out.max_lead, ROM_OBSERVED_MIN_LEAD, ROM_OBSERVED_MAX_LEAD
     );
     // The floor, derived rather than quoted. The prefill cannot land on its target:
@@ -1357,6 +1389,13 @@ fn sizing_scans_for_both_geometry_knobs() {
     }
 }
 
+/// The stream rates a **product** asset may declare. The 32,000 bridge is deliberately
+/// absent from it: 7-0 adds 32,768 here and removes the bridge from `geometry.rs`, in
+/// either order — the assert in the test below is red if only one of the two lands.
+/// Written as an allow-list rather than a `!=` so that the flip is one line in one place,
+/// not a red test somebody deletes in a hurry.
+const PRODUCT_STREAM_RATES: &[u32] = &[geo::PLAYBACK_RATE_HZ];
+
 /// Q14, **ruled** by the project owner on 2026-11-11: a stream is encoded at the rate
 /// it is played at, and the player does not reinterpret a declared rate to fit a
 /// clock — the 1.024× that the shipped asset buys is not acceptable in itself, however
@@ -1367,15 +1406,15 @@ fn sizing_scans_for_both_geometry_knobs() {
 /// asset in this tree is the disqualified one.
 ///
 /// **`TODO(Q14, BLOCKING)`** — when the 32,768 Hz product asset lands (plan item 7-0),
-/// the `32_000` arm in `src/geometry.rs` comes out and this test is rewritten to
-/// assert the identity rule alone. The final assert below is expected to go red at
-/// exactly that moment; that is what it is for.
-/// The stream rates a *product* asset may declare. The 32,000 bridge is
-/// deliberately absent: 7-0 adds 32,768 here and removes the bridge from
-/// `geometry.rs`. Written as an allow-list rather than `assert_ne!` so the
-/// flip is one line in one place, not a red test someone deletes in a hurry.
-const PRODUCT_STREAM_RATES: &[u32] = &[geo::PLAYBACK_RATE_HZ];
-
+/// the `32_000` arm in `src/geometry.rs` comes out and `32_768` joins
+/// `PRODUCT_STREAM_RATES` above; what remains is the identity rule alone. What goes red
+/// at the moment the arm is deleted is the
+/// `.expect("the bridge is still in the tree; 7-0 removes it")` below — that is the
+/// tripwire, and it fires on the first commit of 7-0 that removes the arm. The
+/// allow-list is written so it cannot be satisfied half-way: it asserts that the asset
+/// in this tree is allowed *exactly when* the bridge is gone. So a 7-0 that flips one
+/// of the two and not the other is red, and neither half can be deleted as a test that
+/// seems to be in the way.
 #[test]
 fn ruled_rate_policy_allows_one_bridge_and_no_more() {
     // The product arm: a stream that declares the target rate is played at it.
@@ -1388,9 +1427,17 @@ fn ruled_rate_policy_allows_one_bridge_and_no_more() {
     // Every other rate a FLAC stream can declare: refused, not reinterpreted. This
     // list is the guard — a `Some(_)` appearing in it is a new pitch shift being
     // waved through by a future edit, and Q14 has ruled those out.
+    //
+    // 8,192 / 16,384 / 65,536 are sampled deliberately. An exact cycles/sample figure
+    // is a tempting reason to add a rate — it is the property that makes 32,768 the only
+    // agb clock whose period costs exactly 512 c/sample — and the rates that share it are
+    // exactly the ones dividing 2^24, i.e. powers of two: in the declarable band those
+    // are 8,192 (2,048 c/sample), 16,384 (1,024) and 65,536 (256). All three are
+    // arithmetically clean and all three are still refused: Q14's rule is about the
+    // declared rate, not about which division happens to be exact.
     for rate in [
-        8_000u32, 11_025, 16_000, 18_157, 22_050, 24_000, 26_000, 31_000, 32_001, 33_000, 44_100,
-        48_000, 65_536,
+        8_000u32, 8_192, 11_025, 16_000, 16_384, 18_157, 22_050, 24_000, 26_000, 31_000, 32_001,
+        33_000, 44_100, 48_000, 65_536,
     ] {
         assert_eq!(
             geo::playback_rate_for_stream(rate),
@@ -1399,7 +1446,9 @@ fn ruled_rate_policy_allows_one_bridge_and_no_more() {
         );
     }
 
-    // The one bridge, and its price, computed rather than transcribed.
+    // The one bridge, and its price, computed rather than transcribed. This `expect`
+    // is the tripwire 7-0 is meant to trip.
+    let bridge_in_tree = geo::playback_rate_for_stream(32_000).is_some();
     let played = geo::playback_rate_for_stream(32_000)
         .expect("the bridge is still in the tree; 7-0 removes it");
     let ratio = f64::from(played) / 32_000.0;
@@ -1417,15 +1466,33 @@ fn ruled_rate_policy_allows_one_bridge_and_no_more() {
          error or a semitone; it is neither, and it is disqualifying"
     );
 
-    // And the disqualification is about the asset in this tree, not about an abstract
-    // one: the shipped blob declares a rate that is not in the product allow-list.
-    // This is the line 7-0 flips: add 32,768 to `PRODUCT_STREAM_RATES` and remove the
-    // bridge, and this assertion becomes the product check rather than the tripwire.
+    // And the disqualification is about the asset in this tree, not an abstract one,
+    // stated as a single condition rather than two separate ones: an asset is allowed
+    // to be played exactly when there is no bridge needed to play it. Today the shipped
+    // blob declares 32,000 Hz, the allow-list refuses it, and the bridge is in the
+    // tree — the disqualified state, described rather than asserted away. When 7-0
+    // lands, 32,768 joins `PRODUCT_STREAM_RATES` and the arm above goes away, and this
+    // same condition is the product rule. Half-landing it — a rate on the allow-list
+    // while a bridge still maps, or the arm deleted with nothing on the allow-list —
+    // is red here, which is what it is for.
     let manifest = Manifest::parse(BLOB).expect("the shipped blob parses");
-    assert!(
-        !PRODUCT_STREAM_RATES.contains(&manifest.sample_rate_hz()),
-        "the asset currently shipped declares {} Hz, which the product allow-list must \
-         not contain until 7-0 lands (7-0 adds 32,768 here and this assert goes green)",
-        manifest.sample_rate_hz()
+    let declared_allowed = PRODUCT_STREAM_RATES.contains(&manifest.sample_rate_hz());
+    assert_eq!(
+        declared_allowed,
+        !bridge_in_tree,
+        "the asset shipped in this tree declares {} Hz; the product allow-list {} it and \
+         the rate bridge {} — an asset may be played only where no reinterpretation of \
+         its declared rate is needed to play it (Q14)",
+        manifest.sample_rate_hz(),
+        if declared_allowed {
+            "allows"
+        } else {
+            "refuses"
+        },
+        if bridge_in_tree {
+            "is still present"
+        } else {
+            "is gone"
+        },
     );
 }

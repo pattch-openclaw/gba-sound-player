@@ -190,8 +190,9 @@ where a refusal should have been. The invariant is not new to this repository: t
 harness has held it throughout (`examples/flac_spike/src/rate_main.rs:27`, "encode rate ==
 playback rate per FRAME"; `scripts/frame_vectors.py:1930-1931`, a fixture outside that
 domain is refused outright), so 7-0 is porting an existing rule into the product path, and
-the two tables — `examples/flac_integration/src/geometry.rs:252`,
-`scripts/gafp_pack.py:294` — leave with it, identity-or-refusal behind. And because nothing
+the two tables — `examples/flac_integration/src/geometry.rs::playback_rate_for_stream`
+(the `32_000` arm) and `scripts/gafp_pack.py::PLAYBACK_RATE_FOR_STREAM` — leave with it,
+identity-or-refusal behind. And because nothing
 in the present gate set can see a pitch shift, 7-0's witness measures pitch: the implied Hz
 of the *decoded* PCM, by integer autocorrelation at integer lags with no float anywhere,
 plus a negative leg that authors a tone at 32,000 Hz and packs it as a 32,768 Hz asset, so a

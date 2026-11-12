@@ -42,8 +42,10 @@
 // ---------------------------------------------------------------------------
 
 /// The GBA timer clock: the 16.78 MHz system clock divided by 16 exactly, i.e.
-/// 2^24 = 16,777,216 Hz. `agb` drives its mixer from this (`MIXER_TICK_HZ` in
-/// `agb::sound::mixer`), and `scripts/gafp_pack.py::GBA_CYCLES_PER_SECOND`
+/// 2^24 = 16,777,216 Hz. `agb` drives its mixer from this value — its
+/// `sound/mixer/hw.rs` sets the timer reload as `16777216 / frequency` (0.25.0:
+/// `hw.rs:100`) and does not name the constant anywhere — and
+/// `scripts/gafp_pack.py::GBA_CYCLES_PER_SECOND`
 /// budgets frames with the same exact value — deliberately *not* the rounded
 /// 16,780,000 that `examples/flac_spike/src/stats.rs::GBA_CLOCK_HZ` has used
 /// for every published share so far.
@@ -57,9 +59,15 @@ pub const MIXER_TICK_HZ: u32 = 16_777_216;
 
 /// The playback rate: `agb`'s `Frequency::Hz32768`, the mixer-domain rate C2 is
 /// stated at. It is the only one of agb's three rates whose period is an exact
-/// integer number of timer ticks (`MIXER_TICK_HZ / 32_768 == 512`); 10,512 Hz
-/// needs 1596.1 and 18,157 Hz needs 924.0, so agb's own reload values for those
-/// are rounded and their real rates are a few hundred ppm off.
+/// integer number of timer ticks (`MIXER_TICK_HZ / 32_768 == 512`). The other two
+/// are not exact: 10,512 Hz needs a reload of 1596.006 and agb's integer 1596 plays
+/// 10,512.04 Hz (+3.8 ppm, 0.007 cents), and 18,157 Hz needs 924.009 against its 924
+/// → 18,157.16 Hz (+8.8 ppm, 0.015 cents). Both are inaudible, and stating them is
+/// the point: exactness is not a matter of picking a nicer-looking clock. The only
+/// rates with an integer cycles/sample are the ones that divide 2^24 — powers of two,
+/// i.e. 8,192 / 16,384 / 32,768 / 65,536 — so there is no second exact rate to fall
+/// back on, and "it divides nicely" is not a reason to add one (see the guard in
+/// `tests/product_play_witness.rs`, which samples the exact-but-refused ones).
 pub const PLAYBACK_RATE_HZ: u32 = 32_768;
 
 /// Timer ticks (= cycles at divider /1) per sample at the playback rate: exactly
@@ -91,10 +99,17 @@ pub const PERIOD_CYCLES: u32 = (CHUNK_SAMPLES as u32) * TICKS_PER_SAMPLE;
 /// Samples per mixer-domain hardware buffer. `agb` 0.25.0's
 /// `Frequency::buffer_size` (`src/sound/mixer/mod.rs`) returns 176 / 304 / 560
 /// for 10,512 / 18,157 / 32,768 Hz; the function is `pub(crate)`, so the value
-/// is transcribed and pinned by the assertion below. This is not a free choice:
-/// it is the size of the DMA transfer agb's own mixer would program, and the
-/// 32-byte FIFO refills when it falls to half, so a buffer must be a multiple of
-/// 4 words — 560 is.
+/// is transcribed and pinned by the assertion below. This is not a free choice: it
+/// is exactly what one period costs the consumer — the buffer agb fills, and the
+/// amount of audio this ROM hands over and re-arms once per period — and the
+/// 32-byte FIFO refills in 4-word requests when it falls to half, so a buffer must
+/// be a multiple of 4 words — 560 is.
+///
+/// It is worth stating that precisely, because the same fact is easy to describe
+/// backwards: in sound-FIFO DMA mode the transfer count is *not* what sizes a
+/// period, and `agb` programs no count at all (`hw.rs`'s `enable_dma*_for_sound`
+/// write source, destination and control only). What sizes a period is one
+/// `buffer_size` of samples plus the re-arm.
 ///
 /// The producer never gets to pick a smaller buffer to make its own life easier:
 /// the period is fixed by the hardware rate, and the DMA is re-armed once per
@@ -116,8 +131,8 @@ pub const CHUNK_SAMPLES: usize = 560;
 ///   So the prefill choice puts a floor under the depth choice before any cost is
 ///   considered, and the two knobs are one decision rather than two.
 /// - **What depth buys against a *sustained* overage is real and finite.** With
-///   no ring in the picture the producer fails at 153.6% of the measured cost;
-///   with this ring it fails at 191.3% (178.8% against the hardware derate). The
+///   no ring in the picture the producer fails at 152.9% of the measured cost;
+///   with this ring it fails at 190.6% (178.1% against the hardware derate). The
 ///   refill is therefore worth ~38 points
 ///   of sustained overage — a purchase, not an infinite cushion
 ///   (`sustained_overage_tolerance` bisects both).
@@ -191,7 +206,11 @@ pub const PREFILL_SAMPLES: usize = PREFILL_CHUNKS * CHUNK_SAMPLES;
 /// the same event Sam heard on 2026-10-19.
 pub const REARM_GRACE_SAMPLES: u16 = 16;
 
-/// One hardware buffer in 32-bit words: the sound DMA's transfer count.
+/// One hardware buffer in 32-bit words — the count this ROM writes when it re-arms the
+/// sound DMA each period. It is *not* what sizes a period: in sound-FIFO mode the FIFO
+/// pulls 4 words per request, and `agb`'s own sound enable (`hw.rs:56-68`) writes no
+/// count at all. The count is ours, and it is the shape the rate ROM already ran on
+/// silicon with (`flac-docs/playback-results.md`, the 10,512 Hz row).
 pub const DMA_WORDS: u16 = (CHUNK_SAMPLES / 4) as u16;
 
 // ---------------------------------------------------------------------------
@@ -233,7 +252,11 @@ pub const DMA_WORDS: u16 = (CHUNK_SAMPLES / 4) as u16;
 /// `0..=65535` plus the table values (65,536 cheap calls), and it is described here
 /// rather than added in 6b-3 because the behaviour it protects —
 /// identity-or-refusal in the packer and the player — is item 7-0's. 6b-3's sampled
-/// refusal list is the interim guard.
+/// refusal list is the interim guard, and it deliberately samples the rates that look
+/// *arithmetically* tempting: the only rates with an exact cycles/sample are those
+/// dividing 2^24 — powers of two — so 8,192, 16,384 and 65,536 are exact and still
+/// not product rates. Exactness of the division is a property of the clock, not a
+/// ruling about the stream.
 ///
 /// **`TODO(Q14, BLOCKING)` — delete the `32_000` arm when the 32,768 product asset
 /// exists, and add nothing to this table before then.** Unblocking is four steps and
@@ -291,5 +314,9 @@ const _: () = assert!(RING_SAMPLES >= 2048 + CHUNK_SAMPLES);
 // cycle clock this module's arithmetic prices against wraps at 65,536 periods =
 // 18.8 minutes. The ROM reports the period count it used and refuses to divide
 // any share by a clock that wrapped; this pin says the ceiling is far above any
-// asset the profile admits (the C2 clip plays 572 periods).
+// asset the profile admits. The shipped clip arms 572 periods (571 full ones plus
+// the 240-sample drain tail the ROM reports as `tail_periods=1`); an asset that
+// *declares* 32,768 Hz for the same playing time carries 2.4% more samples —
+// 327,680 of them — and arms 586. Both are three orders of magnitude below the
+// wrap.
 const _: () = assert!(u16::MAX as u64 * PERIOD_CYCLES as u64 > 1_600_000_000);

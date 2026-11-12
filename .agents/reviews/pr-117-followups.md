@@ -16,6 +16,7 @@ note, not a product record; the dated measurements belong in `flac-docs/`.
 | 6 | Host model has no variance/burst test | Add the test | **Done in step 3** |
 | 7 | Screen does not flag the scaffolding | Add it | **Done in step 1** (`rate 32000>32768 scaffold`, `Q14 SCAFFOLD` log) |
 | 8 | Smaller fixes (`finished` ordering, IRQ IF, units, `Stage` void mean, bounds, `convert_frame` length, cosmetics) | Address | **Done** (ordering in step 1; the rest in step 3) |
+| 9 | The PR's own report: a stale host-side cost envelope, a mis-described Q14 guard, and three arithmetic slips in the prose | Fix in this PR where it is report/constant hygiene; the two structural fixes (envelope as a pinned fixture, the sound-DMA/FIFO re-arm mechanism) belong to 7-1/7-2 | **Done in step 4** |
 
 ## Step 1 — verdict integrity (working tree, 2026-11-12)
 
@@ -98,14 +99,81 @@ rules), `flac-docs/plan-of-record.md` (two dated notes), `flac-docs/open-questio
   bounded in periods instead of "until the outer timeout"; `convert_frame` release-checks
   destination lengths; the dead `let _ = stage` is gone; the armed line prints
   `58.51 periods/s`; the unused `AUDIO_BUDGET_CYCLES_PER_SAMPLE` is removed.
-- **Q14 test shape.** The asset assert is now an explicit `PRODUCT_STREAM_RATES`
-  allow-list (the 32,000 bridge is absent); 7-0 flips one line rather than deleting a red
-  `assert_ne!`. The sampled refusal list is unchanged (the exhaustive sweep is docs-only,
-  per #5).
+- **Q14 test shape.** The asset assert is an explicit `PRODUCT_STREAM_RATES` allow-list —
+  the *bridge* is still in `geometry.rs`; what is absent is `32000` from the allow-list.
+  Step 4 rewrote it as **one** condition (see below), so 7-0's job is to delete the arm and
+  add `32_768` to the list, not to fix a red assert. The sampled refusal list is unchanged
+  in step 3 (the exhaustive sweep stays docs-only, per #5); step 4 added the
+  arithmetically exact non-product rates to it.
 - Verification: `make check` clean; `make product-play-test` 12/12; ROM
   `694126d406eb9b2a…`, 1,085,804 B; two identical runs, `PASSED (… fifo=true)`,
   `fit: lines=9 … fits=true`; audio numbers within 1-72 cycles (work/frame 559,848 =
   53.391%, worst 565,867 = 53.965%).
+
+## Step 4 — inspecting the PR against its own records: report hygiene (2026-11-12)
+
+An independent pass over the PR's claims — building the image at HEAD, running it, and
+re-deriving every number in the body and the records. The load-bearing claims held: the
+image, the ledger, the period audit, both digests, `min_lead 9120`, work/frame 559,848 =
+53.391%, worst frame 565,867, the 41.06-cent arithmetic, the geometry's 512 c/sample /
+286,720 c/period / 1,048,576 c/frame / 17-periods-of-stall arithmetic, and the probe's
+0 B/frame and 2 B/frame rate-spelling results all reproduced. What did not hold, and what
+was done:
+
+- **The model's cost envelope was the 2026-11-11 image's** (`555,193` raw / `549,760`
+  attributed / `420,894` decode), carried through three later builds while the test named
+  itself after "the run's own sums". Re-read from the image the tree builds: sums
+  65,079,938 / 17,331,888 / 2,263,016 over 152 windows → **557,070 raw**, less 159
+  boundaries at 5,641 c → **551,170 attributed**, decode half **422,257** — which is that
+  image's own printed `isolated_estimate`, so model and ROM now derive the same number.
+  The sustained ceilings quoted in `plan-of-record.md` and `geometry.rs` follow: **152.9%
+  / 190.6% / 178.1%**, bound 843,237 c/frame (they are computed by
+  `sustained_overage_tolerance`, not scaled). `ROM_WORST_WORK` deliberately keeps the
+  larger recorded 565,939 c rather than this run's 565,867.
+- **The Q14 guard was described as something it is not.** The body and the plan said the
+  asset assert "goes red exactly once, when the bridge is deleted" — it does not: it is an
+  allow-list, and deleting the arm leaves it green. The real tripwire is
+  `.expect("the bridge is still in the tree; 7-0 removes it")`; there is no `assert_ne!`
+  anywhere in the file, and the records still cited one, at line numbers this PR's own next
+  commit had moved. Rewritten as one condition — `declared_allowed == !bridge_in_tree` —
+  so the shipped state and the completed-7-0 state are both green and a **half**-landed 7-0
+  is red; the refusal list now samples 8,192 / 16,384 / 65,536, the other rates dividing
+  2^24. Records now cite symbols, not lines.
+- **Two arithmetic slips in prose** (conclusions unaffected): decode stage shares quoted
+  as 40.835% / 41.655% were 152 window means over a 157-frame budget — the same
+  denominator class this branch already corrected, and not this image's figures (it prints
+  39.531%); and agb's rounded reloads are +3.8 / +8.8 ppm (10,512.04 / 18,157.16 Hz), not
+  "a few hundred". Stated positively in the source comments and sampled by the guard, so a
+  "clean-looking rate" cannot be reached for by that property: the rates with an exact
+  cycles/sample are exactly the divisors of 2^24 — in the declarable band 8,192 / 16,384 /
+  32,768 / 65,536 — and the near-miss lookalikes are not exact (2^24 ÷ 36,864 = 455.11;
+  448 c/sample is 37,449 Hz). "Three identical runs" in the body belongs to the
+  `fe00b590…` image; the current row records two runs within 1–72 cycles, and this pass's
+  run is the third that agreed.
+- **Two instrument descriptions that 7-1/7-2 depend on:** `agb` 0.25's
+  `enable_dma_for_sound` (`hw.rs:56-68`) writes source/destination/control and **no
+  transfer count**, so the "140-word DMA transfer agb would program" framing was backwards
+  — `buffer_size` = 560 is what one period consumes, and the count and the re-arm are this
+  ROM's own — and there is **no `MIXER_TICK_HZ` constant** in `agb::sound::mixer` (the
+  value is inlined at `hw.rs:100`). Comments now say that; the mechanism question is written
+  into 7-2 with the observation that would settle it (re-arm early/late on purpose, count
+  `grace`/`late`).
+- Nits fixed: "the C2 clip plays 572 periods" restated as 571 full + 1 tail (and 586 for a
+  same-playing-time 32,768 Hz asset), the `MIXER_TICK_HZ` symbol attributed to agb removed,
+  `make test-rom` labelled as collecting **0 cases** wherever it is quoted as a gate.
+
+Structural items deliberately **not** done here, both recorded against their owner: pinning
+the ROM's printed `stages:`/`budget:`/`attribution:` lines as a fixture and deriving the
+model's envelope from it (7-1 — no host test reads a ROM log today, so constants drift by
+hand either way), and the sound-DMA/FIFO re-arm observation (7-2).
+
+Verification of this pass: `make product-play-test` **12/12**; `make check` clean;
+`make gafp-check` clean (157 frames, 865,996 B); `gafp-pack-check` 8/8; `flac-gates`
+green; rebuilt `product-play.gba` **`750d01e97800de95…`, 1,085,804 B** — same size and
+section map, and its headless log is **byte-identical** to the `694126d406eb9b2a…` run
+(`diff` clean: 571/571, `underflows=0`, `min_lead 9120`, PCM/FIFO MATCH,
+`verdict PASSED (… fifo=true)`, exit 124 by design). The decode-only pair is unchanged at
+`f73097c144fe4157…` / `aecae6ef815d48c0…`. Working tree clean before and after.
 
 ## Out of scope (follow-up PRs)
 

@@ -30,11 +30,16 @@
 //! `agb::sound::mixer` would program for `Frequency::Hz32768`: timer0 reloaded
 //! with `0 − 16777216/32768` (agb `sound/mixer/hw.rs:100`), a cascaded timer1
 //! reloaded with `0 − 560` and interrupting (`mixer/sw_mixer.rs:167-171`), and a
-//! 140-word sound-FIFO DMA to a fixed destination in repeat mode, FIFO A on DMA1
+//! a sound-FIFO DMA to a fixed destination in repeat mode, re-armed once per period
+//! from a 140-word buffer, FIFO A on DMA1
 //! and FIFO B on DMA2 (`hw.rs`'s pairing, which the rate ROM's first draft got
 //! one channel wrong and Sam's ears caught, 2026-10-19). The mixer-domain
-//! contract — buffer size, half-empty refill threshold, word count, channel
-//! pairing — is met by transcription, not by arithmetic re-derived here.
+//! contract — buffer size, half-empty refill threshold, 4-word request granularity,
+//! channel pairing — is met by transcription, not by arithmetic re-derived here.
+//! One register agb does *not* program for sound is the transfer count: in sound-FIFO
+//! mode the FIFO pulls 4 words per request (`hw.rs:56-68` writes source, destination
+//! and control only), so the per-period count this ROM writes is ours — and it is the
+//! shape the 10,512 Hz rate ROM already ran on silicon with.
 //!
 //! The hardware shape is the throwaway harness's
 //! (`examples/flac_spike/src/rate_play_main.rs`), and the register names, the
@@ -572,7 +577,10 @@ mod rom {
     }
 
     /// Re-arm both sound DMAs from the slot just filled: stop, source, destination,
-    /// count, go — agb `enable_dma_for_sound`'s shape with an explicit word count.
+    /// count, go. `agb`'s `enable_dma_for_sound` (`hw.rs:56-68`) writes source,
+    /// destination and control and no count at all — in sound-FIFO mode the FIFO pulls
+    /// 4 words per request — so the count here is ours, deliberately, and it is the
+    /// shape the rate ROM ran with on hardware.
     ///
     /// # Safety
     /// `lsrc`/`rsrc` must be 4-byte-aligned pointers into the static ping-pong,
@@ -731,8 +739,8 @@ mod rom {
             }
         }
         // SAFETY: aligned pointers into the static ping-pong; the other slot was
-        // handed to the DMA a whole period ago, and a 140-word burst (µs) is long
-        // finished by the next period (17.1 ms at this rate).
+        // handed to the DMA a whole period ago, and the FIFO's 4-word pulls (µs for a
+        // whole buffer) are long finished by the next period (17.1 ms at this rate).
         unsafe { rearm_dma(lp, rp) };
 
         drop(feed);
