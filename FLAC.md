@@ -46,7 +46,24 @@ judged only against these, and full detail is in
   guard, zero underruns, zero late services, both units twice each, the 16-sample grace, and
   the listening witness. The reason is the measured one — the whole chain costs 59.946% of a
   32,768 Hz frame for a **FIXED-0** stream, the cheapest thing FLAC can emit, with no strategy
-  in this tree for recovering the factor two that predicted frames would need.)* The decode half is measured on hardware on the product path — **37.974%
+  in this tree for recovering the factor two that predicted frames would need.)*
+  **The rung is now named: 16,384 Hz.** Ruled by the owner on 2026-11-13 as the first candidate
+  for the amended C2, on 7-1's measured figures — it is `2²⁴/1024`, so it is **exactly
+  expressible**, the declared rate equals the played rate, and Q14 carries across the retarget
+  with nothing relaxed. Projected from the second reading's cycles (which do not move with the
+  clock): work 59.946% → **30.0%**, worst frame 60.755% → **30.4%**, attributed decode 451,763 c
+  → **21.5%** of the frame, the 8,560-sample lead 0.261 s → **0.522 s**, and LPC 173.23% →
+  **86.6%** — better, and still not in budget, so 8,192 Hz remains the only rung where predicted
+  frames are plausible. It is a *candidate of record*, not a met criterion: C2 is satisfied only
+  when 7-1's retarget run establishes it on both units. **An interim instruction to relax
+  exactness and target agb's ~18 kHz was considered and withdrawn the same day** — nothing on
+  this path instantiates `agb`'s mixer (the product ROM states it as a safety precondition:
+  *"no `agb::sound::mixer::Mixer` is instantiated in this ROM"*), so agb's 10,512 / 18,157 /
+  32,768 Hz menu constrains nothing here; and at 924 ticks/sample the clock would play
+  **18,157.16 Hz**, costing the identity guarantee while making the *confirmed* latency defect
+  worse — the push mask is 15.89 samples on the mean and **17.13 on the worst window, against a
+  16-sample grace, so still late**, versus 14.34 / 15.46 at 16,384 Hz. Full reasoning in
+  [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) → "The rung is chosen".)* The decode half is measured on hardware on the product path — **37.974%
   worst** of the 32,768 Hz frame (6b-2 pt 2, GBA 001/SP identical; the
   instrument's own hardware row is 42.48% / 42.72%, 6a-7b). The claim is the
   *combination* — decode + convert + push + mixer/DMA in one
@@ -89,8 +106,10 @@ judged only against these, and full detail is in
   and the run is still 59.946% of the frame** — fixing the mask removes the refusal, not the
   cost. **The rate is dropped as a commitment; nothing else in C2 is.** In particular the
   retarget does not buy the latency work off: at 16,384 Hz the same 14,680-cycle mask is a
-  14.3-sample window against a 16-sample grace — clear of it by 1.7 samples on the mean, 0.5 on
-  the worst window ever recorded for that section.
+  14.34-sample window against a 16-sample grace — clear of it by 1.7 samples on the mean, 0.5 on
+  the worst window ever recorded for that section. The chosen fix is what turns that into a real
+  margin: `CHUNK`-sized push sections scale the measured window to 4,014 c, i.e. **3.92 samples**
+  at this clock and a **4.08×** margin (7.84 samples and 2.04× at 32,768 Hz).
 
   *(Everything below this line in this bullet was written while 32 kHz was still the commitment,
   and is kept as the reasoning of its date.)* **The test that decides it is built and controlled**
@@ -551,10 +570,18 @@ unchanged, and the per-rung state lives in the plan of record:
    ~32 kHz to real-time playback at the highest rate achievable.** The ruling, its arithmetic and
    what it pointedly does *not* relax (every audit clause, Q14's identity rule, both units twice
    each, the listening witness) are in
-   [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) under "The rate ruling". The next
-   rung this architecture expresses exactly is **16,384 Hz** — not agb's 18,157, which no integer
-   reload of a 2^24 Hz timer produces — and "highest achievable" needs a margin bar before it can
-   be judged, which is **Q16**. 7-0 and 7-1 re-run at whatever rate that bar selects.
+   [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) under "The rate ruling".
+   **The rung is then named: 16,384 Hz** (`2^24/1024` — exactly expressible, so Q14's identity rule
+   carries across the retarget with nothing relaxed). It is deliberately **not** agb's 18,157: no
+   integer reload of a 2^24 Hz timer produces that rate (924 ticks plays 18,157.16 Hz), and agb's
+   menu carries no authority here because **this ROM does not use agb's mixer** — the product ROM
+   states its absence as a safety precondition. An interim instruction to relax exactness and go to
+   ~18 kHz was considered and withdrawn on exactly those grounds, with the latency arithmetic that
+   settled it in [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) → "The rung is
+   chosen". "Highest achievable" still needs a margin bar to be judgeable, which is **Q16**; and
+   because LPC projects to 86.6% of a 16,384 Hz frame, **8,192 Hz stays the only rung where
+   predicted frames are plausible** — so whether 16,384 Hz is the ceiling or a way-station is that
+   bar's answer. 7-0 and 7-1 re-run at 16,384 Hz.
    **C2 is met at 7-3**, and C2 says in terms that the stream declares the rate it is played
    at — a clause that survives the rate change, and indeed matters more for it: a rate chosen by
    measurement is exactly where a silent 1.024x reinterpretation would creep back in.

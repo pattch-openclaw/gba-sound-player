@@ -865,10 +865,38 @@ put the image's own `attribution:` line on the screen.
    path's stage shares too.
 
 **What this question does not decide.** Not C2's rate — that was the project owner's to rule and
-**was ruled on 2026-11-13**, C2 now asking for the highest rate achievable rather than a
-committed 32 kHz; the bar that makes "achievable" checkable is **Q16**, not this question. (The
-rung below the current one that this architecture can express exactly is 16,384 Hz, not agb's
-18,157, and that constraint survives the ruling.) **And it no longer explains period 22 either** — that question was
+**was ruled twice on 2026-11-13**: C2 now asks for the highest rate achievable rather than a
+committed 32 kHz, and the rung chosen is **16,384 Hz**. The bar that makes "achievable" checkable
+is **Q16**, not this question.
+
+> **And one thing this question's ruling explicitly did NOT relax, recorded because it nearly
+> was.** The owner's first instruction on retargeting was to **drop rate exactness** and take
+> agb's `Frequency::Hz18157` (~18 kHz), on the understanding that it was "the already supported
+> sample rate". Checking it turned up two facts that voided the premise, and the instruction was
+> withdrawn the same day in favour of 16,384 Hz:
+>
+> 1. **Nothing on this path uses agb's mixer.** `product_play_main.rs:1795` states it as a safety
+>    precondition — *"no `agb::sound::mixer::Mixer` is instantiated in this ROM, so timer0-3 are
+>    unowned"* — and the only `gba.mixer.mixer(…)` call sites in the tree are the baseline
+>    `examples/pcm_playback.rs` demo and the *failed* `symphonia_flac_probe` compile probe. The
+>    product ROM programs timer0, the timer1 cascade, the sound-DMA enable and every per-period
+>    re-arm itself; agb's `enable_dma_for_sound` does not even write a transfer count. So agb's
+>    three-rate menu is a **self-imposed domain** here (via Sam's 2026-10-18 route choice, and via
+>    `CHUNK_SAMPLES = 560` being agb's `Hz32768` buffer size), not a dependency.
+> 2. **~18 kHz is worse, not merely inexact.** A 924-tick reload plays **18,157.16 Hz** (+8.82 ppm,
+>    0.015 cents), and because the re-arm grace is **sample**-denominated while the confirmed
+>    ring-push mask is **cycle**-denominated, the faster clock eats more of the grace: the mask is
+>    **15.89 samples on the mean and 17.13 on the worst window ever recorded, against a 16-sample
+>    grace — still late** — where 16,384 Hz gives 14.34 / 15.46. So it would have traded Q14's
+>    machine-checkable equality *and* 3 points of headroom for a defect that is still refusing.
+>
+> **Q14's identity rule therefore stands exactly as ruled: the stream declares the rate it is
+> played at, and at 16,384 Hz those two numbers are equal integers, so `playback_rate_for_stream`
+> stays an equality and no tolerance is introduced anywhere.** If a future session is tempted to
+> re-derive "we must relax exactness to use agb's rates", the answer is the first bullet. The one
+> place where exactness *is* genuinely re-tested is 7-2, if agb's mixer is ever adopted as the
+> shipping path — at which point its menu (10,512 / 18,157 / 32,768) and a 16,384 Hz product clock
+> are in direct tension and that tension is 7-2's to resolve out loud. **And it no longer explains period 22 either** — that question was
 answered on the units on 2026-11-13, and the answer is not this: 7-1's second reading came back
 **`late in push 1/1`** on four runs across both units, so the one late service was held by the
 producer's own interrupt-masked ring push, which is a code property rather than a bus property.
@@ -940,6 +968,16 @@ rung just refused** — not by the late service, which is now explained and fixa
    16-sample grace, which is a 1.7-sample mean margin and 0.5 on the worst window ever recorded
    for that section. **A headroom bar that ignores this buys a rate change and still leaves the
    product passing its own latency audit by less than one sample of audio.**
+
+**Status update, same day: the target is named, so the bar's job has narrowed.** The owner chose
+**16,384 Hz** as the rate of record ("The rung is chosen" in `plan-of-record.md`), which removes
+the "which rung" half of this question and leaves the "is it the ceiling" half. What Q16 still
+owns: whether 16,384 Hz is accepted as achieved (work ~30% of the frame projected, worst frame
+~30.4%) or whether the bar's real purpose is the **LPC** question it exposes — at 16,384 Hz LPC
+still projects to **86.6% / 87.1%** of the frame, so a product that must carry predicted frames
+lands on **8,192 Hz** (43.3% / 43.5%), and no FIXED-0-only figure can decide that for it. Until
+that is ruled, 16,384 Hz is a **candidate of record**, and C2's rate claim is not met at any rate
+because C2 is met at 7-3.
 
 **What would answer it, in the owner's hands.** One of:
 
