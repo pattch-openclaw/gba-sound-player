@@ -20,7 +20,21 @@ libraries that other GBA ROMs can build on top of.
    so a ROM can be used as a playable instrument, not just a fixed playback
    device.
 
-4. **Compressed audio (FLAC).** Support FLAC decoding in order to make use of compressed audio files, allowing us to fit more songs (or a full album) onto the cartridge. Status and library evaluation live in **[FLAC.md](FLAC.md)**, with the detail split into **[flac-docs/](flac-docs/)** (architecture, format notes, measurements, experiments, method, plan of record, open questions). An alternative-codec evaluation (Opus, opened 2026-09-27 while the FLAC perf gate is failing) lives in **[OPUS.md](OPUS.md)**.
+4. **Compressed audio (codecs).** Support compressed audio decoding so more audio fits on the
+   cartridge. This goal is split into **separate codec tracks, each with its own entry point,
+   plan of record, gates and measurement ledger — none of them a repository-wide spec:**
+
+   | Track | Entry point | Status |
+   |---|---|---|
+   | **ULI2** | **[ULI2.md](ULI2.md)** | **accepted 2026-11-13 as the product codec**; implementation not started. Its plan, gates and ledger move to `uli-docs/` when the crate exists, in the shape of `FLAC.md` / `flac-docs/`. |
+   | **FLAC** | **[FLAC.md](FLAC.md)** | the lossless library, built and bit-exact; its live plan is **[flac-docs/plan-of-record.md](flac-docs/plan-of-record.md)** — **the only live plan *for FLAC***, governing `crates/flac-lite`, `crates/flac-lite-gba`, `examples/flac_integration` and the `GAFP` asset, and nothing outside them. Detail split into **[flac-docs/](flac-docs/)** (architecture, format notes, measurements, experiments, method, plan of record, open questions). |
+   | **ULC** | **[ULC.md](ULC.md)** | scope and intent recorded; **not currently planned**. |
+   | **Opus** | **[OPUS.md](OPUS.md)** | an evaluation opened 2026-09-27 while the FLAC perf gate was failing; not a build plan. |
+
+   The FLAC documents use "the product" and "the product path" in the **FLAC** sense (the
+   `product-play.gba` image and its asset). Read that as track-local: the repo's product-codec
+   choice is recorded in **[ULI2.md](ULI2.md)**, and the two tracks share ground only where a
+   file says so (the ring/FIFO feeder, the geometry, the measurement method).
 
 5. **Upstream higher sample rates.** Add support for higher sample rates (like 65kHz) to the upstream `agb` library to push past the current 32kHz software mixer limit.
 

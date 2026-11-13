@@ -1,5 +1,9 @@
 # The ARM-mode kernel track — measured ARMv4T facts and the kernel set
 
+> **Scope: the FLAC track's ARM kernel work** — `crates/flac-lite-gba`'s `rice-arm` realization
+> of `flac-lite`'s `RiceKernel` seam. The measured ARMv4T machine facts in here are transferable
+> to any GBA codec; the decisions are FLAC-only.
+
 The E10 work lives in `examples/arm-kernels/` and is deliberately outside the
 decode path: kernels are proven correct there before anything is integrated or
 timed. This file keeps what that track established about the machine and about

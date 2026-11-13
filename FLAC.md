@@ -6,6 +6,28 @@ where performance actually stands, what is next, and where every detail lives.
 It is deliberately short — the detail is in [`flac-docs/`](flac-docs/), one file
 per concern.
 
+> **Scope: this file and `flac-docs/` are the FLAC line of work, exclusively.** Everything here —
+> including C1 and C2, [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) (whose "only
+> live plan" means *only live plan in `flac-docs/`*, not in the repository), the
+> [`flac-docs/measurements.md`](flac-docs/measurements.md) ledger, and every Q-number — judges
+> `crates/flac-lite`, `crates/flac-lite-gba`, `examples/flac_integration`, the `GAFP` asset and
+> the `flac-*`/`product-play`/`gafp` Make targets. **It is not a repository-wide spec and it
+> decides nothing outside the FLAC track.** The sibling codec tracks are planned in their own
+> files, each with its own criteria and ledger: [`ULI2.md`](ULI2.md) (**accepted 2026-11-13 as
+> the product codec**; its plan moves to `uli-docs/` when the crate exists),
+> [`ULC.md`](ULC.md) (scope recorded, **not currently planned**) and [`OPUS.md`](OPUS.md) (an
+> evaluation, not a build plan). **"The product" and "the product path" in these pages mean the
+> FLAC product path** — `examples/flac_integration` and `product-play.gba`. That phrase carries a
+> different, wider meaning in [`ULI2.md`](ULI2.md), so do not import a decision across the
+> boundary in either direction; where the tracks genuinely share ground (the ring/FIFO feeder,
+> the geometry, the measurement method, the cycle figures) it is named as such.
+>
+> One live disagreement to be aware of, since both sides recorded it on the same day: this
+> track's C2 was amended on 2026-11-13 to **the highest rate achievable** rather than a committed
+> 32 kHz ([`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) → "The rate ruling"),
+> while [`ULI2.md`](ULI2.md)'s playback gate is written at **32,768 Hz**. Reconciling them is a
+> decision for the owner of the product-codec choice, not an edit this file can make.
+
 **What "done" means — two acceptance criteria** (stated 2026-11-10; the live plan is
 judged only against these, and full detail is in
 [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) §"Acceptance criteria"):
@@ -663,8 +685,8 @@ unchanged, and the per-rung state lives in the plan of record:
 | [`flac-docs/playback-results.md`](flac-docs/playback-results.md) | The rate flow and audible-playback records: push, convert, FIFO, feeder-off control, the landing regression and its fix. |
 | [`flac-docs/arm-kernels.md`](flac-docs/arm-kernels.md) | The ARM-mode kernel track: measured ARMv4T facts, the kernel set, the dual-witness method, and the machine facts the assembly taught (no LDM-to-PC interwork, `MUL` hazards, `global_asm!`). |
 | [`flac-docs/method-and-gates.md`](flac-docs/method-and-gates.md) | How a number gets taken here: budget arithmetic, run discipline, determinism, golden vectors, the gate surface, toolchain pin, cargo-config inheritance, corpus blindness. |
-| [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) | The only live plan: 6a-4…6a-8, 6b, the width decision, invariants, baselines, the landing record, ordering rules. |
-| [`flac-docs/open-questions.md`](flac-docs/open-questions.md) | The eleven questions a future session still owes an answer, each naming the record that opened it and the rung that owns it. |
+| [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) | The only live plan **for the FLAC track** (its scope block names what it governs and what it explicitly does not): 6a-4…6a-8, 6b, the width decision, the rate ruling, invariants, baselines, the landing record, ordering rules. |
+| [`flac-docs/open-questions.md`](flac-docs/open-questions.md) | The sixteen questions a future session still owes an answer, **of the FLAC track**, each naming the record that opened it and the rung that owns it. |
 | [`crates/flac-lite/README.md`](crates/flac-lite/README.md) | The `GAFP` container contract, the encode profile, and the crate's own gate list. |
 | [`examples/flac_spike/README.md`](examples/flac_spike/README.md) | The measurement vehicle: embedded arms, censuses, gates, and how to regenerate the assets. |
 

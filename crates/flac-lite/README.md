@@ -181,7 +181,7 @@ rather than the stream's declared channel count. What is deliberately *not* here
 point's offset and frame number when a caller anchors with one. Also not here: an
 end-of-stream claim based on declared counts, or a second per-frame loop (the
 manifest facade is a shell over this walk).
-Roadmap: [`../../flac-docs/plan-of-record.md`](../../flac-docs/plan-of-record.md).
+Roadmap (FLAC track): [`../../flac-docs/plan-of-record.md`](../../flac-docs/plan-of-record.md).
 
 ```
 crates/flac-lite/
@@ -527,8 +527,10 @@ can be revisited for `i16` later if we need the space.
 ## Next steps
 
 The roadmap is a single list in
-**[flac-docs/plan-of-record.md](../../flac-docs/plan-of-record.md)** (the only
-source of truth for outstanding work). Phase 1's decode path through
+**[flac-docs/plan-of-record.md](../../flac-docs/plan-of-record.md)** — the only
+source of truth for outstanding **FLAC** work, and scoped to this track: it governs
+`crates/flac-lite` and its GBA overlay, and decides nothing about the repository's other codec
+tracks (`ULI2.md`, `ULC.md`, `OPUS.md`). Phase 1's decode path through
 `frame::decode_frame` is complete (`src/lib.rs` carries the per-module state),
 the frame loop landed as `driver` on 2026-11-04, the stream layer landed the same
 day (`stream::parse` → `StreamFacts` + `frame_data_offset`), the table-less

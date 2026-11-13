@@ -1,5 +1,9 @@
 # FLAC format notes — measured byte-level facts
 
+> **Scope: FLAC format facts, measured.** Every byte-level finding here is about the FLAC
+> format and the `GAFP` container this track builds on it, as witnessed by
+> `crates/flac-lite`. Nothing here constrains another codec.
+
 Every claim here is about **FLAC bytes**, and every one carries its witness: an
 RFC 9639 section, encoder output from libFLAC 1.5.0, or a committed test/script
 that reproduces it. The project rule has no exceptions:
