@@ -36,38 +36,141 @@ it is **ready to be separated into its own repository**. In checkable form:
   means a `git subtree split`-shaped extraction would work, not that a registry
   entry exists.
 
-### C2 — `flac-lite-gba` decodes *and plays back*, in real time, at 32 kHz, on a GBA
+### C2 — `flac-lite-gba` decodes *and plays back*, in real time, at the highest rate the
+hardware achieves, on a GBA
+
+> **Amended by the project owner on 2026-11-13, after 7-1's hardware runs.** This criterion
+> formerly read "**in real time, at 32 kHz**", and 32,768 Hz was a target rather than a
+> result. The owner's ruling: the rate is dropped as a commitment and replaced by **the
+> highest rate achievable**, because four identical runs on two units put the whole chain at
+> **59.946% of the frame** for a FIXED-0 stream — the cheapest shape FLAC can make — and
+> there is no strategy on the table for recovering the factor of two that 32,768 Hz would
+> need. Verbatim, with the reasoning below it rather than above it: *the attribution may tell
+> us where we might make improvements, but unless we have a real strategy for meaningfully
+> driving those improvements, the conclusion from these on-hardware runs is that we need to
+> drop the sampling rate.* **Everything in C2 except the number stays**: the declared-rate
+> identity rule (Q14), the pack-time structural guard, zero underruns, zero late services,
+> both units twice each, the 16-sample grace clause, and the listening witness. The full
+> record of the run that caused this is in
+> [`playback-results.md`](playback-results.md); what the release bought and did not buy is
+> under "The rate ruling" below.
 
 The claim the project was started for, demonstrated before the split, and now to be
 demonstrated **through** the split's two crates rather than around them. In
 checkable form:
 
 - a ROM that links `flac-lite-gba` **with `rice-arm` on** and plays 2048-sample
-  frames at **32,768 Hz** from cartridge without an underrun, on hardware;
+  frames at the **rate of record** from cartridge without an underrun, on hardware. The
+  rate of record is a *measurement*, not an aspiration: it is the highest exactly
+  expressible rate on the product's own clock at which the whole gate set passes on both
+  units (see "The rate ruling", and Q16 for the margin bar that ruling still needs);
 - **the stream declares the rate it is played at.** Ruled 2026-11-11 (Q14): a stream is
   encoded at the rate it is played at, and the player does not reinterpret a declared
   rate to fit a clock. A 32,000 Hz asset run on a 32,768 Hz clock is 1.024× fast —
   **41.06 cents** — and is not C2 however clean its period audit. The asset this
   repository shipped was exactly that case until 7-0 landed on 2026-11-13, which is why
   7-0 sat in front of 7-1 and why 7-1 is now the thing standing between this tree and C2;
-- the decode half is already measured on hardware (42.48% mean / **42.72% worst**),
-  so what is unproven is the *combination* — decode + convert + push + mixer/DMA
-  inside one 62.5 ms frame;
+- the decode half is measured on hardware, most recently **43.08%** of the 32,768 Hz frame
+  as an attributed, isolated figure from the product image itself (7-1's second reading,
+  `attr 451763` c/frame — see the note under 7-1's record: this is the number the packer's
+  structural row has been waiting for), so what was unproven is the *combination* — and the
+  combination is now measured too, at **59.946%** of the frame;
 - **FIXED-0 by construction.** LPC is **174.14%** of the 32 kHz frame on
   hardware (decode alone), and only FIXED-0 has a measured row; `-l 0` disables
   LPC but does not force the fixed order. The pack-time encode profile must refuse
   FIXED-1..4 and any unmeasured residual shape. The `EncodeProfile` guard is part
-  of C2, not a nicety;
+  of C2, not a nicety. **This clause is the reason the rate ruling is a rate ruling and
+  not a defeat**: at half the clock LPC projects to **86.6% / 87.1%**, so a lower rate is
+  also what moves "plays a clip with no prediction" off the critical path;
 - the acceptance run is on a GBA 001 **and** a GBA SP, and its verdict is
   **underrun-free playback**, not a cycle count.
+
+### The rate ruling (2026-11-13): what was given up, what it costs, and what it does not buy
+
+Written where a reader looking for C2 will find it, because the change is to a *criterion*
+and not to a rung. Four hardware runs are the evidence; they are in
+[`playback-results.md`](playback-results.md) and the ledger rows are in
+[`measurements.md`](measurements.md).
+
+**What was claimed, and what is now given up.** C2 used to name 32,768 Hz. It named it because
+"plays a real clip at a real, listenable rate" was the point of the project, and because the
+paper arithmetic suggested 32,768 Hz was the top rung that could be made to fit. Silicon
+answered: the whole producer chain costs **59.946% of the 32,768 Hz frame** (worst frame
+**60.755%**) on a **FIXED-0** stream — the cheapest thing FLAC can emit, with no prediction at
+all, which is why the product profile refuses LPC and 7-0's own census says real material
+wants FIXED 1-4 and LPC. So the honest statement of the given-up claim is: **32,768 Hz was
+reachable only for an asset that is not real music.** The revised C2 asks for the highest rate
+achieved, which is a question with a measurable answer, instead of the highest rate wished for,
+which had a 60% answer and no headroom.
+
+**What the release buys, as arithmetic on rows this ledger already holds.** Per-frame costs are
+sample-denominated and the frame is 2,048 samples wide at every rate, so dropping one rung
+halves every *percentage* and changes no *cycle count*: work 59.946% → **29.97%**, worst frame
+60.755% → **30.38%**, the attributed decode figure stays **451,763 c/frame** and falls from
+43.08% to **21.54%** of the frame, and the ring's 8,560-sample lead stops being 0.261 s and
+becomes **0.522 s**. Three consequences are larger than the percentages:
+
+1. **LPC changes sign.** 173.23% / 174.14% (6a-7b, hardware) becomes **86.6% / 87.1%**. Still
+   not shippable at that margin, but the product stops being *forced* by the clock to play an
+   un-predicted clip.
+2. **The IWRAM design Sam named becomes affordable.** The ring is 40,320 B and IWRAM is 32,768 B
+   in total, so an IWRAM-resident ring at 32,768 Hz is not expensive, it is arithmetically
+   excluded; the same 0.615 s of lead at 16,384 Hz is **20,160 B** — the first size at which
+   the design-around is possible at all (still to be budgeted against the kernel's `.iwram` and
+   the interrupt stack).
+3. **The grace window doubles in cycles**, 8,192 → 16,384, so the observed 12,800-cycle miss
+   would have scored **12.5 samples and not been counted**. Read that with care: at the lower
+   rate a late re-arm duplicates 16 samples of a *slower* clock, ~0.98 ms rather than ~0.49 ms,
+   so the same miss is **more** audible, not less. **The ruling does not close 7-2.**
+
+**Which rung, and it is not 18,157 Hz.** The rates this architecture can express *exactly* are
+the ones that divide 2²⁴ by an integer tick count: 65,536 / 32,768 / **16,384** / 8,192. agb's
+`Frequency::Hz18157` is not in that set — its nearest integer reload is 924 ticks/sample, which
+plays 18,157.16 Hz, 8.8×10⁻⁶ off, about 0.015 cents and ~88 µs across the clip. That is
+inaudible and *not identity*, so 7-0's `playback_rate_for_stream` would refuse it, and nothing
+in the gate set would catch the difference because 7-0's pitch witness works in decoded samples
+at integer lags and is deaf to clock error. So: **16,384 Hz** if the retarget is taken on this
+architecture's own timer chain. If 7-2 instead rules agb's mixer to be the shipping path, its
+menu (10,512 / 18,157 / 32,768) and the exact-clock requirement are in tension, and 7-2 has to
+resolve that rather than inherit it. **The trap that repeats at the new rung:** FLAC's four-bit
+table has 16,000 (`0b0101`) and 32,000 (`0b1000`) and neither power of two, so
+`16,384/16,000` is the same 1.024 ratio that made Q14's 41.06-cent defect; a lower-rate asset
+must use the explicit-rate codes and all three of 7-0's guards (`EncodeProfile`, `gafp_pack`'s
+validity leg, the pitch witness) must be re-pointed at the new rate **before** the asset is
+re-authored.
+
+**What the ruling does *not* do.** It does not relax any audit clause: `late` is still zero or
+the run refuses, the grace is still 16 samples, and the 16-sample clause is exactly what made a
+28.6-sample interrupt-mask visible. It does not license a rate that has not been measured: the
+number of record comes from a run on both units, twice each, with the digest gates and the
+listening witness, and until then C2 is unmet at *any* rate. It does not retire Q15 — the
+hardware-versus-mGBA gap is +12.11% on the whole chain and **+35.1% on convert** in both images
+now, and a rate chosen with a 35%-unexplained leg is a rate chosen with an unpriced leg. And it
+does not make the period-22 event interesting any more: the attribution came back
+**`late in push 1/1`** on all four runs, so that defect is *explained* (the ring push's
+interrupt mask, as named), and it is now a fixable thing sitting at the wrong rate rather than a
+mystery worth another cart-load.
+
+**What 7-1 owes now**, since it is the rung that establishes the new C2's number: (a) the
+rate **decision for the record** — 16,384 Hz, stated as a ruling rather than left in a
+paragraph; (b) the retarget itself, listed in 7-1's actions; (c) 7-2's push-mask fix, which
+must be done **at the new rate**, because a 14.6 k-cycle mask against a 16,384-cycle grace is a
+14.3-sample window against a 16-sample tolerance — **inside it by 1.7 samples on the mean**, and
+by **0.5 samples** on the worst push window this repository has ever recorded (15,831 c, 6b-3).
+That is not a margin, it is the same defect wearing a hat — and this image's own worst push
+window is not on the screen, so even the 0.5-sample floor is borrowed from another build.
+
 
 ### What must not delay them
 
 The 3.7–6.9% mGBA shortfall (Q13) is parked: C2's decode number already exists as a
 hardware measurement, and C2 is judged on hardware end to end, so an
-emulator-vs-silicon attribution is not on the path. Also out: 24-bit decode, rates
-other than the target, `dyn` dispatch, kernel sub-stage attribution (6a-8 stays
-untriggered), and crates.io publication.
+emulator-vs-silicon attribution is not on the path. Also out: 24-bit decode, `dyn`
+dispatch, kernel sub-stage attribution (6a-8 stays untriggered), and crates.io
+publication. *(This list used to include "rates other than the target"; since 2026-11-13
+the target is what the measurement returns, so that exclusion no longer means what it did —
+the exclusion that replaces it is "rates that are not exactly expressible", per the rate
+ruling above. Q13 itself was re-opened as Q15 the same day and is no longer parked.)*
 
 ### The arithmetic C2 has to fit
 
@@ -2513,20 +2616,14 @@ they are ~43% of the frame against decode's 42.72%.
 | PR | Scope | Witness | Failure it isolates |
 |---|---|---|---|
 | **7-0** ✅ | **Landed 2026-11-13 — the record is at the end of this item.** **The asset at the rate it will be played at.** Q14 was ruled on 2026-11-11: a stream is encoded at the rate it is played at, and the player does not reinterpret a declared rate to fit the clock. So: re-author the fixture at 32,768 Hz — from Hz, not by reusing the sample periods in `frame_vectors.py:263`, which would leave the played pitch exactly where the defect is — and encode it at the product profile (FIXED-0, 2048-sample frames, the residual shapes the guard admits: a fresh census, not this asset's; and an explicitly short final frame, because 10 s at 32,768 Hz is exactly 160 full frames and the short-frame witness would otherwise stop running). Take the `32_000` arm out of `geometry.rs` — set `RATE_BRIDGE` to `None` — and the `32000` entry out of `gafp_pack.py`'s `PLAYBACK_RATE_FOR_STREAM`, leaving identity-or-refusal. Take the sample rate out of `MEASURED_DECODE`'s key, so cost is keyed by blocksize, predictor kind/order and residual envelope — the variables the 6b-3 rate probe showed cost actually depends on — with the rate becoming a *validity check* on the manifest instead, and one constant clock in the arithmetic rather than two. Put the missing rate clause into `crates/flac-lite`'s `EncodeProfile`, which today checks blocksize, FIXED order, LPC and bit depth and never the rate of the stream it is guarding. The full inventory of where 32,000 lives and which uses are legitimate, the two traps (sample-period fixtures; 128/125 is an exact ratio but ffmpeg's `-ar` is float and float breaks every byte pin here), and the probe showing that real material censuses FIXED 1-4 and so is a profile decision rather than a pipeline swap, are in the "Q14 follow-up" section that closes the 6b-3 record, immediately above this table. It will pack at first only under `--allow-unmeasured`, and that is the honest state rather than a shortcut: the `this is NOT a product blob` note comes off when 7-1's row exists. For the same playing time such a stream carries 2.4% more samples, so expect ~2.4% more blob — arithmetic, and worth measuring rather than assuming. Measured on landing: +1.92% samples, +1.96% blob, the difference being the deliberate short final frame. | A **pitch witness in the same PR**: a tone whose implied pitch is measured out of the *decoded* PCM by integer autocorrelation at integer lags (no float — that is the defect class the 6a-2 float-trig incident is about) and checked against the rate the stream declares, plus the negative leg that authors the same tone at 32,000 Hz and packs it as a 32,768 asset, so a reinterpretation is witnessed red rather than assumed caught. Nothing in the present gate set can see a pitch shift at all — the pinned digest of a 32,000 Hz asset and of a reinterpreted one are the *same bytes*, which is how 41 cents passed every gate this asset has been through. Plus the profile guard with no relaxation flags, and `ruled_rate_policy_allows_one_bridge_and_no_more` failing exactly once at the first half of this item — its `.expect("the bridge is still in the tree; 7-0 removes it")` is the tripwire that goes red when the arm is deleted — while its `PRODUCT_STREAM_RATES` allow-list assert, written as one condition (the asset is allowed exactly when no bridge is present), goes red on any **half**-landed 7-0 and becomes the product's identity-or-refusal check once both halves have landed. | That every gate 6b-3's asset cleared was deaf to its one real defect — and that 7-1 and 7-3 would otherwise be run against an asset the product cannot ship. |
-| **7-1** | **Re-measure the producer at the target rate.** The 10,512 Hz producer pass (convert / push / wait / closure) repeated at 32,768 Hz with the kernel in the decode slot. Measurement only — no new product code, and it runs against **7-0's** asset.
-**It also re-runs `make product-play-test` against that asset**: the geometry's own
-answers are asset-shaped — the sizing scans' depth cliff (20 chunks) and prefill cliff
-(1 chunk, `min_lead` 368) are derived from *this* asset's frame lengths and *this*
-cost, and 7-0's encode has a fresh predictor census and ~2.4% more samples for the same
-playing time. Re-quoting them would be the same error as re-quoting a cycle count
-across a link. **Take the model's envelope off transcription while doing it**: the cost
-constants in `product_play_witness.rs` are a hand-copy of one named run's printed
-`stages:`/`attribution:` lines, and that hand-copy fell a build behind during 6b-3's
-report-hygiene pass — so 7-1 pins those printed lines as a text fixture beside the blob's
-hash pin (the `gen_gafp_blob.py --check` pattern, applied to a cost envelope) and has the
-model derive its envelope from the fixture. | Per-stage shares on **hardware**, same-image, with the rate pass's own discipline (`closure underflows 0`, shares read relatively, the clean image's audit as the wall authority, and the same run's decode figure recorded against the **structural** key `fixed0 @ b2048`, because that is the key `gafp_pack` now uses — the rate moved out of the cost key and into a validity check in 7-0, and the packer prints a provenance warning on every successful pack until 7-1's figure exists on frames 7-0 produced. 7-1's numbers are what take the non-product note off 7-0's asset) | that C2's margin is inherited arithmetic from a different rate and a pre-kernel decoder — the ~85.6% gross and the ~8.7 ms left are estimates, not observations, and that 6b-3's 53.062% envelope is an mGBA figure for an asset the ruling disqualifies |
-| **7-2** | **The shipping playback path.** `agb`'s mixer/DMA, or a written argument for why the custom IRQ feeder is the shipping path. Replaces the throwaway harness the rate track has been leaning on. It also settles a mechanism 6b-3's comment correction exposed rather than resolved: `agb` 0.25's `enable_dma_for_sound` (`hw.rs:56-68`) writes **no transfer count** — the 140-word write and the per-period re-arm in `product_play_main.rs` are ours — so whether a period is bounded in practice by a re-armed count or by the FIFO's half-trigger pull is an observation, not a reading of the source. Take it on silicon deliberately: re-arm early and late on purpose and count `grace`/`late` in the audit, before either wording is claimed. | Bit-exact PCM into the FIFO plus an audibility check on hardware; underruns **counted**, not eyeballed | that the throwaway feeder was load-bearing in ways nobody wrote down (the rate track's own lesson, one layer up) |
-| **7-3** | **The acceptance run.** 2048-sample frames at 32,768 Hz, FIXED-0 assets (enforced by 6b-2's pack-time profile), GBA 001 **and** GBA SP, two runs each. | **Underruns = 0**, plus 7-1's stage shares on the same image, plus the one witness
+| **7-1** ✅⚠ | **Two hardware readings on 2026-11-13, both units, two runs each, on the 32,768 Hz product path; both are recorded below. The second answered the mechanism question outright — **`late in push 1/1`, four runs, both units** — and produced the first attributed, isolated decode figure ever read off a unit, `attr 451,763 c/frame` = **43.08%** of the frame (+6.93% over mGBA's same-image 422,494, inside 6a-7b's band). The rival candidate died too: `2nd src 0/582` with the display's VBlank request bit never set on a unit, where mGBA reported it *set* with one shared entry, so interrupt topology is now a question an emulator cannot settle in either direction. **And it ended this rung's real purpose: the whole chain measured 59.946% of the frame, worst frame 60.755%, on a FIXED-0 stream — which is the cheapest thing FLAC can emit. On that evidence the owner ruled the same day that the rate is dropped as a commitment: C2 now asks for the highest rate achievable, not for 32 kHz. See "The rate ruling" above and Q16 for the margin bar that ruling still needs.** So 7-1's measurement half is closed and its remaining act is the retarget itself: re-run 7-0 and 7-1 at the rung the bar selects, and pin the packer's structural row and the host model's fixture from a real screen while doing it — both are unblocked now that `attr` is on the screen. What the four runs established: zero underruns, 582/582 periods, exact sample counts and digests, minimum lead 8,560 samples = 15.3 periods = 261 ms (not a starving shape), Q14's identity observed on silicon by the absence of the rate/pitch row, and a refusal on one clause only: a re-arm held 25 samples (12,800 c) against a 16-sample (8,192 c) grace at period 22, in the fed phase, deterministically — a latency-window miss with its mechanism now **measured**, not a throughput failure. **A red screen is the combined gate doing its job** (`COLOR_FAIL` on any of ledger/audit/PCM/FIFO), not a separate no-audio banner. The instrument cost is stated on both channels: the first extension +170 c/frame in mGBA / +147 c/frame on silicon; the second +87 / +262. **The delay itself moved 23 → 25 samples between the two instrument images while the period index stayed at 22** — the event is pinned in the schedule and its held time follows wherever the push window lands, and the store that pinned it sits inside the section under measurement, so the instrument made the thing it measures 2 samples worse. Reported, because that is the price of reading it.
+| **7-2** | **The shipping playback path.** `agb`'s mixer/DMA, or a written argument for why the custom IRQ feeder is the shipping path. Replaces the throwaway harness the rate track has been leaning on. It also settles a mechanism 6b-3's comment correction exposed rather than resolved: `agb` 0.25's `enable_dma_for_sound` (`hw.rs:56-68`) writes **no transfer count** — the 140-word write and the per-period re-arm in `product_play_main.rs` are ours — so whether a period is bounded in practice by a re-armed count or by the FIFO's half-trigger pull is an observation, not a reading of the source. Take it on silicon deliberately: re-arm early and late on purpose and count `grace`/`late` in the audit, before either wording is claimed. **Its named defect is now confirmed rather than hypothesised.** 7-1's second hardware reading came back **`late in push 1/1`** on four runs across both units: the one late service's period boundary crossed inside the producer's ring-push critical section, which holds **IME off for ~28.7 samples** against this audit's **16-sample** tolerance, and the alternative candidate — a second source sharing the interrupt entry — came back **`2nd src 0/582`** with `disp 0008`, i.e. the display's VBlank IRQ enable was never set on a unit. So the fix is chosen, not searched for: chunk-sized push sections (~7.2 samples at the current rate), or a lock-free ring so no 2,048-sample copy happens under a mask, or re-arming ahead of the boundary — and the audit count plus `late in push` are the witnesses. **Read the retarget's arithmetic before assuming it buys anything here: at 16,384 Hz the same
+14,680-cycle mask is a 14.3-sample window against a 16-sample grace — inside the tolerance by
+**1.7 samples** on the mean and by **0.5** on the worst push window this repository has ever
+recorded for that section (15,831 c, 6b-3). That is a coin toss, not a margin, and this image's
+own worst push window is not on the screen. The clause is what makes that visible, so the clause
+stays.** | Bit-exact PCM into the FIFO plus an audibility check on hardware; underruns **counted**, not eyeballed | that the throwaway feeder was load-bearing in ways nobody wrote down (the rate track's own lesson, one layer up), and that the period-22 mechanism was ever still a hypothesis: the attribution field settled it in one cart-load |
+| **7-3** | **The acceptance run.** 2048-sample frames at **the rate of record** — no longer a fixed 32,768 Hz; the rate C2 asks for is now the highest the hardware achieves, ruled 2026-11-13 and stated under "The rate ruling", so 7-3 runs at whatever rate 7-1's retarget measures out and 7-2 makes fit, and the run names that rate in its own wording, FIXED-0 assets (enforced by 6b-2's pack-time profile), GBA 001 **and** GBA SP, two runs each. | **Underruns = 0**, plus 7-1's stage shares on the same image, plus the one witness
 no instrument here produces: the image **heard** on both units, with the source file
 beside it — pitch and tempo, not just a counter. 6b-3's image has never been played by
 hand or verified by ear; `underflows=0` and a matching PCM pin are statements about
@@ -2546,7 +2643,15 @@ comes back to this plan rather than being absorbed by a playback patch. 6b-3's n
 not carry forward as product figures: they are the play path's and the geometry's
 evidence, measured against an asset the ruling disqualifies. (7-0 landed on 2026-11-13;
 the record below is what 7-1 runs against, and it corrects one thing in this paragraph:
-the row 7-1 fills is no longer keyed by rate — see *What 7-1 inherits*.)
+the row 7-1 fills is no longer keyed by rate — see *What 7-1 inherits*.) 7-1's first
+reading landed the same day, in the record below 7-0's: the path **plays** on both units,
+zero underflows, all 582 periods serviced, digests exact — and one service 7 samples past
+the half-FIFO window at period 22 is what turned the screen red. That record states
+Sam's two takeaways and the instruction to re-run 7-0/7-1 at the next rate down, and
+**records them rather than ruling them**: C2 said 32 kHz until there was a ruling saying
+otherwise. *(There was, later the same day — see "The rate ruling" at the head of this file and
+7-1's second reading below. Everything in this paragraph is kept as the state of play at the
+hour it was written.)*
 
 ### 7-0 — landed (2026-11-13): the asset is encoded at the rate it is played at
 
@@ -2822,6 +2927,488 @@ play at the same pitch the old design played at on the mis-geared clock. What mo
 tone exact on both clocks, since `gcd(32768, 32000) = 256`) and the low partial (80 → 82,
 because 32,768/80 = 409.6 is not an integer and `partial_periods` used to produce
 non-integer periods silently — it now asserts).
+
+### 7-1, first reading (2026-11-13): it plays on both units, and one service seven samples late at period 22 is what says no
+
+**7-1 is a measurement, and it needed an instrument first.** Two readings were taken on
+2026-11-13 with the 7-0 image and both came back **RED**; the transcribed screens are in
+`playback-results.md`, and the reason they could not be ruled on is that a unit has no
+serial. That screen printed the audit's *verdict* (`aud NO`) and none of the clauses that
+produced it. So the first act of 7-1 was to make the ROM say which clause refused, in the
+same 240×160 space, with one string feeding both channels:
+
+- four more lines: the other three per-frame shares (`conv`/`push`/`feed`), the period
+  ledger (`per`/`ser`/`tail p/r`/`void`), the replay split (`replay`/`late`/`fed`/`drain`),
+  and the indices (`latep`/`worstp`/`dly`/`refus`);
+- four `Stats` fields in the feeder (`late_fed`, `late_drain`, `late_first_period`,
+  `late_worst_period`) — a count of "1 in 582" is not actionable, an index is;
+- a `late detail:` log line that states its own units, because `dly` is in **samples**
+  (timer1 cascades from the 512-cycle sample clock, so its counter *is* a sample counter)
+  and a reader on a unit has no way to know that otherwise;
+- `max_gap` deliberately left off the screen: a gap > 1 always moves `replay` by gap−1, so
+  `replay 0` already states that no gap exceeded 1, and the line budget went to the indices.
+
+The line budget is stated, not discovered: at this font the 8-line screen measured
+`bottom=99`, i.e. ~12.4 px a line, so 11 lines land near 136 of 160 and leave two lines for
+the conditional `rate …!… pitch` row. The same image measures itself honestly: **`fit:
+lines=11 right=174 bottom=135 fits=true`**.
+
+**The image, and what the extension cost — on both channels this time.**
+`product-play.gba` sha256 **`8113f04cabf0fb6326a68c70ad3b1c22bb19b4849dbb0dbccaecb8339e2b84cd`**,
+1,104,592 B; ELF `text 1,104,120 / data 472 / bss 42,608` (the ROM's byte size is unchanged
+from 7-0's, its bytes are not). Only `product_play_main.rs` changed, +122/−3. Gates at that
+build: `product-play-test` **14 passed / 0 failed**, `check` clean, `gafp-check` clean,
+`make native-product-play-rom` clean. The cost of measuring, against 7-0's image:
+
+| channel | work/frame | decode | worst frame | min lead |
+|---|---|---|---|---|
+| mGBA, 7-0 image → this image | 53.446% → **53.462%** (+170 c) | 39.574% → **39.577%** (+34 c) | — | 9120 → 9120 |
+| GBA 001, previous image → this image | 59.907/59.909% → **59.921%** (+147 c) | 42.286/42.287% → **42.288%** | 60.732/60.731% → **60.738%** | 8560 → 8560 |
+
+The two channels agree on the cost of the extension to within ~20 c/frame, which is the
+first time the "the instrument is nearly free" claim was tested on silicon rather than
+assumed. The two earlier readings stay in the ledger as supporting rows, with the
+recorded defect that their image hash was never taken — 7-1's procedure now requires the
+sha *before* the cart goes in the unit.
+
+**The four readings.** Two runs on each of GBA 001 and GBA SP, read off the screen, and
+**all four identical to the third decimal** — of the percentages, of both lead watermarks,
+and of the late index. (Two transcription slips are recorded as read: `Lfr…` at the head of
+one row and `worsp` in another; the shapes are unambiguous. The precedent that makes this
+readable rather than suspicious is 6a-7b: four runs on these same two units, *identical to
+the cycle*. Readings off these units are deterministic; that is a property of the platform
+that this project keeps re-confirming.)
+
+```
+PRODUCT PLAY 32768
+fr 160 und 0 pcm ok fifo ok
+ledg ok aud NO
+push 326144 cons 326144
+work 59.921% dec 42.288%
+conv 14.228% push 1.397% feed 2.006%
+minlead 8560 maxwk 60.738%
+per 582 ser 582 tail 1/224 void 0
+replay 0 late 1 fed 1 drain 0
+latep 22 worstp 22 dly 23 refus 0
+```
+
+(The screens came back **red**, in the user's words "RED screen at the end, not blue". That
+is the gate speaking, not a separate failure banner: `product_play_main.rs:1748` sets
+`COLOR_FAIL` (red) versus `COLOR_PASS` (blue) from the combined result of `ledger_ok`,
+`audit_ok`, `pcm_ok` and `fifo_ok`, so with `aud NO` red is exactly what that gate is
+required to say.)
+
+**What those four readings pass, and it is most of what 7-1 was sent to establish.**
+Zero underflows on every run; **582 periods elapsed and 582 serviced**, with no coalescing
+and no gap above 1; `push 326144 cons 326144` exactly the manifest's sample count; PCM and
+FIFO digests MATCH; the ledger's own counts agree; `void 0` and `refus 0`, so every window
+was measurable; `tail 1/224` is exactly the design — the clip ends 224 samples into a
+560-sample period and the audit allows that one tail period, because 7-0 shipped a
+deliberately short final frame; **no `rate …!… pitch` row on any unit**, which is 7-0's
+identity-or-refusal contract observed on silicon rather than in a log; a minimum lead of
+**8,560 samples = 15.3 periods = 261 ms** at every instant of every run. That last number
+matters for reading the red: **this is not a starvation shape and not a decode overrun.**
+The four per-frame shares also sum to 59.919% beside the total's 59.921% — the same
+integer-truncation behaviour the mGBA rows show (53.460 against 53.462), so the stage
+instrument is self-consistent on hardware too.
+
+**What refused.** One clause: `late 1`, **in the fed phase** (`fed 1 drain 0`), at period
+**22**, at a delay of **23 samples**. Units, from the ROM's own `late detail:` line: a
+sample is 512 cycles at this rate, so the service landed **11,776 cycles** into the
+560-sample period, against a half-FIFO window of 16 samples = **8,192 cycles** — i.e. **7
+samples, 3,584 cycles, past the grace**, and the repeat DMA had already reloaded the old
+source. The audit calls that a mid-waveform splice, and the field's own comment records the
+first hardware reading of it, on 2026-10-19, as *a pop that was heard*. The open witness:
+**is a click audible at 0.376 s into the clip** (period 22 begins at audio sample 12,320)?
+It has not been asked yet. Note what `pcm ok fifo ok` does **not** cover: those digests are
+over the bytes the player pushed, not over what the DAC played, so an exact digest and a
+re-played stretch of the old buffer are compatible statements — which is precisely why the
+audit clause exists and why 7-3 asks a person to listen.
+
+**The identical index is the finding, not a detail.** Same period, same delay, two runs on
+each of two different units. That is not jitter, not thermal, not cart luck: it is a
+deterministic scheduling collision — something keeps the audio IRQ unserviced for ~11.8 k
+cycles at a fixed phase relationship to the audio clock, once in 582 periods.
+
+**What it probably is, and what would settle it.** All of this is read off the code and off
+rows already in this ledger; none of it is measured, and the test below is what turns it
+into a ruling. The delay is **interrupt latency, not handler slowness** — the handler's own
+cost is ~285 c — so 11,776 cycles is time the timer1 IRQ sat pending. What holds it pending
+is a section with **IME off**, and agb's critical sections are exactly that:
+`critical_section::set_impl!` at `agb/src/interrupt.rs:327-339` implements `acquire`/
+`release` over `INTERRUPTS_ENABLED` = `0x04000208` = REG_IME. There is **one** long such
+section in the fed phase: the ring push. `fed_frame` holds **one** `critical_section::with`
+per decode frame (`product_play_main.rs:1267-1284`) around `push_bytes` of the whole frame's
+samples — `n = frame.left.len()`, i.e. up to 2,048 samples per channel in one copy — because
+that is the only instant in which the before/after ring watermarks mean anything. Every other
+critical section on the path is a read of a static: `wait_for_room`'s poll body
+(`:1212-1219`) borrows `FEED` to read `free_samples` and drops it, and a poll loop re-enables
+IME between iterations so it cannot chain into a long mask; the finish flag, the refusal
+counter and the report share that shape. The decode and convert legs are not under a mask at
+all. The stage instrument has been pricing that one section for weeks, and it really is one
+window per frame: **14,649 c in these very runs** (`push 1.397%` of a frame), **14,885–14,899
+c** in 6b-3's rows, worst single window **15,831 c** in one image and **15,776 c** in the
+next (the 79,922 c above them was the un-medianed clock's own artefact, retired in that same
+row). In the units the audit thinks in: **28.6
+samples of masked interrupts, 30.9 at the worst windows**, against a tolerance of **16 samples**,
+half of the 32-byte sound FIFO. **So this is not bad luck: the design masks interrupts for
+about 1.8× the window in which the re-arm has to land.**
+The arithmetic then predicts the observed number rather than merely tolerating it. A boundary
+falling *d* samples into a push window is served when the window ends, i.e. at a delay of
+(window − d): for a 28.6-sample window the late zone is its first **12.6 samples**, and the
+observed **23-sample** delay puts that boundary **≈5.6 samples into the window** — inside the
+measured envelope, and below the mean window length as the model requires.
+One thing the model does **not** yet explain, and it should be said rather than papered over:
+why the coincidence happens once. A 28.6-sample mask per frame over 159 fed frames against a
+560-sample grid suggests on the order of eight boundary-in-window events, of which the late
+zone would take several — not one, at a fixed index. Either the phase relation between the
+producer's loop and the audio clock is far more locked than this arithmetic assumes (the
+producer's own cycle is 559 k c ≈ 1.95 periods, and with a 15-period minimum lead
+`wait_for_room` returns immediately, so the loop free-runs against the clock and drifts by a
+fixed amount every frame — which can land on the alignment rarely rather than often), or
+`Stage.inside` counts something other than what I have assumed. Its exact semantics would have
+to be re-read before that figure could be used as a rate, and the attribution test below
+settles the whole question, this wrinkle included. It is recorded here as an open seam, not
+resolved.
+Corroboration already in this ledger, written down before it could be read this way: the stage
+instrument counts the period boundaries falling inside each window (`Stage.inside`,
+`:816-835`), and 6b-3's row records that shifting the leg timings by *tens of cycles* moved
+**exactly one boundary into a push window** (`boundaries_in 158`, "one boundary now lands in a
+push window"). One boundary inside a push window and one late service in a run are the same
+event counted twice. Caveat, kept honest: those `inside` figures come from pre-7-0 images, and
+6b-3 already refused to reconcile that instrument's `isolated_estimate` with another figure
+once. The test below is what turns this from a story into a measurement.
+Weaker candidate, and now bounded rather than merely doubted: **another source in the same
+interrupt entry**. `IE=0x0011` is agb's own mask with agb's own numbering — bit 4 is
+`Interrupt::Timer1`, the audio chain, and bit 0 is `Interrupt::VBlank` — so the mask did carry a
+second armed source throughout. Two measurements retire it as an explanation for an 11,776-cycle
+late service. The behavioural one: reading that mask as the audio handler itself sees it (agb's
+`interrupt_handler.s` masks out of it every source it is about to dispatch, so the value on
+entry is "what is armed, minus what came with me"), the co-entry count in mGBA is **1 entry in
+582**, and `late=0`. The cost one: for a shared entry to hold a re-arm 23 samples, that entry
+would have to cost ≥ 11,776 c — about five times this ROM's whole measured audio handler, 2,286
+c mean and 2,999 c worst — and this build registers exactly one handler, the feeder, so a shared
+entry contains no project work of its own. A guess made in this plan while drafting the witness
+is worth correcting in the record: `DISPSTAT` bit 0 was written here as "whether a VBlank IRQ is
+generated at all", but agb's `Interrupt::VBlank::enable()` writes **bit 3**
+(`DISPLAY_STATUS.set_bits(1, 1, 3)`), so bit 0 is not that test; the ROM now prints the raw
+registers at arm time and at report time precisely because these meanings belong to agb, and the
+first build that read them reported `DISPSTAT=0x0008` before the loop and `0x0009` after it.
+The drift argument that used to justify doubting this candidate is also moot: a 280,896-cycle
+video frame against a 286,720-cycle audio period slips 5,824 cycles a period, so the phase
+cycles every ~49 periods — but the count that matters is measured, not modelled.
+**The test, in one line: attribute each late service to the leg it landed in.** The producer
+already measures the period range of each of its four legs (`p1…p4`) and the handler already
+records the period index of every late service; comparing the two costs a few instructions a
+frame and adds nothing to the hot path. The prediction is `late in push 1`. If it comes back
+`late in push 0`, this hypothesis is dead and the search re-opens — and the third candidate,
+the bus (Q15), moves up.
+**The fixes, with their arithmetic**, for 7-2 to choose between rather than for anyone to
+argue about now. Slicing does not reduce the work — 2,048 samples of copy is ~14.6 k cycles
+however it is done — but it is the **contiguous** mask that delays a service. So: push in
+`CHUNK`-sized critical sections (560 samples ≈ 3.7 k c ≈ **7.2 samples**, so a boundary is
+served at most 7.2 samples after the mask starts: a 2.2× margin against the 16-sample
+tolerance, and a per-chunk before/after pair is still a meaningful watermark); or make the ring
+lock-free (head and tail as words the feeder can read on its own side, `push_bytes` outside
+any critical section) so that no part of the copy is masked and the delay becomes IRQ entry
+latency, which this ROM already measures in the hundreds of cycles; or re-arm ahead of the
+period boundary, which is 7-2's own subject and touches no ring code at all. All three are
+tested by the same witness: the `late` count on the screen. And whichever is chosen, the clause
+that found it should not move: **the 16-sample clause is what made a 28.6-sample mask visible
+at all**, and no digest in this tree could have.
+
+What is *not* implicated: the duty cycle. A 1.4× miss against a latency window is a
+scheduling result, and `work 59.921%` says nothing about it — a run at 20% work would have
+the same window and, on this evidence, might well have the same collision.
+
+**Hardware versus mGBA, same image, per stage.** The mGBA run of this exact image is the
+comparator (it is above, in the instrument-cost table); the hardware rows are the four
+above. Both are stated as percentages of the same 1,048,576-cycle frame, so a percentage
+delta *is* a cycle delta:
+
+| leg | mGBA | hardware | Δ cycles/frame | Δ relative |
+|---|---|---|---|---|
+| decode window | 39.577% (414,995 c) | 42.288% (443,422 c) | **+28,427** | **+6.85%** |
+| convert | 10.533% (110,447 c) | 14.228% (149,191 c) | **+38,744** | **+35.1%** |
+| push | 1.382% (14,491 c) | 1.397% (14,649 c) | +158 | +1.09% |
+| feeder | 1.968% (20,552 c) | 2.006% (21,034 c) | +482 | +2.35% |
+| **work/frame** | **53.462% (560,590 c)** | **59.921% (628,317 c)** | **+67,727** | **+12.08%** |
+
+The legs sum to the total on both sides (Δ-stages +67,811 against Δ-total +67,727 —
+rounding), so this is a leg-shaped gap, not a clock error. Two constraints on how it is
+read, and they pull against each other: **E5** measured on these very units that the ROM→IWRAM
+fetch pricing is *hardware*, reproduced by mGBA to within 0.012% per call with `WAITCNT`
+identical at `0x4317`, and **6b-1** measured the IWRAM-resident ARM kernel matching mGBA to
+0.055% — so a generic "the cartridge is slow" cannot carry a +35% convert penalty by
+itself. Meanwhile **6a-7b** already measured every leg of a non-kernel path sitting 3.7–6.9%
+above the model on these same units and named *the flashcart* as one of its candidates, and
+the +6.85% decode window here is inside that band. The one leg with no company is
+**convert**, and the property that distinguishes it in this image is that its writes go to
+the 40,320 B ring in **EWRAM** — a placement that is default, not chosen (there is no
+custom linker script in this repository), and whose per-byte penalty this repository
+measures at 3.482 c/B. So: **Q13 re-opens, at the producer path, with a larger gap than the
+one that got it parked**, and it now has a named candidate supplied by the person doing the
+runs.
+
+**Sam's two takeaways, recorded as stated (2026-11-13).** (1) *Given how tight the budget
+is, the product should perhaps target the lower ~18 kHz rate instead of 32,768 Hz.* (2) *The
+emulator-versus-hardware difference is likely real, and likely a consequence of how the ROMs
+are flashed: GBA cartridges are memory-bandwidth-hungry, and these images run from an
+SD-card flash cart rather than a real mask ROM, so the cart probably under-performs. That
+could be designed around by buffering more in IWRAM — the way the FIFO does, but bigger —
+but the simplest way to finish the project is to target a lower sample rate.*
+**Instruction recorded with them: re-run 7-0 and 7-1 as necessary at the next rate down.**
+These were recorded, on 2026-11-13 as they arrived, as the person running the units' reading of
+the result rather than as a ruling — and at the time of writing C2 still named 32 kHz.
+**That status ended the same day:** after the second hardware reading (below), the owner ruled
+the rate question and **C2 was amended to "the highest rate achievable"**. See "The rate
+ruling" near the top of this file for the decision as taken; what follows is the analysis that
+was written while it was still open, and it stands as the reasoning behind the ruling.
+
+**What a lower rate would buy, as arithmetic from rows already in this ledger (not as a
+measurement).** Per-frame cycle costs in this player are sample-denominated, not
+time-denominated — 2048 samples of decode, 2048 samples of convert, 2048 samples of push,
+and ⌈2048/560⌉ feeder services whichever way the clock is drawn — so halving the rate
+halves every percentage while leaving the cycles alone: **work 59.921% → 29.96%,
+worst frame 60.738% → 30.37%, decode 42.288% → 21.1%, convert 14.228% → 7.11%**. The lead
+in *time* doubles for the same sample counts (261 ms becomes 522 ms). On the failing clause
+specifically: the grace is **16 samples**, i.e. 8,192 cycles at 32,768 Hz and **16,384**
+cycles at half that, so the observed 11,776-cycle lateness would have been **11.5 samples —
+inside the window, and not counted at all**. That last part has to be stated carefully,
+because it is the part a reader will want to over-read: a lower rate does not *fix* a late
+re-arm, it lowers the chance of one landing outside a window that has grown in cycles while
+the blocking work (interrupts, critical sections, handler entry) has not. And if a re-arm is
+late at the lower rate, the audio it duplicates is 16 samples of a slower clock — ~0.98 ms
+rather than ~0.49 ms — so the same miss is *more* audible, not less. The latency work is
+still owed at 7-2 either way.
+
+There is one consequence worth naming on the other side of the balance. The product profile
+refuses LPC at 32,768 Hz because the measured cost is **173.23% mean / 174.14% worst** of
+the frame (6a-7b, hardware) — which is why the shipped clip is FIXED-0, i.e. un-predicted,
+while 7-0's own census note says real material censuses FIXED 1-4 and LPC. The same cost at
+half the rate is **86.6% / 87.1%** of the frame: still not shippable at that margin, but
+the sign changes, and "the product plays a clip with no prediction" stops being forced by
+the clock. Also, on the memory side that Sam's second takeaway is about: the ring is
+**40,320 B** of 8-bit planar samples (20,160 samples per channel = 0.615 s of lead) and
+IWRAM is **32,768 B in total**, so an IWRAM-resident ring is not expensive at this rate, it
+is arithmetically *excluded*; at half the rate the same 0.615 s of lead is **20,160 B**,
+which is the first size at which the design being described is possible at all, though it
+would have to be budgeted against the kernel's `.iwram`, the interrupt stack and everything
+else in the 32 kB. **The two takeaways converge there: the lower rate is what makes the
+IWRAM design affordable.**
+
+**Which rung is actually there, and it is not 18,157 Hz.** "~18 kHz" is `agb`'s middle
+`Frequency::Hz18157`, and it is not available to this architecture. This ROM builds its own
+timer chain (`AllTimers`, `TICKS_PER_SAMPLE`, the cascade, the reloads) rather than using
+agb's mixer clock, so the rates it can express exactly are the ones that divide 2²⁴ —
+65,536 / 32,768 / **16,384** / 8,192 — which is the "declarable band" this ledger already
+lists, and 16,384 is expressible in the format exactly the way 32,768 already is — on the
+explicit-rate codes (`0b1100..=0b1110` carry the value after the coded number, per
+`format.rs::from_flac_code`), so a stream can *declare* exactly what the clock plays and
+7-0's identity-or-refusal contract keeps holding.
+**One trap repeats at the new rung, and it is worth naming before any fixture is
+re-authored.** FLAC's four-bit table has **16,000** (code `0b0101`) and **32,000** (`0b1000`)
+and neither power of two; `16,384/16,000` and `32,768/32,000` are the same 1.024 ratio, so
+the Q14 defect — 41.06 cents — arrives again at the lower rung with exactly the same size,
+and `flac -f` will happily produce it. What makes that survivable is what 7-0 landed
+(`EncodeProfile` refusing a stream it is not built to play, `gafp_pack`'s validity leg, the
+pitch witness), and all three have to be re-pointed at the new rate before the asset is.
+18,157 Hz cannot: the nearest integer reload is 924 ticks/sample, which plays
+18,157.16 Hz — 8.8×10⁻⁶ off, about 0.015 cents and ~88 µs over the clip, inaudible but
+*not identity*, so `playback_rate_for_stream` would refuse it and the geometry would need
+its integer-tick arithmetic back (`TICKS_PER_SAMPLE`, `PERIOD_CYCLES`, the `REARM_GRACE ×
+TICKS` bound, the const asserts). And nothing in the gate set would notice: 7-0's pitch
+witness works in decoded samples at integer lags, so it catches *reinterpretation* and is
+deaf to a clock that is 0.015 cents slow. So if a retarget is chosen, **16,384 Hz**; if 7-2
+chooses agb's mixer as the shipping path instead, its menu (10,512 / 18,157 / 32,768) and
+the exact-clock requirement are in tension, and that belongs in 7-2's decision rather than
+being discovered later.
+
+**What 7-1 has closed, and what it has not.** Closed by these four readings: the first
+same-image **hardware** stage shares on the product path, on both units, twice each; the
+zero-underrun / all-periods-serviced / digests-exact part of its witness; the Q14 identity
+observation on silicon. Not closed, and 7-1 stays open:
+
+1. **the packer's structural `fixed0 @ b2048` row — unblocked, still unfilled.** The
+   `attribution:` figure went onto the screen as `attr` and a unit read it back:
+   **`attr 451763` c/frame on hardware**, from 7-1's second reading (2026-11-13), against
+   422,494 in mGBA on the same image (+6.93%). So the number `gafp_pack` wants is no longer
+   waiting on an instrument; it waits on transcribing it into the structural row together with
+   the `frames_sha256` of the frames it was taken from and the residual envelope that row is
+   valid for — and on the rate ruling deciding which shape key to file it under. It is **not** a
+   substitute for 6b-2's row and the two must never be averaged: 6b-2 priced the kernel in a
+   decode slot with nothing else running (37.765% of the frame), `attr` prices the decode leg of
+   a live producer with ring writes and a timer interrupt inside its windows (43.08%). 6b-3
+   refused that same comparison once already and the refusal still stands.
+2. **the host model's envelope is still a hand-copy of a pre-7-0 run.** The constants in
+   `product_play_witness.rs` (`DECODE_SUM 65,073,008`, `CONVERT_SUM 17,331,966`,
+   `PUSH_SUM 2,262,520`, `STAGE_WINDOWS 152`, `FEEDER_SUM 3,221,180`,
+   `PERIODS_SERVICED 571`, and the `557,022 raw / 551,159 attributed` envelope derived
+   from them) belong to the 2026-11-12 image and a 157-frame asset that no longer exists.
+   The gate is green and describes the wrong producer. 7-1's other named job is to pin a
+   ROM-generated text fixture beside the blob's hash pin and derive the envelope from it.
+3. **the packer's provenance warning still prints on an otherwise clean pack**, and only
+   row 1 turns it off.
+4. **the audibility witness** — whether a click is heard at 0.376 s — is unasked, and 7-3's
+   "heard on both units" half is untouched.
+
+Nothing here relaxes the audit. `late 0` stands as written: the failure is real by the
+definition the audit uses, it is one event in 582, and if it ever has to be split into a
+fed-phase clause and a drain-phase clause, that split has to come with the index data that
+justifies it, not with a lowered gate.
+
+**(a) is built and controlled, and the control settled two things before a unit was
+ touched.** The image is
+ `86f6a1dd7e525dfc14cac7ddac4151c4e860aafbf099b11174ea07ed9d08a082`, 1,106,440 bytes;
+ `make check` and `make product-play-test` exit 0, `gafp-check` clean, fit
+ `lines=11 right=188 bottom=135 fits=true` (longest row 188 px of 240 — about six characters
+ of headroom left, which is what the deferred rate/pitch line would need). In mGBA three runs
+ of it agree to the cycle and the cost is **+87 c a frame, +0.008 pp** (work 53.462 →
+ 53.470%), with the isolated decode figure unmoved (422,487 → 422,494 c) and the minimum lead
+ unmoved (9,120 samples) — cheaper than the extension that found the defect, which was +170 c
+ there and +147 c on hardware. It puts on the screen `late in push a/b`, `2nd src a/b`, `disp
+ 0009`, and `attr 422494` — that last one being the decode figure minus the interrupt time
+ inside its windows, computed once and feeding the log, the cross-check and the screen, which
+ is the number the packer and the host model want and what 7-1's item 1 above needs.
+
+ **Free finding 1: the count that looked too small is not too small.** The paragraph above
+ asked why the model expected "of the order of eight" late re-arms and the units reported one.
+ The new counter answers it: `boundaries_inside_push_section` is **0** on this image and **2**
+ on the previous build, against a random-phase expectation of 159 push windows × 28.6 samples ÷
+ 560 = **8.1**. The producer is not in random phase with the period grid — `wait_for_room`
+ parks it until the ring has drained, so its push windows sit at a nearly fixed phase of that
+ grid and boundaries cross occasionally, not at the random rate. And that count moves when the
+ code layout moves: those two builds differ in nothing but log strings and instruction
+ addresses, which is also why the decode stage's boundary count is 161 here and was 160 there.
+ So one late service in 582 periods is not a statistical oddity, and the count must be read
+ from a unit rather than reasoned about. **Free finding 2: a shared interrupt entry cannot hold
+ 23 samples.** The mGBA count is 1 audio entry in 582 sharing an entry with the other armed
+ source, and `late=0`; to be the cause it would have to have cost ≥ 11,776 c, about five times
+ this ROM's entire audio handler (2,286 c mean, 2,999 c worst), and this build registers
+ exactly one handler, the feeder. The field stays — a non-zero count on a unit would be
+ evidence *against* the model — but the candidates are now two, not three: the ring-push
+ section, or a bus/memory stall (Q15), which no interrupt field can see.
+
+ **What the unit run decides, stated before it is run.** With the same `late 1` seen again:
+ `in_push 1` names the mechanism and 7-2 becomes about not masking interrupts for 28.6 samples
+ (push in `CHUNK`-sized sections, ≈7.2 samples and a 2.2× margin, or a lock-free ring); `in_push
+ 0` kills the push-section story for that event and Q15's placement control becomes the next
+ experiment — two images differing only in whether a 20-chunk ring (22,400 B, which fits
+ IWRAM's 32,768 alongside this ROM's ~2 kB of `.iwram`) lives in `.bss` or in `.iwram`; and
+ `boundaries_inside_push_section = 0` alongside a non-zero `late` is a third answer, a clean
+ one, since no late service can have been caused by a section that swallowed no boundary.
+
+**Next actions, as written for the first reading, and where each stands now.** (a) **Done** —
+the `attribution:` figure, the `IE`/`IME`/`DISPSTAT` witness and the late-service attribution
+went onto the screen. (b) **Done and answered** — image `86f6a1dd…` ran on both units twice each
+with its sha recorded first, and came back **`late in push 1/1` on all four readings**: the
+mechanism is the producer's interrupt-masked ring push. `8113f04c…` is now only an instrument
+control. (c) **Still owed** — the listening question at 0.376 s, which the confirmed mechanism
+makes sharper rather than redundant: a re-arm held 25 samples by a copy into the ring is a
+splice candidate, and only an ear says whether this one is audible. (d) **Unblocked, still
+owed** — the screen now carries every field the host fixture needs (`attr` included), so pin the
+ROM-generated text beside the blob's hash pin and derive the envelope from it, then re-read the
+geometry's depth and prefill cliffs against the current asset. (e) **Ruled, not merely answered**
+— the owner dropped the rate commitment on 2026-11-13 and amended C2 to the highest rate
+achievable; what remains is Q16's margin bar, then the retarget itself: the fixture at
+`frame_vectors.py`, the four `.gfp` and the refusal spec,
+`EncodeProfile::PRODUCT_SAMPLE_RATE_HZ`, `geometry`'s
+`TICKS_PER_SAMPLE`/`PERIOD_CYCLES`/`CHUNK_SAMPLES`/`RING_*`/`DMA_WORDS` and their const asserts,
+the packer's rate-validity leg and a measured row keyed to that shape, and C2's remaining "at
+32 kHz" wording. (f) Then 7-2, where the period-22 collision and the three fixes
+above are tested rather than argued — the shortlist is now a decision, since the attribution
+named the section to change.
+
+```sh
+make native-product-play-rom     # the image above; sha256 before the cart goes in
+make product-play-test           # green at that image, and still describing a pre-7-0 run
+make gafp-check gafp-pack-check
+"$(command -v mgba-test-runner)" product-play.gba | grep -E 'screen\||fit:|late detail:|attribution:'
+```
+
+### 7-1, second reading (2026-11-13): the push section held it — and the rate is ruled out, not the latency
+
+**The attribution came back exactly as predicted, four times.** Image
+`86f6a1dd7e525dfc14cac7ddac4151c4e860aafbf099b11174ea07ed9d08a082` (1,106,440 B, source
+`ad37932`, sha recorded before the cart went in), GBA 001 ×2 and GBA SP ×2, and all four
+screens agree: `replay 0 late 1 fed 1 drain 0`, `latep 22 worstp 22 dly 25 refus 0`,
+**`late in push 1/1`**. Four runs, both units, the same period index as the first reading, and
+**every one of the late services attributed to the producer's ring-push critical section**.
+
+That is the mechanism, measured rather than argued. The section publishes the period counter as
+its first act, so "this late service's boundary crossed inside the push" is an identity, not a
+window — and it came back 1 of 1. `2nd src 0/582` says no audio entry ever shared an interrupt
+entry with another source on a unit, and `disp 0008` says why: DISPSTAT bit 0 was **clear** on
+real hardware, so the display was not generating that interrupt at all — whereas mGBA reported
+`dispstat_now=0x0009` and one co-entry in 582. So the second candidate is excluded on hardware
+by two independent witnesses, and the *emulator* turns out to be the one that had the VBlank
+behaviour. That is worth keeping loudly: the same field that ruled a candidate out on the units
+was lying in the one direction that would have misled, so an mGBA control run cannot settle
+interrupt-topology questions either.
+
+**The delay moved; the index did not.** `dly` is **25 samples** here against **23** on the
+previous image — the same event, at the same period, with the mask 1,024 cycles longer, on a
+build whose producer code differs in log strings and instruction addresses. That is the shape
+of a phase-locked collision whose *instant* is stable and whose *held time* follows wherever the
+push section lands in the grid. It also prices the instrument honestly: the extra store inside
+the push critical section made the very defect it measures 2 samples worse. So:
+
+- the model that was recorded as unexplained in the first reading ("why one late service and
+  not eight") is answered from the other side — the producer is phase-locked to the ring, so
+  one boundary per run crosses inside a push window, and the one that crossed is the one that
+  was late. `late in push 1/1` *is* the count matching, which the mGBA control could not show
+  because it has no late service to attribute;
+- 7-2 has a chosen fix rather than a shortlist: stop masking interrupts across a 2,048-sample
+  copy. `CHUNK`-sized push sections are ~7.2 samples here, and a lock-free ring is none.
+
+**And it does not rescue 32,768 Hz — which is the point of the run.** The refused clause is now
+explained and fixable, and the run is still ~60% of the frame with the sample counts, every
+digest and 582/582 periods clean. Fixing the mask removes the only refusal this image made; it
+removes none of the 59.946%. That is precisely the owner's reasoning for the ruling above: the
+attribution says *where* the improvements are, and nothing in the tree says *how* to drive a
+43%-of-frame attributed decode and a 14%-of-frame convert down by the factor a real product
+needs. So the reading closes 7-1's mechanism question, hands 7-2 a decided fix, and lands the
+decision on C2's rate instead.
+
+**The first hardware *attributed* decode figure: `attr 451763`.** The instrument's `attr` field
+was built to carry the packer's number onto a screen a unit can show, and it did:
+**451,763 c/frame** of isolated, attributed decode on hardware. Against mGBA's same-image
+422,494 that is **+29,269 c = +6.93%**, which lands right at the top of the 3.7–6.9% band
+6a-7b measured for non-kernel paths on these units. Against the 6b-2 row of record (396,066
+mean / 398,255 worst) it is **+14.1%**, and that difference is *not* a hardware penalty: 6b-2's
+figure is the kernel in a decode slot with nothing else running, and this one is the decode leg
+of a running producer, ring writes and timer interrupt inside its windows. Both numbers are
+true of different instruments, and this is the one that describes the product. It is also
+**43.08%** of the frame at 32,768 Hz — the figure that makes the rate ruling a measurement and
+not a mood.
+
+**The rest of the screen, and what it cost to read.** work **59.946%**, dec 42.292%, conv
+14.231%, push 1.400%, feed 2.021% — the four shares sum to 59.944 against a reported 59.946,
+so the instrument is self-consistent on this image too — `minlead 8560`, `maxwk 60.755%`,
+`per 582 ser 582 tail 1/224 void 0`, `refus 0`, `push 326144 cons 326144`, and the rate/pitch
+row still absent, which is Q14 observed on silicon a second time. Against the first reading's
+image this one costs **+0.025 pp = +262 c/frame** (59.921 → 59.946), roughly three times its
+87 c/frame mGBA cost, with the lead and every count unchanged. The screen still fits
+(`fit: lines=11 right=188 bottom=135 fits=true` in mGBA).
+
+**Two transcriptions are kept as read, not tidied.** One GBA 001 screen shows `Per 582 tail
+1/224 void 0` with no `ser 582`, and one shows `2nd src 0/562` where the other three read
+`0/582`; one SP screen shows `drain -`. These are the reader's transcription, and 582 is the
+figure every other row of those same screens implies. Recorded so that a future reader can see
+the slips were noticed rather than normalised away.
+
+**What 7-1 does now.** The retarget, in the order that makes each step checkable: rule the rung
+(16,384 Hz is the only exactly expressible one below the current rate — Q16 owns the margin bar
+that settles "highest achievable"); re-author the asset at it with the explicit-rate codes and
+re-point all three of 7-0's guards *before* encoding; move `geometry.rs`'s
+`TICKS_PER_SAMPLE`/`PERIOD_CYCLES`/`CHUNK_SAMPLES`/`RING_*`/`DMA_WORDS` and their const
+asserts; `frame_vectors.py`, the four `.gfp` and the refusal spec; `EncodeProfile`;
+`gafp_pack`'s rate-validity leg; then re-run 7-0 and 7-1 at the new rate, which is also where
+the packer's structural row and the host model's fixture should be taken — both unblocked now
+that `attr` is on a screen, and the fixture should be pinned from *this* image's text rather
+than a hand-copy. 7-2's push-section fix is done against the new rate and re-witnessed with the
+same `late in push` field, which now has a proven hardware answer of `1/1` to compare against.
+
 
 ## The width decision (what it is and is not safe for)
 

@@ -15,8 +15,16 @@ judged only against these, and full detail is in
   `todo!()`, a facade a stranger can drive, platform-bound surface confined to
   off-by-default features or to the overlay crate. The no-`todo!()`/facade clause
   closed with 6b-1; the facade is `decoder::Decoder` over `scan::Frames`.
-- **C2 — `flac-lite-gba` decodes *and plays back*, in real time, at 32 kHz, on a
-  GBA.** The decode half is measured on hardware on the product path — **37.974%
+- **C2 — `flac-lite-gba` decodes *and plays back*, in real time, at the highest rate the
+  hardware achieves, on a GBA.** *(Amended by the project owner on 2026-11-13, after 7-1's
+  hardware runs; it read "in real time, at **32 kHz**" until then, and 32,768 Hz was a target
+  rather than a result. The ruling, its arithmetic and its limits are in
+  [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) under "The rate ruling". What
+  did **not** move with it: the declared-rate identity rule (Q14), the pack-time structural
+  guard, zero underruns, zero late services, both units twice each, the 16-sample grace, and
+  the listening witness. The reason is the measured one — the whole chain costs 59.946% of a
+  32,768 Hz frame for a **FIXED-0** stream, the cheapest thing FLAC can emit, with no strategy
+  in this tree for recovering the factor two that predicted frames would need.)* The decode half is measured on hardware on the product path — **37.974%
   worst** of the 32,768 Hz frame (6b-2 pt 2, GBA 001/SP identical; the
   instrument's own hardware row is 42.48% / 42.72%, 6a-7b). The claim is the
   *combination* — decode + convert + push + mixer/DMA in one
@@ -27,18 +35,96 @@ judged only against these, and full detail is in
   re-measures them instead of trusting the sum, and why **no real-time claim of any
   kind is made here until 7-3 passes: two runs on each unit with underruns counted
   and zero.** (An earlier revision of this paragraph read ≈85.6% / ≈8.7 ms, from
-  the pre-6a-7b numbers.)
+  the pre-6a-7b numbers.) **7-1's first hardware reading (2026-11-13) is now the first
+  measured figure for the whole chain on silicon, and it is lower than that arithmetic:**
+  `product-play.gba` at the 7-0 asset, four identical runs (GBA 001 ×2, GBA SP ×2),
+  **work 59.921% and worst frame 60.738%** of the 32,768 Hz frame, zero underflows, 582
+  periods elapsed and 582 serviced, minimum lead 8,560 samples (261 ms), sample counts and
+  both digests exact — so the stale inputs were pessimistic rather than optimistic, and the
+  run was refused by the audit for **one** reason: a sound-DMA re-arm landing 23 samples
+  (11,776 cycles) into a period against a 16-sample (8,192-cycle) window, at period 22,
+  deterministically in all four runs. That is a latency event, not a budget event, and it is
+  7-2's to close — with a named candidate attached, marked as unmeasured reasoning in the
+  plan: this design holds **interrupts masked for 28.6 samples** while it copies a whole
+  decode frame into the ring (agb's critical section is `IME = 0`; the stage instrument has
+  been pricing that section at 14,649 c mean, 15,831 c for its worst window, all along), against a
+  **16-sample** tolerance for a sound-DMA re-arm. So the miss is a **margin defect in this
+  design**, not bad luck and not the unit's fault — and the 16-sample audit clause is what
+  made a 28.6-sample mask visible at all.
+  **7-1's second reading (same day) settled that mechanism, and settled the rate.** Four more
+  runs on both units, on the image built to attribute a late service to the leg that held it,
+  all four identical, all four **`late in push 1/1`**: the period-22 boundary crossed inside the
+  ring push's interrupt-masked copy, which is the candidate the arithmetic named. The rival
+  candidate died from two directions at once — `2nd src 0/582` (no audio entry ever shared an
+  interrupt entry) and `disp 0008`, the display's VBlank request bit clear the whole time on
+  real hardware, where **mGBA had reported `0x0009` and one co-entry**: the emulator, not the
+  unit, was the one with VBlank behaviour, so interrupt topology is now a question an mGBA
+  control run cannot answer in either direction. The run also produced the first **attributed,
+  isolated decode figure read off a unit — `attr 451,763 c/frame` = 43.08% of the frame**,
+  +6.93% over mGBA's same-image 422,494 (inside 6a-7b's 3.7–6.9% band), which is the number
+  `gafp_pack`'s structural row and the host model have been waiting on. And the conclusion the
+  owner drew from it is the C2 amendment above: **the latency defect is explained and fixable,
+  and the run is still 59.946% of the frame** — fixing the mask removes the refusal, not the
+  cost. **The rate is dropped as a commitment; nothing else in C2 is.** In particular the
+  retarget does not buy the latency work off: at 16,384 Hz the same 14,680-cycle mask is a
+  14.3-sample window against a 16-sample grace — clear of it by 1.7 samples on the mean, 0.5 on
+  the worst window ever recorded for that section.
 
-The 3.7–6.9% mGBA-versus-silicon shortfall (Q13) is **parked by decision**: it would
+  *(Everything below this line in this bullet was written while 32 kHz was still the commitment,
+  and is kept as the reasoning of its date.)* **The test that decides it is built and controlled**
+  (image `86f6a1dd7e525dfc…`, 1,106,440 B, host gates and the fit gate green, cost **+87 c a
+  frame = +0.008 pp** in mGBA with the decode figure and the minimum lead unmoved): the screen
+  now prints `late in push a/b`, which attributes a late service to that section by the period
+  counter the section publishes as its first act — exact, not a timing window, because a
+  ~29-sample section on a 560-sample grid crosses at most one boundary — plus whether a second
+  source shared the interrupt entry, and `attr`, the decode figure minus the interrupt time
+  inside its windows, which is what the packer and the host model want. Two things the control
+  settled without touching a unit: **the count that looked too small is not too small** (only
+  0–2 boundaries land inside the push windows, not the 8.1 a random-phase producer would give,
+  because `wait_for_room` phase-locks the producer to the ring — and that count shifts when the
+  code layout shifts, so it has to be read from a unit), and **a shared interrupt entry is
+  bounded out** (it would have to cost ≥ 11,776 c, five times this ROM's whole audio handler,
+  and this build registers one handler). So there are **two** candidates, not three: that push
+  section, or a bus/memory stall (Q15), which no interrupt field can see. **The next ran, and it
+  came back `late in push 1/1` four times** — mechanism confirmed, second source excluded, and
+  the retarget ruled on the same evidence. See the paragraph above this bullet's closing note,
+  and 7-1's second reading in
+  [`flac-docs/playback-results.md`](flac-docs/playback-results.md).
+
+The 3.7–6.9% mGBA-versus-silicon shortfall (Q13) was **parked by decision**: it would
 explain a number that is already measured on hardware, and C2 is judged on hardware
 anyway. Until something needs it, mGBA figures for memory-heavy paths carry a **+7%
-derating** instead of a probe.
+derating** instead of a probe. **That trigger arrived on 2026-11-13**, on the product path
+and at a larger size (12.08% of the whole chain, with convert at +35.1%), so the question is
+re-opened as **Q15** with the owner's own hypothesis attached to it — these images reach the
+units from an SD-card flash cart, not a mask ROM. Two things have happened to it since.
+**It no longer explains the period-22 late service**: 7-1's second reading attributed that
+service to the producer's own interrupt-masked ring push (`late in push 1/1`, four runs), which
+is a code property and not a bus property. **And it is no longer paired with the rate question**,
+because the rate was ruled on 2026-11-13 — but it does not go away with the ruling either, since
+an unpriced +35.1% on the convert leg is an unpriced leg in the budget of whatever rate ships;
+at 16,384 Hz it is ~7% of the frame instead of ~14%, and the single-variable IWRAM-versus-EWRAM
+ring control is still the probe that would put a number on the hypothesis instead of a name on
+it. One datum from that reading favours the emulator's side of the ledger and is worth stating
+plainly: the instrument cost **+87 c/frame in mGBA but +262 c/frame on silicon** — about three
+times — for one `io` read, one store, a compare and a subtraction a frame. And on the interrupt
+question, mGBA was the one that was wrong: it reported the display's VBlank request bit **set**
+with one shared interrupt entry, where the units read it clear with `2nd src 0/582`, so
+interrupt-topology claims now need silicon in both directions — an emulator control run cannot
+settle them by presence *or* by absence.
 
 **Status in one line:** the decoder is complete and bit-exact; the playback harness
 plays real music at 10,512 Hz with correct tempo and pitch (audibly verified); the
 first product-play image runs that whole path at the full 32,768 Hz with zero
-underflows and a period audit that is part of the verdict, but **in mGBA headless only — never on hardware — so it is not a playback
-claim**; and the asset it plays **was not a product asset either** — it declared 32,000 Hz,
+underflows and a period audit that is part of the verdict — first in mGBA, and **now on both
+units** (7-1, 2026-11-13: eight runs across two instrument images, GBA 001 x2 and GBA SP x2
+each, all four readings identical within an image: zero underflows, 582/582 periods serviced, sample
+counts and digests exact, and one service 7-9 samples past the half-FIFO window at period 22,
+which is what the audit refuses — a lateness the second image attributed **`late in push 1/1`**,
+to the ring push's interrupt mask, on every run). **It is still not a playback claim**: the
+audit says no, the listening half of 7-3 has not been asked — and **C2 no longer names 32 kHz**,
+the owner having ruled on 2026-11-13, on the strength of these very runs, that the product
+targets the highest rate achievable rather than a rate committed to in advance; and the asset it plays **was not a product asset either** — it declared 32,000 Hz,
 and Q14 was ruled on 2026-11-11 that a stream is encoded at the rate it is played at, so
 1.024× (41.06 cents) disqualified it however clean the run (6b-3; the
 re-encode was item **7-0**, which **landed on 2026-11-13**: the product asset is now
@@ -422,10 +508,43 @@ unchanged, and the per-rung state lives in the plan of record:
    predicted `--allow-unmeasured`; and the packed negative leg exists as a mutation plus a
    byte-level respell, because after the ruling the packer refuses to make such an asset at
    all. 7-1's figure — measured on the frames this asset is made of — is what clears it.)*
-   **C2 is met at 7-3**, and C2 now says in terms that the stream declares the rate it is
-   played at.
-5. **Parked:** Q13's data-read probe, and 6a-8. Re-open Q13 only if a product path
-   needs the last 6% or a claim is made by scaling an mGBA cycle count.
+   **7-1 is in progress: its first reading landed the same day 7-0 did** (2026-11-13, four
+   runs on both units, one image `8113f04c…84cd`). What those runs established and what they
+   did not, with the stage shares and the period-22 analysis, is recorded under 7-1's first
+   reading in [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) and dated in
+   [`flac-docs/playback-results.md`](flac-docs/playback-results.md). What 7-1 still owes:
+   the packer's `fixed0 @ b2048` row (which needs an attributed, isolated decode figure from a
+   current image — the screen now shows that as `attr`, so the row is one transcribed reading
+   away, not one more instrument away), the host model's envelope re-derived from a
+   pinned ROM-generated fixture instead of a hand-copied pre-7-0 run, and the listening
+   witness. **And it opened the decision the owner has now taken.** 7-1's second reading (four more
+   runs, both units, image `86f6a1dd7e525dfc…`) came back **`late in push 1/1` on all four** —
+   the latency defect's mechanism, confirmed on silicon, with the VBlank/second-source candidate
+   excluded by `2nd src 0/582` and a display status that never asked for that interrupt — and it
+   came back at **work 59.946% of the frame, worst frame 60.755%**, on a FIXED-0 stream, with
+   **`attr 451763 c/frame`**: the first attributed, isolated decode figure ever read off a unit.
+   Explaining the one refusal did not change the cost of the run, and nothing in this tree
+   recovers the factor of two that predicted frames would need at this clock. **So the owner
+   ruled, 2026-11-13: drop the sample rate, and relax C2 from real-time playback specifically at
+   ~32 kHz to real-time playback at the highest rate achievable.** The ruling, its arithmetic and
+   what it pointedly does *not* relax (every audit clause, Q14's identity rule, both units twice
+   each, the listening witness) are in
+   [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) under "The rate ruling". The next
+   rung this architecture expresses exactly is **16,384 Hz** — not agb's 18,157, which no integer
+   reload of a 2^24 Hz timer produces — and "highest achievable" needs a margin bar before it can
+   be judged, which is **Q16**. 7-0 and 7-1 re-run at whatever rate that bar selects.
+   **C2 is met at 7-3**, and C2 says in terms that the stream declares the rate it is played
+   at — a clause that survives the rate change, and indeed matters more for it: a rate chosen by
+   measurement is exactly where a silent 1.024x reinterpretation would creep back in.
+5. **Parked:** 6a-8. Q13's data-read probe was re-opened on 2026-11-13 as **Q15**, and Q15's
+   scope has since narrowed twice: it no longer explains the period-22 late service (7-1's second
+   reading attributed that to the producer's own interrupt-masked ring push), and it no longer
+   pairs with the rate question, because the rate was **ruled** the same day. What it still owns
+   is the **convert leg's +35.1%**, which is an unpriced leg in the budget of whatever rate
+   ships, and the single-variable IWRAM-versus-EWRAM ring control is still the probe that puts a
+   number on it rather than a name on it. **New: Q16** — the margin bar that makes the amended
+   C2's "highest rate achievable" checkable, which is the owner's to state and the thing standing
+   between this tree and a retarget that means anything.
 
 - ~~**6a-5** — the realization reading, three arms in one image; the item's number
   of record, against a pre-declared fork.~~ **Landed: carry.** asm − ctrl =

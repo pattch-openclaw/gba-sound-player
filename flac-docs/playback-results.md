@@ -655,3 +655,351 @@ tests, including `accumulator_window_invariants_hold_on_mixed_width_sweeps`),
 `bioluminescent.wav` at 10,512 Hz at the **correct tempo and correct pitch
 in real time** for the first time.
 
+---
+
+## In progress: 7-1, the product-play ROM on both units — four readings (2026-11-13)
+
+**What was run.** `product-play.gba`, the item-7 product path: FIXED-0 / blocksize 2048 /
+40.2 s / **32,768 Hz**, 160 frames, 326,144 samples per channel, through the 560-byte
+planar ring and the timer0→timer1→timer2 chain, on **GBA 001** and **GBA SP**, **two runs
+each**. This is the first time that path has been read off a unit rather than a log.
+
+**The image was extended for this, and the extension's cost is measured on both channels.**
+The 7-0 image printed 8 lines and an audit verdict (`aud NO`) with none of the clauses
+behind it, and a unit has no serial. The extended image prints the other three per-frame
+shares, the period ledger, the replay/late split (`fed`/`drain`) and the **period indices of
+the late services** (`latep`/`worstp`/`dly`/`refus`) — 11 lines, and it measures its own
+fit: `fit: lines=11 right=174 bottom=135 fits=true`. Cost against the 7-0 image: mGBA work
+53.446% → 53.462% (+170 c/frame); hardware work 59.907/59.909% → 59.921% (+147 c/frame),
+with min lead and decode unchanged — the two channels agreeing to ~20 c/frame. sha256
+**`8113f04c…84cd`**, 1,104,592 B; gates 14/14 `product-play-test`, `check` clean,
+`gafp-check` clean. **Recorded defect: the two readings taken *before* the extension (also
+2026-11-13: work 59.907/59.909%, `late 1`, red on both units) have no image hash.** From
+here the procedure takes the sha *before* the cart goes into a unit.
+
+**The screens, as transcribed.** Four readings — GBA 001 twice, GBA SP twice — with every
+number identical in all four, to the third decimal of every percentage, both lead
+watermarks and the late index. Two transcription slips are kept as read and marked: `Lfr…`
+at the head of one row, `worsp` in another.
+
+```
+PRODUCT PLAY 32768
+fr 160 und 0 pcm ok fifo ok
+ledg ok aud NO
+push 326144 cons 326144
+work 59.921% dec 42.288%
+conv 14.228% push 1.397% feed 2.006%
+minlead 8560 maxwk 60.738%
+per 582 ser 582 tail 1/224 void 0
+replay 0 late 1 fed 1 drain 0
+latep 22 worstp 22 dly 23 refus 0
+```
+
+| field | all four runs | reading |
+|---|---|---|
+| frames / periods | 160 frames, `per 582 ser 582` | every period that elapsed was serviced |
+| underflows, voids, refusals | `und 0`, `void 0`, `refus 0` | no starvation at any instant; every window measurable |
+| sample accounting | `push 326144 cons 326144` | exactly the manifest total |
+| digests | `pcm ok fifo ok`, `ledg ok` | exact over the bytes *pushed* — **not** over what the DMA/DAC played, see the caveat below |
+| audit | `aud NO` | one clause refused it: `late 1` |
+| replay behaviour | `replay 0 late 1 fed 1 drain 0` | one late re-arm in the fed phase, none in the tail |
+| where | `latep 22 worstp 22 dly 23` | period 22 = audio sample 12,320 = **0.376 s** into the clip |
+| work | 59.921%, worst frame **60.738%** | `maxwk` is per-frame: the worst frame is not the average |
+| lead | min **8,560 samples = 15.3 periods = 261 ms** | the ring never came close to emptying |
+| tail | `tail 1/224` | as designed — the clip ends 224 samples into a 560-sample period |
+| rate contract | no `rate …!… pitch` row on any unit | Q14's identity observed on silicon: declared rate = played rate |
+| screen colour | **RED** ("RED screen at the end, not blue") | `product_play_main.rs:1748` paints `COLOR_FAIL` when any of `ledger_ok`/`audit_ok`/`pcm_ok`/`fifo_ok` is false; here only `audit_ok` was, so the colour is the gate reporting the `late` clause, exactly as designed |
+
+**Stage shares, hardware versus mGBA, same image.** Both are percentages of the same
+1,048,576-cycle frame, so a percentage delta *is* a cycle delta. The instrument is
+self-consistent on both sides: the four shares sum to 59.919% against the total's 59.921%,
+as they do on mGBA (53.460 against 53.462).
+
+| leg | mGBA | hardware | Δ c/frame | Δ |
+|---|---|---|---|---|
+| decode window | 39.577% (414,995) | 42.288% (443,422) | +28,427 | +6.85% |
+| convert | 10.533% (110,447) | 14.228% (149,191) | **+38,744** | **+35.1%** |
+| push | 1.382% (14,491) | 1.397% (14,649) | +158 | +1.09% |
+| feeder | 1.968% (20,552) | 2.006% (21,034) | +482 | +2.35% |
+| **work** | **53.462% (560,590)** | **59.921% (628,317)** | **+67,727** | **+12.08%** |
+
+The legs sum to the total on both sides (Δ-stages +67,811 vs Δ-total +67,727, i.e.
+rounding), so this is a leg-shaped gap and not a clock error. Read it against **E5** (the
+ROM→IWRAM fetch pricing is hardware, and mGBA reproduces it to 0.012% per call) and
+**6b-1** (the IWRAM-resident kernel matches mGBA to 0.055%): a generic "the cartridge is
+slow" cannot carry a +35% convert penalty by itself. And read it against **6a-7b**, which
+already measured every leg of a non-kernel path sitting 3.7–6.9% above the model on these
+same units and named the flashcart as one of its candidates — the +6.85% decode window here
+is inside that band. The leg with no company is convert, and the property that distinguishes
+it in this image is that its writes go to the 40,320 B ring in **EWRAM**, a placement that
+is default rather than chosen (there is no custom linker script in this repository).
+
+**The one thing that refused, in the units the ROM states.** A `late` service is a re-arm of
+the sound-DMA source landing more than 16 samples (**8,192 cycles**) after the timer1
+overflow that ended the previous period. Here it landed **23 samples = 11,776 cycles** in —
+**7 samples, 3,584 cycles past the window** — at **period 22**, with `gap == 1` (no period
+skipped) and in the fed phase (`drain 0`), so the repeat controller had already reloaded the
+old source and the audit's own definition calls it a mid-waveform splice. The field comment
+records the first hearing of that defect class: 2026-10-19, "a pop in the audio that had not
+been heard in any earlier run". **Whether a click is audible at 0.376 s has not been asked
+yet.** What is *not* implicated is the duty cycle: a 1.4× miss against a latency window does
+not care whether the budget is 20% or 60%.
+
+**Why the identical index is the interesting part.** Same period, same delay, two runs, two
+different units. This platform does that: 6a-7b's four runs on these same units were
+identical *to the cycle*. So this is a deterministic scheduling collision, once in 582
+periods, and the delay is interrupt **latency** rather than a slow handler (the handler's own
+cost is ~285 c): something holds the timer1 IRQ pending for ~11.8 k cycles.
+The leading candidate is in this design rather than in the hardware: **the ring push holds one
+critical section per decode frame** (`product_play_main.rs:1267-1284`) — up to 2,048 samples
+per channel copied in a single `push_bytes` under one `critical_section::with`, which in agb
+means **IME = 0** (`agb/src/interrupt.rs:327-339`, `INTERRUPTS_ENABLED` = `0x04000208` =
+REG_IME); every other critical section on the path only reads a static, and the decode and
+convert legs are not masked at all. The stage instrument has been pricing that one section all
+along: **14,649 c here**, 14,885–14,899 c per frame in 6b-3's rows with per-window worsts of
+**15,776–15,831 c**, i.e. **28.6 samples of masked interrupts and 30.9 at the worst** against
+the audit's **16-sample** tolerance for a late re-arm. That makes it a **margin defect rather
+than bad luck: the design masks interrupts for about 1.8× the window in which the re-arm has
+to land.** The arithmetic then reproduces the observed figure rather than merely tolerating it:
+a boundary *d* samples into a push window is served when the window ends, so the late zone is
+the window's first **12.6** samples and an observed delay of **23** samples puts that boundary
+**≈5.6 samples into the window**, inside the measured envelope. What the model does *not* yet
+explain is the **count** — 28.6 samples of mask per fed frame over 159 frames against a
+560-sample grid suggests of the order of eight coincidences, not one — and the free test below
+is what settles that too; the seam is written out in `plan-of-record.md`, 7-1's record, rather
+than smoothed over. The ledger already contains a related count, recorded before it could be
+read this way: 6b-3's rows note that tens-of-cycles shifts in the leg timings moved **exactly
+one period boundary into a push window** (`boundaries_in 158`, "one boundary now lands in a
+push window") while those runs printed `late=0`. Weaker candidate, not yet excludable: agb's
+VBlank chain (`IE=0x0011` shows the bit enabled, and agb runs handler chains under a critical
+section) — but no mixer is created here, the chain is probably empty, and whether a VBlank IRQ
+is generated at all is a `DISPSTAT` bit-0 question the ROM does not print. The test that
+settles it is nearly free: **attribute each late service to the leg it landed in**, since the
+producer already measures the period range of each leg and the handler already records the
+index of every late service. Prediction: `late in push 1`; if it comes back `late in push 0`
+the search re-opens and the bus (Q15) moves up. The fix candidates, with their arithmetic,
+belong to 7-2: `CHUNK`-sized push sections (≈7.2 samples of mask, a 2.2× margin), a lock-free
+ring so no part of the copy is masked, or re-arming ahead of the boundary — and the 16-sample
+clause that exposed all of this should not move whichever is chosen.
+
+**A caveat that must travel with these rows.** `pcm ok fifo ok` claims exactness about the
+bytes the player pushed into the ring and the converted FIFO bytes, not about what the DMA
+and DAC played. A re-played stretch of the old buffer is compatible with every digest in this
+table.
+That is why the audit clause exists, and why 7-3 asks a person to listen.
+
+**Sam's conclusions from this run, recorded as stated** — the arithmetic of a retarget, and
+why the rung that is actually available is **16,384 Hz** rather than agb's 18,157, is in
+`plan-of-record.md` under 7-1's first reading: the budget at 32,768 Hz is too tight to keep
+optimising against; the emulator-versus-hardware gap is probably real and probably a property
+of running from an SD-card flash cart rather than a mask ROM; a larger IWRAM-resident buffer
+in the pattern of the FIFO is one way to design around that, but the simplest way to finish
+is a lower rate; and **7-0/7-1 are to be re-run as necessary at the next rate down**.
+Nothing in these four readings was a decision *at the time they were taken*: C2 still named
+32 kHz until a ruling said otherwise, and the audit was not being relaxed. **The ruling came
+later the same day**, after the second reading recorded below — C2 now asks for the highest rate
+achievable rather than a committed 32 kHz, which changes the target and none of the clauses.
+
+
+
+## In progress (part 2): the same run, now naming which leg held the re-arm (2026-11-13)
+
+The four readings above left the failure named but not explained: `late 1`, `latep 22`,
+`dly 23`, `fed 1`. The plan's next step was a screen that can say *which leg of the
+producer held that re-arm*. Built, controlled, and this section records the control,
+because the control itself answered two of the questions the four readings left open.
+
+**The image.** `86f6a1dd7e525dfc14cac7ddac4151c4e860aafbf099b11174ea07ed9d08a082`,
+1,106,440 bytes, built with `make native-product-play-rom`; `make check` exit 0,
+`make product-play-test` exit 0 (14 passed), `gafp-check` clean (160 frames, 882,949 B).
+Fit gate: `lines=11 right=188 bottom=135 fits=true`. The row is 14 characters wider than
+the previous image's longest (`right=174`) and still inside the 240×160 screen — the headroom
+is now ~50 px, about six characters, which is the budget the deferred rate/pitch line would
+need. Three mGBA runs of this image agree to the cycle (work 560,677 c in all three), so
+"the same image in the same emulator" is reproducible here even though hardware is the only
+place the failure appears.
+
+**The fields, and how each one works.**
+
+| Field | What it is |
+|---|---|
+| `late in push a/b` | of `b` late services, `a` had their period boundary inside the producer's ring-push section |
+| `2nd src a/b` | of `b` audio services, in `a` agb dispatched a second source in the *same* interrupt entry |
+| `disp 0009` | the raw display-status register, printed not interpreted |
+| `attr 422494` | the decode figure **minus** the interrupt time that fell inside its windows — the number the packer and the host model want, on the screen a unit can show |
+
+The push attribution does not use a timing window or a tuned threshold. The push section
+publishes the period counter as its *first act*, inside the critical section that is already
+there; a ~29-sample section against a 560-sample grid can cross **at most one** boundary, so
+`late service's period == the period the section published + 1` is an exact identification.
+The second field uses what the interrupt dispatcher does to the enable mask: agb's
+`interrupt_handler.s` masks out of the mask every source it is about to dispatch and restores
+it on the way out, so the mask *as the audio handler sees it* is "what is armed, minus what
+came with me". One `io_read_u16` per service. `mask_seen_by_audio=0x0001` over the whole run
+says that bit was never cleared from the mask, i.e. it was armed and did not fire in that
+entry; the paired count is the complement, because without it a zero cannot be told apart
+from "not armed at all".
+
+**Cost.** work/frame 560,590 → 560,677 c in mGBA: **+87 cycles a frame, +0.008 pp**
+(work 53.462 → 53.470%). The decode figure is unmoved (isolated estimate 422,487 → 422,494,
++7 c), the minimum lead is unmoved (9,120 samples), and the push stage itself is unchanged
+(14,491 → 14,942 c is the section's own cost, which the new instrument only reads). So the
+instrument that decides the mechanism costs less than a hundred cycles a frame — one store
+inside a critical section that exists anyway, one `io` read and a compare in the handler, and
+the subtraction that turns the window mean into the isolated figure, which is computed once
+and feeds the log line, the cross-check and the screen alike.
+
+**Free finding 1: the count that looked impossible is not impossible.** The previous section
+asked why the model expected "of the order of eight" late re-arms but the units reported one.
+The new counter answers it: in mGBA, `boundaries_inside_push_section` is **2** in the previous
+build and **0** in this one, against a nominal expectation of 159 windows × 28.6 samples ÷ 560
+= **8.1**. The producer is not in random phase with the audio grid: `wait_for_room` parks it
+until the ring has drained, so its push windows sit at a nearly fixed phase of that grid and
+boundaries cross them occasionally, not at the random rate. And the count moves when the code
+layout moves — those two builds differ in nothing but log strings and instruction addresses —
+which is also why the decode stage's boundary count here is 161 and the earlier build's was
+160. So "one late service in 582 periods" is not a statistical oddity: it is one boundary
+crossing, which is what a phase-locked producer does.
+
+**Free finding 2: a second interrupt source cannot hold a re-arm for 23 samples.** In mGBA the
+count is 1 audio entry in 582 that shared an entry with the other armed source, and `late=0`.
+For a shared entry to be what made period 22 seventeen samples late, that entry would have to
+have cost ≥ 11,776 cycles — about **five times the measured cost of this ROM's entire audio
+handler** (2,286 c mean, 2,999 c worst). And this build registers exactly one interrupt
+handler, the feeder (`add_interrupt_handler(Interrupt::Timer1, …)`), so a shared entry contains
+no project work of its own. What is *not* excluded is a stall on the bus or in memory (Q15):
+that is not an interrupt-entry effect and this field cannot see it. The field is still worth
+having, because a non-zero count on a unit would be evidence against the model rather than for
+it — but the leading candidate stays the ring-push section, whose measured cost (14,649 c,
+28.6 samples) is comfortably above the 16-sample grace.
+
+**What the unit run will decide, in advance.** With the same `late 1`:
+
+- `in_push 1` — the boundary that was missed crossed inside the push section. The mechanism is
+  named, and 7-2's fix is to stop masking interrupts for 28.6 samples: push in `CHUNK`-sized
+  critical sections (≈7.2 samples, 2.2× margin), or make the ring lock-free and push with
+  interrupts on.
+- `in_push 0` — it did not. Then the push-section story is dead for that event and Q15's bus
+  leg moves to the front, with the placement control (ring in EWRAM vs ring in IWRAM at 20
+  chunks = 22,400 B, which fits) as the test.
+- `boundaries_inside_push_section = 0` while `late ≥ 1` — a third answer, and a clean one: no
+  boundary was inside any push section, so no late service can have been caused by one.
+
+The reading to ask for on both units, twice each, is `late in push a/b`, `2nd src a/b`, `disp`,
+`attr`, and the unchanged audit block. Ask at the same time whether anything is audible at
+0.376 s — period 22 is the first quarter-second of the clip, and whether a click is there is
+part of 7-3's witness, not a separate question.
+
+## 7-1, second hardware reading (2026-11-13): the push section held it, and the rate is ruled
+
+**Image.** `product-play.gba`, sha256 **`86f6a1dd7e525dfc14cac7ddac4151c4e860aafbf099b11174ea07ed9d08a082`**,
+1,106,440 bytes, md5 `9861b47b0116183e05c21018dc6776df`, built from source commit **`ad37932`**
+and rebuilt before flashing to confirm the bytes reproduce. The sha was recorded before the cart
+went in, and the copy in the unit matches it by md5 after transfer. Four runs: GBA 001 ×2,
+GBA SP ×2.
+
+**The four screens as read.** Reproduced with the transcription slips left in, because they are
+part of the evidence about how these were taken — `Lfr`/`Ledg`/`Latep` capitalisation, one
+missing `ser 582`, one `0/562`, one `drain -`. The four agree everywhere else, exactly.
+
+```text
+GBA 001 (1)                          GBA 001 (2)
+PRODUCT PLAY 32768                   PRODUCT PLAY 32768
+Fr 160 und 0 pcm ok fifo ok          Fr 160 und 0 pcm ok fifo ok
+Ledg ok aud NO push 326144           Ledg ok aud NO push 326144 cons 326144
+     cons 326144                      Work 59.946% dec 42.292% attr 451763
+Work 59.946% dec 42.292% attr 451763 Conv 14.231% push 1.400% feed 2.021%
+Conv 14.231% push 1.400% feed 2.021% Minlead 8560 maxwk 60.755%
+Minlead 8560 maxwk 60.755%           Per 582 tail 1/224 void 0
+Per 582 ser 582 tail 1/224 void 0     [ser 582 not transcribed]
+Replay 0 late 1 fed 1 drain 0        Replay 0 late 1 fed 1 drain 0
+Latep 22 worstp 22 dly 25 refus 0    Latep 22 worstp 22 dly 25 refus 0
+Late in push 1/1 2nd src 0/562       Late in push 1/1 2nd src 0/582
+     disp 0008                            disp 0008
+playback                             Playback
+
+GBA SP (1)                           GBA SP (2)
+PRODUCT PLAY 32768                   PRODUCT PLAY 32768
+Fr 160 und 0 pcm ok fifo ok          Fr 160 und 0 pcm ok fifo ok
+Ledg ok aud NO push 326144           Ledg ok aud NO push 326144 cons 326144
+     cons 326144                      Work 59.946% dec 42.292% attr 451763
+Work 59.946% dec 42.292% attr 451763 Conv 14.231% push 1.400% feed 2.021%
+Conv 14.231% push 1.400% feed 2.021% Minlead 8560 maxwk 60.755%
+Minlead 8560 maxwk 60.755%           Per 582 ser 582 tail 1/224 void 0
+Per 582 ser 582 tail 1/224 void 0    Replay 0 late 1 fed 1 drain -
+Replay 0 late 1 fed 1 drain 0        Latep 22 worstp 22 dly 25 refus 0
+Latep 22 worstp 22 dly 25 refus 0    Late in push 1/1 2nd src 0/582
+Late in push 1/1 2nd src 0/582            disp 0008
+     disp 0008                        Playback
+Playback
+```
+
+`drain -` is read as `drain 0`: every other row on that screen is identical to the three that
+say `drain 0`, and `fed 1` with `late 1` leaves nothing else to be. Same for the missing
+`ser 582` and the `0/562`, which the other three screens and `Per 582` on that very screen
+contradict. Recorded rather than corrected silently.
+
+**What it establishes: the attribution came back 1 of 1, four times.**
+
+| Field | Read | Meaning |
+|---|---|---|
+| `late in push 1/1` | **1 of 1** | the one late service's period boundary crossed inside the producer's ring-push critical section |
+| `2nd src 0/582` | **0** | no audio entry ever shared an interrupt entry with another source on a unit |
+| `disp 0008` | bit 0 **clear** | the display was not generating that interrupt at all on real hardware |
+| `latep / worstp` | **22 / 22** | the same period index the first reading gave, on a different image |
+| `dly` | **25 samples** | 12,800 c, against a 16-sample / 8,192-c grace — **9 samples, 4,608 c late** |
+| `attr` | **451,763 c** | the first *attributed, isolated* decode figure ever read off a unit |
+| `late 1 fed 1 drain 0` | unchanged | still one, still in the fed phase, so still a possible mid-waveform splice |
+
+The mechanism is no longer a hypothesis. The push section publishes the period counter as its
+first act, so "this service's boundary was inside that section" is an identity rather than a
+timing window, and it matched on every run on both units. The competing candidate died the same
+way from two directions: the co-entry count is zero, and `DISPSTAT` bit 0 — the enable that
+makes such a request possible — was clear the whole time. **Note which channel got this wrong:
+mGBA reported `dispstat_now=0x0009` and `2nd src 1/582`, i.e. the emulator had VBlank behaviour
+the real hardware did not.** An interrupt-topology question cannot be settled by an emulator
+control run, in either direction.
+
+**The delay moved, the index did not.** 23 samples on image `8113f04c…`, 25 on `86f6a1dd…`, same
+period, same classification, +1,024 cycles — on a build whose producer code differs in log
+strings and addresses. That is what a phase-locked collision looks like: the *instant* is a
+property of the schedule and the *held time* follows wherever the push window lands. It also
+prices the instrument honestly and unflatteringly: adding one store inside the push critical
+section made the defect it measures two samples worse.
+
+**First hardware attributed decode, and how to read it.** `attr 451,763 c/frame` = **43.08%** of
+the 32,768 Hz frame. Against mGBA's same-image `422,494` it is **+29,269 c, +6.93%** — landing
+at the top of the 3.7–6.9% non-kernel band 6a-7b measured on these units. Against 6b-2's row of
+record (396,066 mean / 398,255 worst) it is +14.1%, and that gap is **instrument, not silicon**:
+6b-2 priced the kernel in a decode slot with nothing else running, this prices the decode leg of
+a live producer with ring writes and a timer interrupt inside its windows. Both are correct
+figures of different things; only this one describes the product. This is the number the
+packer's structural `fixed0 @ b2048` row has been waiting for, and it is now readable from a
+screen.
+
+**Cost of the second instrument, on both channels.** Against `8113f04c…`: hardware work 59.921 →
+**59.946%** (+262 c/frame), maxwk 60.738 → 60.755%, dec 42.288 → 42.292%, conv 14.228 →
+14.231%, push 1.397 → 1.400%, feed 2.006 → 2.021%; min lead, all counts, every digest, `void 0`,
+`refus 0` and the late index **unchanged**. In mGBA the same extension cost **+87 c/frame**. So
+the instrument is ~3× more expensive on silicon than in the emulator — +262 c/frame for one
+store, one `io` read, a compare and a subtraction a frame — which is a Q15-sized observation in
+its own right, and small enough not to matter at 0.025 pp. The four stage shares still sum
+self-consistently: 42.292 + 14.231 + 1.400 + 2.021 = **59.944** against a reported **59.946**.
+
+**And the conclusion the run actually forces.** The refused clause is now fully explained and
+fixable, and the run still costs **59.946% of the frame**, worst frame **60.755%**, on a
+**FIXED-0** stream — a clip with no prediction at all, which is the cheapest thing FLAC can
+emit and is not what real music censes. Fixing the push mask removes the only thing this screen
+refused; it removes none of the 60%. Given no strategy for driving an attributed 43%-of-frame
+decode and a 14%-of-frame convert down by the factor that would make the product able to carry
+predicted frames, the owner ruled on 2026-11-13: **drop the sample rate, and relax C2 from
+real-time playback at ~32 kHz to real-time playback at the highest rate achievable.** Recorded
+in full in `plan-of-record.md` under "The rate ruling", including what it buys (halved
+percentages, LPC from 173% to 86.6% of the frame, the IWRAM ring becoming arithmetically
+possible) and what it pointedly does not buy (**at 16,384 Hz this same 14,680-cycle mask is a
+14.3-sample window against a 16-sample grace — inside the tolerance by 1.7 samples on the mean,
+and by 0.5 on the worst push window this repository has ever recorded for that section**). The
+rate question is closed; 7-2's push fix, the retarget,
+the packer row, the host fixture, and the listening witness are all still open — and the
+listening question at 0.376 s is still unanswered, now with a mechanism attached to it: at
+period 22 the re-arm was held 25 samples by the producer's own copy into the ring.
