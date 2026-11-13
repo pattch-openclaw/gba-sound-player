@@ -113,9 +113,16 @@ mod rom {
     /// through the shared `stats::real_time_budget` at compile time (never
     /// recalled, never divides at runtime): 2048 samples / 32768 Hz = 1/16 s
     /// = 0.0625 s; 0.0625 s × 16,780,000 Hz = 1,048,750 cycles/frame —
-    /// the FLAC.md plan's number (the plan keeps the 32,768-Hz budget even
-    /// though the clips encode at 32,000 Hz: 1,048,750 vs the true window
-    /// 1,073,920, i.e. 2.34375% stricter than real-time, deliberately).
+    /// the FLAC.md plan's number.
+    ///
+    /// Since plan item 7-0 this is also the window the embedded frames
+    /// actually get: a stream is encoded at the rate it is played at, so the
+    /// budget the screen verdict compares against and the stream's own
+    /// nominal frame period are one and the same number —
+    /// `tests/spike_witness.rs` pins the two derivations meeting.
+    /// Before 7-0 the clips declared 32,000 Hz, whose true window is
+    /// 1,073,920: this budget was then 2.34375% tighter than real-time at
+    /// the declared rate, and that gap was the Q14 defect, not a margin.
     /// The screen verdict compares each arm's worst NET window against this.
     const BUDGET_CYCLES_PER_FRAME: u32 = real_time_budget(2048, 32_768);
 

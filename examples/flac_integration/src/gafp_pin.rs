@@ -10,19 +10,19 @@
 //! **played-form** witness the product-play ROM folds in its post-audio proof.
 
 /// Frames in the blob (the manifest's frame count must equal this).
-pub const FRAMES: usize = 157;
+pub const FRAMES: usize = 160;
 
 /// Interchannel samples per channel in the blob.
-pub const SAMPLES: u64 = 320000;
+pub const SAMPLES: u64 = 326144;
 
 /// The reference PCM pin (decode witness; i16 interleaved).
-pub const FNV_PCM: u64 = 0x54C7B356621B6E15;
+pub const FNV_PCM: u64 = 0x054DD8B24062C27D;
 
 /// Left channel's 8-bit FIFO bytes, in stream order (played-form witness).
-pub const FNV_FIFO_L: u64 = 0x7CC75F50B4DF75EC;
+pub const FNV_FIFO_L: u64 = 0x15D1CF3167E9D6A9;
 
 /// Right channel's 8-bit FIFO bytes, in stream order (played-form witness).
-pub const FNV_FIFO_R: u64 = 0x916BA1AF3B1F4342;
+pub const FNV_FIFO_R: u64 = 0xE830329FF1056309;
 
 /// Highest FIXED predictor order the packer recorded for this clip.
 pub const MAX_FIXED_ORDER: u8 = 0;

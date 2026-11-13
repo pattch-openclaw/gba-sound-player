@@ -124,10 +124,10 @@ relaxed, then the predictor kind, channel count, target rate and block size.
 
 | File | What it covers |
 |---|---|
-| `gfp/p0_fixed0_mono_32k_b2048.gfp` | mono, FIXED-0, and a **904-sample final frame** (5,000 samples in 2048-sample blocks — the ragged tail is the point) |
-| `gfp/p2_fixed0_stereo_32k_b2048.gfp` | independent stereo, same PCM |
-| `gfp/p3_fixed0_midside_32k_b2048.gfp` | mid/side: the side slot coded at bps + 1 and decorrelated back |
-| `gfp/x1_lpc_stereo_32k_b2048.gfp` | real **LPC-4** subframes — written only under `--allow-lpc --allow-over-budget`, and recorded as NON-PRODUCT |
+| `gfp/p0_fixed0_mono_32768_b2048.gfp` | mono, FIXED-0, and a **904-sample final frame** (5,000 samples in 2048-sample blocks — the ragged tail is the point) |
+| `gfp/p2_fixed0_stereo_32768_b2048.gfp` | independent stereo, same PCM |
+| `gfp/p3_fixed0_midside_32768_b2048.gfp` | mid/side: the side slot coded at bps + 1 and decorrelated back |
+| `gfp/x1_lpc_stereo_32768_b2048.gfp` | real **LPC-4** subframes — written only under `--allow-lpc --allow-over-budget`, and recorded as NON-PRODUCT |
 | `gafp_asset_vectors.txt` | the packer's record of all four, plus three refusal rows |
 
 The three stereo blobs are **one 5,000-sample source encoded three ways**, so they
@@ -143,7 +143,7 @@ records which guard did the work and what the measured cost was. Item 6b-2 of
 `flac-docs/plan-of-record.md` has the numbers and the refusal text.
 
 **Still planned, and not covered by the four above:** 1024-sample blocks
-(`stereo_32k_b1024_indep` in the original plan), CONSTANT and VERBATIM
+(`stereo_32k_b1024_indep` in the original plan — note that name predates plan item 7-0; the target rate has been the device's 32,768 Hz since), CONSTANT and VERBATIM
 subframe shapes as *packed* assets, an escaped residual partition
 (`order 0b1111`), and a packed `lpc_order14.gfp`: `x1` reaches order 4, the
 highest LPC order any real-stream table here carries is **8**
@@ -154,8 +154,11 @@ the honest state rather than an oversight: an 8-bit stream is refused at pack ti
 (`bits per sample 8 is outside the container's [16]`, and its `-l 0` subframes
 land on VERBATIM, a predictor kind this target has never measured — so the answer
 is a refusal naming an unmeasured kind, not a guessed figure), and 44.1 kHz is
-refused at a 32,000 Hz target by both the stream-level and the frame-level
-reading. Neither is an asset this crate is expected to play.
+refused at the product target by both the stream-level and the frame-level
+reading (`rate_44100_at_32768_target`; the target was 32,000 Hz when this row was
+first measured, and plan item 7-0 moved it to the device's 32,768 Hz — the
+refusal's text, and the fixture row that records it, moved with it). Neither is an
+asset this crate is expected to play.
 
 **The product guard is FIXED-0 and envelope-limited, not merely FIXED-only**
 (measured 2026-11-11). `-l 0` disables LPC; libFLAC still chooses FIXED orders

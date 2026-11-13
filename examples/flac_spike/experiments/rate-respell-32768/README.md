@@ -20,6 +20,14 @@ no code of its own** — the table's `0b1000` is 32,000, and that is the asset t
 repository ships. So can the shipped asset be made to declare the rate it is
 played at, and what does each legal spelling cost?
 
+*(Superseded by plan item 7-0, which landed on 2026-11-13: the product asset now declares
+32,768 Hz, spelled the other way — `0b1101` plus a 16-bit Hz field in every frame header,
+which is why its frame headers are two bytes longer than the `0b1000` spelling this probe
+walked. This probe stays as the measurement that priced the re-encode (**−20 c/frame**,
+under the instrument's floor), and it is also why the packer's cost row carries a provenance
+caveat: the figure quoted against the current asset was taken on the 32,000-era frames this
+probe ran against.)*
+
 | spelling | what it does | cost, measured |
 |---|---|---|
 | `0b0000` | "take the rate from STREAMINFO" | **0 B/frame — zero. Region 865,340 B in, 865,340 B out.** |

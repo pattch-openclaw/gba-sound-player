@@ -576,6 +576,11 @@ the **+7% derating** rule on mGBA figures for memory-heavy paths
 
 ### Q14 — Is the 2.4% pitch shift part of the product, or an accident of the rate contract?
 
+*(RULED 2026-11-11. **IMPLEMENTED 2026-11-13** by plan item 7-0 — record at the end of item
+7 in [`plan-of-record.md`](plan-of-record.md), numbers in the 7-0 row of
+[`measurements.md`](measurements.md). The question stays answered as it was ruled; what
+changed is that the answer is now in the product path rather than in front of it.)*
+
 **RULED 2026-11-11 by the project owner, and the ruling is BLOCKING for the product:**
 *a stream is encoded at the rate it will be played at, and the player does not
 reinterpret a declared rate to fit the clock.* "Is 41 cents acceptable" was the
@@ -592,6 +597,33 @@ greppable as `TODO(Q14` — and its mechanical guard is
 computes the ratio instead of quoting it (**1.024× = 41.06 cents**) and refuses any
 *further* rate reinterpretation.
 
+**Implemented 2026-11-13, and each piece is named by what enforces it.** The product asset
+is authored, encoded and declared at 32,768 Hz (160 frames, 326,144 samples, its last frame a
+512-sample short tail by construction); `geometry.rs`'s `RATE_BRIDGE` is `None` and
+`playback_rate_for_stream` is identity-or-refusal, with the exhaustive sweep over the
+declarable set (`0..=65535` plus the table rates) run as a witness rather than described;
+`PLAYBACK_RATE_FOR_STREAM` is gone from the packer, which refuses a foreign-declaring stream
+*before* encoding and re-checks the rate at every frame, because 6b-3's per-frame rate
+witness proved frames disagree with their own stream; `MEASURED_DECODE` is keyed by shape with
+the frame budget named once in the arithmetic; and `crates/flac-lite`'s `EncodeProfile` now
+carries `allowed_sample_rates_hz`, one element, enforced by the library facade and by the
+product ROM against its own shipped blob. The two `TODO(Q14, BLOCKING)` markers described
+above are gone from the code; the guard is now
+`ruled_rate_policy_allows_no_reinterpretation_of_a_declared_rate`. Three details of what
+landed differ from what was planned, each recorded in the 7-0 entry: the cost key is blocksize
++ predictor kind/order with the residual envelope carried as a stated caveat rather than as a
+key component; the predicted `--allow-unmeasured` state did **not** happen — the census did
+not change, so the asset packs cleanly against the inherited hardware row, and what the packer
+gives instead is a provenance warning, which a gate reading only exit status cannot see; and
+the planned committed negative leg — a tone authored at 32,000 and packed as a 32,768 asset —
+cannot exist as a committed asset because the packer now refuses to make one, so that witness
+exists as a re-synthesised 32,000-era design, a byte-level respell of the shipped blob (same
+samples, refused by the profile), and a mutation left running through the whole generation
+chain, where the pitch instrument answers 32,000 and the suite fails. **Nothing here reopens
+the ruling.** What is still owed to it is 7-1's measured row on the frames 7-0 produced, which
+is what clears the provenance warning: a row keyed by shape is a bridge too, and the rule
+against borrowing one across eras is still in force.
+
 **Two rate sets, not one — and the sweep is over the declarable one.** `agb` 0.25's
 mixer can play **10,512 / 18,157 / 32,768 Hz**, and the product geometry is 32,768; a FLAC
 *stream* can declare any of the format's 4-bit table rates or a 16-bit Hz value. The Q14
@@ -602,7 +634,8 @@ change — identity-or-refusal in the packer and the player — is 7-0's, so the
 loop is described here rather than added. Consequence, stated where it costs something: the
 asset this repository currently ships, `examples/flac_integration/assets/spike_l0.gfp`,
 declares 32,000 Hz and is therefore **not a product asset**. 6b-3's record, `FLAC.md`
-and C2 all say so now.
+and C2 all say so now. *(As of 7-0 it declares 32,768 Hz and is a product asset; those
+sentences stand as the state until it did.)*
 
 **And the root cause is named too, because a ruling without it would leave the shape that
 produced the bridge intact.** The mistake was never the *value* 32,000 — it is one of FLAC's
@@ -613,11 +646,12 @@ and letting `gafp_pack.py` key `MEASURED_DECODE` by the **stream** rate while
 variable the cost does not depend on (the rate probe measured it at −20 c/frame, the
 instrument's own floor) is exactly what forced the fixture to 32,000, the rows to
 32,000-keys, and the bridge into being load-bearing. So 7-0's scope is structural, and says
-so now: cost re-keyed onto blocksize, predictor kind/order and residual envelope; the sample
+so now: cost re-keyed onto blocksize, predictor kind/order and residual envelope *(the landed
+key is the first two; the envelope travels as a stated caveat on the row — see the 7-0 entry)*;
+the sample
 rate demoted from a lookup dimension to a *validity check*; the missing rate clause added to
 `crates/flac-lite`'s `EncodeProfile`, which guards blocksize, FIXED order, LPC and bit depth
-and has no rate field at all; identity-or-refusal in both the packer and the player; and a
-pitch witness, because a digest cannot see this defect — the samples are the same bytes. The
+and has no rate field at all *(it had none: 7-0 added `allowed_sample_rates_hz`)*; identity-or-refusal in both the packer and the player; and a pitch witness, because a digest cannot see this defect — the samples are the same bytes. The
 full inventory of where 32,000 lives and which uses are legitimate, plus the two retarget
 traps (sample-period fixtures preserving the pitch error; 128/125 being exact but ffmpeg's
 `-ar` being float), are in `plan-of-record.md`'s "Q14 follow-up" section, summarised in

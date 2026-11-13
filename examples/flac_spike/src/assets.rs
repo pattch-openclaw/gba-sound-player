@@ -6,12 +6,12 @@
 //!
 //! sha256 pins (regeneration tripwires; the witness tests carry the
 //! FNV-1a pins in code, these are for humans reviewing a regen diff):
-//!   spike_l0_frames.bin      region 3bcf47a6dca1c53867d017f27dc97b4e6bf71a70c9e9d5407f5f987a484c7f21
-//!   spike_l0_pcm.bin         pcm    5011e75804b18aaad79b0242d5c879535ee7e069c95a58f16eba61e8ce7d8b78
-//!   census(l0_stereo.flac): slot 0: fixed0 x157 | slot 1: fixed0 x157
-//!   spike_l4_frames.bin      region 6609602ba18860e6562c86594b6b56c4e434749623f731114e8a602444367cc5
-//!   spike_l4_pcm.bin         pcm    5011e75804b18aaad79b0242d5c879535ee7e069c95a58f16eba61e8ce7d8b78
-//!   census(l4_stereo.flac): slot 0: lpc3 x1, lpc4 x156 | slot 1: lpc3 x1, lpc4 x156
+//!   spike_l0_frames.bin      region 9304b41846d09f0cbed8acd04ab1583d04bb2aafdd16d861689d7c3e308f99ec
+//!   spike_l0_pcm.bin         pcm    2a1226434f09b2de4e51db5953b039a0f3250e190c143cee877676edbbaaf8c1
+//!   census(l0_stereo.flac): slot 0: fixed0 x160 | slot 1: fixed0 x160
+//!   spike_l4_frames.bin      region 3a9cab983f43893ce5a42e19712ff5df1d286ac1668aa53cddd157a80f7cce7e
+//!   spike_l4_pcm.bin         pcm    2a1226434f09b2de4e51db5953b039a0f3250e190c143cee877676edbbaaf8c1
+//!   census(l4_stereo.flac): slot 0: lpc3 x1, lpc4 x159 | slot 1: lpc3 x1, lpc4 x159
 //!
 //! Offsets are BYTE OFFSETS WITHIN THE EMBEDDED REGION (frame 0 at 0),
 //! the spike's deliberate stand-in for the GAFP manifest's seek table.
@@ -72,11 +72,11 @@ pub struct SpikeClip {
 pub const L0_FIXED: SpikeClip = SpikeClip {
     name: "l0_stereo",
     why: "FIXED-only arm (flac -1 -l 0 -b 2048 -m): the gate's conservative predictor cost",
-    census: "slot 0: fixed0 x157 | slot 1: fixed0 x157",
-    sample_rate_hz: 32000,
+    census: "slot 0: fixed0 x160 | slot 1: fixed0 x160",
+    sample_rate_hz: 32768,
     bits_per_sample: 16,
     channels: 2,
-    total_samples: 320000,
+    total_samples: 326144,
     max_blocksize: 2048,
     frames: &[
         FrameMeta {
@@ -84,645 +84,657 @@ pub const L0_FIXED: SpikeClip = SpikeClip {
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 5538,
+            offset: 5541,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 11074,
+            offset: 11080,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 16613,
+            offset: 16622,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 22148,
+            offset: 22159,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 27689,
+            offset: 27701,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 33225,
+            offset: 33239,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 38765,
+            offset: 38781,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 44301,
+            offset: 44319,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 49840,
+            offset: 49860,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 55380,
+            offset: 55401,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 60917,
+            offset: 60940,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 66456,
+            offset: 66482,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 71991,
+            offset: 72020,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 77531,
+            offset: 77562,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 83066,
+            offset: 83099,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 88606,
+            offset: 88641,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 94142,
+            offset: 94178,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 99680,
+            offset: 99720,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 105217,
+            offset: 105260,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 110754,
+            offset: 110800,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 116293,
+            offset: 116340,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 121829,
+            offset: 121878,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 127368,
+            offset: 127419,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 132904,
+            offset: 132956,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 138443,
+            offset: 138497,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 143980,
+            offset: 144036,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 149518,
+            offset: 149577,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 155055,
+            offset: 155116,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 160592,
+            offset: 160656,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 166130,
+            offset: 166196,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 171667,
+            offset: 171735,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 177206,
+            offset: 177276,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 182742,
+            offset: 182814,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 188281,
+            offset: 188355,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 193818,
+            offset: 193894,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 199356,
+            offset: 199433,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 204894,
+            offset: 204973,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 210432,
+            offset: 210513,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 215970,
+            offset: 216053,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 221508,
+            offset: 221592,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 227047,
+            offset: 227133,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 232584,
+            offset: 232672,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 238123,
+            offset: 238214,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 243661,
+            offset: 243754,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 249200,
+            offset: 249294,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 254740,
+            offset: 254835,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 260278,
+            offset: 260373,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 265816,
+            offset: 265914,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 271354,
+            offset: 271454,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 276893,
+            offset: 276995,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 282431,
+            offset: 282533,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 287969,
+            offset: 288074,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 293508,
+            offset: 293614,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 299045,
+            offset: 299154,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 304584,
+            offset: 304694,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 310122,
+            offset: 310233,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 315660,
+            offset: 315773,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 321198,
+            offset: 321312,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 326736,
+            offset: 326852,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 332274,
+            offset: 332391,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 337813,
+            offset: 337932,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 343351,
+            offset: 343471,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 348888,
+            offset: 349010,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 354427,
+            offset: 354552,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 359964,
+            offset: 360091,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 365502,
+            offset: 365632,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 371039,
+            offset: 371172,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 376576,
+            offset: 376713,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 382114,
+            offset: 382252,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 387652,
+            offset: 387791,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 393190,
+            offset: 393331,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 398727,
+            offset: 398870,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 404266,
+            offset: 404410,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 409803,
+            offset: 409949,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 415342,
+            offset: 415490,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 420881,
+            offset: 421030,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 426420,
+            offset: 426570,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 431957,
+            offset: 432110,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 437496,
+            offset: 437651,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 443034,
+            offset: 443191,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 448571,
+            offset: 448730,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 454111,
+            offset: 454270,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 459648,
+            offset: 459810,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 465186,
+            offset: 465352,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 470724,
+            offset: 470892,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 476263,
+            offset: 476434,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 481801,
+            offset: 481973,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 487339,
+            offset: 487513,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 492878,
+            offset: 493054,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 498416,
+            offset: 498593,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 503955,
+            offset: 504134,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 509492,
+            offset: 509673,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 515031,
+            offset: 515213,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 520569,
+            offset: 520753,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 526108,
+            offset: 526294,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 531645,
+            offset: 531834,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 537184,
+            offset: 537375,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 542722,
+            offset: 542915,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 548260,
+            offset: 548454,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 553797,
+            offset: 553993,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 559335,
+            offset: 559532,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 564873,
+            offset: 565073,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 570411,
+            offset: 570613,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 575949,
+            offset: 576154,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 581486,
+            offset: 581693,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 587024,
+            offset: 587233,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 592562,
+            offset: 592772,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 598101,
+            offset: 598312,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 603637,
+            offset: 603851,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 609174,
+            offset: 609391,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 614713,
+            offset: 614930,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 620251,
+            offset: 620470,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 625789,
+            offset: 626012,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 631326,
+            offset: 631553,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 636866,
+            offset: 637094,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 642403,
+            offset: 642632,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 647942,
+            offset: 648172,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 653478,
+            offset: 653710,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 659017,
+            offset: 659251,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 664553,
+            offset: 664791,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 670093,
+            offset: 670332,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 675631,
+            offset: 675872,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 681168,
+            offset: 681412,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 686705,
+            offset: 686952,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 692242,
+            offset: 692492,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 697781,
+            offset: 698033,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 703319,
+            offset: 703573,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 708858,
+            offset: 709114,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 714395,
+            offset: 714653,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 719935,
+            offset: 720195,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 725473,
+            offset: 725735,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 731012,
+            offset: 731275,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 736551,
+            offset: 736816,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 742090,
+            offset: 742357,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 747630,
+            offset: 747898,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 753169,
+            offset: 753438,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 758710,
+            offset: 758980,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 764247,
+            offset: 764521,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 769787,
+            offset: 770064,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 775325,
+            offset: 775605,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 780865,
+            offset: 781147,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 786404,
+            offset: 786687,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 791943,
+            offset: 792229,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 797481,
+            offset: 797771,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 803018,
+            offset: 803311,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 808558,
+            offset: 808853,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 814096,
+            offset: 814392,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 819637,
+            offset: 819935,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 825175,
+            offset: 825474,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 830715,
+            offset: 831017,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 836253,
+            offset: 836557,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 841793,
+            offset: 842098,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 847332,
+            offset: 847639,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 852869,
+            offset: 853179,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 858408,
+            offset: 858720,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 863944,
+            offset: 864259,
+            blocksize: 2048,
+        },
+        FrameMeta {
+            offset: 869802,
+            blocksize: 2048,
+        },
+        FrameMeta {
+            offset: 875341,
+            blocksize: 2048,
+        },
+        FrameMeta {
+            offset: 880884,
             blocksize: 512,
         },
     ],
     region: include_bytes!("../assets/spike_l0_frames.bin"),
     pcm_file: "spike_l0_pcm.bin",
-    fnv_frames: 0x5A0096689BE6EDCE,
-    fnv_pcm: 0x54C7B356621B6E15,
+    fnv_frames: 0x840C8013B5C4FED2,
+    fnv_pcm: 0x054DD8B24062C27D,
 };
 
 /// LPC arm (flac -1 -l 4 -b 2048 -m): the gate's full-profile cost (majority LPC — FLAC.md Correction 3)
 pub const L4_LPC: SpikeClip = SpikeClip {
     name: "l4_stereo",
     why: "LPC arm (flac -1 -l 4 -b 2048 -m): the gate's full-profile cost (majority LPC — FLAC.md Correction 3)",
-    census: "slot 0: lpc3 x1, lpc4 x156 | slot 1: lpc3 x1, lpc4 x156",
-    sample_rate_hz: 32000,
+    census: "slot 0: lpc3 x1, lpc4 x159 | slot 1: lpc3 x1, lpc4 x159",
+    sample_rate_hz: 32768,
     bits_per_sample: 16,
     channels: 2,
-    total_samples: 320000,
+    total_samples: 326144,
     max_blocksize: 2048,
     frames: &[
         FrameMeta {
@@ -730,634 +742,646 @@ pub const L4_LPC: SpikeClip = SpikeClip {
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 5345,
+            offset: 5348,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 10691,
+            offset: 10696,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 16041,
+            offset: 16048,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 21387,
+            offset: 21395,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 26739,
+            offset: 26750,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 32087,
+            offset: 32100,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 37438,
+            offset: 37453,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 42791,
+            offset: 42805,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 48142,
+            offset: 48158,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 53486,
+            offset: 53505,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 58832,
+            offset: 58854,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 64182,
+            offset: 64207,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 69531,
+            offset: 69557,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 74882,
+            offset: 74908,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 80228,
+            offset: 80257,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 85579,
+            offset: 85611,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 90929,
+            offset: 90964,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 96281,
+            offset: 96316,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 101630,
+            offset: 101665,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 106981,
+            offset: 107017,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 112331,
+            offset: 112368,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 117679,
+            offset: 117720,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 123029,
+            offset: 123072,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 128376,
+            offset: 128422,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 133726,
+            offset: 133772,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 139076,
+            offset: 139125,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 144427,
+            offset: 144479,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 149774,
+            offset: 149827,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 155125,
+            offset: 155180,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 160475,
+            offset: 160532,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 165824,
+            offset: 165885,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 171176,
+            offset: 171237,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 176523,
+            offset: 176586,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 181871,
+            offset: 181940,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 187219,
+            offset: 187292,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 192571,
+            offset: 192645,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 197919,
+            offset: 197997,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 203270,
+            offset: 203349,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 208615,
+            offset: 208698,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 213964,
+            offset: 214053,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 219315,
+            offset: 219406,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 224662,
+            offset: 224754,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 230010,
+            offset: 230105,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 235360,
+            offset: 235456,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 240709,
+            offset: 240808,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 246058,
+            offset: 246159,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 251408,
+            offset: 251512,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 256755,
+            offset: 256862,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 262106,
+            offset: 262213,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 267456,
+            offset: 267566,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 272806,
+            offset: 272917,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 278155,
+            offset: 278268,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 283503,
+            offset: 283619,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 288854,
+            offset: 288971,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 294203,
+            offset: 294322,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 299554,
+            offset: 299671,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 304904,
+            offset: 305022,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 310258,
+            offset: 310376,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 315606,
+            offset: 315728,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 320953,
+            offset: 321077,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 326303,
+            offset: 326427,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 331654,
+            offset: 331779,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 337001,
+            offset: 337128,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 342354,
+            offset: 342484,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 347701,
+            offset: 347835,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 353050,
+            offset: 353185,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 358400,
+            offset: 358537,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 363753,
+            offset: 363888,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 369100,
+            offset: 369236,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 374448,
+            offset: 374587,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 379798,
+            offset: 379940,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 385146,
+            offset: 385292,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 390499,
+            offset: 390646,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 395845,
+            offset: 395993,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 401195,
+            offset: 401346,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 406544,
+            offset: 406698,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 411896,
+            offset: 412049,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 417245,
+            offset: 417399,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 422593,
+            offset: 422749,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 427941,
+            offset: 428098,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 433290,
+            offset: 433448,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 438643,
+            offset: 438804,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 443988,
+            offset: 444152,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 449340,
+            offset: 449505,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 454688,
+            offset: 454855,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 460039,
+            offset: 460209,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 465388,
+            offset: 465560,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 470738,
+            offset: 470914,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 476087,
+            offset: 476268,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 481432,
+            offset: 481617,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 486785,
+            offset: 486971,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 492131,
+            offset: 492321,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 497482,
+            offset: 497672,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 502830,
+            offset: 503023,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 508183,
+            offset: 508378,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 513532,
+            offset: 513729,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 518882,
+            offset: 519081,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 524231,
+            offset: 524432,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 529577,
+            offset: 529782,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 534928,
+            offset: 535134,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 540275,
+            offset: 540483,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 545626,
+            offset: 545835,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 550972,
+            offset: 551184,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 556326,
+            offset: 556538,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 561677,
+            offset: 561891,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 567031,
+            offset: 567246,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 572380,
+            offset: 572597,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 577730,
+            offset: 577949,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 583079,
+            offset: 583303,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 588424,
+            offset: 588651,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 593773,
+            offset: 594002,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 599122,
+            offset: 599354,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 604474,
+            offset: 604708,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 609820,
+            offset: 610055,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 615174,
+            offset: 615410,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 620522,
+            offset: 620762,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 625872,
+            offset: 626114,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 631222,
+            offset: 631465,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 636573,
+            offset: 636816,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 641922,
+            offset: 642166,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 647270,
+            offset: 647516,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 652622,
+            offset: 652870,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 657971,
+            offset: 658220,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 663321,
+            offset: 663570,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 668668,
+            offset: 668920,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 674020,
+            offset: 674275,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 679368,
+            offset: 679623,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 684717,
+            offset: 684975,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 690066,
+            offset: 690327,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 695416,
+            offset: 695681,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 700765,
+            offset: 701032,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 706115,
+            offset: 706383,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 711466,
+            offset: 711736,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 716814,
+            offset: 717085,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 722166,
+            offset: 722438,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 727516,
+            offset: 727790,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 732868,
+            offset: 733144,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 738216,
+            offset: 738492,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 743567,
+            offset: 743847,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 748919,
+            offset: 749201,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 754269,
+            offset: 754552,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 759618,
+            offset: 759904,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 764969,
+            offset: 765257,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 770320,
+            offset: 770609,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 775666,
+            offset: 775957,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 781023,
+            offset: 781315,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 786372,
+            offset: 786665,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 791723,
+            offset: 792016,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 797074,
+            offset: 797370,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 802425,
+            offset: 802724,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 807771,
+            offset: 808072,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 813122,
+            offset: 813427,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 818472,
+            offset: 818782,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 823821,
+            offset: 824133,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 829174,
+            offset: 829486,
             blocksize: 2048,
         },
         FrameMeta {
-            offset: 834522,
+            offset: 834836,
+            blocksize: 2048,
+        },
+        FrameMeta {
+            offset: 840188,
+            blocksize: 2048,
+        },
+        FrameMeta {
+            offset: 845539,
+            blocksize: 2048,
+        },
+        FrameMeta {
+            offset: 850891,
             blocksize: 512,
         },
     ],
     region: include_bytes!("../assets/spike_l4_frames.bin"),
     pcm_file: "spike_l4_pcm.bin",
-    fnv_frames: 0x5EE2546D35776FD6,
-    fnv_pcm: 0x54C7B356621B6E15,
+    fnv_frames: 0xB19C800E7FCAA5BB,
+    fnv_pcm: 0x054DD8B24062C27D,
 };
 
 /// Both arms, in gate order (FIXED first — the arm a decision defaults to).

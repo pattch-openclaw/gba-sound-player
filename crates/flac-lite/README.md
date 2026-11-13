@@ -343,7 +343,8 @@ offset  size   field
 0x06    1      bits per sample (16; 8 accepted for experiments)
 0x07    1      max fixed predictor order used (0..4)
 0x08    2      block size, samples per subframe (1024 | 2048)
-0x0A    4      sample rate, Hz (32000 initially; 65536 later)
+0x0A    4      sample rate, Hz (32768 — the device rate; the encode profile
+                      below refuses a manifest declaring any other)
 0x0E    8      total samples in track (u64)
 0x16    2      frame count N
 0x18    4      byte offset of frame data (header + table end)
@@ -365,11 +366,57 @@ matters (2026-11-11):
   encode actually emitted, derived from the packer's frame walk — never from the
   `-l` flag or from STREAMINFO. An all-LPC stream reads `0` there, correctly. The
   crate's own fixture set makes the consequence concrete
-  (`tests/gfp/x1_lpc_stereo_32k_b2048.gfp`, described in `tests/README.md`): that
+  (`tests/gfp/x1_lpc_stereo_32768_b2048.gfp`, described in `tests/README.md`): that
   all-LPC asset and two FIXED-0 assets that decode to the *same PCM* all carry
   `0`, and `EncodeProfile::validate` accepts all three. C2's real guard is the
   packer's subframe census plus the measured cost of the kinds it finds, not this
   byte.
+
+The **`sample rate`** field is the one place where the container's statement and
+the profile's agreement have to be the same check, and plan item 7-0 (Q14, ruled
+2026-11-11: a stream is encoded at the rate it is played at) is what put it there.
+`EncodeProfile::allowed_sample_rates_hz` names exactly one rate —
+`PRODUCT_SAMPLE_RATE_HZ`, 32,768 Hz, the clock `examples/flac_integration/src/
+geometry.rs` drives the mixer at, with a host test asserting the two stay equal —
+and `validate` asks it **first**, before block size or depth or order: a stream at
+a rate this build does not play at has no frame period for any other clause's
+budget to be stated against.
+
+Why a header check and not a runtime one, measured in `src/format.rs`'s own tests
+and in `crates/flac-lite/tests/gafp_asset_facts.rs`: respell a shipped product
+blob's rate field from 32,768 to 32,000 Hz — a completely legal FLAC stream rate,
+the table's `0b1000` — and the manifest still parses, the decoder still runs, and
+the first frame decodes to **identical samples**. The frames of a 32,768 Hz encode
+carry their own rate (`0b1101` plus a 16-bit Hz value, never the table code), and
+the samples are the samples whatever the header claims. What changed is what the
+sample axis *means*: played against a 32,768 Hz timer, a stream that declares
+32,000 Hz runs 1.024x fast, **41.06 cents sharp**. No digest in this project — PCM
+FNV, FIFO FNV, the played bytes on hardware — can tell those two blobs apart, so
+the refusal belongs in the profile, which is the one object every path that
+validates a manifest reads (`Manifest::profile`, `Decoder::new` under
+`strict-profile`, the product ROM's start-up check). Note what it is **not**: not a
+lookup and not a cost key. Cost is keyed structurally in `scripts/gafp_pack.py`'
+`MEASURED_DECODE`, by **block size and predictor kind/order**; the residual envelope
+a row was measured on travels as a stated caveat on that row rather than as a key
+component, and the rate is a validity check asked once. One provenance point belongs
+here because 7-0 is what makes it live: the only measured row for the product's shape
+(`fixed0` at 2048-sample frames, 42.48% mean / **42.72% worst** of a 1,048,576-cycle
+frame period, on hardware) was measured on frames an earlier encode produced, not on
+the bytes this asset is — and because the table is keyed by shape, the new asset packs
+**cleanly** against it, with no refusal and no `--allow-unmeasured` flag. That is the
+cost model behaving as designed and it is also the failure mode the re-keying brings,
+so the packer says it out loud on every pack today:
+
+```
+gafp_pack: warning: the measured decode figures this budget is stated against were
+           measured on different frames than the ones being packed. … the region
+           being packed is not the region those cycles were measured on, and no
+           instrument in this repository has ever decoded these particular bytes on
+           hardware. The match is structural, which is the point of re-keying the
+           table: cost does not care what the stream calls itself.
+```
+
+A row measured on the frames this asset is made of is plan item 7-1's.
 
 Deliberately **absent**, versus a standard `.flac`:
 
@@ -387,7 +434,11 @@ Deliberately **absent**, versus a standard `.flac`:
 
 The decoder only needs to handle what our encoder is allowed to produce:
 
-- 16-bit PCM, 32 kHz (65,536 Hz later), mono or stereo
+- 16-bit PCM at **the device's own rate, 32,768 Hz** — one value, named once in
+  the profile (`PRODUCT_SAMPLE_RATE_HZ`). Before Q14 was ruled this line read
+  "32 kHz (65,536 Hz later)"; plan item 7-0 made the rate a profile clause with a
+  single admissible value rather than a target to grow into, because the mixer has
+  one clock (see the rate note above). Mono or stereo.
 - block size fixed per track: 1024 or 2048 samples
 - fixed block size (no blocking strategy / variable frames)
 - **frame headers inside 6–9 bytes (48–72 bits)** — that is the range the
@@ -461,8 +512,10 @@ needs forcing.
 2. **No I/O traits.** `&[u8]` + cursor, forward only.
 3. **No division, ever** — ARM7TDMI has no hardware divide. Shifts and adds only.
 4. **Fixed-size predictor state** (`[i32; MAX_LPC_ORDER]`), never a growable buffer.
-5. **Per-frame scheduling granularity.** One `decode_next` call = one frame ≈ 64 ms
-   of audio at 2048/32 kHz, so the caller can pin decode work to DMA IRQ boundaries.
+5. **Per-frame scheduling granularity.** One `decode_next` call = one frame = one
+   2048-sample block = **62.5 ms** of audio at 2048 samples / 32,768 Hz — exactly
+   1/16 s, and exactly 2**20 cycles of the GBA's 2**24 Hz clock — so the caller can
+   pin decode work to DMA IRQ boundaries.
 
 ## Memory
 

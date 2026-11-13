@@ -45,22 +45,24 @@
 //! an all-LPC stream genuinely has no FIXED subframe of order above zero. So
 //! `DEFAULT_PROFILE.validate` accepts the LPC asset, a hand-tightened `-l 0`-shaped
 //! profile accepts it too, and `Decoder` plays it correctly. Nothing on this side
-//! of the line can tell you that at 32 kHz the decode half of that asset alone
-//! costs 174.14% of the frame — 1,816,753 cycles where a 2048-sample frame at the
-//! 32768 Hz playback timer has 1,048,576 — against 42.48% for the FIXED-only asset
-//! it sits beside.
+//! of the line can tell you that on this target the decode half of that asset
+//! alone costs 174.14% of the frame — 1,816,753 cycles where a 2048-sample frame
+//! at the 32768 Hz playback timer has 1,048,576 — against 42.48% for the
+//! FIXED-only asset it sits beside.
 //!
 //! That is not a defect to fix in the decoder; it is why the fixture set exists:
 //! to keep honest the claim that C2's "FIXED-only" is enforced at pack time, and to
 //! record in data a test reads — not in prose — which guard did the work, what the
 //! measured cost was, and which two relaxations it took to write the LPC one
-//! anyway (`preflight`, which refuses to build `-l 4` at a rate where the measured
-//! row is already over budget, and the post-walk cost bar; one does not imply the
+//! anyway (`preflight`, which refuses to build a profile carrying `-l 4` before
+//! reading a single byte, and the post-walk cost bar; one does not imply the
 //! other).
 
 #![forbid(unsafe_code)]
 
-use flac_lite::format::{ChannelConfig, DEFAULT_PROFILE, EncodeProfile, HEADER_LEN};
+use flac_lite::format::{
+    ChannelConfig, DEFAULT_PROFILE, EncodeProfile, HEADER_LEN, PRODUCT_SAMPLE_RATE_HZ,
+};
 use flac_lite::scan::Frames;
 use flac_lite::{Decoder, FrameBuffers, Manifest, PredictorState};
 
@@ -77,10 +79,18 @@ const TABLE: &str = include_str!("gafp_asset_vectors.txt");
 /// a fixture nobody verifies, so it fails loudly instead of sitting there.
 fn blob_bytes(name: &str) -> &'static [u8] {
     match name {
-        "p0_fixed0_mono_32k_b2048.gfp" => include_bytes!("gfp/p0_fixed0_mono_32k_b2048.gfp"),
-        "p2_fixed0_stereo_32k_b2048.gfp" => include_bytes!("gfp/p2_fixed0_stereo_32k_b2048.gfp"),
-        "p3_fixed0_midside_32k_b2048.gfp" => include_bytes!("gfp/p3_fixed0_midside_32k_b2048.gfp"),
-        "x1_lpc_stereo_32k_b2048.gfp" => include_bytes!("gfp/x1_lpc_stereo_32k_b2048.gfp"),
+        "p0_fixed0_mono_32768_b2048.gfp" => {
+            include_bytes!("gfp/p0_fixed0_mono_32768_b2048.gfp")
+        }
+        "p2_fixed0_stereo_32768_b2048.gfp" => {
+            include_bytes!("gfp/p2_fixed0_stereo_32768_b2048.gfp")
+        }
+        "p3_fixed0_midside_32768_b2048.gfp" => {
+            include_bytes!("gfp/p3_fixed0_midside_32768_b2048.gfp")
+        }
+        "x1_lpc_stereo_32768_b2048.gfp" => {
+            include_bytes!("gfp/x1_lpc_stereo_32768_b2048.gfp")
+        }
         other => panic!(
             "the table names a blob this suite does not embed: {other}. Embed it \
              or drop it from the generator — a packed asset no Rust test reads is \
@@ -305,6 +315,21 @@ fn load() -> (Vec<Blob>, Vec<Refusal>) {
             target.name = field(row, "name").to_string();
             target.bytes = num(row, "bytes");
             target.frame_count = num(row, "frames");
+            // Q14 / plan item 7-0, enforced at the point of parsing rather than
+            // in a later test. The `profile` row above carries the clock the
+            // packer budgeted against; this row carries the rate the blob
+            // declares. They used to be allowed to differ — a 32,000 Hz stream
+            // packed against a 32,768 Hz frame timer — and that difference is the
+            // pitch bug the ruling exists to prevent. Overwriting the field here
+            // would hide it, so the two are compared instead.
+            assert_eq!(
+                num(row, "rate"),
+                target.rate,
+                "a blob declaring {} Hz was packed at the {} Hz profile: the packer and \
+                 the blob may not name different clocks (Q14)",
+                num(row, "rate"),
+                target.rate
+            );
             target.rate = num(row, "rate");
             target.blocksize = num(row, "blocksize");
             target.channels = num(row, "channels");
@@ -1146,9 +1171,9 @@ fn every_blob_decodes_to_the_pcm_the_reference_decoder_produced() {
 #[test]
 fn one_pcm_three_blobs_and_the_field_that_cannot_tell_them_apart() {
     let (blobs, refusals) = load();
-    let independent = "p2_fixed0_stereo_32k_b2048.gfp";
-    let midside = "p3_fixed0_midside_32k_b2048.gfp";
-    let lpc = "x1_lpc_stereo_32k_b2048.gfp";
+    let independent = "p2_fixed0_stereo_32768_b2048.gfp";
+    let midside = "p3_fixed0_midside_32768_b2048.gfp";
+    let lpc = "x1_lpc_stereo_32768_b2048.gfp";
 
     // One source PCM, three encodings. The audio is identical by construction;
     // the frames are not. If that were not true — if the generator had drifted —
@@ -1226,6 +1251,12 @@ fn one_pcm_three_blobs_and_the_field_that_cannot_tell_them_apart() {
             "{name}: the manifest's own check accepts it"
         );
         let fixed_only = EncodeProfile {
+            // The rate clause is inherited unchanged: this hand-made profile is
+            // tightening the predictor-order clause, and a rate literal here
+            // would be a second place stating the product clock (the value comes
+            // from the crate's own constant, which the product example's rate
+            // guard ties to its mixer clock).
+            allowed_sample_rates_hz: &[PRODUCT_SAMPLE_RATE_HZ],
             allowed_blocksizes: &[2048],
             max_fixed_order: 0,
             allow_full_lpc: false,
@@ -1237,7 +1268,9 @@ fn one_pcm_three_blobs_and_the_field_that_cannot_tell_them_apart() {
             "{name}: even a hand-made `-l 0`-shaped profile accepts it, because \
              the field it polices already reads 0 — a manifest cannot answer \
              whether a stream contains LPC subframes, as EncodeProfile::validate \
-             itself says. On the decoder's side of the line there is nothing that \
+             itself says. The rate clause is inherited, because it is not the clause
+             this profile is tightening; on the decoder's side of the line there is
+             nothing that \
              separates a 42.48%-of-the-frame asset from a 174.14%-of-the-frame \
              one; on the packer's side there is, and the refusal below is it."
         );
@@ -1252,10 +1285,10 @@ fn one_pcm_three_blobs_and_the_field_that_cannot_tell_them_apart() {
     );
     assert_eq!(
         x1.relaxations, "allow-lpc,allow-over-budget",
-        "two separate guards, both needed: `preflight` refuses to build `-l 4` at \
-         a rate where the measured row is already over budget, before reading a \
-         byte of frames, and the post-walk cost bar refuses it again. Neither \
-         flag implies the other — that is the point of the `relaxations` row."
+        "two separate guards, both needed: `preflight` refuses to build a profile \
+         carrying `-l 4` before reading a single byte of frames, and the \
+         post-walk cost bar refuses it again. Neither flag implies the other — \
+         that is the point of the `relaxations` row."
     );
     assert_eq!(x1.profile_max_lpc_order, 4, "the profile it was built at");
     assert!(x1.allow_lpc && x1.allow_over_budget);
@@ -1297,12 +1330,12 @@ fn the_refusals_are_on_the_record() {
     // table: a refusal has to name the property, so whoever reads the message
     // knows what to change. `gen_gafp_fixtures.py --check` re-runs these legs
     // live; this asserts what they printed when the table was generated.
-    let rate = refusal(&refusals, "rate_44100_at_32000_target");
+    let rate = refusal(&refusals, "rate_44100_at_32768_target");
     assert_eq!(rate.exit, 1);
     assert!(!rate.wrote_file);
     assert!(
         rate.reason
-            .contains("sample rate 44100 Hz is not the target 32000 Hz"),
+            .contains("sample rate 44100 Hz is not the target 32768 Hz"),
         "the stream-level fact: {}",
         rate.reason
     );
@@ -1311,6 +1344,24 @@ fn the_refusals_are_on_the_record() {
             .contains("frame 0 resolves a sample rate of 44100 Hz"),
         "…and the frame-level one, because the walk reads each frame's own rate \
          header instead of trusting STREAMINFO: {}",
+        rate.reason
+    );
+    // The rate leg is the Q14 ruling on the record, not a note that two numbers
+    // differ. The packer used to *budget a declared rate against a different
+    // clock* (`PLAYBACK_RATE_FOR_STREAM = {32000: 32768}`), and that mapping is
+    // what the ruling removed; a refusal that only said "not the target" would
+    // still be compatible with a packer that quietly re-keys the cost rows.
+    assert!(
+        rate.reason.contains("Q14"),
+        "the refusal has to name the ruling it is applying, so a reader can find \
+         the plan item instead of guessing at the policy: {}",
+        rate.reason
+    );
+    assert!(
+        rate.reason.contains("1.024x") && rate.reason.contains("41.06 cents"),
+        "…and the size of what the mapping did to the music: 32,000 Hz played on \
+         a 32,768 Hz clock is 41.06 cents sharp. That is the thing a listener \
+         hears and no sample-level pin can see: {}",
         rate.reason
     );
 
@@ -1335,9 +1386,162 @@ fn the_refusals_are_on_the_record() {
 
     for slug in [
         "lpc_at_product_profile",
-        "rate_44100_at_32000_target",
+        "rate_44100_at_32768_target",
         "eight_bit_at_16bit",
     ] {
         refusal(&refusals, slug);
     }
+}
+
+/// Plan item 7-0: the rate contract, read out of the packer's own table.
+///
+/// Every blob the packer accepted declares one rate, and that rate is the clock
+/// the packer's measured rows are stated in. Before 7-0 the table could not say
+/// that: the accepted set declared 32,000 Hz while every percentage in
+/// `measurements.md` was divided by a 32,768 Hz frame period, and the mapping
+/// between the two lived in a dictionary (`PLAYBACK_RATE_FOR_STREAM`) that the
+/// product path mirrored in Rust (`geometry::RATE_BRIDGE`). Q14 ruled the
+/// practice out — a stream is encoded at the rate it is played at — and this is
+/// the leg that keeps the ruling from rotting back into a table again: the
+/// declared rate is a validity check on the pack path, never a key into cost.
+#[test]
+fn every_product_blob_declares_the_clock_its_costs_are_stated_in() {
+    let (blobs, _) = load();
+    // …which is one number, and there is exactly one of them across the accepted
+    // set (the parser above compares each blob against its own profile row; this
+    // compares across blobs, so no fixture can be quietly packed at a clock of its
+    // own while the rest of the set uses another).
+    let mut rates: Vec<u64> = blobs.iter().map(|b| b.rate).collect();
+    rates.sort_unstable();
+    rates.dedup();
+    assert_eq!(
+        rates.len(),
+        1,
+        "every accepted blob must declare one and the same rate; the set declares \
+         {rates:?}"
+    );
+    let packed_at = rates[0];
+    // Not the old product rate, and the reason for the test. 32,000 Hz is a legal
+    // FLAC stream rate; it is not a rate this target plays at, and a set of
+    // fixtures that declared it would be a table of assets the ROM can only play
+    // 41 cents sharp.
+    assert_ne!(
+        packed_at, 32_000,
+        "32,000 Hz was the declared rate of every product asset until plan item \
+         7-0 removed the bridge; if it is back, the bridge is back"
+    );
+    for b in blobs.iter().filter(|b| b.product) {
+        assert_eq!(
+            b.rate, packed_at,
+            "{}: a product blob declares the product clock",
+            b.name
+        );
+        for f in &b.frames {
+            assert_eq!(
+                f.rate, b.rate,
+                "{} frame {}: a frame's own 4-bit rate field disagrees with the \
+                 stream it belongs to — the 6b-3 respell trap",
+                b.name, f.index
+            );
+        }
+    }
+    // The frame period the measured rows divide by follows from that rate, and the
+    // table cites it in the refusal leg's text: 2^24 cycles/s x 2048 samples /
+    // 32,768 Hz = 2**20 cycles. Stated here as arithmetic, not copied as a magic
+    // constant, because the whole point of 7-0 is that the two are the same chain.
+    assert_eq!(
+        (16_777_216u64 * 2048) / packed_at,
+        1_048_576,
+        "the product clock has to be the one the 2**20-cycle frame period the \
+         measured rows cite comes from"
+    );
+
+    // --------------------------------------------------------------------
+    // …and the same claim from the crate's side of the seam, on shipped bytes.
+    //
+    // Until 7-0 the Rust half had no rate clause: `EncodeProfile` checked block
+    // size, bit depth and the recorded maximum FIXED order and never the rate of
+    // the stream it was guarding, so a build that holds a manifest to the profile
+    // (`Manifest::profile`, `Decoder::new` under `strict-profile`) had nothing to
+    // refuse a foreign rate *with* — the invariant lived only in the packer and in
+    // one example's player. This leg is that clause proven on a product fixture
+    // rather than asserted: respell the manifest's own rate field from the device
+    // clock to 32,000 Hz — the exact state Q14 ruled out, a header naming a clock
+    // nothing else in the path uses — and ask for two answers at once.
+    //
+    //   (a) the profile refuses it;
+    //   (b) the frames still decode, to the *same samples* — they carry their own
+    //       rate (`0b1101` plus a 16-bit Hz value, not the table's `0b1000`), and
+    //       the samples are the samples whatever the header claims.
+    //
+    // (b) is the point of the leg, not of (a). It is Q14's 41 cents made visible
+    // in a host test: every sample-level pin this project owns — the PCM FNV, the
+    // two FIFO digests, the played bytes on hardware — reads identically for both
+    // blobs, so a header check is the only thing anywhere in the path that can
+    // tell them apart.
+    let product = blobs
+        .iter()
+        .find(|b| b.product)
+        .expect("the fixture set carries product-shaped blobs");
+    let bytes = blob_bytes(&product.name);
+    let at_home_manifest = Manifest::parse(bytes).expect("a product fixture parses");
+    assert_eq!(
+        DEFAULT_PROFILE.validate(&at_home_manifest),
+        Ok(()),
+        "{}: the shipped bytes pass the profile a product build validates them with",
+        product.name
+    );
+
+    let mut respelled = bytes.to_vec();
+    respelled[0x0A..0x0E].copy_from_slice(&32_000u32.to_le_bytes());
+    let foreign_manifest = Manifest::parse(&respelled)
+        .expect("a manifest declaring 32,000 Hz is still a well-formed manifest");
+    assert_eq!(foreign_manifest.sample_rate_hz(), 32_000);
+    assert_eq!(
+        DEFAULT_PROFILE.validate(&foreign_manifest),
+        Err(flac_lite::Error::ProfileViolation),
+        "{}: the header's rate field now names 32,000 Hz — the profile's rate clause \
+         is what refuses it (plan item 7-0), and it is a profile verdict, not a \
+         malformed-blob or unsupported-stream one: the decoder can read this stream \
+         perfectly well and this build still must not play it ({:?})",
+        product.name,
+        DEFAULT_PROFILE.validate(&foreign_manifest).unwrap_err()
+    );
+    assert_eq!(
+        foreign_manifest.profile(),
+        Err(flac_lite::Error::ProfileViolation),
+        "…through the manifest's own facade as well ({:?}), which is the call a \
+         profile-strict build reaches from `Decoder::new`",
+        foreign_manifest.profile().unwrap_err()
+    );
+
+    // (b): decode frame 0 of each and compare. The walk is the one the facade is
+    // a shell over, run directly over what each manifest hands out.
+    fn first_frame(m: &Manifest<'_>, blocksize: u64) -> (Vec<i32>, Vec<i32>) {
+        let cap = usize::try_from(blocksize).expect("a sane declared block size");
+        let mut left = vec![0i32; cap];
+        let mut right = vec![0i32; cap];
+        let mut state = [PredictorState::new(); 2];
+        let mut walk = Frames::region(m.frame_region(), &m.stream_defaults(), m.bounds());
+        let got = walk
+            .next_frame(&mut left, &mut right, &mut state)
+            .expect("the first frame decodes")
+            .expect("the region has a first frame");
+        let n = usize::try_from(got.samples).expect("samples fit in a usize");
+        (left[..n].to_vec(), right[..n].to_vec())
+    }
+    let at_home = first_frame(&at_home_manifest, product.blocksize);
+    let off_clock = first_frame(&foreign_manifest, product.blocksize);
+    assert_eq!(
+        at_home.0, off_clock.0,
+        "{}: respelling the manifest's rate field changes not one left-channel \
+         sample of frame 0 — no digest in this project could ever have caught Q14, \
+         and that is why the profile clause is not decoration",
+        product.name
+    );
+    assert_eq!(
+        at_home.1, off_clock.1,
+        "{}: …nor a right-channel one",
+        product.name
+    );
 }

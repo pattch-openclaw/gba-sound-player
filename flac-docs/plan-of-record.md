@@ -48,8 +48,8 @@ checkable form:
   encoded at the rate it is played at, and the player does not reinterpret a declared
   rate to fit a clock. A 32,000 Hz asset run on a 32,768 Hz clock is 1.024× fast —
   **41.06 cents** — and is not C2 however clean its period audit. The asset this
-  repository currently ships is exactly that case, which is why 7-0 now sits in front
-  of 7-1;
+  repository shipped was exactly that case until 7-0 landed on 2026-11-13, which is why
+  7-0 sat in front of 7-1 and why 7-1 is now the thing standing between this tree and C2;
 - the decode half is already measured on hardware (42.48% mean / **42.72% worst**),
   so what is unproven is the *combination* — decode + convert + push + mixer/DMA
   inside one 62.5 ms frame;
@@ -2424,7 +2424,10 @@ outside it. The product path is the only place in this repository with two rates
 ports the invariant the rest of the tree already enforces.
 
 **The inventory, and what happens to each kind of use.** (Grep the number, the code
-`0b1000`, and the phrase "32 kHz" and this is all of it.)
+`0b1000`, and the phrase "32 kHz" and this is all of it.) **(Checked off 2026-11-13: every
+row below is what 7-0 did, row for row; the two things it did *differently* — the shape of
+the profile clause and where the packed negative leg went — are recorded at the end of
+item 7.)**
 
 | where | what it is doing | 7-0 action |
 |---|---|---|
@@ -2509,7 +2512,7 @@ they are ~43% of the frame against decode's 42.72%.
 
 | PR | Scope | Witness | Failure it isolates |
 |---|---|---|---|
-| **7-0** | **The asset at the rate it will be played at.** Q14 was ruled on 2026-11-11: a stream is encoded at the rate it is played at, and the player does not reinterpret a declared rate to fit the clock. So: re-author the fixture at 32,768 Hz — from Hz, not by reusing the sample periods in `frame_vectors.py:263`, which would leave the played pitch exactly where the defect is — and encode it at the product profile (FIXED-0, 2048-sample frames, the residual shapes the guard admits: a fresh census, not this asset's; and an explicitly short final frame, because 10 s at 32,768 Hz is exactly 160 full frames and the short-frame witness would otherwise stop running). Take the `32_000` arm out of `geometry.rs` — set `RATE_BRIDGE` to `None` — and the `32000` entry out of `gafp_pack.py`'s `PLAYBACK_RATE_FOR_STREAM`, leaving identity-or-refusal. Take the sample rate out of `MEASURED_DECODE`'s key, so cost is keyed by blocksize, predictor kind/order and residual envelope — the variables the 6b-3 rate probe showed cost actually depends on — with the rate becoming a *validity check* on the manifest instead, and one constant clock in the arithmetic rather than two. Put the missing rate clause into `crates/flac-lite`'s `EncodeProfile`, which today checks blocksize, FIXED order, LPC and bit depth and never the rate of the stream it is guarding. The full inventory of where 32,000 lives and which uses are legitimate, the two traps (sample-period fixtures; 128/125 is an exact ratio but ffmpeg's `-ar` is float and float breaks every byte pin here), and the probe showing that real material censuses FIXED 1-4 and so is a profile decision rather than a pipeline swap, are in the "Q14 follow-up" section that closes the 6b-3 record, immediately above this table. It will pack at first only under `--allow-unmeasured`, and that is the honest state rather than a shortcut: the `this is NOT a product blob` note comes off when 7-1's row exists. For the same playing time such a stream carries 2.4% more samples, so expect ~2.4% more blob — arithmetic, and worth measuring rather than assuming. | A **pitch witness in the same PR**: a tone whose implied pitch is measured out of the *decoded* PCM by integer autocorrelation at integer lags (no float — that is the defect class the 6a-2 float-trig incident is about) and checked against the rate the stream declares, plus the negative leg that authors the same tone at 32,000 Hz and packs it as a 32,768 asset, so a reinterpretation is witnessed red rather than assumed caught. Nothing in the present gate set can see a pitch shift at all — the pinned digest of a 32,000 Hz asset and of a reinterpreted one are the *same bytes*, which is how 41 cents passed every gate this asset has been through. Plus the profile guard with no relaxation flags, and `ruled_rate_policy_allows_one_bridge_and_no_more` failing exactly once at the first half of this item — its `.expect("the bridge is still in the tree; 7-0 removes it")` is the tripwire that goes red when the arm is deleted — while its `PRODUCT_STREAM_RATES` allow-list assert, written as one condition (the asset is allowed exactly when no bridge is present), goes red on any **half**-landed 7-0 and becomes the product's identity-or-refusal check once both halves have landed. | That every gate 6b-3's asset cleared was deaf to its one real defect — and that 7-1 and 7-3 would otherwise be run against an asset the product cannot ship. |
+| **7-0** ✅ | **Landed 2026-11-13 — the record is at the end of this item.** **The asset at the rate it will be played at.** Q14 was ruled on 2026-11-11: a stream is encoded at the rate it is played at, and the player does not reinterpret a declared rate to fit the clock. So: re-author the fixture at 32,768 Hz — from Hz, not by reusing the sample periods in `frame_vectors.py:263`, which would leave the played pitch exactly where the defect is — and encode it at the product profile (FIXED-0, 2048-sample frames, the residual shapes the guard admits: a fresh census, not this asset's; and an explicitly short final frame, because 10 s at 32,768 Hz is exactly 160 full frames and the short-frame witness would otherwise stop running). Take the `32_000` arm out of `geometry.rs` — set `RATE_BRIDGE` to `None` — and the `32000` entry out of `gafp_pack.py`'s `PLAYBACK_RATE_FOR_STREAM`, leaving identity-or-refusal. Take the sample rate out of `MEASURED_DECODE`'s key, so cost is keyed by blocksize, predictor kind/order and residual envelope — the variables the 6b-3 rate probe showed cost actually depends on — with the rate becoming a *validity check* on the manifest instead, and one constant clock in the arithmetic rather than two. Put the missing rate clause into `crates/flac-lite`'s `EncodeProfile`, which today checks blocksize, FIXED order, LPC and bit depth and never the rate of the stream it is guarding. The full inventory of where 32,000 lives and which uses are legitimate, the two traps (sample-period fixtures; 128/125 is an exact ratio but ffmpeg's `-ar` is float and float breaks every byte pin here), and the probe showing that real material censuses FIXED 1-4 and so is a profile decision rather than a pipeline swap, are in the "Q14 follow-up" section that closes the 6b-3 record, immediately above this table. It will pack at first only under `--allow-unmeasured`, and that is the honest state rather than a shortcut: the `this is NOT a product blob` note comes off when 7-1's row exists. For the same playing time such a stream carries 2.4% more samples, so expect ~2.4% more blob — arithmetic, and worth measuring rather than assuming. Measured on landing: +1.92% samples, +1.96% blob, the difference being the deliberate short final frame. | A **pitch witness in the same PR**: a tone whose implied pitch is measured out of the *decoded* PCM by integer autocorrelation at integer lags (no float — that is the defect class the 6a-2 float-trig incident is about) and checked against the rate the stream declares, plus the negative leg that authors the same tone at 32,000 Hz and packs it as a 32,768 asset, so a reinterpretation is witnessed red rather than assumed caught. Nothing in the present gate set can see a pitch shift at all — the pinned digest of a 32,000 Hz asset and of a reinterpreted one are the *same bytes*, which is how 41 cents passed every gate this asset has been through. Plus the profile guard with no relaxation flags, and `ruled_rate_policy_allows_one_bridge_and_no_more` failing exactly once at the first half of this item — its `.expect("the bridge is still in the tree; 7-0 removes it")` is the tripwire that goes red when the arm is deleted — while its `PRODUCT_STREAM_RATES` allow-list assert, written as one condition (the asset is allowed exactly when no bridge is present), goes red on any **half**-landed 7-0 and becomes the product's identity-or-refusal check once both halves have landed. | That every gate 6b-3's asset cleared was deaf to its one real defect — and that 7-1 and 7-3 would otherwise be run against an asset the product cannot ship. |
 | **7-1** | **Re-measure the producer at the target rate.** The 10,512 Hz producer pass (convert / push / wait / closure) repeated at 32,768 Hz with the kernel in the decode slot. Measurement only — no new product code, and it runs against **7-0's** asset.
 **It also re-runs `make product-play-test` against that asset**: the geometry's own
 answers are asset-shaped — the sizing scans' depth cliff (20 chunks) and prefill cliff
@@ -2521,7 +2524,7 @@ constants in `product_play_witness.rs` are a hand-copy of one named run's printe
 `stages:`/`attribution:` lines, and that hand-copy fell a build behind during 6b-3's
 report-hygiene pass — so 7-1 pins those printed lines as a text fixture beside the blob's
 hash pin (the `gen_gafp_blob.py --check` pattern, applied to a cost envelope) and has the
-model derive its envelope from the fixture. | Per-stage shares on **hardware**, same-image, with the rate pass's own discipline (`closure underflows 0`, shares read relatively, the clean image's audit as the wall authority, and the same run's decode figure recorded against `(32768, 2048, fixed, 0)`, which is the key `gafp_pack`'s guard is missing — 7-1's numbers are what take the non-product note off 7-0's asset) | that C2's margin is inherited arithmetic from a different rate and a pre-kernel decoder — the ~85.6% gross and the ~8.7 ms left are estimates, not observations, and that 6b-3's 53.062% envelope is an mGBA figure for an asset the ruling disqualifies |
+model derive its envelope from the fixture. | Per-stage shares on **hardware**, same-image, with the rate pass's own discipline (`closure underflows 0`, shares read relatively, the clean image's audit as the wall authority, and the same run's decode figure recorded against the **structural** key `fixed0 @ b2048`, because that is the key `gafp_pack` now uses — the rate moved out of the cost key and into a validity check in 7-0, and the packer prints a provenance warning on every successful pack until 7-1's figure exists on frames 7-0 produced. 7-1's numbers are what take the non-product note off 7-0's asset) | that C2's margin is inherited arithmetic from a different rate and a pre-kernel decoder — the ~85.6% gross and the ~8.7 ms left are estimates, not observations, and that 6b-3's 53.062% envelope is an mGBA figure for an asset the ruling disqualifies |
 | **7-2** | **The shipping playback path.** `agb`'s mixer/DMA, or a written argument for why the custom IRQ feeder is the shipping path. Replaces the throwaway harness the rate track has been leaning on. It also settles a mechanism 6b-3's comment correction exposed rather than resolved: `agb` 0.25's `enable_dma_for_sound` (`hw.rs:56-68`) writes **no transfer count** — the 140-word write and the per-period re-arm in `product_play_main.rs` are ours — so whether a period is bounded in practice by a re-armed count or by the FIFO's half-trigger pull is an observation, not a reading of the source. Take it on silicon deliberately: re-arm early and late on purpose and count `grace`/`late` in the audit, before either wording is claimed. | Bit-exact PCM into the FIFO plus an audibility check on hardware; underruns **counted**, not eyeballed | that the throwaway feeder was load-bearing in ways nobody wrote down (the rate track's own lesson, one layer up) |
 | **7-3** | **The acceptance run.** 2048-sample frames at 32,768 Hz, FIXED-0 assets (enforced by 6b-2's pack-time profile), GBA 001 **and** GBA SP, two runs each. | **Underruns = 0**, plus 7-1's stage shares on the same image, plus the one witness
 no instrument here produces: the image **heard** on both units, with the source file
@@ -2541,7 +2544,284 @@ that decides whether 7-2 has to find savings or merely has to land, and if 7-1 s
 producer stages eating the whole margin that is a decode-side or rate-side finding and it
 comes back to this plan rather than being absorbed by a playback patch. 6b-3's numbers do
 not carry forward as product figures: they are the play path's and the geometry's
-evidence, measured against an asset the ruling disqualifies.
+evidence, measured against an asset the ruling disqualifies. (7-0 landed on 2026-11-13;
+the record below is what 7-1 runs against, and it corrects one thing in this paragraph:
+the row 7-1 fills is no longer keyed by rate — see *What 7-1 inherits*.)
+
+### 7-0 — landed (2026-11-13): the asset is encoded at the rate it is played at
+
+**What changed, in one line each, and the two log lines that are the whole point.**
+`examples/flac_spike/scripts/frame_vectors.py` re-authors the fixture at 32,768 Hz
+(`PARTIALS_DEVICE`, `PRODUCT_SAMPLES = 159 × 2048 + 512`, and a hard integer-period guard
+in `partial_periods`); `scripts/gen_gafp_fixtures.py`, the four product-shaped `.gfp`
+fixtures and the refusal spec follow the same name change (`p2_fixed0_stereo_32768_b2048`,
+`rate_44100_at_32768_target`); `geometry.rs` sets `RATE_BRIDGE: Option<(u32, u32)> = None`
+and `playback_rate_for_stream` becomes identity-or-refusal; `gafp_pack.py` loses
+`PLAYBACK_RATE_FOR_STREAM`, re-keys `MEASURED_DECODE` to `(blocksize, kind, order)` and
+adds a per-frame rate-consistency check; `crates/flac-lite` gains
+`PRODUCT_SAMPLE_RATE_HZ` and an `EncodeProfile` clause that refuses a stream it is not
+built to play, checked **before** the cost-shaped clauses. From the two ROM runs, same
+harness, same day:
+
+```
+HEAD        [pp-rom] rate: stream 32000 Hz -> playback 32768 Hz; 512 cycles/sample,
+                       budget 1048576 cycles for a 2048-sample frame (the stream's own
+                       nominal period would be 1073741)
+7-0         [pp-rom] rate: stream 32768 Hz -> playback 32768 Hz; 512 cycles/sample,
+                       budget 1048576 cycles for a 2048-sample frame; the stream's own
+                       nominal period is 1048576 c — equal by the rate contract. Two
+                       different numbers here = the Q14 defect.
+```
+
+The parenthetical *would be* and the sentence *is* are the change. A `match` on an
+`Option<((u32, u32), u32)>` became an equality test, and the ROM now says out of its own
+mouth which of the two states it is in.
+
+**Pre-change control build, and the determinism control.** `f4777f8` was checked out into
+`git worktree add --detach /tmp/ctrl70` and built before any edit, with the same
+Make targets, the same toolchain (`rustc 1.98.0-nightly (a3563f0602 2026-12-09)`,
+`rustup run nightly-2026-09-04` for the GBA tier, `aarch64-unknown-linux-gnu` host), and
+`flac 1.5.0` / `metaflac 1.5.0` on both sides. The three FLAC-path images paired:
+
+| image | control `f4777f8` | 7-0 tree | 7-0 tree after a clean rebuild (`cargo clean` in each example dir, then relink) |
+|---|---|---|---|
+| `flac-integration.gba` | `46a8d38e…` | `5e212af0…` | `5e212af0…` |
+| `product-play.gba` | `6aaec4c1…` | `7e0ecf74…` | `7e0ecf74…` |
+| `flac-spike.gba` | `227c0f29…` | `9c8a0d0b…` | `9c8a0d0b…` |
+
+so the 7-0 image is stable under a from-scratch relink of every crate it contains. The
+clean control is worth stating exactly, because the obvious command is the one that fails:
+from the repository root, `cargo clean -p flac-lite -p flac-lite-gba -p flac-integration
+-p flac-spike` answers *"package ID specification `flac-lite` did not match any packages"*
+(the root manifest is a single package, not a workspace holding those members; verified on this tree — that command prints the error above, exits 101, and an earlier attempt's log records the same). The control that works is a clean *inside each directory that builds an image*:
+`cargo clean` in `examples/flac_integration` and `examples/flac_spike`, then
+`make native-flac-rom native-product-play-rom native-spike-rom` with no prior artifacts.
+All three hashes above reproduce, and the two rebuilt product images were run again: exit 124
+(a passing run ends in `loop {}`), `flac-integration` `verdict PASSED — screen BLUE
+(bitreader=true, decode=true)`, `product-play` `verdict PASSED — screen BLUE
+(ledger=true, audit=true, pcm=true, fifo=true)` with the same identity rate line.
+
+**That control caught a stale artifact, which is exactly why it is asked for.** Before the
+clean, `flac-spike.gba` on disk was `47b09f02…`, not the `9c8a0d0b…` this record quotes. The
+cross-experiment arm — this code, the control's *old* 32,000 Hz spike assets — had rebuilt
+that image; when the assets were restored, the tie was verified (`gafp-check`: *"the
+committed GAFP blob still matches its generator"*) but the image was not rebuilt with them.
+A clean build of the restored tree gives the recorded hash, so `47b09f02…` is a fourth point
+on the pair rather than a fifth build of the 7-0 tree: same code, different asset bytes. An
+incrementally-built tree can be holding an image of a state that no longer exists, and no
+gate in this repository reads the file on disk.
+
+The
+gba-sound-player (Tier 3) image was built and its gates run on the 7-0 side
+(`e665a302…`) but has no control pair: the control batch built only the three
+FLAC-path binaries, and that ROM carries no FLAC path. **A trap for the next person who
+tries this**: the linker output is ELF at
+`examples/<x>/target/thumbv4t-none-eabi/release/<bin>` and the `.gba` is not —
+`agb-gbafix` rewrites the header and `readelf -S` answers *"Not an ELF file – it has the
+wrong magic bytes at the start"*. Section and `nm` evidence comes from the ELF; the digest
+pins above and `mgba-test-runner` runs come from the `.gba`.
+
+**Section table, control → 7-0.**
+
+| image | `.text` | `.rodata` | `.iwram` | `.ewram` | `.bss` | `.gba` bytes |
+|---|---|---|---|---|---|---|
+| `flac-integration` | `0x010bc4 → 0x010bc4` (**+0**) | `0xf3fec → 0xf82e4` (+17,144) | +0 | +0 | +0 | 1,070,768 → 1,087,912 |
+| `product-play` | `0x136f4 → 0x137b8` (**+196**) | `0xf4ef8 → 0xf92fc` (+17,412) | +0 | +0 | +0 | 1,085,676 → 1,103,288 |
+| `flac-spike` | `0x0cad8 → 0x0c504` (**−1,492**) | `0x1beb10 → 0x1c6de0` (+33,488) | +0 | +0 | +0 | 1,883,140 → 1,881,756 |
+
+Every byte of the `.rodata` growth is the asset: the product blob went 865,996 →
+882,949 B (+16,953, +1.96%) and the two spike frame tables went 865,340 → 882,281 and
+835,884 → 852,255; the residue of a couple of hundred bytes is the new profile-refusal
+message text and the rate static. `.rodata` is not a code-generation signal here, and
+`nm --print-size --size-sort` on the two ELF pairs says the same thing from the other
+direction — with the internal-name hashes normalised so only real deltas show:
+
+* **`flac-integration`: total +0 B, zero symbols with a real delta.** The product decode
+  path's code is byte-for-byte the same size and layout. The profile clause is *not* in
+  the ROM's hot path — the ROM calls `DEFAULT_PROFILE.validate` once at start-up, and that
+  call already existed; the new clause is a comparison against a slice the linker already
+  had a use for.
+* **`product-play`: +196 B, all of it reporting.** `_RNvNtCH_12product_play3rom6report`
+  +192, `…rom8manifest` +4, and four `String` glue objects moving ±4–12 B against each
+  other. That is the rate line, the nominal-period comparison and the pitch printout. No
+  decoder symbol appears in the list at all.
+* **`flac-spike`: −1,494 B.** Fourteen symbols, and 1,475 B of it is one shape:
+  `flac_lite::residual::decode_residual_with<TableCountKernel>` −1,716 B against
+  `TableCountKernel::decode_partition` +266 B and `read_bits` moving ±576 B as a
+  specialisation folds and an inlining boundary moves. Nothing was deleted from the
+  decoder; the bench's census-only instantiation got smaller. `count_ones` stayed at 6 B
+  in both, and the arm tables and `decode_partition<true>`/`<false>` sizes are unchanged.
+
+**The anchor question, restated and re-measured.** The plan's 6b-3 record left "is the
+ARM kernel's cost the kernel's own or the bench's?" open. The image above settles the
+second half of it for this PR: **the product path's code did not move at all**
+(+0 B, zero symbol deltas), so any cost comparison across this change on the product side
+is a comparison of *data*, not of code. For the bench side, a cross-experiment —
+`flac-spike.gba` built from the 7-0 tree against the **control's** committed frame table,
+run in the same harness:
+
+| build | frames | mean c/frame | worst frame |
+|---|---|---|---|
+| control code + control frames | 157 | 1,470,570 | 1,477,975 |
+| 7-0 code + **control** frames | 157 | **1,686,388** | 1,694,849 |
+| 7-0 code + 7-0 frames | 160 | **1,686,658** | 1,694,961 |
+
+The frames cost **+0.016%**; the code wobble costs **+14.7%** (and +7.7% on the LPC arm).
+That is the same effect the plan already recorded as "one generated table entry moves the
+bench's mean by ~1%", and larger: the bench's absolute numbers are **not comparable across
+this change in either direction**, and the 14.7% must not be read as the new asset being
+costlier. The product-side pair, which *is* comparable, is the same ROM at both trees:
+`dec 39.527% → 39.574%`, `work 53.386% → 53.446%` of the 1,048,576-cycle frame period —
+the new frames cost **+0.12% relative** through the shipped path. Neither figure is a C2
+margin (that is 7-1's, on hardware), and neither belongs to the 42.703% denominator the
+6b-4 note warns about.
+
+**Gates.** `make check`, `test-rom`, `test`, `flac-gates`, `product-play-test`,
+`item6a5-test`, `overlay-kernel-test`, `spike-test`, `kernel-test`, `opus-test`,
+`gafp-check`, `gafp-pack-check` and the fixture generator's own assertion all exit 0 on
+the 7-0 tree; `flac-gates` reports **1,509 passed / 0 failed / 3 ignored**, `make test`
+**203 passed / 0 failed**, and `product-play-test` **14 passed** (10 at the control).
+No Make target was added, moved or renamed, so no gate is *new*: `product-play-test` is
+the same gate carrying four new tests, and `make test-rom` **was run** and collected zero
+cases — `agb v0.25.0 has no `#[test_case]` macro` still, exactly as the control, and it
+is stated here as an existing known condition rather than as a result.
+This entry and the doc comments it touched were written *after* that first batch, so the
+same gates were re-run on the post-record tree: identical counts (**1,509 / 203 / 14**, all
+exit 0), and no test was added, renamed or removed by the write-up. The clean-rebuild control
+above, and the re-runs of both product ROMs that follow it, were done on that post-record
+tree.
+Three ROMs were run headless; all three print their verdict and are killed by the timeout, which is the
+correct exit for this harness (`124`):
+
+* `flac-integration.gba` — `verdict PASSED — screen BLUE (bitreader=true, decode=true)`,
+  manifest `frames=160 samples=326144 rate=32768 ch=2 bps=16 block=2048 max_fixed_order=0`.
+* `product-play.gba` — `verdict PASSED — screen BLUE (ledger=true, audit=true, pcm=true,
+  fifo=true)`, `hw_periods=582 serviced=582 und=0 coalesced=0 max_gap=0 late=0`,
+  `feed: pushed=326144 expected=326144 consumed=326144 frames=160/160 underflows=0`,
+  `pcm_fnv` and both FIFO digests MATCH, screen fit `lines=8 right=132 bottom=99
+  fits=true`.
+* `flac-spike.gba` — correctness legs pass and the censuses are the point:
+  `l0_stereo: fixed0 x160` per slot, `l4_stereo: lpc3 x1, lpc4 x159` per slot, i.e. the
+  re-authored fixture still makes `-l 0` stay FIXED and `-l 4` choose LPC at the device
+  rate. Its **PR-3 performance verdict is FAILED** and stays failed: `l0_stereo worst
+  worst_frame=156 worst_net=1694961 vs budget=1048750`, `l4_stereo worst_net=2983747 vs
+  budget=1048750` `[OVER BUDGET]`, `within budget 0/2`. The control and the
+  cross-experiment above are over budget the same way, so this is not a regression this
+  PR introduced — it is the pre-existing 6b-1/6b-4 bench condition, now measured against
+  an asset the product is actually allowed to ship.
+
+**Mutation witnesses, including one that was rejected.** Every new correctness claim above
+was broken on purpose and the failure read:
+
+| mutation | result |
+|---|---|
+| delete the sample-rate clause from `EncodeProfile::validate` | `gafp-pack-check` **fails** (`every_product_blob_declares_the_clock_its_costs_are_stated_in` panics at `unwrap_err()` on `Ok`), `flac-test` **fails** (`the_profile_refuses_a_stream_it_is_not_built_to_play`: `left: Ok(())`, `right: Err(ProfileViolation)`), and the same `left/right` pair appears in `gafp_asset_facts`' `every_product_blob_declares…` — the clause is load-bearing in three places, not one |
+| leave the sample rate *in* `MEASURED_DECODE`'s key (4 of 14 rows keyed `(32000, …)`) | **rejected as a witness, kept as a fact.** The packer's own guard self-check fires first: `no measured decode figure for (2048-sample frames, fixed0)` — the legacy row is the *only* one and it cannot cover the product shape, which is exactly why 7-0 re-keys it. It proves the re-keying was not cosmetic and it is not evidence of a guard. |
+| put one device-rate partial's period back to the 32,000-era number (`PARTIALS_DEVICE`'s 256 → 250) through the *whole* chain — `gen_spike_assets.sh` → `gen_gafp_blob.py` → the real packer | **fails twice**: `the_pitch_witness_names_the_clock_the_samples_were_made_at` ("the anchor's tone must be present at the design level… measured −0.0139, the declared term alone measures 2.9308") and `the_pitch_witness_survives_the_fifo_and_the_product_fixture_does_not` (`left: Some(32000)`, `right: Some(32768)`). Restoring the one number reproduces every committed asset byte-identically. |
+| revert the 512-sample tail edit (back to a 10 s exact-multiple length) | the plan's own predicted failure, exactly: `frame_header_decoder_vectors_reject_*` panics with `"vector prod-rate32768-last: required field 'block_size_code' not present in decoded header"`. The negative control for the plan's trap. |
+| let the player reinterpret instead of refuse: `playback_rate_for_stream`'s `_ => None` arm → `_ => Some(PLAYBACK_RATE_HZ)` | **fails**: `ruled_rate_policy_allows_no_reinterpretation_of_a_declared_rate` — `assertion \`left == right\` failed: 8000 Hz must be refused by the player, not mapped onto the timer`, `left: Some(32768)`, `right: None`; 13 of 14 tests pass and the guard alone goes red. This is the *generalised* defect rather than the historical one, and note where the historical one is caught instead: `geometry.rs` pins the bridge's absence with `const _: () = assert!(matches!(RATE_BRIDGE, None));`, so reinstating `RATE_BRIDGE = Some((32_000, PLAYBACK_RATE_HZ))` is a **compile error**, not a red test — the pin guards the past, the guard guards the general case. Restored byte-identical. |
+| widen the profile by one element, `&[PRODUCT_SAMPLE_RATE_HZ]` → `&[PRODUCT_SAMPLE_RATE_HZ, 32_000]`: a completely legal FLAC stream rate, nothing else touched | **red on three surfaces at once**: `product-play-test` (`…names exactly one rate, and states it once`, `left: [32768, 32000]`, `right: [32768]`), `flac-test` (`the_profile_refuses_a_stream_it_is_not_built_to_play`, `src/format.rs:779`), and `gafp-pack-check` (`every_product_blob_declares_the_clock_its_costs_are_stated_in`, make exits 101) — while the Python generator stays green ("4 blobs match their committed bytes, 3 refusal legs still refused with their stated reasons"), because the packer asks the question with its own copy of the answer. Restored byte-identical. |
+
+The last two rows name what the two halves of the ruling are for. Widening the list changes
+no byte anywhere and still breaks the "stated once" claim on three surfaces; generalising the
+player's function breaks only the guard, because the shipped asset is at the right rate and an
+inert bridge cannot be caught by an asset. Restoring the specific historical bridge is refused
+at compile time, before any test runs.
+
+The first and third rows are the ones to read together: the third is the plan's asked-for
+negative leg (an asset **authored** at the old numbers and **packed** at the device rate,
+which the instrument then *names* as 32,000 Hz), landed as a mutation rather than as a
+committed fixture — see the deviation below.
+
+**Deviation from the planned shape of the witness, and where the missing leg went.** The
+plan asked for "the negative leg that authors the same tone at 32,000 Hz and packs it as a
+32,768 asset". A committed asset like that cannot exist after Q14: `gafp_pack.py` refuses
+a 32,000 Hz stream before it encodes anything, with the ruling in the message. So the leg
+is split across three places that each witness part of it, and one of them (the mutation
+above) witnesses the whole chain:
+
+1. `gafp_asset_facts::every_product_blob_declares_the_clock_its_costs_are_stated_in` takes
+   the shipped blob and respells its own STREAMINFO rate field `32768 → 32000`. The
+   respelling **parses**, decodes to byte-identical samples in both channels, and is
+   refused by the profile twice over (`validate` and `Manifest::profile`, both
+   `Err(ProfileViolation)`, message quoted in the assertion) — while the header's own rate
+   *field* still reads 32,000. The test says so in its own output: the PCM FNV, the FIFO
+   digest and every byte-level pin in this repository are identical for the two blobs, so
+   **the profile is the only thing in the tree that can catch it**. It also proves the
+   parser is not what refuses: widening `allowed_sample_rates_hz` makes the same bytes
+   legal.
+2. The instrument's own negative leg **re-synthesises** the recorded 32,000-era design
+   from `frame_vectors.py`'s own parameters (`RECORDED_CENTRE_AT_32000`,
+   `RECORDED_SIDE_AT_32000`, `RECORDED_SQUARE_AT_32000`) and names it 32,000 Hz. This
+   does *not* go through the encoder, so on its own it cannot witness that a 32,000-authored
+   design survives the encoder's choices at the device rate — the third mutation row does.
+   Its answer, in the units Q14 is stated in, is reached from measured sample periods and
+   not from a header: 41.06 cents, asserted against the same figure
+   `ruled_rate_policy_allows_no_reinterpretation_of_a_declared_rate` pins from two header
+   fields.
+3. `gafp_pack.py` refuses the foreign rate at the manifest *and* per frame, so the packer
+   cannot produce such an asset even by accident.
+
+The instrument itself is also a deviation from the plan's sketch, and the plan's own
+failure case is why: the version that used a window of samples around each candidate as
+the noise floor failed on the shipped asset at 1.9:1, because the fixture's per-channel
+hash ramps have period 801 and a template at period 267 is their third harmonic — a real
+component, inside the window, not noise. What landed thresholds **two ratios** (candidate
+vs candidate, winner vs offset-matched shoulders) at 10, and the file prints both probes
+that decision rests on: the 801/3 harmonic must stay a component (it answers 26.7 counts
+against the anchor's 2.92 and its shoulders' 0.014), and the rejected 32 Hz anchor (period
+1024, exact on both clocks, therefore arithmetically eligible) is ruled out by measurement
+because its neighbouring period answers 81% of it. The shipped asset answers **340:1 /
+209:1**; its played 8-bit form **66:1 / 20:1**; a clean design term **410:1 / 212:1** and
+the same term authored at the other clock **413:1 the other way**. The weakest observation
+in the file is the 20:1, which is a factor of 2 over the line — that is recorded rather
+than hidden because a future asset changes it. The 8-bit half of the same test is where
+7-0 answers a question 7-3 would otherwise have met for the first time: a ±24,000-count
+tone through the real `convert_frame` measures **93.7579 LSB against the exact arithmetic
+93.7500 (0.008% out)** and still separates 414:1 / 211:1, and a tone at **half an LSB**
+still measures 0.7499 LSB and separates 394:1 / 209:1 — so `sample >> 8` costs amplitude
+and none of the pitch, because truncation preserves the zero crossings and the sign of a
+sub-LSB component. What the fixture cannot do is be *heard*: its anchor is **2.9240 i16
+counts = 1.1% of one FIFO step**, in a centre band whose own peak-to-peak is 822 counts,
+and at the FIFO depth the term alone takes exactly the byte values `0x00, 0xFF` — a 1 LSB
+square wave at the anchor's period, not the tone. A half-LSB tone is **44×** louder than
+the fixture's anchor, and that gap is the entire difference between a machine being able
+to name this asset's pitch and a person being able to hear it. A fixture loud enough to
+hear is a fixture whose broadband floor stops making `-l 4` choose LPC — the same
+trade-off, in the other direction.
+
+**What 7-1 inherits, and one correction to what this plan told it to expect.** The row
+7-1 fills is **not** `(32768, 2048, fixed, 0)`: cost is now keyed by shape —
+`(blocksize, predictor kind, predictor order)` — and the rate is a validity check with the
+clock named once in the arithmetic. **What this plan predicted about the pack did not
+happen, and the difference matters.** It expected the new asset to pack "only under
+`--allow-unmeasured`, and that is the honest state rather than a shortcut", on the
+assumption of "a fresh census, not this asset's". The census did *not* change, so the
+re-keyed table matches the new asset structurally and it packs **cleanly**: no refusal, no
+flag, no `this is NOT a product blob` note. That is the cost model working as designed and
+it is simultaneously the failure mode the re-keying introduces — a row measured on one
+frame region now silently authorises a different one — which is why the packer prints a
+provenance warning instead: *"the measured decode figures this budget is stated against
+were measured on different frames than the ones being packed … no instrument in this
+repository has ever decoded these particular bytes on hardware. The match is structural,
+which is the point of re-keying the table: cost does not care what the stream calls
+itself."* The honest signal moved from a refusal-plus-note to a warning-on-a-clean-pack,
+and a gate that only checks the exit status cannot see it — so 7-1's figure is what clears
+the warning, and the packer's `self_check` (which refuses to trust a row that does not
+carry its provenance) is what keeps the warning from being decorative. Two expectations to
+correct alongside it: the samples went up **+1.92%**
+(320,000 → 326,144), not +2.4%, because the landed asset deliberately ends in a 512-sample
+tail rather than filling a sixteenth frame — the plan's own arithmetic (10 s × 32,768 =
+327,680) is right, and the 1,536-sample difference is the short-frame witness; and the
+prediction of "a fresh census, not this asset's" did not come true — the re-authored
+fixture still censuses `fixed0` on every slot at the product profile and `lpc4` at the
+bench's `-l 4`, which is the property the fixture exists for. Keeping that property is why
+the non-anchor partials kept their sample periods (131, 197): at 32,768 Hz those periods
+play at the same pitch the old design played at on the mis-geared clock. What moved is the
+*witness* partial (250 → 256, the offset the measurement is about; 128 Hz is the highest
+tone exact on both clocks, since `gcd(32768, 32000) = 256`) and the low partial (80 → 82,
+because 32,768/80 = 409.6 is not an integer and `partial_periods` used to produce
+non-integer periods silently — it now asserts).
 
 ## The width decision (what it is and is not safe for)
 

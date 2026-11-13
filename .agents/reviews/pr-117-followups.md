@@ -102,7 +102,12 @@ rules), `flac-docs/plan-of-record.md` (two dated notes), `flac-docs/open-questio
 - **Q14 test shape.** The asset assert is an explicit `PRODUCT_STREAM_RATES` allow-list —
   the *bridge* is still in `geometry.rs`; what is absent is `32000` from the allow-list.
   Step 4 rewrote it as **one** condition (see below), so 7-0's job is to delete the arm and
-  add `32_768` to the list, not to fix a red assert. The sampled refusal list is unchanged
+  add `32_768` to the list, not to fix a red assert. *(Done as described on 2026-11-13: the
+  bridge arm is gone, `RATE_BRIDGE` is `None`, and the rate clause moved up into
+  `flac-lite`'s `EncodeProfile.allowed_sample_rates_hz` rather than staying a product-side
+  allow-list — so the library, the packer and the ROM all ask the same question. The guard is
+  now `ruled_rate_policy_allows_no_reinterpretation_of_a_declared_rate`; the suite is 14
+  tests. Record: item 7's 7-0 entry in `flac-docs/plan-of-record.md`.)* The sampled refusal list is unchanged
   in step 3 (the exhaustive sweep stays docs-only, per #5); step 4 added the
   arithmetically exact non-product rates to it.
 - Verification: `make check` clean; `make product-play-test` 12/12; ROM

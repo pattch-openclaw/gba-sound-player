@@ -392,7 +392,9 @@ pub mod subframe;
 
 #[cfg(feature = "scan")]
 pub use decoder::{DecodedFrame, Decoder, FrameBuffers};
-pub use format::{Blocksize, ChannelConfig, EncodeProfile, Manifest, SampleRate};
+pub use format::{
+    Blocksize, ChannelConfig, EncodeProfile, Manifest, PRODUCT_SAMPLE_RATE_HZ, SampleRate,
+};
 pub use frame::FrameHeader;
 pub use subframe::{ArithmeticWidth, PredictorState, SubframeType};
 
