@@ -24,7 +24,7 @@
 #     writing it 'because the header CRC is unaligned' encodes a lie.
 
 vector stereo-6byte-first
-source_stream l4_stereo.flac
+source_stream vec_l4_stereo32k.flac
 note 6-byte header: 1-octet coded frame number, CRC-8 at bit 40
 required true
 bytes FF F8 B8 A8 00 81
@@ -57,7 +57,7 @@ subframe0_wasted 0
 subframe0_bytes 46 FE
 
 vector stereo-7byte-num128
-source_stream l4_stereo.flac
+source_stream vec_l4_stereo32k.flac
 note 7-byte header: 2-octet coded number (>=128 forces the wider form)
 required true
 bytes FF F8 B8 A8 C2 80 C0
@@ -90,7 +90,7 @@ subframe0_wasted 0
 subframe0_bytes 46 FF
 
 vector stereo-last
-source_stream l4_stereo.flac
+source_stream vec_l4_stereo32k.flac
 note final frame: short blocksize (the tail is 512, not the track's 2048) AND a 7-byte coded number -- the frame most decoders get wrong
 required true
 bytes FF F8 98 A8 C2 9C 5A
@@ -123,7 +123,7 @@ subframe0_wasted 0
 subframe0_bytes 44 01
 
 vector mono-b1024-first
-source_stream l4_mono.flac
+source_stream vec_l4_mono32k.flac
 note mono: channels code 0b0000, one subframe per frame
 required true
 bytes FF F8 A8 08 00 3B
@@ -189,7 +189,7 @@ subframe0_wasted 0
 subframe0_bytes 46 FE
 
 vector fixed-only-first
-source_stream l0_stereo.flac
+source_stream vec_l0_stereo32k.flac
 note `-l 0` encode: FIXED-only subframes, the perf gate's FIXED arm
 required true
 bytes FF F8 B8 A8 00 81
@@ -288,7 +288,7 @@ subframe0_wasted 0
 subframe0_bytes 00 00
 
 vector stereo-midside
-source_stream l4_stereo.flac
+source_stream vec_l4_stereo32k.flac
 note mid/side decorrelation: channels code 0b1010
 required false
 bytes FF F8 B8 A8 00 81
@@ -452,6 +452,72 @@ subframe0_order 3
 subframe0_wasted 0
 subframe0_bytes 44 FD
 
+vector prod-rate32768-first
+source_stream vec_prod_l0.flac
+note the shipped product asset's first frame header: 32,768 Hz has no entry in the 4-bit sample-rate table, so every frame spells it as 0b1101 + a 16-bit Hz field — extra_field_bytes 2, an 8-byte header, CRC-8 at bit 56 rather than 40. Same encode command as scripts/gen_spike_assets.sh's FIXED arm, so this is byte-for-byte what examples/flac_integration/assets/spike_l0.gfp carries on all 160 of its frames (plan item 7-0: a stream is encoded at the rate it is played at)
+required true
+bytes FF F8 BD A8 00 80 00 F8
+frame_offset 8304
+stream_frame_count 160
+header_bits 64
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0xB
+blocksize 2048
+samplerate_code 0xD
+samplerate_hz 32768
+stream_samplerate_hz 32768
+channels_code 0xA
+subframes 2
+decorrelation mid-side
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 0
+coded_number_octets 1
+extra_field_bytes 2
+crc8_byte 0xF8
+crc8_bit_position 56
+crc8_byte_aligned true
+subframe0_type fixed0
+subframe0_kind fixed
+subframe0_order 0
+subframe0_wasted 0
+subframe0_bytes 10 02
+
+vector prod-rate32768-last
+source_stream vec_prod_l0.flac
+note the shipped product asset's final frame: a 512-sample short tail (a table size, 0b1001 — the same tail length the 32,000-era clip ended with, and deliberately so: see PRODUCT_SAMPLES above), a 2-octet coded frame number, and the 0b1101 + 16-bit Hz rate field, all in one 9-byte header — where `stereo-last` above is 7 bytes with the rate inside one nibble. That difference is why this vector is not redundant: the short tail alone is not a product witness, the tail spelled at the device rate is. This is the frame the product blob actually ends with, and the reason a product asset must not be an exact multiple of the block size: the short tail is a decoder contract the product path has to keep
+required true
+bytes FF F8 9D A8 C2 9F 80 00 08
+frame_offset 889188
+stream_frame_count 160
+header_bits 72
+fixed_fields_bits 32
+sync 0x3FFE
+blocksize_code 0x9
+blocksize 512
+samplerate_code 0xD
+samplerate_hz 32768
+stream_samplerate_hz 32768
+channels_code 0xA
+subframes 2
+decorrelation mid-side
+samplesize_code 0x4
+bits_per_sample 16
+stream_bits_per_sample 16
+coded_number 159
+coded_number_octets 2
+extra_field_bytes 2
+crc8_byte 0x8
+crc8_bit_position 64
+crc8_byte_aligned true
+subframe0_type fixed0
+subframe0_kind fixed
+subframe0_order 0
+subframe0_wasted 0
+subframe0_bytes 10 02
+
 vector rate-hz10-16bit
 source_stream rate_hz10.flac
 note 10010 Hz: 0b1110 + rate/10 as a 16-bit number (units are per-code, and never 24-bit -- the scaffold's '8 | 16 | 24' note had no witness)
@@ -520,10 +586,12 @@ subframe0_bytes 02 80
 
 # --- measured encoder behaviour (cite these instead of guessing) ---------
 # First-subframe type across a whole 10s encode of the same source:
-#   l0_stereo.flac   fixed0 x157
+#   vec_l0_stereo32k.flac fixed0 x157
 #                    decorrelation chosen: mid-side x157
-#   l4_stereo.flac   lpc3 x1, lpc4 x156
+#   vec_l4_stereo32k.flac lpc3 x1, lpc4 x156
 #                    decorrelation chosen: mid-side x157
+#   vec_prod_l0.flac fixed0 x160
+#                    decorrelation chosen: mid-side x160
 # => `-l N` is MAX LPC ORDER, not a FIXED-predictor cap (flac --help:
 #    '-l, --max-lpc-order=#   Max LPC order; 0 => only fixed predictors').
 #    `-l 0` is FIXED-only; `-l 4` emits real LPC subframes of order <= 4.

@@ -150,7 +150,14 @@ def measure(work, tag, encode_flags, wav):
 
 def main():
     work = tempfile.mkdtemp(prefix="warmup-measure-")
-    sr, n = 32000, 64000
+    # The device's own rate, since plan item 7-0 (the sample rate is a profile
+    # clause with one admissible value, 32768 Hz, and a measurement script should
+    # not be the last place still naming the old one). Nothing in this witness
+    # depends on the rate — the claim is about warm-up samples inside a subframe,
+    # and the source is synthesized from sample indices, not from Hz — so the two
+    # counts below are re-verified at the new rate rather than assumed: they are
+    # the same counts this script printed at 32000.
+    sr, n = 32768, 64000
     samples = []
     for i in range(n):
         v = ((i * 7919) % 1024) - 512 + 400 * (((i // 100) % 2) * 2 - 1)

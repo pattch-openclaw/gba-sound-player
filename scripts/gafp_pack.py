@@ -51,14 +51,19 @@ Usage:
   profile, then encoded with the reference command.
 
 Options:
-  -r, --rate HZ            target sample rate            (default 32000)
+  -r, --rate HZ            target sample rate            (default 32768, and
+                           the only value a product blob may carry — see
+                           PRODUCT_CLOCK_HZ: the packer budgets a frame against
+                           one clock, so a stream that declares another rate is
+                           refused rather than reinterpreted. Plan-of-record
+                           Q14, ruled 2026-11-11.)
   -b, --blocksize N        samples per subframe, fixed   (default 2048)
   -L, --max-lpc-order N    libFLAC `-l` value            (default 0 = LPC disabled;
                            the measured product rows cover FIXED-0 only)
       --allow-lpc          let real LPC subframes above `-L` through the profile
                            guard (a NON-PRODUCT blob)
       --allow-unmeasured   let predictor kinds or residual shapes with no
-                           measured figure at the target rate through the guard
+                           measured figure for their shape through the guard
                            (a NON-PRODUCT blob)
       --allow-over-budget  let a predictor kind that IS measured and IS over the
                            measured-cost bar through the guard (a NON-PRODUCT
@@ -79,9 +84,9 @@ different questions, and a build that means one must not quietly get another:
 
   * `-L` is what libFLAC is asked to use, and the profile limit against which
     real subframe orders are checked. "Outside the encode profile we asked for."
-    Asking for `-l 4` at a rate where the measured row is over budget is refused
-    by `preflight` before a single byte is encoded — the request itself is the
-    thing that cannot be satisfied on this target.
+    Asking for `-l 4` at the product block size is refused by `preflight` before a
+    single byte is encoded — the request itself is the thing that cannot be
+    satisfied on this target.
   * `--allow-unmeasured` is for a predictor kind this table has no row for, or a
     residual shape outside the envelope its row was measured on. Unmeasured is not
     the same as safe; the plan says so, so the default is to refuse and name the
@@ -147,12 +152,15 @@ BPS_ALLOWED = (16,)
 
 # ---------------------------------------------------------------- the profile
 #
-# `EncodeProfile` in `crates/flac-lite/src/format.rs` is the same object: allowed
-# block sizes, allowed bit depths, a maximum predictor order, and whether full LPC
-# is permitted at all. `Manifest::validate`/`EncodeProfile::validate` can only
+# `EncodeProfile` in `crates/flac-lite/src/format.rs` is the same object: the
+# sample rates it accepts, allowed block sizes, allowed bit depths, a maximum
+# predictor order, and whether full LPC is permitted at all. Since 7-0 the Rust
+# half states the rate too, and this file's `Profile.rate` is checked against the
+# clock it budgets against (`PRODUCT_CLOCK_HZ`) rather than being a knob that can
+# be pointed anywhere. `Manifest::validate`/`EncodeProfile::validate` can only
 # check header fields. This file can also see the frames, so the profile guard
 # lives here — and the measured half of it has to live here, because the cost of
-# a predictor kind at a sample rate is a hardware fact, not a decoder fact.
+# a predictor shape is a hardware fact, not a decoder fact.
 #
 # Why the header field is not the guard
 # -------------------------------------
@@ -173,11 +181,38 @@ BPS_ALLOWED = (16,)
 # What is allowed, and on what evidence
 # ------------------------------------
 # `MEASURED_DECODE` below records decode cost *as measured on GBA hardware* for a
-# specific (stream rate, block size, predictor kind/order) configuration, as a
-# share of the frame it has to fit in. The guard has three verdicts, and the
-# third one is not a permission: a configuration with no measured row is refused
-# too, because "not yet measured" is not "fits". `--allow-unmeasured` says
-# otherwise out loud, and the output is then reported as a NON-PRODUCT blob.
+# structural configuration — block size, predictor kind/order, and the residual
+# envelope the row was measured on — as a share of the frame that configuration
+# has to fit in. The guard has three verdicts, and the third one is not a
+# permission: a configuration with no measured row is refused too, because "not yet
+# measured" is not "fits". `--allow-unmeasured` says otherwise out loud, and the
+# output is then reported as a NON-PRODUCT blob.
+#
+# Why the key is not the sample rate (Q14, plan item 7-0)
+# ------------------------------------------------------
+# Until 7-0 these rows were keyed `(stream rate, block size, kind, order)` while
+# the frame budget was computed from the *playback* rate. The two halves of one
+# inequality were keyed on different quantities, and asking "does 32,768 Hz fit?"
+# had no answer — the row said unmeasured, the budget said a number. Measured, in
+# `examples/flac_spike/experiments/rate-respell-32768/probe.py`: respelling the
+# shipped frames' rate code with no residual changed costs decode **−20 cycles per
+# frame out of ~426,000**, which is 0.005% and under the instrument's floor. What
+# costs what it costs is the block size, the predictor and the residual walk.
+#
+# So the key here is now structural, and the declared rate is a **validity
+# check**, asked separately in `profile_verdict`: a stream may be packed only if it
+# declares the clock this file budgets against. That is the whole of Q14's ruling
+# as seen from the packer — it is what makes the cost table rate-free *safe*, and
+# it is why deleting the rate from the key does not silently widen anything: every
+# blob that reaches a row has already been checked to declare the row's clock.
+#
+# One consequence worth stating rather than hiding: the FIXED-0 row below was
+# measured on the *previous* asset's frames, and a structurally identical new
+# asset therefore inherits it. That inheritance is the cost model's claim, not a
+# measurement of the new bytes, so each row names the frames it was measured on
+# (`frames_sha256`) and `profile_verdict` says out loud, in the report and in the
+# facts table, when the blob being packed is not those frames. Plan item 7-1 owns
+# the row measured on the frames 7-0 produced.
 #
 # The rows are FIXED-0 and LPC-4 only. `-l 0` disables LPC, not libFLAC's FIXED
 # order choice: FIXED-1..4 have no row and are refused. Each row also states the
@@ -194,16 +229,28 @@ BPS_ALLOWED = (16,)
 # facade.
 
 MEASURED_DECODE = {
-    # (stream rate, blocksize, kind, order) -> the decode half of one frame,
-    # measured on hardware, as a share of the frame period the hardware gives it
+    # (blocksize, kind, order) -> the decode half of one frame, measured on
+    # hardware, as a share of the frame period the hardware gives it
     # (`frame_budget_cycles` below — the row's own `budget_cycles` is there so the
     # share arithmetic is checkable, and `check_rows()` re-derives it on every
-    # run).
-    (32000, 2048, "fixed", 0): dict(
+    # run). The rate is NOT part of this key: see "Why the key is not the sample
+    # rate" above. A row is valid only for its block size, its predictor
+    # kind/order and the residual envelope recorded in it — and only for frames
+    # like the ones it names in `frames_sha256`.
+    (2048, "fixed", 0): dict(
         mean_pct=42.48,
         worst_pct=42.72,
         cycles_mean=445558,
         budget_cycles=1048576,
+        # The frames this figure was taken from: the perf spike's FIXED-only arm
+        # as it stood before plan item 7-0 re-authored the clip at the device
+        # rate (157 frames, 314 slots, `fixed0` x314, a 512-sample final frame).
+        # `profile_verdict` compares the blob it is about to pack against this and
+        # says in the report when the bytes are not these.
+        frames_sha256=("3bcf47a6dca1c53867d017f27dc97b4e6bf71a70c9e9d5407f5f"
+                       "987a484c7f21"),
+        frames_note=("examples/flac_spike/assets/spike_l0_frames.bin as of the "
+                     "commit before plan item 7-0 (the 32,000 Hz-era clip)"),
         # The residual envelope this row was measured on: one partition, no
         # wasted bits, no escape partition, and Rice parameters no larger than
         # 10. The predictor kind/order alone is not enough to inherit a decode
@@ -219,13 +266,20 @@ MEASURED_DECODE = {
              "= 217.56 c/sample, 42.48% mean / 42.72% worst of the 32,768 Hz "
              "frame. Kernel-only: the 6b-1 product ROM measures the same clip "
              "end to end at 37.83% mean / 38.04% worst through the manifest "
-             "facade, and both figures are inside the bar this module states."),
+             "facade, and both figures are inside the bar this module states. "
+             "The frames measured are named by `frames_sha256`; a different "
+             "asset at this structural key inherits the figure, and 7-1 owns "
+             "the row measured on the frames 7-0 produced."),
     ),
-    (32000, 2048, "lpc", 4): dict(
+    (2048, "lpc", 4): dict(
         mean_pct=173.23,
         worst_pct=174.14,
         cycles_mean=1816753,
         budget_cycles=1048576,
+        frames_sha256=("6609602ba18860e6562c86594b6b56c4e434749623f731114e8a"
+                       "602444367cc5"),
+        frames_note=("examples/flac_spike/assets/spike_l4_frames.bin as of the "
+                     "commit before plan item 7-0 (the 32,000 Hz-era clip)"),
         residual=dict(partitions_max=1, wasted_max=0, escaped_max=0,
                       rice_param_max=10),
         src=("flac-docs/measurements.md, 6a-7b on hardware, `asm` arm, same "
@@ -240,9 +294,11 @@ MEASURED_DECODE = {
 # A transcription slip in a row like these is the failure mode that matters, so
 # every row is re-derived at run time: `cycles_mean / budget_cycles` must land on
 # `mean_pct`. It is not a hypothetical guard — writing this file got the
-# denominator wrong on the first pass (32,000 Hz gives 1,073,742 cycles at this
-# script's clock, against 1,048,576 for the 32,768 Hz timer the product uses: a
-# 2.4% difference, enough to move 42.49% to 41.49% and hide nothing). Percent.
+# denominator wrong on the first pass (a 32,000 Hz frame period is 1,073,742
+# cycles at this script's clock, against 1,048,576 for the 32,768 Hz timer the
+# product plays against: a 2.4% difference, enough to move 42.49% to 41.49% and
+# hide nothing). That is exactly why the denominator is now stated once, as a
+# clock, and is not derived from the stream that is being packed. Percent.
 #
 # One honest caveat about the tolerance below: this file budgets with the exact
 # 2^24 Hz clock, while the instrument budgets with `stats.rs::GBA_CLOCK_HZ =
@@ -265,50 +321,57 @@ ROW_CONSISTENCY_TOLERANCE_PCT = 0.1
 # this bar is a necessary, not a sufficient, condition for C2.
 DECODE_SHARE_LIMIT_PCT = 50.0
 
-# What a "frame" is in cycles. The GBA's clock is exactly 2^24 = 16,777,216
-# cycles/s — the rounded "16.78 MHz" that `stats.rs::GBA_CLOCK_HZ` budgets with
-# is 0.0166% wider, see the note on the tolerance above — and a frame of
-# `blocksize` samples at a playback rate of `r` is `blocksize / r` seconds, i.e.
-# 2^24 * blocksize / r cycles.
+# What a "frame" is in cycles, and the single clock it is measured in. The GBA's
+# clock is exactly 2^24 = 16,777,216 cycles/s — the rounded "16.78 MHz" that
+# `stats.rs::GBA_CLOCK_HZ` budgets with is 0.0166% wider, see the note on the
+# tolerance above — and a frame of `blocksize` samples at the playback rate is
+# `blocksize / r` seconds, i.e. 2^24 * blocksize / r cycles.
 #
-# The playback rate is not the stream rate, and for the one configuration that
-# has a measured C2 path they differ: a 32,000 Hz asset is played by the product
-# path on a 32,768 Hz timer, whose frame period is 2^20 = 1,048,576 cycles —
-# 2.4% *tighter* than the stream's own period of 1,073,742. Every percentage in
-# flac-docs/measurements.md for the C2 clip is stated *at* 32,768 Hz for exactly
-# that reason, and divided by the rounded-clock budget, which is 174 cycles
-# looser; the rate is the shared thing, the denominator is the one this script
-# has to state for itself. How samples are paced across that difference is item
-# 7-1's measurement, not a pack-time question. A stream rate with no entry here
-# is budgeted at its own rate — and has no measured row either, so it is refused
-# as unmeasured anyway.
+# There is one playback rate in the product path, and it is a constant:
+# `agb::mixer::SoundDriver::SAMPLE_RATE`, mirrored by
+# `examples/flac_integration/src/geometry.rs::PLAYBACK_RATE_HZ`. Q14 (ruled
+# 2026-11-11) is what lets this file say so: a stream is encoded at the rate it
+# is played at, so the rate a blob declares is the rate its frames are budgeted
+# against, and no arithmetic ever needs the two to be reconciled. The rate is
+# therefore a *validity check* in `profile_verdict` — "does this stream declare
+# the clock these rows are stated in?" — and never a lookup that picks a
+# different clock for a stream that declares something else.
 GBA_CYCLES_PER_SECOND = 16777216
-# `TODO(Q14, BLOCKING)` — ruled 2026-11-11 by the project owner: a stream is encoded at
-# the rate it will be played at, and the player does not reinterpret a declared rate to
-# fit the clock. This entry is 6b-3's measurement bridge (1.024x = +41.06 cents of
-# pitch), **not** a product path: it comes out when the asset is encoded at 32,768 Hz
-# (plan item 7-0). The player's half of the same bridge is `geometry::RATE_BRIDGE`,
-# which 7-0 sets to `None`; this table loses its entry in the same change, and the
-# identity mapping is all that should remain here. Until that
-# exists, a 32,768 Hz asset packs only under `--allow-unmeasured`, because
-# `MEASURED_DECODE` holds no row keyed `(32768, 2048, ...)` — and that row is 7-1's
-# hardware read, not a number this script may invent.
-# The keys are *declared stream* rates, not agb's three *playback* rates
-# (10,512 / 18,157 / 32,768; the product geometry is 32,768). A stream may
-# declare any FLAC table rate or a 16-bit Hz value. The Q14 sweep is over that
-# declarable set (0..=65535 plus the table), which is cheap; 7-0 replaces this
-# table with identity-or-refusal. The player is already stricter than this
-# fallback: `geometry::playback_rate_for_stream` refuses every unlisted rate.
-PLAYBACK_RATE_FOR_STREAM = {32000: 32768}
+PRODUCT_CLOCK_HZ = 32768
+
+# Rate reinterpretations this packer is willing to perform. After Q14 there are
+# none, and the table exists only to say that in one place: it must stay empty.
+# Every entry was a pitch shift — the one entry this table ever carried mapped a
+# 32,000 Hz stream onto a 32,768 Hz timer, which is 1.024x, 41.06 cents sharp,
+# and it is the reason plan item 7-0 exists. A stream that declares any other
+# rate is refused by the profile check below; `crates/flac-lite`'s player is
+# already stricter (`geometry::playback_rate_for_stream` refuses every unlisted
+# rate), and `geometry::RATE_BRIDGE` is now `None` for the same reason.
+#
+# The keys of the old table were *declared stream* rates — any FLAC table rate or
+# 16-bit Hz value in 0..=65535 — and the Q14 sweep ran over that set, which is
+# cheap to enumerate. Identity-or-refusal is all that remains.
+PLAYBACK_RATE_FOR_STREAM = {}
 
 
 def playback_rate(stream_rate):
+    """The rate a declared stream would actually be played at. Identity, always:
+    the table above is empty by ruling, and an entry reappearing here would be a
+    new pitch shift, which is the thing Q14 forbids."""
     return PLAYBACK_RATE_FOR_STREAM.get(stream_rate, stream_rate)
 
 
-def frame_budget_cycles(stream_rate, blocksize):
-    return int(round(GBA_CYCLES_PER_SECOND * blocksize
-                     / playback_rate(stream_rate)))
+def frame_budget_cycles(blocksize):
+    """The frame period, in cycles, that the product's timer gives a
+    `blocksize`-sample frame. Stated in exactly one clock — see PRODUCT_CLOCK_HZ.
+    The stream being packed does not get to choose it; `profile_verdict` refuses a
+    stream that declares a different one."""
+    return int(round(GBA_CYCLES_PER_SECOND * blocksize / PRODUCT_CLOCK_HZ))
+
+
+def frames_digest(region):
+    """The identity of a set of frames, for `frames_sha256` provenance."""
+    return hashlib.sha256(region).hexdigest()
 
 
 def check_rows():
@@ -322,31 +385,41 @@ def check_rows():
             bad.append("%s: %.2f cycles / %d cycles = %.2f%%, but the row says "
                        "%.2f%%" % (key, row["cycles_mean"], row["budget_cycles"],
                                    derived, row["mean_pct"]))
-        if row["budget_cycles"] != frame_budget_cycles(key[0], key[1]):
+        if row["budget_cycles"] != frame_budget_cycles(key[0]):
             bad.append("%s: cites %d cycles, this target's frame period is %d"
-                       % (key, row["budget_cycles"],
-                          frame_budget_cycles(key[0], key[1])))
+                       % (key, row["budget_cycles"], frame_budget_cycles(key[0])))
     return bad
 
 
 def check_guard_shapes():
-    """Prove the guard's FIXED-0 and residual-envelope decisions without an
+    """Prove the guard's FIXED-0, residual-envelope and rate decisions without an
     encoder. This is a self-check, not a substitute for a hardware row: it asserts
     the *policy* that has no measured figure yet — FIXED-1..4 and shapes outside
-    the measured envelope must be refused, while the measured FIXED-0 shape must
-    be accepted — so a later edit cannot silently widen the guard."""
-    info = {"sample_rate": 32000, "bits-per-sample": 16, "channels": 2,
-            "maximum blocksize": 2048, "total samples": 2048}
+    the measured envelope must be refused, as must any stream that does not
+    declare the clock these rows are stated in — so a later edit cannot silently
+    widen the guard."""
     profile = Profile()
+    # The rate this self-check runs at is read from the profile, never written
+    # here. A literal 32,000 in a guard self-check is how the packer came to be
+    # checking a rate it no longer packs at.
+    rate = profile.rate
+    assert rate == PRODUCT_CLOCK_HZ, (
+        "the default profile's rate (%d Hz) must be the clock the frame budget is "
+        "stated in (%d Hz) — the packer cannot guard a rate it does not budget "
+        "against" % (rate, PRODUCT_CLOCK_HZ))
+    info = {"sample_rate": rate, "bits-per-sample": 16, "channels": 2,
+            "maximum blocksize": 2048, "total samples": 2048}
 
     def slot(kind, order, partitions=1, wasted=0, escaped=0, rice=10):
         return dict(kind=kind, order=order, partitions=partitions,
                     wasted=wasted, escaped=escaped, max_rice_param=rice)
 
-    def verdict(s):
-        frame = dict(number=0, blocksize=2048, rate=32000, channels=2,
+    def verdict(s, at=rate):
+        at_info = dict(info)
+        at_info["sample_rate"] = at
+        frame = dict(number=0, blocksize=2048, rate=at, channels=2,
                      crc_ok=True, subframes=[s])
-        return profile_verdict(info, [frame], profile)
+        return profile_verdict(at_info, [frame], profile)
 
     ok, reasons, _ = verdict(slot("fixed", 0))
     assert ok, "the measured FIXED-0 shape must stay accepted: %s" % reasons
@@ -365,12 +438,31 @@ def check_guard_shapes():
         assert not ok and any(needle in r for r in reasons), \
             "%s should be refused with %r, got %s" % (name, needle, reasons)
 
+    # The rate legs. A stream that declares another rate is refused on the ruling,
+    # not budgeted at a different clock — including 32,000 Hz, the rate every
+    # asset in this tree carried until 7-0, and including the powers of two that
+    # divide the clock exactly (8,192 / 16,384 / 65,536), which are arithmetically
+    # clean and still refused: the rule is about the declared rate, not about
+    # which division happens to be exact.
+    for other in (8000, 8192, 11025, 16000, 16384, 22050, 24000, 31000, 32000,
+                  32001, 44100, 48000, 65536):
+        ok, reasons, _ = verdict(slot("fixed", 0), at=other)
+        assert not ok and any("is not the target" in r for r in reasons), \
+            "a %d Hz stream must be refused by the rate clause, got %s" % (
+                other, reasons)
+    # …and the cost key must not be the rate: the same shape at the same block
+    # size finds the same row whatever the stream would have declared, so the
+    # refusal above is the only thing a wrong rate can do.
+    row, _ = nearest_measured(PRODUCT_CLOCK_HZ, 2048, "fixed", 0)
+    assert row is not None and row[0] == 2048 and row[1:] == ("fixed", 0), \
+        "the measured rows must be keyed structurally, not by rate"
+
 
 # Sample rates the container may carry, and the reason 44,100 is not among the
-# ones the packer will build a product blob at: `crates/flac-lite` implements the
-# eight standard 4-bit rate codes, and the 32 kHz target is the only one with a
-# measured C2 path. A rate outside `MEASURED_DECODE` is refused as unmeasured.
-DEFAULT_RATE = 32000
+# ones the packer will build a product blob at: the product plays at one rate, and
+# Q14's ruling is that a stream declares it. A rate outside that is refused before
+# any cost question is asked.
+DEFAULT_RATE = PRODUCT_CLOCK_HZ
 DEFAULT_BLOCKSIZE = 2048
 DEFAULT_MAX_LPC_ORDER = 0
 BLOCKSIZES_ALLOWED = (1024, 2048)
@@ -710,21 +802,30 @@ def residual_census(facts):
 
 def nearest_measured(rate, blocksize, kind, order):
     """The closest measured row, so a refusal names the figure a reader would
-    compare with: same rate and block size first, then the same predictor kind,
-    then the nearest order."""
+    compare with: same block size first, then the same predictor kind, then the
+    nearest order. The rate is not part of this search because it is not part of
+    the key; the argument is kept (and ignored) so the call sites read the same
+    way they always did — "what is the nearest thing to what this asset asks
+    for?"."""
     def score(row_key):
-        mr, mb, mk, mo = row_key
-        return (0 if mr == rate else 1,
-                0 if mb == blocksize else 1,
+        mb, mk, mo = row_key
+        return (0 if mb == blocksize else 1,
                 0 if mk == kind else 1,
                 abs(mo - order))
     best = min(MEASURED_DECODE, key=score) if MEASURED_DECODE else None
     return (best, MEASURED_DECODE[best]) if best else (None, None)
 
 
-def profile_verdict(info, facts, profile):
+def profile_verdict(info, facts, profile, region_sha=None):
     """Return (ok, reasons, report). Fail-closed: an unrecognised shape is a
-    reason, not a permission."""
+    reason, not a permission.
+
+    `region_sha` is the digest of the frame region about to be packed, when the
+    caller has one. It is used only for provenance: each measured row names the
+    frames its figure was measured on, and when the bytes in front of the guard
+    are not those frames the report says so plainly. That is the difference
+    between "this shape is measured" and "these bytes are measured", and after
+    7-0 the two are no longer the same statement."""
     reasons = []
     report = []
     census = frame_census(facts)
@@ -735,8 +836,15 @@ def profile_verdict(info, facts, profile):
         reasons.append(msg)
 
     if info["sample_rate"] != profile.rate:
-        bad("sample rate %d Hz is not the target %d Hz"
-            % (info["sample_rate"], profile.rate))
+        bad("sample rate %d Hz is not the target %d Hz. Q14 (plan-of-record, "
+            "ruled 2026-11-11): a stream is encoded at the rate it is played at, "
+            "and this packer does not reinterpret a declared rate to fit the "
+            "clock — the only reinterpretation it ever carried, 32,000 Hz onto a "
+            "32,768 Hz timer, is 1.024x, 41.06 cents sharp. The declared rate is "
+            "also the clock every figure in MEASURED_DECODE is stated in, so a "
+            "stream that declares another rate has no frame period to be measured "
+            "against; re-encode it at %d Hz, or it is not a product asset."
+            % (info["sample_rate"], profile.rate, profile.rate))
     if info["bits-per-sample"] not in BPS_ALLOWED:
         bad("bits per sample %d is outside the container's %s"
             % (info["bits-per-sample"], list(BPS_ALLOWED)))
@@ -755,7 +863,11 @@ def profile_verdict(info, facts, profile):
             % (max(blocks), profile.blocksize))
     for f in frames:
         if f["rate"] != profile.rate:
-            bad("frame %d resolves a sample rate of %d Hz, not %d"
+            bad("frame %d resolves a sample rate of %d Hz, not the %d Hz the "
+                "stream was accepted at — a frame's 4-bit rate code is part of "
+                "the bytes being packed, so a stream whose frames disagree with "
+                "its own STREAMINFO is not the stream this profile was asked "
+                "about (the 6b-3 respell trap)"
                 % (f["number"], f["rate"], profile.rate))
         if f["channels"] != info["channels"]:
             bad("frame %d carries %d subframes, the track has %d channels"
@@ -771,11 +883,14 @@ def profile_verdict(info, facts, profile):
         bad("block size %d is outside the container contract %s"
             % (info["maximum blocksize"], list(BLOCKSIZES_ALLOWED)))
 
-    # The predictor question, asked of the frames rather than of the header.
-    budget = frame_budget_cycles(profile.rate, profile.blocksize)
-    timer = playback_rate(profile.rate)
+    # The predictor question, asked of the frames rather than of the header. The
+    # frame budget comes from the one clock (PRODUCT_CLOCK_HZ), never from the
+    # stream: the rate leg above is what makes that safe, and `timer` exists only
+    # to say in the report that the two are the same number now.
+    budget = frame_budget_cycles(profile.blocksize)
+    timer = playback_rate(info["sample_rate"])
     for (kind, order), count in sorted(census.items()):
-        row = MEASURED_DECODE.get((profile.rate, profile.blocksize, kind, order))
+        row = MEASURED_DECODE.get((profile.blocksize, kind, order))
         label = "%s%s" % (kind, order if kind in ("fixed", "lpc") else "")
         if kind == "lpc" and not profile.allow_lpc and order > profile.max_lpc_order:
             bad("real LPC subframes (order %d) x%d: `-l %d` is the maximum LPC "
@@ -785,15 +900,14 @@ def profile_verdict(info, facts, profile):
             if not profile.allow_unmeasured:
                 near_key, nrow = nearest_measured(
                     profile.rate, profile.blocksize, kind, order)
-                hint = ("no measured decode figure for (%d Hz, %d-sample frames, "
-                        "%s)" % (profile.rate, profile.blocksize, label))
+                hint = ("no measured decode figure for (%d-sample frames, "
+                        "%s)" % (profile.blocksize, label))
                 if nrow:
-                    hint += (" — the nearest measured row is (%d Hz, %d, %s, "
-                             "order %d): %.2f%% mean, %.2f%% worst, cited in "
+                    hint += (" — the nearest measured row is (%d-sample frames, "
+                             "%s, order %d): %.2f%% mean, %.2f%% worst, cited in "
                              "flac-docs/measurements.md"
                              % (near_key[0], near_key[1], near_key[2],
-                                near_key[3], nrow["mean_pct"],
-                                nrow["worst_pct"]))
+                                nrow["mean_pct"], nrow["worst_pct"]))
                 if kind == "fixed" and order > 0:
                     hint += (". FIXED orders 1-4 are not measured at this target: "
                              "`-l 0` disables LPC but does not force libFLAC's "
@@ -802,10 +916,10 @@ def profile_verdict(info, facts, profile):
                 bad("%s x%d: %s; measure it or pass --allow-unmeasured"
                     % (label, count, hint))
             else:
-                report.append("%s x%d: UNMEASURED at %d Hz/%d — accepted only "
-                              "because --allow-unmeasured was passed; this is "
-                              "NOT a product blob" % (label, count, profile.rate,
-                                                      profile.blocksize))
+                report.append("%s x%d: UNMEASURED at %d-sample frames — accepted "
+                              "only because --allow-unmeasured was passed; this "
+                              "is NOT a product blob"
+                              % (label, count, profile.blocksize))
             continue
         # A measured row is valid only for the residual shape it was measured
         # on. `row["residual"]` is the envelope from the clip in the row's
@@ -843,14 +957,31 @@ def profile_verdict(info, facts, profile):
                 else:
                     bad(msg)
         verdict = ("measured %.2f%% mean / %.2f%% worst of the %d-cycle frame "
-                   "(%d cycles for %d samples at the %d Hz playback timer, for a "
-                   "%d Hz stream) — %s"
+                   "(%d cycles for %d samples at the %d Hz playback timer; the "
+                   "stream declares %d Hz, which is that clock, and the figure is "
+                   "keyed to the shape rather than the rate) — %s"
                    % (row["mean_pct"], row["worst_pct"], row["budget_cycles"],
                       row["cycles_mean"], profile.blocksize, timer,
-                      profile.rate, row["src"]))
+                      info["sample_rate"], row["src"]))
         if row["budget_cycles"] != budget:
             bad("internal: row for %s cites %d cycles, this target's frame "
                 "period is %d" % (label, row["budget_cycles"], budget))
+        # Provenance, stated rather than implied: the row is a fact about the
+        # frames it names. Inheriting it across a *re-authored asset* is exactly
+        # the claim the structural key makes, and it is the claim plan item 7-1
+        # has to discharge by measuring the new frames on hardware.
+        measured_frames = row.get("frames_sha256")
+        if measured_frames and region_sha and region_sha != measured_frames:
+            report.append(
+                "%s x%d: PROVENANCE — the measured figure quoted for this shape "
+                "was taken on a different set of frames: sha256 %s (%s). This "
+                "blob's frame region hashes to sha256 %s. The row applies by "
+                "structure (block size, predictor kind/order, residual envelope), "
+                "which is the cost model plan item 7-0 adopted; it is NOT a "
+                "measurement of these bytes, and plan item 7-1 owns the hardware "
+                "row measured on them."
+                % (label, count, measured_frames, row.get("frames_note", ""),
+                   region_sha))
         if row["worst_pct"] > DECODE_SHARE_LIMIT_PCT:
             if not profile.allow_over_budget:
                 bad("the asset uses %s x%d, and that predictor at this target "
@@ -880,21 +1011,21 @@ def preflight(profile):
         raise SystemExit("gafp_pack: %d channels is outside the container's %s"
                          % (profile.channels, list(CHANNELS_ALLOWED)))
     if (profile.max_lpc_order > 0 and not profile.allow_lpc
-            and (profile.rate, profile.blocksize, "lpc",
+            and (profile.blocksize, "lpc",
                  profile.max_lpc_order) in MEASURED_DECODE):
-        row = MEASURED_DECODE[(profile.rate, profile.blocksize, "lpc",
+        row = MEASURED_DECODE[(profile.blocksize, "lpc",
                               profile.max_lpc_order)]
         raise SystemExit(
             "gafp_pack: refusing to build this profile at all: `-l %d` means the "
-            "encode may emit real LPC subframes, and LPC at %d Hz with %d-sample "
-            "frames measures %.2f%% mean / %.2f%% worst of the frame on hardware "
+            "encode may emit real LPC subframes, and LPC at %d-sample frames "
+            "measures %.2f%% mean / %.2f%% worst of the frame on hardware "
             "— decode alone, before the producer's other stages. FIXED-only is "
             "`-l 0`, but the measured product row is FIXED-0: `-l 0` disables "
             "LPC, not libFLAC's FIXED order choice. Pass --allow-lpc to build a "
             "NON-PRODUCT blob anyway, and note that a kind measured over the "
             "decode-half bar needs --allow-over-budget as well: the profile limit "
             "and the measured cost are different questions."
-            % (profile.max_lpc_order, profile.rate, profile.blocksize,
+            % (profile.max_lpc_order, profile.blocksize,
                row["mean_pct"], row["worst_pct"]))
 
 
@@ -1266,7 +1397,9 @@ def main(argv):
         print("gafp_pack: predictor census: %s"
               % ", ".join("%s%s x%d" % (k, o if k in ("fixed", "lpc") else "", c)
                           for (k, o), c in sorted(census.items())))
-        ok, reasons, report = profile_verdict(info, facts, profile)
+        ok, reasons, report = profile_verdict(
+            info, facts, profile,
+            region_sha=frames_digest(data[facts[0]["offset"]:]))
         for r in report:
             print("gafp_pack: note: %s" % r)
         if not ok:

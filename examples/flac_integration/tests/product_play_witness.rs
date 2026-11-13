@@ -108,7 +108,7 @@ use flac_lite::{Decoder, FrameBuffers, Manifest};
 use flac_integration::checksum::{Fnv1a64, fold_i16le_stereo};
 use flac_integration::gafp_pin;
 use flac_integration::geometry as geo;
-use flac_integration::playback::{Chunk, RingFeed, convert_frame, fold_bytes};
+use flac_integration::playback::{Chunk, RingFeed, convert_frame, fifo_byte, fold_bytes};
 
 /// The shipped product asset, read from this crate's own `assets/` — the same
 /// bytes `gafp-check` guards, `flac-rom` embeds and `product-play-rom` plays. Not
@@ -596,37 +596,44 @@ fn manifest_and_geometry_agree() {
         "2048-sample frames at 32,768 Hz must come to exactly 2^20 cycles, which is what every published share at this rate is divided by"
     );
 
-    // The rate mapping is the packer's, and its consequence is arithmetic: the
-    // frames were encoded for a 32,000 Hz stream and are played against a 32,768 Hz
-    // clock, so the budget the player enforces is the *shorter* one. Both numbers
-    // are printed because that 2.4% is the price of the mapping and belongs in the
-    // open, not in a footnote. The mapping itself is **`TODO(Q14, BLOCKING)`** —
-    // ruled not a product path on 2026-11-11 because the other price it takes is 41
-    // cents of pitch (`ruled_rate_policy_allows_one_bridge_and_no_more` below, and
-    // `src/geometry.rs`); what this test models is the geometry, which survives the
-    // ruling unchanged.
+    // The rate contract, witnessed against the asset rather than assumed by the
+    // geometry: the blob declares the clock this file budgets against, so the
+    // stream's own nominal frame period and the player's frame budget are the same
+    // number. Under the bridge this test used to sit behind, the two differed by
+    // 2.4% and the assert here was `budget < nominal` — a sentence about a mapping,
+    // not about a contract. Q14 ruled the mapping out (2026-11-11), plan item 7-0
+    // removed it, and what is left to check is stricter: equality in both the rate
+    // and the period it implies. A blob on any other rate never reaches here — the
+    // packer refuses to write one and the ROM refuses to play one — and
+    // `ruled_rate_policy_*` below is where the refusal side is swept.
     let declared = manifest.sample_rate_hz();
-    let mapped = geo::playback_rate_for_stream(declared)
-        .expect("the packer's table must cover the rate the packer wrote");
-    assert_eq!(mapped, geo::PLAYBACK_RATE_HZ);
+    let played = geo::playback_rate_for_stream(declared)
+        .expect("the product asset must declare a rate the player accepts as-is");
+    assert_eq!(
+        declared,
+        geo::PLAYBACK_RATE_HZ,
+        "the shipped asset must declare the product clock it is played at (Q14)"
+    );
+    assert_eq!(played, declared, "identity is the only mapping left");
     let nominal = geo::MIXER_TICK_HZ as u64 * block / u64::from(declared);
     let budget = u64::from(geo::frame_cycles(u32::from(manifest.blocksize())));
-    assert!(
-        budget < nominal,
-        "playing a {} Hz stream at {} Hz must make the budget tighter, not looser",
-        declared,
-        mapped
+    assert_eq!(
+        budget, nominal,
+        "the frame the player budgets must be the frame the stream was made for: \
+         a {} Hz stream's own {}-sample period is {} c and the player's budget is {} c",
+        declared, block, nominal, budget
     );
     println!(
-        "model/asset: {} frames of {}, {} samples; declared {} Hz -> played at {} Hz; the stream's own nominal frame period is {} c, the player's budget is {} c (the mapping costs {:.3}% of the producer's time)",
+        "model/asset: {} frames of {}, {} samples ({:.3} s at {} Hz); declared {} Hz, played at {} Hz; \
+         the stream's own nominal frame period and the player's budget are both {} c",
         manifest.frame_count(),
         manifest.blocksize(),
         manifest.total_samples(),
+        manifest.total_samples() as f64 / declared as f64,
         declared,
-        mapped,
-        nominal,
-        budget,
-        (nominal - budget) as f64 * 100.0 / nominal as f64
+        declared,
+        played,
+        budget
     );
 
     // The one ring arithmetic the geometry must never get wrong, and which is not
@@ -1429,43 +1436,50 @@ fn sizing_scans_for_both_geometry_knobs() {
     }
 }
 
-/// The stream rates a **product** asset may declare. The 32,000 bridge is deliberately
-/// absent from it: 7-0 adds 32,768 here and sets `geometry::RATE_BRIDGE` to `None`, in
-/// either order — the assert below is red if only one of the two lands. Written as an
-/// allow-list rather than a `!=` so that the flip is one line in one place, not a red
-/// test somebody deletes in a hurry.
+/// The stream rates a **product** asset may declare: exactly one, and it is the
+/// clock everything else in this path uses. Until plan item 7-0 this list named no
+/// product rate at all, because the shipped asset needed a mapping to be played; it
+/// now states the end of the rule rather than the interim. Written as an allow-list
+/// rather than a `!=` so that widening it is a decision somebody has to make in one
+/// place, with a red test next to it.
 const PRODUCT_STREAM_RATES: &[u32] = &[geo::PLAYBACK_RATE_HZ];
 
-/// The one bridge on record, as `(declared, played)` — independent of whether the tree
-/// still carries it.
+/// The one bridge that was ever carried here, as `(declared, played)` — kept
+/// whether or not the tree still carries it.
 ///
-/// Deliberately a literal rather than a read of `geometry::RATE_BRIDGE`: the cents below
-/// are a fact about the asset that was measured on 2026-11-11, and the pin has to survive
-/// 7-0 deleting the mapping, or the number that says *why* the ruling was made would
-/// disappear with the arm.
+/// Deliberately a literal rather than a read of `geometry::RATE_BRIDGE`, which is
+/// `None`: the cents below are a fact about the asset that was measured on
+/// 2026-11-11, and the pin has to outlive the deletion of the mapping, or the
+/// number that says *why* the ruling was made would disappear with the arm. It is a
+/// historical record, not a permitted pair: the assert below demands the tree refuse
+/// this exact declaration outright.
 const RECORDED_BRIDGE: (u32, u32) = (32_000, geo::PLAYBACK_RATE_HZ);
 
-/// Q14, **ruled** by the project owner on 2026-11-11: a stream is encoded at the rate
-/// it is played at, and the player does not reinterpret a declared rate to fit a
-/// clock — the 1.024× that the shipped asset buys is not acceptable in itself, however
-/// clean the run. The asset in `assets/` predates the ruling, so this test does not
-/// assert compliance. It does three other things: it pins the *size* of the violation
-/// in cents, computed here rather than quoted from prose; it refuses every rate
-/// reinterpretation except the one bridge that is on record; and it states which
-/// asset in this tree is the disqualified one.
+/// Q14, **ruled** by the project owner on 2026-11-11 and **landed by plan item
+/// 7-0**: a stream is encoded at the rate it is played at, and the player does not
+/// reinterpret a declared rate to fit a clock. What that policy is made of here, in
+/// one test:
 ///
-/// **`TODO(Q14, BLOCKING)`** — when the 32,768 Hz product asset lands (plan item 7-0),
-/// `geometry::RATE_BRIDGE` becomes `None` and `32_768` joins `PRODUCT_STREAM_RATES`
-/// above; what remains is the identity rule alone. The guard is one condition,
-/// `declared_allowed == bridge_is_gone`, so it is **green in both end states** — the
-/// shipped, disqualified one and the completed 7-0 one — and red only if 7-0 lands
-/// half-way (an asset on the allow-list while a bridge still maps, or the bridge gone
-/// with nothing on the allow-list). Nothing here has to be deleted in a hurry to make
-/// 7-0 green: the bridge's presence is *read* from `geometry::RATE_BRIDGE` rather than
-/// unwrapped out of the mapping, and the cents are pinned against `RECORDED_BRIDGE`,
-/// which does not move when the tree does.
+/// * the identity case, and the identity case alone, is accepted — including every
+///   rate that looks arithmetically tempting, which are refused by name;
+/// * the tree carries **no** bridge, and if a future edit adds one it must be
+///   read from `geometry::RATE_BRIDGE` rather than inferred from the mapping, so
+///   the constant and the function cannot drift apart; a *second* pair is a second
+///   pitch shift, which the ruling forbids on its size, not its direction;
+/// * the size of what the removed mapping cost is pinned in cents, computed here
+///   rather than quoted from prose, and cross-checked against the pitch witness
+///   (`pitch_witness_*` below) — which is the instrument that would have caught it,
+///   and which is the reason this test no longer has to be the only one holding the
+///   line;
+/// * and the asset in this tree is **on** the rule, asserted as a fact: it declares
+///   the product clock, it needs no reinterpretation, and the allow-list covers it;
+/// * and the crate-side half of the rule — the rate clause `EncodeProfile` gained in
+///   7-0, which every build that validates a manifest reads — names that same one
+///   rate and no other. The profile and the mixer are one fact in two crates, so
+///   their equality is asserted here rather than left to a start-up failure on
+///   hardware.
 #[test]
-fn ruled_rate_policy_allows_one_bridge_and_no_more() {
+fn ruled_rate_policy_allows_no_reinterpretation_of_a_declared_rate() {
     // The product arm: a stream that declares the target rate is played at it.
     assert_eq!(
         geo::playback_rate_for_stream(geo::PLAYBACK_RATE_HZ),
@@ -1495,21 +1509,34 @@ fn ruled_rate_policy_allows_one_bridge_and_no_more() {
         );
     }
 
-    // The one bridge, and its price, computed from the *record* rather than from the
-    // tree's current mapping, so the pin is still checked after 7-0 removes the arm.
+    // The bridge that used to be here, and its price, computed from the *record*
+    // rather than from the tree, so the pin is still checked now that the arm is
+    // gone.
     let (declared, played) = RECORDED_BRIDGE;
     let ratio = f64::from(played) / f64::from(declared);
     let cents = 1200.0 * ratio.log2();
     println!(
-        "q14: the recorded bridge plays a {} Hz stream at {} Hz = {}x = {:.2} cents sharp. \
-         TODO(Q14, BLOCKING): ruled out as a product path 2026-11-11; 7-0 owns the \
-         encode at 32,768 and 7-1 owns the hardware row at (32768, 2048, fixed, 0).",
-        declared, played, ratio, cents
+        "q14: the bridge that was removed here played a {} Hz stream at {} Hz = {}x = {:.2} cents sharp. \
+         Ruled out as a product path 2026-11-11; plan item 7-0 removed it and re-encoded \
+         the asset at {} Hz; 7-1 owns the hardware row measured on those bytes.",
+        declared,
+        played,
+        ratio,
+        cents,
+        geo::PLAYBACK_RATE_HZ
     );
     assert!(
         (cents - 41.06).abs() < 0.01,
         "1.024x is 41.06 cents — pinned so that no future record can call it a rounding \
          error or a semitone; it is neither, and it is disqualifying"
+    );
+    // The same number from the other direction. The pitch witness measures a played
+    // signal's period and turns it into hertz; this test computes cents from two
+    // rate fields. If they ever disagree, one of the two is measuring the wrong
+    // thing, and the disagreement is the thing 7-3's human ear would notice.
+    assert!(
+        (cents - pitch_cents_of(RECORDED_BRIDGE.0, RECORDED_BRIDGE.1)).abs() < 1e-9,
+        "the rate arithmetic here and the pitch instrument's cents must be the same number"
     );
 
     // The tree may carry at most this one bridge, and if it carries one it must be this
@@ -1539,14 +1566,12 @@ fn ruled_rate_policy_allows_one_bridge_and_no_more() {
         ),
     }
 
-    // And the disqualification is about the asset in this tree, not an abstract one,
-    // stated as a single condition: an asset is allowed to be played exactly when there
-    // is no bridge needed to play it. Today the shipped blob declares 32,000 Hz, the
-    // allow-list refuses it, and the bridge is in the tree — the disqualified state,
-    // described rather than asserted away. When 7-0 lands, 32,768 joins
-    // `PRODUCT_STREAM_RATES` and the bridge goes, and this same condition is the product
-    // rule. Half-landing it — a rate on the allow-list while a bridge still maps, or the
-    // bridge gone with nothing on the allow-list — is red here, which is what it is for.
+    // And the disqualification/ascent is about the asset in this tree, not an
+    // abstract one. The single condition is kept because it is what makes a
+    // half-landed 7-0 impossible to miss: an asset may be played exactly when no
+    // reinterpretation of its declared rate is needed to play it. On top of it sit
+    // the two absolute claims, which only hold in the completed state — the shipped
+    // blob is on the rule, and the tree carries no mapping.
     let manifest = Manifest::parse(BLOB).expect("the shipped blob parses");
     let declared_allowed = PRODUCT_STREAM_RATES.contains(&manifest.sample_rate_hz());
     assert_eq!(
@@ -1566,5 +1591,888 @@ fn ruled_rate_policy_allows_one_bridge_and_no_more() {
         } else {
             "is gone"
         },
+    );
+    assert!(
+        bridge.is_none(),
+        "the product path carries no rate reinterpretation at all (plan item 7-0); \
+         `geometry::RATE_BRIDGE` is back, and with it the 41 cents"
+    );
+    assert_eq!(
+        manifest.sample_rate_hz(),
+        geo::PLAYBACK_RATE_HZ,
+        "the product asset in `assets/` must declare the clock its costs are stated in"
+    );
+
+    // The crate's profile and this example's mixer are one fact stated in two
+    // crates, and this is the only place either half can be compared against the
+    // other. The ROM plays at `geo::PLAYBACK_RATE_HZ` (which mirrors
+    // `agb::mixer::SoundDriver::SAMPLE_RATE`) and holds its asset to
+    // `flac_lite::format::DEFAULT_PROFILE`; if those two ever named different
+    // rates, the product image would refuse its own blob at start-up — so the drift
+    // is asserted here, on the host, rather than discovered on hardware in 7-1.
+    assert_eq!(
+        flac_lite::format::DEFAULT_PROFILE.allowed_sample_rates_hz,
+        [flac_lite::format::PRODUCT_SAMPLE_RATE_HZ],
+        "the product profile names exactly one rate, and states it once"
+    );
+    assert_eq!(
+        flac_lite::format::PRODUCT_SAMPLE_RATE_HZ,
+        geo::PLAYBACK_RATE_HZ,
+        "`EncodeProfile::allowed_sample_rates_hz` and the mixer's clock are the same \
+         fact: the profile is 7-0's crate-side half of the rate contract, and a \
+         profile that named another rate would have the ROM refuse the asset it ships"
+    );
+    assert!(
+        !flac_lite::format::DEFAULT_PROFILE
+            .allowed_sample_rates_hz
+            .contains(&declared),
+        "the rate on the record as the removed bridge's declared half ({declared} Hz) \
+         must stay outside the profile — identity-or-refusal, seen from the crate"
+    );
+    assert!(
+        flac_lite::format::DEFAULT_PROFILE
+            .validate(&manifest)
+            .is_ok(),
+        "the shipped blob passes the profile the ROM validates it with — the same \
+         call `Decoder::new` makes under `strict-profile`"
+    );
+}
+// ---------------------------------------------------------------------------
+// PITCH — the one thing the pinned digests cannot see
+// ---------------------------------------------------------------------------
+
+// `fifo_pins_match_the_converted_stream` pins the exact bytes every frame
+// produces, and `gafp_pin`'s constants pin the whole stream. Neither can see Q14.
+// A stream made at 32,000 Hz and played on a 32,768 Hz clock produces
+// **byte-identical output** — the defect is not in the samples, it is in what the
+// sample axis means, and 6b-3 proved that on hardware: its run was 571/571 periods
+// with zero underflows, its digests matched, and it was 41 cents sharp. A run that
+// passes every digest and is out of tune is exactly the kind of green this project
+// has already paid for once (`method-and-gates.md`'s false-green catalogue), so the
+// pitch question needs its own instrument.
+//
+// It belongs here, in 7-0, rather than in 7-3 for a practical reason: 7-3 asks a
+// person to say "in tune and in time", and a claim carried by one unrepeatable
+// opinion cannot be re-checked by a later run. The machine half of the same
+// question — *do the decoded samples carry the pitch their own design intends, at
+// the clock this player runs?* — has to exist before the hardware run, or there is
+// nothing for the human's answer to be compared against. And it is the half that
+// can be run on every commit.
+//
+// **The instrument: a matched filter.** Given a waveform the *design* declares, the
+// least-squares fit of that waveform inside the measured samples is the amplitude
+// that waveform has in the samples, in the samples' own units. Everything up to the
+// final division is integer (`i128` sums), there is no crate, no FFT window, and no
+// float state that could drift. One property is why this form and not a transform:
+// 326,144 samples is not a whole number of periods at 256 **or** at 250, so a
+// length-commensurate transform would have smeared exactly the difference it is
+// being asked to resolve. The filter is calibrated against the term as the
+// generator actually emits it — partial cycle at the end included — and the decode
+// is lossless, so "calibrated against the design" and "measured on the decoded
+// stream" are the same measurement taken from opposite ends. That is why their
+// agreement is evidence rather than a tautology.
+//
+// **The anchor.** The filter needs a frequency the design declares *and* that both
+// clocks can spell exactly, or the two hypotheses are not separable.
+// `32,768 = 2^15` and `32,000 = 2^8 · 125`, so their `gcd` is 256 and the only
+// hertz with an exact integer period on both are divisors of 256. 128 Hz is 256
+// samples at the product clock and 250 at the old one — a 2.4% period offset, which
+// is the Q14 offset itself, and it is the one frequency both design tables declare
+// at the same weight: `scripts/frame_vectors.py`'s current `PARTIALS_DEVICE` carries
+// `(256, 3)` where the 32,000-era table carried `(250, 3)`. 32 Hz is arithmetically
+// usable and was tried and dropped on measurement rather than on taste: its energy
+// sits in the **side** band, which is where this fixture puts its noise, and a period
+// one sample off answers a large part of what the instrument is being asked. The
+// side-band probe in the positive leg measures that; it is why the anchor is 128 Hz
+// in the centre band and not 32 Hz in the side band.
+//
+// **The band.** The generator's pitched material is in the centre (`L = c + s`,
+// `R = c − s`), so `(L+R)>>1` keeps it and halves away the side band's noise.
+// Arithmetic shift, floor, so this file and the Python generator cannot drift apart
+// on a negative odd sample.
+//
+// **What "resolved" means here, and why a bare ratio is not enough.** Each reading
+// answers at four periods: the two candidates, and at each candidate's own offset
+// from the other — period 262 for the product candidate, 244 for the recorded one.
+// Those controls sit at the *same* period distance as the hypothesis separation, so
+// they ask the only question that matters about a peak: is it a peak, or is it the
+// shoulder of something else? The figures quoted below are measured on this run's
+// decode rather than assumed: a clean design term answers 410:1 between the
+// hypotheses and 212:1 over its own shoulders, and the same term authored at the
+// *other* clock answers 413:1 the other way — which is why the rule compares the two
+// answers instead of thresholding either one. The shipped asset answers 340:1 and
+// 209:1; its played 8-bit form still answers 66:1 and 20:1. The weakest observation
+// in this file is that 20:1, and both thresholds sit at 10.
+//
+// The first version of this block defined its floor as "every other period in a
+// window around the candidates" and the shipped asset failed it at 1.9:1 — for a
+// correct reason, now probed rather than remembered: the fixture's per-channel hash
+// noise is a ramp of period 801 whose third harmonic (period 267) is a real component
+// of the centre band — it answers 1.57 counts there against the anchor's 2.92 — and
+// any window wide enough to hold a shoulder holds it.
+// Reading that as noise was the mistake. Both rejected alternatives — the window floor
+// and the 32 Hz anchor — are re-measured in the positive leg below, because an
+// instrument whose noise model is wrong in one place is wrong everywhere and a claim
+// left in prose is a claim a later change voids without noticing.
+
+/// The clock the 6b-3 asset was made at, and the clock of the negative leg below. A
+/// record, kept for the same reason as [`RECORDED_BRIDGE`]: the tree no longer
+/// encodes at it, and the number has to outlive the change so the reason for the
+/// ruling stays checkable.
+const RECORDED_OLD_CLOCK: u32 = 32_000;
+
+/// The anchor frequency, and the weight the design gives it. The section header
+/// above is why this frequency and no other; the weight is
+/// `scripts/frame_vectors.py`'s `(256, 3)` centre partial, which is what the filter
+/// is calibrated against.
+const ANCHOR_HZ: u32 = 128;
+const ANCHOR_WEIGHT: i32 = 3;
+
+/// The pre-7-0 centre table as `scripts/frame_vectors.py` declared it at 32,000 Hz,
+/// before plan item 7-0 authored the product fixtures at the device rate. A record,
+/// not a fixture: the negative leg below synthesises it, so that leg is *the same
+/// design at the old clock* rather than an invented signal — the identical 128 Hz at
+/// 250 samples instead of 256, with nothing else about the design changed. The side,
+/// square and noise parameters go with it for the same reason: a half-copied design
+/// would change what the noise is doing, and the noise is what the controls below
+/// exist to discount.
+const RECORDED_CENTRE_AT_32000: &[(usize, i32)] = &[(128, 5), (192, 4), (250, 3), (80, 2)];
+const RECORDED_SIDE_AT_32000: (usize, i32) = (1000, 3);
+const RECORDED_SQUARE_AT_32000: usize = 32;
+/// The spans `scripts/frame_vectors.py::synth_pcm` mixes its two hash noises at —
+/// named for where they actually land rather than for the script's parameter names,
+/// which do not say: the signature calls them `noise_l, noise_r`, but the call site
+/// passes `700` into the *side* term's noise and `400` into each channel's, so
+/// `noise_l` is not left-channel noise and copying the names across would have put a
+/// ±700 ramp in the centre band this instrument reads. Measured on the 400-span
+/// pair, whose ramps have period 801 (7919/104729/15485863 are all coprime to the
+/// moduli 1401 and 801): a period-267 filter — the third harmonic of the 801-sample
+/// ramp, inside any window that contains a shoulder — answers **1.57 counts** on the
+/// shipped asset's centre band, over half the anchor's own 2.92, where the
+/// offset-matched shoulders answer 0.014. That is what a component of the signal looks
+/// like to an instrument that was told to treat everything off-candidate as noise, and
+/// it is why the floor in this file is defined by period distance rather than by
+/// "anywhere else".
+const NOISE_SPAN_SIDE: usize = 700;
+const NOISE_SPAN_CHANNEL: usize = 400;
+/// The multipliers `synth_pcm` mixes noise with, named for the same reason: one of
+/// them is load-bearing in a way nobody predicted (see [`NOISE_SPAN_SIDE`]).
+const NOISE_MULT_SIDE: usize = 7919;
+const NOISE_MULT_L: usize = 104729;
+const NOISE_MULT_R: usize = 15485863;
+
+/// One FIFO step in i16 counts. The conversion rule is `sample >> 8` as u8
+/// (`playback::fifo_byte`) and `agb` reads the byte back signed (`ldrsb`), so a
+/// step is exactly 256 counts and a component smaller than that cannot set a step on
+/// its own — which is what "below the DAC's own floor" means, numerically.
+const FIFO_STEP_COUNTS: f64 = 256.0;
+
+/// Cents between the clock a stream was made at and the clock it is played at:
+/// `1200 · log2(played / made)`. One implementation on purpose — the rate guard
+/// computes this from two header fields and the instrument below computes the same
+/// number from measured sample periods, and if those two ever disagree, one of them
+/// is measuring the wrong thing.
+fn pitch_cents_of(made_at_hz: u32, played_at_hz: u32) -> f64 {
+    (f64::from(played_at_hz) / f64::from(made_at_hz)).log2() * 1200.0
+}
+
+/// The generator's triangle, exactly as `scripts/frame_vectors.py::tri` defines it.
+/// Copied, not approximated: the claim under test is that a design term is present
+/// at its declared amplitude inside the decoded samples, and that comparison is only
+/// evidence if both sides run the same arithmetic. Integer only, for the same reason
+/// the script gives — the numbers below must not depend on the host.
+fn tri(index: usize, period: usize) -> i32 {
+    let x = index % period;
+    let half = period / 2;
+    if x < half {
+        (2000 * x as i32) / half as i32 - 1000
+    } else {
+        1000 - (2000 * (x - half) as i32) / half as i32
+    }
+}
+
+/// `scripts/frame_vectors.py::square` and `::hash_noise`, same reason.
+fn square(index: usize, period: usize) -> i32 {
+    if (index % period) * 100 < period * 50 {
+        1000
+    } else {
+        -1000
+    }
+}
+
+fn hash_noise(index: usize, mult: usize, span: usize) -> i32 {
+    ((index * mult) % (2 * span + 1)) as i32 - span as i32
+}
+
+/// Python's `//` — floor division — because that is what the generator uses, and
+/// every term below is a `weight * tri(...) // 1000`. Rust's `/` truncates toward
+/// zero, which for a negative dividend is a whole count away from the generator's
+/// value on every negative half-epoch: half the samples, so the error does not cancel
+/// in the fit, it changes the waveform. Measured, not asserted: the first version of
+/// this block used `/` and reported the design's own weight-3 anchor term as
+/// **2.19 counts** — a 27% shortfall on a signal this file generated itself, from one
+/// arithmetic convention. A witness that cannot recover a number it wrote down
+/// itself is not a witness, so this helper is what makes the calibration at the top
+/// of the pitch test mean anything.
+fn fl(x: i32, d: i32) -> i32 {
+    debug_assert!(d > 0, "every generator term divides by a positive 1000");
+    let q = x / d;
+    if x % d != 0 && x < 0 { q - 1 } else { q }
+}
+
+/// One centre-band term as the generator emits it — the thing the filter is
+/// calibrated against. `weight * tri // 1000` with truncating division, as in the
+/// script: that truncation is why a weight-3 term measures 2.93 rather than 3.00,
+/// and the shortfall is the generator's, not the instrument's.
+fn design_term(weight: i32, period: usize, count: usize) -> Vec<i32> {
+    (0..count)
+        .map(|i| fl(weight * tri(i, period), 1000))
+        .collect()
+}
+
+/// The same term at an arbitrary peak: the loud-tone legs below, where the point is
+/// that the *depth* of the FIFO is not what limits a pitch witness.
+fn tone(peak: i32, period: usize, count: usize) -> Vec<i32> {
+    (0..count)
+        .map(|i| fl(peak * tri(i, period), 1000))
+        .collect()
+}
+
+/// The pre-7-0 design, synthesised at 32,000 Hz, planar. Not decoded — it never has
+/// to be: what this leg asks is what the instrument answers when the samples were
+/// authored on the other clock, and the lossless-decode witnesses elsewhere (plus the
+/// calibration agreement asserted below) are what cover the decode half. Same
+/// arithmetic as `scripts/frame_vectors.py::synth_pcm`, clip included. It is given
+/// the *same sample count* as the shipped asset on purpose: filter resolution
+/// depends on record length, so both legs have to be read over the same length for
+/// their ratios to be comparable.
+fn recorded_design_at_old_clock(count: usize) -> (Vec<i32>, Vec<i32>) {
+    let mut l = Vec::with_capacity(count);
+    let mut r = Vec::with_capacity(count);
+    for i in 0..count {
+        let mut center: i32 = RECORDED_CENTRE_AT_32000
+            .iter()
+            .map(|(p, w)| fl(w * tri(i, *p), 1000))
+            .sum();
+        center += fl(2 * square(i, RECORDED_SQUARE_AT_32000), 1000);
+        let (sp, sw) = RECORDED_SIDE_AT_32000;
+        let side = fl(sw * tri(i, sp), 1000) + hash_noise(i, NOISE_MULT_SIDE, NOISE_SPAN_SIDE);
+        l.push(
+            (center + side + hash_noise(i, NOISE_MULT_L, NOISE_SPAN_CHANNEL)).clamp(-32768, 32767),
+        );
+        r.push(
+            (center - side + hash_noise(i, NOISE_MULT_R, NOISE_SPAN_CHANNEL)).clamp(-32768, 32767),
+        );
+    }
+    (l, r)
+}
+
+/// The centre band, recovered the way the generator's own mixing makes it
+/// recoverable: with `L = c + s + n_L` and `R = c − s + n_R`, `(L+R)>>1` is `c`
+/// plus half the sum of two incoherent ramps.
+fn centre_band(l: &[i32], r: &[i32]) -> Vec<i32> {
+    l.iter()
+        .zip(r.iter())
+        .map(|(a, b)| ((*a as i64 + *b as i64) >> 1) as i32)
+        .collect()
+}
+
+/// The matched filter: the least-squares amplitude of `tri(·, period)` inside `x`,
+/// in `x`'s own units. Exact in `i128` up to the one division — 326,144 samples of
+/// a full-scale signal against a ±1000 template is 1.1e12, nine orders of magnitude
+/// inside `i128` — and every magnitude is printed, so an f64 result can be checked
+/// against the design's declared weight by hand.
+fn matched(x: &[i32], period: usize) -> f64 {
+    let mut num: i128 = 0;
+    let mut den: i128 = 0;
+    for (i, &v) in x.iter().enumerate() {
+        let t = tri(i, period) as i128;
+        num += v as i128 * t;
+        den += t * t;
+    }
+    // `tri` peaks at 1000, so `1000 · Σx·t / Σt²` is that waveform's peak amplitude
+    // in `x`'s units: a signal containing exactly `3*tri(i,256)//1000` answers 2.93,
+    // and 2.3% short of the declared 3 is the generator's truncation, which the
+    // calibration reproduces rather than corrects.
+    1000.0 * (num as f64 / den as f64)
+}
+
+/// One reading: the response at each candidate period, and the largest response at
+/// either candidate's own offset from the other. See the section header for why the
+/// controls are at ±Δ and not "everywhere else in a window".
+struct Pitch {
+    period_product: usize,
+    period_recorded: usize,
+    at_product_clock: f64,
+    at_recorded_clock: f64,
+    /// The two offset-matched shoulders.
+    control: f64,
+}
+
+impl Pitch {
+    fn winner(&self) -> (usize, f64) {
+        if self.at_product_clock.abs() >= self.at_recorded_clock.abs() {
+            (self.period_product, self.at_product_clock.abs())
+        } else {
+            (self.period_recorded, self.at_recorded_clock.abs())
+        }
+    }
+
+    /// How much the two hypotheses differ — the discriminator.
+    fn candidate_ratio(&self) -> f64 {
+        let (p, w) = self.winner();
+        let loser = if p == self.period_product {
+            self.at_recorded_clock.abs()
+        } else {
+            self.at_product_clock.abs()
+        };
+        w / loser.max(1e-12)
+    }
+
+    /// How much the winner beats the shoulders of its own peak — the resolvability
+    /// condition, and the one that keeps a ripple from being read as a tone.
+    fn resolved_ratio(&self) -> f64 {
+        let (_, w) = self.winner();
+        w / self.control.max(1e-12)
+    }
+}
+
+/// Read the instrument. The two candidates are `Δ` apart by construction (the
+/// anchor's two exact periods at the two clocks), so the control set is the
+/// reflection of each candidate about the other: `p_new − Δ` and `p_new + Δ` for the
+/// product candidate, and the mirror for the recorded one. For a 128 Hz anchor on
+/// these clocks that is periods 244, 250, 256, 262 — four filter passes, and the
+/// reason a Q14-sized pitch shift cannot hide in the instrument's own sidelobes is
+/// that the only periods it could hide at are exactly the two being measured.
+fn read_pitch(x: &[i32], period_product: usize, period_recorded: usize) -> Pitch {
+    let delta = period_product - period_recorded;
+    let mut p = Pitch {
+        period_product,
+        period_recorded,
+        at_product_clock: 0.0,
+        at_recorded_clock: 0.0,
+        control: 0.0,
+    };
+    for period in [
+        period_recorded - delta,
+        period_recorded,
+        period_product,
+        period_product + delta,
+    ] {
+        let m = matched(x, period);
+        if period == period_product {
+            p.at_product_clock = m;
+        } else if period == period_recorded {
+            p.at_recorded_clock = m;
+        } else if m.abs() > p.control {
+            p.control = m.abs();
+        }
+    }
+    p
+}
+
+/// The two thresholds of the naming rule, discussed and measured in the section
+/// header: candidate-to-candidate and winner-to-shoulder both have to clear 10. The
+/// nearness of the second one to what is observed — 209 on the shipped asset, 20 on its
+/// played 8-bit form — is not the point: the 20 is only a factor of 2.0 over this line,
+/// and it is the weakest thing in the file. What the line is actually for is that a
+/// signal with no tone in it answers ~1:1 on both, so a ratio of 10 is a qualitative
+/// rather than a tuned boundary.
+const RATIO_NAMES: f64 = 10.0;
+const RATIO_RESOLVED: f64 = 10.0;
+
+/// Which clock these samples were made at, or `None` when the instrument declines to
+/// say. The named period times the anchor's declared frequency *is* the clock: that
+/// is the whole trick, and it is why the answer is not fed in — 256 samples per
+/// period of a 128.000 Hz tone can only come from a 32,768 Hz axis, and 250 of the
+/// same tone only from a 32,000 Hz one.
+fn name_the_clock(p: &Pitch) -> Option<u32> {
+    let (period, winner) = p.winner();
+    let loser = if period == p.period_product {
+        p.at_recorded_clock.abs()
+    } else {
+        p.at_product_clock.abs()
+    };
+    if winner / loser.max(1e-12) > RATIO_NAMES && winner / p.control.max(1e-12) > RATIO_RESOLVED {
+        Some((period as u64 * u64::from(ANCHOR_HZ)) as u32)
+    } else {
+        None
+    }
+}
+
+/// The periods are exact on both clocks by construction of the anchor; asserted
+/// rather than assumed, because a non-exact anchor would make the two hypotheses
+/// overlap and the instrument meaningless.
+fn exact_period(clock_hz: u32, hz: u32) -> usize {
+    assert_eq!(
+        clock_hz % hz,
+        0,
+        "{} Hz has no exact sample period at {} Hz: the anchor must divide both clocks \
+         (gcd(32768, 32000) = 256, so only its divisors qualify)",
+        hz,
+        clock_hz
+    );
+    (clock_hz / hz) as usize
+}
+
+/// Decode the shipped asset to planar i32 samples in stream order — the lossless
+/// output, before `convert_frame` takes it to 8-bit. The same public [`Decoder`]
+/// seam as [`decoded_frames`], for the same reason: the samples have to be the ones
+/// the manifest describes.
+fn decoded_planar(manifest: &Manifest<'_>) -> (Vec<i32>, Vec<i32>) {
+    let mut decoder = Decoder::new(manifest).expect("the shipped manifest must build a decoder");
+    let capacity = FrameBuffers::required_len(manifest);
+    let mut left = vec![0i32; capacity];
+    let mut right = vec![0i32; capacity];
+    let mut bufs = FrameBuffers::new(&mut left, &mut right);
+    let mut l = Vec::new();
+    let mut r = Vec::new();
+    loop {
+        match decoder
+            .decode_next(&mut bufs)
+            .expect("the shipped blob decodes on the host — `flac-test` witnesses that")
+        {
+            Some(frame) => {
+                l.extend_from_slice(frame.left);
+                r.extend_from_slice(frame.right);
+            }
+            None => break,
+        }
+    }
+    (l, r)
+}
+
+/// The positive leg runs on the shipped bytes: the filter finds the design's 128 Hz
+/// tone at the period the **product clock** implies for it and does not find it at
+/// the period the recorded clock implies. The negative leg takes the pre-7-0 design
+/// and shows the instrument answering the other way, which is what makes the first
+/// sentence a measurement rather than a preference. Then the naming rule's answer is
+/// compared with what the manifest declares — the only place in this suite where an
+/// asset's rate is checked against its samples rather than against its own header.
+#[test]
+fn the_pitch_witness_names_the_clock_the_samples_were_made_at() {
+    let p_new = exact_period(geo::PLAYBACK_RATE_HZ, ANCHOR_HZ);
+    let p_old = exact_period(RECORDED_OLD_CLOCK, ANCHOR_HZ);
+    assert_eq!(
+        p_new - p_old,
+        ((geo::PLAYBACK_RATE_HZ - RECORDED_OLD_CLOCK) / ANCHOR_HZ) as usize,
+        "the two candidate periods must be exactly the rate offset apart, in samples: \
+         that offset IS the Q14 error, so if the anchor's periods were not separated by \
+         it, the instrument could not see it"
+    );
+
+    let manifest = Manifest::parse(BLOB).expect("the shipped blob parses");
+    let (l, r) = decoded_planar(&manifest);
+    assert_eq!(
+        l.len() as u64,
+        gafp_pin::SAMPLES,
+        "the decode must be the whole clip the pin describes"
+    );
+    let n = l.len();
+
+    // Calibration first, and it is the generator's own arithmetic rather than a
+    // hand-tuned constant: each design term, filtered against itself and against the
+    // other clock's period. `N` is the asset's length throughout, because filter
+    // resolution is a function of record length and every ratio below is compared
+    // across legs.
+    let term_new = design_term(ANCHOR_WEIGHT, p_new, n);
+    let term_old = design_term(ANCHOR_WEIGHT, p_old, n);
+    let cal_new = read_pitch(&term_new, p_new, p_old);
+    let cal_old = read_pitch(&term_old, p_new, p_old);
+    println!(
+        "calibration: a weight-{} term authored at period {} measures {:.4} counts (declared \
+         weight {}; the {:.1}% shortfall is the generator's own integer truncation), and \
+         answers {:.0}:1 against the other clock's period {} and {:.0}:1 against its own \
+         shoulders. The same term authored at period {} ({} Hz) answers {:.0}:1 the other \
+         way — the two hypotheses are separated by the ratio between those answers, not by \
+         either answer, which is why the rule thresholds two ratios rather than one (both of \
+         them at {}).",
+        ANCHOR_WEIGHT,
+        p_new,
+        cal_new.at_product_clock,
+        ANCHOR_WEIGHT,
+        (1.0 - cal_new.at_product_clock / f64::from(ANCHOR_WEIGHT)) * 100.0,
+        cal_new.candidate_ratio(),
+        p_old,
+        cal_new.resolved_ratio(),
+        p_old,
+        RECORDED_OLD_CLOCK,
+        cal_old.candidate_ratio(),
+        RATIO_NAMES as u64
+    );
+    assert_eq!(name_the_clock(&cal_new), Some(geo::PLAYBACK_RATE_HZ));
+    assert_eq!(name_the_clock(&cal_old), Some(RECORDED_OLD_CLOCK));
+    assert!(
+        (cal_new.at_product_clock - f64::from(ANCHOR_WEIGHT)).abs()
+            < 0.1 * f64::from(ANCHOR_WEIGHT),
+        "the instrument must report a declared weight-3 term as ~3 counts, and it reports \
+         {:.4}: if this is wrong, nothing measured below means anything",
+        cal_new.at_product_clock
+    );
+
+    // ---- the shipped asset --------------------------------------------------
+    let mid = centre_band(&l, &r);
+    let real = read_pitch(&mid, p_new, p_old);
+    println!(
+        "shipped asset ({} decoded samples, centre band): the 128.000 Hz anchor measures \
+         {:.4} counts at period {} (= {} Hz) and {:.4} at period {} (= {} Hz); its \
+         offset-matched shoulders are {:.4}; {:.0}:1 candidate-to-candidate, {:.0}:1 over the \
+         shoulders",
+        n,
+        real.at_product_clock,
+        p_new,
+        p_new as u64 * u64::from(ANCHOR_HZ),
+        real.at_recorded_clock,
+        p_old,
+        p_old as u64 * u64::from(ANCHOR_HZ),
+        real.control,
+        real.candidate_ratio(),
+        real.resolved_ratio()
+    );
+    let named = name_the_clock(&real).expect(
+        "the instrument cannot name a clock for the shipped asset: the anchor measures \
+         unresolvably, so the asset's material has changed and this test's premise with it",
+    );
+    // Present, at its declared level. This is a C1-side claim sitting inside a
+    // pitch test: the design term reaches the decoded stream at its authored
+    // amplitude, so the chain from what the asset was authored from to what the
+    // samples say is intact end to end.
+    assert!(
+        real.at_product_clock > 0.9 * cal_new.at_product_clock,
+        "the anchor's tone must be present at the design level in the decoded stream: \
+         measured {:.4}, the declared term alone measures {:.4}",
+        real.at_product_clock,
+        cal_new.at_product_clock
+    );
+    // And absent at the other clock's period. A tone of the same design weight
+    // sitting there would have answered 0.24% of the winner (that is the calibration's
+    // 410:1), and this measures 0.29% — the same order as the instrument's own
+    // shoulders, which is how "there is nothing at 250" sounds when it is said by a
+    // measurement rather than by an assertion.
+    assert!(
+        real.at_recorded_clock.abs() < 0.02 * real.at_product_clock.abs(),
+        "the anchor must not be present at the {}-clock period {}: {:.4} against {:.4}",
+        RECORDED_OLD_CLOCK,
+        p_old,
+        real.at_recorded_clock,
+        real.at_product_clock
+    );
+
+    // Two probes. The first is the confounder that broke the earlier version of this
+    // instrument: the fixture's per-channel hash ramps have period 801, so a template
+    // at period 267 is their third harmonic — a real component of the centre band, and
+    // inside any window that contains a shoulder.
+    let harmonic = matched(&mid, 801 / 3);
+    println!(
+        "probe: period {} — the third harmonic of the fixture's 801-sample noise ramp, and \
+         inside the window a 250/256 reading sweeps — answers {:.4} counts on this asset \
+         against the anchor's {:.4} and its shoulders' {:.4}. A window-as-noise floor \
+         counts that as noise and fails the asset at {:.1}:1.",
+        801 / 3,
+        harmonic,
+        real.at_product_clock,
+        real.control,
+        real.at_product_clock / harmonic.abs().max(1e-12)
+    );
+    assert!(
+        harmonic.abs() > 5.0 * real.control,
+        "the 801/3 harmonic has to stay a component of this signal, well clear of the \
+         offset-matched shoulders — it answers {:.4} against {:.4}. That is what makes a \
+         window-as-noise floor wrong rather than merely loose; if this ever does read as \
+         noise, the anchor choice above has to be re-argued rather than kept.",
+        harmonic,
+        real.control
+    );
+    // The second is the rejected 32 Hz anchor. Period 1024 divides both clocks
+    // exactly, so it is arithmetically eligible and is ruled out on what it measures:
+    // its energy is in the side band, where the fixture deliberately puts its noise.
+    let side: Vec<i32> = l
+        .iter()
+        .zip(r.iter())
+        .map(|(a, b)| ((*a as i64 - *b as i64) >> 1) as i32)
+        .collect();
+    let at_1024 = matched(&side, 1024);
+    let at_1023 = matched(&side, 1023);
+    println!(
+        "probe: the side band answers {:.4} counts at period 1024 (32.000 Hz, the rejected \
+         anchor) and {:.4} at period 1023 — {:.0}% of that answer arrives at a period no \
+         part of the design declares. That is what an anchor sitting inside noise looks \
+         like.",
+        at_1024,
+        at_1023,
+        at_1023.abs() * 100.0 / at_1024.abs().max(1e-12)
+    );
+    assert!(
+        at_1023.abs() > 0.25 * at_1024.abs(),
+        "the 32 Hz rejection rests on the neighbouring side-band period answering a large \
+         share of the anchor: measured {:.4} against {:.4}. If that stopped being true the \
+         rejection would have to be re-derived, not kept.",
+        at_1023,
+        at_1024
+    );
+    // The point of the whole exercise, in the units Q14 is stated in.
+    assert_eq!(
+        named,
+        manifest.sample_rate_hz(),
+        "the clock the samples imply ({}) and the clock the manifest declares ({}) are \
+         different numbers: the header is not describing the audio",
+        named,
+        manifest.sample_rate_hz()
+    );
+    assert_eq!(
+        named,
+        geo::PLAYBACK_RATE_HZ,
+        "the samples must imply the clock the player runs on, or the run is pitch-shifted \
+         whatever the header says"
+    );
+    println!(
+        "shipped asset: the samples imply a {} Hz axis, the manifest declares {} Hz, the \
+         player runs {} Hz — the three agree, and the pitch error a listener would meet is \
+         {:.2} cents.",
+        named,
+        manifest.sample_rate_hz(),
+        geo::PLAYBACK_RATE_HZ,
+        pitch_cents_of(named, geo::PLAYBACK_RATE_HZ)
+    );
+    assert_eq!(pitch_cents_of(named, geo::PLAYBACK_RATE_HZ), 0.0);
+
+    // ---- the negative leg: the same design, authored at the recorded clock ----
+    let (ol, or) = recorded_design_at_old_clock(n);
+    let neg = read_pitch(&centre_band(&ol, &or), p_new, p_old);
+    let neg_named = name_the_clock(&neg);
+    println!(
+        "negative leg: the design recorded at {} Hz, resynthesised for this run at {} Hz — \
+         the same anchor measures {:.4} \
+         counts at period {} and {:.4} at period {} ({:.0}:1, {:.0}:1 over the shoulders); \
+         the instrument names {:?}",
+        RECORDED_OLD_CLOCK,
+        RECORDED_OLD_CLOCK,
+        neg.at_recorded_clock,
+        p_old,
+        neg.at_product_clock,
+        p_new,
+        neg.candidate_ratio(),
+        neg.resolved_ratio(),
+        neg_named
+    );
+    assert_eq!(
+        neg_named,
+        Some(RECORDED_OLD_CLOCK),
+        "the instrument must refuse the same anchor at the product period when the samples \
+         were authored at {} — if it names {} here, the positive leg's answer was a \
+         preference, not a measurement",
+        RECORDED_OLD_CLOCK,
+        geo::PLAYBACK_RATE_HZ
+    );
+    assert_eq!(p_old * ANCHOR_HZ as usize, RECORDED_OLD_CLOCK as usize);
+    let cents = pitch_cents_of(RECORDED_OLD_CLOCK, geo::PLAYBACK_RATE_HZ);
+    println!(
+        "negative leg: on a {} Hz clock that is {} samples per period against the {} those \
+         samples were made for — {:.2} cents, and every digest in this file would have \
+         passed it. That is the 6b-3 configuration: the sample side cannot see it, so the \
+         rule side has to, and now there is an instrument behind both.",
+        geo::PLAYBACK_RATE_HZ,
+        p_new,
+        p_old,
+        cents
+    );
+    assert!(
+        (cents - 41.06).abs() < 0.01,
+        "the same figure `ruled_rate_policy_allows_no_reinterpretation_of_a_declared_rate` \
+         pins, reached from measured sample periods instead of two header fields"
+    );
+    // The instrument's resolution, stated as a measured bound rather than claimed: a
+    // 2.4% period offset separates 410:1 on a clean term and 340:1 on the shipped
+    // bytes, so a Q14-class error is not near this instrument's floor. What *is* near
+    // a floor is a tone at the bottom of an 8-bit range, and that is the next
+    // test.
+    assert!(
+        real.candidate_ratio() > RATIO_NAMES && real.resolved_ratio() > RATIO_NAMES,
+        "the shipped asset must clear both thresholds by a real margin, not marginally: \
+         {:.0} and {:.0}",
+        real.candidate_ratio(),
+        real.resolved_ratio()
+    );
+}
+
+/// The other half of the measurement, and the half that says what 7-3 can and
+/// cannot be asked to witness. Everything above is measured at 16-bit depth, before
+/// the FIFO. The GBA plays at 8 bits, so the question is whether the 8-bit path is
+/// what would hide a pitch error — and the answer, on the product's own conversion
+/// path, is that it is not:
+///
+/// * A ±24,000-count anchor tone through `convert_frame` measures **93.758 LSB**
+///   against the exact arithmetic of 24,000/256 = 93.750 — 0.008% out — and its
+///   period separates 414:1 from the other clock's period and 211:1 from its own
+///   shoulders. A tone at *half an LSB* (±128 counts) still answers 394:1 and 209:1.
+///   So the truncation costs amplitude and none of the pitch: `sample >> 8` keeps
+///   the sign of a sub-LSB component, and its zero crossings, which is where period
+///   lives.
+/// * The shipped fixture's own anchor is **2.92 i16 counts** — its declared weight,
+///   exactly as authored — which is **1.1% of one FIFO step**. Run through the real
+///   converter, its period is still resolvable: 66:1 and 20:1 on the played bytes.
+///   So this fixture *is* a pitch witness for a machine, at both depths, and it is
+///   not one for a person: at that level the component cannot set a quantisation
+///   step of its own.
+///
+/// That second bullet is the one the plan needs written down, and it belongs in the
+/// record of 7-0 rather than in a footnote on 7-3: **the fixture that was chosen
+/// because it makes the encoder behave cannot be listened to.** Its centre partials
+/// are single-digit i16 counts against a centre band of 822 counts peak-to-peak,
+/// because a strong broadband floor is exactly what makes `-l 4`
+/// choose LPC while `-l 0` stays FIXED — `scripts/frame_vectors.py`'s own docstring
+/// for `synth_pcm` says so. C2's acceptance wording promises a human being will
+/// judge pitch and tempo, and the profile question the plan keeps deferring (FIXED-0
+/// only; real music out of scope) is the same question: material a person could hear
+/// in tune is material that costs LPC-side cycles to decode. This test does not
+/// decide that. It puts a measured number on it, and it demonstrates the instrument
+/// is ready for whichever material the answer uses.
+#[test]
+fn the_pitch_witness_survives_the_fifo_and_the_product_fixture_does_not() {
+    let p_new = exact_period(geo::PLAYBACK_RATE_HZ, ANCHOR_HZ);
+    let p_old = exact_period(RECORDED_OLD_CLOCK, ANCHOR_HZ);
+    let manifest = Manifest::parse(BLOB).expect("the shipped blob parses");
+    let (l, r) = decoded_planar(&manifest);
+    let mid = centre_band(&l, &r);
+    let frames = decoded_frames(&manifest);
+
+    let at_16 = read_pitch(&mid, p_new, p_old);
+    // The played form: the exact bytes `decoded_frames` produced, read back signed
+    // the way `agb`'s mixer reads them (`ldrsb`), which is the only reason a
+    // sub-LSB component has any period left to be found.
+    let played: Vec<i32> = frames
+        .iter()
+        .flat_map(|(fl, _)| fl.iter().map(|&b| b as i8 as i32))
+        .collect();
+    assert_eq!(played.len(), mid.len(), "every sample has a played byte");
+    let at_8 = read_pitch(&played, p_new, p_old);
+    println!(
+        "the product fixture: anchor = {:.4} i16 counts = {:.4} of one FIFO step, in a centre \
+         band whose own peak-to-peak is {}; at 8-bit the same filter answers {:.4} LSB at \
+         period {} against shoulders of {:.4} — {:.0}:1 and {:.0}:1, so the period arrives \
+         and the level does not.",
+        at_16.at_product_clock,
+        at_16.at_product_clock / FIFO_STEP_COUNTS,
+        mid.iter().max().unwrap() - mid.iter().min().unwrap(),
+        at_8.at_product_clock,
+        p_new,
+        at_8.control,
+        at_8.candidate_ratio(),
+        at_8.resolved_ratio()
+    );
+    assert!(
+        at_16.at_product_clock / FIFO_STEP_COUNTS < 0.02,
+        "the fixture's anchor should sit far below one FIFO step by any measure: it is at \
+         {:.4} of a step",
+        at_16.at_product_clock / FIFO_STEP_COUNTS
+    );
+    assert!(
+        at_8.candidate_ratio() > RATIO_NAMES && at_8.resolved_ratio() > RATIO_NAMES,
+        "the played form is expected to *keep* a nameable pitch — that is the finding, and \
+         if it stopped being true the conversion path changed: {:.0}:1, {:.0}:1",
+        at_8.candidate_ratio(),
+        at_8.resolved_ratio()
+    );
+    assert_eq!(name_the_clock(&at_8), Some(geo::PLAYBACK_RATE_HZ));
+    // What a sub-LSB component actually becomes at 8 bits, stated exactly rather than
+    // argued. The term alone, on its own, maps to two byte values: the non-negative
+    // half-epochs to 0x00 and the negative ones to 0xFF. Truncation therefore turns a
+    // triangle the DAC cannot represent into a one-step square wave at the anchor's own
+    // period — same pitch, wrong waveform, at the mixer's own floor. (Length 4,096
+    // here, because this probe is about the byte values rather than about filter
+    // resolution, and the shortest window that shows the pattern is the clearest one.)
+    let term = design_term(ANCHOR_WEIGHT, p_new, 4096);
+    let bytes: Vec<u8> = term.iter().map(|&v| fifo_byte(v)).collect();
+    let distinct: Vec<u8> = {
+        let mut d = bytes.clone();
+        d.sort_unstable();
+        d.dedup();
+        d
+    };
+    println!(
+        "the fixture's anchor term alone, at the FIFO depth, takes exactly the byte values \
+         {:?} — a {} LSB peak-to-peak square wave at the anchor's own period, not the tone \
+         that was authored.",
+        distinct
+            .iter()
+            .map(|b| format!("{:02X}", b))
+            .collect::<Vec<_>>(),
+        distinct.iter().map(|&b| b as i8 as i32).max().unwrap()
+            - distinct.iter().map(|&b| b as i8 as i32).min().unwrap()
+    );
+    assert_eq!(
+        distinct,
+        vec![0x00, 0xFF],
+        "a weight-{} term (±{} counts) must map to exactly the two bytes straddling zero, \
+         because {} is far below one FIFO step of {} counts — that is what 'below the DAC \
+         floor' means here, in the mixer's own terms",
+        ANCHOR_WEIGHT,
+        ANCHOR_WEIGHT,
+        ANCHOR_WEIGHT,
+        FIFO_STEP_COUNTS as u32
+    );
+
+    // And the control that keeps the previous paragraph honest: the 8-bit depth is not
+    // what limits this instrument. Same anchor, same period, same real
+    // `convert_frame`, at a level that has something to preserve — and the same record
+    // length as every other leg in this file, because filter resolution is a function
+    // of record length and a ratio measured over a shorter window is not comparable
+    // with one measured over a longer one. (That was not obvious the first time
+    // through: these two controls were 65,536 samples and came out at 49:1 / 50:1
+    // where the identical signal over the asset's own length answers ~410:1 / ~210:1.)
+    let peak = 24_000i32;
+    let loud = tone(peak, p_new, mid.len());
+    let mut out_l = vec![0u8; loud.len()];
+    let mut out_r = vec![0u8; loud.len()];
+    convert_frame(&loud, &[], &mut out_l, &mut out_r).expect("a mono window converts alone");
+    let loud_bytes: Vec<i32> = out_l.iter().map(|&b| b as i8 as i32).collect();
+    let loud_read = read_pitch(&loud_bytes, p_new, p_old);
+    let exact = f64::from(peak) / FIFO_STEP_COUNTS;
+    println!(
+        "control: a ±{}-count anchor tone through the real convert_frame measures {:.4} LSB \
+         against the exact arithmetic {:.4} ({:.3}% out) and separates {:.0}:1 / {:.0}:1. \
+         The 8-bit path costs 8 bits of amplitude and no pitch.",
+        peak,
+        loud_read.at_product_clock,
+        exact,
+        (loud_read.at_product_clock - exact).abs() * 100.0 / exact,
+        loud_read.candidate_ratio(),
+        loud_read.resolved_ratio()
+    );
+    assert!(
+        (loud_read.at_product_clock - exact).abs() < 0.01 * exact,
+        "a tone with something to preserve must measure its own arithmetic through the \
+         conversion path: expected {} LSB, measured {:.4}",
+        exact,
+        loud_read.at_product_clock
+    );
+    assert_eq!(name_the_clock(&loud_read), Some(geo::PLAYBACK_RATE_HZ));
+    // Half an LSB, for the floor of where that stops: still nameable, so the
+    // fixture's level — 1.1% of a step, 44x below this — is the whole of the
+    // difference between "a machine can tell" and "a person could hear".
+    let half_peak = (FIFO_STEP_COUNTS as i32) / 2;
+    let half = tone(half_peak, p_new, mid.len());
+    let mut half_out = vec![0u8; half.len()];
+    convert_frame(&half, &[], &mut half_out, &mut out_r).expect("a half-LSB tone fits i16");
+    let half_bytes: Vec<i32> = half_out.iter().map(|&b| b as i8 as i32).collect();
+    let half_read = read_pitch(&half_bytes, p_new, p_old);
+    println!(
+        "control: a half-LSB tone (+-{}) still measures {:.4} LSB and separates {:.0}:1 / \
+         {:.0}:1 — {:.0}x louder in i16 counts than the product fixture's anchor, which is \
+         the entire gap between a machine being able to name this asset's pitch and a person \
+         being able to hear it.",
+        half_peak,
+        half_read.at_product_clock,
+        half_read.candidate_ratio(),
+        half_read.resolved_ratio(),
+        f64::from(half_peak) / at_16.at_product_clock
+    );
+    assert_eq!(name_the_clock(&half_read), Some(geo::PLAYBACK_RATE_HZ));
+    assert!(
+        f64::from(half_peak) / at_16.at_product_clock > 20.0,
+        "the gap between the fixture's level and a level this instrument can read at 8 bits \
+         is the measured finding: {:.1}x. If it ever narrows below 20x, the fixture got \
+         louder and this test's conclusion has to be re-read, not re-run.",
+        f64::from(half_peak) / at_16.at_product_clock
     );
 }

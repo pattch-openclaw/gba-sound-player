@@ -73,7 +73,13 @@ def parse_l0(text):
     frames = [
         (int(off), int(bs))
         for off, bs in re.findall(
-            r"FrameMeta \{\s*offset: (\d+),\s*blocksize: (\d+),\s*\}", arm
+            # The generated table is committed rustfmt-formatted (this crate is
+            # covered by the format pass, and rustfmt's default
+            # struct_lit_width=18 wraps these literals onto three lines). Match
+            # both the wrapped and the single-line form, with or without the
+            # trailing comma: this tie reads the table, it does not police the
+            # table's layout.
+            r"FrameMeta \{\s*offset: (\d+),\s*blocksize: (\d+),?\s*\}", arm
         )
     ]
     if not frames:

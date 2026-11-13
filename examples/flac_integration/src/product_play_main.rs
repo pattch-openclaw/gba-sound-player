@@ -113,9 +113,11 @@
 //! 1. `underflows = 0` — every period got a whole chunk from the ring
 //!    ([`playback::RingFeed::take_chunk`] consumes only what it copies, so
 //!    padding cannot fool the sample ledger);
-//! 2. `pushed = consumed = 320,000` — the whole clip reached the DMA exactly once
-//!    and in order, and the one short period at the end is a classified `Tail`,
-//!    not a hole;
+//! 2. `pushed = consumed = gafp_pin::SAMPLES` — the whole clip reached the DMA
+//!    exactly once and in order (the manifest's own count, which boot holds to the
+//!    pack-time pin at [`gafp_pin::SAMPLES`], so this number travels with the asset
+//!    rather than being written out here), and the one short period at the end is a
+//!    classified `Tail`, not a hole;
 //! 3. `pcm MATCH` — the samples the proof pass decodes are the samples `flac -d`
 //!    produces, pinned at pack time ([`gafp_pin::FNV_PCM`]). This is a **decode**
 //!    witness: the fold is over the interleaved i16 PCM, not the 8-bit FIFO bytes the
@@ -137,40 +139,41 @@
 //! period is what the ring is for — and so does the largest single frame's work
 //! against the period it has to hide inside.
 //!
-//! ## Rate — and why this asset is not a product asset
+//! ## Rate — one clock, and the asset declares it
 //!
 //! **RULED (Q14, 2026-11-11, project owner): a stream is encoded at the rate it is
 //! played at, and the player does not reinterpret a declared rate to fit the clock.**
-//! The asset this ROM reads is the one every other gate reads —
-//! `assets/spike_l0.gfp`, which declares **32,000 Hz** in its STREAMINFO — and the
-//! image plays it on the exact 32,768 Hz timer through the mapping
-//! `scripts/gafp_pack.py` records as `PLAYBACK_RATE_FOR_STREAM`, mirrored by
-//! [`geometry::playback_rate_for_stream`] and checked against the parsed manifest at
-//! boot. So this image is **measurement scaffolding, not a product path**: the audio
-//! runs 32,768/32,000 = 1.024× fast, **41.06 cents** — computed, not approximated, by
-//! `tests/product_play_witness.rs::ruled_rate_policy_allows_one_bridge_and_no_more` —
-//! and that has been ruled
-//! unacceptable in itself — clean period audit, zero underflows and bit-exact PCM do
-//! not buy it back. The screen carries that fact (`rate 32000>32768 scaffold`) and
-//! the log carries a `Q14 SCAFFOLD` line, because on a stock unit the screen is the
-//! record a run gets.
+//! This image is what satisfying that ruling looks like: the asset it reads —
+//! `assets/spike_l0.gfp`, the same one every other gate reads — declares **32,768 Hz**
+//! in its STREAMINFO, which is the rate [`geometry::PLAYBACK_RATE_HZ`] names and the
+//! only rate [`geometry::playback_rate_for_stream`] accepts; and
+//! `scripts/gafp_pack.py` refuses to write a blob whose declared rate is not the
+//! clock its measured rows are budgeted against. So the frame of audio this producer
+//! is asked to service is the frame the asset was made for — 2,048 samples at the
+//! rate they were encoded at, 1,048,576 cycles at this timer — and both sides of that
+//! number come from the same declaration rather than from a mapping.
 //!
-//! **`TODO(Q14, BLOCKING)`: the blocking work is a 32,768 Hz encode of the product
-//! asset, not any change to this image** (`flac-docs/plan-of-record.md`, 7-0; the
-//! hardware row 7-1 owns; the pitch witness that would have caught this — none of the
-//! existing gates can see a pitch shift, because the samples are the same either
-//! way). The geometry, the flow control and the cost envelope measured here carry over
-//! unchanged: the 2026-11-11 rate probe measured that a stream *declaring* 32,768
-//! decodes bit-identically at the same floor and the same cost, so the ruling costs
-//! pipeline work, not a redesign.
+//! What that replaced, kept on the record because it is why the ruling exists: until
+//! plan item 7-0 the asset declared **32,000 Hz** and this image played it on the
+//! 32,768 Hz timer through a mapping (`geometry::RATE_BRIDGE`, mirrored by
+//! `gafp_pack.PLAYBACK_RATE_FOR_STREAM`). The audio ran 32,768/32,000 = **1.024×
+//! fast, 41.06 cents sharp** — computed, not approximated, by
+//! `tests/product_play_witness.rs` — and **no gate in this repository could see it**:
+//! the decoded samples are identical either way, so every PCM and FIFO digest passed
+//! a run that was 41 cents high. That is the 6b-3 measurement scaffolding recorded in
+//! `flac-docs/measurements.md` (screen `rate 32000>32768 scaffold`, log
+//! `Q14 SCAFFOLD`), and those shares are **not** this image's: the 7-0 asset is new
+//! bytes of a different length — 160 frames, 326,144 samples, a 512-sample tail
+//! instead of a 240-sample one — and it is spelled with the format's `0b1101`
+//! sample-rate code plus a 16-bit Hz field, which is what `flac` emits for 32,768 Hz.
+//! Re-measuring this producer against those bytes on silicon is plan item 7-1.
 //!
-//! The other half of the mismatch, priced rather than assumed: the frames were made
-//! for a 32,000 Hz stream, so their nominal period is 1,073,741 cycles while this
-//! timer's is 1,048,576 — 2.4 % tighter. [`geometry::frame_cycles`] already prices
-//! the tighter one, so nothing here is discounted, and the same probe measured that
-//! the tightening costs nothing at current work levels (worst frame 59.4 % in both
-//! arms of that probe — the pre-median clock, so that is its reading and not this
-//! image's; this image's worst frame is 53.965 %).
+//! The two rates are still printed side by side, and the nominal period is still
+//! printed next to the budget, on purpose: with the contract satisfied the two pairs
+//! are equal, which makes that log line a running check of the identity instead of an
+//! explanation of a difference. If they ever differ on a real run, the asset and the
+//! geometry have parted company again — and the screen says so (`rate X!Y pitch`),
+//! because on a stock unit the screen is the record a run gets.
 //!
 //! ## What this ROM deliberately does not do
 //!
@@ -932,10 +935,11 @@ mod rom {
     /// Parse the shipped blob's manifest and hold it to the pins and the profile —
     /// the same checks `src/main.rs` runs, so the two images cannot disagree about
     /// what they are decoding. The manifest's own declared sample rate is what the
-    /// rate mapping is checked against: the asset says 32,000 Hz, and the only way
-    /// this ROM is allowed to play it at 32,768 Hz is that the packer's table says
-    /// so — which Q14 has since ruled is not a thing a product asset may do
-    /// (`TODO(Q14, BLOCKING)`, see the module docs' "Rate" section).
+    /// rate check is made against, and since plan item 7-0 the only answer that
+    /// check accepts is the identity: the asset declares 32,768 Hz because that is
+    /// the rate this geometry, the packer's budget and `agb`'s timer all use.
+    /// Anything else is refused here rather than played 41 cents sharp
+    /// (`flac-docs/open-questions.md` Q14; [`geometry::RATE_BRIDGE`] is `None`).
     fn manifest() -> Option<Manifest<'static>> {
         let manifest = match Manifest::parse(SONG) {
             Ok(m) => m,
@@ -979,10 +983,11 @@ mod rom {
         }
         let stream_rate = manifest.sample_rate_hz();
         match geo::playback_rate_for_stream(stream_rate) {
-            // The only mapping this ROM's geometry is built for — and, since
-            // 2026-11-11, the only one a product asset is allowed to take. A stream
-            // that declares 32,000 arrives here through the ruled-out bridge; see the
-            // module docs and `TODO(Q14, BLOCKING)` in `geometry.rs`.
+            // Identity, and only identity: `geo::playback_rate_for_stream` returns
+            // `Some` for exactly the rate this geometry is built for now that
+            // `geo::RATE_BRIDGE` is `None` (Q14, plan item 7-0). The arm is written
+            // this way so that a re-introduced mapping would have to land in one of
+            // the two arms below and be refused or reported, not pass silently.
             Some(geo::PLAYBACK_RATE_HZ) => {}
             Some(other) => {
                 agb::println!(
@@ -1000,13 +1005,16 @@ mod rom {
                 return None;
             }
         }
-        // Both budgets, printed side by side, because the difference is the 2.4 %
-        // the module docs describe and a reader should see it rather than take it
-        // on trust: the frames were made for a 32,000 Hz stream, and the timer
-        // they are played against is 32,768 Hz.
+        // Both numbers, printed side by side, as a running check of the identity
+        // rather than an explanation of a difference: the declared rate and the
+        // playback rate are the same number, and the stream's own nominal frame
+        // period and this timer's frame budget are therefore the same number. If a
+        // real run ever prints two different ones, the asset and the geometry have
+        // parted company again — which is the Q14 defect, and it is worth having in
+        // the log.
         let blocksize = u32::from(manifest.blocksize());
         agb::println!(
-            "[pp-rom] rate: stream {} Hz -> playback {} Hz; {} cycles/sample, budget {} cycles for a {}-sample frame (the stream's own nominal period would be {})",
+            "[pp-rom] rate: stream {} Hz -> playback {} Hz; {} cycles/sample, budget {} cycles for a {}-sample frame; the stream's own nominal period is {} c — equal by the rate contract. Two different numbers here = the Q14 defect.",
             stream_rate,
             geo::PLAYBACK_RATE_HZ,
             TICKS_PER_SAMPLE,
@@ -1015,8 +1023,11 @@ mod rom {
             u64::from(geo::MIXER_TICK_HZ) * u64::from(blocksize) / u64::from(stream_rate)
         );
         if stream_rate != geo::PLAYBACK_RATE_HZ {
+            // Unreachable while the match above admits only the identity case, and
+            // kept for that reason: it is the Q14 tripwire in the one place a
+            // hardware run leaves a record.
             agb::println!(
-                "[pp-rom] Q14 SCAFFOLD: stream {} Hz is played at {} Hz — pitch-shifted, NOT a product asset",
+                "[pp-rom] Q14 VIOLATION: stream {} Hz is played at {} Hz — pitch-shifted, NOT a product asset",
                 stream_rate,
                 geo::PLAYBACK_RATE_HZ
             );
@@ -1910,14 +1921,23 @@ mod rom {
                 derated
             );
         }
+        // Three lines rather than one: the ROM's log printer cuts a line at 256
+        // characters, and the part of the sentence that explains what the numbers
+        // mean is exactly what was being cut off the end.
         agb::println!(
-            "[pp-rom] decode cross-check: this image's isolated estimate {} c/frame vs the decode-only instrument's pinned {} mean / {} worst (flac-docs/measurements.md, 6b-2 pt 2, hardware) — the difference is this image's cost, ring residency included; it is not a contradiction of that row",
+            "[pp-rom] decode cross-check: this image's isolated estimate {} c/frame vs the pinned {} mean / {} worst (flac-docs/measurements.md 6b-2 pt 2, hardware)",
             ledger.stages[1].mean().saturating_sub(
                 (u64::from(ledger.stages[1].inside) * feed_mean)
                     / u64::from(ledger.stages[1].n.max(1))
             ),
             PINNED_DECODE_MEAN,
             PINNED_DECODE_WORST
+        );
+        agb::println!(
+            "[pp-rom] decode cross-check meaning: the gap is what this image's decode costs with the ring and the interrupt in it, not a contradiction of that row"
+        );
+        agb::println!(
+            "[pp-rom] decode cross-check provenance: that row was measured on the pre-7-0 32,000 Hz-era frames — same shape, different bytes; 7-1 owns rows measured on the shipped asset"
         );
         // An unset watermark prints as 0, not as usize::MAX: a run that never
         // reached a push is a failure for other reasons, and a screen full of
@@ -2017,7 +2037,11 @@ mod rom {
             ));
             if let Some((stream, played)) = rates {
                 if stream != played {
-                    screen_text.push_str(&format!("rate {}>{} scaffold\n", stream, played));
+                    // The Q14 defect on the screen, in 24 columns: the run played a
+                    // stream at a rate it does not declare. Nothing else in the
+                    // verdict can see this — the digests match either way — so it has
+                    // to be visible where a person will look.
+                    screen_text.push_str(&format!("rate {}!{} pitch\n", stream, played));
                 }
             }
         }

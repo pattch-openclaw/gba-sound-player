@@ -33,9 +33,10 @@
 //! Every constant here is transcribed from something that already exists, with
 //! the source named at the constant. Nothing in this module is a guess: the
 //! buffer size is `agb`'s, the clock is the GBA's, the frame budget is
-//! `scripts/gafp_pack.py`'s, and the rate mapping is that packer's
-//! `PLAYBACK_RATE_FOR_STREAM`. The compile-time assertions at the bottom are what
-//! keeps the transcriptions from silently rotting.
+//! `scripts/gafp_pack.py`'s, and there is exactly one sample rate in the product
+//! path — the one this module names, which is also the rate the shipped asset
+//! declares (see the rate contract below). The compile-time assertions at the
+//! bottom are what keeps the transcriptions from silently rotting.
 
 // ---------------------------------------------------------------------------
 // The clock, and the frame it is divided into
@@ -223,90 +224,83 @@ pub const REARM_GRACE_SAMPLES: u16 = 16;
 pub const DMA_WORDS: u16 = (CHUNK_SAMPLES / 4) as u16;
 
 // ---------------------------------------------------------------------------
-// The stream rate vs the playback rate
+// The rate contract: one clock, declared by the stream that plays on it
 // ---------------------------------------------------------------------------
 
-/// The **only** rate reinterpretation this tree carries, as `(declared, played)`.
+/// The rate reinterpretations this product path carries. **There are none.**
 ///
-/// `Some((32_000, PLAYBACK_RATE_HZ))` is 6b-3's measurement bridge, ruled not a
-/// product path on 2026-11-11 (Q14). **`TODO(Q14, BLOCKING)` — item 7-0 sets this to
-/// `None`,** which removes the mapping and leaves the identity rule alone. It is a
-/// named constant rather than a `match` arm for one reason: the guard in
-/// `tests/product_play_witness.rs` reads the tree's actual bridge from here instead of
-/// inferring one from a mapping it would then have to `unwrap`, so 7-0 is green at
-/// both ends of its own edit and red only if it lands half-way.
-pub const RATE_BRIDGE: Option<(u32, u32)> = Some((32_000, PLAYBACK_RATE_HZ));
+/// This is plan item 7-0 landed, and it is the whole of Q14's ruling in one
+/// constant: a stream is encoded at the rate it is played at, so
+/// `assets/spike_l0.gfp` declares 32,768 Hz because that is the rate
+/// [`PLAYBACK_RATE_HZ`] names, and there is no mapping left for a player to
+/// apply. It is a named `Option` rather than an absent concept for one reason:
+/// [`playback_rate_for_stream`] below still *reads* it, so a future
+/// re-introduction of a mapping changes the player's behaviour and the guard in
+/// `tests/product_play_witness.rs` (`ruled_rate_policy_*`) goes red in the same
+/// test run — the tripwire is the pair, not the constant.
+///
+/// What used to sit here was `Some((32_000, PLAYBACK_RATE_HZ))`: an asset encoded
+/// at 32,000 Hz played on a 32,768 Hz timer. It bought a measured row
+/// (`scripts/gafp_pack.py::MEASURED_DECODE` held only 32,000-Hz-keyed rows) and it
+/// cost 32,768/32,000 = 1.024x — **2.4% faster, 41.06 cents sharp** — a defect no
+/// sample-level pin in this repository could see, because the samples were
+/// identical either way; the pitch and tempo are not in the digest. That is
+/// recorded in `flac-docs/open-questions.md` Q14 and in the cents arithmetic
+/// `tests/product_play_witness.rs` still computes, and it is why the cost rows in
+/// the packer are keyed to *structure* (block size, predictor kind/order, residual
+/// envelope) rather than to a declared rate: the rate is a validity check, and the
+/// cost of a frame never was a function of it.
+///
+/// **What the declaration looks like on the wire, since it is no longer
+/// hypothetical.** 32,768 has no entry in the FLAC 4-bit sample-rate table, so a
+/// stream either spells it as code `0b0000` ("get it from the stream") plus a
+/// 32,768 stream default, or as code `0b1101` plus an appended 16-bit Hz field.
+/// The 6b-3 rate probe established both legs on the shipped frames — neither
+/// changes a frame's length, and the decode is bit-identical either way — and the
+/// asset now shipped uses the second spelling, because it is what `flac` emits when
+/// asked for 32,768 Hz: `crates/flac-lite/tests/frame_header_vectors.txt` pins
+/// `samplerate_code 0xD` with `extra_field_bytes 2` on every frame of it, and
+/// `crates/flac-lite/tests/gafp_asset_vectors.txt` pins the same for the packed
+/// blobs. The cost of that spelling is 2 header bytes per frame: 320 bytes across
+/// the product blob's 160 frames. (The blob itself grew from 865,996 B to
+/// 882,949 B, and only a small part of that is the rate field — the 7-0 clip also
+/// carries 2,144 more samples and 3 more frames, and re-encoding at a different
+/// rate changes the residual bytes. The frame-size difference is not the thing
+/// being paid for here; the 6b-3 probe measured the decode-cost effect as about
+/// −20 cycles per frame out of ~426,000, i.e. below the instrument's floor.)
+/// Representability and cost were never the obstacle; the pipeline was.
+pub const RATE_BRIDGE: Option<(u32, u32)> = None;
 
-/// The playback rate this *stream* rate is played at. **For the product there is one
-/// legitimate answer and it is the stream's own rate; every other entry on this table
-/// is scaffolding** (Q14, ruled 2026-11-11 — the block below is the ruling).
-/// The packer's table (`scripts/gafp_pack.py::PLAYBACK_RATE_FOR_STREAM`) is the
-/// source: the asset in `assets/` is encoded at 32,000 Hz and played on the exact
-/// 32,768 Hz timer, because
-/// 32,768 is the only playback rate whose period is an integer number of ticks
-/// and 32,000 is the only stream rate the encode profile holds a measured row at
-/// (`scripts/gafp_pack.py::MEASURED_DECODE`, both rows keyed `(32000, 2048, …)`).
+/// The playback rate for a declared stream rate: **identity, or refusal.**
 ///
-/// The consequence is stated, not hidden: the clip plays 32,768/32,000 = 1.024×
-/// fast — 2.4% shorter and 41.06 cents sharp, the cents computed rather than
-/// approximated in
-/// `tests/product_play_witness.rs::ruled_rate_policy_allows_one_bridge_and_no_more` —
-/// and the deadline the player runs is
-/// 2.4% *tighter* than the stream's own frame period would ask for. `frame_cycles`
-/// above prices the tight one. No instrument in this repository budgets from the
-/// declared rate — every share here is divided by the timer's frame — and the
-/// 2026-11-11 rate probe measured that the tightening prices nothing at current
-/// cost levels: same `audio_span`, same period count, worst frame 59.4% in both arms
-/// of that probe (it ran on the pre-median clock, so 59.4% is that instrument's
-/// reading and not this image's — the current image prints 53.965%).
+/// Two rate sets, not one, and the distinction is why this function takes a
+/// *stream* rate at all. `agb` 0.25 can *play* 10,512 / 18,157 / 32,768 Hz, and
+/// this geometry is built for 32,768; a FLAC **stream** may declare any of the
+/// format's 4-bit table rates or a 16-bit Hz value. Before 7-0 this function
+/// bridged the two sets for one pair, and the guard test's refusal list is still
+/// the interim form of the sweep over the declarable set (`0..=65535` plus the
+/// table values). It deliberately samples the rates that look *arithmetically*
+/// tempting: the only rates with an exact cycles/sample are those dividing 2^24 —
+/// powers of two — so 8,192, 16,384 and 65,536 are exact and still not product
+/// rates. Exactness of the division is a property of the clock, not a ruling about
+/// the stream.
 ///
-/// **RULED (Q14, 2026-11-11, by the project owner): a stream is encoded at the rate
-/// it is played at, and the player does not reinterpret a declared rate to fit the
-/// clock. The 41 cents this mapping buys is not acceptable in any circumstances, so
-/// the product carries a true 32,768 Hz stream and the bridge above is not a
-/// shipping path.**
+/// The `RATE_BRIDGE` arm is inert in this tree — [`RATE_BRIDGE`] is `None`, and
+/// the compile-time pin at the bottom of this module says so — but it is kept on
+/// purpose: it is what makes the constant load-bearing rather than decorative, so
+/// re-adding a mapping there would change what this function returns and the
+/// witness would notice. Deleting the arm would leave a constant nothing reads.
 ///
-/// **Two rate sets, not one.** `agb` 0.25 can *play* 10,512 / 18,157 / 32,768 Hz,
-/// and the product geometry is built for 32,768. A FLAC **stream** can declare any
-/// of the format's 4-bit table rates or a 16-bit Hz value, and this function maps
-/// that *declared* rate. The Q14 guard is therefore about the declarable stream
-/// rates, not about agb's three clocks: the exhaustive form is a host sweep over
-/// `0..=65535` plus the table values (65,536 cheap calls), and it is described here
-/// rather than added in 6b-3 because the behaviour it protects —
-/// identity-or-refusal in the packer and the player — is item 7-0's. 6b-3's sampled
-/// refusal list is the interim guard, and it deliberately samples the rates that look
-/// *arithmetically* tempting: the only rates with an exact cycles/sample are those
-/// dividing 2^24 — powers of two — so 8,192, 16,384 and 65,536 are exact and still
-/// not product rates. Exactness of the division is a property of the clock, not a
-/// ruling about the stream.
-///
-/// **`TODO(Q14, BLOCKING)` — set [`RATE_BRIDGE`] to `None` when the 32,768 product
-/// asset exists, and add nothing to this table before then.** Unblocking is four steps and
-/// none of them are format work: resample the source to 32,768, encode it at the
-/// product profile, measure on hardware the row `(32768, 2048, fixed, 0)` that
-/// `gafp_pack`'s guard asks for (7-1), and re-run the play path against the result —
-/// with a pitch witness in the same PR, because the pinned PCM digest cannot see a
-/// pitch shift: the samples are identical either way, which is exactly how a 41-cent
-/// error survived every gate this asset has been through.
-///
-/// What the 2026-11-11 rate probe settled, recorded here so the ruling is not
-/// re-litigated from this comment: 32,768 is representable — no entry in the FLAC
-/// 4-bit rate table, so such a stream spells the rate as code `0b0000` plus a 32,768
-/// stream default (measured: not one frame changes length, the blob stays 865,996 B),
-/// or as code `0b1101` plus a 16-bit Hz field, which is what `flac` itself emits when
-/// asked and which costs 2 bytes per frame — and `flac-lite` decodes the first
-/// spelling to a bit-identical PCM at the same flow-control floor and the same cost
-/// within the instrument's floor. Neither the format nor the cost was ever the
-/// obstacle; the pipeline and the pitch are. `flac-docs/measurements.md`, the 6b-3
-/// rate row; `flac-docs/open-questions.md`, Q14; `flac-docs/plan-of-record.md`, 7-0.
-pub fn playback_rate_for_stream(stream_rate_hz: u32) -> Option<u32> {
+/// `const` so the contract below can be pinned at compile time: the identity case
+/// is checkable there, and only the identity case — everything else this function
+/// can return is a `RATE_BRIDGE` lookup, which the pin says is absent.
+pub const fn playback_rate_for_stream(stream_rate_hz: u32) -> Option<u32> {
+    if stream_rate_hz == PLAYBACK_RATE_HZ {
+        // The identity case is the product case: the asset declares the clock.
+        return Some(PLAYBACK_RATE_HZ);
+    }
     match RATE_BRIDGE {
-        // **`TODO(Q14, BLOCKING)`** — the measurement bridge, not a product path: it
-        // buys 2.4% of speed and 41.06 cents of pitch. Ruled out on 2026-11-11; it
-        // leaves when `RATE_BRIDGE` becomes `None` and the 32,768 Hz asset lands (7-0).
         Some((declared, played)) if stream_rate_hz == declared => Some(played),
-        // A stream that already declares the target rate needs no mapping.
-        _ if stream_rate_hz == PLAYBACK_RATE_HZ => Some(PLAYBACK_RATE_HZ),
         _ => None,
     }
 }
@@ -331,13 +325,29 @@ const _: () = assert!(PREFILL_SAMPLES == 8_960);
 // consumer side to be satisfiable at once: free >= 2048 and ready >= 560.
 const _: () = assert!(RING_SAMPLES > PREFILL_SAMPLES + 2048);
 const _: () = assert!(RING_SAMPLES >= 2048 + CHUNK_SAMPLES);
-// The period counter (timer2) is 16-bit and counts periods, so the composite
-// cycle clock this module's arithmetic prices against wraps at 65,536 periods =
-// 18.8 minutes. The ROM reports the period count it used and refuses to divide
-// any share by a clock that wrapped; this pin says the ceiling is far above any
-// asset the profile admits. The shipped clip arms 572 periods (571 full ones plus
-// the 240-sample drain tail the ROM reports as `tail_periods=1`); an asset that
-// *declares* 32,768 Hz for the same playing time carries 2.4% more samples —
-// 327,680 of them — and arms 586. Both are three orders of magnitude below the
-// wrap.
+/// The period counter (timer2) is 16-bit and counts periods, so the composite
+/// cycle clock this module's arithmetic prices against wraps at 65,536 periods =
+/// 18.7 minutes of audio at this rate. The ROM reports the period count it used
+/// and refuses to divide any share by a clock that wrapped; this pin says the
+/// ceiling is far above any asset the profile admits. What a run arms is
+/// `ceil(total_samples / CHUNK_SAMPLES)` periods, so the shipped 326,144-sample
+/// clip — 32,768 Hz for 9.95 s, 160 frames with a 512-sample tail — arms 583.
+/// The wrap is two orders of magnitude above that, and the asset cannot be
+/// lengthened past ~36.7 million samples (18.7 minutes) without the counter
+/// needing a wider field.
 const _: () = assert!(u16::MAX as u64 * PERIOD_CYCLES as u64 > 1_600_000_000);
+
+// The rate contract itself, as a compile-time fact: this product path carries no
+// rate reinterpretation. Paired with the runtime guard in
+// `tests/product_play_witness.rs`, which checks what the *player* does with a
+// declared rate; a constant nothing reads would pass this and fail that.
+const _: () = assert!(matches!(RATE_BRIDGE, None));
+// …and identity is total for the product clock: the rate the shipped asset
+// declares resolves to the rate this geometry's frame budget is stated in. The
+// negative half of that — nothing else resolves at all — is what the runtime
+// guard in `tests/product_play_witness.rs` sweeps, because the declarable rate
+// set is 65,536 wide and a compile-time pin cannot enumerate it honestly.
+const _: () = assert!(matches!(
+    playback_rate_for_stream(PLAYBACK_RATE_HZ),
+    Some(rate) if rate == PLAYBACK_RATE_HZ
+));

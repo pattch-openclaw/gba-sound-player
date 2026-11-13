@@ -13,10 +13,10 @@ it in `examples/flac_spike/src/assets.rs`.
 
 What the set is for, and why each member is there
 ------------------------------------------------
-C2 says "FIXED-only assets, 2048-sample frames at 32 kHz, underrun-free on
-hardware", and the plan puts the FIXED-only guarantee at *pack time*. So the
-fixtures exist to make two claims checkable in Rust over real packed bytes rather
-than asserted in a comment:
+C2 says "FIXED-only assets, 2048-sample frames at the device sample rate,
+underrun-free on hardware", and the plan puts the FIXED-only guarantee at *pack
+time*. So the fixtures exist to make two claims checkable in Rust over real packed
+bytes rather than asserted in a comment:
 
   1. A GAFP the real packer wrote from a real encode decodes through
      `format::Manifest` + `decoder::Decoder` to exactly the reference decoder's
@@ -31,14 +31,24 @@ than asserted in a comment:
      the packer's refusal of the same encode and demands the reason name real LPC
      subframes and the measured cost.
 
-Why these are small and the perf clip is not re-packed here: the 157-frame
+Why these are small and the perf clip is not re-packed here: the 160-frame
 FIXED-only blob at `examples/flac_integration/assets/spike_l0.gfp` is the measured
 C2 asset, and its byte-identity against the real packer is gate `gafp-pack-check`.
 These fixtures cover the *shape* of the container contract — mono, independent
 stereo, mid/side, a short final frame, an LPC arm — at a size a test table can
-carry: 5,000 samples at 32,000 Hz with `-b 2048` is three frames, the last one
-legitimately 904 samples, which is the case `scripts/pack_flac.sh`'s notes warn
-about ("never filter candidates on blocksize == track blocksize").
+carry: 5,000 samples with `-b 2048` is three frames, the last one legitimately 904
+samples, which is the case `scripts/pack_flac.sh`'s notes warn about ("never
+filter candidates on blocksize == track blocksize").
+
+**Every source here is generated at the device rate, and says so.** Plan item 7-0
+and Q14's ruling are the reason: `gafp_pack.py` refuses a stream that declares any
+rate other than the clock it budgets against, so a 32,000 Hz fixture could only
+ever be a refusal leg here — and a test set that had to *resample* its way to the
+product clock would be proving a path the product does not take. The sample counts
+and periods are therefore stated at 32,768 Hz like the product clip's: 5,000
+samples is 5000/2**15 s, exact in binary, and the periods come from
+`frame_vectors.PARTIALS_DEVICE` (Hz-authored), not from periods chosen at another
+rate.
 
 The refusal legs write no file: the packer's exit status and its stated reason are
 the witness, and they are re-run on every `--check`. Note how each is reached:
@@ -81,9 +91,11 @@ GFP = os.path.join(TESTS, "gfp")
 TABLE = os.path.join(TESTS, "gafp_asset_vectors.txt")
 
 # Every accepted fixture is 5,000 samples of the same deterministic synthesis at
-# 32,000 Hz — short on purpose, with a deliberately ragged final frame.
+# the device rate — short on purpose, with a deliberately ragged final frame. The
+# rate is read from `frame_vectors.DEVICE_RATE`, never written here: this file
+# cannot name a sample rate that the packer it calls would refuse.
 SAMPLES = 5000
-SECONDS = SAMPLES / 32000.0          # 0.15625, exact in binary
+SECONDS = SAMPLES / fv.DEVICE_RATE    # 5000/2**15, exact in binary
 
 
 def fixtures():
@@ -95,14 +107,14 @@ def fixtures():
     """
     return [
         dict(
-            name="p0_fixed0_mono_32k_b2048.gfp", src="mono_5000.wav",
+            name="p0_fixed0_mono_32768_b2048.gfp", src="mono_5000.wav",
             channels=1, lpc=0, midside=False, allow=[],
             why=("product profile, mono: the smallest shape the container has to "
                  "carry and the one the manifest's mono channel-config code is "
                  "written for; 3 frames, the last 904 samples."),
         ),
         dict(
-            name="p2_fixed0_stereo_32k_b2048.gfp", src="stereo_5000.wav",
+            name="p2_fixed0_stereo_32768_b2048.gfp", src="stereo_5000.wav",
             channels=2, lpc=0, midside=False, allow=[],
             why=("product profile, independent L/R stereo (`--no-midside`): the "
                  "assignment whose two subframes are plain left and right. "
@@ -111,7 +123,7 @@ def fixtures():
                  "redundant."),
         ),
         dict(
-            name="p3_fixed0_midside_32k_b2048.gfp", src="stereo_5000.wav",
+            name="p3_fixed0_midside_32768_b2048.gfp", src="stereo_5000.wav",
             channels=2, lpc=0, midside=True, allow=[],
             why=("product profile, mid/side (`-m`): the decorrelated assignment "
                  "whose side slot is coded at bps + 1 (the measured seam in "
@@ -120,13 +132,13 @@ def fixtures():
                  "PCM pins below are what prove it did."),
         ),
         dict(
-            name="x1_lpc_stereo_32k_b2048.gfp", src="stereo_5000.wav",
+            name="x1_lpc_stereo_32768_b2048.gfp", src="stereo_5000.wav",
             channels=2, lpc=4, midside=True,
             allow=["allow-lpc", "allow-over-budget"],
             why=("NOT a product blob, and the reason this file exists: the same "
                  "source at `-l 4`. The packer needs TWO separate relaxations to "
                  "write it — `--allow-lpc` for the profile limit (which preflight "
-                 "refuses up front at this rate, before encoding anything) and "
+                 "refuses up front, before encoding anything) and "
                  "`--allow-over-budget` for the measured-cost bar — and the table "
                  "records both, because `-L 4` is not the C2 profile. The product "
                  "profile refuses this exact encode, and `--check` re-runs that "
@@ -148,13 +160,16 @@ def refusals():
              want=["real LPC subframes", "decodes at 174.14% of the frame"],
              why="the asset C2 cannot play, refused by the frames, not by a "
                  "header field that reads 0"),
-        dict(name="44,100 Hz at the 32,000 Hz target",
-             slug="rate_44100_at_32000_target", src="r44100_stereo.flac",
+        dict(name="44,100 Hz at the 32,768 Hz target",
+             slug="rate_44100_at_32768_target", src="r44100_stereo.flac",
              extra=[],
-             want=["sample rate 44100 Hz is not the target 32000 Hz"],
+             want=["sample rate 44100 Hz is not the target 32768 Hz"],
              why="a rate the container can express and this target has no "
-                 "measured path for; note this is the native path — a WAV at "
-                 "44,100 Hz would have been resampled to the target instead"),
+                 "measured path for — and, since Q14 and plan item 7-0, no "
+                 "interpretation either: the packer refuses it rather than "
+                 "budgeting it against a different clock. Note this is the native "
+                 "path — a WAV at 44,100 Hz would have been resampled to the "
+                 "target instead"),
         dict(name="8-bit PCM at a 16-bit profile", slug="eight_bit_at_16bit",
              src="eight_bit.flac", extra=[],
              want=["bits per sample 8 is outside the container's [16]"],
@@ -182,9 +197,13 @@ def write_wav(path, samples, rate, channels, width=2):
                 w.writeframes(bytes([(s >> 8) & 0xFF]))
 
 
-def flac_encode(src, dst, rate, order=0, midside=True):
+def flac_encode(src, dst, order=0, midside=True):
     """An encode made outside the packer, for the legs that must arrive as an
-    existing encode rather than as a fresh one."""
+    existing encode rather than as a fresh one.
+
+    No rate argument: the rate is in the WAV, and an unused parameter here would
+    read as if this function chose it. It does not — and after 7-0 the only rate
+    worth naming in this file is the one `build_sources` writes into the WAV."""
     cmd = ["flac", "-1", "-f", "-s", "-l", str(order), "-b", "2048"]
     if midside:
         cmd.append("-m")
@@ -195,23 +214,38 @@ def build_sources(work):
     def p(name):
         return os.path.join(work, name)
 
-    stereo = fv.synth_pcm(SECONDS, 32000, fv.PARTIALS_32K, 1000, 3, 700, 400)
-    mono = fv.synth_pcm(SECONDS, 32000, fv.PARTIALS_32K, 1000, 3, 700, 400,
-                        mono=True)
-    write_wav(p("stereo_5000.wav"), stereo, 32000, 2)
-    write_wav(p("mono_5000.wav"), mono, 32000, 1)
-    write_wav(p("eight_bit.wav"), stereo, 32000, 2, width=1)
-    flac_encode(p("eight_bit.wav"), p("eight_bit.flac"), 32000)
+    # The product profile's own cost shape is what these fixtures are meant to
+    # reproduce at test size, so the sources are built the way the product clip's
+    # are: at the device rate, with periods authored from Hz at that rate. See
+    # `frame_vectors.py`'s comment above `PARTIALS_32K` for why the two sets
+    # differ by one sample each and why that difference is the whole of Q14.
+    def at_device_rate(mono=False):
+        return fv.synth_pcm(SECONDS, fv.DEVICE_RATE, fv.PARTIALS_DEVICE,
+                            # The fixture's square keeps the 32 Hz its name always
+                            # meant; at this rate that is an exact 1024-sample
+                            # period, which is also the product clip's side slot.
+                            fv.SIDE_PERIOD_DEVICE, 3, 700, 400, mono=mono)
 
+    stereo = at_device_rate()
+    mono = at_device_rate(mono=True)
+    write_wav(p("stereo_5000.wav"), stereo, fv.DEVICE_RATE, 2)
+    write_wav(p("mono_5000.wav"), mono, fv.DEVICE_RATE, 1)
+    write_wav(p("eight_bit.wav"), stereo, fv.DEVICE_RATE, 2, width=1)
+    flac_encode(p("eight_bit.wav"), p("eight_bit.flac"))
+
+    # The one deliberately off-rate source in the file: the rate refusal leg. It
+    # stays 44,100 Hz *because* that is the thing being witnessed — a stream whose
+    # declared rate is not the target's clock, arriving as an existing encode so
+    # the packer cannot resample it away.
     r44100 = fv.synth_pcm(SECONDS, 44100, fv.PARTIALS_32K, 1000, 3, 700, 400)
     write_wav(p("stereo_44100.wav"), r44100, 44100, 2)
-    flac_encode(p("stereo_44100.wav"), p("r44100_stereo.flac"), 44100)
+    flac_encode(p("stereo_44100.wav"), p("r44100_stereo.flac"))
 
     # The LPC leg, encoded outside the packer on purpose: the refusal leg and the
     # relaxed fixture must be about the SAME bytes, so that "the product profile
     # refuses this" and "this file exists only because a guard was relaxed" are
     # statements about one stream, not about two similar ones.
-    flac_encode(p("stereo_5000.wav"), p("l4_stereo.flac"), 32000, order=4)
+    flac_encode(p("stereo_5000.wav"), p("l4_stereo.flac"), order=4)
 
 
 def run_packer(src, out, extra, facts=None):
@@ -235,6 +269,15 @@ TABLE_HEADER = """# flac-lite GAFP asset facts -- GENERATED
 #   (integer-exact, no RNG). Reference PCM: `flac -d` of the stream the frames
 #   came from -- a second implementation, not the encoder's own word.
 # encoder: %(version)s
+#
+# Every accepted blob here declares 32,768 Hz, and so does every source WAV this
+# file synthesizes. That is not incidental: since Q14 (ruled 2026-11-11) and plan
+# item 7-0, `gafp_pack.py` refuses any stream whose declared rate is not the clock
+# its measured rows are budgeted against, so an off-rate source could only ever
+# reach this table as a refusal leg. `rate_44100_at_32768_target` is that leg, and
+# the reason it is kept. A rate that *looks* close to the target — 32,000 Hz,
+# 1.024x, +41.06 cents — is refused exactly like 44,100 Hz is: the declared rate is
+# a validity check, never something the packer reinterprets.
 #
 # One block per committed blob under tests/gfp/, in the order gen_gafp_fixtures.py
 # builds them, then the refusal legs. A block is: `# source:`/`# flags:`/`# why:`

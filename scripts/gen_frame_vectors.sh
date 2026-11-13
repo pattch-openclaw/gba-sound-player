@@ -50,16 +50,34 @@ python3 "$here/frame_vectors.py" synth "$tmp"
 
 echo "== encoding (each vector's encode profile is recorded in the output)"
 # -m: allow mid/side. -b: pin blocksize. -l: max predictor order (0 => FIXED only).
-flac -1 -f -s -l 4 -b 2048 -m -o "$tmp/l4_stereo.flac"     "$tmp/stereo.wav"
-flac -1 -f -s -l 0 -b 2048 -m -o "$tmp/l0_stereo.flac"     "$tmp/stereo.wav"
-flac -1 -f -s -l 4 -b 1024    -o "$tmp/l4_mono.flac"       "$tmp/mono.wav"
+#
+# Two rates, on purpose (plan item 7-0).
+#
+# The `vec_*32k` sources stay at 32,000 Hz: what they witness only exists at a
+# rate the 4-bit sample-rate table can spell. `stereo-6byte-first` is 6 bytes
+# because the rate is one nibble, and it is the base every byte-indexed header
+# mutation in tests/frame_header_layout.rs is written against; at 32,768 Hz the
+# same encode grows by two bytes per frame and that whole family stops existing.
+# Keeping a format witness at a table rate is not a leftover bridge: Q14 rules how
+# the *product* names its clock, and the product stream is right below.
+flac -1 -f -s -l 4 -b 2048 -m -o "$tmp/vec_l4_stereo32k.flac" "$tmp/stereo_32k.wav"
+flac -1 -f -s -l 0 -b 2048 -m -o "$tmp/vec_l0_stereo32k.flac" "$tmp/stereo_32k.wav"
+flac -1 -f -s -l 4 -b 1024    -o "$tmp/vec_l4_mono32k.flac"   "$tmp/mono_32k.wav"
+# The shipped product asset's own bytes: the same command, same source,
+# scripts/gen_spike_assets.sh runs for its FIXED arm, so the `prod-*` vectors are
+# frame-for-frame what examples/flac_integration/assets/spike_l0.gfp contains —
+# 32,768 Hz spelled as 0b1101 + a 16-bit field, 160 frames, 512-sample tail.
+# frame_vectors.py's emit() refuses to write the table if that stops being true.
+flac -1 -f -s -l 0 -b 2048 -m -o "$tmp/vec_prod_l0.flac"      "$tmp/stereo.wav"
 flac -1 -f -s -l 4 -b 2048 -m -o "$tmp/l4_silence.flac"    "$tmp/silence.wav"
 # Wasted-bits witness: coarse square wave (zero LSBs by construction) makes
 # libFLAC signal wasted bits in the subframe header. -l 0 keeps it FIXED, so
 # the vector witnesses the type field AND the wasted flag that follows it.
 flac -1 -f -s -l 0 -b 2048    -o "$tmp/wasted_square.flac" "$tmp/wasted_square.wav"
 # 65536 Hz is outside FLAC's streamable subset (no 4-bit code for it), so
-# libFLAC needs --lax; every frame then says "rate from stream" (code 0).
+# libFLAC needs --lax; every frame then says "rate from stream" (code 0). That
+# is one half of the rate story; 32,768 Hz (no code, but streamable: 0b1101 +
+# 16-bit) is the other, and it is witnessed by the product source above.
 flac -1 -f -s -l 4 -b 2048 -m --lax -o "$tmp/r65k.flac"    "$tmp/r65k.wav"
 # Final frames whose length is not a table block size force the uncommon
 # ("get 8/16-bit") blocksize form -- the only way those frames can be carried.

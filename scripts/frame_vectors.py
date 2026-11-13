@@ -204,7 +204,7 @@ def hash_pcm(count):
 
 
 def synth_pcm(seconds, rate, center_partials, side_period, side_weight,
-              noise_l, noise_r, mono=False, exact=None):
+              noise_l, noise_r, mono=False, exact=None, square_period=32):
     """Correlated stereo (or mono) material tuned to make the *encoder* choose
     the features the vectors are supposed to demonstrate.
 
@@ -229,7 +229,13 @@ def synth_pcm(seconds, rate, center_partials, side_period, side_weight,
     # precise sample count (it decides the final frame's blocksize), and a float
     # multiply must never be allowed to shave one sample off it.
     count = exact if exact is not None else int(seconds * rate)
-    square_period = 32
+    # `square_period` used to be a literal 32 here. It is a parameter because a
+    # fixture authored in Hz has to derive EVERY periodic component from the rate
+    # it declares: the 32,000-era fixture's square sat at period 32 = 1,000 Hz,
+    # and a period copied across a rate change is the exact defect plan-of-record
+    # Q14 ruled out (41.06 cents). `SQUARE_PERIOD_DEVICE` below carries the
+    # device-rate value; the default stays 32 so the format-witness streams do
+    # not move with this item.
     samples = []
     for i in range(count):
         center = sum(weight * tri(i, period) // 1000
@@ -262,6 +268,74 @@ def write_wav(path, rate, channels, samples):
 # pinning every period to a divisor would quietly change the encoder's choices.
 PARTIALS_32K = [(128, 5), (192, 4), (250, 3), (80, 2)]
 PARTIALS_64K = [(64, 5), (128, 4), (256, 3), (512, 2)]
+
+# ---------------------------------------------------------------------------
+# The device rate, and the one fixture family authored at it (plan item 7-0).
+# ---------------------------------------------------------------------------
+#
+# 32,768 Hz is the rate the product path's timer runs at
+# (`agb::mixer::SoundDriver::SAMPLE_RATE`, mirrored by
+# `examples/flac_integration/src/geometry.rs::PLAYBACK_RATE_HZ`). Q14 was ruled
+# on 2026-11-11: **a stream is encoded at the rate it is played at**, and the
+# player does not reinterpret a declared rate to fit a clock. The rule is about
+# pitch, not cost: the shipped 32,000 Hz asset played on a 32,768 Hz timer is
+# 1.024x fast, which is 41.06 cents -- audible, and invisible to every sample
+# digest in the tree because the samples themselves are identical.
+#
+# So the product's *fixture* has to be authored at 32,768, and that changes how
+# it is specified: not as sample periods that happen to suit 32,000, but as Hz,
+# with the period derived at the rate the stream declares. PARTIALS_DEVICE below
+# is that derivation -- `period = round(rate / hz)` at 32,768 Hz, from the Hz the
+# 32,000-era fixture was actually playing. Measured drift, in cents (each is the
+# difference the integer period forces; none of them is the 41-cent defect):
+#
+#     intended Hz   32k period   device period   played Hz     drift
+#     250.000       128          131             250.137       +0.95 c
+#     166.667        192         197             166.335       -3.45 c
+#     128.000        250         256             128.000        0.00 c
+#     400.000         80          82             399.610       -1.69 c
+#     32.000        1000        1024              32.000        0.00 c
+#     1000.000        32          33             992.970      -12.21 c
+#
+# 131 and 197 do not divide 32,768, and that is deliberate for the same reason
+# 192 does not divide 32,000 (the note above): a partial that is not periodic in
+# the block is part of what pushes `-l 4` toward LPC, which is what the spike's
+# L4 arm needs to stay an arm. What matters for 7-0 is the *census*, and it is
+# re-measured here rather than inherited: at `-l 0 -b 2048 -m` this source emits
+# `fixed0` x320 with one partition, no wasted bits, no escape partition and Rice
+# parameters no larger than 10 -- the same shape the measured hardware row names
+# -- and at `-l 4` it emits majority LPC (measured: lpc4 x318 + lpc3 x2). If a
+# future edit changes those, the fail-closed arm censuses in `spike_assets` and
+# the profile guard in `gafp_pack.py` refuse to write, exactly as they do today.
+#
+# What does NOT move: every stream in `synth()` that exists to witness a *format
+# fact* -- the 4-bit rate table, the uncommon rate/blocksize forms, the tail
+# lengths, the per-type subframe bodies, the channel-assignment baits -- stays at
+# 32,000. The spec table has 32,000 in it and the format tables must know that
+# value forever; deleting it would be the over-correction Q14's record warns
+# against. The dividing question is "would the product ship this bytes-of-it?":
+# the ~10 s stereo/mono family below is the perf instrument and the source of the
+# product asset, so it carries the device rate; a 256-sample stream that exists to
+# show what a `0b111` subframe header looks like does not.
+DEVICE_RATE = 32_768
+SQUARE_PERIOD_DEVICE = 33
+PARTIALS_DEVICE = [(131, 5), (197, 4), (256, 3), (82, 2)]
+SIDE_PERIOD_DEVICE = 1024
+
+# The product clip's length, as an explicit shape rather than as seconds.
+#
+# Ten seconds at 32,768 Hz is 327,680 samples = **exactly 160 full 2048-sample
+# frames**, and that would delete the short-frame witness: the asset's final frame
+# is the one every decoder gets wrong (`stereo-last` in the header table exists
+# for that reason, and 6b-1/6b-3's walk of the shipped asset reports a 512-sample
+# tail). So the count is written as full blocks plus an explicit short tail --
+# the same tail length the 32,000-era asset carries -- and never as
+# `int(seconds * rate)`, which is how the exact-multiple accident arrives.
+PRODUCT_FULL_FRAMES = 159
+PRODUCT_TAIL_SAMPLES = 512
+PRODUCT_BLOCKSIZE = BLOCKSIZE[0b1011]        # 2048, the C2 geometry
+PRODUCT_SAMPLES = (PRODUCT_FULL_FRAMES * PRODUCT_BLOCKSIZE
+                   + PRODUCT_TAIL_SAMPLES)   # 326,144
 
 
 # Streams whose *final frame* cannot be expressed by the 4-bit blocksize
@@ -359,9 +433,36 @@ def run_indep_pcm(count):
 
 
 def synth(dst):
-    write_wav(os.path.join(dst, "stereo.wav"), 32000, 2,
+    # The product-shaped pair: the perf instrument's two arms and the source of
+    # the product asset. Authored at the device rate, in Hz (see
+    # DEVICE_RATE/PARTIALS_DEVICE above), with an explicit short final frame
+    # (see PRODUCT_SAMPLES). Everything else in this function witnesses a format
+    # fact and stays at 32,000 on purpose — see the pair below.
+    write_wav(os.path.join(dst, "stereo.wav"), DEVICE_RATE, 2,
+              synth_pcm(0, DEVICE_RATE, PARTIALS_DEVICE, SIDE_PERIOD_DEVICE, 3,
+                        700, 400, exact=PRODUCT_SAMPLES,
+                        square_period=SQUARE_PERIOD_DEVICE))
+    write_wav(os.path.join(dst, "mono.wav"), DEVICE_RATE, 1,
+              synth_pcm(0, DEVICE_RATE, PARTIALS_DEVICE, SIDE_PERIOD_DEVICE, 3,
+                        700, 400, mono=True, exact=PRODUCT_SAMPLES,
+                        square_period=SQUARE_PERIOD_DEVICE))
+    # The header-vector family's stereo/mono sources. These stay at 32,000 Hz for
+    # a reason that is about the FORMAT and not about the product: most of what
+    # they witness only exists at a rate the 4-bit sample-rate table can spell.
+    # `stereo-6byte-first` is a 6-byte header because the rate fits in one
+    # nibble; the same encode at 32,768 Hz gains two bytes per frame (0b1101 plus
+    # a 16-bit Hz field), and that vector — the base every byte-indexed header
+    # mutation in tests/frame_header_layout.rs is written against — stops existing.
+    # Q14 moved the product/perf pair to the device rate; it says nothing about
+    # format witnesses, and the product's own 0b1101 shape is witnessed directly
+    # (the `prod-*` vectors below, from the device-rate source) rather than by
+    # leaving the rest of the family unable to say anything else. Same parameters
+    # as before plan item 7-0, so the bytes are the bytes those vectors have
+    # always carried. `r65k.wav` below is the other half of the rate story: a
+    # rate no code spells at all.
+    write_wav(os.path.join(dst, "stereo_32k.wav"), 32000, 2,
               synth_pcm(10.0, 32000, PARTIALS_32K, 1000, 3, 700, 400))
-    write_wav(os.path.join(dst, "mono.wav"), 32000, 1,
+    write_wav(os.path.join(dst, "mono_32k.wav"), 32000, 1,
               synth_pcm(10.0, 32000, PARTIALS_32K, 1000, 3, 700, 400, mono=True))
     write_wav(os.path.join(dst, "r65k.wav"), 65536, 2,
               synth_pcm(10.0, 65536, PARTIALS_64K, 1024, 3, 700, 400))
@@ -692,20 +793,20 @@ def find_frames(data):
 # version. Optional vectors record whatever that version happened to choose —
 # they document observed behaviour, and regeneration is expected to move them.
 VECTOR_SPECS = [
-    ("stereo-6byte-first", "l4_stereo.flac", lambda f: f[0], True,
+    ("stereo-6byte-first", "vec_l4_stereo32k.flac", lambda f: f[0], True,
      "6-byte header: 1-octet coded frame number, CRC-8 at bit 40"),
-    ("stereo-7byte-num128", "l4_stereo.flac",
+    ("stereo-7byte-num128", "vec_l4_stereo32k.flac",
      lambda f: next(h for h in f if h["number"] == 128), True,
      "7-byte header: 2-octet coded number (>=128 forces the wider form)"),
-    ("stereo-last", "l4_stereo.flac", lambda f: f[-1], True,
+    ("stereo-last", "vec_l4_stereo32k.flac", lambda f: f[-1], True,
      "final frame: short blocksize (the tail is 512, not the track's 2048) AND "
      "a 7-byte coded number -- the frame most decoders get wrong"),
-    ("mono-b1024-first", "l4_mono.flac", lambda f: f[0], True,
+    ("mono-b1024-first", "vec_l4_mono32k.flac", lambda f: f[0], True,
      "mono: channels code 0b0000, one subframe per frame"),
     ("r65k-rate-from-stream", "r65k.flac", lambda f: f[0], True,
      "sample-rate code 0b0000: 65536 Hz has no 4-bit code, so it lives only in "
      "STREAMINFO -> the FromStreamDefault path the GBA 65kHz goal depends on"),
-    ("fixed-only-first", "l0_stereo.flac", lambda f: f[0], True,
+    ("fixed-only-first", "vec_l0_stereo32k.flac", lambda f: f[0], True,
      "`-l 0` encode: FIXED-only subframes, the perf gate's FIXED arm"),
     ("subframe-wasted-bits", "wasted_square.flac", lambda f: f[0], False,
      "subframe header WITH wasted bits: coarse square wave encodes FIXED-1 + "
@@ -713,7 +814,7 @@ VECTOR_SPECS = [
      "consumes pad+type (7 bits) and stops exactly before the wasted flag"),
     ("silence-constant", "l4_silence.flac", lambda f: f[0], False,
      "CONSTANT subframes (digitally silent input)"),
-    ("stereo-midside", "l4_stereo.flac",
+    ("stereo-midside", "vec_l4_stereo32k.flac",
      lambda f: next(h for h in f if h["decorrelation"] == "mid-side"), False,
      "mid/side decorrelation: channels code 0b1010"),
     # --- uncommon blocksize forms (9.1.6): the header is only parseable if the
@@ -730,13 +831,37 @@ VECTOR_SPECS = [
      "56000 Hz: no table code, so 0b1100 + rate in kHz as an 8-bit number"),
     ("rate-hz-16bit", "rate_hz.flac", lambda f: f[0], True,
      "48001 Hz: 0b1101 + rate in Hz as a 16-bit number"),
+    # The same code, but not a constructed witness: this one is the shipped
+    # product asset's own header, at the rate the GBA plays at. Required, and
+    # fail-closed in emit() below (every frame of the stream has to spell the
+    # rate this way and keep the geometry these vectors claim) — a `prod-*`
+    # vector that stopped describing assets/spike_l0.gfp would be worse than none.
+    ("prod-rate32768-first", "vec_prod_l0.flac", lambda f: f[0], True,
+     "the shipped product asset's first frame header: 32,768 Hz has no entry in "
+     "the 4-bit sample-rate table, so every frame spells it as 0b1101 + a 16-bit "
+     "Hz field — extra_field_bytes 2, an 8-byte header, CRC-8 at bit 56 rather "
+     "than 40. Same encode command as scripts/gen_spike_assets.sh's FIXED arm, so "
+     "this is byte-for-byte what examples/flac_integration/assets/spike_l0.gfp "
+     "carries on all 160 of its frames (plan item 7-0: a stream is encoded at the "
+     "rate it is played at)"),
+    ("prod-rate32768-last", "vec_prod_l0.flac", lambda f: f[-1], True,
+     "the shipped product asset's final frame: a 512-sample short tail (a table "
+     "size, 0b1001 — the same tail length the 32,000-era clip ended with, and "
+     "deliberately so: see PRODUCT_SAMPLES above), a 2-octet coded frame number, "
+     "and the 0b1101 + 16-bit Hz rate field, all in one 9-byte header — where "
+     "`stereo-last` above is 7 bytes with the rate inside one nibble. That "
+     "difference is why this vector is not redundant: the short tail alone is "
+     "not a product witness, the tail spelled at the device rate is. This is the "
+     "frame the product blob actually ends with, and the reason a product asset "
+     "must not be an exact multiple of the block size: the short tail is a "
+     "decoder contract the product path has to keep"),
     ("rate-hz10-16bit", "rate_hz10.flac", lambda f: f[0], True,
      "10010 Hz: 0b1110 + rate/10 as a 16-bit number (units are per-code, and "
      "never 24-bit -- the scaffold's '8 | 16 | 24' note had no witness)"),
-    ("stereo-leftside", "l4_stereo.flac",
+    ("stereo-leftside", "vec_l4_stereo32k.flac",
      lambda f: next(h for h in f if h["decorrelation"] == "left-side"), False,
      "left/side decorrelation: channels code 0b1000"),
-    ("stereo-sideright", "l4_stereo.flac",
+    ("stereo-sideright", "vec_l4_stereo32k.flac",
      lambda f: next(h for h in f if h["decorrelation"] == "side-right"), False,
      "side/right decorrelation: channels code 0b1001"),
     ("verbatim-first", "verbatim.flac", lambda f: f[0], True,
@@ -793,6 +918,29 @@ def emit(src, out_path):
         "verbatim.flac: not every frame is VERBATIM with wasted 0 -- the " \
         "required verbatim-first vector would silently stop witnessing " \
         "verbatim. Re-measure before regenerating."
+    # Fail-closed on the product-shape vectors, for the same reason as the
+    # verbatim census above: their whole claim is that they ARE the shipped
+    # asset's bytes, so the stream they come from has to keep being that asset.
+    _, prod_info, prod_frames = streams["vec_prod_l0.flac"]
+    assert (prod_info["sample_rate"], prod_info["total samples"],
+            prod_info["bits-per-sample"], prod_info["channels"]) \
+        == (DEVICE_RATE, PRODUCT_SAMPLES, 16, 2), \
+        "vec_prod_l0.flac is no longer the 7-0 product stream — the prod-* " \
+        "vectors would be describing a clip nothing ships"
+    # Every frame carries its own rate, so one vector cannot see a stream that
+    # spells it inconsistently: that is the 6b-3 respell trap.
+    assert all(h["rate_code"] == 0b1101 and h["rate_hz"] == DEVICE_RATE
+               and h["extra_bytes"] == 2 for h in prod_frames), \
+        "vec_prod_l0.flac: a frame stops spelling 32,768 Hz as 0b1101 + a " \
+        "16-bit field — the exact shape the prod-* vectors exist to pin"
+    assert [h["blocksize"] for h in prod_frames] == \
+        [PRODUCT_BLOCKSIZE] * PRODUCT_FULL_FRAMES + [PRODUCT_TAIL_SAMPLES], \
+        "vec_prod_l0.flac: the block geometry moved off the constants in this " \
+        "file that the product docs cite — regenerate the asset, the pin and " \
+        "these vectors together, or the vectors are lying about the tail"
+    assert all(h["subframe0_kind"] == "fixed" for h in prod_frames), \
+        "vec_prod_l0.flac: the FIXED-only arm stopped being FIXED-only — the " \
+        "prod-* vectors would be quoting a shape the product profile refuses"
     version = subprocess.run(["flac", "--version"], capture_output=True,
                              text=True).stdout.strip().splitlines()[0]
     lines = []
@@ -874,7 +1022,8 @@ def emit(src, out_path):
 
     w("# --- measured encoder behaviour (cite these instead of guessing) ---------")
     w("# First-subframe type across a whole 10s encode of the same source:")
-    for filename in ("l0_stereo.flac", "l4_stereo.flac"):
+    for filename in ("vec_l0_stereo32k.flac", "vec_l4_stereo32k.flac",
+                     "vec_prod_l0.flac"):
         _, info, frames = streams[filename]
         tally = {}
         for header in frames:
@@ -898,7 +1047,8 @@ def emit(src, out_path):
           % (out_path, written))
 
 
-STREAMS = ("l4_stereo.flac", "l0_stereo.flac", "l4_mono.flac",
+STREAMS = ("vec_l4_stereo32k.flac", "vec_l0_stereo32k.flac",
+           "vec_l4_mono32k.flac",
            "l4_silence.flac", "r65k.flac", "tail16.flac", "tail8.flac",
            "rate_khz.flac", "rate_hz.flac", "rate_hz10.flac")
 
@@ -1679,8 +1829,11 @@ def spike_assets(src, crate_dir):
         frames = find_frames(data)
         check_stream(filename, frames, info)
         assert (info["channels"], info["bits-per-sample"], info["sample_rate"]) \
-            == (2, 16, 32000), "%s: expected 16-bit stereo 32 kHz, got %s" % (
-                filename, info)
+            == (2, 16, DEVICE_RATE), "%s: expected 16-bit stereo at the device " \
+            "rate %d Hz (plan item 7-0: a stream is encoded at the rate it is " \
+            "played at), got %s" % (filename, DEVICE_RATE, (info["channels"],
+                                                            info["bits-per-sample"],
+                                                            info["sample_rate"]))
         census = spike_census(filename, frames, data, info)
         start = first_frame_offset(data)
         assert frames[0]["offset"] == start, \

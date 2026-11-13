@@ -481,8 +481,8 @@ impl<'a> Manifest<'a> {
     }
 
     /// The encode profile a decoder should hold this blob to, as the packer
-    /// recorded it: block size, bit depth and predictor order come from the
-    /// header, so a manifest is validated against itself plus
+    /// recorded it: sample rate, block size, bit depth and predictor order come
+    /// from the header, so a manifest is validated against itself plus
     /// [`DEFAULT_PROFILE`]'s category rules.
     pub fn profile(&self) -> crate::Result<()> {
         DEFAULT_PROFILE.validate(self)
@@ -505,6 +505,29 @@ fn read_u32(table: &[u8], index: usize) -> u32 {
 /// `Copy` and free of lifetime plumbing in a hot path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EncodeProfile {
+    /// Sample rates (Hz) a manifest may declare.
+    ///
+    /// This clause was missing until plan item 7-0 (Q14, ruled 2026-11-11: a
+    /// stream is encoded at the rate it is played at). It belongs in the profile
+    /// rather than only in the packer and in one example's player because the
+    /// profile is the single object every path that validates a manifest reads —
+    /// [`Manifest::profile`], `Decoder::new` under the `strict-profile` feature,
+    /// and the product ROM's start-up check. A build that plays at one clock and
+    /// is handed a stream that declares another has only two options, and both are
+    /// wrong: reinterpret the declared rate to fit the timer (1.024x, i.e. 41.06
+    /// cents of pitch — the defect Q14 was ruled on), or play it at the declared
+    /// rate and change the sample clock of the whole mixer. Refusing it is the
+    /// third option, and it is the one that costs nothing downstream.
+    ///
+    /// Note what this is *not*: not a lookup, and not a cost key. Cost is keyed
+    /// structurally in `scripts/gafp_pack.py`'s `MEASURED_DECODE`, by **block
+    /// size and predictor kind/order**; the residual envelope a row was measured
+    /// on travels as a stated caveat on that row rather than as a key component,
+    /// which is why the packer says out loud when it falls back to the nearest
+    /// shape. The declared rate is a validity check asked before any cost
+    /// question, because a stream at a rate this build does not play at has no
+    /// frame period for a cost figure to be a percentage *of*.
+    pub allowed_sample_rates_hz: &'static [u32],
     /// Allowed block sizes.
     pub allowed_blocksizes: &'static [u16],
     /// Max FIXED predictor order (0..=4).
@@ -520,8 +543,17 @@ pub struct EncodeProfile {
     pub allowed_bits_per_sample: &'static [u8],
 }
 
+/// The one rate the product path plays at, spelled here as well as in the
+/// example that drives the mixer (`examples/flac_integration/src/geometry.rs::
+/// PLAYBACK_RATE_HZ`, which mirrors `agb::mixer::SoundDriver::SAMPLE_RATE`).
+/// They are one fact in two crates, and the example's own rate guard asserts
+/// they stay equal — a crate-side profile naming a different rate from the mixer
+/// would have the ROM refuse its own asset at start-up.
+pub const PRODUCT_SAMPLE_RATE_HZ: u32 = 32_768;
+
 /// The default constrained profile documented in README.md.
 pub const DEFAULT_PROFILE: EncodeProfile = EncodeProfile {
+    allowed_sample_rates_hz: &[PRODUCT_SAMPLE_RATE_HZ],
     allowed_blocksizes: &[1024, 2048],
     max_fixed_order: 4,
     allow_full_lpc: false,
@@ -532,9 +564,18 @@ pub const DEFAULT_PROFILE: EncodeProfile = EncodeProfile {
 impl EncodeProfile {
     /// Check a parsed manifest against this profile.
     ///
-    /// What a *manifest* can decide, and what it cannot, is worth stating: block
-    /// size, bit depth and the packer's recorded maximum FIXED order are
-    /// header fields, so they are checked here. Whether the stream contains
+    /// What a *manifest* can decide, and what it cannot, is worth stating: the
+    /// declared sample rate, block size, bit depth and the packer's recorded
+    /// maximum FIXED order are header fields, so they are checked here. The rate
+    /// is checked **first**, and not because it is cheaper: a stream at a rate
+    /// this build does not play at has no frame period for any other clause's
+    /// budget to be stated against, so every other answer about it would be a
+    /// number in the wrong units. What this check cannot see is the frame layer:
+    /// a frame may carry its own 4-bit rate code and disagree with its own
+    /// `STREAMINFO` — the 6b-3 respell trap — and only a walk of the frames sees
+    /// that (`scripts/gafp_pack.py`'s frame census refuses it at pack time).
+    ///
+    /// Whether the stream contains
     /// **LPC subframes** — the distinction `allow_full_lpc` names, and the one
     /// the 32 kHz target depends on, since LPC is 174.14% of that frame on
     /// hardware — is *not* in the manifest: it lives in the subframes. That is a
@@ -542,6 +583,12 @@ impl EncodeProfile {
     /// assets), not something a borrowed header can answer. `#[strict-profile]`
     /// keeps the per-frame rejection where it already is, in `subframe`.
     pub fn validate(&self, manifest: &Manifest<'_>) -> crate::Result<()> {
+        if !self
+            .allowed_sample_rates_hz
+            .contains(&manifest.sample_rate_hz())
+        {
+            return Err(crate::Error::ProfileViolation);
+        }
         if !self.allowed_blocksizes.contains(&manifest.blocksize()) {
             return Err(crate::Error::ProfileViolation);
         }
@@ -709,5 +756,78 @@ mod manifest_tests {
         let b = blob(2, 8, 2048, 4, &[32], 32, 40);
         let m = Manifest::parse(&b[..40]).expect("8-bit parses");
         assert_eq!(DEFAULT_PROFILE.validate(&m), Err(Error::ProfileViolation));
+    }
+
+    /// The rate clause plan item 7-0 added to the profile (Q14, ruled
+    /// 2026-11-11: a stream is encoded at the rate it is played at).
+    ///
+    /// The failure mode this pins is the one every sample-level digest in this
+    /// repository is blind to: a 32,000 Hz asset and a 32,768 Hz asset are the
+    /// same samples, so a byte-pinned run of the first one passes with the pitch
+    /// 41.06 cents sharp. The *profile* is where that is refused, because a build
+    /// has one mixer clock and a manifest that declares another rate has no frame
+    /// period for any figure about it to be stated against.
+    #[test]
+    fn the_profile_refuses_a_stream_it_is_not_built_to_play() {
+        // 32,000 Hz is legal in every other sense. It is FLAC's own `0b1000`
+        // rate code (`sample_rate_code_table` above), it parses into a
+        // well-formed manifest, and the decoder itself has no opinion about it.
+        let mut b = good();
+        b[10..14].copy_from_slice(&32_000u32.to_le_bytes());
+        let m = Manifest::parse(&b[..44]).expect("a 32,000 Hz manifest is well-formed");
+        assert_eq!(m.sample_rate_hz(), 32_000);
+        assert_eq!(
+            DEFAULT_PROFILE.validate(&m),
+            Err(Error::ProfileViolation),
+            "the profile, not the parser, is what refuses it"
+        );
+
+        // …so it is the profile clause doing the work, and not some other check
+        // that happens to fire on the same blob: widen only that clause and the
+        // same manifest is accepted.
+        let wider = EncodeProfile {
+            allowed_sample_rates_hz: &[32_768, 32_000],
+            ..DEFAULT_PROFILE
+        };
+        assert_eq!(
+            wider.validate(&m),
+            Ok(()),
+            "a profile that names the rate accepts the stream — the refusal above \
+             must be the clause, not an accident of the fixture"
+        );
+
+        // The rates a future edit might be tempted to add, all refused: the FLAC
+        // table rates near the target, one hertz off the target (an off-by-one in
+        // a profile literal), and 16,384 Hz, which is the tempting case — it
+        // divides the GBA clock exactly like the target does, and Q14's rule is
+        // about the declared rate, not about which division happens to be exact.
+        for rate in [
+            8_000, 16_384, 22_050, 24_000, 32_001, 32_767, 44_100, 48_000,
+        ] {
+            let mut b = good();
+            b[10..14].copy_from_slice(&u32::to_le_bytes(rate));
+            let m = Manifest::parse(&b[..44]).unwrap_or_else(|e| panic!("{rate} Hz parses: {e:?}"));
+            assert_eq!(
+                DEFAULT_PROFILE.validate(&m),
+                Err(Error::ProfileViolation),
+                "{rate} Hz is not the rate this profile was built for"
+            );
+        }
+
+        // The profile states exactly one rate, and the header's zero-rate guard
+        // is a *manifest* verdict, not a profile one: a blob with no rate at all
+        // is malformed, which is a different error and stays that way.
+        assert_eq!(
+            DEFAULT_PROFILE.allowed_sample_rates_hz,
+            [PRODUCT_SAMPLE_RATE_HZ],
+            "one clock, stated once"
+        );
+        let mut b = good();
+        b[10..14].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            Manifest::parse(&b[..44]).err(),
+            Some(Error::Manifest),
+            "0 Hz is not a rate, and refuses as a malformed blob"
+        );
     }
 }

@@ -210,10 +210,16 @@ mod tests {
         // FLAC.md plan: 2048 / 32768 s × 16.78 MHz = 1,048,750 cycles/frame
         // (16,780,000 / 32,768 = 512.0849609375 cycles/sample exactly — the
         // plan's "≈ 512" is an approximation; only the frame-level number
-        // is integral at this rate). The clips encode at 32,000 Hz, whose
-        // true window (1,073,920) is 2.4% looser — the plan keeps the
-        // stricter 32,768-Hz budget deliberately.
+        // is integral at this rate). Since plan item 7-0 the clips *are*
+        // 32,768 Hz, so this row is the window the spike's own frames are
+        // played against; and note it is 174 cycles looser than the exact
+        // 2^24-clock figure `scripts/gafp_pack.py` and `geometry::frame_cycles`
+        // both use — the rounding in this helper's clock, not a rate question
+        // (7-1 standardises on one clock).
         assert_eq!(real_time_budget(2048, 32_768), 1_048_750);
+        // The 32,000 Hz rows below are arithmetic coverage of the helper at a
+        // second rate, nothing more: no asset in this tree encodes at 32,000 Hz
+        // after 7-0, and the packer refuses to budget one at any other clock.
         assert_eq!(real_time_budget(2048, 32_000), 1_073_920);
         // Sub-frame windows truncate toward zero at both rates (computed
         // with b × 16,780,000 / r, not recalled):

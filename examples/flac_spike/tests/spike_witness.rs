@@ -332,14 +332,23 @@ fn cycle_fold_witness_on_embedded_bytes() {
             clip.name
         );
         // The budget arithmetic PR 3's verdict runs on, recomputed here from
-        // FLAC.md's plan rather than recalled. Two numbers, both pinned:
-        // the TRUE worst-frame window at the clips' encode rate (2048 @
-        // 32,000 Hz), and the stricter 32,768-Hz budget the ROM screen
-        // compares against (the plan keeps it deliberately — exactly
-        // 2.34375% tighter than real-time at 32 kHz: 1 − 1,048,750/1,073,920).
+        // FLAC.md's plan rather than recalled. Since plan item 7-0 these are
+        // ONE number, and that equality is the thing being pinned: the rate
+        // contract says a stream is encoded at the rate it is played at, so
+        // the stream's own worst-frame window (2048 at the rate its own
+        // STREAMINFO declares) and the 32,768 Hz budget the ROM screen
+        // compares against must be equal. Two different numbers here is the
+        // Q14 defect re-opened, and the rate check below is what names it.
+        assert_eq!(
+            clip.sample_rate_hz, 32_768,
+            "{}: rate contract — the spike's assets must be encoded at the clock \
+             they are played at, or the window derived from their declared rate is \
+             not the window the ROM's screen verdict budgets against",
+            clip.name
+        );
         let true_window = real_time_budget(usize::from(clip.max_blocksize), clip.sample_rate_hz);
         assert_eq!(
-            true_window, 1_073_920,
+            true_window, 1_048_750,
             "{}: true worst-window arithmetic",
             clip.name
         );
