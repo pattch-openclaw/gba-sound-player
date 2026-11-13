@@ -1,0 +1,32 @@
+[package]
+name = "uli-spike"
+version = "0.1.0"
+edition = "2024"
+
+# Phase 1 decode-only ROM for the ULI2 port: embed the committed corpus, parse
+# the ULA2 header, decode every frame through the portable `uli-lite` core, and
+# check the int8 FNV pin on the target. No playback, no asm overlay yet.
+#
+# Standalone workspace, same inherited root-config pattern as the other ROM
+# crates: the root .cargo/config.toml supplies thumbv4t, -Zbuild-std and the
+# agb linker script. Do not add a local .cargo/config.toml (double -Tgba.ld).
+
+[dependencies]
+uli-lite = { path = "../../crates/uli-lite" }
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+agb = "0.25.0"
+
+[[bin]]
+name = "uli-spike"
+path = "src/main.rs"
+
+[workspace]
+
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true

@@ -9,7 +9,7 @@
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
-        test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check gafp-check \
+        test test-rom flac-test uli-test uli-check uli-fixture uli-spike-rom flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check gafp-check \
         product-play-rom native-product-play-rom product-play-test \
         flac-rom-default-kernel native-flac-rom-default-kernel spike-test opus-test kernel-test \
         overlay-check overlay-check-arm overlay-test overlay-test-twin overlay-test-arm overlay-objdump \
@@ -265,6 +265,12 @@ FLAC_CRATE_DIR := examples/flac_integration
 # Absolute manifest path for the flac-lite host gate (see `flac-test`: the gate
 # runs from outside the repo so the root's cargo config is not inherited).
 FLAC_CRATE_DIR_MANIFEST := $(abspath crates/flac-lite/Cargo.toml)
+# ULI2 portable core (Phase 0): the same out-of-tree host-gate shape as flac-test.
+ULI_CRATE_MANIFEST := $(abspath crates/uli-lite/Cargo.toml)
+# Phase 1 decode-only ROM (examples/uli_spike/ — standalone workspace).
+ULI_SPIKE_DIR := examples/uli_spike
+ULI_SPIKE_BIN := $(ULI_SPIKE_DIR)/target/$(TARGET)/release/uli-spike
+ULI_SPIKE_ROM := uli-spike.gba
 # The manifest of the crate that builds the product ROMs, for the same reason the
 # host gates above use a manifest path and a neutral cwd: the repository-root
 # .cargo/config.toml sets `[unstable] build-std` and a default ARM target, and a
@@ -378,6 +384,8 @@ ifeq ($(HAS_RUSTFMT),1)
 format:
 	$(CARGO) fmt
 	cd crates/flac-lite && $(CARGO) fmt
+	cd crates/uli-lite && $(CARGO) fmt
+	cd $(ULI_SPIKE_DIR) && $(CARGO) fmt
 	cd $(FLAC_CRATE_DIR) && $(CARGO) fmt
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) fmt
 	cd $(OPUS_CRATE_DIR) && $(CARGO) fmt
@@ -841,6 +849,39 @@ flac-test: toolchain-check
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features instrument
 	@echo "flac-test passed: flac-lite compiles for $(TARGET) and passes host tests"
 
+# ULI2 portable core, Phase 0. The two halves are the same shape as flac-test:
+#  1. thumbv4t compile — keeps std, alloc and platform dependencies out.
+#  2. host corpus — run outside the repo, so the root cargo config is not
+#     inherited; the committed fixture is bit-exact against the C reference,
+#     including int8/int16 hashes, per-frame ops, seek paths and malformed input.
+uli-test: toolchain-check
+	cd crates/uli-lite && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE)
+	@echo "uli-test passed: uli-lite compiles for $(TARGET) and is bit-exact on the host corpus"
+
+# Phase 1 decode-only ROM: parse the committed ULA2 corpus, decode every
+# frame through the portable core, and check the C-reference int8/int16 pins on
+# the target. This is a correctness image, not a player and not a cycle record.
+uli-spike-rom: format
+	cd $(ULI_SPIKE_DIR) && $(CARGO) build --release --target $(TARGET)
+	agb-gbafix $(ULI_SPIKE_BIN) -o $(ULI_SPIKE_ROM)
+
+uli-check: toolchain-check
+	cd crates/uli-lite && $(CARGO) fmt --check
+
+# Regenerate the committed expected-vector file from the Rust generator. This
+# WRITES the fixture, so it is a maintenance command, not part of `make test`.
+# The committed file remains the frozen reference; see the fixture README.
+uli-fixture: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) run --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE) --example gen_expected -- \
+	    $(abspath crates/uli-lite/tests/fixtures/uli2_tiny.uli) \
+	    $(abspath crates/uli-lite/tests/fixtures/uli2_tiny_expected.txt)
+
 # Second-target build witness (FLAC.md split-proposal ladder step 3, 2026-11-02):
 # records the PORTABILITY claim — flac-lite compiles for a non-thumbv4t
 # bare-metal ARM target — as a build fact, with NO performance claim attached
@@ -1142,8 +1183,8 @@ test-rom: toolchain-check
 # working tree as a side effect (that would also let CI's `make test` silently
 # fix drift that `make check` is supposed to fail on). Builds format; tests
 # verify. `check` is the formatting gate.
-test: test-rom flac-test
-	@echo "test passed: ROM suite + flac-lite isolation gates"
+test: test-rom flac-test uli-test
+	@echo "test passed: ROM suite + flac-lite isolation gates + uli-lite host corpus"
 
 # The aggregate README's "TODO: one aggregate for the non-default-configuration
 # gates" asked for by name, landed with split-ladder item 5 PR 2 (2026-11-05):
@@ -1243,6 +1284,8 @@ clean-cache:
 check:
 	$(CARGO) fmt --check
 	cd crates/flac-lite && $(CARGO) fmt --check
+	cd crates/uli-lite && $(CARGO) fmt --check
+	cd $(ULI_SPIKE_DIR) && $(CARGO) fmt --check
 	cd $(FLAC_CRATE_DIR) && $(CARGO) fmt --check
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) fmt --check
 	cd $(OPUS_CRATE_DIR) && $(CARGO) fmt --check
