@@ -885,7 +885,8 @@ it — but the leading candidate stays the ring-push section, whose measured cos
 
 - `in_push 1` — the boundary that was missed crossed inside the push section. The mechanism is
   named, and 7-2's fix is to stop masking interrupts for 28.6 samples: push in `CHUNK`-sized
-  critical sections (≈7.2 samples, 2.2× margin), or make the ring lock-free and push with
+  critical sections (≈7.2 samples, 2.2× margin — superseded by 7-1's measured window: **4,014 c =
+  3.92 samples at 16,384 Hz, a 4.08× margin**, 7.84 / 2.04× here), or make the ring lock-free and push with
   interrupts on.
 - `in_push 0` — it did not. Then the push-section story is dead for that event and Q15's bus
   leg moves to the front, with the placement control (ring in EWRAM vs ring in IWRAM at 20
@@ -1007,7 +1008,10 @@ percentages, LPC from 173% to 86.6% of the frame, the IWRAM ring becoming arithm
 possible) and what it pointedly does not buy (**at 16,384 Hz this same 14,680-cycle mask is a
 14.3-sample window against a 16-sample grace — inside the tolerance by 1.7 samples on the mean,
 and by 0.5 on the worst push window this repository has ever recorded for that section**). The
-rate question is closed; 7-2's push fix, the retarget,
+rate question is closed — **and the rung was then chosen as 16,384 Hz** (`2²⁴/1024`, exact, so
+Q14's identity rule carries across with nothing relaxed; agb's ~18 kHz was considered and declined
+the same day, on `late in push` arithmetic that a faster clock makes *worse*, not better);
+7-2's push fix, the retarget,
 the packer row, the host fixture, and the listening witness are all still open — and the
 listening question at 0.376 s is still unanswered, now with a mechanism attached to it: at
 period 22 the re-arm was held 25 samples by the producer's own copy into the ring.
