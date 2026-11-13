@@ -1,9 +1,11 @@
 # ULI2.md — product codec decision: ULI2 in a standalone `uli-lite` crate
 
-Status: **accepted 2026-11-13**. Implementation has not started. This file is the
-entry point for the decision; once the crate exists, the live plan, gates and
-measurement ledger move to `uli-docs/` in the same shape as
-[`FLAC.md`](FLAC.md) / [`flac-docs/`](flac-docs/).
+Status: **accepted 2026-11-13**. Implementation is in progress: Phase 0 (portable
+core) is complete and bit-exact on the host corpus, and the Phase 1 decode-only
+ROM passes its int8/int16 pins in mGBA. It is **not** a playback or cycle claim.
+The live plan, gates and measurement ledger move to `uli-docs/` once the
+playback path lands, in the same shape as [`FLAC.md`](FLAC.md) /
+[`flac-docs/`](flac-docs/).
 
 Companion files:
 
@@ -23,8 +25,15 @@ standalone, `no_std`, pure-Rust, zero-dependency, zero-allocation crate at
 ARM-mode kernels and memory placement. Do **not** open a new repository yet: the
 crate boundary is the extraction seam, exactly as it is for `flac-lite`. Keep
 `flac-lite` as the reusable lossless library; remove FLAC from the **product
-path**, not from the repository. Port only the decoder — the encoder stays
-offline in C.
+path**, not from the repository. The current decoder port is the first
+milestone. For the time being the offline encoder is expected to be reused from
+`gba-audio` (C/OpenMP), because it is the encoding reference and the source of
+the measured assets. The target is to replace that encoder and any other
+C-language tooling or source material with Rust, so this project does not depend
+on the `gba-audio` repository or its C sources. General Python scripts and
+reusable external tools such as `ffmpeg` remain acceptable; the isolation rule
+is about not reusing or depending on `gba-audio`'s C implementation, not about
+avoiding every non-Rust tool.
 
 The first target is the shape the measurements were taken at: **32,768 Hz,
 stereo, hop 512 (N = 1024), about 102 kbit/s for a full album**. Higher rates
@@ -135,6 +144,10 @@ crates/uli-lite-gba/       GBA overlay: platform-bound realizations
   asm/imdct.s              ARM-mode pre/FFT/post/OLA kernels (ported with permission)
   src/placement.rs         .iwram/.ewram tables and hot state
   tests/                   out-of-crate witnesses; no agb dependency
+
+examples/uli_spike/        Phase 1 decode-only ROM
+  src/main.rs              embeds the corpus, parses ULA2, decodes, hashes int8/int16
+  assets/uli2_tiny.uli     the committed Phase 0 corpus
 ```
 
 Both crates are **standalone workspaces** with their own `[workspace]` table,
@@ -147,9 +160,14 @@ is stable.
 
 ### Boundaries
 
-- **Decoder only.** The encoder is the offline C/OpenMP tool from `gba-audio`.
-  It is not part of the GBA image and is not ported in this effort. A Rust
-  encoder, if ever wanted, is a separate project.
+- **Decoder first; Rust encoder later.** The current encoder is the offline
+  C/OpenMP tool from `gba-audio`. It is not part of the GBA image and is not
+  ported in the current decoder milestone. It is expected to be reused for the
+  time being so the decoder and playback work can use the measured assets. The
+  target is to reimplement that encoder and any other C-language tooling or
+  source material in Rust, removing the `gba-audio`/C-source dependency. General
+  Python orchestration and reusable external tools such as `ffmpeg` stay
+  allowed.
 - **No `agb` in the core.** The core is platform-free; the product ROM composes
   it with the playback layer. This is what makes host tests and future reuse
   possible.
@@ -163,6 +181,38 @@ is stable.
 - **Unsafe is confined to the overlay.** The core can be `#![deny(unsafe_code)]`
   (or an audited, tiny budget for slice split/placement); the overlay’s asm/FFI
   carries the SAFETY blocks, following `flac-lite-gba`’s pattern.
+
+### Encoder and asset generation: current vs target
+
+**Current.** The encoder of record is still the offline C/OpenMP tool from
+`gba-audio`. It produces the ULA2 blob used by the tests and measurements; it is
+never linked into the GBA image. The existing prep path (source decoding,
+resampling, track assembly) is external tooling for now; Python orchestration
+and `ffmpeg` are acceptable and are not what this isolation rule targets.
+
+**Target.** Reimplement any C-language tooling or source material in Rust and
+remove the dependency on `gba-audio` and its C sources. That means, at minimum:
+
+- a from-scratch Rust encoder: forward MDCT, quantisation/search, table
+  training, album-wide allocation, the per-frame CPU cap, and the ULA2
+  container/tables/seek/strings writer;
+- Rust replacements for any other C-language asset-generation code that would
+  otherwise be reused from `gba-audio`;
+- deterministic, documented encoder output and its own round-trip witness.
+
+General Python scripts remain fine: they may orchestrate source preparation,
+resampling, track assembly or fixture generation, and they may call reusable
+external tools such as `ffmpeg`. The rule is that **C-language tooling/source
+material must not be reused or depended on**, not that every script becomes
+Rust. The test tree now follows that rule too: `gen_expected.c` has been
+replaced by the Rust tool `crates/uli-lite/examples/gen_expected.rs`. The
+committed expected-vector file remains the frozen C-pinned reference; the Rust
+tool is a maintenance/snapshot generator, not an independent oracle, so a
+failing decoder test must not be "fixed" by regenerating it.
+
+This is a separate milestone after the decoder/playback path. It is not required
+for the first product ROM, and it does not change the decoder work. Until it
+lands, the `gba-audio` C encoder remains the encoder of record.
 
 ### Suggested public API
 
@@ -192,6 +242,24 @@ platforms without asm.
 ---
 
 ## Porting plan
+
+### Implementation status (2026-11-13)
+
+- **Phase 0 — complete.** `crates/uli-lite` is a `no_std`, zero-dependency,
+  zero-allocation integer decoder. `make uli-test` compiles it for
+  `thumbv4t-none-eabi` and runs the committed 2-second corpus on the host:
+  int8 and int16 outputs, per-frame bits/bitpos/ops/cycle model, both seek
+  paths, malformed albums and short output buffers. It is bit-exact against
+  the C reference.
+- **Phase 1 — decode-only target witness.** `make uli-spike-rom` builds
+  `examples/uli_spike`; in mGBA it decodes all 129 frames, prints
+  `int8=e6e87652` and `int16=b3530978` (the C-reference album pins), reports
+  `xover=0 hfnz=0`, and PASSes. This is a **correctness** witness only: the
+  portable Rust kernels are slow (tens of seconds of emulated time for two
+  seconds of audio), so it makes no real-time or cycle claim.
+- **Not yet:** the GBA overlay's ARM kernels, IWRAM placement, playback, cycle
+  measurement, hardware runs, any product-path change, or the from-scratch Rust
+  encoder/asset pipeline.
 
 ### Phase 0 — reference and vectors (host)
 
@@ -319,10 +387,12 @@ product codec without pretending one codec covers both jobs.
 5. **CPU inheritance.** 73.63% is the `gba-audio` gate total on its driver, not
    this tree’s. The Rust port may be slower or faster than the C/asm original;
    the ARM asm kernels are likely necessary for the real-time gate.
-6. **Encoder packaging.** A decoder-only crate is useful internally, but
-   external users need an encoder. Publishing ULI2 as a reusable codec means
-   packaging the C encoder or writing a Rust encoder; that is a separate scope
-   and a major reason ULI2 is not the public-reuse answer.
+6. **Encoder packaging and independence.** A decoder-only crate is useful
+   internally, but external users need an encoder. The current C encoder is
+   reused from `gba-audio` and must eventually be replaced by a Rust encoder.
+   General Python tooling and `ffmpeg` are not the problem; the C tooling and
+   source dependency are. Until the C tooling is reimplemented, the project is
+   not fully isolated and ULI2 is not yet the public-reuse answer.
 7. **Rate flexibility.** ULI2 is fixed at 32,768 Hz. Goal #5 (higher rates such
    as 65,536 Hz) would require a format/encoder change. Do not block the
    current product on that; record it as future work.
@@ -337,6 +407,16 @@ product codec without pretending one codec covers both jobs.
 - **2026-11-13 — accepted.** ULI2 is the product codec. Decoder-only port in
   `crates/uli-lite` + `crates/uli-lite-gba`; no new repository yet; FLAC stays
   as the reusable lossless library; ULC is documented but not planned.
+- **2026-11-13 — encoder independence target.** For the time being the
+  `gba-audio` C encoder is reused for asset generation. The target is to
+  reimplement that encoder and any other C-language tooling/source material in
+  Rust, removing the `gba-audio`/C-source dependency. General Python scripts and
+  reusable external tools such as `ffmpeg` remain acceptable; the isolation rule
+  does not remove them.
+- **2026-11-13 — expected-vector generator in Rust.** `gen_expected.c` was
+  replaced by `crates/uli-lite/examples/gen_expected.rs`; the committed
+  expected file remains the frozen C-pinned reference and the Rust tool is a
+  maintenance/snapshot generator.
 - Alternatives considered and rejected for the product:
   - **Stock ULC** — public and reusable, but lower measured fidelity in the
     gba-audio ULC-format arms, a float reference with no integer oracle, a

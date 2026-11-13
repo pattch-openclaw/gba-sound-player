@@ -1,0 +1,30 @@
+[package]
+name = "uli-lite"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal no_std, zero-dependency, zero-allocation ULI2 decoder for the ULA2 album container and raw frames"
+# Licensing is unresolved until the gba-audio reference is licensed for reuse; see ULI2.md.
+publish = false
+keywords = ["uli2", "audio", "no_std", "decoder", "gba"]
+categories = ["multimedia::audio", "no-std"]
+
+[dependencies]
+# Intentionally EMPTY. The GBA target is core-only, and the decoder is
+# caller-owned state plus borrowed slices. Do not add dependencies without
+# re-verifying the thumbv4t build.
+
+[[example]]
+name = "gen_expected"
+path = "examples/gen_expected.rs"
+
+[lib]
+name = "uli_lite"
+path = "src/lib.rs"
+
+# Standalone workspace, like crates/flac-lite: the root ROM crate's target
+# config must not leak into host-side unit tests, and vice versa.
+[workspace]
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
