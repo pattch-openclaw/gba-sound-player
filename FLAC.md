@@ -38,11 +38,14 @@ derating** instead of a probe.
 plays real music at 10,512 Hz with correct tempo and pitch (audibly verified); the
 first product-play image runs that whole path at the full 32,768 Hz with zero
 underflows and a period audit that is part of the verdict, but **in mGBA headless only — never on hardware — so it is not a playback
-claim**; and the asset it plays is **not a product asset either** — it declares 32,000 Hz,
+claim**; and the asset it plays **was not a product asset either** — it declared 32,000 Hz,
 and Q14 was ruled on 2026-11-11 that a stream is encoded at the rate it is played at, so
-1.024× (41.06 cents) disqualifies it however clean the run (6b-3; the
-re-encode is item **7-0**, and `TODO(Q14, BLOCKING)` greps in
-`examples/flac_integration/src/geometry.rs`); the
+1.024× (41.06 cents) disqualified it however clean the run (6b-3; the
+re-encode was item **7-0**, which **landed on 2026-11-13**: the product asset is now
+authored, encoded and declared at 32,768 Hz, `geometry.rs`'s bridge is gone and that module
+greps "plan item 7-0 landed, the whole of Q14's ruling in one function" where
+`TODO(Q14, BLOCKING)` used to, and `crates/flac-lite`'s encode profile names exactly one
+admissible rate — which the ROM itself checks against its shipped asset at start-up); the
 **shipped** path — the core's default `TableCountKernel` — is still over budget at
 full rate (167% of the 32,768 Hz frame: that is the pre-kernel product reading, and
 the control re-read inside the 6b-1/6b-2 product images lands at 154.7%);
@@ -98,7 +101,11 @@ claimed only at item **7-3**: 2048-sample frames at 32,768 Hz, FIXED-0, both
 units, two runs each, underruns counted and equal to zero — and, since Q14 was ruled on
 2026-11-11, at a rate the **stream declares** as well as a clock that plays it. The asset
 in `assets/` does not declare it, so 7-0 owns re-encoding it and the 32,768 Hz image 7-3
-will be judged on is not the one 6b-3 built. And nothing built at
+will be judged on is not the one 6b-3 built. *(Updated 2026-11-13, when 7-0 landed: the
+asset in `assets/` **does** declare 32,768 Hz — 160 frames, 326,144 samples, 882,949 B, its
+last frame a 512-sample short tail — and the image 7-3 will be judged on is that one. The
+sentence above stands as the state until it did; what still stands between this tree and C2
+is silicon, which is 7-1's.)* And nothing built at
 `main` after that PR has been run on hardware or on mGBA at all; the re-read table
 in [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) ("Re-read at
 HEAD") is the bridge from those rows to the current tree. *(Stale as a description of
@@ -130,8 +137,11 @@ file is about depth, and the ~48 dB that 8-bit truncation implies (with no dithe
 none is specified) is the product's floor rather than a defect to be fixed at item 7.
 
 **One question the rate mapping raised was measured, and then ruled (Q14, 2026-11-11).**
-The shipped asset is a **32,000 Hz** stream consumed by a **32,768 Hz** clock, so playback
-runs **1.024× fast, 41.06 cents sharp**. The cost half of that question measured as free:
+The asset shipped then was a **32,000 Hz** stream consumed by a **32,768 Hz** clock, so
+playback ran **1.024× fast, 41.06 cents sharp** (7-0 landed the re-encode on 2026-11-13, so
+the stream and the clock are one rate now; the measurements below stand, and the record of
+what moved is at the end of item 7 in
+[`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md)). The cost half of that question measured as free:
 a stream that declares 32,768 Hz is representable two ways (there is no 4-bit rate code
 for it), `flac-lite` plays one to a bit-identical PCM with the same flow-control floor,
 the two product images' cycle counts do not separate from the shipped asset's at the
@@ -156,7 +166,19 @@ which does not exist and which belongs with 7-0, because no gate in this reposit
 currently see a pitch shift at all: the pinned PCM digest of a correctly-encoded asset and
 of a reinterpreted one is the *same bytes*, and that is exactly how 41 cents cleared every
 gate this asset has been through. The numbers are the 6b-3 rate row in
-[`flac-docs/measurements.md`](flac-docs/measurements.md).
+[`flac-docs/measurements.md`](flac-docs/measurements.md). *(Closed on the second half,
+2026-11-13: the pitch witness exists, and landed with 7-0 — an integer matched filter over
+the decoded samples with two ratios thresholded rather than one, naming the clock the samples
+were made at from its period: 410:1 on a clean design term, 340:1 on the shipped asset,
+66:1/20:1 on its played 8-bit form, and 93.7579 LSB measured through the real 8-bit converter
+against the exact 93.7500 — the truncation costs amplitude and none of the pitch. Its negative
+leg is a re-synthesis of the 32,000-era design plus a byte-level respell of the shipped blob
+(identical samples, refused by the profile); the planned "pack it as a 32,768 asset" form was
+run as a mutation, and it fails by naming 32,000. The guard named above is now
+`ruled_rate_policy_allows_no_reinterpretation_of_a_declared_rate`. The first half stays open,
+and its key is now structural — `fixed0` at 2048-sample frames, the rate a validity check —
+which is why the packer prints a provenance warning until 7-1's hardware figure exists on
+7-0's frames.)*
 
 **Measuring at 32,000 Hz was a mistake, and it is named here as one.** The *value* is fine:
 32,000 is one of FLAC's four-bit table rates, and 6a-7b's hardware rows were honestly
@@ -207,6 +229,20 @@ specifies its tones in sample *periods*, so re-synthesising "the same" fixture a
 leaves the played pitch exactly where the defect is; and 32,768/32,000 is exactly 128/125,
 so an exact resample exists, but ffmpeg's `-ar` is float and float would break every byte
 pin in the repository — the same class of defect as the 6a-2 float-trig incident.
+
+*(Landed 2026-11-13. Three details above describe what was planned rather than what shipped,
+so they are marked where they matter: the cost key is **blocksize and predictor kind/order**,
+with the residual envelope carried as a stated caveat on each row rather than as a key
+component; the `EncodeProfile` rate field that "does not exist at all" now exists, is one
+element wide, and is enforced both by the library facade and by the product ROM against its
+own shipped blob; and the packed negative leg above cannot be a committed asset, because the
+packer now refuses to make such a stream at all — that witness exists as a re-synthesised
+32,000-era fixture, a byte-level respell of the shipped blob (same samples, refused by the
+profile) and a mutation left running through the whole generation chain. What the plan
+expected to be an `--allow-unmeasured` pack came out **clean** instead, because the census did
+not change and a structurally-keyed table has no way to notice the frames are new ones; the
+honest signal moved to a provenance warning on the pack, and 7-1's measured row on 7-0's
+frames is what clears it. The plan-of-record entry says all of this at length.)*
 
 **6a-7b measured the instrument on silicon: GBA 001 and GBA SP, two runs each, all four
 runs identical to the cycle.** Two results. The decode path is
@@ -371,11 +407,21 @@ unchanged, and the per-rung state lives in the plan of record:
    shipping path, which is 7-2. The question that second one would have owned — Q14, the
    41-cent pitch shift — was ruled the same day this landed, and its answer changed what
    this item is: the asset it plays declares 32,000 Hz, so it is measurement scaffolding
-   and not a product asset.)*
-4. **7-0**, then **7-1 / 7-2 / 7-3** — re-encode the product asset at 32,768 Hz, the rate
-   it is played at (Q14, ruled 2026-11-11), with a pitch witness in the same PR; then
-   re-measure the producer at 32 kHz on hardware against *that* asset, land the shipping
-   mixer/DMA path, and run the acceptance test: underruns = 0 on both units.
+   and not a product asset. *(7-0 landed on 2026-11-13 and it no longer does.)*
+)
+4. ✅ **7-0** (landed 2026-11-13), then **7-1 / 7-2 / 7-3** — re-encode the product asset at
+   32,768 Hz, the rate it is played at (Q14, ruled 2026-11-11), with a pitch witness in the
+   same PR; then re-measure the producer at 32 kHz on hardware against *that* asset, land the
+   shipping mixer/DMA path, and run the acceptance test: underruns = 0 on both units.
+   *(Three shape details of 7-0 differ from this line, and all three are recorded in the 7-0
+   entry at the end of item 7 in
+   [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md): cost is keyed by blocksize
+   and predictor kind/order with the residual envelope carried as a caveat rather than as a
+   key component; the asset's census did not change, so it packs **cleanly** against the
+   inherited hardware row and the honest signal became a provenance warning rather than the
+   predicted `--allow-unmeasured`; and the packed negative leg exists as a mutation plus a
+   byte-level respell, because after the ruling the packer refuses to make such an asset at
+   all. 7-1's figure — measured on the frames this asset is made of — is what clears it.)*
    **C2 is met at 7-3**, and C2 now says in terms that the stream declares the rate it is
    played at.
 5. **Parked:** Q13's data-read probe, and 6a-8. Re-open Q13 only if a product path
@@ -478,6 +524,11 @@ unchanged, and the per-rung state lives in the plan of record:
   played at, so this image is measurement scaffolding and **7-0** owns the asset. Item 7-1
   takes its stage timings on that image, not this one; 7-2 owns
   whether this feeder is the shipping path. Numbers: the 6b-3 rows in
+  [`flac-docs/measurements.md`](flac-docs/measurements.md). *(7-0 landed on 2026-11-13, so
+  the scaffolding is now a real product asset — 160 frames, 326,144 samples, 582/582 periods,
+  both digests matched, `work 53.446% / dec 39.574%` against the control image's 53.386 /
+  39.527. 7-1 takes its timings on **this** image. Its record is the 7-0 entry in
+  [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) and the 7-0 row in
   [`flac-docs/measurements.md`](flac-docs/measurements.md).)*
 - **Rate sweep** — the cross-rate profiling sweep on the improved decoder, which
   produces the "which rates become feasible" guidelines from measurement.
@@ -518,7 +569,7 @@ cite its section names. Those names now resolve here:
 | Sample-rate reduction proposal; rate ROM; rate-play ROM; playback attribution; feeder-off | [`playback-results.md`](flac-docs/playback-results.md) (+ budget table in [`method-and-gates.md`](flac-docs/method-and-gates.md)) |
 | flac-lite / flac-lite-gba split proposal | [`architecture.md`](flac-docs/architecture.md) §"Why two crates"; measured correction in [`measurements.md`](flac-docs/measurements.md) |
 | Split-ladder item 5 (`RiceKernel` seam, PRs 1–4) | seam in [`architecture.md`](flac-docs/architecture.md) §"The seam"; reading in [`measurements.md`](flac-docs/measurements.md) |
-| Split-ladder item 6; 6a-1/2/3; toolchain pin; width decision; 6b | [`plan-of-record.md`](flac-docs/plan-of-record.md); measurements in [`measurements.md`](flac-docs/measurements.md); toolchain rule in [`method-and-gates.md`](flac-docs/method-and-gates.md) |
+| Split-ladder item 6; 6a-1/2/3; toolchain pin; width decision; 6b; 6b-4; Q14 / 7-0 | [`plan-of-record.md`](flac-docs/plan-of-record.md); measurements in [`measurements.md`](flac-docs/measurements.md); toolchain rule in [`method-and-gates.md`](flac-docs/method-and-gates.md) |
 | Recording Q&A for a future session | [`open-questions.md`](flac-docs/open-questions.md) |
 
 ## Standing caveats
