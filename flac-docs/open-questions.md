@@ -1,5 +1,12 @@
 # Open questions for a future session
 
+> **Scope: questions the FLAC track owes, and only those.** Each Q below is a FLAC-track
+> question, owned by a rung in [`plan-of-record.md`](plan-of-record.md) and priced in
+> [`measurements.md`](measurements.md). Nothing here is a repository-wide open question and
+> nothing here decides another track's plan ([`../ULI2.md`](../ULI2.md),
+> [`../ULC.md`](../ULC.md), [`../OPUS.md`](../OPUS.md) are their own entry points). "Product"
+> and "product path" below mean the **FLAC** product path.
+
 Questions this project has already *earned*: each was raised, or left open by
 name, in a landed record, and none has an answer in these docs. They are collected
 here so a session does not have to reconstruct them from nine sections.

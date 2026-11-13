@@ -1,5 +1,10 @@
 # Decoder performance experiments — the E-series results
 
+> **Scope: the FLAC track's experiment narratives** (the E-series and its predecessors),
+> measured on `crates/flac-lite` / `crates/flac-lite-gba` code. See
+> [`measurements.md`](measurements.md) for the ledger those experiments feed and
+> [`../FLAC.md`](../FLAC.md) for the track's entry point.
+
 The records below are the measurements themselves, kept close to the form they
 were written in (each names its own image, control, calibration and gates). What
 was removed is the planning that preceded them: the experiment menu, its status

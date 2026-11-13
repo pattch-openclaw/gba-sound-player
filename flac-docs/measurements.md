@@ -1,5 +1,13 @@
 # Measurements — the numbers of record, and what each one belongs to
 
+> **Scope: FLAC track only.** Every number here belongs to the FLAC line of work —
+> `crates/flac-lite`, `crates/flac-lite-gba`, `examples/flac_integration`, `examples/flac_spike`
+> and the `flac-*`/`product-play`/`gafp` targets. "The product path" means the **FLAC** product
+> path. Nothing in this ledger prices, permits or forbids a codec outside FLAC; the sibling
+> tracks keep their own ledgers ([`../ULI2.md`](../ULI2.md), [`../ULC.md`](../ULC.md),
+> [`../OPUS.md`](../OPUS.md)). The measurement *method* is deliberately transferable — the
+> instrument (same-image discipline, control builds, determinism) is not a FLAC claim.
+
 This is the ledger. `FLAC.md` used to be the only place a cycle count could live,
 so the same number was restated in a menu entry, a result section and a sample
 README, each with a different denominator. Here every number appears once, tied to

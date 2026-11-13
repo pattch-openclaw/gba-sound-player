@@ -1,5 +1,13 @@
 # Playback pipeline measurements — the rate flow, FIFO playback, and the live-producer readings
 
+> **Scope: the FLAC track's playback log.** Every run below was produced by a FLAC image —
+> `flac-integration.gba`, `product-play.gba`, the rate ROM — decoding a `GAFP` asset through
+> `crates/flac-lite` and `crates/flac-lite-gba`. "The product path" is the **FLAC** product path.
+> Other codec tracks keep their own records ([`../ULI2.md`](../ULI2.md),
+> [`../ULC.md`](../ULC.md), [`../OPUS.md`](../OPUS.md)); the feeder geometry these runs measure
+> is shared ground that ULI2 reuses, so a *figure* here may be re-usable elsewhere while its
+> *verdict* is not.
+
 Decoder cost is paid per sample; the budget is granted per second. That asymmetry
 is why the rate track exists, and this file is its measured record: the rate ROM
 (real music at 10,512 Hz), the rate-play ROM (audible FIFO playback), and the

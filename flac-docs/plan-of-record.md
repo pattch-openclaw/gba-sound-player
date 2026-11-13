@@ -1,4 +1,43 @@
-# Plan of record — the only live plan
+# Plan of record — the only live plan *for the FLAC line of work*
+
+> ## Scope: this file governs FLAC and nothing else
+>
+> **Opened 2026-11-13 to say so out loud, because the repo had grown past the point where it
+> was obvious.** This is the plan of record for the **FLAC** line of work: `crates/flac-lite`,
+> `crates/flac-lite-gba`, `examples/flac_integration`, `examples/flac_spike`,
+> `scripts/gafp_pack.py`, the `flac-*`/`product-play`/`gafp`/`overlay` Make targets, and the
+> two acceptance criteria C1 and C2. Everything in `flac-docs/` — this file, the number ledger
+> `measurements.md`, `playback-results.md`, `open-questions.md` and the rest — is **FLAC-track
+> documentation on FLAC-track work**, and nothing in it decides, or is bound to decide,
+> anything outside that.
+>
+> It is **not** a repo-wide plan, and "the only live plan" in the title means *the only live
+> plan in this directory*: the other codec tracks are planned in their own files, each with its
+> own scope and its own ledger —
+>
+> | Track | Entry point | Status as of 2026-11-13 |
+> |---|---|---|
+> | **FLAC** (this plan) | [`FLAC.md`](../FLAC.md) + `flac-docs/` | live; C1 nearly closed, C2 amended (see "The rate ruling") |
+> | **ULI2** | [`ULI2.md`](../ULI2.md) | **accepted 2026-11-13 as the product codec**; implementation not started, and its plan/gates/ledger are to move to `uli-docs/` when the crate exists |
+> | **ULC** | [`ULC.md`](../ULC.md) | scope and intent recorded; **not currently planned** |
+> | **Opus** | [`OPUS.md`](../OPUS.md) | an evaluation opened 2026-09-27, not a build plan |
+> | baseline audio/input stack, the ROMs | [`README.md`](../README.md) | outside all four codec tracks |
+>
+> **A rule for reading every word below.** "The product", "the product path", "the shipped
+> path" and "product-play" mean the **FLAC product path** — `examples/flac_integration`, the
+> `product-play.gba` image, and the `GAFP` asset. They have never meant the repo's product
+> codec choice, and since [`ULI2.md`](../ULI2.md) landed that phrase is used in a second,
+> different sense there, so a reader arriving from that file should not import decisions from
+> this one or export them into it. A C2 verdict, a rate ruling, a cycle figure or an audit
+> clause in these pages is a **FLAC** verdict, ruling, figure and clause.
+>
+> **Where the two tracks genuinely touch, it is stated, not assumed.** [`ULI2.md`](../ULI2.md)
+> reuses the ring/FIFO feeder built here and asks for the FLAC product path to become an
+> alternate backend, so the feeder, the geometry and the measurement *method* in this plan are
+> shared ground and their rulings travel. The rate question is not shared ground in the same
+> way and the two files do not currently agree on it — see the note under "The rate ruling".
+
+---
 
 Everything else in these docs describes what has been built or measured. This file
 describes what is being built next, what bar each piece is judged against, and the
@@ -6,7 +45,8 @@ rules a landing may not bend. It replaces the item-5 plan (fully landed), the
 "Phased plan" (fully landed or superseded), the perf-spike five-PR plan (PRs 1–3
 landed; 4–5 open), the E10 plans (landed) and the rate-tooling proposal (landed,
 with its step-4 multi-clip ROM and its cross-rate sweep still open) — all of which
-now live only in git history and in the records they produced.
+now live only in git history and in the records they produced. Each of those was a
+**FLAC** plan, which is the sense in which this one replaces them.
 
 ## Acceptance criteria — what this plan is for
 
@@ -153,12 +193,26 @@ mystery worth another cart-load.
 
 **What 7-1 owes now**, since it is the rung that establishes the new C2's number: (a) the
 rate **decision for the record** — 16,384 Hz, stated as a ruling rather than left in a
-paragraph; (b) the retarget itself, listed in 7-1's actions; (c) 7-2's push-mask fix, which
-must be done **at the new rate**, because a 14.6 k-cycle mask against a 16,384-cycle grace is a
-14.3-sample window against a 16-sample tolerance — **inside it by 1.7 samples on the mean**, and
-by **0.5 samples** on the worst push window this repository has ever recorded (15,831 c, 6b-3).
-That is not a margin, it is the same defect wearing a hat — and this image's own worst push
+paragraph; (b) the retarget itself, listed in 7-1's actions; (c) 7-2's push-mask fix, which must
+be done **at the new rate**, because a 14.6 k-cycle mask against a 16,384-cycle grace is a
+**14.3-sample** window against a 16-sample tolerance — **inside it by 1.7 samples on the mean**,
+and by **0.5 samples** on the worst push window this repository has ever recorded (15,831 c,
+6b-3). That is not a margin, it is the same defect wearing a hat — and this image's own worst push
 window is not on the screen, so even the 0.5-sample floor is borrowed from another build.
+
+**One limit on the scope of this ruling, and it is not a small one.** Everything above decides
+the rate of the **FLAC product path** and nothing else — see the scope block at the head of this
+file. [`ULI2.md`](../ULI2.md) was accepted as the repo's product codec on this same date, and its
+own playback gate is written **at 32,768 Hz**, i.e. the rate this ruling declines. Those are two
+decisions by two tracks about the same number, made on the same day, and **they are not yet
+reconciled**: this file does not speak for ULI2 and will not amend it, and ULI2 does not speak
+for FLAC's C2. What this ruling *does* hand across the boundary is the evidence, which is
+track-neutral and cheap to re-use — the producer chain measured at **59.946% of a 32,768 Hz
+frame** on a FIXED-0 stream, the attributed decode at **451,763 c/frame**, the convert leg's
+unexplained **+35.1%** against mGBA, and the confirmed fact that a whole-decode-frame copy under
+one interrupt mask overshoots a 16-sample re-arm grace at that clock. Anyone setting a ULI2 rate
+bar should price those before committing to 32,768 Hz, because they are properties of the feeder
+ULI2 reuses, not of FLAC.
 
 
 ### What must not delay them

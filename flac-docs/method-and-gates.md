@@ -1,5 +1,11 @@
 # Method and gates — how a number gets taken here
 
+> **Scope: how the FLAC track takes a number and what gates it runs.** The discipline in here
+> (control builds, determinism, golden vectors, the gate surface, the toolchain pin) is written
+> for `crates/flac-lite`, `crates/flac-lite-gba`, `examples/flac_integration` and the `flac-*` /
+> `gafp` / `overlay` Make targets. It is offered as a *method* the sibling codec tracks may copy,
+> not as a rule that binds them.
+
 `FLAC.md` used to be a lab notebook, so its method was spread across every record
 that had ever used it. This file collects the rules once. Results live in
 [`perf-results.md`](perf-results.md), [`playback-results.md`](playback-results.md)

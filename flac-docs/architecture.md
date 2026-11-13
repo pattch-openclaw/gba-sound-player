@@ -1,5 +1,11 @@
 # Architecture — what exists, and why it is shaped this way
 
+> **Scope: the FLAC line of work.** This file describes `crates/flac-lite`,
+> `crates/flac-lite-gba` and the seam between them, and the design decisions of that track only.
+> It is not a repository-wide architecture document; the other codec tracks are recorded in
+> [`../ULI2.md`](../ULI2.md), [`../ULC.md`](../ULC.md) and [`../OPUS.md`](../OPUS.md), and the
+> baseline audio/input stack in [`../README.md`](../README.md).
+
 This is the design file: the constraint, the decision that produced the decoder,
 what the tree actually contains today, the seam between the portable core and the
 GBA overlay, and the rules that must survive implementation. Measurements live in
