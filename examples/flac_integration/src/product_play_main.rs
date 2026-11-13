@@ -272,6 +272,22 @@ mod rom {
     const REG_IE: usize = 0x0400_0200;
     const REG_IF: usize = 0x0400_0202;
     const REG_IME: usize = 0x0400_0208;
+    /// DISPSTAT, not an interrupt register: bit 0 is the hardware's "generate an
+    /// interrupt on VBlank" enable. `IE`'s bit 0 only says a VBlank request would
+    /// be waited for; whether one is ever *raised* is decided here, and the ROM
+    /// has not printed this register until now.
+    const REG_DISPSTAT: usize = 0x0400_0004;
+    /// The one bit of the mask agb maintains at 0x0400_0200 that is not the audio
+    /// chain: `Interrupt::VBlank`'s slot in **agb's own** numbering (`VBlank = 0`,
+    /// `HBlank = 1`, `VCounter = 2`, `Timer0 = 3`, `Timer1 = 4`, …), which is not
+    /// GBA's hardware IE bit map. It is the only other agb-registered source in this
+    /// build, so "that bit is missing from the mask seen by the audio handler" means
+    /// a second source was dispatched in the same interrupt entry as the audio
+    /// service — which is the question. Which hardware request agb's `VBlank` slot
+    /// actually waits for is left unclaimed here: agb's enable writes DISPSTAT bit 3
+    /// (`Interrupt::VBlank::enable` → `DISPLAY_STATUS.set_bits(1, 1, 3)`), and this
+    /// ROM has measured, not inferred, what those registers hold.
+    const IE_OTHER_SOURCE_BIT: u16 = 1 << 0;
 
     /// Timer data registers live at 0x0400_0100 + 4·n (agb `timer.rs`'s own
     /// arithmetic). The audio chain uses timer0/1/2.
@@ -407,6 +423,46 @@ mod rom {
         /// watermark above already does.
         late_first_period: u32,
         late_worst_period: u32,
+        // --- Which leg held the late re-arm (7-2's mechanism question).
+        // The ring push in `fed_frame` is the long interrupt-masked section of a
+        // fed frame — the stage instrument prices it at ~29 samples, against a
+        // 16-sample grace for a re-arm — so it is the candidate. Publishing the
+        // period counter as that section's first act lets the handler say, for a
+        // late service, whether the boundary it is late *for* crossed inside the
+        // section: a window of ~29 samples against a 560-sample grid crosses at
+        // most one boundary, so `periods == push_start_period + 1` identifies it
+        // exactly — no timing slot to tune, no extra clock reads, no extra
+        // critical section (the store rides the section that is already there).
+        push_start_period: u32,
+        late_in_push: u32,
+        // --- The other candidate for the same lateness, measured rather than
+        // argued about. agb's `interrupt_handler.s` reads the mask/IF pair as one
+        // 32-bit word, masks out of the mask every source that it is about to
+        // dispatch in this entry, and restores it on the way out. So the mask *as
+        // seen on entry to the audio handler* is exactly "what is armed, minus what
+        // fired with me": bit 0 of it still set means no second source came with
+        // this service, bit 0 clear means one did — and a service that had to wait
+        // for another entry is the other way a re-arm can miss its window. What
+        // that bit's source is in hardware is not claimed (see
+        // `IE_OTHER_SOURCE_BIT`: the bit is `Interrupt::VBlank`'s slot in agb's own
+        // numbering, and the field names keep the hypothesis's name, not a
+        // hardware ruling). `ie_latched` is the OR of the observations, which is
+        // what makes a zero mean "never shared an entry" rather than "was never
+        // armed", and records that nothing changed the mask mid-run.
+        //
+        // The raw registers are read at arm time and again at report time — not
+        // latched, because nothing in this build writes them — so the run brackets
+        // them: the first build that read DISPSTAT reported 0x0008 before the loop
+        // and 0x0009 after it, which is itself worth having on the log rather than
+        // assumed stable.
+        ie_latched: u16,
+        vblank_coentry: u32,
+        /// The other side of the same observation: services where the mask still
+        /// carried bit 0 on entry, i.e. the second source was armed and did not
+        /// fire. A co-entry
+        /// count is only meaningful beside this one — without it, "0 co-entries"
+        /// cannot be told apart from "VBlank was never enabled".
+        ie_vblank_armed: u32,
         // --- The feeder's own cost: the ring copy, the DMA re-arm, the FIFO
         // enables. It competes with the producer for the same core, so it belongs
         // in the duty-cycle arithmetic rather than in a footnote.
@@ -429,6 +485,14 @@ mod rom {
         late_drain: 0,
         late_first_period: u32::MAX,
         late_worst_period: u32::MAX,
+        // An unset watermark: the only period it could match is 0 (MAX + 1 wraps
+        // to 0), and period 0 is never called late — `gap` is measured against
+        // `last_period`, which starts at 0, so the first service has gap 0.
+        push_start_period: u32::MAX,
+        late_in_push: 0,
+        ie_latched: 0,
+        vblank_coentry: 0,
+        ie_vblank_armed: 0,
         feed_cycles_sum: 0,
         feed_cycles_worst: 0,
     }));
@@ -691,6 +755,25 @@ mod rom {
         let mut feed = FEED.borrow_ref_mut(cs);
         let mut stats = STATS.borrow_ref_mut(cs);
 
+        // What the dispatcher left in IE: every source that triggered in this
+        // entry has been masked out of it and will be restored on the way out, so
+        // a bit still set here did NOT fire with this service. Taken after the
+        // audit reads above, which is what keeps it out of the answer those reads
+        // are the measurement of; its own cost is ~10^2 cycles and it lands in
+        // the feeder's reported cost, which already says it carries the
+        // instrument. `ie_latched` recovers bit 0 from any entry that had it, and
+        // that is what makes a zero co-entry count mean "never happened" rather
+        // than "never enabled".
+        let ie_now = unsafe { io_read_u16(REG_IE) }; // SAFETY: fixed I/O address.
+        stats.ie_latched |= ie_now;
+        if ie_now & IE_OTHER_SOURCE_BIT == 0 {
+            stats.vblank_coentry += 1;
+        } else {
+            // A service that could not have been delayed by that source: the mask
+            // still says it is armed and it did not fire in this entry.
+            stats.ie_vblank_armed += 1;
+        }
+
         let gap = periods.wrapping_sub(stats.last_period);
         stats.last_period = periods;
         if gap > 1 {
@@ -711,6 +794,14 @@ mod rom {
             }
             if u32::from(periods) < stats.late_first_period {
                 stats.late_first_period = u32::from(periods);
+            }
+            // Which leg held it. See `push_start_period`: the value published as
+            // the push section's first act names the boundary that crossed inside
+            // that section, and nothing else can — IME goes back when the section
+            // ends, so a service whose boundary is inside it is by construction
+            // held until the section is over.
+            if u32::from(periods) == stats.push_start_period.wrapping_add(1) {
+                stats.late_in_push += 1;
             }
         }
         stats.serviced += 1;
@@ -1268,6 +1359,12 @@ mod rom {
             // only instant at which the ring's watermark means anything: the
             // feeder cannot take or add between the reads.
             let (lead_before, lead_after, outcome) = critical_section::with(|cs| {
+                // The section's first act, before the copy that makes it long: see
+                // `Stats::push_start_period`. A store into a static that is
+                // already being written here, so no new masked region is created
+                // anywhere — that matters, because adding a mask of its own to
+                // chase this defect would be the instrument causing it.
+                STATS.borrow_ref_mut(cs).push_start_period = u32::from(p3);
                 let (before, after, pushed) = {
                     let mut feed = FEED.borrow_ref_mut(cs);
                     let before = feed.ready();
@@ -1417,14 +1514,26 @@ mod rom {
         producer.ledger.audio_start = unsafe { audio_cycles() };
         let periods_x100 = geo::PLAYBACK_RATE_HZ * 100 / CHUNK as u32;
         agb::println!(
-            "[pp-rom] armed: {}.{:02} periods/s of {} cycles, frame budget {} cycles; IE=0x{:04X} IME={} (witness: timer1 is set and no other timer bit is — agb keeps VBlank, which is not part of the audio chain)",
+            "[pp-rom] armed: {}.{:02} periods/s of {} cycles, frame budget {} cycles; IE=0x{:04X} IME={} DISPSTAT=0x{:04X}",
             periods_x100 / 100,
             periods_x100 % 100,
             PERIOD_CYCLES,
             producer.ledger.frame_budget,
             unsafe { io_read_u16(REG_IE) },
-            unsafe { io_read_u16(REG_IME) }
+            unsafe { io_read_u16(REG_IME) },
+            unsafe { io_read_u16(REG_DISPSTAT) }
         );
+        // Its own line, because the printer cuts at 256 characters and the part
+        // that was being cut off is the part that says what the numbers mean. IE as
+        // printed here is the mask agb maintains at 0x0400_0200 in **agb's own** bit
+        // numbering (`Interrupt::VBlank = 0`, `Interrupt::Timer1 = 4`), and the two
+        // bits present are exactly those two: the audio chain's period source and one
+        // other source. Which hardware request that other bit stands for is not
+        // settled here — agb's `Interrupt::VBlank::enable()` writes DISPSTAT bit 3,
+        // not bit 0, and the first build that read DISPSTAT saw 0x0008 at arm time
+        // and 0x0009 after the run — so the claim this witness supports is the
+        // behavioural one: was a second source dispatched in the same entry as an
+        // audio service, yes or no. That answer is the `other source` line below.
 
         // The producer loop. No logging here: one `agb::println!` is a semihosting
         // trap, which on hardware is a syscall into a host that may not exist.
@@ -1788,6 +1897,11 @@ mod rom {
                 s.late_drain,
                 s.late_first_period,
                 s.late_worst_period,
+                s.push_start_period,
+                s.late_in_push,
+                s.ie_latched,
+                s.vblank_coentry,
+                s.ie_vblank_armed,
                 s.feed_cycles_sum,
                 s.feed_cycles_worst,
                 *CLOCK_REFUSALS.borrow_ref(cs),
@@ -1807,6 +1921,11 @@ mod rom {
             late_drain,
             late_first_period,
             late_worst_period,
+            push_start_period,
+            late_in_push,
+            ie_latched,
+            vblank_coentry,
+            ie_vblank_armed,
             feed_sum,
             feed_worst,
             clock_refusals,
@@ -1892,6 +2011,61 @@ mod rom {
             clock_refusals
         );
 
+        // Which leg held the late re-arm, read against the row above it. The push
+        // stage's `boundaries_in` says how many period boundaries crossed inside a
+        // push section at all; `in_push` is the subset of the *late* services whose
+        // boundary is the one that section published. A boundary that crossed inside
+        // that section cannot be served before the section ends (IME goes back with
+        // it), so `late 1 / in_push 1` names the mechanism instead of correlating
+        // with it, and `late 1 / in_push 0` rules it out for that event and moves
+        // the search to another source in the same entry or to the bus itself (Q15).
+        // The two counts disagreeing is itself the finding: it would say the push
+        // section swallows boundaries without them turning late, which is the open
+        // half of why one event in 582 periods happened at all.
+        agb::println!(
+            "[pp-rom] which leg held it: late={} in_push={} boundaries_inside_push_section={} last_push_section_started_at_period={}",
+            late,
+            late_in_push,
+            ledger.stages[3].inside,
+            push_start_period
+        );
+        agb::println!(
+            "[pp-rom] which leg meaning: a late service is called the push's by the period counter that section published as its first act; a ~{}-sample section on a {}-sample grid crosses at most one boundary, so the match is exact",
+            ledger.stages[3].mean() / u64::from(TICKS_PER_SAMPLE),
+            CHUNK
+        );
+        // The other candidate that could hold the same service: a second source in
+        // the same interrupt entry. agb's dispatcher masks out of the enable mask
+        // every source it is about to dispatch and restores it on the way out, so
+        // the mask as seen from inside the audio handler says directly whether a
+        // second source shared that entry — no handler need be registered for the
+        // entry to have been made and paid for. The second count is the complement,
+        // and it is printed because without it a zero co-entry count cannot be told
+        // apart from "that source is not armed here". Which hardware request the bit
+        // stands for is not claimed; the raw registers are printed at arm time and
+        // here, and nothing in this build writes them, so the run brackets them.
+        let ie_now = unsafe { io_read_u16(REG_IE) }; // SAFETY: fixed I/O address.
+        let ime_now = unsafe { io_read_u16(REG_IME) }; // SAFETY: fixed I/O address.
+        let if_now = unsafe { io_read_u16(REG_IF) }; // SAFETY: fixed I/O address.
+        let dispstat = unsafe { io_read_u16(REG_DISPSTAT) }; // SAFETY: fixed I/O address.
+        agb::println!(
+            "[pp-rom] other source in the same entry: mask_now=0x{:04X} mask_seen_by_audio=0x{:04X} ime={} if_now=0x{:04X} dispstat_now=0x{:04X} dispstat_bit0={} audio_entries_with_second_source={} audio_entries_second_source_armed_but_absent={}",
+            ie_now,
+            ie_latched,
+            ime_now,
+            if_now,
+            dispstat,
+            u32::from(dispstat & (1 << 0) != 0),
+            vblank_coentry,
+            ie_vblank_armed
+        );
+        agb::println!(
+            "[pp-rom] other source meaning (1/2): the mask as the audio handler sees it is what is armed minus what agb is dispatching in this entry, so bit 0 set means no second source came with this service"
+        );
+        agb::println!(
+            "[pp-rom] other source meaning (2/2): the second count is its complement; without it a zero cannot be told from \"not armed here\". Both registers are read at arm time too, and what agb's bit 0 waits for in hardware is deliberately not claimed."
+        );
+
         // The pacer's period, printed before the shares so the wait is understood
         // as what the flow control left idle rather than as time the producer ran
         // out of. Its mean should sit on the frame budget; that is the whole
@@ -1973,17 +2147,23 @@ mod rom {
         } else {
             feed_sum / u64::from(serviced)
         };
+        // One formula, shared by the per-stage lines below, the decode cross-check
+        // and the screen's `attr` field: three copies of the same arithmetic are
+        // three chances to report three different numbers for one quantity, and the
+        // screen field exists precisely so that a hardware run can be read without
+        // the log.
+        let isolated = |st: Stage| -> u64 {
+            st.mean()
+                .saturating_sub((u64::from(st.inside) * feed_mean) / u64::from(st.n.max(1)))
+        };
         for i in 1..4 {
             let st = ledger.stages[i];
-            let derated = st
-                .mean()
-                .saturating_sub((u64::from(st.inside) * feed_mean) / u64::from(st.n.max(1)));
             agb::println!(
                 "[pp-rom] attribution: {} system_mean={} boundaries={} isolated_estimate={}",
                 ledger.stage_names[i].trim_end(),
                 st.mean(),
                 st.inside,
-                derated
+                isolated(st)
             );
         }
         // Three lines rather than one: the ROM's log printer cuts a line at 256
@@ -1991,10 +2171,7 @@ mod rom {
         // mean is exactly what was being cut off the end.
         agb::println!(
             "[pp-rom] decode cross-check: this image's isolated estimate {} c/frame vs the pinned {} mean / {} worst (flac-docs/measurements.md 6b-2 pt 2, hardware)",
-            ledger.stages[1].mean().saturating_sub(
-                (u64::from(ledger.stages[1].inside) * feed_mean)
-                    / u64::from(ledger.stages[1].n.max(1))
-            ),
+            isolated(ledger.stages[1]),
             PINNED_DECODE_MEAN,
             PINNED_DECODE_WORST
         );
@@ -2066,12 +2243,13 @@ mod rom {
         // reports the extent, and the fit line below is the witness that the
         // verdict a hardware run reads is actually legible.
         // Line budget, stated rather than discovered: eleven lines at the font this
-        // module carries measured `bottom=99` for eight, i.e. ~12.4 px a line, so
-        // eleven land near 136 of the 160 available and leave two lines of margin
-        // for the conditional `rate …!… pitch` line below. Longest line here is 35
-        // characters (~193 px), inside the 236 px wrap. If a future row breaks
-        // either bound, the `fit:` line says so in the log and on the emulator —
-        // trim here rather than discovering it on a unit.
+        // module carries measured `bottom=135` for eleven, i.e. ~12.3 px a line, so
+        // the shape below — ten content lines plus the final `stage` word — measures
+        // the same eleven and leaves two lines of margin for the conditional
+        // `rate …!… pitch` line below. Longest line here is 38 characters (~210 px),
+        // inside the 236 px wrap. If a future row breaks either bound, the `fit:`
+        // line says so in the log and on the emulator — trim here rather than
+        // discovering it on a unit.
         let stages_void: u32 =
             ledger.stages.iter().map(|s| s.void).sum::<u32>() + ledger.paced.void;
         // Unset period indices print as 0, as the unset lead watermark above
@@ -2091,18 +2269,34 @@ mod rom {
                 if pcm_ok { "ok" } else { "NO" },
                 if fifo_ok { "ok" } else { "NO" }
             ));
+            // `ledg`/`aud` share a line with the sample counts: the two verdicts
+            // and the two totals are the same kind of thing (what the run claims to
+            // have moved), and merging them buys back the line the attribution and
+            // interrupt witness below need. Measured rather than assumed: the `fit:`
+            // line prints the result, and the longest merged line here is 38
+            // characters, which `text::measure` reports inside the 236 px wrap.
             screen_text.push_str(&format!(
-                "ledg {} aud {}\n",
+                "ledg {} aud {} push {} cons {}\n",
                 if ledger_ok { "ok" } else { "NO" },
-                if audit_ok { "ok" } else { "NO" }
+                if audit_ok { "ok" } else { "NO" },
+                pushed,
+                consumed
             ));
-            screen_text.push_str(&format!("push {} cons {}\n", pushed, consumed));
+            // `attr` is decode's attributed figure — the same number the
+            // `attribution:` log line prints, from the same shared formula — and it
+            // is on the screen because it is the figure the host model's cost
+            // envelope and the packer's row are stated in, while `dec` beside it is
+            // the system figure with period boundaries nested inside it. The two are
+            // about 1% apart and reading the wrong one is the error 6b-3 refused to
+            // paper over; they are printed side by side so the difference is visible
+            // rather than something a reader has to know to look for.
             screen_text.push_str(&format!(
-                "work {}.{:03}% dec {}.{:03}%\n",
+                "work {}.{:03}% dec {}.{:03}% attr {}\n",
                 ledger.pct_x1000(work_per_frame) / 1000,
                 ledger.pct_x1000(work_per_frame) % 1000,
                 ledger.pct_x1000(decode_per_frame) / 1000,
-                ledger.pct_x1000(decode_per_frame) % 1000
+                ledger.pct_x1000(decode_per_frame) % 1000,
+                isolated(ledger.stages[1])
             ));
             // The other three per-frame shares. They join the screen because they
             // are the numbers item 7-1 exists to read off a unit: the host model's
@@ -2153,6 +2347,21 @@ mod rom {
             screen_text.push_str(&format!(
                 "latep {} worstp {} dly {} refus {}\n",
                 late_first, late_worst, max_delay, clock_refusals
+            ));
+            // The two mechanism answers, in the two forms that decide 7-2 rather
+            // than describe it. `in push a/b`: of the b late services, a of them had
+            // their period boundary inside the producer's ring-push section, which is
+            // the section the stage rows price at ~29 samples of masked interrupts
+            // against this audit's 16-sample grace — a mechanism, not a correlation,
+            // and a zero says go look elsewhere. `2nd src a/b`: of the b audio
+            // services, in a of them agb dispatched a second source in the same
+            // interrupt entry (the other way a re-arm can be held past its window),
+            // and `disp 0x…` is the raw display-status register, printed rather than
+            // interpreted, because the meaning of the other source's bit belongs to
+            // agb's numbering and is argued in the log, not on a unit.
+            screen_text.push_str(&format!(
+                "late in push {}/{} 2nd src {}/{} disp {:04X}\n",
+                late_in_push, late, vblank_coentry, serviced, dispstat
             ));
             if let Some((stream, played)) = rates {
                 if stream != played {

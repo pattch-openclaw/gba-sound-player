@@ -799,3 +799,91 @@ Nothing in these four readings is a decision: C2 still names 32 kHz until a ruli
 otherwise, and the audit is not being relaxed.
 
 
+
+## In progress (part 2): the same run, now naming which leg held the re-arm (2026-11-13)
+
+The four readings above left the failure named but not explained: `late 1`, `latep 22`,
+`dly 23`, `fed 1`. The plan's next step was a screen that can say *which leg of the
+producer held that re-arm*. Built, controlled, and this section records the control,
+because the control itself answered two of the questions the four readings left open.
+
+**The image.** `86f6a1dd7e525dfc14cac7ddac4151c4e860aafbf099b11174ea07ed9d08a082`,
+1,106,440 bytes, built with `make native-product-play-rom`; `make check` exit 0,
+`make product-play-test` exit 0 (14 passed), `gafp-check` clean (160 frames, 882,949 B).
+Fit gate: `lines=11 right=188 bottom=135 fits=true`. The row is 14 characters wider than
+the previous image's longest (`right=174`) and still inside the 240×160 screen — the headroom
+is now ~50 px, about six characters, which is the budget the deferred rate/pitch line would
+need. Three mGBA runs of this image agree to the cycle (work 560,677 c in all three), so
+"the same image in the same emulator" is reproducible here even though hardware is the only
+place the failure appears.
+
+**The fields, and how each one works.**
+
+| Field | What it is |
+|---|---|
+| `late in push a/b` | of `b` late services, `a` had their period boundary inside the producer's ring-push section |
+| `2nd src a/b` | of `b` audio services, in `a` agb dispatched a second source in the *same* interrupt entry |
+| `disp 0009` | the raw display-status register, printed not interpreted |
+| `attr 422494` | the decode figure **minus** the interrupt time that fell inside its windows — the number the packer and the host model want, on the screen a unit can show |
+
+The push attribution does not use a timing window or a tuned threshold. The push section
+publishes the period counter as its *first act*, inside the critical section that is already
+there; a ~29-sample section against a 560-sample grid can cross **at most one** boundary, so
+`late service's period == the period the section published + 1` is an exact identification.
+The second field uses what the interrupt dispatcher does to the enable mask: agb's
+`interrupt_handler.s` masks out of the mask every source it is about to dispatch and restores
+it on the way out, so the mask *as the audio handler sees it* is "what is armed, minus what
+came with me". One `io_read_u16` per service. `mask_seen_by_audio=0x0001` over the whole run
+says that bit was never cleared from the mask, i.e. it was armed and did not fire in that
+entry; the paired count is the complement, because without it a zero cannot be told apart
+from "not armed at all".
+
+**Cost.** work/frame 560,590 → 560,677 c in mGBA: **+87 cycles a frame, +0.008 pp**
+(work 53.462 → 53.470%). The decode figure is unmoved (isolated estimate 422,487 → 422,494,
++7 c), the minimum lead is unmoved (9,120 samples), and the push stage itself is unchanged
+(14,491 → 14,942 c is the section's own cost, which the new instrument only reads). So the
+instrument that decides the mechanism costs less than a hundred cycles a frame — one store
+inside a critical section that exists anyway, one `io` read and a compare in the handler, and
+the subtraction that turns the window mean into the isolated figure, which is computed once
+and feeds the log line, the cross-check and the screen alike.
+
+**Free finding 1: the count that looked impossible is not impossible.** The previous section
+asked why the model expected "of the order of eight" late re-arms but the units reported one.
+The new counter answers it: in mGBA, `boundaries_inside_push_section` is **2** in the previous
+build and **0** in this one, against a nominal expectation of 159 windows × 28.6 samples ÷ 560
+= **8.1**. The producer is not in random phase with the audio grid: `wait_for_room` parks it
+until the ring has drained, so its push windows sit at a nearly fixed phase of that grid and
+boundaries cross them occasionally, not at the random rate. And the count moves when the code
+layout moves — those two builds differ in nothing but log strings and instruction addresses —
+which is also why the decode stage's boundary count here is 161 and the earlier build's was
+160. So "one late service in 582 periods" is not a statistical oddity: it is one boundary
+crossing, which is what a phase-locked producer does.
+
+**Free finding 2: a second interrupt source cannot hold a re-arm for 23 samples.** In mGBA the
+count is 1 audio entry in 582 that shared an entry with the other armed source, and `late=0`.
+For a shared entry to be what made period 22 seventeen samples late, that entry would have to
+have cost ≥ 11,776 cycles — about **five times the measured cost of this ROM's entire audio
+handler** (2,286 c mean, 2,999 c worst). And this build registers exactly one interrupt
+handler, the feeder (`add_interrupt_handler(Interrupt::Timer1, …)`), so a shared entry contains
+no project work of its own. What is *not* excluded is a stall on the bus or in memory (Q15):
+that is not an interrupt-entry effect and this field cannot see it. The field is still worth
+having, because a non-zero count on a unit would be evidence against the model rather than for
+it — but the leading candidate stays the ring-push section, whose measured cost (14,649 c,
+28.6 samples) is comfortably above the 16-sample grace.
+
+**What the unit run will decide, in advance.** With the same `late 1`:
+
+- `in_push 1` — the boundary that was missed crossed inside the push section. The mechanism is
+  named, and 7-2's fix is to stop masking interrupts for 28.6 samples: push in `CHUNK`-sized
+  critical sections (≈7.2 samples, 2.2× margin), or make the ring lock-free and push with
+  interrupts on.
+- `in_push 0` — it did not. Then the push-section story is dead for that event and Q15's bus
+  leg moves to the front, with the placement control (ring in EWRAM vs ring in IWRAM at 20
+  chunks = 22,400 B, which fits) as the test.
+- `boundaries_inside_push_section = 0` while `late ≥ 1` — a third answer, and a clean one: no
+  boundary was inside any push section, so no late service can have been caused by one.
+
+The reading to ask for on both units, twice each, is `late in push a/b`, `2nd src a/b`, `disp`,
+`attr`, and the unchanged audit block. Ask at the same time whether anything is audible at
+0.376 s — period 22 is the first quarter-second of the clip, and whether a click is there is
+part of 7-3's witness, not a separate question.

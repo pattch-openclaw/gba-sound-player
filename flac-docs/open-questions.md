@@ -812,15 +812,22 @@ same asset). The instrument step that separates them on a unit is 7-1's next ste
 put the image's own `attribution:` line on the screen.
 
 **What would answer it, cheapest first.**
-1. **Three witnesses on the screen, not two.** The image's own `attribution:` figure; the
-   `IE`/`IME`/**`DISPSTAT`** set (`DISPSTAT` bit 0 is what decides whether a VBlank IRQ is
-   generated at all, which is the only way to rule the agb-chain candidate in or out from a
-   unit); and **late services attributed to the leg they landed in** — the producer already
-   measures each leg's period range and the handler already records every late service's
-   period index, so the comparison costs a few instructions a frame. That last one is what
-   tests the leading explanation for period 22 (the ring push's critical section, 28.6 samples
-   of IME-masked time against a 16-sample tolerance): the prediction is `late in push 1`, and
-   if it comes back zero then the bus — this question — moves to the front.
+1. **Built and controlled 2026-11-13** (image `86f6a1dd7e525dfc…`, +87 c/frame in mGBA, fit
+   gate green). Three witnesses went onto the screen, and one of them corrected a guess made
+   here: the `attribution:` figure now prints as `attr`; the enable-mask/IME/**DISPSTAT** set
+   is printed at arm time and again at report time; and late services are attributed to the leg
+   they landed in — by the period counter the ring-push section publishes as its first act,
+   which is exact rather than windowed, since a ~29-sample section on a 560-sample grid crosses
+   at most one boundary. **What was guessed wrong:** `DISPSTAT` bit 0 was said to be what
+   decides whether a VBlank IRQ exists, but agb's `Interrupt::VBlank::enable()` writes **bit 3**
+   (`DISPLAY_STATUS.set_bits(1, 1, 3)`), and the mask at 0x0400_0200 is **agb's own** with
+   agb's bit numbering (`VBlank = 0`, `Timer1 = 4`), not GBA's IE map. Hence the raw registers
+   are printed and not interpreted, and the behavioural witness — the mask as the audio handler
+   itself sees it, with the co-entry count and its complement — is what carries any claim. What
+   is owed now is the **reading, not the instrument**: the same image twice per unit with
+   `late in push a/b` transcribed. That field either names the push section as the cause of the
+   period-22 miss or kills it for that event — and if it kills it, item 2 below becomes the
+   next experiment.
 2. **A single-variable ring-placement control that does fit at this rate.** The host model's
    depth cliff is **20 chunks**, and 20×560×2 = **22,400 B**, which does fit in IWRAM
    alongside the ~2 KB the image already carries there. So: one image with the ring in `.bss`
@@ -838,4 +845,15 @@ put the image's own `attribution:` line on the screen.
 owner's to rule, it is recorded unruled under 7-1 in `plan-of-record.md`, and the rung that
 this architecture can express exactly is 16,384 Hz rather than agb's 18,157. Not the
 period-22 late service either — that is a scheduling matter, though "something has the bus or
-the CPU" is a candidate they share.
+the CPU" is a candidate they share. **Two things about that shared candidate are now settled
+without a unit**, and they narrow what this question can be asked to explain. A *second source
+in the same interrupt entry* is excluded on cost: explaining 23 samples needs such an entry to
+have cost ≥ 11,776 c, about five times this ROM's entire measured audio handler (2,286 c mean,
+2,999 c worst), and this build registers exactly one interrupt handler, the feeder. And the
+number of period boundaries that fall inside the producer's IME-masked push windows is **0–2, not
+the 8.1 that a random-phase producer would give**, because `wait_for_room` parks the producer
+until the ring has drained and so phase-locks it to the period grid — which is also why that
+count changed between two builds that differ only in log strings. So the single late service in
+582 periods was never a statistical puzzle, and the count has to be read from a unit rather than
+modelled. What remains between the ring-push section and this question's bus/memory leg is
+decided by the `late in push` field; a bus stall is something no interrupt field here can see.

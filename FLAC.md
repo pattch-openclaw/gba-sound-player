@@ -42,7 +42,25 @@ judged only against these, and full detail is in
   been pricing that section at 14,649 c mean, 15,831 c for its worst window, all along), against a
   **16-sample** tolerance for a sound-DMA re-arm. So the miss is a **margin defect in this
   design**, not bad luck and not the unit's fault — and the 16-sample audit clause is what
-  made a 28.6-sample mask visible at all.
+  made a 28.6-sample mask visible at all. **The test that decides it is built and controlled**
+  (image `86f6a1dd7e525dfc…`, 1,106,440 B, host gates and the fit gate green, cost **+87 c a
+  frame = +0.008 pp** in mGBA with the decode figure and the minimum lead unmoved): the screen
+  now prints `late in push a/b`, which attributes a late service to that section by the period
+  counter the section publishes as its first act — exact, not a timing window, because a
+  ~29-sample section on a 560-sample grid crosses at most one boundary — plus whether a second
+  source shared the interrupt entry, and `attr`, the decode figure minus the interrupt time
+  inside its windows, which is what the packer and the host model want. Two things the control
+  settled without touching a unit: **the count that looked too small is not too small** (only
+  0–2 boundaries land inside the push windows, not the 8.1 a random-phase producer would give,
+  because `wait_for_room` phase-locks the producer to the ring — and that count shifts when the
+  code layout shifts, so it has to be read from a unit), and **a shared interrupt entry is
+  bounded out** (it would have to cost ≥ 11,776 c, five times this ROM's whole audio handler,
+  and this build registers one handler). So there are **two** candidates, not three: that push
+  section, or a bus/memory stall (Q15), which no interrupt field can see. The next run — same
+  image, twice per unit, sha recorded first — decides it: `late in push 1` names the mechanism
+  and 7-2 is about not masking interrupts for 28.6 samples (push in `CHUNK`-sized sections ≈7.2
+  samples, or a lock-free ring); `in_push 0`, or no boundaries inside any push section while
+  `late` is non-zero, makes Q15's ring-placement control the next experiment.
 
 The 3.7–6.9% mGBA-versus-silicon shortfall (Q13) was **parked by decision**: it would
 explain a number that is already measured on hardware, and C2 is judged on hardware
@@ -450,8 +468,9 @@ unchanged, and the per-rung state lives in the plan of record:
    did not, with the stage shares and the period-22 analysis, is recorded under 7-1's first
    reading in [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) and dated in
    [`flac-docs/playback-results.md`](flac-docs/playback-results.md). What 7-1 still owes:
-   the packer's `fixed0 @ b2048` row (which needs the image's `attribution:` figure, and
-   that line is not on the GBA screen yet), the host model's envelope re-derived from a
+   the packer's `fixed0 @ b2048` row (which needs an attributed, isolated decode figure from a
+   current image — the screen now shows that as `attr`, so the row is one transcribed reading
+   away, not one more instrument away), the host model's envelope re-derived from a
    pinned ROM-generated fixture instead of a hand-copied pre-7-0 run, and the listening
    witness. **And it opened a decision that is the project owner's, recorded but not ruled:**
    whether the product should target the next rate down instead of 32,768 Hz, given a
