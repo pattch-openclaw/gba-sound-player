@@ -795,8 +795,10 @@ optimising against; the emulator-versus-hardware gap is probably real and probab
 of running from an SD-card flash cart rather than a mask ROM; a larger IWRAM-resident buffer
 in the pattern of the FIFO is one way to design around that, but the simplest way to finish
 is a lower rate; and **7-0/7-1 are to be re-run as necessary at the next rate down**.
-Nothing in these four readings is a decision: C2 still names 32 kHz until a ruling says
-otherwise, and the audit is not being relaxed.
+Nothing in these four readings was a decision *at the time they were taken*: C2 still named
+32 kHz until a ruling said otherwise, and the audit was not being relaxed. **The ruling came
+later the same day**, after the second reading recorded below — C2 now asks for the highest rate
+achievable rather than a committed 32 kHz, which changes the target and none of the clauses.
 
 
 
@@ -887,3 +889,117 @@ The reading to ask for on both units, twice each, is `late in push a/b`, `2nd sr
 `attr`, and the unchanged audit block. Ask at the same time whether anything is audible at
 0.376 s — period 22 is the first quarter-second of the clip, and whether a click is there is
 part of 7-3's witness, not a separate question.
+
+## 7-1, second hardware reading (2026-11-13): the push section held it, and the rate is ruled
+
+**Image.** `product-play.gba`, sha256 **`86f6a1dd7e525dfc14cac7ddac4151c4e860aafbf099b11174ea07ed9d08a082`**,
+1,106,440 bytes, md5 `9861b47b0116183e05c21018dc6776df`, built from source commit **`ad37932`**
+and rebuilt before flashing to confirm the bytes reproduce. The sha was recorded before the cart
+went in, and the copy in the unit matches it by md5 after transfer. Four runs: GBA 001 ×2,
+GBA SP ×2.
+
+**The four screens as read.** Reproduced with the transcription slips left in, because they are
+part of the evidence about how these were taken — `Lfr`/`Ledg`/`Latep` capitalisation, one
+missing `ser 582`, one `0/562`, one `drain -`. The four agree everywhere else, exactly.
+
+```text
+GBA 001 (1)                          GBA 001 (2)
+PRODUCT PLAY 32768                   PRODUCT PLAY 32768
+Fr 160 und 0 pcm ok fifo ok          Fr 160 und 0 pcm ok fifo ok
+Ledg ok aud NO push 326144           Ledg ok aud NO push 326144 cons 326144
+     cons 326144                      Work 59.946% dec 42.292% attr 451763
+Work 59.946% dec 42.292% attr 451763 Conv 14.231% push 1.400% feed 2.021%
+Conv 14.231% push 1.400% feed 2.021% Minlead 8560 maxwk 60.755%
+Minlead 8560 maxwk 60.755%           Per 582 tail 1/224 void 0
+Per 582 ser 582 tail 1/224 void 0     [ser 582 not transcribed]
+Replay 0 late 1 fed 1 drain 0        Replay 0 late 1 fed 1 drain 0
+Latep 22 worstp 22 dly 25 refus 0    Latep 22 worstp 22 dly 25 refus 0
+Late in push 1/1 2nd src 0/562       Late in push 1/1 2nd src 0/582
+     disp 0008                            disp 0008
+playback                             Playback
+
+GBA SP (1)                           GBA SP (2)
+PRODUCT PLAY 32768                   PRODUCT PLAY 32768
+Fr 160 und 0 pcm ok fifo ok          Fr 160 und 0 pcm ok fifo ok
+Ledg ok aud NO push 326144           Ledg ok aud NO push 326144 cons 326144
+     cons 326144                      Work 59.946% dec 42.292% attr 451763
+Work 59.946% dec 42.292% attr 451763 Conv 14.231% push 1.400% feed 2.021%
+Conv 14.231% push 1.400% feed 2.021% Minlead 8560 maxwk 60.755%
+Minlead 8560 maxwk 60.755%           Per 582 ser 582 tail 1/224 void 0
+Per 582 ser 582 tail 1/224 void 0    Replay 0 late 1 fed 1 drain -
+Replay 0 late 1 fed 1 drain 0        Latep 22 worstp 22 dly 25 refus 0
+Latep 22 worstp 22 dly 25 refus 0    Late in push 1/1 2nd src 0/582
+Late in push 1/1 2nd src 0/582            disp 0008
+     disp 0008                        Playback
+Playback
+```
+
+`drain -` is read as `drain 0`: every other row on that screen is identical to the three that
+say `drain 0`, and `fed 1` with `late 1` leaves nothing else to be. Same for the missing
+`ser 582` and the `0/562`, which the other three screens and `Per 582` on that very screen
+contradict. Recorded rather than corrected silently.
+
+**What it establishes: the attribution came back 1 of 1, four times.**
+
+| Field | Read | Meaning |
+|---|---|---|
+| `late in push 1/1` | **1 of 1** | the one late service's period boundary crossed inside the producer's ring-push critical section |
+| `2nd src 0/582` | **0** | no audio entry ever shared an interrupt entry with another source on a unit |
+| `disp 0008` | bit 0 **clear** | the display was not generating that interrupt at all on real hardware |
+| `latep / worstp` | **22 / 22** | the same period index the first reading gave, on a different image |
+| `dly` | **25 samples** | 12,800 c, against a 16-sample / 8,192-c grace — **9 samples, 4,608 c late** |
+| `attr` | **451,763 c** | the first *attributed, isolated* decode figure ever read off a unit |
+| `late 1 fed 1 drain 0` | unchanged | still one, still in the fed phase, so still a possible mid-waveform splice |
+
+The mechanism is no longer a hypothesis. The push section publishes the period counter as its
+first act, so "this service's boundary was inside that section" is an identity rather than a
+timing window, and it matched on every run on both units. The competing candidate died the same
+way from two directions: the co-entry count is zero, and `DISPSTAT` bit 0 — the enable that
+makes such a request possible — was clear the whole time. **Note which channel got this wrong:
+mGBA reported `dispstat_now=0x0009` and `2nd src 1/582`, i.e. the emulator had VBlank behaviour
+the real hardware did not.** An interrupt-topology question cannot be settled by an emulator
+control run, in either direction.
+
+**The delay moved, the index did not.** 23 samples on image `8113f04c…`, 25 on `86f6a1dd…`, same
+period, same classification, +1,024 cycles — on a build whose producer code differs in log
+strings and addresses. That is what a phase-locked collision looks like: the *instant* is a
+property of the schedule and the *held time* follows wherever the push window lands. It also
+prices the instrument honestly and unflatteringly: adding one store inside the push critical
+section made the defect it measures two samples worse.
+
+**First hardware attributed decode, and how to read it.** `attr 451,763 c/frame` = **43.08%** of
+the 32,768 Hz frame. Against mGBA's same-image `422,494` it is **+29,269 c, +6.93%** — landing
+at the top of the 3.7–6.9% non-kernel band 6a-7b measured on these units. Against 6b-2's row of
+record (396,066 mean / 398,255 worst) it is +14.1%, and that gap is **instrument, not silicon**:
+6b-2 priced the kernel in a decode slot with nothing else running, this prices the decode leg of
+a live producer with ring writes and a timer interrupt inside its windows. Both are correct
+figures of different things; only this one describes the product. This is the number the
+packer's structural `fixed0 @ b2048` row has been waiting for, and it is now readable from a
+screen.
+
+**Cost of the second instrument, on both channels.** Against `8113f04c…`: hardware work 59.921 →
+**59.946%** (+262 c/frame), maxwk 60.738 → 60.755%, dec 42.288 → 42.292%, conv 14.228 →
+14.231%, push 1.397 → 1.400%, feed 2.006 → 2.021%; min lead, all counts, every digest, `void 0`,
+`refus 0` and the late index **unchanged**. In mGBA the same extension cost **+87 c/frame**. So
+the instrument is ~3× more expensive on silicon than in the emulator — +262 c/frame for one
+store, one `io` read, a compare and a subtraction a frame — which is a Q15-sized observation in
+its own right, and small enough not to matter at 0.025 pp. The four stage shares still sum
+self-consistently: 42.292 + 14.231 + 1.400 + 2.021 = **59.944** against a reported **59.946**.
+
+**And the conclusion the run actually forces.** The refused clause is now fully explained and
+fixable, and the run still costs **59.946% of the frame**, worst frame **60.755%**, on a
+**FIXED-0** stream — a clip with no prediction at all, which is the cheapest thing FLAC can
+emit and is not what real music censes. Fixing the push mask removes the only thing this screen
+refused; it removes none of the 60%. Given no strategy for driving an attributed 43%-of-frame
+decode and a 14%-of-frame convert down by the factor that would make the product able to carry
+predicted frames, the owner ruled on 2026-11-13: **drop the sample rate, and relax C2 from
+real-time playback at ~32 kHz to real-time playback at the highest rate achievable.** Recorded
+in full in `plan-of-record.md` under "The rate ruling", including what it buys (halved
+percentages, LPC from 173% to 86.6% of the frame, the IWRAM ring becoming arithmetically
+possible) and what it pointedly does not buy (**at 16,384 Hz this same 14,680-cycle mask is a
+14.3-sample window against a 16-sample grace — inside the tolerance by 1.7 samples on the mean,
+and by 0.5 on the worst push window this repository has ever recorded for that section**). The
+rate question is closed; 7-2's push fix, the retarget,
+the packer row, the host fixture, and the listening witness are all still open — and the
+listening question at 0.376 s is still unanswered, now with a mechanism attached to it: at
+period 22 the re-arm was held 25 samples by the producer's own copy into the ring.

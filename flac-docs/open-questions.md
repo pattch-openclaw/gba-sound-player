@@ -356,7 +356,19 @@ claim has to state what the command *varied*, not only what it printed — and a
 zero-returning throwaway script can report a fact that merely agrees with the prose
 being checked.
 
-### Q12 — Where do the seam's 48 c/sample go, and what puts 32,768 Hz FIXED back under budget?
+### Q12 — Where do the seam's 48 c/sample go, and what puts FIXED back under budget?
+
+> **Re-framed by the rate ruling of 2026-11-13.** This question was written while 32,768 Hz was
+> the commitment, so "back under budget" meant "under a 1,048,576-cycle frame". C2 now asks for
+> the highest rate achievable (Q16 owns the bar), and the cycle costs this question is about are
+> sample-denominated — they do not move with the clock, only the budget does. So Q12's two halves
+> survive the ruling differently: **the attribution half (where the 48 c/sample go) is
+> rate-independent and still owed**, and it is now the most valuable thing in the file, because
+> 7-1's second reading put the product's attributed decode at **451,763 c/frame** against 6b-2's
+> kernel-in-a-slot **396,066 c/frame** — a ~55,700-cycle difference, 12.4% of the decode bill,
+> that lives somewhere between the kernel and a running producer and has never been attributed.
+> The "is 32,768 Hz reachable" framing is closed: it was reached, at 59.946% of the frame, and the
+> owner declined it.
 
 **Opened by:** 6a-5's stack projection (2026-11-08) — the item's first measured
 negative. **CLOSED 2026-11-09 (first half), and the answer is a memory address.**
@@ -812,8 +824,12 @@ same asset). The instrument step that separates them on a unit is 7-1's next ste
 put the image's own `attribution:` line on the screen.
 
 **What would answer it, cheapest first.**
-1. **Built and controlled 2026-11-13** (image `86f6a1dd7e525dfc…`, +87 c/frame in mGBA, fit
-   gate green). Three witnesses went onto the screen, and one of them corrected a guess made
+1. **Built, controlled, and answered on the units 2026-11-13** (image `86f6a1dd7e525dfc…`,
+   +87 c/frame in mGBA / +262 c/frame on silicon, fit gate green). **The answer:
+   `late in push 1/1`, four runs, both units** — period 22 belongs to the ring push, and this
+   question's bus leg is not the explanation for it. What follows is the record of how the field
+   was built, kept because the register witness caught an emulator-side artefact that would
+   otherwise have been read as hardware evidence. Three witnesses went onto the screen, and one of them corrected a guess made
    here: the `attribution:` figure now prints as `attr`; the enable-mask/IME/**DISPSTAT** set
    is printed at arm time and again at report time; and late services are attributed to the leg
    they landed in — by the period counter the ring-push section publishes as its first act,
@@ -841,19 +857,100 @@ put the image's own `attribution:` line on the screen.
    be *carried as a stated limit of every hardware number here* — and now of the product
    path's stage shares too.
 
-**What this question does not decide.** Not C2's rate: the rate question is the project
-owner's to rule, it is recorded unruled under 7-1 in `plan-of-record.md`, and the rung that
-this architecture can express exactly is 16,384 Hz rather than agb's 18,157. Not the
-period-22 late service either — that is a scheduling matter, though "something has the bus or
-the CPU" is a candidate they share. **Two things about that shared candidate are now settled
-without a unit**, and they narrow what this question can be asked to explain. A *second source
-in the same interrupt entry* is excluded on cost: explaining 23 samples needs such an entry to
-have cost ≥ 11,776 c, about five times this ROM's entire measured audio handler (2,286 c mean,
-2,999 c worst), and this build registers exactly one interrupt handler, the feeder. And the
-number of period boundaries that fall inside the producer's IME-masked push windows is **0–2, not
-the 8.1 that a random-phase producer would give**, because `wait_for_room` parks the producer
-until the ring has drained and so phase-locks it to the period grid — which is also why that
-count changed between two builds that differ only in log strings. So the single late service in
-582 periods was never a statistical puzzle, and the count has to be read from a unit rather than
-modelled. What remains between the ring-push section and this question's bus/memory leg is
-decided by the `late in push` field; a bus stall is something no interrupt field here can see.
+**What this question does not decide.** Not C2's rate — that was the project owner's to rule and
+**was ruled on 2026-11-13**, C2 now asking for the highest rate achievable rather than a
+committed 32 kHz; the bar that makes "achievable" checkable is **Q16**, not this question. (The
+rung below the current one that this architecture can express exactly is 16,384 Hz, not agb's
+18,157, and that constraint survives the ruling.) **And it no longer explains period 22 either** — that question was
+answered on the units on 2026-11-13, and the answer is not this: 7-1's second reading came back
+**`late in push 1/1`** on four runs across both units, so the one late service was held by the
+producer's own interrupt-masked ring push, which is a code property rather than a bus property.
+Two earlier findings pointed the same way before a cart was filled: a *second source in the same
+interrupt entry* would have to cost ≥ 11,776 c, about five times this ROM's entire measured
+audio handler (2,286 c mean / 2,999 c worst), in a build that registers exactly one handler; and
+the count of period boundaries falling inside the masked push windows is **0–2, not the 8.1 a
+random-phase producer would give**, because `wait_for_room` phase-locks the producer to the
+period grid — which is also why that count moved between two builds differing only in log
+strings, and why a number like it has to be read from a unit rather than modelled.
+
+**So what this question owns now is narrower, and one notch more urgent.** It owns the
+**convert leg's +35.1%**, which no attribution field explains, and which the ruling on the rate
+does not make disappear: at 16,384 Hz that unexplained gap is ~7% of the frame instead of ~14%,
+but it is still an unpriced leg in the budget of whatever rate ships. And the second reading
+handed it a new datum in the *emulator's* direction: `2nd src 0/582` with the display's VBlank
+request bit never set on a unit, where mGBA reported that bit **set** and one shared entry. The
+emulator generates an interrupt the real hardware does not, so interrupt-topology claims now need
+silicon in both directions — an mGBA control run cannot settle them by presence *or* absence. The
+placement control (item 2 above) is still the probe that would put a number on the
+flashcart/EWRAM hypothesis instead of a name on it, and it is the cheapest remaining piece of
+this question.
+
+---
+
+### Q16 — What makes a rate "the highest achievable"? C2's new wording needs a bar before it can be judged
+
+**Opened by:** the owner's ruling of 2026-11-13, which amended C2 from "in real time, at
+32 kHz" to "at the highest rate the hardware achieves" (full text and arithmetic in
+[`plan-of-record.md`](plan-of-record.md) under "The rate ruling").
+
+**Why it is a question and not a formality.** "Highest achievable" is a *result*, so it has to
+be produced by a measurement with a stopping rule. Without one, the clause is unfalsifiable in
+both directions: any rate that happens to pass can be called the highest achievable, and any
+rate that fails can be called unachievable. C2 used to be checkable precisely because it named
+a number; the amendment trades that for a search, and the search needs the bar that makes its
+answer the answer.
+
+**The shape the bar has to have.** The ladder is fixed by the clock, not by taste: the rates
+this architecture expresses *exactly* are 65,536 / 32,768 / **16,384** / 8,192 Hz, and Q14's
+identity rule survives the change, so a rate below the current one is only a candidate if the
+stream *declares* it (explicit-rate codes — FLAC's four-bit table has 16,000 and 32,000, and
+`16,384/16,000 = 1.024` re-imports Q14's 41.06-cent defect exactly). That leaves at most four
+rungs to test, and two of them are already answered from rows in this ledger: **65,536 Hz is
+out on arithmetic** (twice the current 59.946%, no instrument needed), and **32,768 Hz is the
+rung just refused** — not by the late service, which is now explained and fixable, but by
+59.946% of the frame going to a FIXED-0 stream that carries no prediction at all.
+
+**The three things the bar has to say, and what each is for.**
+
+1. **A headroom floor, in cycles, on the worst frame** — not the mean. The product-path numbers
+   are close to their own means (`work 59.946%` against `maxwk 60.755%`), so a mean-only bar
+   would be nearly free; the reason to price the worst frame is that the shipped clip is 160
+   frames of one asset, and a real library will not be.
+2. **What the rate must be able to carry, not just what it did carry.** This is the substantive
+   choice, and it is the owner's: a bar set against the shipped FIXED-0 clip is met at
+   16,384 Hz with the work figure around **30%** (from the second reading's 59.946%, halved,
+   cycles unchanged) — comfortable, and arguably not worth calling a result. The same bar set
+   against *predicted* frames is met nowhere above **8,192 Hz**, because LPC decodes at 173.23%
+   mean / 174.14% worst of a 32,768 Hz frame on hardware (6a-7b), which is 86.6% / 87.1% at
+   16,384 Hz and **43.3% / 43.5% at 8,192 Hz**. So "highest achievable" means 16,384 Hz if the
+   product is a FIXED-0 player and 8,192 Hz if it is a music player. 7-0's own census said real
+   material censuses FIXED 1-4 and LPC, and this question is where that observation gets
+   either paid for or officially dropped.
+3. **What the headroom is *for*.** One candidate use is already in the ledger and already
+   overdue: the audit's 16-sample grace is currently oversubscribed by design — the producer's
+   masked push window is 28.7 samples at 32,768 Hz, confirmed as the cause of period 22 by
+   `late in push 1/1`. Halving the rate brings that window to 14.3 samples against the same
+   16-sample grace, which is a 1.7-sample mean margin and 0.5 on the worst window ever recorded
+   for that section. **A headroom bar that ignores this buys a rate change and still leaves the
+   product passing its own latency audit by less than one sample of audio.**
+
+**What would answer it, in the owner's hands.** One of:
+
+- a stated rule — e.g. "the highest exactly-expressible rate at which the full gate set passes
+  on both units with the worst frame at or below X% of the budget, where X is chosen to leave
+  room for the shapes we intend to ship"; or
+- a narrowing of C2's wording to the product the tree actually means (FIXED-0 only, or music),
+  which settles the ladder by itself; or
+- a decision to keep the search but bind it to a named fixture — e.g. "the highest rate at which
+  the shipped clip passes with a 2x worst-frame margin, re-measured per asset."
+
+Any of those makes the amended C2 checkable. What must not happen is the amended C2 being
+treated as satisfied by whatever rate is convenient at the moment someone wants a claim: the
+16-sample clause, the zero-underrun clause, Q14's identity rule and the listening witness all
+carried across the amendment unchanged, and they are the parts that make the rate mean anything.
+
+**What this question does not decide.** Not 7-2's push-mask fix, which is owed at whatever rate
+ships and is now a decided thing rather than an open one. Not Q15 either: an unpriced +35.1% on
+the convert leg is a leg missing from any rate's budget, and at 16,384 Hz that leg is roughly
+7% of the frame — so the same unexplained gap that was survivable-at-40%-headroom at one rung is
+a bigger share of the margin at the next one, but it is not the thing setting the bar.
