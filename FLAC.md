@@ -27,18 +27,41 @@ judged only against these, and full detail is in
   re-measures them instead of trusting the sum, and why **no real-time claim of any
   kind is made here until 7-3 passes: two runs on each unit with underruns counted
   and zero.** (An earlier revision of this paragraph read ≈85.6% / ≈8.7 ms, from
-  the pre-6a-7b numbers.)
+  the pre-6a-7b numbers.) **7-1's first hardware reading (2026-11-13) is now the first
+  measured figure for the whole chain on silicon, and it is lower than that arithmetic:**
+  `product-play.gba` at the 7-0 asset, four identical runs (GBA 001 ×2, GBA SP ×2),
+  **work 59.921% and worst frame 60.738%** of the 32,768 Hz frame, zero underflows, 582
+  periods elapsed and 582 serviced, minimum lead 8,560 samples (261 ms), sample counts and
+  both digests exact — so the stale inputs were pessimistic rather than optimistic, and the
+  run was refused by the audit for **one** reason: a sound-DMA re-arm landing 23 samples
+  (11,776 cycles) into a period against a 16-sample (8,192-cycle) window, at period 22,
+  deterministically in all four runs. That is a latency event, not a budget event, and it is
+  7-2's to close — with a named candidate attached, marked as unmeasured reasoning in the
+  plan: this design holds **interrupts masked for 28.6 samples** while it copies a whole
+  decode frame into the ring (agb's critical section is `IME = 0`; the stage instrument has
+  been pricing that section at 14,649 c mean, 15,831 c for its worst window, all along), against a
+  **16-sample** tolerance for a sound-DMA re-arm. So the miss is a **margin defect in this
+  design**, not bad luck and not the unit's fault — and the 16-sample audit clause is what
+  made a 28.6-sample mask visible at all.
 
-The 3.7–6.9% mGBA-versus-silicon shortfall (Q13) is **parked by decision**: it would
+The 3.7–6.9% mGBA-versus-silicon shortfall (Q13) was **parked by decision**: it would
 explain a number that is already measured on hardware, and C2 is judged on hardware
 anyway. Until something needs it, mGBA figures for memory-heavy paths carry a **+7%
-derating** instead of a probe.
+derating** instead of a probe. **That trigger arrived on 2026-11-13**, on the product path
+and at a larger size (12.08% of the whole chain, with convert at +35.1%), so the question is
+re-opened as **Q15** with the owner's own hypothesis attached to it — these images reach the
+units from an SD-card flash cart, not a mask ROM — and it is now paired with the rate
+question rather than sitting behind it.
 
 **Status in one line:** the decoder is complete and bit-exact; the playback harness
 plays real music at 10,512 Hz with correct tempo and pitch (audibly verified); the
 first product-play image runs that whole path at the full 32,768 Hz with zero
-underflows and a period audit that is part of the verdict, but **in mGBA headless only — never on hardware — so it is not a playback
-claim**; and the asset it plays **was not a product asset either** — it declared 32,000 Hz,
+underflows and a period audit that is part of the verdict — first in mGBA, and **now on both
+units** (7-1, 2026-11-13: four runs, GBA 001 ×2 and GBA SP ×2, all four identical: zero
+underflows, 582/582 periods serviced, sample counts and digests exact, and one service 7
+samples past the half-FIFO window at period 22, which is what the audit refuses). **It is
+still not a playback claim**, because the audit says no and the listening half of 7-3 has
+not been asked; and the asset it plays **was not a product asset either** — it declared 32,000 Hz,
 and Q14 was ruled on 2026-11-11 that a stream is encoded at the rate it is played at, so
 1.024× (41.06 cents) disqualified it however clean the run (6b-3; the
 re-encode was item **7-0**, which **landed on 2026-11-13**: the product asset is now
@@ -422,10 +445,28 @@ unchanged, and the per-rung state lives in the plan of record:
    predicted `--allow-unmeasured`; and the packed negative leg exists as a mutation plus a
    byte-level respell, because after the ruling the packer refuses to make such an asset at
    all. 7-1's figure — measured on the frames this asset is made of — is what clears it.)*
+   **7-1 is in progress: its first reading landed the same day 7-0 did** (2026-11-13, four
+   runs on both units, one image `8113f04c…84cd`). What those runs established and what they
+   did not, with the stage shares and the period-22 analysis, is recorded under 7-1's first
+   reading in [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) and dated in
+   [`flac-docs/playback-results.md`](flac-docs/playback-results.md). What 7-1 still owes:
+   the packer's `fixed0 @ b2048` row (which needs the image's `attribution:` figure, and
+   that line is not on the GBA screen yet), the host model's envelope re-derived from a
+   pinned ROM-generated fixture instead of a hand-copied pre-7-0 run, and the listening
+   witness. **And it opened a decision that is the project owner's, recorded but not ruled:**
+   whether the product should target the next rate down instead of 32,768 Hz, given a
+   60%-of-frame measured cost on silicon and an emulator-versus-hardware gap of 12.08% whose
+   likely cause is the flash cart. If that decision is taken, 7-0 and 7-1 are re-run at that
+   rate, and the only rung this architecture can express exactly is **16,384 Hz** — not agb's
+   18,157, which cannot be produced from a 2²⁴ Hz timer with an integer reload.
    **C2 is met at 7-3**, and C2 now says in terms that the stream declares the rate it is
    played at.
 5. **Parked:** Q13's data-read probe, and 6a-8. Re-open Q13 only if a product path
-   needs the last 6% or a claim is made by scaling an mGBA cycle count.
+   needs the last 6% or a claim is made by scaling an mGBA cycle count. *(That trigger
+   arrived on 2026-11-13 — see Q15: the product path's own stage shares differ from mGBA by
+   12.08% overall and +35.1% on the convert leg, and the candidate mechanism is now the
+   transport, an SD-card flash cart, with a single-variable IWRAM-versus-EWRAM ring control
+   as the probe that would put a number on it.)*
 
 - ~~**6a-5** — the realization reading, three arms in one image; the item's number
   of record, against a pre-declared fork.~~ **Landed: carry.** asm − ctrl =

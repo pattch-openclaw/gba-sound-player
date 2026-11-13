@@ -286,6 +286,34 @@ See [`playback-results.md`](playback-results.md) for the dated log.
 | E2b landing on the unpatched reader | **+37.96%** FIXED (fixed by landing E2a alongside) |
 | Decode at 10,512 Hz, E2b-only (the +37.96% bisect point) | 3,335,100 cycles/frame ≈ 199 ms of decode per 195 ms of audio |
 | Decode at 10,512 Hz, FIXED rate-ROM mean | 2,417,429 cycles/frame ≈ 144 ms |
+| **7-1 first hardware reading, product-play path, 32,768 Hz (2026-11-13)** | four runs — GBA 001 ×2, GBA SP ×2 — of image **`8113f04cabf0fb63…`**, 1,104,592 B: **all four identical**: `work 59.921%`, worst frame `maxwk 60.738%`, **min lead 8,560 samples = 15.3 periods = 261 ms**, `per 582 ser 582`, `und 0`, `void 0`, `refus 0`, `replay 0`, `push = cons = 326,144`, `tail 1/224`, PCM and FIFO MATCH — and `late 1 fed 1 drain 0` at **period 22**, `dly 23` samples | the first same-image hardware stage shares on the product path. **The refusal is one latency event, not a budget failure**: the run never came near emptying the ring, and the **red screen is the combined gate reporting** — `product_play_main.rs:1748` paints `COLOR_FAIL` when any of `ledger_ok`/`audit_ok`/`pcm_ok`/`fifo_ok` is false, and here only `audit_ok` was |
+| …and the one event, in the ROM's own units | a re-arm landing **23 samples = 11,776 cycles** into a 560-sample period against a **16-sample = 8,192-cycle** half-FIFO window: **7 samples / 3,584 cycles late**, `gap == 1`, fed phase, period 22 = audio sample 12,320 = **0.376 s** | the audit's definition is a mid-waveform splice (the repeat controller had already reloaded the old source); the same defect class was heard on 2026-10-19 as "a pop … not heard in any earlier run", and whether it is audible at 0.376 s has not been asked |
+| …and that it is deterministic | same period index, same delay, two runs per unit, **two different units** | 6a-7b's four runs on these same units were identical *to the cycle*, so this is a scheduling result with a fixed phase relationship to the audio clock, not jitter. The leading candidate has an arithmetic shape rather than a probability: **the design holds one critical section per decode frame for the ring push, measured at 28.6 samples (14,649 c here; 30.9 samples at the 15,776–15,831 c per-window worsts in 6b-3's rows) of IME-masked time against a 16-sample tolerance for a late re-arm** — and 6b-3's own rows already recorded that one period boundary lands inside a push window, with those runs reporting `late=0`. Full reasoning — including the arithmetic that reproduces the observed 23-sample delay, the weaker VBlank candidate, the free test (attribute late services to the leg they landed in), and the seam the model does not yet explain, namely why the coincidence count is one rather than order eight — is in `plan-of-record.md`, 7-1's record |
+| Instrument extension, priced on both channels at once | mGBA work 53.446 → **53.462%** (+170 c/frame) and decode 39.574 → **39.577%**; GBA units 59.907/59.909 → **59.921%** (+147 c/frame), lead and decode unchanged, `late 1` unchanged | the two channels agree on what 3 extra lines and 4 counters cost to within ~20 c/frame — the instrument is close to free, and that claim is now tested on silicon |
+| **Hardware minus mGBA, same image, per leg** (Δ is both a % and a cycle delta because both sides divide by the same 1,048,576 c/frame) | decode window 414,995 → **443,422 c** (+28,427, **+6.85%**); convert 110,447 → **149,191 c** (+38,744, **+35.1%**); push 14,491 → **14,649 c** (+158, **+1.09%**); feeder 20,552 → **21,034 c** (+482, **+2.35%**); **work 560,590 → 628,317 c (+67,727, +12.08%)** | the legs sum to the total on both sides (Δ-stages +67,811 vs Δ-total +67,727) and the shares sum to 59.919% against the total's 59.921% (mGBA: 53.460 vs 53.462), so the stage instrument is internally consistent in both environments and the gap is leg-shaped, not clock-shaped. It lands **between** two measured bounds: E5/6b-1 say the fetch and the IWRAM kernel are reproduced by mGBA to ~0.01–0.06%, while 6a-7b measured every leg of a non-kernel path 3.7–6.9% high on these same units. **convert is the outlier, by 5× the decode gap**, and it is the leg whose writes go to the 40,320 B ring in EWRAM — a placement that is default, not chosen |
+
+**7-1 retarget arithmetic — derived from the rows above, not measured.** Per-frame costs in
+this player are sample-denominated: 2048 samples of decode, 2048 of convert, 2048 of push,
+⌈2048/560⌉ feeder services. So halving the clock halves every percentage and leaves the
+cycles alone — **work 59.921% → 29.96%, worst frame 60.738% → 30.37%, decode 42.288% →
+21.1%, convert 14.228% → 7.11%** — while a fixed sample-count lead doubles *in time*
+(8,560 samples: 261 ms → 522 ms). Two arithmetic facts about the failing clause, both of
+which must be read as what they are: the grace is **16 samples**, so 8,192 cycles at
+32,768 Hz and **16,384 cycles at 16,384 Hz**, and the observed 11,776-cycle lateness would
+have been **11.5 samples — inside the window and never counted**; but a late re-arm at the
+lower rate duplicates 16 samples of a *slower* clock, ~0.98 ms rather than ~0.49 ms, so the
+same miss is more audible. Lowering the rate moves the probability and the consequence of a
+miss; it does not remove the miss, and the LPC comparison changes sign but not its
+conclusion (6a-7b's 173.23% mean / 174.14% worst at 32,768 Hz becomes 86.6% / 87.1%).
+**Rate availability is not symmetric:** the clock this ROM drives is 2²⁴ Hz divided by an
+integer `TICKS_PER_SAMPLE`, so the exactly-expressible set is 65,536 / 32,768 / 16,384 /
+8,192. agb's `Hz18157`/`Hz10512` are not in it (the nearest reload for 18,157 is 924 ticks,
+which plays 18,157.16 Hz: 8.8×10⁻⁶ off, ~0.015 cents, ~88 µs across this clip — inaudible,
+and invisible to every witness in the tree, including 7-0's pitch witness, which works in
+decoded samples at integer lags). In the format, 16,384 travels the way 32,768 already does:
+on the explicit-rate codes, because FLAC's four-bit table has **16,000** (`0b0101`) and
+**32,000** (`0b1000`) and neither power of two — and `16,384/16,000 = 32,768/32,000 = 1.024`,
+so Q14's 41.06-cent defect re-appears at the lower rung with exactly the same magnitude.
 
 ## Item 6 / 6a numbers that constrain how anything else is read
 
@@ -385,6 +413,13 @@ refusals cover the exact-but-refused rates. **Still no hardware**; 7-1/7-3 own t
 - Repeated headless runs of one ROM are byte-identical (`cmp`), including every
   `***` cycle line. 6a-5b re-took this on the three-leg image: 664 `***` lines,
   zero differences across two runs.
+- **On real hardware the same control holds, and it is what makes an index readable.**
+  6a-7b: four runs on GBA 001 and GBA SP, *identical to the cycle*. 7-1 (2026-11-13):
+  four runs of one image on the same two units, identical in every stage percentage to the
+  third decimal, in both lead watermarks, and in the index and delay of a single late
+  service (`latep 22 dly 23`). A one-in-582 event that repeats at the same period index on
+  two different units is a measurement of something deterministic, and the first thing to
+  ask about it is what has a fixed phase relationship to the audio clock.
 - **6a-5b bounds the recompile class on both sides at once.** Three images with
   different shas print *cycle-identical* arm and control numbers (the record's
   `de51bead…`, a pre-change rebuild and the current-tree rebuild `262cdf0a…`: 342
@@ -436,6 +471,22 @@ refusals cover the exact-but-refused rates. **Still no hardware**; 7-1/7-3 own t
   emulator figure and **42.72% worst / 42.48% mean** is the hardware one. The
   shortfall is per-leg and does not cancel, so it is not safe to scale one arm's
   mGBA number onto another arm either.
+- **A product-play screen's `dec`/`conv`/`push`/`feed` shares as a stage row of record.**
+  They are window means measured *inside a running player* — EWRAM-resident ring, live
+  timer/DMA, IRQs enabled — and 7-1's hardware reading is the first of its kind. The
+  figure `gafp_pack` and the host model want is the *attributed, isolated* one, which the
+  image prints only on its `attribution:` log line; that line is not on the screen yet,
+  which is 7-1's remaining instrument half. Comparing the two kinds of number is exactly
+  the error 6b-3 named when it refused to reconcile 436,756 (the integration ROM's
+  measured decode) with 422,248 (the same asset's attributed decode).
+- **7-1's four identical hardware readings as a C2 claim.** They establish zero underflows,
+  every period serviced, exact sample accounting and matching digests on both units, twice,
+  plus the first hardware stage shares. They do not establish audio (7-3 asks a person),
+  they do not close the audit (`late 1`), and they are one image and one asset.
+- **agb's `Frequency::Hz18157` (or `Hz10512` for that matter) as a target this
+  architecture can hold.** The rates expressible on the 2²⁴ timer chain are the ones that
+  divide it. If 7-2 makes agb's mixer the shipping path, that menu and the exact-clock
+  requirement are in tension, and it is 7-2's decision to make with its eyes open.
 - **6b-3's product-play stage shares as decode numbers.** The window means are one
   image's decode cost *inside a running player* — ring resident in EWRAM, 159
   interrupt boundaries landing inside its own decode windows — against the decode

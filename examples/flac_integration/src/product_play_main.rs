@@ -391,6 +391,22 @@ mod rom {
         /// counted.
         late_servicings: u32,
         max_delay_samples: u32,
+        // --- Where the late servicings happened. `late_servicings` says how many,
+        // which is what the verdict reads; it cannot say what to *do*, because a
+        // late service in the fed phase is a mid-waveform splice (the pop the
+        // 2026-10-19 hardware reading of this field heard) while one after the
+        // producer finished can only shorten the tail silence. So: the fed/drain
+        // split, and the period each one landed on. The indices are timer2's
+        // period counts — the same ground-truth counter the audit reads — and a
+        // count of "1 in 582" is not actionable while an index is.
+        late_fed: u32,
+        late_drain: u32,
+        /// Smallest and the period of the largest late delay, as timer2 counts.
+        /// `u32::MAX` means "none", so an unset index cannot be mis-read as
+        /// period 0 — `report` prints 0 for that case, as the unset lead
+        /// watermark above already does.
+        late_first_period: u32,
+        late_worst_period: u32,
         // --- The feeder's own cost: the ring copy, the DMA re-arm, the FIFO
         // enables. It competes with the producer for the same core, so it belongs
         // in the duty-cycle arithmetic rather than in a footnote.
@@ -409,6 +425,10 @@ mod rom {
         max_period_gap: 0,
         late_servicings: 0,
         max_delay_samples: 0,
+        late_fed: 0,
+        late_drain: 0,
+        late_first_period: u32::MAX,
+        late_worst_period: u32::MAX,
         feed_cycles_sum: 0,
         feed_cycles_worst: 0,
     }));
@@ -682,14 +702,32 @@ mod rom {
         // A gap > 1 means TM1_DATA re-wrapped past a whole period, so the
         // coalesced count already owns that case; only gap-1 entries time a
         // sub-period lateness, which is the late-splice event.
-        if gap == 1 && delay > REARM_GRACE_SAMPLES {
+        let late_splice = gap == 1 && delay > REARM_GRACE_SAMPLES;
+        if late_splice {
             stats.late_servicings += 1;
             if delay > stats.max_delay_samples {
                 stats.max_delay_samples = delay;
+                stats.late_worst_period = u32::from(periods);
+            }
+            if u32::from(periods) < stats.late_first_period {
+                stats.late_first_period = u32::from(periods);
             }
         }
         stats.serviced += 1;
         let finished = stats.finished;
+        // The fed/drain split is classified here rather than inside the branch
+        // above only because `finished` is read with the rest of the
+        // producer-state reads. The io reads that *are* the measurement stay
+        // first either way, which is what the note at the top of this handler
+        // requires; the arithmetic those reads feed is unchanged by where the
+        // tallies sit.
+        if late_splice {
+            if finished {
+                stats.late_drain += 1;
+            } else {
+                stats.late_fed += 1;
+            }
+        }
 
         // Raw pointers to the slot BEFORE filling, in their own statement: the
         // static never moves, so they stay valid past the borrow, and
@@ -1746,6 +1784,10 @@ mod rom {
                 u32::from(s.max_period_gap),
                 s.late_servicings,
                 s.max_delay_samples,
+                s.late_fed,
+                s.late_drain,
+                s.late_first_period,
+                s.late_worst_period,
                 s.feed_cycles_sum,
                 s.feed_cycles_worst,
                 *CLOCK_REFUSALS.borrow_ref(cs),
@@ -1761,6 +1803,10 @@ mod rom {
             max_gap,
             late,
             max_delay,
+            late_fed,
+            late_drain,
+            late_first_period,
+            late_worst_period,
             feed_sum,
             feed_worst,
             clock_refusals,
@@ -1783,6 +1829,25 @@ mod rom {
             "[pp-rom] audit verdict: replays={} of {} serviced periods; the ring absorbing a burst looks identical to the hardware losing one until this line is read",
             replays,
             serviced
+        );
+        // The late detail, in its own line so the explanation is not what gets
+        // cut at the log printer's 256-character limit. Units, stated once here:
+        // `max_delay` is in **samples** (timer1 cascades from the 512-cycle
+        // sample clock, so its counter is a sample counter), one sample = 512
+        // cycles = 30.5 us at this rate, the period is 560 samples and the grace
+        // is 16 of them. `first_period`/`worst_period` are timer2 period counts,
+        // i.e. the same index the audit above calls ground truth, and 0 with
+        // late=0 means "none", not "period zero".
+        agb::println!(
+            "[pp-rom] late detail: fed={} drain={} first_period={} worst_period={} max_delay={} samples of {} (grace {} samples = {} cycles); an index below the producer's last period names a splice, one at or after it names only the tail",
+            late_fed,
+            late_drain,
+            if late == 0 { 0 } else { late_first_period },
+            if late == 0 { 0 } else { late_worst_period },
+            max_delay,
+            CHUNK,
+            REARM_GRACE_SAMPLES,
+            u64::from(REARM_GRACE_SAMPLES) * u64::from(TICKS_PER_SAMPLE)
         );
         let Some(ledger) = ledger else {
             screen(gfx, pass, stage, &mut String::new());
@@ -2000,6 +2065,20 @@ mod rom {
         // The screen. Kept short on purpose: `text::measure` wraps at 236 px and
         // reports the extent, and the fit line below is the witness that the
         // verdict a hardware run reads is actually legible.
+        // Line budget, stated rather than discovered: eleven lines at the font this
+        // module carries measured `bottom=99` for eight, i.e. ~12.4 px a line, so
+        // eleven land near 136 of the 160 available and leave two lines of margin
+        // for the conditional `rate …!… pitch` line below. Longest line here is 35
+        // characters (~193 px), inside the 236 px wrap. If a future row breaks
+        // either bound, the `fit:` line says so in the log and on the emulator —
+        // trim here rather than discovering it on a unit.
+        let stages_void: u32 =
+            ledger.stages.iter().map(|s| s.void).sum::<u32>() + ledger.paced.void;
+        // Unset period indices print as 0, as the unset lead watermark above
+        // already does: a column of 4294967295 on a unit where nothing was late
+        // would read as a period number.
+        let late_first = if late == 0 { 0 } else { late_first_period };
+        let late_worst = if late == 0 { 0 } else { late_worst_period };
         let mut screen_text = String::new();
         screen_text.push_str("PRODUCT PLAY 32768\n");
         if let Some((pushed, consumed, underflows, ledger_ok, audit_ok, pcm_ok, fifo_ok)) =
@@ -2025,15 +2104,55 @@ mod rom {
                 ledger.pct_x1000(decode_per_frame) / 1000,
                 ledger.pct_x1000(decode_per_frame) % 1000
             ));
+            // The other three per-frame shares. They join the screen because they
+            // are the numbers item 7-1 exists to read off a unit: the host model's
+            // cost envelope and the packer's `fixed0 @ b2048` row are both stated
+            // in per-stage terms, and a run that prints only `work` cannot
+            // separate the decode leg from the producer legs — which is exactly the
+            // distinction the ~80.9% paper figure got wrong. Note these are the
+            // *system* means with period boundaries nested inside them; the
+            // attribution that prices those boundaries out is the `attribution:`
+            // log line, and the difference is ~1%, not a rounding.
+            screen_text.push_str(&format!(
+                "conv {}.{:03}% push {}.{:03}% feed {}.{:03}%\n",
+                ledger.pct_x1000(convert_per_frame) / 1000,
+                ledger.pct_x1000(convert_per_frame) % 1000,
+                ledger.pct_x1000(push_per_frame) / 1000,
+                ledger.pct_x1000(push_per_frame) % 1000,
+                ledger.pct_x1000(feed_per_frame) / 1000,
+                ledger.pct_x1000(feed_per_frame) % 1000
+            ));
             screen_text.push_str(&format!(
                 "minlead {} maxwk {}.{:03}%\n",
                 min_lead,
                 ledger.pct_x1000(u64::from(ledger.max_work)) / 1000,
                 ledger.pct_x1000(u64::from(ledger.max_work)) % 1000
             ));
+            // The audit, not only its verdict. A screen that prints `aud NO` says
+            // a clause refused; a hardware run cannot ask which one afterwards, so
+            // every clause the verdict reads is printed here. `max_gap` is
+            // deliberately absent: a gap > 1 always moves `replay` by gap−1, so
+            // `replay 0` already states that no gap exceeded 1, and the line
+            // budget goes to the indices instead. `tail p/r` is the one allowed
+            // tail period and the real samples in it — the shipped clip ends 224
+            // samples into a 560-sample period, so `tail 1/224` is the expected
+            // reading, not a fault.
             screen_text.push_str(&format!(
-                "replay {} late {} tail {}\n",
-                coalesced, late, tail_periods
+                "per {} ser {} tail {}/{} void {}\n",
+                periods_hw, serviced, tail_periods, tail_real, stages_void
+            ));
+            screen_text.push_str(&format!(
+                "replay {} late {} fed {} drain {}\n",
+                coalesced, late, late_fed, late_drain
+            ));
+            // Where, not just how many: the period indices are timer2's counts, and
+            // `dly` is the worst lateness in samples (of 560; the grace is 16, and
+            // a sample is 512 cycles). `refus` is the clock-refusal count, the
+            // other clause the audit reads and the only one that can make the
+            // shares themselves unreadable rather than merely late.
+            screen_text.push_str(&format!(
+                "latep {} worstp {} dly {} refus {}\n",
+                late_first, late_worst, max_delay, clock_refusals
             ));
             if let Some((stream, played)) = rates {
                 if stream != played {

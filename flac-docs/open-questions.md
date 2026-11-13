@@ -570,7 +570,10 @@ hardware — so the probe is out of the queue and the critical path runs
 written here rather than implied:** a product path that needs the last 6%, or any
 claim derived by scaling an mGBA cycle count. Until then the working substitute is
 the **+7% derating** rule on mGBA figures for memory-heavy paths
-(`plan-of-record.md` §"Ordering rules").
+(`plan-of-record.md` §"Ordering rules"). **Re-opened on 2026-11-13 by 7-1's first hardware
+reading, on the product path and with a bigger gap than the one that parked this — the
+numbers and the hypothesis are in Q15; the two questions are the same question at different
+points on the map.**
 
 ---
 
@@ -755,3 +758,84 @@ witness was already in before the ruling: representability, both rate spellings 
 their byte cost, the decoder's behaviour, bit-exactness against the pinned PCM and the
 cost (`measurements.md`, the 6b-3 rate row) — which is what makes the ruling affordable
 to accept: it costs pipeline work, not a redesign.
+
+---
+
+### Q15 — Is the emulator-versus-hardware gap a property of how these images reach a unit, and would the answer change the product's rate?
+
+**Opened by:** 7-1's first hardware reading (2026-11-13) — four runs of one image
+(`8113f04c…84cd`), GBA 001 ×2 and GBA SP ×2, against an mGBA run of the **same image**.
+Every leg came out high on silicon, and one leg far more than the others:
+**convert +35.1%**, decode window +6.85%, push +1.09%, feeder +2.35%, **work +12.08%**
+(+67,727 cycles a frame). The legs sum to the total on both sides, so it is not a clock
+term. Q13's trigger is met — this *is* a product path, and the gap is now 12.08% of the
+whole rather than 3.7–6.9% of a leg.
+
+**The hypothesis, as supplied by the person running the units, recorded as stated.** These
+images reach the units from a **flash cart backed by an SD card**, not from a mask ROM, and
+cartridges are memory-bandwidth-hungry, so the cart probably under-performs a real ROM. If
+that is the mechanism, one way to design around it is **to keep more of the pipeline in
+IWRAM — "the way the FIFO does, but bigger"** — and the simplest way to finish the project
+is a lower sample rate instead. The observed shape is at least consistent with it: the one
+leg with no company in the comparison is convert, and convert is the leg whose writes go to
+the 40,320 B ring in **EWRAM** — a placement that is *default*, not chosen, because there is
+no custom linker script in this repository.
+
+**What this tree already constrains, all of it in the same direction:**
+- **E5** priced instruction fetch (SROM/BIOS/ROM/SDRAM and the NE72/NE73/NI72 states) on real
+  units, and mGBA reproduces every per-call figure to **0.012%** with `WAITCNT` identical at
+  `0x4317`. So "the CPU/bus model is wrong about *fetch*" is out.
+- **6b-1** is the sharpest fact available for the hypothesis: in one binary on two units, the
+  **IWRAM-resident** ARM kernel came back **+0.055%** over mGBA and the ROM-resident Thumb
+  kernel **+4.03%**. *Residence changes the gap* — which is exactly the lever an IWRAM buffer
+  design pulls.
+- **E3** measured the **3.482 c/B** penalty for writing decoded samples to EWRAM **on real
+  GBA hardware**, and it was worth ~43 points of work/frame. So an IWRAM-resident ring is a
+  measured prize, not a modelling hope — and it is the reason the 6b-1 record says the
+  *placement of the ring*, not the decoder, is the standing target on this path.
+- **The geometry says what fits.** The shipped ring is 20,160 samples per channel × 2 =
+  **40,320 B** against **32,768 B** of IWRAM: at this rate an IWRAM ring is not expensive,
+  it is arithmetically excluded. At half the rate the same 0.615 s of lead is 20,160 B.
+  That is the arithmetic that makes the two halves of the owner's judgment fit together —
+  **the lower rate is what makes the IWRAM design affordable.**
+
+**And one thing the hypothesis does not explain, which is why it is still a question.**
+push (+1.09%) and feeder (+2.35%) are essentially the same in both environments, and those
+legs touch the same ring; meanwhile the decode-window delta sits *inside* the band 6a-7b
+already measured for legs whose time is fetching instructions from cartridge ROM, whereas the
+same kernel shape measured +0.055% when IWRAM-resident in 6b-1. Two explanations are still
+open and they are not distinguishable with the numbers in hand: a real memory penalty, or
+**window attribution** — the screen's `dec` is a window mean taken inside a running player
+with timer IRQs and a live DMA on the bus, and 6b-3 already refused to reconcile exactly
+this pair of numbers once (436,756 measured-in-a-player versus 422,248 attributed for the
+same asset). The instrument step that separates them on a unit is 7-1's next step anyway:
+put the image's own `attribution:` line on the screen.
+
+**What would answer it, cheapest first.**
+1. **Three witnesses on the screen, not two.** The image's own `attribution:` figure; the
+   `IE`/`IME`/**`DISPSTAT`** set (`DISPSTAT` bit 0 is what decides whether a VBlank IRQ is
+   generated at all, which is the only way to rule the agb-chain candidate in or out from a
+   unit); and **late services attributed to the leg they landed in** — the producer already
+   measures each leg's period range and the handler already records every late service's
+   period index, so the comparison costs a few instructions a frame. That last one is what
+   tests the leading explanation for period 22 (the ring push's critical section, 28.6 samples
+   of IME-masked time against a 16-sample tolerance): the prediction is `late in push 1`, and
+   if it comes back zero then the bus — this question — moves to the front.
+2. **A single-variable ring-placement control that does fit at this rate.** The host model's
+   depth cliff is **20 chunks**, and 20×560×2 = **22,400 B**, which does fit in IWRAM
+   alongside the ~2 KB the image already carries there. So: one image with the ring in `.bss`
+   (EWRAM) at 20 chunks, one with the ring in `.iwram` at 20 chunks, everything else held —
+   and the convert leg either collapses toward the mGBA figure or it does not. This test has
+   never been run here, and it is the one that would put a number on the flashcart/EWRAM
+   hypothesis instead of a name on it.
+3. **The transport question, which has never been answered in this repository.** Which cart,
+   whether its wait states are configurable, and whether a different cart (or a real mask
+   ROM) is obtainable. Q13's own words still stand: absent that, the flashcart term has to
+   be *carried as a stated limit of every hardware number here* — and now of the product
+   path's stage shares too.
+
+**What this question does not decide.** Not C2's rate: the rate question is the project
+owner's to rule, it is recorded unruled under 7-1 in `plan-of-record.md`, and the rung that
+this architecture can express exactly is 16,384 Hz rather than agb's 18,157. Not the
+period-22 late service either — that is a scheduling matter, though "something has the bus or
+the CPU" is a candidate they share.
