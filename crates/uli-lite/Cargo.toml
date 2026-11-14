@@ -8,6 +8,19 @@ publish = false
 keywords = ["uli2", "audio", "no_std", "decoder", "gba"]
 categories = ["multimedia::audio", "no-std"]
 
+[features]
+# Exposes `uli_lite::imdct` (the four synthesis kernels) for the GBA overlay
+# and the on-target measurement ROM. OFF by default: the product facade does
+# not promise these functions, and the portable kernels are the correctness
+# reference the overlay's kernels are tested against.
+kernels = []
+# The GBA product's hot-path view of the parsed tables. `product` implies
+# `kernels` (the product also needs the synthesis constants). The safe core
+# keeps its fields private in every other build; this feature exists so
+# `uli-lite-gba` can run the same table layout with ARM-mode, unchecked code
+# instead of duplicating the parser.
+product = ["kernels"]
+
 [dependencies]
 # Intentionally EMPTY. The GBA target is core-only, and the decoder is
 # caller-owned state plus borrowed slices. Do not add dependencies without

@@ -94,3 +94,13 @@ __pycache__/
 # build output like every other one).
 /examples/overlay-kernel-check/target/
 /examples/e5_fetch/target/
+
+# The ULI2 Phase 1b cycle harness (examples/uli_bench/ — own workspace, same
+# pattern). Its Cargo.lock is committed like uli_spike's: the instrument's
+# dependency graph is part of the measurement.
+/examples/uli_bench/target/
+!/examples/uli_bench/Cargo.lock
+
+# Cycle-harness logs are per-run output; the numbers that matter live in
+# ULI2.md, and `make uli-bench` can regenerate the raw log.
+/uli-bench*.log

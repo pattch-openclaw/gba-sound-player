@@ -1,0 +1,39 @@
+[package]
+name = "uli-bench"
+version = "0.1.0"
+edition = "2024"
+
+# ULI2 decoder measurement ROM (Phase 1b): the on-target cycle harness for the
+# portable `uli-lite` decoder and its four synthesis kernels.
+#
+# Standalone workspace, config INHERITED from the repo root — do NOT add a
+# local .cargo/config.toml: cargo concatenates target.<triple>.rustflags across
+# config layers, and a local re-declaration links `-Tgba.ld` twice.
+#
+#   make uli-bench-rom   build + fix the ROM
+#   make uli-bench       build, run in headless mGBA, and write the log
+#
+# The corpus is the committed Phase 0 fixture, byte-for-byte, so the image is
+# measured only after its own decode reproduces the C-reference album pins.
+
+[dependencies]
+uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }
+# The overlay's ARM-mode, unchecked kernels (the measurement's second arm).
+uli-lite-gba = { path = "../../crates/uli-lite-gba" }
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+agb = "0.25.0"
+
+[[bin]]
+name = "uli-bench"
+path = "src/main.rs"
+
+[workspace]
+
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true

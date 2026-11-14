@@ -126,6 +126,34 @@ impl Huffman {
     }
 }
 
+/// Raw views of one Huffman table for the GBA product's hot decoder.
+///
+/// Exposed only under the `product` feature. The slices are the table's own
+/// storage; the product indexes them with `get_unchecked` after the canonical
+/// table parser has validated every offset.
+#[cfg(feature = "product")]
+#[derive(Clone, Copy, Debug)]
+pub struct HuffmanParts<'a> {
+    pub lut: &'a [u16],
+    pub first: &'a [u16],
+    pub count: &'a [u16],
+    pub offs: &'a [u16],
+    pub sym: &'a [u16],
+}
+
+#[cfg(feature = "product")]
+impl Huffman {
+    pub fn parts(&self) -> HuffmanParts<'_> {
+        HuffmanParts {
+            lut: &self.lut,
+            first: &self.first,
+            count: &self.count,
+            offs: &self.offs,
+            sym: &self.sym,
+        }
+    }
+}
+
 /// Parsed per-album code tables.
 #[derive(Clone)]
 pub struct CodeTables {
