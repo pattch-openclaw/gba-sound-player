@@ -139,6 +139,34 @@ checkable form:
 - the acceptance run is on a GBA 001 **and** a GBA SP, and its verdict is
   **underrun-free playback**, not a cycle count.
 
+### C2 closure (2026-11-13): the path was validated end to end on hardware
+
+**C2 is met.** The code path was run with real programme material on both units:
+`master-play.gba` (`78a02c9c…`, 645,072 B), the first 9.9 s of `bioluminescent.wav`
+encoded at 16,384 Hz / 16-bit through the master path, on **GBA 001 ×2 and GBA SP ×2**.
+All four runs were **audible and recognizable**, all four ended **BLUE**, and all four
+showed `fr 80 und 0`, `per 289 ser 289`, `replay 0 late 0 fed 0 drain 0`,
+`late in push 0/0`, exact `push`/`cons` counts and PCM/FIFO digests. Work was
+**32.208%** mean / **35.831%** worst, with `attr 527339`; the master path fits with
+substantial headroom.
+
+**The acceptance model is amended by the project owner.** C2 is a claim about the
+**code path**, not a requirement to re-prove the whole stack for every asset. The path is
+manually validated end to end once with real audio; subsequent encodes are built and
+validated with **build-time unit tests and the mGBA control**, not another two-unit
+hardware run per asset. The earlier FIXED-0-by-construction and measured-packer-row
+clauses are retained as **preflight and hardening**, not as the C2 acceptance gate.
+They are still useful: they catch a bad asset before it reaches a unit.
+
+**Further coverage is a separate, post-C2 question** — not a condition on this closure.
+Useful work, in rough order: a stress corpus for `VERBATIM`, `FIXED-4`, wider residual
+envelopes and the remaining stereo assignments; a derated mGBA budget model (measured
+hardware is about ×1.16 above mGBA on worst frame, so a 95% warning must be applied to the
+*derated* estimate); per-asset host-model tests using the mGBA run's cost; mono playback;
+and pinning the ffmpeg resampler version or replacing it with an integer resampler. The
+`2nd src 2/289` observation from the master run is recorded as unexplained and
+non-failing; it belongs in that hardening work.
+
 ### The rate ruling (2026-11-13): what was given up, what it costs, and what it does not buy
 
 Written where a reader looking for C2 will find it, because the change is to a *criterion*
@@ -2792,8 +2820,13 @@ beside it — pitch and tempo, not just a counter. 6b-3's image has never been p
 hand or verified by ear; `underflows=0` and a matching PCM pin are statements about
 bytes reaching the FIFO, and the acceptance run is the first place a person listens. | that C2 is claimed from a mean and a projection rather than from playback on a unit |
 
-**C2 is met when 7-3 passes on both units**, and not before. "Decodes within
-budget" was already true at 42.72% and is not the claim; it is the precondition.
+**C2 is met as of 2026-11-13.** The 7-3 master reading above is the acceptance evidence:
+real audio, both units, twice each, audible, BLUE, zero underruns and zero late services.
+The earlier formulation "C2 is met when 7-3 passes on both units" is superseded only by
+the owner's amended model: the path is validated once; subsequent encodes are judged by
+build-time tests and the mGBA control, not by repeating the two-unit run per asset.
+"Decodes within budget" was already true at 42.72% and is not the claim; it is the
+precondition. The post-C2 hardening list is separate from this closure.
 
 **Sequencing note, re-cut on 2026-11-11 by Q14's ruling.** 7-1 cannot run until 7-0
 lands. That is the ruling's consequence, not a slip: the image 7-1 measures has to be an
@@ -3794,9 +3827,11 @@ hardware is +15.04% / +12.68% — the same direction as every other row; convert
 lateness; it is recorded, not explained. The full four-screen transcription is in
 [`playback-results.md`](playback-results.md) under "7-3 master hardware reading".
 
-This is the audible half of 7-3 for the master path, and it is green. It is **not C2 yet**
-because the asset is still a MASTER-mode asset: the packer does not have measured
-CONSTANT/FIXED-1..3 rows or residual envelopes to promote it to the product profile.
+This is the C2 acceptance run. The path was manually validated once end to end with real
+audio; subsequent encodes are judged by build-time tests and the mGBA control, not by
+repeating this two-unit run for every asset. The missing CONSTANT/FIXED-1..3 rows and
+residual envelopes are now preflight/hardening, not a C2 prerequisite; the post-C2 list is
+in "C2 closure" above.
 
 
 ## The width decision (what it is and is not safe for)

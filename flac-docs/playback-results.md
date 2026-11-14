@@ -1134,7 +1134,8 @@ at the new rate, where the convert leg is about 7% of the frame instead of 14%.
 - **It is not 7-3/C2.** The hardware count/digest/late clauses are met on this
   image, but the human listening witness — pitch and tempo, heard on both units
   with the source beside it — has not been done, and 7-2's fix is not in this
-  image. C2 remains unmet until 7-3 passes on both units.
+  image. C2 was unmet at that point; it is met by the 7-3 master hardware reading
+  below.
 
 ## 7-2: chunked push on hardware (2026-11-13): four green runs, both units
 
@@ -1218,7 +1219,8 @@ interrupt mask is gone, the chunk-sized mask has a 4.08x arithmetic margin, and 
 both units show zero late services with no new underruns or digest changes.
 
 **What remains.** 7-3's listening witness — pitch and tempo, heard on both units with the
-source beside it — is still the acceptance half, and C2 remains unmet until it is asked.
+source beside it — was the last acceptance clause; it is recorded in the master reading
+below, and C2 is met.
 
 ## 7-3 asset finding (2026-11-13): the synthetic fixture is not a listening witness
 
@@ -1257,8 +1259,9 @@ LPC, not fixed-order selection). So the next decision is one of:
 3. use a non-product master-approved fixture for audibility only, which does **not** meet
    C2's FIXED-0-by-construction clause.
 
-The first is the natural product path if real music is to be the audible witness; it needs
-hardware decode rows and a profile decision, not just a new `.gfp`.
+**Superseded by the owner's acceptance model and the master hardware reading below:** the
+master path is the C2 code path, validated once end to end with real audio. The per-shape
+rows and residual-envelope work is post-C2 hardening, not a condition on that closure.
 
 **The master pipeline now has a control.** `gafp_pack.py --master` accepts
 CONSTANT/FIXED-0..4/VERBATIM without a measured row while still refusing LPC and still
@@ -1369,8 +1372,15 @@ GAFP → decode → playback works with actual programme material, audible and r
 both units, with zero underruns and zero late services at 16,384 Hz. Work is 32.208% / worst
 35.831%, so the master path has ample frame headroom.
 
-**What it does not establish.** This is a **MASTER-mode** asset, not yet a C2 product asset:
-the packer still refuses CONSTANT/FIXED-1..3 as unmeasured product shapes. The run gives the
-whole-asset hardware figures, not the per-shape rows and residual envelopes needed to widen
-the product profile. The remaining step is to measure those rows (or accept a different
-product policy), promote the master profile, and then re-run with the product asset/pin.
+**C2 is met by this run.** Under the owner's amended acceptance model, the code path is
+validated once end to end with real audio; subsequent encodes are validated by build-time
+unit tests and the mGBA control, not by repeating the two-unit hardware run for every asset.
+This run supplies the real-audio hardware evidence: both units, twice each, audible, BLUE,
+zero underruns, zero late services, exact counts and digests. The old FIXED-0/measured-row
+requirements are now preflight and hardening, not a C2 prerequisite.
+
+The separate hardening work is: a stress corpus for `VERBATIM`, `FIXED-4`, wider residual
+envelopes and the remaining stereo assignments; a derated mGBA budget model (measured
+hardware is about ×1.16 above mGBA on worst frame); per-asset host-model tests; mono
+playback; and pinning the ffmpeg resampler or replacing it with an integer resampler.
+`2nd src 2/289` remains recorded and unexplained but non-failing.

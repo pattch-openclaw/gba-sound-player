@@ -54,8 +54,11 @@ judged only against these, and full detail is in
   clock): work 59.946% → **30.0%**, worst frame 60.755% → **30.4%**, attributed decode 451,763 c
   → **21.5%** of the frame, the 8,560-sample lead 0.261 s → **0.522 s**, and LPC 173.23% →
   **86.6%** — better, and still not in budget, so 8,192 Hz remains the only rung where predicted
-  frames are plausible. It is a *candidate of record*, not a met criterion: C2 is satisfied only
-  when 7-1's retarget run establishes it on both units. **An interim instruction to relax
+  frames are plausible. **C2 is met as of 2026-11-13**: the 16,384 Hz master path was validated
+  end to end with real audio on both units, twice each, audible, BLUE, with zero underruns and
+  zero late services. The acceptance model was amended by the owner to validate the code path
+  once, with subsequent encodes judged by build-time tests and the mGBA control; see
+  "Retarget status" below and plan-of-record's "C2 closure". **An interim instruction to relax
   exactness and target agb's ~18 kHz was considered and withdrawn the same day** — nothing on
   this path instantiates `agb`'s mixer (the product ROM states it as a safety precondition:
   *"no `agb::sound::mixer::Mixer` is instantiated in this ROM"*), so agb's 10,512 / 18,157 /
@@ -551,16 +554,18 @@ and GBA SP ×2, and all four runs are green: `fr 80 und 0`, `per 289 ser 289`,
 are in [`flac-docs/playback-results.md`](flac-docs/playback-results.md) under
 "7-2: chunked push on hardware".
 
-This is **still not C2**: 7-3's listening witness — pitch and tempo, heard on
-both units with the source beside it — is the remaining acceptance half. **The
-current product asset cannot supply it**: it is the synthetic encoder fixture,
-about -37 dBFS, and its 8-bit FIFO form is RMS 1.9 LSB. The master
-`bioluminescent.wav` is real programme material and ~21 dB louder, but at the
-product profile its first excerpt censuses CONSTANT/FIXED-1..3, which the packer
-refuses because only FIXED-0 is measured. The 7-3 asset therefore needs a profile
-decision and new measured rows, not just a file swap; see
-[`flac-docs/playback-results.md`](flac-docs/playback-results.md) under "7-3 asset
-finding".
+**C2 is met as of 2026-11-13.** The code path was exercised end to end with real
+audio — the first 9.9 s of `bioluminescent.wav` at 16,384 Hz — on GBA 001 ×2 and
+GBA SP ×2. All four runs were **audible and recognizable**, all ended **BLUE**,
+and all showed `und 0`, `late 0`, 289/289 periods, exact counts and digests, work
+**32.208%** / worst **35.831%**, `attr 527339`.
+
+The acceptance model was amended by the owner: the path is manually validated
+once with real audio; subsequent encodes are judged by build-time unit tests and
+the mGBA control, not by repeating the two-unit run for every asset. The old
+FIXED-0/measured-row clauses remain useful **preflight** checks, not the C2 gate.
+Further stress coverage is a separate post-C2 hardening question; it is listed in
+[`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) under "C2 closure".
 
 **The master pipeline is implemented:** `gafp_pack.py --master` accepts real
 CONSTANT/FIXED-0..4/VERBATIM material without a measured product row (still no
@@ -577,9 +582,9 @@ as `bioluminescent.wav`, all ended BLUE, and all showed `und 0`, `late 0`,
 289/289 periods, exact digests, work **32.208%** / worst **35.831%**,
 `attr 527339`, `minlead 9120`. `2nd src 2/289` is new versus the synthetic
 asset's 0/289, with no lateness; it is recorded, not explained. This is the
-audible half of 7-3 for the master path, but **not C2 yet**: the asset is still
-MASTER-mode, and the packer lacks measured CONSTANT/FIXED-1..3 rows and residual
-envelopes to promote it to the product profile.
+C2 acceptance run: real audio, both units, twice each, audible, BLUE, zero
+underruns and zero late services. The missing CONSTANT/FIXED-1..3 measured rows
+are now **preflight/hardening**, not a C2 prerequisite.
 
 ## What is next
 
@@ -659,7 +664,7 @@ unchanged, and the per-rung state lives in the plan of record:
    zero late services, `late in push 0/0`, work 28.600% / worst 29.781% (the expected
    +0.150 pp price of four sections). 7-3's listening witness is the remaining acceptance
    half.
-   **C2 is met at 7-3**, and C2 says in terms that the stream declares the rate it is played
+   **C2 was met at 7-3 on 2026-11-13**, and C2 says in terms that the stream declares the rate it is played
    at — a clause that survives the rate change, and indeed matters more for it: a rate chosen by
    measurement is exactly where a silent 1.024x reinterpretation would creep back in.
 5. **Parked:** 6a-8. Q13's data-read probe was re-opened on 2026-11-13 as **Q15**, and Q15's

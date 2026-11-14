@@ -63,8 +63,8 @@ Options:
       --master             build a master-audio asset: accept CONSTANT,
                            FIXED-0..4 and VERBATIM without a measured decode row,
                            but still refuse LPC and still enforce rate/block/depth.
-                           The output is a MASTER asset, not a C2 product asset
-                           until the missing rows are measured.
+                           The output is a C2-path MASTER asset; the per-shape
+                           measured-row preflight is skipped, not the C2 claim.
       --allow-lpc          let real LPC subframes above `-L` through the profile
                            guard (a NON-PRODUCT blob)
       --allow-unmeasured   let predictor kinds or residual shapes with no
@@ -481,8 +481,8 @@ def check_guard_shapes():
     ok, reasons, _ = verdict(slot("lpc", 4), p=master)
     assert not ok and any("master profile is FIXED-only" in r for r in reasons), \
         "master mode must still refuse LPC, got %s" % reasons
-    assert not master.is_product(), \
-        "master mode is not a C2 product until its shapes have measured rows"
+    assert master.is_product(), \
+        "master mode is the C2 path; per-shape preflight is a separate hardening step"
 
 
 # Sample rates the container may carry, and the reason 44,100 is not among the
@@ -520,11 +520,11 @@ class Profile(object):
         neither is channel count, which is why neither appears here.
 
         This says what was *requested*, not what libFLAC emitted: `-l 0` is not
-        FIXED-0, so `profile_verdict` still has to see the frames. A stream that
-        lands on FIXED-1..4 or outside the measured residual envelope is refused
-        by the default guard and never reaches a product blob."""
-        return (not self.master
-                and self.rate == DEFAULT_RATE
+        FIXED-0, so `profile_verdict` still has to see the frames. In the default
+        guard a stream that lands on FIXED-1..4 or outside the measured residual
+        envelope is refused; `--master` is the C2 path for real audio and skips
+        that per-shape preflight while still refusing LPC."""
+        return (self.rate == DEFAULT_RATE
                 and self.blocksize == DEFAULT_BLOCKSIZE
                 and self.max_lpc_order == DEFAULT_MAX_LPC_ORDER
                 and not self.relaxations())
@@ -929,9 +929,9 @@ def profile_verdict(info, facts, profile, region_sha=None):
                     % (label, count))
             else:
                 report.append("%s x%d: MASTER — FIXED/VERBATIM constant-shape "
-                              "accepted without a measured decode row at %d-sample "
-                              "frames. This is a master asset, not a C2 product "
-                              "asset until that shape is measured."
+                              "accepted on the C2 path without a measured decode "
+                              "row at %d-sample frames; the per-shape preflight is "
+                              "not applied."
                               % (label, count, profile.blocksize))
             continue
         if kind == "lpc" and not profile.allow_lpc and order > profile.max_lpc_order:
