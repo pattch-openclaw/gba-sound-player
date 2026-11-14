@@ -28,6 +28,13 @@
 # remove the stub again. If the pin is present — a real `master-pack` output —
 # it is left exactly as it is and only formatted like any other file.
 #
+# The cwd is never changed. `cargo fmt --manifest-path` resolves `#[path]
+# modules against the manifest's crate root, so this needs no `cd` — and that
+# matters: an earlier version `cd`-ed into the crate and then removed a
+# RELATIVE stub path, which silently deleted the wrong location (`rm -f` hides
+# the miss) and left the stub behind. With no `cd`, every path in this script
+# means the same thing from top to bottom.
+#
 # Usage: fmt_with_generated_stub.sh <crate-dir> [--check]
 # Exit: the rustfmt exit status (so `check` stays a real gate).
 
@@ -36,10 +43,6 @@ set -eu
 dir=${1:?usage: fmt_with_generated_stub.sh <crate-dir> [--check]}
 shift
 
-# Absolute, because we `cd` into the crate before running rustfmt and the
-# cleanup must still reach this path (a relative one was silently deleted from
-# the crate root instead — `rm -f` hides the miss).
-dir=$(cd "$dir" && pwd)
 pin="$dir/src/master_pin.rs"
 created=0
 
@@ -81,12 +84,17 @@ STUB
     trap 'if [ "$created" = 1 ]; then rm -f "$pin"; fi' EXIT INT TERM
 fi
 
-cd "$dir"
+# No `cd`: the working directory never has to change, so there is no window in
+# which `$pin` (or anything else) means something different. `cargo fmt
+# --manifest-path` resolves `#[path]` modules against the MANIFEST's crate root,
+# not the cwd — verified from an unrelated directory — so this formats exactly
+# what `cd <crate> && cargo fmt` did.
+#
 # `CARGO` in the Makefile is "rustup run <pinned-toolchain> cargo" — several
 # words, exactly as a recipe would expand it. Splitting it here is the same
 # thing, and it keeps the formatter the binary every other target uses.
 # shellcheck disable=SC2086
-${CARGO:-cargo} fmt "$@"
+${CARGO:-cargo} fmt --manifest-path "$dir/Cargo.toml" "$@"
 status=$?
 
 if [ "$created" = 1 ]; then
