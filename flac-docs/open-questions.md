@@ -999,3 +999,9 @@ ships and is now a decided thing rather than an open one. Not Q15 either: an unp
 the convert leg is a leg missing from any rate's budget, and at 16,384 Hz that leg is roughly
 7% of the frame — so the same unexplained gap that was survivable-at-40%-headroom at one rung is
 a bigger share of the margin at the next one, but it is not the thing setting the bar.
+
+**Status 2026-11-13: closed for C2.** The owner chose 16,384 Hz and accepted the real-audio
+master path after the four-run hardware reading (audible, BLUE, zero underruns, zero late
+services). The acceptance model is now: validate the code path once end to end; judge subsequent
+encodes with build-time tests and the mGBA control. A derated-margin bar and a stress corpus are
+post-C2 hardening, not an open acceptance criterion.

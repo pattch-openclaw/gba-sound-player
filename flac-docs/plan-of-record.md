@@ -139,6 +139,34 @@ checkable form:
 - the acceptance run is on a GBA 001 **and** a GBA SP, and its verdict is
   **underrun-free playback**, not a cycle count.
 
+### C2 closure (2026-11-13): the path was validated end to end on hardware
+
+**C2 is met.** The code path was run with real programme material on both units:
+`master-play.gba` (`78a02c9c…`, 645,072 B), the first 9.9 s of `bioluminescent.wav`
+encoded at 16,384 Hz / 16-bit through the master path, on **GBA 001 ×2 and GBA SP ×2**.
+All four runs were **audible and recognizable**, all four ended **BLUE**, and all four
+showed `fr 80 und 0`, `per 289 ser 289`, `replay 0 late 0 fed 0 drain 0`,
+`late in push 0/0`, exact `push`/`cons` counts and PCM/FIFO digests. Work was
+**32.208%** mean / **35.831%** worst, with `attr 527339`; the master path fits with
+substantial headroom.
+
+**The acceptance model is amended by the project owner.** C2 is a claim about the
+**code path**, not a requirement to re-prove the whole stack for every asset. The path is
+manually validated end to end once with real audio; subsequent encodes are built and
+validated with **build-time unit tests and the mGBA control**, not another two-unit
+hardware run per asset. The earlier FIXED-0-by-construction and measured-packer-row
+clauses are retained as **preflight and hardening**, not as the C2 acceptance gate.
+They are still useful: they catch a bad asset before it reaches a unit.
+
+**Further coverage is a separate, post-C2 question** — not a condition on this closure.
+Useful work, in rough order: a stress corpus for `VERBATIM`, `FIXED-4`, wider residual
+envelopes and the remaining stereo assignments; a derated mGBA budget model (measured
+hardware is about ×1.16 above mGBA on worst frame, so a 95% warning must be applied to the
+*derated* estimate); per-asset host-model tests using the mGBA run's cost; mono playback;
+and pinning the ffmpeg resampler version or replacing it with an integer resampler. The
+`2nd src 2/289` observation from the master run is recorded as unexplained and
+non-failing; it belongs in that hardening work.
+
 ### The rate ruling (2026-11-13): what was given up, what it costs, and what it does not buy
 
 Written where a reader looking for C2 will find it, because the change is to a *criterion*
@@ -2792,8 +2820,13 @@ beside it — pitch and tempo, not just a counter. 6b-3's image has never been p
 hand or verified by ear; `underflows=0` and a matching PCM pin are statements about
 bytes reaching the FIFO, and the acceptance run is the first place a person listens. | that C2 is claimed from a mean and a projection rather than from playback on a unit |
 
-**C2 is met when 7-3 passes on both units**, and not before. "Decodes within
-budget" was already true at 42.72% and is not the claim; it is the precondition.
+**C2 is met as of 2026-11-13.** The 7-3 master reading above is the acceptance evidence:
+real audio, both units, twice each, audible, BLUE, zero underruns and zero late services.
+The earlier formulation "C2 is met when 7-3 passes on both units" is superseded only by
+the owner's amended model: the path is validated once; subsequent encodes are judged by
+build-time tests and the mGBA control, not by repeating the two-unit run per asset.
+"Decodes within budget" was already true at 42.72% and is not the claim; it is the
+precondition. The post-C2 hardening list is separate from this closure.
 
 **Sequencing note, re-cut on 2026-11-11 by Q14's ruling.** 7-1 cannot run until 7-0
 lands. That is the ruling's consequence, not a slip: the image 7-1 measures has to be an
@@ -3693,6 +3726,112 @@ worst case. This image did not reproduce the phase-locked period-22 collision th
 32,768 Hz image hit; the fix is still owed at this rate. And 7-3's listening witness — pitch
 and tempo, heard on both units with the source beside it — has not been asked. C2 remains
 unmet until 7-3 passes.
+
+### 7-2: the push mask is chunk-sized — hardware green on both units
+
+**The change.** `product_play_main.rs` no longer holds one critical section across a whole
+2,048-sample ring push. `Producer::push_frame_in_chunks` appends the frame in slices of at
+most `CHUNK_SAMPLES = 560`, each slice a complete `RingFeed::push_bytes` under its own
+short critical section. `push_bytes` credits only after the copy, so the feeder sees the
+previous slice or the new one, never a torn one; interrupts are live between slices, which
+is the point. `push_start_period` is still written once, at the first slice's start: the
+whole sequence is shorter than one 560-sample period, so a boundary crossing any slice
+still makes the handler's period equal that counter + 1 and the `late in push` witness
+remains exact.
+
+**The arithmetic this buys.** The measured whole-frame mask was **14,680 c** — **14.3
+samples** at 1,024 ticks/sample against the **16-sample** re-arm grace, with the worst
+recorded push window **15,831 c / 15.46 samples** leaving only **0.5** samples. A
+`CHUNK`-sized slice scales that window to about **4,014 c = 3.92 samples**, a **4.08×**
+margin. The price is visible and small: on the same image, the push stage's whole-sequence
+mean rises from 14,817 to **18,018 c/frame** (four sections instead of one), work
+25.363% → **25.507%** (+0.144 pp), worst frame 26.583% → **26.727%**. Decode and convert
+are unchanged; there are still zero underflows, zero late services, and both PCM/FIFO pins
+match.
+
+**Control image.** `product-play.gba`, sha256
+`2abf61e8b18f4bac46ed680d2320f1b9237b3586e35e3f167f8aef2885eab5ff`, **662,440 B**. One
+headless mGBA run: `fr 80 und 0`, `per 289 ser 289 tail 1/464 void 0`,
+`replay 0 late 0 fed 0 drain 0`, `late in push 0/0`, `2nd src 0/289`, `disp 000A`,
+work **25.507%** / worst **26.727%**, `dec 18.678%`, `attr 417451`, `conv 5.051%`,
+`push 0.805%`, `feed 0.971%`, `minlead 9680`, verdict PASSED. The host envelope was
+re-read from this run and `make product-play-test` is 14/14.
+
+**The hardware reading.** Four runs of the same image — GBA 001 ×2 and GBA SP ×2 — all
+green on the gate fields: `fr 80 und 0`, `per 289 ser 289 tail 1/464 void 0`,
+`replay 0 late 0 fed 0 drain 0`, `latep 0 worstp 0 dly 0 refus 0`,
+`late in push 0/0`, `2nd src 0/289`, `disp 000A`, `push 162304 cons 162304`,
+`pcm ok fifo ok ledg ok aud ok`. The measured shares are **work 28.600%**, worst frame
+**29.781%**, `dec 19.961%`, **`attr 446292`**, `conv 6.825%`, `push 0.816%`,
+`feed 0.997%`, `minlead 9120`. Against the whole-frame-push image (`ef1ed8ba…`, work
+28.450% / push 0.666% / maxwk 29.613%) the chunked push costs **+0.150 pp work**,
+**+0.150 pp push**, **+0.168 pp worst frame** and leaves decode, convert, every count,
+every digest and every late field unchanged. The hardware-versus-mGBA gap is still the
+Q15 shape: decode +6.87%, convert **+35.12%**, work **+12.13%**, attr +6.91%. The
+four-screen transcription is in [`playback-results.md`](playback-results.md) under
+"7-2: chunked push on hardware"; the `dev`/missing-`Minlead`/case slips are kept there.
+
+**Why this is the shipping path.** `agb`'s mixer offers 10,512 / 18,157 / 32,768 Hz and
+none is 16,384; this ROM already owns timer0-2, the sound-DMA re-arm and the FIFO feed, and
+`agb`'s `enable_dma_for_sound` writes no transfer count. Adopting the mixer would mean
+giving up the exact rate, so the custom IRQ feeder is the shipping path by arithmetic.
+`CHUNK_SAMPLES = 560` remains a free parameter rather than a transcription of agb's buffer
+size; it is kept because it is a multiple of four words and every measured run is stated on
+it.
+
+**What remains.** The named 7-2 latency defect is closed on hardware: zero late services on
+both units, twice each, with the mask now `CHUNK`-sized. 7-3 still needs the listening
+witness — pitch and tempo, heard on both units with the source beside it — and that is the
+remaining C2 clause.
+
+### 7-3 prerequisite: the audible asset has to come from `bioluminescent.wav`
+
+The 7-0..7-2 product asset is the deterministic synthetic fixture, not the master. It is
+**not a listening witness**: 16-bit RMS 466 counts (~-37 dBFS), and through `sample >> 8`
+it is RMS 1.91 LSB, range -5..4. Its per-second RMS is constant across the clip, so the
+perceived "silence after the opening high tone" is level and content, not a delivery
+dropout. `assets/sound/bioluminescent.wav` is 96 kHz / 24-bit / stereo; its first 9.9 s at
+16 kHz / 16-bit measures RMS 5,369 counts (~-15.7 dBFS), about 21 dB louder.
+
+The master excerpt at the current product profile (`-l 0 -b 2048 -m`, 16,384 Hz) censuses
+**CONSTANT x4, FIXED-1 x102, FIXED-2 x53, FIXED-3 x1**, and the packer refuses it: only
+FIXED-0 has a measured row, and stock `flac` does not force FIXED-0 (`-l 0` disables LPC,
+not fixed-order selection). So 7-3 cannot be just a file swap. The next decision is to
+measure/admit FIXED-1..3 (and CONSTANT) plus their residual envelopes at 16,384 Hz, or
+force FIXED-0 with a custom encode, or use a non-product listening fixture that does not
+meet C2's FIXED-0-by-construction clause. The measurements are in
+[`playback-results.md`](playback-results.md) under "7-3 asset finding"; the first option is
+the natural product path if real music is the audible witness.
+
+**The master pipeline is now implemented.** `gafp_pack.py --master` accepts
+CONSTANT/FIXED-0..4/VERBATIM without a measured row, still refuses LPC and still enforces
+16,384 Hz / 16-bit / 2048-sample frames; `--emit-pin` writes the `gafp_pin.rs` shape.
+`make master-pack INPUT=…` writes the gitignored master asset and pin, and
+`make master-play-rom INPUT=…` builds a playable image. The first 9.9 s of
+`bioluminescent.wav` packs to 80 frames / 162,304 samples / 422,025 B with census
+`constant x4, fixed1 x102, fixed2 x53, fixed3 x1`; the resulting `master-play.gba`
+(`78a02c9c…`, 645,072 B) runs in mGBA with `und 0`, `late 0`, all 289 periods serviced,
+PCM/FIFO MATCH, **work 27.998% / worst frame 30.871%**, `attr 468011`, `minlead 9120`.
+That is an **mGBA control**: the FIXED-1..3/CONSTANT hardware rows are still needed before
+the master asset can be called a C2 product. The image is the one to take to the units for
+that measurement.
+
+**The master hardware reading then came back audible on both units, twice each.** All four
+runs of `master-play.gba` (`78a02c9c…`, 645,072 B) were recognizable master audio and ended
+BLUE: `fr 80 und 0`, `per 289 ser 289 tail 1/464 void 0`, `replay 0 late 0 fed 0 drain 0`,
+`late in push 0/0`, `2nd src 2/289`, `disp 0008`, `push 162304 cons 162304`, digests ok.
+Work **32.208%** / worst **35.831%**, `attr 527339`, `dec 23.656%`, `conv 6.733%`,
+`push 0.820%`, `feed 0.997%`, `minlead 9120`. Against mGBA's 27.998% work / 468,011 attr,
+hardware is +15.04% / +12.68% — the same direction as every other row; convert is +27.37%.
+`2nd src 2/289` is new (earlier synthetic runs were 0/289), with `disp 0008` and zero
+lateness; it is recorded, not explained. The full four-screen transcription is in
+[`playback-results.md`](playback-results.md) under "7-3 master hardware reading".
+
+This is the C2 acceptance run. The path was manually validated once end to end with real
+audio; subsequent encodes are judged by build-time tests and the mGBA control, not by
+repeating this two-unit run for every asset. The missing CONSTANT/FIXED-1..3 rows and
+residual envelopes are now preflight/hardening, not a C2 prerequisite; the post-C2 list is
+in "C2 closure" above.
 
 
 ## The width decision (what it is and is not safe for)

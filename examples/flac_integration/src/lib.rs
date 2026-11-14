@@ -34,6 +34,10 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "master-asset")]
+#[path = "master_pin.rs"]
+pub mod gafp_pin;
+#[cfg(not(feature = "master-asset"))]
 pub mod gafp_pin;
 pub mod geometry;
 

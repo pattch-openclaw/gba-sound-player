@@ -63,6 +63,9 @@ mod rom {
 
     /// The packed clip this ROM decodes: real libFLAC frames behind a generated
     /// `GAFP` header (see the module docs).
+    #[cfg(feature = "master-asset")]
+    static SONG: &[u8] = include_bytes!("../assets/master.gfp");
+    #[cfg(not(feature = "master-asset"))]
     static SONG: &[u8] = include_bytes!("../assets/spike_l0.gfp");
 
     /// The 16,384 Hz / 2048-sample frame budget: `2048 / 16384 s × 16.78 MHz`.

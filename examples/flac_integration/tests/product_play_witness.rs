@@ -75,10 +75,10 @@
 //! ## Where the cost figures come from
 //!
 //! From a run, not an estimate: `product-play.gba` as this tree builds it — sha
-//! `ef1ed8baf0feadb696e0b0c5e3fb24c92ced31a6fbab6d40edfb5ce45b789351`, the first
-//! 16,384 Hz retarget image — run under mGBA, whose serial log gives [`MEASURED`] and
+//! `2abf61e8b18f4bac46ed680d2320f1b9237b3586e35e3f167f8aef2885eab5ff`, the
+//! 16,384 Hz image with the chunked push — run under mGBA, whose serial log gives [`MEASURED`] and
 //! [`FEEDER_PER_PERIOD`]. That run is 289/289 periods, zero underflows, zero late
-//! services, work 25.363% / worst frame 26.583%, attributed decode 417,431 c/frame,
+//! services, work 25.507% / worst frame 26.727%, attributed decode 417,451 c/frame,
 //! minimum lead 9,680 samples; it is an mGBA control, not a hardware claim.
 //! The envelope is tied to the bytes
 //! the ROM is built from on purpose: when a code change moves that image's `stages` line,
@@ -167,14 +167,14 @@ fn decoded_frames(manifest: &Manifest<'_>) -> Vec<FrameBytes> {
 // `the_envelope_is_the_runs_own_sums` checks the derivation against the ROM's printed
 // means.
 
-/// The current image's mGBA run — `ef1ed8ba…` at 16,384 Hz — `[pp-rom] stages`, as the sums
+/// The current image's mGBA run — `2abf61e8…` at 16,384 Hz, chunked push — `[pp-rom] stages`, as the sums
 /// and counts that run printed. Means are recomputed here; nothing is copied. Re-read
 /// these five from a fresh run whenever ROM code changes: the sums are the only honest
 /// source, and the test named in the header re-checks them against the means that same
 /// run prints.
-const DECODE_SUM: u64 = 31_335_458;
-const CONVERT_SUM: u64 = 8_476_297;
-const PUSH_SUM: u64 = 1_111_346;
+const DECODE_SUM: u64 = 31_337_010;
+const CONVERT_SUM: u64 = 8_475_888;
+const PUSH_SUM: u64 = 1_351_391;
 /// Fed-phase windows: the frames decoded with the audio running. 75 = the 80
 /// frames less the 5 the prefill decoded before arming; the consumer's tail (one
 /// period, 464 real samples) is not a decode window at all.
@@ -183,7 +183,7 @@ const STAGE_WINDOWS: u64 = 75;
 /// nested in producer work. `convert` and `push` report `boundaries_in=0`.
 const DECODE_BOUNDARIES_INSIDE: u64 = 5;
 /// The same run's feeder: total over 289 serviced periods.
-const FEEDER_SUM: u64 = 1_629_347;
+const FEEDER_SUM: u64 = 1_629_955;
 const PERIODS_SERVICED: u64 = 289;
 
 /// The feeder's own cost per period, from the same run: the mean of 289 measured
@@ -205,16 +205,16 @@ const fn window_mean(sum: u64) -> u64 {
 
 /// The producer's own work per frame with the nesting left in: the three stage
 /// means added, which is exactly what the ROM's "decode + convert + push" line
-/// says (417,806 + 113,017 + 14,817 = 545,640).
+/// says (417,826 + 113,011 + 18,018 = 548,855).
 const MEASURED_RAW: u64 =
     window_mean(DECODE_SUM) + window_mean(CONVERT_SUM) + window_mean(PUSH_SUM);
 
 /// The same envelope with the boundaries nested inside those windows priced out of
-/// it, because that time belongs to the interrupt, not to the producer: 545,640 −
-/// (5/75) × 5,637 = 545,265.
+/// it, because that time belongs to the interrupt, not to the producer: 548,855 −
+/// (5/75) × 5,639 = 548,480.
 ///
 /// That subtraction is the attribution the ROM prints itself, and it is the same
-/// arithmetic — 417,806 − (5/75) × 5,637 = 417,431 — which is the very
+/// arithmetic — 417,826 − (5/75) × 5,639 = 417,451 — which is the very
 /// `isolated_estimate` that image prints on its `attribution:` line, so the model and
 /// the ROM derive that one figure identically. One period boundary landed in a `push`
 /// window this run, and this envelope prices only the decode windows' nesting, so the
@@ -740,8 +740,8 @@ fn fifo_pins_match_the_converted_stream() {
 
 /// The cost envelope the rest of these tests are charged is the run's own sums, and
 /// the derivation is arithmetic a reader can re-do from the log: the three stage
-/// means add to 545,640 as printed, the 5 boundaries inside the decode windows
-/// price out at (5/75) × 5,637 = 375, and 417,806 − 375 = 417,431 is the
+/// means add to 548,855 as printed, the 5 boundaries inside the decode windows
+/// price out at (5/75) × 5,639 = 375, and 417,826 − 375 = 417,451 is the
 /// `isolated_estimate` that same image prints for itself.
 ///
 /// This test exists because the block it guards was a transcription first, and the
@@ -753,27 +753,27 @@ fn fifo_pins_match_the_converted_stream() {
 fn the_envelope_is_the_runs_own_sums() {
     assert_eq!(
         window_mean(DECODE_SUM),
-        417_806,
+        417_826,
         "the ROM printed this mean"
     );
     assert_eq!(
         window_mean(CONVERT_SUM),
-        113_017,
+        113_011,
         "the ROM printed this mean"
     );
-    assert_eq!(window_mean(PUSH_SUM), 14_817, "the ROM printed this mean");
-    assert_eq!(FEEDER_PER_PERIOD, 5_637, "1,629,347 / 289, as printed");
-    assert_eq!(MEASURED_RAW, 545_640, "the ROM's decode + convert + push");
+    assert_eq!(window_mean(PUSH_SUM), 18_018, "the ROM printed this mean");
+    assert_eq!(FEEDER_PER_PERIOD, 5_639, "1,629,955 / 289, as printed");
+    assert_eq!(MEASURED_RAW, 548_855, "the ROM's decode + convert + push");
 
     // The attribution, computed the way the ROM computes it (its own per-window
     // `inside` over its own `n`), against the constant this file charges.
     let nested = FEEDER_PER_PERIOD * DECODE_BOUNDARIES_INSIDE / STAGE_WINDOWS;
     assert_eq!(nested, 375);
-    assert_eq!(MEASURED, 545_265);
+    assert_eq!(MEASURED, 548_480);
     let isolated_decode = window_mean(DECODE_SUM) - nested;
     assert_eq!(
-        isolated_decode, 417_431,
-        "the image prints `attribution: decode ... isolated_estimate=417431` itself; the \
+        isolated_decode, 417_451,
+        "the image prints `attribution: decode ... isolated_estimate=417451` itself; the \
          model derives that number from the same sums, and if it moves the two records \
          have parted company"
     );
@@ -937,7 +937,7 @@ fn worst_frame_burst_does_not_starve() {
     let total = usize::try_from(manifest.total_samples()).unwrap();
     let block = usize::from(manifest.blocksize());
     let prefill_frames = (geo::PREFILL_SAMPLES + block - 1) / block;
-    const ROM_WORST_WORK: u64 = 557_503; // the largest recorded; see the doc above
+    const ROM_WORST_WORK: u64 = 560_506; // the largest recorded; see the doc above
     for at in prefill_frames..frames.len() {
         let settings = Settings {
             burst: Some((at, ROM_WORST_WORK)),
