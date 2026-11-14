@@ -270,41 +270,42 @@ PARTIALS_32K = [(128, 5), (192, 4), (250, 3), (80, 2)]
 PARTIALS_64K = [(64, 5), (128, 4), (256, 3), (512, 2)]
 
 # ---------------------------------------------------------------------------
-# The device rate, and the one fixture family authored at it (plan item 7-0).
+# The device rate, and the one fixture family authored at it (plan item 7-0,
+# retargeted to the 16,384 Hz rung by plan item 7-1).
 # ---------------------------------------------------------------------------
 #
-# 32,768 Hz is the rate the product path's timer runs at
-# (`agb::mixer::SoundDriver::SAMPLE_RATE`, mirrored by
-# `examples/flac_integration/src/geometry.rs::PLAYBACK_RATE_HZ`). Q14 was ruled
-# on 2026-11-11: **a stream is encoded at the rate it is played at**, and the
-# player does not reinterpret a declared rate to fit a clock. The rule is about
-# pitch, not cost: the shipped 32,000 Hz asset played on a 32,768 Hz timer is
-# 1.024x fast, which is 41.06 cents -- audible, and invisible to every sample
-# digest in the tree because the samples themselves are identical.
+# 16,384 Hz is the rate the product path's timer runs at after the owner's
+# 2026-11-13 rate ruling: it is `2^24 / 1024`, exactly expressible, so the stream
+# declares exactly the rate the clock plays. Q14 was ruled on 2026-11-11: **a
+# stream is encoded at the rate it is played at**, and the player does not
+# reinterpret a declared rate to fit a clock. The rule is about pitch, not cost:
+# a 32,000 Hz asset played on a 32,768 Hz timer is 1.024x fast, which is 41.06
+# cents -- audible, and invisible to every sample digest in the tree because the
+# samples themselves are identical. At this rung the corresponding trap is
+# 16,384/16,000, the same 1.024 ratio; that is why the rate guards move first.
 #
-# So the product's *fixture* has to be authored at 32,768, and that changes how
-# it is specified: not as sample periods that happen to suit 32,000, but as Hz,
-# with the period derived at the rate the stream declares. PARTIALS_DEVICE below
-# is that derivation -- `period = round(rate / hz)` at 32,768 Hz, from the Hz the
-# 32,000-era fixture was actually playing. Measured drift, in cents (each is the
-# difference the integer period forces; none of them is the 41-cent defect):
+# The product's *fixture* is authored at 16,384, and it is specified as Hz, with
+# the period derived at the rate the stream declares. PARTIALS_DEVICE below is
+# that derivation -- `period = round(rate / hz)` at 16,384 Hz, from the Hz the
+# fixture was actually playing. Measured drift, in cents (each is the difference
+# the integer period forces; none of them is the 41-cent defect):
 #
 #     intended Hz   32k period   device period   played Hz     drift
-#     250.000       128          131             250.137       +0.95 c
-#     166.667        192         197             166.335       -3.45 c
-#     128.000        250         256             128.000        0.00 c
-#     400.000         80          82             399.610       -1.69 c
-#     32.000        1000        1024              32.000        0.00 c
-#     1000.000        32          33             992.970      -12.21 c
+#     250.000       128           66            248.242      -12.20 c
+#     166.667        192          98            167.184       +5.36 c
+#     128.000        250         128            128.000        0.00 c
+#     400.000         80          41            399.610       -1.69 c
+#     32.000        1000         512             32.000        0.00 c
+#     1000.000        32          16           1024.000        0.00 c
 #
-# 131 and 197 do not divide 32,768, and that is deliberate for the same reason
+# 66 and 98 do not divide 16,384, and that is deliberate for the same reason
 # 192 does not divide 32,000 (the note above): a partial that is not periodic in
 # the block is part of what pushes `-l 4` toward LPC, which is what the spike's
-# L4 arm needs to stay an arm. What matters for 7-0 is the *census*, and it is
+# L4 arm needs to stay an arm. What matters is the *census*, and it is
 # re-measured here rather than inherited: at `-l 0 -b 2048 -m` this source emits
-# `fixed0` x320 with one partition, no wasted bits, no escape partition and Rice
+# `fixed0` x160 with one partition, no wasted bits, no escape partition and Rice
 # parameters no larger than 10 -- the same shape the measured hardware row names
-# -- and at `-l 4` it emits majority LPC (measured: lpc4 x318 + lpc3 x2). If a
+# -- and at `-l 4` it emits majority LPC (measured: lpc4 x158 + lpc3 x2). If a
 # future edit changes those, the fail-closed arm censuses in `spike_assets` and
 # the profile guard in `gafp_pack.py` refuse to write, exactly as they do today.
 #
@@ -317,25 +318,27 @@ PARTIALS_64K = [(64, 5), (128, 4), (256, 3), (512, 2)]
 # the ~10 s stereo/mono family below is the perf instrument and the source of the
 # product asset, so it carries the device rate; a 256-sample stream that exists to
 # show what a `0b111` subframe header looks like does not.
-DEVICE_RATE = 32_768
-SQUARE_PERIOD_DEVICE = 33
-PARTIALS_DEVICE = [(131, 5), (197, 4), (256, 3), (82, 2)]
-SIDE_PERIOD_DEVICE = 1024
+DEVICE_RATE = 16_384
+SQUARE_PERIOD_DEVICE = 16
+PARTIALS_DEVICE = [(66, 5), (98, 4), (128, 3), (41, 2)]
+SIDE_PERIOD_DEVICE = 512
 
 # The product clip's length, as an explicit shape rather than as seconds.
 #
-# Ten seconds at 32,768 Hz is 327,680 samples = **exactly 160 full 2048-sample
+# Ten seconds at 16,384 Hz is 163,840 samples = **exactly 80 full 2048-sample
 # frames**, and that would delete the short-frame witness: the asset's final frame
 # is the one every decoder gets wrong (`stereo-last` in the header table exists
 # for that reason, and 6b-1/6b-3's walk of the shipped asset reports a 512-sample
 # tail). So the count is written as full blocks plus an explicit short tail --
 # the same tail length the 32,000-era asset carries -- and never as
-# `int(seconds * rate)`, which is how the exact-multiple accident arrives.
-PRODUCT_FULL_FRAMES = 159
+# `int(seconds * rate)`, which is how the exact-multiple accident arrives. The
+# retarget keeps the clip at the same ~10 s playing time rather than keeping the
+# old sample count, which would double its duration at half the clock.
+PRODUCT_FULL_FRAMES = 79
 PRODUCT_TAIL_SAMPLES = 512
 PRODUCT_BLOCKSIZE = BLOCKSIZE[0b1011]        # 2048, the C2 geometry
 PRODUCT_SAMPLES = (PRODUCT_FULL_FRAMES * PRODUCT_BLOCKSIZE
-                   + PRODUCT_TAIL_SAMPLES)   # 326,144
+                   + PRODUCT_TAIL_SAMPLES)   # 162,304
 
 
 # Streams whose *final frame* cannot be expressed by the 4-bit blocksize
@@ -450,7 +453,7 @@ def synth(dst):
     # a reason that is about the FORMAT and not about the product: most of what
     # they witness only exists at a rate the 4-bit sample-rate table can spell.
     # `stereo-6byte-first` is a 6-byte header because the rate fits in one
-    # nibble; the same encode at 32,768 Hz gains two bytes per frame (0b1101 plus
+    # nibble; the same encode at 16,384 Hz gains two bytes per frame (0b1101 plus
     # a 16-bit Hz field), and that vector — the base every byte-indexed header
     # mutation in tests/frame_header_layout.rs is written against — stops existing.
     # Q14 moved the product/perf pair to the device rate; it says nothing about
@@ -836,15 +839,15 @@ VECTOR_SPECS = [
     # fail-closed in emit() below (every frame of the stream has to spell the
     # rate this way and keep the geometry these vectors claim) — a `prod-*`
     # vector that stopped describing assets/spike_l0.gfp would be worse than none.
-    ("prod-rate32768-first", "vec_prod_l0.flac", lambda f: f[0], True,
-     "the shipped product asset's first frame header: 32,768 Hz has no entry in "
+    ("prod-rate16384-first", "vec_prod_l0.flac", lambda f: f[0], True,
+     "the shipped product asset's first frame header: 16,384 Hz has no entry in "
      "the 4-bit sample-rate table, so every frame spells it as 0b1101 + a 16-bit "
      "Hz field — extra_field_bytes 2, an 8-byte header, CRC-8 at bit 56 rather "
      "than 40. Same encode command as scripts/gen_spike_assets.sh's FIXED arm, so "
      "this is byte-for-byte what examples/flac_integration/assets/spike_l0.gfp "
-     "carries on all 160 of its frames (plan item 7-0: a stream is encoded at the "
+     "carries on all 80 of its frames (plan item 7-0: a stream is encoded at the "
      "rate it is played at)"),
-    ("prod-rate32768-last", "vec_prod_l0.flac", lambda f: f[-1], True,
+    ("prod-rate16384-last", "vec_prod_l0.flac", lambda f: f[-1], True,
      "the shipped product asset's final frame: a 512-sample short tail (a table "
      "size, 0b1001 — the same tail length the 32,000-era clip ended with, and "
      "deliberately so: see PRODUCT_SAMPLES above), a 2-octet coded frame number, "
@@ -931,7 +934,7 @@ def emit(src, out_path):
     # spells it inconsistently: that is the 6b-3 respell trap.
     assert all(h["rate_code"] == 0b1101 and h["rate_hz"] == DEVICE_RATE
                and h["extra_bytes"] == 2 for h in prod_frames), \
-        "vec_prod_l0.flac: a frame stops spelling 32,768 Hz as 0b1101 + a " \
+        "vec_prod_l0.flac: a frame stops spelling 16,384 Hz as 0b1101 + a " \
         "16-bit field — the exact shape the prod-* vectors exist to pin"
     assert [h["blocksize"] for h in prod_frames] == \
         [PRODUCT_BLOCKSIZE] * PRODUCT_FULL_FRAMES + [PRODUCT_TAIL_SAMPLES], \

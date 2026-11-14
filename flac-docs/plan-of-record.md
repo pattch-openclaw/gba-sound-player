@@ -3590,6 +3590,56 @@ that `attr` is on a screen, and the fixture should be pinned from *this* image's
 than a hand-copy. 7-2's push-section fix is done against the new rate and re-witnessed with the
 same `late in push` field, which now has a proven hardware answer of `1/1` to compare against.
 
+### 7-1 retarget landing (2026-11-13): 16,384 Hz, FIXED-0, mGBA green
+
+The owner ruled Q16 in the smallest form the tree needs: **FIXED-0 is the product and LPC is
+measurement-only**, so 16,384 Hz is the target of record rather than a way-station to 8,192.
+The retarget then landed as one change:
+
+- **Asset.** `scripts/frame_vectors.py` moved `DEVICE_RATE` to 16,384 and re-derived the
+  Hz-authored partials at that clock (`[(66,5),(98,4),(128,3),(41,2)]`, square 16, side 512).
+  The product clip keeps its ~10 s playing time rather than its old sample count: 79 full
+  2048-sample frames plus a 512-sample tail = **162,304 samples, 80 frames**, encoded
+  FIXED-0 at 16,384. `gen_spike_assets.sh` regenerated the spike regions and reference PCM;
+  `gen_gafp_blob.py` wrote the product blob and `gafp_pin.rs`. The shipped blob is
+  **439,396 bytes**, sha256 `6ad460ea0415579a87e11ade3ed602aad532e2e2cd185be575e1c75b0fc075f3`,
+  and declares 16,384 Hz through code `0b1101` + a 16-bit field on every frame.
+- **Guards.** `EncodeProfile::PRODUCT_SAMPLE_RATE_HZ` and the packer's `PRODUCT_CLOCK_HZ` /
+  `DEFAULT_RATE` moved together; `MEASURED_DECODE`'s FIXED-0 row is now
+  **21.25% mean / 21.36% worst of the 2,097,152-cycle frame** (the same 445,558 cycles),
+  and the LPC row **86.64% / 87.07%**. The row's `frames_sha256` still names the pre-7-0
+  frames, so a clean product pack prints its provenance warning — the honest state until a
+  hardware row measured on *these* frames exists. The refusal self-check now refuses
+  32,768 Hz as well as 32,000, 16,000 and the other tempting values.
+- **Geometry.** `PLAYBACK_RATE_HZ = 16_384`, `TICKS_PER_SAMPLE = 1_024`,
+  `frame_cycles(2048) = 2_097_152`, `PERIOD_CYCLES = 573_440`; `CHUNK_SAMPLES = 560`,
+  `RING_*`, `PREFILL_SAMPLES`, `DMA_WORDS` and the 16-sample grace are unchanged. The
+  screen/budget labels, `flac-rom`'s budget and the spike's budget moved with it.
+- **Fixtures and vectors.** The four `.gfp` fixtures are now
+  `p0_fixed0_mono_16384_b2048.gfp`, `p2_fixed0_stereo_16384_b2048.gfp`,
+  `p3_fixed0_midside_16384_b2048.gfp`, `x1_lpc_stereo_16384_b2048.gfp`; the refusal slug is
+  `rate_44100_at_16384_target`. `gen_gafp_fixtures.py` and `gen_frame_vectors.sh` regenerated
+  the tables; the product header vectors are `prod-rate16384-first` / `-last`.
+- **mGBA control.** `product-play.gba`, sha256
+  `ef1ed8baf0feadb696e0b0c5e3fb24c92ced31a6fbab6d40edfb5ce45b789351`, one headless run:
+  `fr 80 und 0`, `per 289 ser 289 tail 1/464 void 0`, `late 0`, `replay 0`, PCM and FIFO
+  pins `MATCH`, `work 25.363%` / worst frame `26.583%`, attributed decode `417,431 c/frame`,
+  `minlead 9680`, verdict PASSED. This is an emulator control, **not** 7-3 and not a C2
+  claim; the hardware reading, its `late in push` witness and the listening half are still
+  owed, and 7-2's push-mask fix is still owed at this rate.
+- **Host model.** The envelope constants were re-read from that run (decode/convert/push
+  sums 31,335,458 / 8,476,297 / 1,111,346 over 75 windows, feeder 1,629,347 over 289
+  periods), and `make product-play-test` is 14/14. The pitch witness now compares the
+  16,384 Hz 128 Hz anchor against the recorded 32,000 Hz design; the recorded design's
+  250 Hz partial is omitted from the negative leg because its period at 32,000 (128) is the
+  current anchor's period at 16,384, which would make the instrument measure the wrong tone.
+- **Gates.** `gafp-check`, `gafp-pack-check`, `flac-gates`, `spike-test`, `make test` and
+  `make check` all exit 0 on this tree. The ROM images build; `test-rom` still collects zero
+  cases, as recorded in the standing caveats.
+
+What this does **not** establish: any hardware figure at 16,384 Hz, a `late`-free hardware
+run, or the listening witness. C2 remains unmet until 7-3 passes on both units, twice each.
+
 
 ## The width decision (what it is and is not safe for)
 

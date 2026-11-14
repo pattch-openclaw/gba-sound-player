@@ -543,13 +543,12 @@ pub struct EncodeProfile {
     pub allowed_bits_per_sample: &'static [u8],
 }
 
-/// The one rate the product path plays at, spelled here as well as in the
-/// example that drives the mixer (`examples/flac_integration/src/geometry.rs::
-/// PLAYBACK_RATE_HZ`, which mirrors `agb::mixer::SoundDriver::SAMPLE_RATE`).
-/// They are one fact in two crates, and the example's own rate guard asserts
-/// they stay equal — a crate-side profile naming a different rate from the mixer
-/// would have the ROM refuse its own asset at start-up.
-pub const PRODUCT_SAMPLE_RATE_HZ: u32 = 32_768;
+/// The one rate the product path plays at, spelled here as well as in
+/// `examples/flac_integration/src/geometry.rs::PLAYBACK_RATE_HZ` (16,384 Hz,
+/// `2^24 / 1024`). They are one fact in two crates, and the example's own rate
+/// guard asserts they stay equal — a crate-side profile naming a different rate
+/// from the player would have the ROM refuse its own asset at start-up.
+pub const PRODUCT_SAMPLE_RATE_HZ: u32 = 16_384;
 
 /// The default constrained profile documented in README.md.
 pub const DEFAULT_PROFILE: EncodeProfile = EncodeProfile {
@@ -636,7 +635,7 @@ mod manifest_tests {
         b[6] = bps;
         b[7] = order;
         b[8..10].copy_from_slice(&blocksize.to_le_bytes());
-        b[10..14].copy_from_slice(&32_768u32.to_le_bytes());
+        b[10..14].copy_from_slice(&PRODUCT_SAMPLE_RATE_HZ.to_le_bytes());
         b[14..22].copy_from_slice(&(blocksize as u64 * offsets.len() as u64).to_le_bytes());
         b[22..24].copy_from_slice(&(offsets.len() as u16).to_le_bytes());
         b[24..28].copy_from_slice(&frame_data_start.to_le_bytes());
@@ -665,11 +664,11 @@ mod manifest_tests {
         assert_eq!(m.channels(), 2);
         assert_eq!(m.bits_per_sample(), 16);
         assert_eq!(m.blocksize(), 2048);
-        assert_eq!(m.sample_rate_hz(), 32_768);
+        assert_eq!(m.sample_rate_hz(), PRODUCT_SAMPLE_RATE_HZ);
         assert_eq!(m.max_fixed_order(), 4);
         assert_eq!(m.total_samples(), 4096);
         let defaults = m.stream_defaults();
-        assert_eq!(defaults.sample_rate_hz, 32_768);
+        assert_eq!(defaults.sample_rate_hz, PRODUCT_SAMPLE_RATE_HZ);
         assert_eq!(defaults.bits_per_sample, 16);
         assert_eq!(m.frame_offset(2), Err(Error::Manifest), "out of range");
     }
@@ -764,7 +763,8 @@ mod manifest_tests {
     /// The failure mode this pins is the one every sample-level digest in this
     /// repository is blind to: a 32,000 Hz asset and a 32,768 Hz asset are the
     /// same samples, so a byte-pinned run of the first one passes with the pitch
-    /// 41.06 cents sharp. The *profile* is where that is refused, because a build
+    /// 41.06 cents sharp. The retarget moves the target to 16,384 Hz, but the
+    /// same 1.024x trap now arrives as 16,000 Hz against 16,384 Hz. The *profile* is where that is refused, because a build
     /// has one mixer clock and a manifest that declares another rate has no frame
     /// period for any figure about it to be stated against.
     #[test]
@@ -786,7 +786,7 @@ mod manifest_tests {
         // that happens to fire on the same blob: widen only that clause and the
         // same manifest is accepted.
         let wider = EncodeProfile {
-            allowed_sample_rates_hz: &[32_768, 32_000],
+            allowed_sample_rates_hz: &[PRODUCT_SAMPLE_RATE_HZ, 32_000],
             ..DEFAULT_PROFILE
         };
         assert_eq!(
@@ -798,11 +798,11 @@ mod manifest_tests {
 
         // The rates a future edit might be tempted to add, all refused: the FLAC
         // table rates near the target, one hertz off the target (an off-by-one in
-        // a profile literal), and 16,384 Hz, which is the tempting case — it
-        // divides the GBA clock exactly like the target does, and Q14's rule is
-        // about the declared rate, not about which division happens to be exact.
+        // a profile literal), and 32,768 Hz, which is the rung this retarget moved
+        // away from — it divides the GBA clock exactly, and Q14's rule is about
+        // the declared rate, not about which division happens to be exact.
         for rate in [
-            8_000, 16_384, 22_050, 24_000, 32_001, 32_767, 44_100, 48_000,
+            8_000, 16_000, 22_050, 24_000, 31_000, 32_001, 32_767, 32_768, 44_100, 48_000,
         ] {
             let mut b = good();
             b[10..14].copy_from_slice(&u32::to_le_bytes(rate));

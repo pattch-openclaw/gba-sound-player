@@ -1,5 +1,5 @@
 //! The product player's geometry — the numbers that say what "play at
-//! 32,768 Hz" means on this hardware, shared by the ROM
+//! 16,384 Hz" means on this hardware, shared by the ROM
 //! (`src/product_play_main.rs`) and the host model
 //! (`tests/product_play_witness.rs`).
 //!
@@ -54,57 +54,59 @@
 /// The two differ by 174 cycles per 2048-sample frame (0.0166%); item 7-1
 /// standardises on one. This module uses the exact one for a reason that is not
 /// preference: the clock the product ROM measures *is* 2^24 — timer0 is loaded
-/// with `0 − 512` ticks of it per sample — so a stage measured against this
+/// with `0 − 1024` ticks of it per sample — so a stage measured against this
 /// number is measured against the thing that actually paced the audio.
 pub const MIXER_TICK_HZ: u32 = 16_777_216;
 
-/// The playback rate: `agb`'s `Frequency::Hz32768`, the mixer-domain rate C2 is
-/// stated at. It is the only one of agb's three rates whose period is an exact
-/// integer number of timer ticks (`MIXER_TICK_HZ / 32_768 == 512`). The other two
-/// are not exact: 10,512 Hz needs a reload of 1596.006 and agb's integer 1596 plays
-/// 10,512.04 Hz (+3.8 ppm, 0.007 cents), and 18,157 Hz needs 924.009 against its 924
-/// → 18,157.16 Hz (+8.8 ppm, 0.015 cents). Both are inaudible, and stating them is
-/// the point: exactness is not a matter of picking a nicer-looking clock. The only
-/// rates with an integer cycles/sample are the ones that divide 2^24 — powers of two,
-/// i.e. 8,192 / 16,384 / 32,768 / 65,536 — so there is no second exact rate to fall
-/// back on, and "it divides nicely" is not a reason to add one (see the guard in
-/// `tests/product_play_witness.rs`, which samples the exact-but-refused ones).
-pub const PLAYBACK_RATE_HZ: u32 = 32_768;
+/// The playback rate: the ruler's 16,384 Hz rung (`2^24 / 1024`), which is an
+/// exact integer number of timer ticks per sample (`MIXER_TICK_HZ / 16_384 ==
+/// 1024`). It is deliberately *not* one of `agb`'s mixer rates (10,512 / 18,157 /
+/// 32,768): this ROM programs its own timer chain and instantiates no
+/// `agb::sound::mixer::Mixer`, so the mixer's menu constrains nothing here. The
+/// other two are not exact — 10,512 Hz needs a reload of 1596.006 and agb's
+/// integer 1596 plays 10,512.04 Hz (+3.8 ppm, 0.007 cents), and 18,157 Hz needs
+/// 924.009 against its 924 → 18,157.16 Hz (+8.8 ppm, 0.015 cents). Exactness is
+/// not a matter of picking a nicer-looking clock. The only rates with an integer
+/// cycles/sample are the ones that divide 2^24 — powers of two, i.e. 8,192 /
+/// 16,384 / 32,768 / 65,536 — and the retarget chose the highest one that fits.
+pub const PLAYBACK_RATE_HZ: u32 = 16_384;
 
 /// Timer ticks (= cycles at divider /1) per sample at the playback rate: exactly
-/// 512. This is the unit every cost in this project eventually reduces to — see
+/// 1,024. This is the unit every cost in this project eventually reduces to — see
 /// `MEASURED_DECODE` in `scripts/gafp_pack.py`, which is quoted per frame, and
-/// `flac-docs/measurements.md`, which quotes 193.4 cycles/sample for the same
-/// row. At this rate the hardware spends 512 cycles on each sample it plays, and
-/// the whole real-time question is whether the producer spends less.
+/// `flac-docs/measurements.md`, which quotes the same cycle counts against the
+/// 32,768 Hz denominator. At this rate the hardware spends 1,024 cycles on each
+/// sample it plays, and the whole real-time question is whether the producer
+/// spends less.
 pub const TICKS_PER_SAMPLE: u32 = MIXER_TICK_HZ / PLAYBACK_RATE_HZ;
 
 /// A frame's period in cycles: `blocksize × TICKS_PER_SAMPLE`, which is what
 /// `scripts/gafp_pack.py::frame_budget_cycles` computes as
 /// `2^24 × blocksize / playback_rate`. For the product's 2,048-sample blocks
-/// that is 2^20 = 1,048,576 cycles. The rounded-clock reading of the same frame
-/// is 1,048,750; the ratio of one frame to the other is what the 0.0166% note
+/// that is 2^21 = 2,097,152 cycles. The rounded-clock reading of the same frame
+/// is 2,097,500; the ratio of one frame to the other is what the 0.0166% note
 /// above is about.
 pub const fn frame_cycles(blocksize: u32) -> u32 {
     blocksize * TICKS_PER_SAMPLE
 }
 
 /// A period in cycles: the interval at which the sound hardware asks for the
-/// next buffer. `CHUNK_SAMPLES × TICKS_PER_SAMPLE` = 286,720 = 17.08 ms.
+/// next buffer. `CHUNK_SAMPLES × TICKS_PER_SAMPLE` = 573,440 = 34.18 ms.
 pub const PERIOD_CYCLES: u32 = (CHUNK_SAMPLES as u32) * TICKS_PER_SAMPLE;
 
 // ---------------------------------------------------------------------------
 // The buffer the hardware consumes, and the ring that feeds it
 // ---------------------------------------------------------------------------
 
-/// Samples per mixer-domain hardware buffer. `agb` 0.25.0's
-/// `Frequency::buffer_size` (`src/sound/mixer/mod.rs`) returns 176 / 304 / 560
-/// for 10,512 / 18,157 / 32,768 Hz; the function is `pub(crate)`, so the value
-/// is transcribed and pinned by the assertion below. This is not a free choice: it
-/// is exactly what one period costs the consumer — the buffer agb fills, and the
-/// amount of audio this ROM hands over and re-arms once per period — and the
-/// 32-byte FIFO refills in 4-word requests when it falls to half, so a buffer must
-/// be a multiple of 4 words — 560 is.
+/// Samples per hardware buffer. At 32,768 Hz this was a transcription of `agb`
+/// 0.25.0's `Frequency::buffer_size` (`src/sound/mixer/mod.rs`, 176 / 304 / 560
+/// for 10,512 / 18,157 / 32,768 Hz). At 16,384 Hz none of those menu entries
+/// applies, so the value is now a free parameter rather than a transcription; it
+/// is kept at 560 because the rest of the geometry and every measured run are
+/// stated on it, and 7-2 owns re-deriving it for the new clock. This is exactly
+/// what one period costs the consumer — the buffer the ROM hands over and re-arms
+/// once per period — and the 32-byte FIFO refills in 4-word requests when it falls
+/// to half, so a buffer must be a multiple of 4 words — 560 is.
 ///
 /// It is worth stating that precisely, because the same fact is easy to describe
 /// backwards: in sound-FIFO DMA mode the transfer count is *not* what sizes a
@@ -117,7 +119,7 @@ pub const PERIOD_CYCLES: u32 = (CHUNK_SAMPLES as u32) * TICKS_PER_SAMPLE;
 /// period. A smaller chunk would just mean more interrupts.
 pub const CHUNK_SAMPLES: usize = 560;
 
-/// Ring depth in chunks. 36 chunks = 20,160 samples = 615 ms of lead per
+/// Ring depth in chunks. 36 chunks = 20,160 samples = 1.23 s of lead per
 /// channel (40,320 B of `.bss`, one channel's bytes per array; EWRAM, which the
 /// sound DMAs read fine — the rate ROM proved that at 10,512 Hz for 12.7 kB).
 ///
@@ -177,7 +179,7 @@ pub const RING_SAMPLES: usize = RING_CHUNKS * CHUNK_SAMPLES;
 /// inside its first decode, the consumer is already taking one chunk per period,
 /// and the first frame is the most expensive one in the run (cold caches: the
 /// decode tables, the .iwram kernel, the frame's own bytes coming out of ROM the
-/// first time). 16 chunks = 8,960 samples = 273 ms of lead.
+/// first time). 16 chunks = 8,960 samples = 547 ms of lead.
 ///
 /// Two facts the model turned from assertion into measurement, and both say this
 /// is the cheap knob and the ring depth the expensive one:
@@ -231,7 +233,7 @@ pub const DMA_WORDS: u16 = (CHUNK_SAMPLES / 4) as u16;
 ///
 /// This is plan item 7-0 landed, and it is the whole of Q14's ruling in one
 /// constant: a stream is encoded at the rate it is played at, so
-/// `assets/spike_l0.gfp` declares 32,768 Hz because that is the rate
+/// `assets/spike_l0.gfp` declares 16,384 Hz because that is the rate
 /// [`PLAYBACK_RATE_HZ`] names, and there is no mapping left for a player to
 /// apply. It is a named `Option` rather than an absent concept for one reason:
 /// [`playback_rate_for_stream`] below still *reads* it, so a future
@@ -251,39 +253,31 @@ pub const DMA_WORDS: u16 = (CHUNK_SAMPLES / 4) as u16;
 /// envelope) rather than to a declared rate: the rate is a validity check, and the
 /// cost of a frame never was a function of it.
 ///
-/// **What the declaration looks like on the wire, since it is no longer
-/// hypothetical.** 32,768 has no entry in the FLAC 4-bit sample-rate table, so a
-/// stream either spells it as code `0b0000` ("get it from the stream") plus a
-/// 32,768 stream default, or as code `0b1101` plus an appended 16-bit Hz field.
-/// The 6b-3 rate probe established both legs on the shipped frames — neither
-/// changes a frame's length, and the decode is bit-identical either way — and the
-/// asset now shipped uses the second spelling, because it is what `flac` emits when
-/// asked for 32,768 Hz: `crates/flac-lite/tests/frame_header_vectors.txt` pins
-/// `samplerate_code 0xD` with `extra_field_bytes 2` on every frame of it, and
+/// **What the declaration looks like on the wire.** 16,384 has no entry in the
+/// FLAC 4-bit sample-rate table either, so a stream either spells it as code
+/// `0b0000` ("get it from the stream") plus a 16,384 stream default, or as code
+/// `0b1101` plus an appended 16-bit Hz field. `flac` emits the second spelling,
+/// and the retargeted asset uses it: `crates/flac-lite/tests/frame_header_vectors.txt`
+/// pins `samplerate_code 0xD` with `extra_field_bytes 2` on every frame of it, and
 /// `crates/flac-lite/tests/gafp_asset_vectors.txt` pins the same for the packed
-/// blobs. The cost of that spelling is 2 header bytes per frame: 320 bytes across
-/// the product blob's 160 frames. (The blob itself grew from 865,996 B to
-/// 882,949 B, and only a small part of that is the rate field — the 7-0 clip also
-/// carries 2,144 more samples and 3 more frames, and re-encoding at a different
-/// rate changes the residual bytes. The frame-size difference is not the thing
-/// being paid for here; the 6b-3 probe measured the decode-cost effect as about
-/// −20 cycles per frame out of ~426,000, i.e. below the instrument's floor.)
-/// Representability and cost were never the obstacle; the pipeline was.
+/// blobs. The cost of that spelling is 2 header bytes per frame — 160 bytes across
+/// the retargeted product blob's 80 frames. Representability and cost were never
+/// the obstacle; the pipeline was.
 pub const RATE_BRIDGE: Option<(u32, u32)> = None;
 
 /// The playback rate for a declared stream rate: **identity, or refusal.**
 ///
 /// Two rate sets, not one, and the distinction is why this function takes a
 /// *stream* rate at all. `agb` 0.25 can *play* 10,512 / 18,157 / 32,768 Hz, and
-/// this geometry is built for 32,768; a FLAC **stream** may declare any of the
-/// format's 4-bit table rates or a 16-bit Hz value. Before 7-0 this function
-/// bridged the two sets for one pair, and the guard test's refusal list is still
-/// the interim form of the sweep over the declarable set (`0..=65535` plus the
-/// table values). It deliberately samples the rates that look *arithmetically*
-/// tempting: the only rates with an exact cycles/sample are those dividing 2^24 —
-/// powers of two — so 8,192, 16,384 and 65,536 are exact and still not product
-/// rates. Exactness of the division is a property of the clock, not a ruling about
-/// the stream.
+/// this geometry is built for 16,384 — outside agb's menu; a FLAC **stream** may
+/// declare any of the format's 4-bit table rates or a 16-bit Hz value. Before 7-0
+/// this function bridged the two sets for one pair, and the guard test's refusal
+/// list is still the interim form of the sweep over the declarable set (`0..=65535`
+/// plus the table values). It deliberately samples the rates that look
+/// *arithmetically* tempting: the only rates with an exact cycles/sample are those
+/// dividing 2^24 — powers of two — so 8,192, 32,768 and 65,536 are exact and still
+/// not product rates. Exactness of the division is a property of the clock, not a
+/// ruling about the stream.
 ///
 /// The `RATE_BRIDGE` arm is inert in this tree — [`RATE_BRIDGE`] is `None`, and
 /// the compile-time pin at the bottom of this module says so — but it is kept on
@@ -310,13 +304,13 @@ pub const fn playback_rate_for_stream(stream_rate_hz: u32) -> Option<u32> {
 // ---------------------------------------------------------------------------
 
 const _: () = assert!(MIXER_TICK_HZ == 1 << 24);
-const _: () = assert!(PLAYBACK_RATE_HZ == 32_768);
-const _: () = assert!(TICKS_PER_SAMPLE == 512);
+const _: () = assert!(PLAYBACK_RATE_HZ == 16_384);
+const _: () = assert!(TICKS_PER_SAMPLE == 1_024);
 const _: () = assert!(MIXER_TICK_HZ % PLAYBACK_RATE_HZ == 0);
-const _: () = assert!(frame_cycles(2048) == 1_048_576);
+const _: () = assert!(frame_cycles(2048) == 2_097_152);
 const _: () = assert!(CHUNK_SAMPLES == 560);
 const _: () = assert!(CHUNK_SAMPLES % 4 == 0);
-const _: () = assert!(PERIOD_CYCLES == 286_720);
+const _: () = assert!(PERIOD_CYCLES == 573_440);
 const _: () = assert!(DMA_WORDS == 140);
 const _: () = assert!(RING_SAMPLES == 20_160);
 const _: () = assert!(PREFILL_SAMPLES == 8_960);
@@ -327,13 +321,13 @@ const _: () = assert!(RING_SAMPLES > PREFILL_SAMPLES + 2048);
 const _: () = assert!(RING_SAMPLES >= 2048 + CHUNK_SAMPLES);
 /// The period counter (timer2) is 16-bit and counts periods, so the composite
 /// cycle clock this module's arithmetic prices against wraps at 65,536 periods =
-/// 18.7 minutes of audio at this rate. The ROM reports the period count it used
+/// 37.4 minutes of audio at this rate. The ROM reports the period count it used
 /// and refuses to divide any share by a clock that wrapped; this pin says the
 /// ceiling is far above any asset the profile admits. What a run arms is
-/// `ceil(total_samples / CHUNK_SAMPLES)` periods, so the shipped 326,144-sample
-/// clip — 32,768 Hz for 9.95 s, 160 frames with a 512-sample tail — arms 583.
+/// `ceil(total_samples / CHUNK_SAMPLES)` periods, so the shipped 162,304-sample
+/// clip — 16,384 Hz for 9.91 s, 80 frames with a 512-sample tail — arms 290.
 /// The wrap is two orders of magnitude above that, and the asset cannot be
-/// lengthened past ~36.7 million samples (18.7 minutes) without the counter
+/// lengthened past ~36.7 million samples (37.4 minutes) without the counter
 /// needing a wider field.
 const _: () = assert!(u16::MAX as u64 * PERIOD_CYCLES as u64 > 1_600_000_000);
 

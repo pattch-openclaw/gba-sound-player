@@ -452,21 +452,21 @@ subframe0_order 3
 subframe0_wasted 0
 subframe0_bytes 44 FD
 
-vector prod-rate32768-first
+vector prod-rate16384-first
 source_stream vec_prod_l0.flac
-note the shipped product asset's first frame header: 32,768 Hz has no entry in the 4-bit sample-rate table, so every frame spells it as 0b1101 + a 16-bit Hz field — extra_field_bytes 2, an 8-byte header, CRC-8 at bit 56 rather than 40. Same encode command as scripts/gen_spike_assets.sh's FIXED arm, so this is byte-for-byte what examples/flac_integration/assets/spike_l0.gfp carries on all 160 of its frames (plan item 7-0: a stream is encoded at the rate it is played at)
+note the shipped product asset's first frame header: 16,384 Hz has no entry in the 4-bit sample-rate table, so every frame spells it as 0b1101 + a 16-bit Hz field — extra_field_bytes 2, an 8-byte header, CRC-8 at bit 56 rather than 40. Same encode command as scripts/gen_spike_assets.sh's FIXED arm, so this is byte-for-byte what examples/flac_integration/assets/spike_l0.gfp carries on all 80 of its frames (plan item 7-0: a stream is encoded at the rate it is played at)
 required true
-bytes FF F8 BD A8 00 80 00 F8
+bytes FF F8 BD A8 00 40 00 15
 frame_offset 8304
-stream_frame_count 160
+stream_frame_count 80
 header_bits 64
 fixed_fields_bits 32
 sync 0x3FFE
 blocksize_code 0xB
 blocksize 2048
 samplerate_code 0xD
-samplerate_hz 32768
-stream_samplerate_hz 32768
+samplerate_hz 16384
+stream_samplerate_hz 16384
 channels_code 0xA
 subframes 2
 decorrelation mid-side
@@ -476,7 +476,7 @@ stream_bits_per_sample 16
 coded_number 0
 coded_number_octets 1
 extra_field_bytes 2
-crc8_byte 0xF8
+crc8_byte 0x15
 crc8_bit_position 56
 crc8_byte_aligned true
 subframe0_type fixed0
@@ -485,32 +485,32 @@ subframe0_order 0
 subframe0_wasted 0
 subframe0_bytes 10 02
 
-vector prod-rate32768-last
+vector prod-rate16384-last
 source_stream vec_prod_l0.flac
 note the shipped product asset's final frame: a 512-sample short tail (a table size, 0b1001 — the same tail length the 32,000-era clip ended with, and deliberately so: see PRODUCT_SAMPLES above), a 2-octet coded frame number, and the 0b1101 + 16-bit Hz rate field, all in one 9-byte header — where `stereo-last` above is 7 bytes with the rate inside one nibble. That difference is why this vector is not redundant: the short tail alone is not a product witness, the tail spelled at the device rate is. This is the frame the product blob actually ends with, and the reason a product asset must not be an exact multiple of the block size: the short tail is a decoder contract the product path has to keep
 required true
-bytes FF F8 9D A8 C2 9F 80 00 08
-frame_offset 889188
-stream_frame_count 160
-header_bits 72
+bytes FF F8 9D A8 4F 40 00 B0
+frame_offset 445955
+stream_frame_count 80
+header_bits 64
 fixed_fields_bits 32
 sync 0x3FFE
 blocksize_code 0x9
 blocksize 512
 samplerate_code 0xD
-samplerate_hz 32768
-stream_samplerate_hz 32768
+samplerate_hz 16384
+stream_samplerate_hz 16384
 channels_code 0xA
 subframes 2
 decorrelation mid-side
 samplesize_code 0x4
 bits_per_sample 16
 stream_bits_per_sample 16
-coded_number 159
-coded_number_octets 2
+coded_number 79
+coded_number_octets 1
 extra_field_bytes 2
-crc8_byte 0x8
-crc8_bit_position 64
+crc8_byte 0xB0
+crc8_bit_position 56
 crc8_byte_aligned true
 subframe0_type fixed0
 subframe0_kind fixed
@@ -590,8 +590,8 @@ subframe0_bytes 02 80
 #                    decorrelation chosen: mid-side x157
 #   vec_l4_stereo32k.flac lpc3 x1, lpc4 x156
 #                    decorrelation chosen: mid-side x157
-#   vec_prod_l0.flac fixed0 x160
-#                    decorrelation chosen: mid-side x160
+#   vec_prod_l0.flac fixed0 x80
+#                    decorrelation chosen: mid-side x80
 # => `-l N` is MAX LPC ORDER, not a FIXED-predictor cap (flac --help:
 #    '-l, --max-lpc-order=#   Max LPC order; 0 => only fixed predictors').
 #    `-l 0` is FIXED-only; `-l 4` emits real LPC subframes of order <= 4.

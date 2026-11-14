@@ -513,6 +513,26 @@ stages are still mGBA-only.
 Which numbers may be quoted, how eras and denominators differ, and the full
 ledger: [`flac-docs/measurements.md`](flac-docs/measurements.md).
 
+## Retarget status (2026-11-13): 16,384 Hz, FIXED-0, mGBA green
+
+The owner ruled Q16 as the product needs it — **FIXED-0 is the product, LPC is
+measurement-only** — and the 16,384 Hz retarget has landed in the tree. The
+product asset is now 80 frames / 162,304 samples / 439,396 B, declares 16,384 Hz
+on every frame, and the geometry is `1,024` ticks/sample, `2,097,152` cycles per
+2048-sample frame, `573,440` cycles per period; `CHUNK`, ring, prefill and the
+16-sample grace are unchanged. The packer, profile, fixtures, vectors and the
+spike's budget moved with it. A headless mGBA run of `product-play.gba`
+(`ef1ed8ba…`) is green — 289/289 periods, `und 0`, `late 0`, PCM/FIFO pins
+matched, `work 25.363%`, worst frame `26.583%`, attributed decode `417,431
+c/frame` — and `make product-play-test` is 14/14. The full landing record,
+including the provenance warning that still prints for the inherited FIXED-0
+cost row, is in [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md)
+under "7-1 retarget landing".
+
+This is **not** C2: no hardware run at 16,384 Hz exists yet, the push-mask fix
+(7-2) is still owed, and the listening witness has not been asked. The hardware
+measurement and 7-3 acceptance remain the next steps.
+
 ## What is next
 
 One line per rung; the full plan, bars and invariants are in

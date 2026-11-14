@@ -51,7 +51,7 @@ Usage:
   profile, then encoded with the reference command.
 
 Options:
-  -r, --rate HZ            target sample rate            (default 32768, and
+  -r, --rate HZ            target sample rate            (default 16384, and
                            the only value a product blob may carry — see
                            PRODUCT_CLOCK_HZ: the packer budgets a frame against
                            one clock, so a stream that declares another rate is
@@ -92,8 +92,8 @@ different questions, and a build that means one must not quietly get another:
     the same as safe; the plan says so, so the default is to refuse and name the
     nearest measured row instead of inventing a figure.
   * `--allow-over-budget` is for a kind that HAS been measured on hardware at this
-    target and is over the decode-half bar — `-l 4` at 32 kHz/2048 is 174.14% of
-    the frame for the decode half alone, which is why C2 excludes LPC. The
+    target and is over the decode-half bar — `-l 4` at 16,384 Hz/2048 is 87.07%
+    of the frame for the decode half alone, which is why C2 excludes LPC. The
     measured product row is FIXED-0: `-l 0` disables LPC, but libFLAC still
     chooses FIXED orders 1-4 from the signal, and those orders have no measured
     row here. A real track that lands on FIXED-1..4 is therefore refused, not
@@ -238,10 +238,10 @@ MEASURED_DECODE = {
     # kind/order and the residual envelope recorded in it — and only for frames
     # like the ones it names in `frames_sha256`.
     (2048, "fixed", 0): dict(
-        mean_pct=42.48,
-        worst_pct=42.72,
+        mean_pct=21.25,
+        worst_pct=21.36,
         cycles_mean=445558,
-        budget_cycles=1048576,
+        budget_cycles=2097152,
         # The frames this figure was taken from: the perf spike's FIXED-only arm
         # as it stood before plan item 7-0 re-authored the clip at the device
         # rate (157 frames, 314 slots, `fixed0` x314, a 512-sample final frame).
@@ -263,7 +263,7 @@ MEASURED_DECODE = {
                       rice_param_max=10),
         src=("flac-docs/measurements.md, 6a-7b on hardware, `asm` arm, GBA 001 "
              "+ GBA SP, two runs each, identical to the cycle: 445,558 c/frame "
-             "= 217.56 c/sample, 42.48% mean / 42.72% worst of the 32,768 Hz "
+             "= 217.56 c/sample, 21.25% mean / 21.36% worst of the 16,384 Hz "
              "frame. Kernel-only: the 6b-1 product ROM measures the same clip "
              "end to end at 37.83% mean / 38.04% worst through the manifest "
              "facade, and both figures are inside the bar this module states. "
@@ -272,10 +272,10 @@ MEASURED_DECODE = {
              "the row measured on the frames 7-0 produced."),
     ),
     (2048, "lpc", 4): dict(
-        mean_pct=173.23,
-        worst_pct=174.14,
+        mean_pct=86.64,
+        worst_pct=87.07,
         cycles_mean=1816753,
-        budget_cycles=1048576,
+        budget_cycles=2097152,
         frames_sha256=("6609602ba18860e6562c86594b6b56c4e434749623f731114e8a"
                        "602444367cc5"),
         frames_note=("examples/flac_spike/assets/spike_l4_frames.bin as of the "
@@ -284,7 +284,7 @@ MEASURED_DECODE = {
                       rice_param_max=10),
         src=("flac-docs/measurements.md, 6a-7b on hardware, `asm` arm, same "
              "instrument and same frames as the row above, `-l 4` arm: "
-             "1,816,753 c/frame = 173.23% mean / 174.14% worst. That arm's "
+             "1,816,753 c/frame = 86.64% mean / 87.07% worst at 16,384 Hz (the same cycles are 173.23% / 174.14% at 32,768 Hz). That arm's "
              "census is lpc4 x312 + lpc3 x2, so this is a CLIP mean and a LOWER "
              "bound on what the LPC kind alone costs per frame. Over budget by "
              "itself, before the producer's other stages exist."),
@@ -296,9 +296,11 @@ MEASURED_DECODE = {
 # `mean_pct`. It is not a hypothetical guard — writing this file got the
 # denominator wrong on the first pass (a 32,000 Hz frame period is 1,073,742
 # cycles at this script's clock, against 1,048,576 for the 32,768 Hz timer the
-# product plays against: a 2.4% difference, enough to move 42.49% to 41.49% and
-# hide nothing). That is exactly why the denominator is now stated once, as a
-# clock, and is not derived from the stream that is being packed. Percent.
+# product played against then, and 2,097,152 for the 16,384 Hz timer it plays
+# against now: the 32,000 comparison was a 2.4% difference, enough to move 42.49%
+# to 41.49% and hide nothing). That is exactly why the denominator is now stated
+# once, as a clock, and is not derived from the stream that is being packed.
+# Percent.
 #
 # One honest caveat about the tolerance below: this file budgets with the exact
 # 2^24 Hz clock, while the instrument budgets with `stats.rs::GBA_CLOCK_HZ =
@@ -306,8 +308,8 @@ MEASURED_DECODE = {
 # `verdict:` line and every published share in flac-docs/measurements.md and
 # perf-results.md is divided by. The two denominators differ by 174 cycles
 # (0.0166%), which is under this 0.1 pp tolerance, so a row copied from either
-# source re-derives and passes here; e.g. 445,558 c re-derives to 42.49% against
-# this budget against the 42.48% a rounded-clock reading gives. That is why rows
+# source re-derives and passes here; e.g. 445,558 c re-derives to 21.25% against
+# this budget against the 21.24% a rounded-clock reading gives. That is why rows
 # are cited by source and condition, and why the reconciliation of the two clocks
 # is written down in flac-docs/method-and-gates.md before item 7-1 puts new
 # shares on the same table.
@@ -337,7 +339,7 @@ DECODE_SHARE_LIMIT_PCT = 50.0
 # the clock these rows are stated in?" — and never a lookup that picks a
 # different clock for a stream that declares something else.
 GBA_CYCLES_PER_SECOND = 16777216
-PRODUCT_CLOCK_HZ = 32768
+PRODUCT_CLOCK_HZ = 16384
 
 # Rate reinterpretations this packer is willing to perform. After Q14 there are
 # none, and the table exists only to say that in one place: it must stay empty.
@@ -441,11 +443,11 @@ def check_guard_shapes():
     # The rate legs. A stream that declares another rate is refused on the ruling,
     # not budgeted at a different clock — including 32,000 Hz, the rate every
     # asset in this tree carried until 7-0, and including the powers of two that
-    # divide the clock exactly (8,192 / 16,384 / 65,536), which are arithmetically
+    # divide the clock exactly (8,192 / 32,768 / 65,536), which are arithmetically
     # clean and still refused: the rule is about the declared rate, not about
     # which division happens to be exact.
-    for other in (8000, 8192, 11025, 16000, 16384, 22050, 24000, 31000, 32000,
-                  32001, 44100, 48000, 65536):
+    for other in (8000, 8192, 11025, 16000, 22050, 24000, 31000, 32000,
+                  32001, 32768, 44100, 48000, 65536):
         ok, reasons, _ = verdict(slot("fixed", 0), at=other)
         assert not ok and any("is not the target" in r for r in reasons), \
             "a %d Hz stream must be refused by the rate clause, got %s" % (
