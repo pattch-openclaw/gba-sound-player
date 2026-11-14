@@ -387,6 +387,15 @@ OVERLAY_ROM_BIN := target/$(TARGET)/release/overlay-kernel-check
 # `podman-rom` gets this too for free (the container runs `make rom` ->
 # `make build`), and the container mounts the project dir, so containerized
 # formats write back to your working tree.
+#
+# flac_integration is formatted through scripts/fmt_with_generated_stub.sh, not
+# a bare `cargo fmt`, because its `src/lib.rs` declares a feature-gated module
+# from a GENERATED, gitignored file (`master_pin.rs`, written by
+# `make master-pack`). rustfmt resolves `#[path]` modules regardless of `cfg`,
+# so a bare `cargo fmt` aborts on any tree where the master asset has never been
+# packed (a fresh clone). The helper writes a parse-only stub when the pin is
+# absent, formats, and removes the stub; a real pin is formatted in place and
+# never removed. `check` uses the same helper, so it stays a real gate.
 # ---------------------------------------------------------------------------
 ifeq ($(HAS_RUSTFMT),1)
 format:
@@ -396,7 +405,7 @@ format:
 	cd crates/uli-lite-gba && $(CARGO) fmt
 	cd $(ULI_SPIKE_DIR) && $(CARGO) fmt
 	cd $(ULI_BENCH_DIR) && $(CARGO) fmt
-	cd $(FLAC_CRATE_DIR) && $(CARGO) fmt
+	CARGO='$(CARGO)' sh scripts/fmt_with_generated_stub.sh $(FLAC_CRATE_DIR)
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) fmt
 	cd $(OPUS_CRATE_DIR) && $(CARGO) fmt
 	cd $(KERNEL_CRATE_DIR) && $(CARGO) fmt
@@ -1348,7 +1357,7 @@ check:
 	cd crates/flac-lite && $(CARGO) fmt --check
 	cd crates/uli-lite && $(CARGO) fmt --check
 	cd $(ULI_SPIKE_DIR) && $(CARGO) fmt --check
-	cd $(FLAC_CRATE_DIR) && $(CARGO) fmt --check
+	CARGO='$(CARGO)' sh scripts/fmt_with_generated_stub.sh $(FLAC_CRATE_DIR) --check
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) fmt --check
 	cd $(OPUS_CRATE_DIR) && $(CARGO) fmt --check
 	cd $(KERNEL_CRATE_DIR) && $(CARGO) fmt --check
