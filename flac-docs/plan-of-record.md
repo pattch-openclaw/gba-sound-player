@@ -3751,6 +3751,25 @@ both units, twice each, with the mask now `CHUNK`-sized. 7-3 still needs the lis
 witness — pitch and tempo, heard on both units with the source beside it — and that is the
 remaining C2 clause.
 
+### 7-3 prerequisite: the audible asset has to come from `bioluminescent.wav`
+
+The 7-0..7-2 product asset is the deterministic synthetic fixture, not the master. It is
+**not a listening witness**: 16-bit RMS 466 counts (~-37 dBFS), and through `sample >> 8`
+it is RMS 1.91 LSB, range -5..4. Its per-second RMS is constant across the clip, so the
+perceived "silence after the opening high tone" is level and content, not a delivery
+dropout. `assets/sound/bioluminescent.wav` is 96 kHz / 24-bit / stereo; its first 9.9 s at
+16 kHz / 16-bit measures RMS 5,369 counts (~-15.7 dBFS), about 21 dB louder.
+
+The master excerpt at the current product profile (`-l 0 -b 2048 -m`, 16,384 Hz) censuses
+**CONSTANT x4, FIXED-1 x102, FIXED-2 x53, FIXED-3 x1**, and the packer refuses it: only
+FIXED-0 has a measured row, and stock `flac` does not force FIXED-0 (`-l 0` disables LPC,
+not fixed-order selection). So 7-3 cannot be just a file swap. The next decision is to
+measure/admit FIXED-1..3 (and CONSTANT) plus their residual envelopes at 16,384 Hz, or
+force FIXED-0 with a custom encode, or use a non-product listening fixture that does not
+meet C2's FIXED-0-by-construction clause. The measurements are in
+[`playback-results.md`](playback-results.md) under "7-3 asset finding"; the first option is
+the natural product path if real music is the audible witness.
+
 
 ## The width decision (what it is and is not safe for)
 

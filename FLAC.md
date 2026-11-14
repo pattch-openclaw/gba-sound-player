@@ -552,7 +552,15 @@ are in [`flac-docs/playback-results.md`](flac-docs/playback-results.md) under
 "7-2: chunked push on hardware".
 
 This is **still not C2**: 7-3's listening witness — pitch and tempo, heard on
-both units with the source beside it — is the remaining acceptance half.
+both units with the source beside it — is the remaining acceptance half. **The
+current product asset cannot supply it**: it is the synthetic encoder fixture,
+about -37 dBFS, and its 8-bit FIFO form is RMS 1.9 LSB. The master
+`bioluminescent.wav` is real programme material and ~21 dB louder, but at the
+product profile its first excerpt censuses CONSTANT/FIXED-1..3, which the packer
+refuses because only FIXED-0 is measured. The 7-3 asset therefore needs a profile
+decision and new measured rows, not just a file swap; see
+[`flac-docs/playback-results.md`](flac-docs/playback-results.md) under "7-3 asset
+finding".
 
 ## What is next
 

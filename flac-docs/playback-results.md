@@ -1219,3 +1219,43 @@ both units show zero late services with no new underruns or digest changes.
 
 **What remains.** 7-3's listening witness — pitch and tempo, heard on both units with the
 source beside it — is still the acceptance half, and C2 remains unmet until it is asked.
+
+## 7-3 asset finding (2026-11-13): the synthetic fixture is not a listening witness
+
+The product asset used from 7-0 through 7-2 is the deterministic fixture in
+`scripts/frame_vectors.py`, not `assets/sound/bioluminescent.wav`. It was chosen to make
+libFLAC choose the encoder shapes the track measures, and it is not music.
+
+Measured on the shipped 16,384 Hz / 162,304-sample PCM:
+
+- 16-bit RMS **466 counts** (1.42% full scale, about **-37 dBFS**), peak 1,115 counts.
+  Per-second RMS is 465.7–466.2 counts across the whole 9.9 s, so there is **no data
+  dropout or silence** in the stream; every period is serviced and every digest matches.
+- through the real `sample >> 8` conversion the FIFO bytes are 0.82 nonzero, **RMS 1.91
+  LSB**, range **-5..4**. The GBA is playing a few LSB of low-level synthetic tone.
+- the fixture's dominant components are a 1,024 Hz square plus low partials; it is a
+  pitch/encoder witness, not a musical programme. `product_play_witness.rs` already records
+  the conclusion: *"the fixture that was chosen because it makes the encoder behave cannot
+  be listened to"*.
+
+For comparison, `assets/sound/bioluminescent.wav` is **96 kHz / 24-bit / stereo, 258.6 s**.
+Its first 9.9 s, resampled to 16 kHz / 16-bit, measures RMS **5,369 counts** (about
+**-15.7 dBFS**), peak 29,241, and **~21 LSB RMS** after the FIFO conversion — roughly 21 dB
+louder than the fixture, with real programme material.
+
+**Implication for 7-3.** The hardware runs through 7-2 prove delivery, timing and digests,
+but they cannot be a listening acceptance: the asset is not audibly representative. 7-3
+needs a master-derived excerpt. That is not just a file swap today: at the product profile
+(`flac -l 0 -b 2048 -m`, 16,384 Hz) the first master excerpt censuses
+**CONSTANT x4, FIXED-1 x102, FIXED-2 x53, FIXED-3 x1**, and `gafp_pack.py` refuses it because
+only FIXED-0 has a measured row. Stock `flac` offers no way to force FIXED-0 (`-l 0` disables
+LPC, not fixed-order selection). So the next decision is one of:
+
+1. **Measure and admit FIXED-1..3 (and CONSTANT), plus their residual envelopes, at 16,384
+   Hz**, and widen the product profile accordingly; or
+2. **force FIXED-0 with a custom encoder/post-encode path**; or
+3. use a non-product master-approved fixture for audibility only, which does **not** meet
+   C2's FIXED-0-by-construction clause.
+
+The first is the natural product path if real music is to be the audible witness; it needs
+hardware decode rows and a profile decision, not just a new `.gfp`.
