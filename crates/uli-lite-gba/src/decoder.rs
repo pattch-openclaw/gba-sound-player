@@ -23,9 +23,10 @@
 
 use core::fmt;
 
-use uli_lite::format::{
-    BANDW, CT_PAIR, CT_ZERO, H, LUTB, M, MAXK, MAXLEN, NBANDS, NCODED, NSTEP, XLIM,
-};
+use uli_lite::format::{BANDW, CT_PAIR, CT_ZERO, H, LUTB, M, MAXK, MAXLEN, NBANDS, NSTEP};
+// The diagnostics' operands only exist in a `verify` build (PR C-3b).
+#[cfg(feature = "verify")]
+use uli_lite::format::{NCODED, XLIM};
 use uli_lite::tables_data::STEP;
 use uli_lite::{Album, CodeTables, Error, FrameInfo, HuffmanParts, Ops};
 
@@ -61,10 +62,72 @@ impl HotState {
     }
 }
 
+/// Format-rule diagnostics: `xover` (a coefficient past the encoder's `|X|`
+/// bound) and `hfnz` (a nonzero coefficient at index >= `NCODED`).
+///
+/// Both are a compare per nonzero coefficient, measured at ~19,000 cycles on the
+/// worst frame, so the **product build compiles them out** (PR C-3b). The rules
+/// stay witnessed: `examples/uli_bench`'s correctness pass reads them off the
+/// core decoder, and `tests/product_twin.rs` reads them from a `verify` build.
 #[derive(Clone, Copy, Debug, Default)]
 struct Diag {
+    #[cfg(feature = "verify")]
     xover: u32,
+    #[cfg(feature = "verify")]
     hfnz: u32,
+}
+
+/// Count one operation on the hot path.
+///
+/// A no-op in the product build. The counters feed the reference twin's
+/// `FrameInfo` comparison and the cycle model; in the loop they cost ~11,000
+/// cycles on the worst frame (PR C-3b), so they only exist under `verify`.
+/// Call sites read the same as the reference's `ops`.
+macro_rules! counter {
+    ($($name:ident => $field:ident),* $(,)?) => {
+        $(
+            #[inline(always)]
+            #[allow(unused_variables)]
+            fn $name(ops: &mut Ops) {
+                #[cfg(feature = "verify")]
+                {
+                    ops.$field = ops.$field.wrapping_add(1);
+                }
+            }
+        )*
+    };
+}
+
+counter!(
+    count_band_symbol => bandsyms,
+    count_coded_band => coded_bands,
+    count_pair => pairs,
+    count_quad => quads,
+    count_nonzero => nz,
+    count_zero => zc,
+    count_raw => raws,
+    count_escape => escs,
+    count_long => long_codes,
+);
+
+/// Record an `|X|`-bound violation. No-op in the product build; see [`Diag`].
+#[inline(always)]
+#[allow(unused_variables, dead_code)]
+fn note_xover(diag: &mut Diag) {
+    #[cfg(feature = "verify")]
+    {
+        diag.xover = diag.xover.wrapping_add(1);
+    }
+}
+
+/// Record a nonzero coefficient past `NCODED`. No-op in the product build.
+#[inline(always)]
+#[allow(unused_variables, dead_code)]
+fn note_hfnz(diag: &mut Diag) {
+    #[cfg(feature = "verify")]
+    {
+        diag.hfnz = diag.hfnz.wrapping_add(1);
+    }
 }
 
 /// The quad-digit expansion table (PR C-3a).
@@ -351,7 +414,7 @@ fn huff_slow(br: &mut BitReader, p: &HuffmanParts<'_>, ops: &mut Ops) -> u16 {
             .wrapping_sub(unsafe { *p.first.get_unchecked(l) } as u32);
         if c < unsafe { *p.count.get_unchecked(l) } as u32 {
             br.skip(l as u32);
-            ops.long_codes = ops.long_codes.wrapping_add(1);
+            count_long(ops);
             let i = unsafe { *p.offs.get_unchecked(l) } as usize + c as usize;
             // SAFETY: the canonical table parser guarantees offs + count <=
             // 256, and c < count.
@@ -387,6 +450,7 @@ unsafe fn zero16(p: *mut i32) {
 /// reads it.
 #[inline(always)]
 #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+#[allow(unused_variables)]
 unsafe fn put_coef(
     p: *mut i32,
     m: u32,
@@ -399,7 +463,7 @@ unsafe fn put_coef(
     diag: &mut Diag,
 ) {
     if m == 0 {
-        ops.zc = ops.zc.wrapping_add(1);
+        count_zero(ops);
         // SAFETY: the caller guarantees `p` is a coefficient slot.
         unsafe { p.write(0) };
         return;
@@ -411,16 +475,18 @@ unsafe fn put_coef(
         ((m as i32) << 4) - dq15 as i32
     };
     let xv = r.wrapping_mul(step as i32);
+    #[cfg(feature = "verify")]
     if xv >= XLIM as i32 {
-        diag.xover = diag.xover.wrapping_add(1);
+        note_xover(diag);
     }
     let q = xv;
     let v = if br.get(1) != 0 { q.wrapping_neg() } else { q };
     // SAFETY: the caller guarantees `p` is a coefficient slot.
     unsafe { p.write(v) };
-    ops.nz = ops.nz.wrapping_add(1);
+    count_nonzero(ops);
+    #[cfg(feature = "verify")]
     if index >= NCODED {
-        diag.hfnz = diag.hfnz.wrapping_add(1);
+        note_hfnz(diag);
     }
 }
 
@@ -456,7 +522,7 @@ unsafe fn dec_chan(
     while b < NBANDS {
         let band = tables.band_table(ctx).parts();
         let e = huff(br, &band, ops);
-        ops.bandsyms = ops.bandsyms.wrapping_add(1);
+        count_band_symbol(ops);
         if br.bad {
             return b;
         }
@@ -478,7 +544,7 @@ unsafe fn dec_chan(
             b += 1;
             continue;
         }
-        ops.coded_bands = ops.coded_bands.wrapping_add(1);
+        count_coded_band(ops);
         let cls = tables.class_table(c).parts();
         // SAFETY: c < MAXK.
         let rq = unsafe { tables.rq.get_unchecked(c) };
@@ -489,18 +555,18 @@ unsafe fn dec_chan(
             let mut i = 0usize;
             while i < BANDW {
                 let e = huff(br, &cls, ops);
-                ops.pairs = ops.pairs.wrapping_add(1);
+                count_pair(ops);
                 let symb = (e >> 5) as u32;
                 let mut kk = 0usize;
                 while kk < 2 {
                     let mut m = if kk == 0 { symb >> 4 } else { symb & 15 };
                     if m == 15 {
                         m = m.wrapping_add(esc(br, esck));
-                        ops.escs = ops.escs.wrapping_add(1);
+                        count_escape(ops);
                     }
                     let mm = m.wrapping_shl(r) | br.get(r);
                     if r != 0 {
-                        ops.raws = ops.raws.wrapping_add(1);
+                        count_raw(ops);
                     }
                     // SAFETY: i < BANDW and kk < 2.
                     unsafe {
@@ -524,7 +590,7 @@ unsafe fn dec_chan(
             let mut i = 0usize;
             while i < BANDW {
                 let e = huff(br, &cls, ops);
-                ops.quads = ops.quads.wrapping_add(1);
+                count_quad(ops);
                 // SAFETY: a CT_QUAD class table has exactly 81 symbols.
                 let q3 = unsafe { *Q3.get_unchecked((e >> 5) as usize) };
                 let mut kk = 0usize;
@@ -532,7 +598,7 @@ unsafe fn dec_chan(
                     let mut m = ((q3 >> (6 - 2 * kk)) & 3) as u32;
                     if m == 2 {
                         m = m.wrapping_add(esc(br, esck));
-                        ops.escs = ops.escs.wrapping_add(1);
+                        count_escape(ops);
                     }
                     // SAFETY: i < BANDW and kk < 4.
                     unsafe {
@@ -629,14 +695,17 @@ impl<'a, 's> GbaDecoder<'a, 's> {
         self.g_prev
     }
 
+    /// Operation counts for the last frame. Zero unless built with `verify` (PR C-3b).
     pub fn ops(&self) -> Ops {
         self.ops
     }
 
+    /// Cumulative `|X|`-bound violations. Zero unless built with `verify` (PR C-3b).
     pub fn xover(&self) -> u32 {
         self.xover
     }
 
+    /// Cumulative nonzero coefficients past `NCODED`. Zero unless built with `verify` (PR C-3b).
     pub fn hfnz(&self) -> u32 {
         self.hfnz
     }
@@ -688,7 +757,10 @@ impl<'a, 's> GbaDecoder<'a, 's> {
         }
         // SAFETY: geff is in 0..NSTEP.
         let step = unsafe { *STEP.get_unchecked(geff as usize) };
-        ops.ms = ms as u32;
+        #[cfg(feature = "verify")]
+        {
+            ops.ms = ms as u32;
+        }
         if br.bad {
             return Err(Error::BadBitstream);
         }
@@ -751,19 +823,31 @@ impl<'a, 's> GbaDecoder<'a, 's> {
         crate::ola(&self.hot.x[1], &mut self.hot.p[1], out8r, out16r);
 
         self.bitpos = br.bitpos();
-        self.ops = ops;
-        self.xover = self.xover.wrapping_add(diag.xover);
-        self.hfnz = self.hfnz.wrapping_add(diag.hfnz);
+        // The whole diagnostic block is product-build dead code: `Diag` is empty
+        // and the counters are no-ops there (PR C-3b). The reference twin builds
+        // with `verify` and compares every field.
+        #[cfg(feature = "verify")]
+        let (info_ops, info_cycles, info_xover, info_hfnz) = {
+            self.ops = ops;
+            self.xover = self.xover.wrapping_add(diag.xover);
+            self.hfnz = self.hfnz.wrapping_add(diag.hfnz);
+            (ops, ops.cycle_model(), diag.xover, diag.hfnz)
+        };
+        #[cfg(not(feature = "verify"))]
+        let (info_ops, info_cycles, info_xover, info_hfnz) = {
+            let _ = (&ops, &diag);
+            (Ops::ZERO, 0, 0, 0)
+        };
         let frame = self.frame;
         self.frame = self.frame.wrapping_add(1);
         Ok(FrameInfo {
             frame,
             bits: self.bitpos.wrapping_sub(start),
             bitpos: self.bitpos,
-            ops,
-            cycles: ops.cycle_model(),
-            xover: diag.xover,
-            hfnz: diag.hfnz,
+            ops: info_ops,
+            cycles: info_cycles,
+            xover: info_xover,
+            hfnz: info_hfnz,
         })
     }
 

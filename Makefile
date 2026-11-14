@@ -611,7 +611,9 @@ uli-overlay-test: toolchain-check
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(ULI_OVERLAY_MANIFEST) --target $(HOST_TRIPLE)
-	@echo "uli-overlay-test passed: overlay kernels and the full decoder are bit-exact with the portable reference"
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(ULI_OVERLAY_MANIFEST) --target $(HOST_TRIPLE) --features verify
+	@echo "uli-overlay-test passed: overlay kernels and the full decoder are bit-exact with the portable reference, in both the product and the verify build"
 
 # Regenerate the committed expected-vector file. This WRITES a fixture, so it is
 # a maintenance command and never part of `make test`.

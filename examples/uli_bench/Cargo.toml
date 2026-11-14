@@ -19,8 +19,16 @@ edition = "2024"
 [features]
 # Per-frame dump for attribution work: one CSV-ish line per frame with the
 # measured window and the decoder's operation counts, fitted host-side. Off by
-# default so the gate's log stays the record.
-per-frame = []
+# default so the gate's log stays the record. Implies `verify`, because the dump
+# exists to correlate cycles with counts.
+per-frame = ["verify"]
+
+# Compiles the product decoder's counters and format-rule diagnostics back in
+# (`uli-lite-gba/verify`). Off by default: the gate measures the product build,
+# which does not carry them (PR C-3b, ~30,000 cycles/frame). A `verify` build
+# prints the per-arm operation counts and is the arm that witnesses `xover=0
+# hfnz=0` for the product decoder itself.
+verify = ["uli-lite-gba/verify"]
 
 [dependencies]
 uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }

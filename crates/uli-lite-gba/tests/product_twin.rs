@@ -48,7 +48,26 @@ fn product_decoder_matches_the_reference_frame_for_frame() {
     for frame in 0..album.n_frames() {
         let a = outputs(&mut reference, &mut a8l, &mut a8r, &mut a16l, &mut a16r);
         let b = product_outputs(&mut product, &mut b8l, &mut b8r, &mut b16l, &mut b16r);
+        // The full metadata comparison needs the counters, which the product
+        // build compiles out (PR C-3b). In that build, check every field the
+        // product must still agree on and prove the diagnostics stay zeroed.
+        #[cfg(feature = "verify")]
         assert_eq!(a, b, "frame {frame} metadata diverged");
+        #[cfg(not(feature = "verify"))]
+        {
+            assert_eq!(a.frame, b.frame, "frame {frame} index diverged");
+            assert_eq!(a.bits, b.bits, "frame {frame} bit count diverged");
+            assert_eq!(a.bitpos, b.bitpos, "frame {frame} bit position diverged");
+            assert_eq!(
+                b.ops,
+                uli_lite::Ops::ZERO,
+                "frame {frame}: a product build counted operations"
+            );
+            assert_eq!(
+                b.cycles, 0,
+                "frame {frame}: a product build ran the cycle model"
+            );
+        }
         assert_eq!(a8l, b8l, "frame {frame} int8 L diverged");
         assert_eq!(a8r, b8r, "frame {frame} int8 R diverged");
         assert_eq!(a16l, b16l, "frame {frame} int16 L diverged");
@@ -84,7 +103,19 @@ fn product_decoder_seeks_like_the_reference() {
         for frame in 0..4 {
             let a = outputs(&mut reference, &mut a8l, &mut a8r, &mut a16l, &mut a16r);
             let b = product_outputs(&mut product, &mut b8l, &mut b8r, &mut b16l, &mut b16r);
+            #[cfg(feature = "verify")]
             assert_eq!(a, b, "track {track} frame {frame} metadata diverged");
+            #[cfg(not(feature = "verify"))]
+            {
+                assert_eq!(a.frame, b.frame, "track {track} frame {frame} index");
+                assert_eq!(a.bits, b.bits, "track {track} frame {frame} bits");
+                assert_eq!(a.bitpos, b.bitpos, "track {track} frame {frame} bitpos");
+                assert_eq!(
+                    b.ops,
+                    uli_lite::Ops::ZERO,
+                    "track {track} frame {frame}: a product build counted operations"
+                );
+            }
             assert_eq!(a8l, b8l, "track {track} frame {frame} int8 L diverged");
             assert_eq!(a8r, b8r, "track {track} frame {frame} int8 R diverged");
             assert_eq!(a16l, b16l, "track {track} frame {frame} int16 L diverged");
@@ -104,4 +135,29 @@ fn product_decoder_seeks_like_the_reference() {
         assert_eq!(reference.state().bitpos(), product.bitpos());
         assert_eq!(reference.state().frame_index(), product.frame_index());
     }
+}
+
+/// The product build must not pay for the counters it cannot see (PR C-3b).
+/// If this fails, something re-enabled `Ops`/`Diag` outside the `verify` gate.
+#[cfg(not(feature = "verify"))]
+#[test]
+fn product_build_compiles_the_diagnostics_out() {
+    let album = Album::parse(BLOB).expect("fixture parses");
+    let mut tables = CodeTables::new();
+    let mut hot = HotState::new();
+    let mut product = GbaDecoder::new(album, &mut tables, &mut hot).expect("product");
+    let (mut l8, mut r8) = ([0i8; M], [0i8; M]);
+    let (mut l16, mut r16) = ([0i16; M], [0i16; M]);
+    let info = product
+        .decode_frame(&mut l8, &mut r8, Some(&mut l16), Some(&mut r16))
+        .expect("frame 0 decodes");
+    assert_eq!(info.ops, uli_lite::Ops::ZERO, "ops are not compiled out");
+    assert_eq!(info.cycles, 0, "the cycle model is not compiled out");
+    assert_eq!(
+        (info.xover, info.hfnz),
+        (0, 0),
+        "diagnostics are not compiled out"
+    );
+    assert_eq!(product.ops(), uli_lite::Ops::ZERO);
+    assert_eq!((product.xover(), product.hfnz()), (0, 0));
 }

@@ -387,7 +387,7 @@ fn product_pass(
     Ok((cost, all8, all16))
 }
 
-fn print_cost(label: &str, cost: &FrameCost) {
+fn print_cost(label: &str, cost: &FrameCost, counted: bool) {
     agb::println!(
         "[uli-bench] frame {} count={} min={} min_frame={} max={} max_frame={} sum={} wrapped={}",
         label,
@@ -399,6 +399,13 @@ fn print_cost(label: &str, cost: &FrameCost) {
         cost.sum,
         cost.wrapped
     );
+    if !counted {
+        agb::println!(
+            "[uli-bench] {} worst ops: not counted in a product build (rebuild with --features verify)",
+            label
+        );
+        return;
+    }
     agb::println!(
         "[uli-bench] {} worst ops bandsyms={} coded={} pairs={} quads={} nz={} zc={} raws={} escs={} ms={} long={} model={}",
         label,
@@ -539,7 +546,7 @@ fn run(gba: &mut agb::Gba) -> bool {
         }
     };
     let core_pin_ok = core8 == EXPECTED_INT8 && core16 == EXPECTED_INT16;
-    print_cost("core", &cost_core);
+    print_cost("core", &cost_core, true);
     agb::println!(
         "[uli-bench] core pins int8={:08x} int16={:08x} [{}]",
         core8,
@@ -564,7 +571,7 @@ fn run(gba: &mut agb::Gba) -> bool {
         }
     };
     let ovl_pin_ok = ovl8 == EXPECTED_INT8 && ovl16 == EXPECTED_INT16;
-    print_cost("ovl", &cost_ovl);
+    print_cost("ovl", &cost_ovl, true);
     agb::println!(
         "[uli-bench] ovl pins int8={:08x} int16={:08x} [{}]",
         ovl8,
@@ -595,7 +602,7 @@ fn run(gba: &mut agb::Gba) -> bool {
         }
     };
     let prod_pin_ok = prod8 == EXPECTED_INT8 && prod16 == EXPECTED_INT16;
-    print_cost("prod", &cost_prod);
+    print_cost("prod", &cost_prod, cfg!(feature = "verify"));
     agb::println!(
         "[uli-bench] prod pins int8={:08x} int16={:08x} [{}]",
         prod8,
