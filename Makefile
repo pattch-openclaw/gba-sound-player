@@ -10,7 +10,7 @@
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
         test test-rom flac-test uli-test uli-check uli-fixture uli-spike-rom uli-bench-rom uli-bench uli-overlay-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check gafp-check \
-        product-play-rom native-product-play-rom product-play-test \
+        product-play-rom native-product-play-rom product-play-test master-pack master-play-rom \
         flac-rom-default-kernel native-flac-rom-default-kernel spike-test opus-test kernel-test \
         overlay-check overlay-check-arm overlay-test overlay-test-twin overlay-test-arm overlay-objdump \
         overlay-kernel-rom native-overlay-kernel-rom podman-overlay-kernel-rom overlay-kernel-test podman-overlay-kernel-test \
@@ -287,6 +287,14 @@ FLAC_CRATE_BIN := target/$(TARGET)/release/flac-integration
 # percentage; see `examples/flac_integration/src/product_play_main.rs`.
 PRODUCT_PLAY_ROM := product-play.gba
 PRODUCT_PLAY_BIN := $(FLAC_CRATE_DIR)/target/$(TARGET)/release/product-play
+# The master-audio path (7-3): a source master is resampled/encoded to the
+# product rate and packed into a GAFP asset, then the product-play binary is
+# rebuilt with that asset and its generated pin. The asset/pin are build
+# artifacts (gitignored), so the tracked product asset is never overwritten.
+MASTER_ASSET := $(FLAC_CRATE_DIR)/assets/master.gfp
+MASTER_PIN := $(FLAC_CRATE_DIR)/src/master_pin.rs
+MASTER_PLAY_ROM := master-play.gba
+MASTER_PLAY_BIN := $(FLAC_CRATE_DIR)/target/$(TARGET)/release/product-play
 # The perf-gate spike ROM crate (examples/flac_spike/) — Phase 1 step 4, see
 # FLAC.md "Perf gate spike". Its host witness gate runs the same out-of-tree
 # --manifest-path way as flac-test (cargo config leak; FLAC.md).
@@ -568,6 +576,22 @@ gafp-pack-check: toolchain-check
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features scan,instrument --test gafp_asset_facts
 	@echo "gafp-pack-check passed: the real packer writes the committed product blob byte for byte, the fixture set and its three refusals still match their generator, and the crate re-reads all of it bit-exactly"
+
+# Encode an arbitrary source master into a playable GAFP asset at the target
+# rate/depth. This is the master-audio path: libFLAC chooses FIXED-1..4 and
+# sometimes CONSTANT/VERBATIM from real music, so `--master` accepts those
+# shapes without a measured product row, while still refusing LPC and still
+# enforcing 16,384 Hz / 16-bit / 2048-sample frames. The output is a MASTER
+# asset, not a C2 product asset until those decode rows are measured.
+master-pack: toolchain-check
+	@test -n "$(INPUT)" || { echo "usage: make master-pack INPUT=source.wav"; exit 1; }
+	python3 scripts/gafp_pack.py --master --emit-pin "$(MASTER_PIN)" "$(INPUT)" "$(MASTER_ASSET)"
+	@echo "master-pack done: $(MASTER_ASSET) + $(MASTER_PIN) — MASTER asset, not a C2 product until its shapes are measured"
+
+master-play-rom: master-pack format
+	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin product-play --features master-asset
+	agb-gbafix $(MASTER_PLAY_BIN) -o $(MASTER_PLAY_ROM)
+	@echo "master-play ROM built: $(MASTER_PLAY_ROM) — run it with 'timeout -k 5 120 $(GBA_TEST_RUNNER) $(MASTER_PLAY_ROM)' and read the [pp-rom] log"
 
 native-flac-rom: flac-rom
 	@echo "native-flac-rom done: $(FLAC_ROM)"
@@ -1384,6 +1408,8 @@ help:
 	@echo "  EXPERIMENTAL FLAC ROMs (flac-lite bundled for $(TARGET)):"
 	@echo "    native-flac-rom   build $(FLAC_ROM) natively"
 	@echo "    podman-flac-rom   build $(FLAC_ROM) in the container"
+	@echo "    master-pack       encode a source master to the master GAFP asset + pin (INPUT=…)"
+	@echo "    master-play-rom   pack that master and build $(MASTER_PLAY_ROM) (INPUT=…)"
 	@echo ""
 	@echo "  ULI2 (ULI2.md — product codec):"
 	@echo "    uli-test          portable core: thumbv4t build + bit-exact host corpus"

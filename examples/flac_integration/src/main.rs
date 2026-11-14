@@ -63,12 +63,15 @@ mod rom {
 
     /// The packed clip this ROM decodes: real libFLAC frames behind a generated
     /// `GAFP` header (see the module docs).
+    #[cfg(feature = "master-asset")]
+    static SONG: &[u8] = include_bytes!("../assets/master.gfp");
+    #[cfg(not(feature = "master-asset"))]
     static SONG: &[u8] = include_bytes!("../assets/spike_l0.gfp");
 
-    /// The 32,768 Hz / 2048-sample frame budget: `2048 / 32768 s × 16.78 MHz`.
+    /// The 16,384 Hz / 2048-sample frame budget: `2048 / 16384 s × 16.78 MHz`.
     /// Derived at compile time, never recalled — the same number the perf gate's
-    /// `stats::real_time_budget(2048, 32_768)` produces.
-    const BUDGET_CYCLES_PER_FRAME: u32 = (2048u64 * 16_780_000 / 32_768) as u32;
+    /// `stats::real_time_budget(2048, 16_384)` produces.
+    const BUDGET_CYCLES_PER_FRAME: u32 = (2048u64 * 16_780_000 / 16_384) as u32;
 
     const COLOR_PENDING: agb::display::Rgb15 = Rgb::new(128, 0, 255).to_rgb15(); // purple = running
     const COLOR_PASS: agb::display::Rgb15 = Rgb::new(0, 0, 255).to_rgb15(); // blue = every proof passed
@@ -492,7 +495,7 @@ mod rom {
         );
         agb::println!("[flac-rom] blob: {} bytes", SONG.len());
         agb::println!(
-            "[flac-rom] budget: {} cycles/frame (2048 @ 32768 Hz)",
+            "[flac-rom] budget: {} cycles/frame (2048 @ 16384 Hz)",
             BUDGET_CYCLES_PER_FRAME
         );
 
@@ -519,7 +522,7 @@ mod rom {
                         worst
                     );
                     agb::println!(
-                        "[flac-rom] budget: mean {}.{:03}% worst {}.{:03}% of a 32768 Hz frame",
+                        "[flac-rom] budget: mean {}.{:03}% worst {}.{:03}% of a 16384 Hz frame",
                         mean_x1000 / 1000,
                         mean_x1000 % 1000,
                         worst_x1000 / 1000,

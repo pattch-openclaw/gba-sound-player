@@ -42,7 +42,7 @@
 //! producer that keeps up forever may spend `(PERIOD_CYCLES − feeder) × 3.657`
 //! cycles per frame — **186.5%** of the measured cost. Ring depth does not move that
 //! number, because a bounded buffer cannot pay a permanent deficit; what depth buys
-//! is *time*, its lead spent once, which on the shipped 9.766 s clip shows up as a
+//! is *time*, its lead spent once, which on the shipped 9.906 s clip shows up as a
 //! few points of overage above the ceiling (190.6%, 178.1% at the hardware derate)
 //! and shrinks as the clip lengthens. [`sustained_overage_tolerance`] measures the
 //! clip and a doubled one; [`burst_stall_tolerance`] measures the transient that the
@@ -67,20 +67,19 @@
 //! room instead of stopping at its target the way `Producer::prefill` does, so the
 //! model was running a geometry the product does not have. Fix that one rule and the
 //! two implementations agree exactly — `ceil(8,960 / 2,048) × 2,048 = 10,240` of
-//! prefill, less the prime chunk and one period's drain, is 9,120, the number the
-//! ROM prints. Keeping a disagreement that was a bug would have been the more
-//! expensive kind of honesty.
+//! prefill, less the prime chunk, is 9,680, the number the 16,384 Hz ROM prints;
+//! at a slower cost the first period's take happens before the first fed-phase push
+//! and the floor is one chunk lower. Keeping a disagreement that was a bug would
+//! have been the more expensive kind of honesty.
 //!
 //! ## Where the cost figures come from
 //!
 //! From a run, not an estimate: `product-play.gba` as this tree builds it — sha
-//! `c0d3ac36e4580a7c…`, the image this pass rebuilt after correcting the sustained-overage
-//! arithmetic, the rate guard's shape and a handful of instrument descriptions — run under
-//! mGBA, whose serial log gives [`MEASURED`] and [`FEEDER_PER_PERIOD`]. Its ledger, period
-//! audit, `min_lead`/`max_lead`, PCM and FIFO pins are the same as `750d01e97800de95…`'s
-//! run; the stage sums and the attribution moved by a few tens of cycles because a string
-//! and the code around it changed length, not because the player's work did (work/frame
-//! 559,800 vs 559,848, one period boundary moved from the decode windows to a push window).
+//! `2abf61e8b18f4bac46ed680d2320f1b9237b3586e35e3f167f8aef2885eab5ff`, the
+//! 16,384 Hz image with the chunked push — run under mGBA, whose serial log gives [`MEASURED`] and
+//! [`FEEDER_PER_PERIOD`]. That run is 289/289 periods, zero underflows, zero late
+//! services, work 25.507% / worst frame 26.727%, attributed decode 417,451 c/frame,
+//! minimum lead 9,680 samples; it is an mGBA control, not a hardware claim.
 //! The envelope is tied to the bytes
 //! the ROM is built from on purpose: when a code change moves that image's `stages` line,
 //! this block has to be re-read from a fresh run in the same change. Be exact about what
@@ -168,26 +167,26 @@ fn decoded_frames(manifest: &Manifest<'_>) -> Vec<FrameBytes> {
 // `the_envelope_is_the_runs_own_sums` checks the derivation against the ROM's printed
 // means.
 
-/// The current image's mGBA run — `c0d3ac36e4580a7c…` — `[pp-rom] stages`, as the sums
+/// The current image's mGBA run — `2abf61e8…` at 16,384 Hz, chunked push — `[pp-rom] stages`, as the sums
 /// and counts that run printed. Means are recomputed here; nothing is copied. Re-read
 /// these five from a fresh run whenever ROM code changes: the sums are the only honest
 /// source, and the test named in the header re-checks them against the means that same
 /// run prints.
-const DECODE_SUM: u64 = 65_073_008;
-const CONVERT_SUM: u64 = 17_331_966;
-const PUSH_SUM: u64 = 2_262_520;
-/// Fed-phase windows: the frames decoded with the audio running. 152 = the 157
+const DECODE_SUM: u64 = 31_337_010;
+const CONVERT_SUM: u64 = 8_475_888;
+const PUSH_SUM: u64 = 1_351_391;
+/// Fed-phase windows: the frames decoded with the audio running. 75 = the 80
 /// frames less the 5 the prefill decoded before arming; the consumer's tail (one
-/// period, 240 real samples) is not a decode window at all.
-const STAGE_WINDOWS: u64 = 152;
+/// period, 464 real samples) is not a decode window at all.
+const STAGE_WINDOWS: u64 = 75;
 /// Period boundaries that fell **inside the decode windows** — the only ones
 /// nested in producer work. `convert` and `push` report `boundaries_in=0`.
-const DECODE_BOUNDARIES_INSIDE: u64 = 158;
-/// The same run's feeder: total over 571 serviced periods.
-const FEEDER_SUM: u64 = 3_221_180;
-const PERIODS_SERVICED: u64 = 571;
+const DECODE_BOUNDARIES_INSIDE: u64 = 5;
+/// The same run's feeder: total over 289 serviced periods.
+const FEEDER_SUM: u64 = 1_629_955;
+const PERIODS_SERVICED: u64 = 289;
 
-/// The feeder's own cost per period, from the same run: the mean of 571 measured
+/// The feeder's own cost per period, from the same run: the mean of 289 measured
 /// samples. It is deducted from each period's budget because the model charges the
 /// producer [`MEASURED`], which excludes the nesting: the two halves of the GBA's
 /// one core have to add up, not overlap.
@@ -206,23 +205,22 @@ const fn window_mean(sum: u64) -> u64 {
 
 /// The producer's own work per frame with the nesting left in: the three stage
 /// means added, which is exactly what the ROM's "decode + convert + push" line
-/// says (428,111 + 114,026 + 14,885 = 557,022).
+/// says (417,826 + 113,011 + 18,018 = 548,855).
 const MEASURED_RAW: u64 =
     window_mean(DECODE_SUM) + window_mean(CONVERT_SUM) + window_mean(PUSH_SUM);
 
 /// The same envelope with the boundaries nested inside those windows priced out of
-/// it, because that time belongs to the interrupt, not to the producer: 557,022 −
-/// (158/152) × 5,641 = 551,159.
+/// it, because that time belongs to the interrupt, not to the producer: 548,855 −
+/// (5/75) × 5,639 = 548,480.
 ///
 /// That subtraction is the attribution the ROM prints itself, and it is the same
-/// arithmetic — 428,111 − (158/152) × 5,641 = 422,248 — which is the very
+/// arithmetic — 417,826 − (5/75) × 5,639 = 417,451 — which is the very
 /// `isolated_estimate` that image prints on its `attribution:` line, so the model and
 /// the ROM derive that one figure identically. One period boundary landed in a `push`
 /// window this run, and this envelope prices only the decode windows' nesting, so the
 /// model is charged ~37 c/frame more than the ROM's fully attributed producer figure —
 /// the conservative direction, and it moves nothing. The earlier images in this lineage
-/// (`5dc7869…`, `750d01e9…`) printed 420,894 and 422,257 by the same arithmetic, and the
-/// record's rows for those images keep those figures. It is an estimate: an interrupt's
+/// (`5dc7869…`, `750d01e9…`, `c0d3ac3…`) keep their own figures in the record. It is an estimate: an interrupt's
 /// entry cost is not separable from the work it interrupted, which is why the
 /// unattributed figure is charged too, in [`MEASURED_RAW`], and why nothing here turns
 /// on the difference.
@@ -238,9 +236,9 @@ const HARDWARE_DERATE_PERCENT: u64 = 7;
 /// The ring watermark the current image's run observed, for the model to compare
 /// against: the minimum lead seen immediately before a push, and the maximum seen
 /// immediately after one.
-const ROM_OBSERVED_MIN_LEAD: usize = 9_120;
+const ROM_OBSERVED_MIN_LEAD: usize = 9_680;
 /// …and the maximum.
-const ROM_OBSERVED_MAX_LEAD: usize = 19_600;
+const ROM_OBSERVED_MAX_LEAD: usize = 20_160;
 
 // ---------------------------------------------------------------------------
 // The model
@@ -592,8 +590,8 @@ fn manifest_and_geometry_agree() {
     );
     assert_eq!(
         u64::from(geo::frame_cycles(u32::from(manifest.blocksize()))),
-        1 << 20,
-        "2048-sample frames at 32,768 Hz must come to exactly 2^20 cycles, which is what every published share at this rate is divided by"
+        1 << 21,
+        "2048-sample frames at 16,384 Hz must come to exactly 2^21 cycles, which is what every published share at this rate is divided by"
     );
 
     // The rate contract, witnessed against the asset rather than assumed by the
@@ -742,40 +740,40 @@ fn fifo_pins_match_the_converted_stream() {
 
 /// The cost envelope the rest of these tests are charged is the run's own sums, and
 /// the derivation is arithmetic a reader can re-do from the log: the three stage
-/// means add to 557,022 as printed, the 158 boundaries inside the decode windows
-/// price out at (158/152) × 5,641 = 5,863, and 428,111 − 5,863 = 422,248 is the
+/// means add to 548,855 as printed, the 5 boundaries inside the decode windows
+/// price out at (5/75) × 5,639 = 375, and 417,826 − 375 = 417,451 is the
 /// `isolated_estimate` that same image prints for itself.
 ///
 /// This test exists because the block it guards was a transcription first, and the
 /// transcription was wrong in the permissive direction — it charged the model 2.4%
-/// less than the ROM's own arithmetic says the producer costs (the 2026-11-11 image).
+/// less than the ROM's own arithmetic says the producer costs (the 2026-11-13 16,384 Hz image).
 /// Its second job is the one that earned its keep on 2026-11-12: the envelope had by
 /// then been left behind by three later builds, and this is the check that says so.
 #[test]
 fn the_envelope_is_the_runs_own_sums() {
     assert_eq!(
         window_mean(DECODE_SUM),
-        428_111,
+        417_826,
         "the ROM printed this mean"
     );
     assert_eq!(
         window_mean(CONVERT_SUM),
-        114_026,
+        113_011,
         "the ROM printed this mean"
     );
-    assert_eq!(window_mean(PUSH_SUM), 14_885, "the ROM printed this mean");
-    assert_eq!(FEEDER_PER_PERIOD, 5_641, "3,221,180 / 571, as printed");
-    assert_eq!(MEASURED_RAW, 557_022, "the ROM's decode + convert + push");
+    assert_eq!(window_mean(PUSH_SUM), 18_018, "the ROM printed this mean");
+    assert_eq!(FEEDER_PER_PERIOD, 5_639, "1,629,955 / 289, as printed");
+    assert_eq!(MEASURED_RAW, 548_855, "the ROM's decode + convert + push");
 
     // The attribution, computed the way the ROM computes it (its own per-window
     // `inside` over its own `n`), against the constant this file charges.
     let nested = FEEDER_PER_PERIOD * DECODE_BOUNDARIES_INSIDE / STAGE_WINDOWS;
-    assert_eq!(nested, 5_863);
-    assert_eq!(MEASURED, 551_159);
+    assert_eq!(nested, 375);
+    assert_eq!(MEASURED, 548_480);
     let isolated_decode = window_mean(DECODE_SUM) - nested;
     assert_eq!(
-        isolated_decode, 422_248,
-        "the image prints `attribution: decode ... isolated_estimate=422248` itself; the \
+        isolated_decode, 417_451,
+        "the image prints `attribution: decode ... isolated_estimate=417451` itself; the \
          model derives that number from the same sums, and if it moves the two records \
          have parted company"
     );
@@ -816,7 +814,7 @@ fn model_and_rom_instantiate_the_same_ring() {
     );
     // And the DMA shape follows from the same numbers, because it is the same
     // numbers: 560 bytes per channel is 140 words, which is what the register
-    // block has to be loaded with, and a period is 560 samples at 512 cycles each.
+    // block has to be loaded with, and a period is 560 samples at 1,024 cycles each.
     assert_eq!(geo::DMA_WORDS as usize * 4, geo::CHUNK_SAMPLES);
     assert_eq!(
         geo::PERIOD_CYCLES,
@@ -829,7 +827,7 @@ fn model_and_rom_instantiate_the_same_ring() {
     );
     assert_eq!(
         u32::from(geo::REARM_GRACE_SAMPLES) * geo::TICKS_PER_SAMPLE,
-        8192
+        16_384
     );
 }
 
@@ -939,7 +937,7 @@ fn worst_frame_burst_does_not_starve() {
     let total = usize::try_from(manifest.total_samples()).unwrap();
     let block = usize::from(manifest.blocksize());
     let prefill_frames = (geo::PREFILL_SAMPLES + block - 1) / block;
-    const ROM_WORST_WORK: u64 = 565_939; // the largest recorded; see the doc above
+    const ROM_WORST_WORK: u64 = 560_506; // the largest recorded; see the doc above
     for at in prefill_frames..frames.len() {
         let settings = Settings {
             burst: Some((at, ROM_WORST_WORK)),
@@ -989,9 +987,13 @@ fn floor_matches_the_roms_watermark() {
     // the ROM measured — sample for sample, from an independent implementation.
     let block = usize::from(manifest.blocksize());
     let prefill_actual = (geo::PREFILL_SAMPLES + block - 1) / block * block;
-    let predicted = prefill_actual - 2 * geo::CHUNK_SAMPLES;
+    // At the post-retarget cost one period's credit is enough to start a frame
+    // before the first period's chunk is taken, so the floor is the prefill less
+    // the prime; at a slower cost the first take happens first and it is one chunk
+    // lower. The model decides which, and the assertion below is against its answer.
+    let predicted = prefill_actual - geo::CHUNK_SAMPLES;
     println!(
-        "model/floor: prefill target {} -> actual {} (rounded up to whole frames of {}); less the prime and one period's drain = {}",
+        "model/floor: prefill target {} -> actual {} (rounded up to whole frames of {}); less the prime = {}",
         geo::PREFILL_SAMPLES,
         prefill_actual,
         block,
@@ -1003,7 +1005,7 @@ fn floor_matches_the_roms_watermark() {
     );
     assert_eq!(
         out.min_lead, predicted,
-        "the floor is the quantised prefill less the prime and the first period's drain; anything else means the model and the ROM disagree about flow control"
+        "the floor is the quantised prefill less the prime; anything else means the model and the ROM disagree about flow control"
     );
     assert_eq!(
         out.min_lead, ROM_OBSERVED_MIN_LEAD,
@@ -1114,7 +1116,7 @@ fn tolerate_per_mille(frames: &[FrameBytes], total: usize, base: u64) -> u64 {
 /// **186.5%** of the measured cost. That ceiling is a property of the clock; **no ring
 /// depth can move it**, because a bounded buffer cannot pay a permanent deficit.
 ///
-/// What the ring can buy is *time* — its lead, spent once. On the shipped 9.766 s clip
+/// What the ring can buy is *time* — its lead, spent once. On the shipped 9.906 s clip
 /// that is worth a few points of overage above the ceiling; double the clip and it is
 /// worth less, because the lead is fixed and the deficit is not. This test measures the
 /// first and the trend of the last. An earlier version divided `frame_cycles` by
@@ -1453,7 +1455,13 @@ const PRODUCT_STREAM_RATES: &[u32] = &[geo::PLAYBACK_RATE_HZ];
 /// number that says *why* the ruling was made would disappear with the arm. It is a
 /// historical record, not a permitted pair: the assert below demands the tree refuse
 /// this exact declaration outright.
-const RECORDED_BRIDGE: (u32, u32) = (32_000, geo::PLAYBACK_RATE_HZ);
+const RECORDED_BRIDGE: (u32, u32) = (32_000, RECORDED_PRODUCT_CLOCK);
+
+/// The product clock the recorded bridge played on: the 32,768 Hz rung the
+/// 2026-11-11 hardware runs were taken at. Kept as a literal because the current
+/// tree plays at 16,384 Hz; using `geo::PLAYBACK_RATE_HZ` here would silently
+/// re-point a historical 41.06-cent calculation at a different clock.
+const RECORDED_PRODUCT_CLOCK: u32 = 32_768;
 
 /// Q14, **ruled** by the project owner on 2026-11-11 and **landed by plan item
 /// 7-0**: a stream is encoded at the rate it is played at, and the player does not
@@ -1499,7 +1507,7 @@ fn ruled_rate_policy_allows_no_reinterpretation_of_a_declared_rate() {
     // arithmetically clean and all three are still refused: Q14's rule is about the
     // declared rate, not about which division happens to be exact.
     for rate in [
-        8_000u32, 8_192, 11_025, 16_000, 16_384, 18_157, 22_050, 24_000, 26_000, 31_000, 32_001,
+        8_000u32, 8_192, 11_025, 16_000, 18_157, 22_050, 24_000, 26_000, 31_000, 32_001, 32_768,
         33_000, 44_100, 48_000, 65_536,
     ] {
         assert_eq!(
@@ -1846,12 +1854,22 @@ fn tone(peak: i32, period: usize, count: usize) -> Vec<i32> {
 /// the *same sample count* as the shipped asset on purpose: filter resolution
 /// depends on record length, so both legs have to be read over the same length for
 /// their ratios to be comparable.
+///
+/// One term of the recorded design is deliberately omitted, and the reason is a
+/// retarget collision rather than a preference: the old design's 250 Hz partial has
+/// period 128 at 32,000 Hz, which is exactly the current 128 Hz anchor's period at
+/// 16,384 Hz. Keeping it would make the negative leg answer at `p_new` with that
+/// partial (weight 5, about 4.89 counts) instead of at the old anchor (weight 3,
+/// about 2.92), so the instrument would be measuring the wrong tone. Every other
+/// recorded term — the 128 Hz anchor, the 166.7 Hz and 400 Hz partials, the square,
+/// the side band and both noise ramps — is unchanged.
 fn recorded_design_at_old_clock(count: usize) -> (Vec<i32>, Vec<i32>) {
     let mut l = Vec::with_capacity(count);
     let mut r = Vec::with_capacity(count);
     for i in 0..count {
         let mut center: i32 = RECORDED_CENTRE_AT_32000
             .iter()
+            .filter(|(p, _)| *p != 128)
             .map(|(p, w)| fl(w * tri(i, *p), 1000))
             .sum();
         center += fl(2 * square(i, RECORDED_SQUARE_AT_32000), 1000);
@@ -2054,8 +2072,8 @@ fn the_pitch_witness_names_the_clock_the_samples_were_made_at() {
     let p_new = exact_period(geo::PLAYBACK_RATE_HZ, ANCHOR_HZ);
     let p_old = exact_period(RECORDED_OLD_CLOCK, ANCHOR_HZ);
     assert_eq!(
-        p_new - p_old,
-        ((geo::PLAYBACK_RATE_HZ - RECORDED_OLD_CLOCK) / ANCHOR_HZ) as usize,
+        p_old - p_new,
+        ((RECORDED_OLD_CLOCK - geo::PLAYBACK_RATE_HZ) / ANCHOR_HZ) as usize,
         "the two candidate periods must be exactly the rate offset apart, in samples: \
          that offset IS the Q14 error, so if the anchor's periods were not separated by \
          it, the instrument could not see it"
@@ -2265,15 +2283,12 @@ fn the_pitch_witness_names_the_clock_the_samples_were_made_at() {
         geo::PLAYBACK_RATE_HZ
     );
     assert_eq!(p_old * ANCHOR_HZ as usize, RECORDED_OLD_CLOCK as usize);
-    let cents = pitch_cents_of(RECORDED_OLD_CLOCK, geo::PLAYBACK_RATE_HZ);
+    let cents = pitch_cents_of(RECORDED_OLD_CLOCK, RECORDED_PRODUCT_CLOCK);
     println!(
-        "negative leg: on a {} Hz clock that is {} samples per period against the {} those \
-         samples were made for — {:.2} cents, and every digest in this file would have \
-         passed it. That is the 6b-3 configuration: the sample side cannot see it, so the \
-         rule side has to, and now there is an instrument behind both.",
-        geo::PLAYBACK_RATE_HZ,
-        p_new,
-        p_old,
+        "negative leg: the recorded 32,000 Hz design against the 32,768 Hz clock it was \
+         played on is {:.2} cents; every digest in this file would have passed it. That is \
+         the 6b-3 configuration: the sample side cannot see it, so the rule side has to, \
+         and now there is an instrument behind both.",
         cents
     );
     assert!(

@@ -336,11 +336,11 @@ fn cycle_fold_witness_on_embedded_bytes() {
         // ONE number, and that equality is the thing being pinned: the rate
         // contract says a stream is encoded at the rate it is played at, so
         // the stream's own worst-frame window (2048 at the rate its own
-        // STREAMINFO declares) and the 32,768 Hz budget the ROM screen
+        // STREAMINFO declares) and the 16,384 Hz budget the ROM screen
         // compares against must be equal. Two different numbers here is the
         // Q14 defect re-opened, and the rate check below is what names it.
         assert_eq!(
-            clip.sample_rate_hz, 32_768,
+            clip.sample_rate_hz, 16_384,
             "{}: rate contract — the spike's assets must be encoded at the clock \
              they are played at, or the window derived from their declared rate is \
              not the window the ROM's screen verdict budgets against",
@@ -348,14 +348,14 @@ fn cycle_fold_witness_on_embedded_bytes() {
         );
         let true_window = real_time_budget(usize::from(clip.max_blocksize), clip.sample_rate_hz);
         assert_eq!(
-            true_window, 1_048_750,
+            true_window, 2_097_500,
             "{}: true worst-window arithmetic",
             clip.name
         );
         assert_eq!(
-            real_time_budget(2048, 32_768),
-            1_048_750,
-            "{}: ROM verdict budget (the plan's 512 cycles/sample arithmetic)",
+            real_time_budget(2048, 16_384),
+            2_097_500,
+            "{}: ROM verdict budget (the plan's 1,024 cycles/sample arithmetic)",
             clip.name
         );
         assert!(

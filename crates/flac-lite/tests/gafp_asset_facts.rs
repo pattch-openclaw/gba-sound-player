@@ -46,8 +46,8 @@
 //! `DEFAULT_PROFILE.validate` accepts the LPC asset, a hand-tightened `-l 0`-shaped
 //! profile accepts it too, and `Decoder` plays it correctly. Nothing on this side
 //! of the line can tell you that on this target the decode half of that asset
-//! alone costs 174.14% of the frame — 1,816,753 cycles where a 2048-sample frame
-//! at the 32768 Hz playback timer has 1,048,576 — against 42.48% for the
+//! alone costs 87.07% of the frame — 1,816,753 cycles where a 2048-sample frame
+//! at the 16384 Hz playback timer has 2,097,152 — against 21.25% for the
 //! FIXED-only asset it sits beside.
 //!
 //! That is not a defect to fix in the decoder; it is why the fixture set exists:
@@ -79,17 +79,17 @@ const TABLE: &str = include_str!("gafp_asset_vectors.txt");
 /// a fixture nobody verifies, so it fails loudly instead of sitting there.
 fn blob_bytes(name: &str) -> &'static [u8] {
     match name {
-        "p0_fixed0_mono_32768_b2048.gfp" => {
-            include_bytes!("gfp/p0_fixed0_mono_32768_b2048.gfp")
+        "p0_fixed0_mono_16384_b2048.gfp" => {
+            include_bytes!("gfp/p0_fixed0_mono_16384_b2048.gfp")
         }
-        "p2_fixed0_stereo_32768_b2048.gfp" => {
-            include_bytes!("gfp/p2_fixed0_stereo_32768_b2048.gfp")
+        "p2_fixed0_stereo_16384_b2048.gfp" => {
+            include_bytes!("gfp/p2_fixed0_stereo_16384_b2048.gfp")
         }
-        "p3_fixed0_midside_32768_b2048.gfp" => {
-            include_bytes!("gfp/p3_fixed0_midside_32768_b2048.gfp")
+        "p3_fixed0_midside_16384_b2048.gfp" => {
+            include_bytes!("gfp/p3_fixed0_midside_16384_b2048.gfp")
         }
-        "x1_lpc_stereo_32768_b2048.gfp" => {
-            include_bytes!("gfp/x1_lpc_stereo_32768_b2048.gfp")
+        "x1_lpc_stereo_16384_b2048.gfp" => {
+            include_bytes!("gfp/x1_lpc_stereo_16384_b2048.gfp")
         }
         other => panic!(
             "the table names a blob this suite does not embed: {other}. Embed it \
@@ -319,7 +319,7 @@ fn load() -> (Vec<Blob>, Vec<Refusal>) {
             // in a later test. The `profile` row above carries the clock the
             // packer budgeted against; this row carries the rate the blob
             // declares. They used to be allowed to differ — a 32,000 Hz stream
-            // packed against a 32,768 Hz frame timer — and that difference is the
+            // packed against a 16,384 Hz frame timer — and that difference is the
             // pitch bug the ruling exists to prevent. Overwriting the field here
             // would hide it, so the two are compared instead.
             assert_eq!(
@@ -1171,9 +1171,9 @@ fn every_blob_decodes_to_the_pcm_the_reference_decoder_produced() {
 #[test]
 fn one_pcm_three_blobs_and_the_field_that_cannot_tell_them_apart() {
     let (blobs, refusals) = load();
-    let independent = "p2_fixed0_stereo_32768_b2048.gfp";
-    let midside = "p3_fixed0_midside_32768_b2048.gfp";
-    let lpc = "x1_lpc_stereo_32768_b2048.gfp";
+    let independent = "p2_fixed0_stereo_16384_b2048.gfp";
+    let midside = "p3_fixed0_midside_16384_b2048.gfp";
+    let lpc = "x1_lpc_stereo_16384_b2048.gfp";
 
     // One source PCM, three encodings. The audio is identical by construction;
     // the frames are not. If that were not true — if the generator had drifted —
@@ -1224,7 +1224,7 @@ fn one_pcm_three_blobs_and_the_field_that_cannot_tell_them_apart() {
         assert_eq!(
             census(blob_named(&blobs, name)),
             (0, 6),
-            "{name}: the product-profile asset stands at 42.48% mean / 42.72% \
+            "{name}: the product-profile asset stands at 21.25% mean / 21.36% \
              worst of the frame with six FIXED-0 subframes and no LPC ones"
         );
     }
@@ -1271,7 +1271,7 @@ fn one_pcm_three_blobs_and_the_field_that_cannot_tell_them_apart() {
              itself says. The rate clause is inherited, because it is not the clause
              this profile is tightening; on the decoder's side of the line there is
              nothing that \
-             separates a 42.48%-of-the-frame asset from a 174.14%-of-the-frame \
+             separates a 21.25%-of-the-frame asset from an 87.07%-of-the-frame \
              one; on the packer's side there is, and the refusal below is it."
         );
     }
@@ -1311,8 +1311,8 @@ fn one_pcm_three_blobs_and_the_field_that_cannot_tell_them_apart() {
     assert!(!refused.wrote_file, "and it wrote no file");
     for fact in [
         "real LPC subframes",
-        "decodes at 174.14% of the frame",
-        "1816753 cycles for 2048 samples at the 32768 Hz playback timer",
+        "decodes at 87.07% of the frame",
+        "1816753 cycles for 2048 samples at the 16384 Hz playback timer",
     ] {
         assert!(
             refused.reason.contains(fact),
@@ -1330,12 +1330,12 @@ fn the_refusals_are_on_the_record() {
     // table: a refusal has to name the property, so whoever reads the message
     // knows what to change. `gen_gafp_fixtures.py --check` re-runs these legs
     // live; this asserts what they printed when the table was generated.
-    let rate = refusal(&refusals, "rate_44100_at_32768_target");
+    let rate = refusal(&refusals, "rate_44100_at_16384_target");
     assert_eq!(rate.exit, 1);
     assert!(!rate.wrote_file);
     assert!(
         rate.reason
-            .contains("sample rate 44100 Hz is not the target 32768 Hz"),
+            .contains("sample rate 44100 Hz is not the target 16384 Hz"),
         "the stream-level fact: {}",
         rate.reason
     );
@@ -1360,7 +1360,7 @@ fn the_refusals_are_on_the_record() {
     assert!(
         rate.reason.contains("1.024x") && rate.reason.contains("41.06 cents"),
         "…and the size of what the mapping did to the music: 32,000 Hz played on \
-         a 32,768 Hz clock is 41.06 cents sharp. That is the thing a listener \
+         a clock that is not the stream's rate is a pitch shift the profile refuses. That is the thing a listener \
          hears and no sample-level pin can see: {}",
         rate.reason
     );
@@ -1386,7 +1386,7 @@ fn the_refusals_are_on_the_record() {
 
     for slug in [
         "lpc_at_product_profile",
-        "rate_44100_at_32768_target",
+        "rate_44100_at_16384_target",
         "eight_bit_at_16bit",
     ] {
         refusal(&refusals, slug);
@@ -1398,7 +1398,7 @@ fn the_refusals_are_on_the_record() {
 /// Every blob the packer accepted declares one rate, and that rate is the clock
 /// the packer's measured rows are stated in. Before 7-0 the table could not say
 /// that: the accepted set declared 32,000 Hz while every percentage in
-/// `measurements.md` was divided by a 32,768 Hz frame period, and the mapping
+/// `measurements.md` was divided by a 16,384 Hz frame period, and the mapping
 /// between the two lived in a dictionary (`PLAYBACK_RATE_FOR_STREAM`) that the
 /// product path mirrored in Rust (`geometry::RATE_BRIDGE`). Q14 ruled the
 /// practice out — a stream is encoded at the rate it is played at — and this is
@@ -1421,6 +1421,11 @@ fn every_product_blob_declares_the_clock_its_costs_are_stated_in() {
          {rates:?}"
     );
     let packed_at = rates[0];
+    assert_eq!(
+        packed_at,
+        u64::from(PRODUCT_SAMPLE_RATE_HZ),
+        "the accepted fixtures must declare the crate's product clock"
+    );
     // Not the old product rate, and the reason for the test. 32,000 Hz is a legal
     // FLAC stream rate; it is not a rate this target plays at, and a set of
     // fixtures that declared it would be a table of assets the ROM can only play
@@ -1447,12 +1452,12 @@ fn every_product_blob_declares_the_clock_its_costs_are_stated_in() {
     }
     // The frame period the measured rows divide by follows from that rate, and the
     // table cites it in the refusal leg's text: 2^24 cycles/s x 2048 samples /
-    // 32,768 Hz = 2**20 cycles. Stated here as arithmetic, not copied as a magic
+    // 16,384 Hz = 2**21 cycles. Stated here as arithmetic, not copied as a magic
     // constant, because the whole point of 7-0 is that the two are the same chain.
     assert_eq!(
         (16_777_216u64 * 2048) / packed_at,
-        1_048_576,
-        "the product clock has to be the one the 2**20-cycle frame period the \
+        2_097_152,
+        "the product clock has to be the one the 2**21-cycle frame period the \
          measured rows cite comes from"
     );
 

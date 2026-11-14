@@ -51,7 +51,7 @@ Usage:
   profile, then encoded with the reference command.
 
 Options:
-  -r, --rate HZ            target sample rate            (default 32768, and
+  -r, --rate HZ            target sample rate            (default 16384, and
                            the only value a product blob may carry — see
                            PRODUCT_CLOCK_HZ: the packer budgets a frame against
                            one clock, so a stream that declares another rate is
@@ -60,6 +60,11 @@ Options:
   -b, --blocksize N        samples per subframe, fixed   (default 2048)
   -L, --max-lpc-order N    libFLAC `-l` value            (default 0 = LPC disabled;
                            the measured product rows cover FIXED-0 only)
+      --master             build a master-audio asset: accept CONSTANT,
+                           FIXED-0..4 and VERBATIM without a measured decode row,
+                           but still refuse LPC and still enforce rate/block/depth.
+                           The output is a C2-path MASTER asset; the per-shape
+                           measured-row preflight is skipped, not the C2 claim.
       --allow-lpc          let real LPC subframes above `-L` through the profile
                            guard (a NON-PRODUCT blob)
       --allow-unmeasured   let predictor kinds or residual shapes with no
@@ -75,6 +80,8 @@ Options:
       --check              build in memory and compare with OUTPUT (tripwire)
       --emit-facts TABLE   also write the per-frame/per-subframe facts table
                            `tests/gafp_asset_facts.rs` reads
+      --emit-pin PATH      also write a `gafp_pin.rs`-shaped Rust module with the
+                           blob's frame/sample counts, PCM and FIFO pins
       --keep-work          keep the temporary working directory and print it
 
 Three separate knobs, on purpose
@@ -92,8 +99,8 @@ different questions, and a build that means one must not quietly get another:
     the same as safe; the plan says so, so the default is to refuse and name the
     nearest measured row instead of inventing a figure.
   * `--allow-over-budget` is for a kind that HAS been measured on hardware at this
-    target and is over the decode-half bar — `-l 4` at 32 kHz/2048 is 174.14% of
-    the frame for the decode half alone, which is why C2 excludes LPC. The
+    target and is over the decode-half bar — `-l 4` at 16,384 Hz/2048 is 87.07%
+    of the frame for the decode half alone, which is why C2 excludes LPC. The
     measured product row is FIXED-0: `-l 0` disables LPC, but libFLAC still
     chooses FIXED orders 1-4 from the signal, and those orders have no measured
     row here. A real track that lands on FIXED-1..4 is therefore refused, not
@@ -238,10 +245,10 @@ MEASURED_DECODE = {
     # kind/order and the residual envelope recorded in it — and only for frames
     # like the ones it names in `frames_sha256`.
     (2048, "fixed", 0): dict(
-        mean_pct=42.48,
-        worst_pct=42.72,
+        mean_pct=21.25,
+        worst_pct=21.36,
         cycles_mean=445558,
-        budget_cycles=1048576,
+        budget_cycles=2097152,
         # The frames this figure was taken from: the perf spike's FIXED-only arm
         # as it stood before plan item 7-0 re-authored the clip at the device
         # rate (157 frames, 314 slots, `fixed0` x314, a 512-sample final frame).
@@ -263,7 +270,7 @@ MEASURED_DECODE = {
                       rice_param_max=10),
         src=("flac-docs/measurements.md, 6a-7b on hardware, `asm` arm, GBA 001 "
              "+ GBA SP, two runs each, identical to the cycle: 445,558 c/frame "
-             "= 217.56 c/sample, 42.48% mean / 42.72% worst of the 32,768 Hz "
+             "= 217.56 c/sample, 21.25% mean / 21.36% worst of the 16,384 Hz "
              "frame. Kernel-only: the 6b-1 product ROM measures the same clip "
              "end to end at 37.83% mean / 38.04% worst through the manifest "
              "facade, and both figures are inside the bar this module states. "
@@ -272,10 +279,10 @@ MEASURED_DECODE = {
              "the row measured on the frames 7-0 produced."),
     ),
     (2048, "lpc", 4): dict(
-        mean_pct=173.23,
-        worst_pct=174.14,
+        mean_pct=86.64,
+        worst_pct=87.07,
         cycles_mean=1816753,
-        budget_cycles=1048576,
+        budget_cycles=2097152,
         frames_sha256=("6609602ba18860e6562c86594b6b56c4e434749623f731114e8a"
                        "602444367cc5"),
         frames_note=("examples/flac_spike/assets/spike_l4_frames.bin as of the "
@@ -284,7 +291,7 @@ MEASURED_DECODE = {
                       rice_param_max=10),
         src=("flac-docs/measurements.md, 6a-7b on hardware, `asm` arm, same "
              "instrument and same frames as the row above, `-l 4` arm: "
-             "1,816,753 c/frame = 173.23% mean / 174.14% worst. That arm's "
+             "1,816,753 c/frame = 86.64% mean / 87.07% worst at 16,384 Hz (the same cycles are 173.23% / 174.14% at 32,768 Hz). That arm's "
              "census is lpc4 x312 + lpc3 x2, so this is a CLIP mean and a LOWER "
              "bound on what the LPC kind alone costs per frame. Over budget by "
              "itself, before the producer's other stages exist."),
@@ -296,9 +303,11 @@ MEASURED_DECODE = {
 # `mean_pct`. It is not a hypothetical guard — writing this file got the
 # denominator wrong on the first pass (a 32,000 Hz frame period is 1,073,742
 # cycles at this script's clock, against 1,048,576 for the 32,768 Hz timer the
-# product plays against: a 2.4% difference, enough to move 42.49% to 41.49% and
-# hide nothing). That is exactly why the denominator is now stated once, as a
-# clock, and is not derived from the stream that is being packed. Percent.
+# product played against then, and 2,097,152 for the 16,384 Hz timer it plays
+# against now: the 32,000 comparison was a 2.4% difference, enough to move 42.49%
+# to 41.49% and hide nothing). That is exactly why the denominator is now stated
+# once, as a clock, and is not derived from the stream that is being packed.
+# Percent.
 #
 # One honest caveat about the tolerance below: this file budgets with the exact
 # 2^24 Hz clock, while the instrument budgets with `stats.rs::GBA_CLOCK_HZ =
@@ -306,8 +315,8 @@ MEASURED_DECODE = {
 # `verdict:` line and every published share in flac-docs/measurements.md and
 # perf-results.md is divided by. The two denominators differ by 174 cycles
 # (0.0166%), which is under this 0.1 pp tolerance, so a row copied from either
-# source re-derives and passes here; e.g. 445,558 c re-derives to 42.49% against
-# this budget against the 42.48% a rounded-clock reading gives. That is why rows
+# source re-derives and passes here; e.g. 445,558 c re-derives to 21.25% against
+# this budget against the 21.24% a rounded-clock reading gives. That is why rows
 # are cited by source and condition, and why the reconciliation of the two clocks
 # is written down in flac-docs/method-and-gates.md before item 7-1 puts new
 # shares on the same table.
@@ -337,7 +346,7 @@ DECODE_SHARE_LIMIT_PCT = 50.0
 # the clock these rows are stated in?" — and never a lookup that picks a
 # different clock for a stream that declares something else.
 GBA_CYCLES_PER_SECOND = 16777216
-PRODUCT_CLOCK_HZ = 32768
+PRODUCT_CLOCK_HZ = 16384
 
 # Rate reinterpretations this packer is willing to perform. After Q14 there are
 # none, and the table exists only to say that in one place: it must stay empty.
@@ -414,12 +423,12 @@ def check_guard_shapes():
         return dict(kind=kind, order=order, partitions=partitions,
                     wasted=wasted, escaped=escaped, max_rice_param=rice)
 
-    def verdict(s, at=rate):
+    def verdict(s, at=rate, p=profile):
         at_info = dict(info)
         at_info["sample_rate"] = at
         frame = dict(number=0, blocksize=2048, rate=at, channels=2,
                      crc_ok=True, subframes=[s])
-        return profile_verdict(at_info, [frame], profile)
+        return profile_verdict(at_info, [frame], p)
 
     ok, reasons, _ = verdict(slot("fixed", 0))
     assert ok, "the measured FIXED-0 shape must stay accepted: %s" % reasons
@@ -441,11 +450,11 @@ def check_guard_shapes():
     # The rate legs. A stream that declares another rate is refused on the ruling,
     # not budgeted at a different clock — including 32,000 Hz, the rate every
     # asset in this tree carried until 7-0, and including the powers of two that
-    # divide the clock exactly (8,192 / 16,384 / 65,536), which are arithmetically
+    # divide the clock exactly (8,192 / 32,768 / 65,536), which are arithmetically
     # clean and still refused: the rule is about the declared rate, not about
     # which division happens to be exact.
-    for other in (8000, 8192, 11025, 16000, 16384, 22050, 24000, 31000, 32000,
-                  32001, 44100, 48000, 65536):
+    for other in (8000, 8192, 11025, 16000, 22050, 24000, 31000, 32000,
+                  32001, 32768, 44100, 48000, 65536):
         ok, reasons, _ = verdict(slot("fixed", 0), at=other)
         assert not ok and any("is not the target" in r for r in reasons), \
             "a %d Hz stream must be refused by the rate clause, got %s" % (
@@ -456,6 +465,24 @@ def check_guard_shapes():
     row, _ = nearest_measured(PRODUCT_CLOCK_HZ, 2048, "fixed", 0)
     assert row is not None and row[0] == 2048 and row[1:] == ("fixed", 0), \
         "the measured rows must be keyed structurally, not by rate"
+
+    # The master mode: real source material chooses FIXED-1..4 and sometimes
+    # CONSTANT/VERBATIM, none of which has a measured product row yet. It may
+    # write a MASTER asset, but never an LPC one, and it never calls that asset
+    # a C2 product.
+    master = Profile()
+    master.master = True
+    for shape in (slot("constant", 0), slot("fixed", 1), slot("fixed", 4),
+                  slot("verbatim", 0)):
+        ok, reasons, _ = verdict(shape, p=master)
+        assert ok and not reasons, \
+            "master mode must accept the non-LPC %s shape, got %s" % (
+                shape["kind"], reasons)
+    ok, reasons, _ = verdict(slot("lpc", 4), p=master)
+    assert not ok and any("master profile is FIXED-only" in r for r in reasons), \
+        "master mode must still refuse LPC, got %s" % reasons
+    assert master.is_product(), \
+        "master mode is the C2 path; per-shape preflight is a separate hardening step"
 
 
 # Sample rates the container may carry, and the reason 44,100 is not among the
@@ -478,6 +505,7 @@ class Profile(object):
         self.allow_lpc = False
         self.allow_unmeasured = False
         self.allow_over_budget = False
+        self.master = False
         self.channels = None          # None = take the input's own
         self.midside = True
         self.verify_pcm = True
@@ -492,9 +520,10 @@ class Profile(object):
         neither is channel count, which is why neither appears here.
 
         This says what was *requested*, not what libFLAC emitted: `-l 0` is not
-        FIXED-0, so `profile_verdict` still has to see the frames. A stream that
-        lands on FIXED-1..4 or outside the measured residual envelope is refused
-        by the default guard and never reaches a product blob."""
+        FIXED-0, so `profile_verdict` still has to see the frames. In the default
+        guard a stream that lands on FIXED-1..4 or outside the measured residual
+        envelope is refused; `--master` is the C2 path for real audio and skips
+        that per-shape preflight while still refusing LPC."""
         return (self.rate == DEFAULT_RATE
                 and self.blocksize == DEFAULT_BLOCKSIZE
                 and self.max_lpc_order == DEFAULT_MAX_LPC_ORDER
@@ -502,11 +531,11 @@ class Profile(object):
 
     def describe(self):
         return ("rate=%d blocksize=%d -l %d midside=%s channels=%s "
-                "allow_lpc=%s allow_unmeasured=%s allow_over_budget=%s"
+                "master=%s allow_lpc=%s allow_unmeasured=%s allow_over_budget=%s"
                 % (self.rate, self.blocksize, self.max_lpc_order,
                    "on" if self.midside else "off",
                    self.channels if self.channels else "as-input",
-                   self.allow_lpc, self.allow_unmeasured,
+                   self.master, self.allow_lpc, self.allow_unmeasured,
                    self.allow_over_budget))
 
     def relaxations(self):
@@ -892,6 +921,19 @@ def profile_verdict(info, facts, profile, region_sha=None):
     for (kind, order), count in sorted(census.items()):
         row = MEASURED_DECODE.get((profile.blocksize, kind, order))
         label = "%s%s" % (kind, order if kind in ("fixed", "lpc") else "")
+        if profile.master:
+            if kind == "lpc":
+                bad("%s x%d: the master profile is FIXED-only; `-l 0` disables "
+                    "LPC, and this track contains real LPC subframes. Re-encode "
+                    "it with `-l 0`, or use --allow-lpc for a non-product blob."
+                    % (label, count))
+            else:
+                report.append("%s x%d: MASTER — FIXED/VERBATIM constant-shape "
+                              "accepted on the C2 path without a measured decode "
+                              "row at %d-sample frames; the per-shape preflight is "
+                              "not applied."
+                              % (label, count, profile.blocksize))
+            continue
         if kind == "lpc" and not profile.allow_lpc and order > profile.max_lpc_order:
             bad("real LPC subframes (order %d) x%d: `-l %d` is the maximum LPC "
                 "order the profile permits, and LPC is not what this target is "
@@ -1212,6 +1254,60 @@ def facts_table(path, blob, sha, facts, info, profile, verdict, reasons, report,
     return "\n".join(w) + "\n"
 
 
+# -------------------------------------------------------------------- pin
+
+
+def fifo_pins(pcm, channels):
+    """FNV-1a 64 over each channel's 8-bit FIFO bytes, in stream order.
+
+    The played-form witness the product-play ROM folds: the FIFO byte is
+    `(sample >> 8) as u8`, the same arithmetic `playback::fifo_byte` implements.
+    """
+    if channels != 2:
+        raise SystemExit("gafp_pack: --emit-pin currently requires stereo; "
+                         "the product playback path is stereo-shaped")
+    left = bytearray()
+    right = bytearray()
+    for i in range(0, len(pcm), 2):
+        left.append((pcm[i] >> 8) & 0xFF)
+        right.append((pcm[i + 1] >> 8) & 0xFF)
+    return fv.fnv1a64(left), fv.fnv1a64(right)
+
+
+def pin_table(facts, info, pcm, source_name):
+    """A `gafp_pin.rs`-shaped module for the packed asset."""
+    fnv_pcm = fv.fnv1a64(struct.pack("<%dh" % len(pcm), *pcm))
+    fl, fr = fifo_pins(pcm, info["channels"])
+    return (
+        "//! Generated by `scripts/gafp_pack.py --emit-pin` — do not edit.\n"
+        "//!\n"
+        "//! Facts about the embedded `assets/%s` blob: the manifest's\n"
+        "//! frame count and sample total, FNV-1a 64 over the interleaved i16\n"
+        "//! reference PCM (`flac -d`), and FNV-1a 64 over each channel's 8-bit\n"
+        "//! FIFO bytes, `(sample >> 8) as u8`, in stream order.\n"
+        "\n"
+        "/// Frames in the blob (the manifest's frame count must equal this).\n"
+        "pub const FRAMES: usize = %d;\n"
+        "\n"
+        "/// Interchannel samples per channel in the blob.\n"
+        "pub const SAMPLES: u64 = %d;\n"
+        "\n"
+        "/// The reference PCM pin (decode witness; i16 interleaved).\n"
+        "pub const FNV_PCM: u64 = 0x%016X;\n"
+        "\n"
+        "/// Left channel's 8-bit FIFO bytes, in stream order (played-form witness).\n"
+        "pub const FNV_FIFO_L: u64 = 0x%016X;\n"
+        "\n"
+        "/// Right channel's 8-bit FIFO bytes, in stream order (played-form witness).\n"
+        "pub const FNV_FIFO_R: u64 = 0x%016X;\n"
+        "\n"
+        "/// Highest FIXED predictor order the packer recorded for this clip.\n"
+        "pub const MAX_FIXED_ORDER: u8 = %d;\n"
+        % (source_name, len(facts), info["total samples"], fnv_pcm, fl, fr,
+           max_fixed_order_used(facts))
+    )
+
+
 # -------------------------------------------------------------------- pcm
 
 
@@ -1301,7 +1397,7 @@ def parse_args(argv):
         a = argv[i]
         if a in ("-h", "--help"):
             print(USAGE)
-            return None, profile, None, None, False, None
+            return None, profile, None, None, None, False, None
         elif a in ("-r", "--rate"):
             i += 1
             profile.rate = int(argv[i])
@@ -1314,6 +1410,8 @@ def parse_args(argv):
         elif a == "--channels":
             i += 1
             profile.channels = int(argv[i])
+        elif a == "--master":
+            profile.master = True
         elif a == "--allow-lpc":
             profile.allow_lpc = True
         elif a == "--allow-unmeasured":
@@ -1332,6 +1430,9 @@ def parse_args(argv):
         elif a == "--emit-facts":
             i += 1
             args.append(("facts", argv[i]))
+        elif a == "--emit-pin":
+            i += 1
+            args.append(("pin", argv[i]))
         elif a == "--keep-work":
             args.append(("keep", True))
         elif a.startswith("-"):
@@ -1344,12 +1445,12 @@ def parse_args(argv):
     if len(positional) != 2:
         raise SystemExit("gafp_pack: INPUT and OUTPUT are both required\n\n%s"
                          % USAGE)
-    return positional, profile, opts.get("facts"), opts.get("expect"), \
-        bool(opts.get("check")), bool(opts.get("keep"))
+    return positional, profile, opts.get("facts"), opts.get("pin"), \
+        opts.get("expect"), bool(opts.get("check")), bool(opts.get("keep"))
 
 
 def main(argv):
-    positional, profile, facts_out, expect, check, keep = parse_args(argv)
+    positional, profile, facts_out, pin_out, expect, check, keep = parse_args(argv)
     if positional is None:
         return 0
     src, out = positional
@@ -1425,7 +1526,7 @@ def main(argv):
         # is either compared against what went in (an encode pass) or pinned as
         # the expected output of these exact frames (any pass, with a facts
         # table). Neither is the encoder's own word.
-        need_pcm = bool(facts_out) or bool(profile.verify_pcm and source_wav)
+        need_pcm = bool(facts_out) or bool(pin_out) or bool(profile.verify_pcm and source_wav)
         ref = fv.reference_pcm(packed) if need_pcm else None
         if ref is not None and profile.verify_pcm and source_wav:
             n = verify_pcm(source_wav, ref)
@@ -1449,6 +1550,23 @@ def main(argv):
                 os.makedirs(os.path.dirname(facts_out) or ".", exist_ok=True)
                 open(facts_out, "w").write(text)
                 print("gafp_pack: wrote %s" % facts_out)
+
+        if pin_out:
+            if ref is None:
+                raise SystemExit("gafp_pack: --emit-pin needs the reference "
+                                 "decoder's samples; refusing to write a pin "
+                                 "without them")
+            text = pin_table(facts, info, ref, os.path.basename(out))
+            if check:
+                current = (open(pin_out).read()
+                           if os.path.exists(pin_out) else None)
+                if current != text:
+                    print("gafp_pack: STALE   %s" % pin_out)
+                    return 1
+            else:
+                os.makedirs(os.path.dirname(pin_out) or ".", exist_ok=True)
+                open(pin_out, "w").write(text)
+                print("gafp_pack: wrote %s" % pin_out)
 
         if check:
             same = (os.path.exists(out)
@@ -1480,7 +1598,9 @@ def main(argv):
                      hashlib.sha256(blob).hexdigest()))
         if not profile.is_product():
             print("gafp_pack: NOTE: this is NOT a C2 product asset: %s."
-                  % ("relaxed guard(s) " + ", ".join(profile.relaxations())
+                  % ("master mode (unmeasured FIXED/CONSTANT/VERBATIM shapes)"
+                     if profile.master else
+                     "relaxed guard(s) " + ", ".join(profile.relaxations())
                      if profile.relaxations() else
                      "built at a profile other than the C2 one (%s)"
                      % profile.describe()))

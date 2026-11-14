@@ -46,7 +46,27 @@ judged only against these, and full detail is in
   guard, zero underruns, zero late services, both units twice each, the 16-sample grace, and
   the listening witness. The reason is the measured one — the whole chain costs 59.946% of a
   32,768 Hz frame for a **FIXED-0** stream, the cheapest thing FLAC can emit, with no strategy
-  in this tree for recovering the factor two that predicted frames would need.)* The decode half is measured on hardware on the product path — **37.974%
+  in this tree for recovering the factor two that predicted frames would need.)*
+  **The rung is now named: 16,384 Hz.** Ruled by the owner on 2026-11-13 as the first candidate
+  for the amended C2, on 7-1's measured figures — it is `2²⁴/1024`, so it is **exactly
+  expressible**, the declared rate equals the played rate, and Q14 carries across the retarget
+  with nothing relaxed. Projected from the second reading's cycles (which do not move with the
+  clock): work 59.946% → **30.0%**, worst frame 60.755% → **30.4%**, attributed decode 451,763 c
+  → **21.5%** of the frame, the 8,560-sample lead 0.261 s → **0.522 s**, and LPC 173.23% →
+  **86.6%** — better, and still not in budget, so 8,192 Hz remains the only rung where predicted
+  frames are plausible. **C2 is met as of 2026-11-13**: the 16,384 Hz master path was validated
+  end to end with real audio on both units, twice each, audible, BLUE, with zero underruns and
+  zero late services. The acceptance model was amended by the owner to validate the code path
+  once, with subsequent encodes judged by build-time tests and the mGBA control; see
+  "Retarget status" below and plan-of-record's "C2 closure". **An interim instruction to relax
+  exactness and target agb's ~18 kHz was considered and withdrawn the same day** — nothing on
+  this path instantiates `agb`'s mixer (the product ROM states it as a safety precondition:
+  *"no `agb::sound::mixer::Mixer` is instantiated in this ROM"*), so agb's 10,512 / 18,157 /
+  32,768 Hz menu constrains nothing here; and at 924 ticks/sample the clock would play
+  **18,157.16 Hz**, costing the identity guarantee while making the *confirmed* latency defect
+  worse — the push mask is 15.89 samples on the mean and **17.13 on the worst window, against a
+  16-sample grace, so still late**, versus 14.34 / 15.46 at 16,384 Hz. Full reasoning in
+  [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) → "The rung is chosen".)* The decode half is measured on hardware on the product path — **37.974%
   worst** of the 32,768 Hz frame (6b-2 pt 2, GBA 001/SP identical; the
   instrument's own hardware row is 42.48% / 42.72%, 6a-7b). The claim is the
   *combination* — decode + convert + push + mixer/DMA in one
@@ -89,8 +109,10 @@ judged only against these, and full detail is in
   and the run is still 59.946% of the frame** — fixing the mask removes the refusal, not the
   cost. **The rate is dropped as a commitment; nothing else in C2 is.** In particular the
   retarget does not buy the latency work off: at 16,384 Hz the same 14,680-cycle mask is a
-  14.3-sample window against a 16-sample grace — clear of it by 1.7 samples on the mean, 0.5 on
-  the worst window ever recorded for that section.
+  14.34-sample window against a 16-sample grace — clear of it by 1.7 samples on the mean, 0.5 on
+  the worst window ever recorded for that section. The chosen fix is what turns that into a real
+  margin: `CHUNK`-sized push sections scale the measured window to 4,014 c, i.e. **3.92 samples**
+  at this clock and a **4.08×** margin (7.84 samples and 2.04× at 32,768 Hz).
 
   *(Everything below this line in this bullet was written while 32 kHz was still the commitment,
   and is kept as the reasoning of its date.)* **The test that decides it is built and controlled**
@@ -494,6 +516,76 @@ stages are still mGBA-only.
 Which numbers may be quoted, how eras and denominators differ, and the full
 ledger: [`flac-docs/measurements.md`](flac-docs/measurements.md).
 
+## Retarget status (2026-11-13): 16,384 Hz, FIXED-0, green on both units
+
+The owner ruled Q16 as the product needs it — **FIXED-0 is the product, LPC is
+measurement-only** — and the 16,384 Hz retarget has landed in the tree. The
+product asset is now 80 frames / 162,304 samples / 439,396 B, declares 16,384 Hz
+on every frame, and the geometry is `1,024` ticks/sample, `2,097,152` cycles per
+2048-sample frame, `573,440` cycles per period; `CHUNK`, ring, prefill and the
+16-sample grace are unchanged. The packer, profile, fixtures, vectors and the
+spike's budget moved with it. A headless mGBA run of `product-play.gba`
+(`ef1ed8ba…`) is green — 289/289 periods, `und 0`, `late 0`, PCM/FIFO pins
+matched, `work 25.363%`, worst frame `26.583%`, attributed decode `417,431
+c/frame` — and `make product-play-test` is 14/14. The full landing record,
+including the provenance warning that still prints for the inherited FIXED-0
+cost row, is in [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md)
+under "7-1 retarget landing".
+
+**7-1's retarget hardware reading then came back green on both units, twice each:
+BLUE screen, `fr 80 und 0`, `per 289 ser 289`, `replay 0 late 0 fed 0 drain 0`,
+`late in push 0/0`, exact sample counts and digests, and no rate/pitch row.**
+Hardware work is **28.450%** / worst frame **29.613%**, decode window **19.961%**,
+attributed decode **446,306 c/frame**, convert 6.824%, push 0.666%, feeder 0.997%,
+minimum lead 9,120 samples (0.557 s). The hardware-versus-mGBA gap is the same
+leg-shaped result measured at 32,768 Hz: decode +6.87%, convert **+35.08%**, work
++12.17% — Q15 re-confirmed, not retired. The four screens are transcribed in
+[`flac-docs/playback-results.md`](flac-docs/playback-results.md) under "7-1,
+retarget hardware reading".
+
+**7-2 is now closed on hardware.** The chunk-sized push — one critical section
+per 560-sample slice, about 3.92 samples / 4.08× margin — was run on GBA 001 ×2
+and GBA SP ×2, and all four runs are green: `fr 80 und 0`, `per 289 ser 289`,
+`replay 0 late 0 fed 0 drain 0`, `late in push 0/0`, `2nd src 0/289`,
+`disp 000A`, exact sample counts and digests. Work is **28.600%** / worst frame
+**29.781%**, `dec 19.961%`, **`attr 446292`**, `conv 6.825%`, `push 0.816%`,
+`feed 0.997%`, `minlead 9120`. Against the whole-frame-push image the cost is
++0.150 pp work and +0.150 pp push; decode/convert are unchanged. The four screens
+are in [`flac-docs/playback-results.md`](flac-docs/playback-results.md) under
+"7-2: chunked push on hardware".
+
+**C2 is met as of 2026-11-13.** The code path was exercised end to end with real
+audio — the first 9.9 s of `bioluminescent.wav` at 16,384 Hz — on GBA 001 ×2 and
+GBA SP ×2. All four runs were **audible and recognizable**, all ended **BLUE**,
+and all showed `und 0`, `late 0`, 289/289 periods, exact counts and digests, work
+**32.208%** / worst **35.831%**, `attr 527339`.
+
+The acceptance model was amended by the owner: the path is manually validated
+once with real audio; subsequent encodes are judged by build-time unit tests and
+the mGBA control, not by repeating the two-unit run for every asset. The old
+FIXED-0/measured-row clauses remain useful **preflight** checks, not the C2 gate.
+Further stress coverage is a separate post-C2 hardening question; it is listed in
+[`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) under "C2 closure".
+
+**The master pipeline is implemented:** `gafp_pack.py --master` accepts real
+CONSTANT/FIXED-0..4/VERBATIM material without a measured product row (still no
+LPC, still 16,384 Hz / 16-bit / 2048-sample frames), `--emit-pin` writes the ROM
+pins, and `make master-pack INPUT=…` / `make master-play-rom INPUT=…` build the
+asset and a playable image. The first 9.9 s of `bioluminescent.wav` packs at
+80 frames / 162,304 samples, and `master-play.gba` (`78a02c9c…`, 645,072 B) runs
+in mGBA with `und 0`, `late 0`, 289/289 periods, PCM/FIFO MATCH, work **27.998%**
+/ worst **30.871%**, `attr 468011`. That is an mGBA control.
+
+**The master hardware reading is green:** four runs of `master-play.gba`
+(`78a02c9c…`) on GBA 001 and GBA SP, twice each, were audible and recognizable
+as `bioluminescent.wav`, all ended BLUE, and all showed `und 0`, `late 0`,
+289/289 periods, exact digests, work **32.208%** / worst **35.831%**,
+`attr 527339`, `minlead 9120`. `2nd src 2/289` is new versus the synthetic
+asset's 0/289, with no lateness; it is recorded, not explained. This is the
+C2 acceptance run: real audio, both units, twice each, audible, BLUE, zero
+underruns and zero late services. The missing CONSTANT/FIXED-1..3 measured rows
+are now **preflight/hardening**, not a C2 prerequisite.
+
 ## What is next
 
 One line per rung; the full plan, bars and invariants are in
@@ -551,11 +643,28 @@ unchanged, and the per-rung state lives in the plan of record:
    ~32 kHz to real-time playback at the highest rate achievable.** The ruling, its arithmetic and
    what it pointedly does *not* relax (every audit clause, Q14's identity rule, both units twice
    each, the listening witness) are in
-   [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) under "The rate ruling". The next
-   rung this architecture expresses exactly is **16,384 Hz** — not agb's 18,157, which no integer
-   reload of a 2^24 Hz timer produces — and "highest achievable" needs a margin bar before it can
-   be judged, which is **Q16**. 7-0 and 7-1 re-run at whatever rate that bar selects.
-   **C2 is met at 7-3**, and C2 says in terms that the stream declares the rate it is played
+   [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) under "The rate ruling".
+   **The rung is then named: 16,384 Hz** (`2^24/1024` — exactly expressible, so Q14's identity rule
+   carries across the retarget with nothing relaxed). It is deliberately **not** agb's 18,157: no
+   integer reload of a 2^24 Hz timer produces that rate (924 ticks plays 18,157.16 Hz), and agb's
+   menu carries no authority here because **this ROM does not use agb's mixer** — the product ROM
+   states its absence as a safety precondition. An interim instruction to relax exactness and go to
+   ~18 kHz was considered and withdrawn on exactly those grounds, with the latency arithmetic that
+   settled it in [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md) → "The rung is
+   chosen". "Highest achievable" still needs a margin bar to be judgeable, which is **Q16**; and
+   because LPC projects to 86.6% of a 16,384 Hz frame, **8,192 Hz stays the only rung where
+   predicted frames are plausible** — so whether 16,384 Hz is the ceiling or a way-station is that
+   bar's answer. 7-0 and 7-1 were re-run at 16,384 Hz: the retarget hardware reading is
+   green on both units, twice each (`fr 80 und 0`, `per 289 ser 289`, `late 0`, `late in
+   push 0/0`, work 28.450% / worst 29.613%, `attr 446306`), recorded in
+   [`flac-docs/playback-results.md`](flac-docs/playback-results.md). What 7-1 still owes is
+   narrower: the packer's `fixed0 @ b2048` row transcribed from these bytes, and the host
+   model's envelope pinned from a ROM-generated fixture rather than hand-copied from a run.
+   The chunked push has since landed and closed 7-2 on hardware: four runs on both units,
+   zero late services, `late in push 0/0`, work 28.600% / worst 29.781% (the expected
+   +0.150 pp price of four sections). 7-3's listening witness is the remaining acceptance
+   half.
+   **C2 was met at 7-3 on 2026-11-13**, and C2 says in terms that the stream declares the rate it is played
    at — a clause that survives the rate change, and indeed matters more for it: a rate chosen by
    measurement is exactly where a silent 1.024x reinterpretation would creep back in.
 5. **Parked:** 6a-8. Q13's data-read probe was re-opened on 2026-11-13 as **Q15**, and Q15's

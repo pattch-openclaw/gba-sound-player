@@ -36,7 +36,7 @@ Usage: scripts/pack_flac.sh INPUT.[wav|aiff|flac] OUTPUT.gfp
 
 Plan of record (unimplemented; corrected 2026-09-07 after measuring real
 encodes — see FLAC.md "Frame header: measured byte layout"):
-  1. Normalize input to the target profile: PCM 16-bit, 32768 Hz (the device's
+  1. Normalize input to the target profile: PCM 16-bit, 16384 Hz (the device's
      own rate — plan item 7-0 made the sample rate a profile clause with exactly
      one admissible value, `EncodeProfile::allowed_sample_rates_hz`; the 32000 Hz
      this line used to name is a legal FLAC stream rate that this target refuses,
@@ -50,7 +50,7 @@ encodes — see FLAC.md "Frame header: measured byte layout"):
      also carried `--force-utf8-legacy-noop`, which is not a libFLAC option at
      all — 1.5.0 exits 1 with "unrecognized option".)
      The rate leg of this step has a constraint that the others do not, and it is
-     why this front-end must not just reach for `ffmpeg -ar`: 32768/32000 =
+     why this front-end must not just reach for `ffmpeg -ar`: 16384/16000 =
      128/125 is exact, so an exact rational resample exists, but ffmpeg's `-ar`
      is float and float breaks the integer-only determinism every pin in this
      project rests on (see flac-docs/plan-of-record.md, 7-0's trap 2). If a
@@ -62,8 +62,8 @@ encodes — see FLAC.md "Frame header: measured byte layout"):
      profile name one rate, so 65536 Hz is a profile change and a mixer change,
      not an encoder option — and every measured row's frame-period budget is
      stated in samples of the clock it was measured at, so it would have to be
-     re-stated (a 2048-sample block is 2**20 cycles of the 2**24 Hz clock at
-     32,768 Hz and 2**19 at 65,536 Hz: the work per second doubles).
+     re-stated (a 2048-sample block is 2**21 cycles of the 2**24 Hz clock at
+     16,384 Hz and 2**20 at 32,768 Hz: the work per second doubles).
   2. Verify the encoder produced only profile-conforming frames: predictor order
      <= the profile cap (order > 4, not "is LPC"), fixed blocking strategy, no
      variable blocksize, 16-bit. Reject otherwise -- fail at pack time, not

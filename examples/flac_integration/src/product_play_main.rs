@@ -5,7 +5,8 @@
 //!
 //! What this is *not*: another decode instrument. `src/main.rs` (`flac-rom`) is
 //! that, and its row of record — 396,066 mean / 398,255 worst cycles per frame,
-//! 37.765 % / 37.974 % of a 32,768 Hz frame (`flac-docs/measurements.md`, 6b-2
+//! 37.765 % / 37.974 % of a 32,768 Hz frame (18.88 % / 18.99 % at the
+//! 16,384 Hz rung this image plays) (`flac-docs/measurements.md`, 6b-2
 //! pt 2) — is an **input** to the arithmetic below, not something this ROM
 //! re-derives. What this ROM adds is the half that has never been measured at the
 //! target rate on any path: convert, push, and the wait that paces the producer
@@ -25,11 +26,10 @@
 //! copy — the pattern `crates/flac-lite-gba/tests/arm_from_outside.rs` already
 //! uses across these directories for the same reason.
 //!
-//! Every constant comes from [`geometry`], which transcribes it from agb 0.25.0's
-//! own mixer or from the GBA's clock. In register terms this ROM programs what
-//! `agb::sound::mixer` would program for `Frequency::Hz32768`: timer0 reloaded
-//! with `0 − 16777216/32768` (agb `sound/mixer/hw.rs:100`), a cascaded timer1
-//! reloaded with `0 − 560` and interrupting (`mixer/sw_mixer.rs:167-171`), and the
+//! Every constant comes from [`geometry`], and the clock is the GBA's 2^24 Hz
+//! timer clock (this ROM does not instantiate `agb`'s mixer). In register terms:
+//! timer0 reloaded with `0 − 16777216/16384` (1,024 ticks per sample), a cascaded
+//! timer1 reloaded with `0 − 560` and interrupting, and the
 //! sound-FIFO DMA to a fixed destination in repeat mode, re-armed once per period
 //! from a 140-word buffer, FIFO A on DMA1
 //! and FIFO B on DMA2 (`hw.rs`'s pairing, which the rate ROM's first draft got
@@ -56,13 +56,13 @@
 //!
 //! | timer | role | reload |
 //! |---|---|---|
-//! | timer0 | one audio sample | `0 − 512`, divider /1 |
+//! | timer0 | one audio sample | `0 − 1024`, divider /1 |
 //! | timer1 | one mixer period, and the feeder's interrupt | `0 − 560`, cascaded |
 //! | timer2 | periods elapsed (the harness's witness, kept) | `0`, cascaded |
 //!
-//! Composite, that is a cycle counter whose unit *is* audio time: 512 cycles per
-//! sample, 286,720 per period, 1,048,576 per 2,048-sample frame — the exact
-//! `2^20` [`geometry::frame_cycles`] prices. See [`audio_cycles`] for why the
+//! Composite, that is a cycle counter whose unit *is* audio time: 1,024 cycles
+//! per sample, 573,440 per period, 2,097,152 per 2,048-sample frame — the exact
+//! `2^21` [`geometry::frame_cycles`] prices. See [`audio_cycles`] for why the
 //! read is a median-of-three retry loop and why a single torn snapshot cannot be
 //! mistaken for a good one. This replaces the free-running pair (`src/main.rs`'s `Counter`) that every
 //! earlier timing row used; that instrument and this one agree to within a
@@ -144,13 +144,13 @@
 //! **RULED (Q14, 2026-11-11, project owner): a stream is encoded at the rate it is
 //! played at, and the player does not reinterpret a declared rate to fit the clock.**
 //! This image is what satisfying that ruling looks like: the asset it reads —
-//! `assets/spike_l0.gfp`, the same one every other gate reads — declares **32,768 Hz**
+//! `assets/spike_l0.gfp`, the same one every other gate reads — declares **16,384 Hz**
 //! in its STREAMINFO, which is the rate [`geometry::PLAYBACK_RATE_HZ`] names and the
 //! only rate [`geometry::playback_rate_for_stream`] accepts; and
 //! `scripts/gafp_pack.py` refuses to write a blob whose declared rate is not the
 //! clock its measured rows are budgeted against. So the frame of audio this producer
 //! is asked to service is the frame the asset was made for — 2,048 samples at the
-//! rate they were encoded at, 1,048,576 cycles at this timer — and both sides of that
+//! rate they were encoded at, 2,097,152 cycles at this timer — and both sides of that
 //! number come from the same declaration rather than from a mapping.
 //!
 //! What that replaced, kept on the record because it is why the ruling exists: until
@@ -162,10 +162,10 @@
 //! the decoded samples are identical either way, so every PCM and FIFO digest passed
 //! a run that was 41 cents high. That is the 6b-3 measurement scaffolding recorded in
 //! `flac-docs/measurements.md` (screen `rate 32000>32768 scaffold`, log
-//! `Q14 SCAFFOLD`), and those shares are **not** this image's: the 7-0 asset is new
-//! bytes of a different length — 160 frames, 326,144 samples, a 512-sample tail
-//! instead of a 240-sample one — and it is spelled with the format's `0b1101`
-//! sample-rate code plus a 16-bit Hz field, which is what `flac` emits for 32,768 Hz.
+//! `Q14 SCAFFOLD`), and those shares are **not** this image's: the retargeted asset
+//! is new bytes of a different length — 80 frames, 162,304 samples, a 512-sample
+//! tail instead of a 240-sample one — and it is spelled with the format's `0b1101`
+//! sample-rate code plus a 16-bit Hz field, which is what `flac` emits for 16,384 Hz.
 //! Re-measuring this producer against those bytes on silicon is plan item 7-1.
 //!
 //! The two rates are still printed side by side, and the nominal period is still
@@ -225,11 +225,14 @@ mod rom {
     use flac_integration::checksum::{Fnv1a64, fold_i16le_stereo};
     use flac_integration::geometry as geo;
     use flac_integration::{gafp_pin, playback};
-    use playback::{Chunk, RingFeed, convert_frame, fold_bytes};
+    use playback::{Chunk, PushError, RingFeed, convert_frame, fold_bytes};
 
     /// The clip: the same FIXED-0 asset `gafp-check` guards and `flac-rom`
     /// decodes. Nothing here is generated for this ROM — the manifest, the frame
     /// walk and the pins all come from the shipped blob.
+    #[cfg(feature = "master-asset")]
+    static SONG: &[u8] = include_bytes!("../assets/master.gfp");
+    #[cfg(not(feature = "master-asset"))]
     static SONG: &[u8] = include_bytes!("../assets/spike_l0.gfp");
 
     // ------------------------------------------------- geometry, by shorter name
@@ -424,15 +427,15 @@ mod rom {
         late_first_period: u32,
         late_worst_period: u32,
         // --- Which leg held the late re-arm (7-2's mechanism question).
-        // The ring push in `fed_frame` is the long interrupt-masked section of a
-        // fed frame — the stage instrument prices it at ~29 samples, against a
-        // 16-sample grace for a re-arm — so it is the candidate. Publishing the
-        // period counter as that section's first act lets the handler say, for a
-        // late service, whether the boundary it is late *for* crossed inside the
-        // section: a window of ~29 samples against a 560-sample grid crosses at
-        // most one boundary, so `periods == push_start_period + 1` identifies it
-        // exactly — no timing slot to tune, no extra clock reads, no extra
-        // critical section (the store rides the section that is already there).
+        // The ring push in `fed_frame` is now a sequence of `CHUNK`-sized
+        // interrupt-masked sections, each ~4,000 c (~3.9 samples) against a
+        // 16-sample grace. Publishing the period counter at the first section's
+        // first act lets the handler say, for a late service, whether the boundary
+        // it is late *for* crossed inside the push sequence: the whole sequence is
+        // shorter than one 560-sample period, so a boundary crossing any section
+        // makes the handler's period equal this counter + 1. That identifies the
+        // mechanism exactly — no timing slot to tune, no extra clock reads, no
+        // extra critical section (the store rides a section that already exists).
         push_start_period: u32,
         late_in_push: u32,
         // --- The other candidate for the same lateness, measured rather than
@@ -691,8 +694,9 @@ mod rom {
         }
     }
 
-    /// Program the audio timebase. The values are agb's for
-    /// `Frequency::Hz32768`, and the chain is stopped with its counters written to
+    /// Program the audio timebase for the 16,384 Hz rung (1,024 ticks per
+    /// sample; not an `agb` `Frequency`, because this ROM owns the timers), and
+    /// the chain is stopped with its counters written to
     /// their latches first, so audio time and the measurement clock start at the
     /// same instant. Timer2 is armed *before* timer1 can overflow, so the first
     /// period of audio is not missed by the counter that judges every period.
@@ -795,11 +799,11 @@ mod rom {
             if u32::from(periods) < stats.late_first_period {
                 stats.late_first_period = u32::from(periods);
             }
-            // Which leg held it. See `push_start_period`: the value published as
-            // the push section's first act names the boundary that crossed inside
-            // that section, and nothing else can — IME goes back when the section
-            // ends, so a service whose boundary is inside it is by construction
-            // held until the section is over.
+            // Which leg held it. See `push_start_period`: the value published at
+            // the first chunk section's start names the boundary that crossed
+            // inside the push sequence, and nothing else can — IME goes back when
+            // each chunk section ends, but the whole sequence is shorter than a
+            // period, so the handler still enters with this period + 1.
             if u32::from(periods) == stats.push_start_period.wrapping_add(1) {
                 stats.late_in_push += 1;
             }
@@ -1065,8 +1069,8 @@ mod rom {
     /// the same checks `src/main.rs` runs, so the two images cannot disagree about
     /// what they are decoding. The manifest's own declared sample rate is what the
     /// rate check is made against, and since plan item 7-0 the only answer that
-    /// check accepts is the identity: the asset declares 32,768 Hz because that is
-    /// the rate this geometry, the packer's budget and `agb`'s timer all use.
+    /// check accepts is the identity: the asset declares 16,384 Hz because that
+    /// is the rate this geometry and the packer's budget use.
     /// Anything else is refused here rather than played 41 cents sharp
     /// (`flac-docs/open-questions.md` Q14; [`geometry::RATE_BRIDGE`] is `None`).
     fn manifest() -> Option<Manifest<'static>> {
@@ -1206,6 +1210,70 @@ mod rom {
             Ok(pushed)
         }
 
+        /// Append one decoded and converted frame in `CHUNK`-sized slices, each
+        /// under its own short critical section.
+        ///
+        /// This is the 7-2 fix. A whole-frame push held `IME = 0` for the
+        /// measured 14,680 c (~14.3 samples at 1,024 ticks/sample), against the
+        /// 16-sample sound-DMA re-arm grace; the worst push window recorded was
+        /// 15,831 c (~15.46 samples), leaving only 0.5 samples of margin. Four
+        /// slices of at most `CHUNK` samples cost ~4,014 c each (~3.92 samples),
+        /// a 4.08x margin. The slices are complete pushes: `push_bytes` credits
+        /// only after the copy, so the feeder sees either the previous slice or
+        /// the new one, never a torn one. Interrupts are live between slices,
+        /// which is the point.
+        ///
+        /// `attribution_period` is the period counter read at the start of the
+        /// first slice. It is stored once for `Stats::push_start_period`: the
+        /// whole sequence is shorter than one period, so a boundary that crosses
+        /// any slice makes the handler's period equal this value + 1. That keeps
+        /// the `late in push` witness meaningful after the section was split.
+        ///
+        /// Returns `(lead_before, lead_after, outcome)`: the first slice's
+        /// pre-push watermark and the last slice's post-push watermark, for the
+        /// fed-phase lead audit. A failed slice stops the sequence and reports
+        /// the error; in a passing run the room check makes that unreachable.
+        fn push_frame_in_chunks(
+            &mut self,
+            n: usize,
+            attribution_period: Option<u32>,
+        ) -> (usize, usize, Result<(), PushError>) {
+            let mut offset = 0usize;
+            let mut lead_before = 0usize;
+            let mut lead_after = 0usize;
+            while offset < n {
+                let end = (offset + CHUNK).min(n);
+                let first = offset == 0;
+                let (before, after, outcome) = critical_section::with(|cs| {
+                    let (before, after, outcome) = {
+                        let mut feed = FEED.borrow_ref_mut(cs);
+                        let before = feed.ready();
+                        if first {
+                            if let Some(period) = attribution_period {
+                                STATS.borrow_ref_mut(cs).push_start_period = period;
+                            }
+                        }
+                        let outcome = feed
+                            .push_bytes(&self.scratch_l[offset..end], &self.scratch_r[offset..end]);
+                        (before, feed.ready(), outcome)
+                    };
+                    if outcome.is_ok() && FEED.borrow_ref(cs).pushed() == self.total_samples {
+                        STATS.borrow_ref_mut(cs).finished = true;
+                    }
+                    (before, after, outcome)
+                });
+                if first {
+                    lead_before = before;
+                }
+                lead_after = after;
+                if outcome.is_err() {
+                    return (lead_before, lead_after, outcome);
+                }
+                offset = end;
+            }
+            (lead_before, lead_after, Ok(()))
+        }
+
         /// One frame of the **prefill**: decode, convert, push, with no stage windows
         /// (the prefill is not timed — see the module docs) and no flow-control wait
         /// (the ring is empty, so there is always room). The fed phase is
@@ -1213,7 +1281,7 @@ mod rom {
         /// `convert_frame` / `push_bytes` seam but wraps each step in a measured window
         /// and waits for room first. The two are deliberately separate functions and
         /// not one: their error paths and their bookkeeping differ, and the aliasing
-        /// rule (one critical section per push, never across a wait) is easier to see
+        /// rule (one critical section per chunk, never across a wait) is easier to see
         /// twice than to thread through a flag.
         fn decode_and_push(&mut self) -> Result<usize, Halt> {
             let frame = match decode_one(&mut self.decoder, &mut self.bufs) {
@@ -1250,16 +1318,7 @@ mod rom {
             // final push. Setting it after the producer loop leaves a window in
             // which the feeder can see an empty ring while the flag is still
             // false and count the final short chunk as an underflow.
-            let outcome = critical_section::with(|cs| {
-                let pushed = {
-                    let mut feed = FEED.borrow_ref_mut(cs);
-                    feed.push_bytes(&self.scratch_l[..n], &self.scratch_r[..n])
-                };
-                if pushed.is_ok() && FEED.borrow_ref(cs).pushed() == self.total_samples {
-                    STATS.borrow_ref_mut(cs).finished = true;
-                }
-                pushed
-            });
+            let (_, _, outcome) = self.push_frame_in_chunks(n, None);
             if let Err(e) = outcome {
                 // Named rather than swallowed: the ring's own numbers are what a
                 // sizing mistake is read from, and `push_bytes` re-checks with the
@@ -1294,7 +1353,7 @@ mod rom {
         ///
         /// The loop is bounded in *periods* so that a wedge fails visibly instead
         /// of hanging: the deepest legitimate wait is one frame's drain (~2,048
-        /// samples = 1,048,576 cycles), and the bound is the ring's depth plus two
+        /// samples = 2,097,152 cycles), and the bound is the ring's depth plus two
         /// frames' worth of polling headroom. A few hundred cycles per iteration
         /// puts it well under a second; the previous `8_000_000` was "until the
         /// outer timeout", not a bound.
@@ -1355,27 +1414,15 @@ mod rom {
             }
             let (t3, p3) = unsafe { (audio_cycles(), periods_elapsed()) };
 
-            // Lead, push, lead — inside one critical section, because that is the
-            // only instant at which the ring's watermark means anything: the
-            // feeder cannot take or add between the reads.
-            let (lead_before, lead_after, outcome) = critical_section::with(|cs| {
-                // The section's first act, before the copy that makes it long: see
-                // `Stats::push_start_period`. A store into a static that is
-                // already being written here, so no new masked region is created
-                // anywhere — that matters, because adding a mask of its own to
-                // chase this defect would be the instrument causing it.
-                STATS.borrow_ref_mut(cs).push_start_period = u32::from(p3);
-                let (before, after, pushed) = {
-                    let mut feed = FEED.borrow_ref_mut(cs);
-                    let before = feed.ready();
-                    let pushed = feed.push_bytes(&self.scratch_l[..n], &self.scratch_r[..n]);
-                    (before, feed.ready(), pushed)
-                };
-                if pushed.is_ok() && FEED.borrow_ref(cs).pushed() == self.total_samples {
-                    STATS.borrow_ref_mut(cs).finished = true;
-                }
-                (before, after, pushed)
-            });
+            // One critical section per CHUNK-sized slice, not one for the whole
+            // frame. The old whole-frame section was the 7-2 defect: it held
+            // interrupts for ~14,680 c (~14.3 samples at this clock) while the
+            // sound DMA re-arm has a 16-sample grace. A chunk-sized section is
+            // ~4,014 c (~3.92 samples), a 4.08x margin. The feeder can run
+            // between slices; every slice is a complete, credited push, so it
+            // sees either the previous slice or this one, never a partial one.
+            let (lead_before, lead_after, outcome) =
+                self.push_frame_in_chunks(n, Some(u32::from(p3)));
             if let Err(e) = outcome {
                 agb::println!(
                     "[pp-rom] FAIL push refused at frame {}: {:?} (room was demanded for {} samples before the frame was decoded)",
@@ -1580,7 +1627,7 @@ mod rom {
         // handed to the DMA.
         producer.ledger.audio_drain_start = unsafe { audio_cycles() };
         // The drain can legitimately last the ring's whole depth: 36 periods at
-        // 286,720 cycles. Bound the spin in periods (with headroom) so a wedged
+        // 573,440 cycles. Bound the spin in periods (with headroom) so a wedged
         // consumer fails visibly rather than waiting for the harness timeout.
         let max_polls = (RING_SAMPLES / CHUNK + 2) as u64 * 8192;
         let mut polls = 0u64;
@@ -2012,16 +2059,14 @@ mod rom {
         );
 
         // Which leg held the late re-arm, read against the row above it. The push
-        // stage's `boundaries_in` says how many period boundaries crossed inside a
-        // push section at all; `in_push` is the subset of the *late* services whose
-        // boundary is the one that section published. A boundary that crossed inside
-        // that section cannot be served before the section ends (IME goes back with
-        // it), so `late 1 / in_push 1` names the mechanism instead of correlating
-        // with it, and `late 1 / in_push 0` rules it out for that event and moves
-        // the search to another source in the same entry or to the bus itself (Q15).
-        // The two counts disagreeing is itself the finding: it would say the push
-        // section swallows boundaries without them turning late, which is the open
-        // half of why one event in 582 periods happened at all.
+        // stage's `boundaries_in` says how many period boundaries crossed inside the
+        // chunked push sequence at all; `in_push` is the subset of the *late*
+        // services whose boundary is the one the first chunk section published. A
+        // boundary that crossed inside any chunk section cannot be served before
+        // that section ends (IME goes back with it), so `late 1 / in_push 1` names
+        // the mechanism instead of correlating with it, and `late 1 / in_push 0`
+        // rules it out for that event and moves the search to another source in the
+        // same entry or to the bus itself (Q15).
         agb::println!(
             "[pp-rom] which leg held it: late={} in_push={} boundaries_inside_push_section={} last_push_section_started_at_period={}",
             late,
@@ -2030,8 +2075,7 @@ mod rom {
             push_start_period
         );
         agb::println!(
-            "[pp-rom] which leg meaning: a late service is called the push's by the period counter that section published as its first act; a ~{}-sample section on a {}-sample grid crosses at most one boundary, so the match is exact",
-            ledger.stages[3].mean() / u64::from(TICKS_PER_SAMPLE),
+            "[pp-rom] which leg meaning: a late service is called the push's by the period counter the first chunk section published; the whole push sequence is shorter than a {}-sample period, so a boundary crossing any chunk section makes the handler period equal that counter + 1 — exact, not a timing window",
             CHUNK
         );
         // The other candidate that could hold the same service: a second source in
@@ -2258,7 +2302,7 @@ mod rom {
         let late_first = if late == 0 { 0 } else { late_first_period };
         let late_worst = if late == 0 { 0 } else { late_worst_period };
         let mut screen_text = String::new();
-        screen_text.push_str("PRODUCT PLAY 32768\n");
+        screen_text.push_str("PRODUCT PLAY 16384\n");
         if let Some((pushed, consumed, underflows, ledger_ok, audit_ok, pcm_ok, fifo_ok)) =
             ledger_counts
         {
@@ -2341,7 +2385,7 @@ mod rom {
             ));
             // Where, not just how many: the period indices are timer2's counts, and
             // `dly` is the worst lateness in samples (of 560; the grace is 16, and
-            // a sample is 512 cycles). `refus` is the clock-refusal count, the
+            // a sample is 1,024 cycles). `refus` is the clock-refusal count, the
             // other clause the audit reads and the only one that can make the
             // shares themselves unreadable rather than merely late.
             screen_text.push_str(&format!(
@@ -2350,10 +2394,10 @@ mod rom {
             ));
             // The two mechanism answers, in the two forms that decide 7-2 rather
             // than describe it. `in push a/b`: of the b late services, a of them had
-            // their period boundary inside the producer's ring-push section, which is
-            // the section the stage rows price at ~29 samples of masked interrupts
-            // against this audit's 16-sample grace — a mechanism, not a correlation,
-            // and a zero says go look elsewhere. `2nd src a/b`: of the b audio
+            // their period boundary inside the producer's chunked ring-push
+            // sequence — each section is now ~4,000 c (~3.9 samples) against this
+            // audit's 16-sample grace — a mechanism, not a correlation, and a zero
+            // says go look elsewhere. `2nd src a/b`: of the b audio
             // services, in a of them agb dispatched a second source in the same
             // interrupt entry (the other way a re-arm can be held past its window),
             // and `disp 0x…` is the raw display-status register, printed rather than
@@ -2386,7 +2430,7 @@ mod rom {
         text_body: &mut String,
     ) {
         if text_body.is_empty() {
-            text_body.push_str("PRODUCT PLAY 32768\n");
+            text_body.push_str("PRODUCT PLAY 16384\n");
             text_body.push_str(stage);
         }
         for line in text_body.lines() {

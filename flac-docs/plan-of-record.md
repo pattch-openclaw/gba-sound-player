@@ -94,6 +94,17 @@ hardware achieves, on a GBA
 > record of the run that caused this is in
 > [`playback-results.md`](playback-results.md); what the release bought and did not buy is
 > under "The rate ruling" below.
+>
+> **Second amendment the same day, and it names the number.** Once the rate was a result rather
+> than a commitment, the rung was ruled: **the product targets 16,384 Hz** ("~16 kHz"), which is
+> `2²⁴ / 1024` and so is **exactly expressible** — see "The rung is chosen" below "The rate
+> ruling". An interim instruction to relax the exactness half of Q14 in order to reach agb's
+> `Frequency::Hz18157` (~18 kHz) is recorded there too, **with its reason withdrawn**: no ROM on
+> this path instantiates `agb::sound::mixer::Mixer`, so agb's three-rate menu is not a
+> dependency. It is a convention this track imposed on itself, and 18,157.16 Hz would have cost
+> the identity guarantee *and* margin — the confirmed push-mask defect is still late at that
+> clock. **Q14's identity rule is therefore unchanged and unreloosened: the stream declares the
+> rate it is played at, and at 16,384 Hz those two numbers are equal.**
 
 The claim the project was started for, demonstrated before the split, and now to be
 demonstrated **through** the split's two crates rather than around them. In
@@ -101,9 +112,12 @@ checkable form:
 
 - a ROM that links `flac-lite-gba` **with `rice-arm` on** and plays 2048-sample
   frames at the **rate of record** from cartridge without an underrun, on hardware. The
-  rate of record is a *measurement*, not an aspiration: it is the highest exactly
-  expressible rate on the product's own clock at which the whole gate set passes on both
-  units (see "The rate ruling", and Q16 for the margin bar that ruling still needs);
+  rate of record is **16,384 Hz** as ruled by the project owner on 2026-11-13; it is a
+  *measured* claim rather than an aspiration, so it is C2's number only once 7-1's retarget run
+  establishes it on both units (and it is the highest exactly expressible rate at which the whole
+  gate set passes — "The rate ruling" records why 32,768 Hz was declined and why re-admitting it
+  needs a fresh ruling, not merely a fixed latency bug; Q16 still owns the margin bar that
+  settles whether 16,384 Hz is the ceiling or a way-station to 8,192 Hz);
 - **the stream declares the rate it is played at.** Ruled 2026-11-11 (Q14): a stream is
   encoded at the rate it is played at, and the player does not reinterpret a declared
   rate to fit a clock. A 32,000 Hz asset run on a 32,768 Hz clock is 1.024× fast —
@@ -124,6 +138,34 @@ checkable form:
   also what moves "plays a clip with no prediction" off the critical path;
 - the acceptance run is on a GBA 001 **and** a GBA SP, and its verdict is
   **underrun-free playback**, not a cycle count.
+
+### C2 closure (2026-11-13): the path was validated end to end on hardware
+
+**C2 is met.** The code path was run with real programme material on both units:
+`master-play.gba` (`78a02c9c…`, 645,072 B), the first 9.9 s of `bioluminescent.wav`
+encoded at 16,384 Hz / 16-bit through the master path, on **GBA 001 ×2 and GBA SP ×2**.
+All four runs were **audible and recognizable**, all four ended **BLUE**, and all four
+showed `fr 80 und 0`, `per 289 ser 289`, `replay 0 late 0 fed 0 drain 0`,
+`late in push 0/0`, exact `push`/`cons` counts and PCM/FIFO digests. Work was
+**32.208%** mean / **35.831%** worst, with `attr 527339`; the master path fits with
+substantial headroom.
+
+**The acceptance model is amended by the project owner.** C2 is a claim about the
+**code path**, not a requirement to re-prove the whole stack for every asset. The path is
+manually validated end to end once with real audio; subsequent encodes are built and
+validated with **build-time unit tests and the mGBA control**, not another two-unit
+hardware run per asset. The earlier FIXED-0-by-construction and measured-packer-row
+clauses are retained as **preflight and hardening**, not as the C2 acceptance gate.
+They are still useful: they catch a bad asset before it reaches a unit.
+
+**Further coverage is a separate, post-C2 question** — not a condition on this closure.
+Useful work, in rough order: a stress corpus for `VERBATIM`, `FIXED-4`, wider residual
+envelopes and the remaining stereo assignments; a derated mGBA budget model (measured
+hardware is about ×1.16 above mGBA on worst frame, so a 95% warning must be applied to the
+*derated* estimate); per-asset host-model tests using the mGBA run's cost; mono playback;
+and pinning the ffmpeg resampler version or replacing it with an integer resampler. The
+`2nd src 2/289` observation from the master run is recorded as unexplained and
+non-failing; it belongs in that hardening work.
 
 ### The rate ruling (2026-11-13): what was given up, what it costs, and what it does not buy
 
@@ -191,14 +233,109 @@ does not make the period-22 event interesting any more: the attribution came bac
 interrupt mask, as named), and it is now a fixable thing sitting at the wrong rate rather than a
 mystery worth another cart-load.
 
-**What 7-1 owes now**, since it is the rung that establishes the new C2's number: (a) the
-rate **decision for the record** — 16,384 Hz, stated as a ruling rather than left in a
-paragraph; (b) the retarget itself, listed in 7-1's actions; (c) 7-2's push-mask fix, which must
-be done **at the new rate**, because a 14.6 k-cycle mask against a 16,384-cycle grace is a
-**14.3-sample** window against a 16-sample tolerance — **inside it by 1.7 samples on the mean**,
-and by **0.5 samples** on the worst push window this repository has ever recorded (15,831 c,
-6b-3). That is not a margin, it is the same defect wearing a hat — and this image's own worst push
-window is not on the screen, so even the 0.5-sample floor is borrowed from another build.
+### The rung is chosen: 16,384 Hz (ruled 2026-11-13, later the same day)
+
+**The instruction, and the correction it arrived with.** Having ruled the rate out of C2, the
+owner first directed that the project **relax rate exactness** and target "the ~18 kHz sample rate
+that agb already supports". On checking, that instruction rested on a premise this repository does
+not satisfy, so the same owner revised it to **16,384 Hz**. Both halves are recorded, because the
+wrong half is the more likely one for a future session to re-derive.
+
+**`agb`'s mixer is not used on this path — verified, not remembered.** Nothing on the FLAC product
+path instantiates `agb::sound::mixer::Mixer`. `product_play_main.rs:1795` carries that as a safety
+precondition, verbatim: *"no `agb::sound::mixer::Mixer` is instantiated in this ROM, so timer0-3 are
+unowned"*. The ROM programs the same registers itself — timer0, the timer1 cascade, the sound-DMA
+enable and every per-period re-arm — and 7-2's row already notes that agb's own
+`enable_dma_for_sound` writes **no transfer count**, so that part could not have been delegated
+anyway. The only two `gba.mixer.mixer(…)` call sites in the tree are `examples/pcm_playback.rs`
+(the baseline demo) and `examples/symphonia_flac_probe/` (the compile probe that *failed* and
+justified writing `flac-lite` at all). So `Frequency::{Hz10512, Hz18157, Hz32768}` constrains
+nothing here.
+
+**But the menu was never irrelevant either, and saying so is the honest version.** What agb's rates
+are to this track is a **convention it imposed on itself, deliberately**: `geometry.rs:101` takes
+`CHUNK_SAMPLES = 560` from agb's `Frequency::buffer_size`, and the rate ROM documents the domain
+explicitly — `rate_play_main.rs:101-110` maps 10,512→176, 18,157→304, 32,768→560 and says *"the
+generator fail-closes outside the mixer domain"*, on Sam's 2026-10-18 route choice of a custom
+feeder **on** agb's hardware terms rather than stock-agb-mixer. That is precisely why "~18 kHz"
+looked like "the next supported rate": it is the next rung of a set we chose to stay inside, not a
+set the hardware or the framework imposes. **Targeting 16,384 Hz knowingly steps outside the mixer
+domain**, and the retarget should say so rather than do it silently: the domain guard belongs to the
+spike's rate generator, not to the product geometry, and `CHUNK_SAMPLES` becomes a free parameter
+rather than a transcription of agb's buffer size.
+
+**Why 16,384 Hz is preferred to 18,157 Hz — arithmetic, not taste.** All of it follows from the
+7-1 second reading's measured figures (`work 59.946%`, push mask 14,680 c, grace 16 samples):
+
+| | 32,768 Hz (measured) | 18,157.16 Hz (n=924) | **16,384 Hz (n=1024)** |
+|---|---|---|---|
+| ticks/sample | 512, exact | **924.0082 → not an integer** | 1024, exact |
+| what the clock plays | 32,768.00 | 18,157.**16** (+8.82 ppm, 0.015 cents) | 16,384.00 |
+| declared == played | ✓ | ✗ — needs a tolerance | ✓ |
+| FIXED-0 chain work | 59.946% | 33.2% | **30.0%** |
+| worst frame | 60.755% | 33.7% | **30.4%** |
+| attributed decode | 451,763 c (43.08%) | 23.87% | **21.54%** |
+| **push mask vs the 16-sample grace** (mean / worst ever recorded) | 28.7 / 30.9 → **late** | 15.89 / **17.13 → still late** | **14.34 / 15.46 → inside** |
+| the clip's lead, same sample counts | 0.261 s | 0.471 s | **0.522 s** |
+
+The row that decides it is the masked-push one. The grace is **sample**-denominated and the mask is
+**cycle**-denominated, so *the faster the clock, the more of the grace a fixed mask eats*. 18,157 Hz
+would have taken the one defect this project has actually confirmed on silicon — `late in push 1/1`,
+four runs, both units — from "overruns by 12.7 samples" to "overruns by 1.13 samples on the worst
+window", i.e. still failing, while giving up 3 points of headroom **and** the identity guarantee. It
+also would have required re-expressing Q14 as a bounded comparison: a defensible bar exists (~100 ppm
+sits 11× above 8.82 ppm and 240× below Q14's 24,038 ppm defect), but it converts a machine-checkable
+equality into an adjudicated tolerance and a permanent, un-witnessable discrepancy — the pitch
+witness is deaf to 0.015 cents by construction. **Trading that for a rate the hardware does not
+require, on the strength of a menu nothing in this ROM calls, is the error this section exists to
+prevent someone re-making.**
+
+**What 16,384 Hz costs, unchanged by the ruling.** It is one rung down, so the retarget list stands
+exactly as written: re-author the asset at 16,384 Hz, move `PLAYBACK_RATE_HZ` and the four const
+asserts that pin it (`geometry.rs:313-318`: the rate itself, `TICKS_PER_SAMPLE == 512`,
+`frame_cycles(2048) == 1_048_576`, `PERIOD_CYCLES == 286_720` → **16,384 / 1,024 / 2,097,152 /
+573,440**),
+`EncodeProfile::PRODUCT_SAMPLE_RATE_HZ`, `gafp_pack`'s clock and rate-validity leg,
+`frame_vectors.py`, the four `.gfp` and the refusal spec, and C2's remaining "32 kHz" wording.
+Three things worth noting as *favourable*: `TICKS_PER_SAMPLE`, `PERIOD_CYCLES` and every frame
+budget are **derived** from `PLAYBACK_RATE_HZ`, so one constant moves most of the geometry; the
+ring's sample counts, `RING_CHUNKS`, `PREFILL_SAMPLES` and `DMA_WORDS` are all sample-denominated
+and need no change at all; and the timer2 period-counter wrap moves from ~18.7 to ~37.4 minutes of
+audio, which widens the margin rather than straining it.
+
+**One new, unavoidable piece of work the lower rung creates, and it is in the format.** FLAC's
+four-bit table holds 16,000 and 32,000 and **neither power of two**, so 16,384 Hz must be declared
+through the explicit-rate codes `0b1100..=0b1110` — and `SampleRate::from_flac_code`
+(`format.rs:89-90`) **currently returns `Error::InvalidField` for exactly those codes**, because the
+value lives after the coded number rather than in it. Two ways through, and the retarget should pick
+deliberately: implement explicit-rate frame parsing, or author frames with code `0b0000`
+("sample rate from the stream"), which `from_flac_code` already handles as `FromStreamDefault`. The
+second is smaller, and `gafp_pack`'s `audit_blob` is the gate that proves it: it strict-parses every
+frame of the finished blob back through the real reader, so a frame carrying an unimplemented rate
+code fails the pack rather than shipping. **This is the one place where the lower rate needs new
+decoder work, and it is a refusal path, not a correctness risk.**
+
+**Guard-rail, so this does not quietly reverse.** 32,768 Hz was declined on the **cost of real
+material** — 59.946% of the frame for a FIXED-0 stream that carries no prediction — and *not*
+merely on the late service. So fixing the push mask does **not** re-admit 32,768 Hz: that needs a
+fresh ruling with a measured reason, and the reason would have to be a decode/convert figure, not a
+latency one. Likewise 8,192 Hz remains the only rung where LPC projects inside the frame (43.3% /
+43.5%, against 86.6% / 87.1% at 16,384 Hz): if real predicted music turns out to be the product
+after all, that is the rung, and Q16's bar is what decides it.
+
+**What 7-1 owes now**, since it is the rung that establishes the new C2's number: (a) the rate
+**decision for the record — now made: 16,384 Hz**, in "The rung is chosen" above, and recorded as
+ruled rather than left in a paragraph; (b) the retarget itself, listed in 7-1's actions; and (c)
+7-2's push-mask fix, which must be done **at the new rate**, because a 14,680-cycle mask against a
+16,384-cycle grace is a **14.3-sample** window against a 16-sample tolerance — inside it by **1.7
+samples** on the mean and by **0.5 samples** on the worst push window this repository has ever
+recorded (15,831 c, 6b-3). That is not a margin, it is the same defect wearing a hat, and this
+image's own worst push window is not on the screen, so even the 0.5-sample floor is borrowed from
+another build. At 16,384 Hz the fix is also what turns "inside by luck" into "inside by design":
+`CHUNK`-sized push sections scale the measured 14,680-cycle window to **4,014 cycles**
+(3.584 c per copied sample-pair), i.e. **3.92 samples** at 1,024 ticks/sample against the same
+16-sample grace — a **4.08× margin**, where the same fix buys 7.84 samples and **2.04×** at
+32,768 Hz.
 
 **One limit on the scope of this ruling, and it is not a small one.** Everything above decides
 the rate of the **FLAC product path** and nothing else — see the scope block at the head of this
@@ -2671,7 +2808,7 @@ they are ~43% of the frame against decode's 42.72%.
 |---|---|---|---|
 | **7-0** ✅ | **Landed 2026-11-13 — the record is at the end of this item.** **The asset at the rate it will be played at.** Q14 was ruled on 2026-11-11: a stream is encoded at the rate it is played at, and the player does not reinterpret a declared rate to fit the clock. So: re-author the fixture at 32,768 Hz — from Hz, not by reusing the sample periods in `frame_vectors.py:263`, which would leave the played pitch exactly where the defect is — and encode it at the product profile (FIXED-0, 2048-sample frames, the residual shapes the guard admits: a fresh census, not this asset's; and an explicitly short final frame, because 10 s at 32,768 Hz is exactly 160 full frames and the short-frame witness would otherwise stop running). Take the `32_000` arm out of `geometry.rs` — set `RATE_BRIDGE` to `None` — and the `32000` entry out of `gafp_pack.py`'s `PLAYBACK_RATE_FOR_STREAM`, leaving identity-or-refusal. Take the sample rate out of `MEASURED_DECODE`'s key, so cost is keyed by blocksize, predictor kind/order and residual envelope — the variables the 6b-3 rate probe showed cost actually depends on — with the rate becoming a *validity check* on the manifest instead, and one constant clock in the arithmetic rather than two. Put the missing rate clause into `crates/flac-lite`'s `EncodeProfile`, which today checks blocksize, FIXED order, LPC and bit depth and never the rate of the stream it is guarding. The full inventory of where 32,000 lives and which uses are legitimate, the two traps (sample-period fixtures; 128/125 is an exact ratio but ffmpeg's `-ar` is float and float breaks every byte pin here), and the probe showing that real material censuses FIXED 1-4 and so is a profile decision rather than a pipeline swap, are in the "Q14 follow-up" section that closes the 6b-3 record, immediately above this table. It will pack at first only under `--allow-unmeasured`, and that is the honest state rather than a shortcut: the `this is NOT a product blob` note comes off when 7-1's row exists. For the same playing time such a stream carries 2.4% more samples, so expect ~2.4% more blob — arithmetic, and worth measuring rather than assuming. Measured on landing: +1.92% samples, +1.96% blob, the difference being the deliberate short final frame. | A **pitch witness in the same PR**: a tone whose implied pitch is measured out of the *decoded* PCM by integer autocorrelation at integer lags (no float — that is the defect class the 6a-2 float-trig incident is about) and checked against the rate the stream declares, plus the negative leg that authors the same tone at 32,000 Hz and packs it as a 32,768 asset, so a reinterpretation is witnessed red rather than assumed caught. Nothing in the present gate set can see a pitch shift at all — the pinned digest of a 32,000 Hz asset and of a reinterpreted one are the *same bytes*, which is how 41 cents passed every gate this asset has been through. Plus the profile guard with no relaxation flags, and `ruled_rate_policy_allows_one_bridge_and_no_more` failing exactly once at the first half of this item — its `.expect("the bridge is still in the tree; 7-0 removes it")` is the tripwire that goes red when the arm is deleted — while its `PRODUCT_STREAM_RATES` allow-list assert, written as one condition (the asset is allowed exactly when no bridge is present), goes red on any **half**-landed 7-0 and becomes the product's identity-or-refusal check once both halves have landed. | That every gate 6b-3's asset cleared was deaf to its one real defect — and that 7-1 and 7-3 would otherwise be run against an asset the product cannot ship. |
 | **7-1** ✅⚠ | **Two hardware readings on 2026-11-13, both units, two runs each, on the 32,768 Hz product path; both are recorded below. The second answered the mechanism question outright — **`late in push 1/1`, four runs, both units** — and produced the first attributed, isolated decode figure ever read off a unit, `attr 451,763 c/frame` = **43.08%** of the frame (+6.93% over mGBA's same-image 422,494, inside 6a-7b's band). The rival candidate died too: `2nd src 0/582` with the display's VBlank request bit never set on a unit, where mGBA reported it *set* with one shared entry, so interrupt topology is now a question an emulator cannot settle in either direction. **And it ended this rung's real purpose: the whole chain measured 59.946% of the frame, worst frame 60.755%, on a FIXED-0 stream — which is the cheapest thing FLAC can emit. On that evidence the owner ruled the same day that the rate is dropped as a commitment: C2 now asks for the highest rate achievable, not for 32 kHz. See "The rate ruling" above and Q16 for the margin bar that ruling still needs.** So 7-1's measurement half is closed and its remaining act is the retarget itself: re-run 7-0 and 7-1 at the rung the bar selects, and pin the packer's structural row and the host model's fixture from a real screen while doing it — both are unblocked now that `attr` is on the screen. What the four runs established: zero underruns, 582/582 periods, exact sample counts and digests, minimum lead 8,560 samples = 15.3 periods = 261 ms (not a starving shape), Q14's identity observed on silicon by the absence of the rate/pitch row, and a refusal on one clause only: a re-arm held 25 samples (12,800 c) against a 16-sample (8,192 c) grace at period 22, in the fed phase, deterministically — a latency-window miss with its mechanism now **measured**, not a throughput failure. **A red screen is the combined gate doing its job** (`COLOR_FAIL` on any of ledger/audit/PCM/FIFO), not a separate no-audio banner. The instrument cost is stated on both channels: the first extension +170 c/frame in mGBA / +147 c/frame on silicon; the second +87 / +262. **The delay itself moved 23 → 25 samples between the two instrument images while the period index stayed at 22** — the event is pinned in the schedule and its held time follows wherever the push window lands, and the store that pinned it sits inside the section under measurement, so the instrument made the thing it measures 2 samples worse. Reported, because that is the price of reading it.
-| **7-2** | **The shipping playback path.** `agb`'s mixer/DMA, or a written argument for why the custom IRQ feeder is the shipping path. Replaces the throwaway harness the rate track has been leaning on. It also settles a mechanism 6b-3's comment correction exposed rather than resolved: `agb` 0.25's `enable_dma_for_sound` (`hw.rs:56-68`) writes **no transfer count** — the 140-word write and the per-period re-arm in `product_play_main.rs` are ours — so whether a period is bounded in practice by a re-armed count or by the FIFO's half-trigger pull is an observation, not a reading of the source. Take it on silicon deliberately: re-arm early and late on purpose and count `grace`/`late` in the audit, before either wording is claimed. **Its named defect is now confirmed rather than hypothesised.** 7-1's second hardware reading came back **`late in push 1/1`** on four runs across both units: the one late service's period boundary crossed inside the producer's ring-push critical section, which holds **IME off for ~28.7 samples** against this audit's **16-sample** tolerance, and the alternative candidate — a second source sharing the interrupt entry — came back **`2nd src 0/582`** with `disp 0008`, i.e. the display's VBlank IRQ enable was never set on a unit. So the fix is chosen, not searched for: chunk-sized push sections (~7.2 samples at the current rate), or a lock-free ring so no 2,048-sample copy happens under a mask, or re-arming ahead of the boundary — and the audit count plus `late in push` are the witnesses. **Read the retarget's arithmetic before assuming it buys anything here: at 16,384 Hz the same
+| **7-2** | **The shipping playback path.** `agb`'s mixer/DMA, or a written argument for why the custom IRQ feeder is the shipping path. Replaces the throwaway harness the rate track has been leaning on. It also settles a mechanism 6b-3's comment correction exposed rather than resolved: `agb` 0.25's `enable_dma_for_sound` (`hw.rs:56-68`) writes **no transfer count** — the 140-word write and the per-period re-arm in `product_play_main.rs` are ours — so whether a period is bounded in practice by a re-armed count or by the FIFO's half-trigger pull is an observation, not a reading of the source. Take it on silicon deliberately: re-arm early and late on purpose and count `grace`/`late` in the audit, before either wording is claimed. **Its named defect is now confirmed rather than hypothesised.** 7-1's second hardware reading came back **`late in push 1/1`** on four runs across both units: the one late service's period boundary crossed inside the producer's ring-push critical section, which holds **IME off for ~28.7 samples** against this audit's **16-sample** tolerance, and the alternative candidate — a second source sharing the interrupt entry — came back **`2nd src 0/582`** with `disp 0008`, i.e. the display's VBlank IRQ enable was never set on a unit. So the fix is chosen, not searched for: chunk-sized push sections (~7.84 samples at the current rate, and **3.92 samples — a 4.08× margin — at the ruled 16,384 Hz**), or a lock-free ring so no 2,048-sample copy happens under a mask, or re-arming ahead of the boundary — and the audit count plus `late in push` are the witnesses. **And this rung's framework question was very largely answered by the rate ruling: `agb`'s mixer offers 10,512 / 18,157 / 32,768 Hz, the target is 16,384 Hz, and none of the three is it — so "adopt `agb`'s mixer" now means abandoning either the exact rate or the mixer. The ROM already owns the timer/DMA/re-arm, so the custom feeder is the shipping path by arithmetic; what 7-2 still owes is the *written argument* the item asks for rather than a necessity of the moment, plus a decision on whether `CHUNK_SAMPLES = 560` — a transcription of `agb`'s `Frequency::buffer_size`, which put this path inside a self-imposed "mixer domain" — is kept as a free choice or re-derived for the new clock.** **Read the retarget's arithmetic before assuming it buys anything here: at 16,384 Hz the same
 14,680-cycle mask is a 14.3-sample window against a 16-sample grace — inside the tolerance by
 **1.7 samples** on the mean and by **0.5** on the worst push window this repository has ever
 recorded for that section (15,831 c, 6b-3). That is a coin toss, not a margin, and this image's
@@ -2683,8 +2820,13 @@ beside it — pitch and tempo, not just a counter. 6b-3's image has never been p
 hand or verified by ear; `underflows=0` and a matching PCM pin are statements about
 bytes reaching the FIFO, and the acceptance run is the first place a person listens. | that C2 is claimed from a mean and a projection rather than from playback on a unit |
 
-**C2 is met when 7-3 passes on both units**, and not before. "Decodes within
-budget" was already true at 42.72% and is not the claim; it is the precondition.
+**C2 is met as of 2026-11-13.** The 7-3 master reading above is the acceptance evidence:
+real audio, both units, twice each, audible, BLUE, zero underruns and zero late services.
+The earlier formulation "C2 is met when 7-3 passes on both units" is superseded only by
+the owner's amended model: the path is validated once; subsequent encodes are judged by
+build-time tests and the mGBA control, not by repeating the two-unit run per asset.
+"Decodes within budget" was already true at 42.72% and is not the claim; it is the
+precondition. The post-C2 hardening list is separate from this closure.
 
 **Sequencing note, re-cut on 2026-11-11 by Q14's ruling.** 7-1 cannot run until 7-0
 lands. That is the ruling's consequence, not a slip: the image 7-1 measures has to be an
@@ -3162,7 +3304,9 @@ argue about now. Slicing does not reduce the work — 2,048 samples of copy is ~
 however it is done — but it is the **contiguous** mask that delays a service. So: push in
 `CHUNK`-sized critical sections (560 samples ≈ 3.7 k c ≈ **7.2 samples**, so a boundary is
 served at most 7.2 samples after the mask starts: a 2.2× margin against the 16-sample
-tolerance, and a per-chunk before/after pair is still a meaningful watermark); or make the ring
+tolerance *(superseded by measurement: the 3.7 k c was a rounding, and scaling 7-1's measured
+14,680-cycle mean window gives **4,014 c = 7.84 samples**, a **2.04×** margin at this clock and
+3.92 samples / **4.08×** at the ruled 16,384 Hz — see "The rung is chosen")*, and a per-chunk before/after pair is still a meaningful watermark); or make the ring
 lock-free (head and tail as words the feeder can read on its own side, `push_bytes` outside
 any critical section) so that no part of the copy is masked and the delay becomes IRQ entry
 latency, which this ROM already measures in the hundreds of cycles; or re-arm ahead of the
@@ -3250,6 +3394,12 @@ which is the first size at which the design being described is possible at all, 
 would have to be budgeted against the kernel's `.iwram`, the interrupt stack and everything
 else in the 32 kB. **The two takeaways converge there: the lower rate is what makes the
 IWRAM design affordable.**
+
+> **This paragraph became the ruling the same day.** 16,384 Hz is the target of record: see
+> "The rung is chosen", inside "The rate ruling" near the head of this file, for the decision as
+> taken — including the interim instruction to relax exactness toward agb's `Hz18157`, and why it
+> was withdrawn (nothing on this path instantiates agb's mixer; and at 18,157.16 Hz the confirmed
+> push-mask defect is *still late*). Kept as written because it is the reasoning that got there.
 
 **Which rung is actually there, and it is not 18,157 Hz.** "~18 kHz" is `agb`'s middle
 `Frequency::Hz18157`, and it is not available to this architecture. This ROM builds its own
@@ -3362,12 +3512,19 @@ makes sharper rather than redundant: a re-arm held 25 samples by a copy into the
 splice candidate, and only an ear says whether this one is audible. (d) **Unblocked, still
 owed** — the screen now carries every field the host fixture needs (`attr` included), so pin the
 ROM-generated text beside the blob's hash pin and derive the envelope from it, then re-read the
-geometry's depth and prefill cliffs against the current asset. (e) **Ruled, not merely answered**
-— the owner dropped the rate commitment on 2026-11-13 and amended C2 to the highest rate
-achievable; what remains is Q16's margin bar, then the retarget itself: the fixture at
-`frame_vectors.py`, the four `.gfp` and the refusal spec,
+geometry's depth and prefill cliffs against the current asset. (e) **Ruled, twice.** The owner dropped the rate commitment on 2026-11-13 and amended C2 to
+the highest rate achievable; the same day, the rung was **chosen as 16,384 Hz** ("The rung is
+chosen"), which is exactly expressible so Q14's identity rule carries across unchanged. Q16's margin
+bar is still owed for whether that is the ceiling. Then the retarget itself: the fixture at
+`frame_vectors.py`, the four `.gfp` and the refusal spec, the explicit-rate declaration path
+(`SampleRate::from_flac_code` refuses `0b1100..=0b1110` today, so either frames are authored with
+code `0b0000` — already handled as `FromStreamDefault` — or explicit-rate parsing lands;
+`gafp_pack`'s `audit_blob` strict re-read is the gate that proves which),
 `EncodeProfile::PRODUCT_SAMPLE_RATE_HZ`, `geometry`'s
-`TICKS_PER_SAMPLE`/`PERIOD_CYCLES`/`CHUNK_SAMPLES`/`RING_*`/`DMA_WORDS` and their const asserts,
+`PLAYBACK_RATE_HZ` and the const asserts that pin it (`TICKS_PER_SAMPLE == 512`,
+`frame_cycles(2048) == 1_048_576` and `PERIOD_CYCLES == 286_720` become 1024 / 2,097,152 / 573,440;
+`CHUNK_SAMPLES`, `RING_*`, `PREFILL_SAMPLES` and `DMA_WORDS` are sample-denominated and do not
+move),
 the packer's rate-validity leg and a measured row keyed to that shape, and C2's remaining "at
 32 kHz" wording. (f) Then 7-2, where the period-22 collision and the three fixes
 above are tested rather than argued — the shortlist is now a decision, since the attribution
@@ -3413,7 +3570,9 @@ the push critical section made the very defect it measures 2 samples worse. So:
   was late. `late in push 1/1` *is* the count matching, which the mGBA control could not show
   because it has no late service to attribute;
 - 7-2 has a chosen fix rather than a shortlist: stop masking interrupts across a 2,048-sample
-  copy. `CHUNK`-sized push sections are ~7.2 samples here, and a lock-free ring is none.
+  copy. `CHUNK`-sized push sections are ~7.2 samples here, and a lock-free ring is none. *(That
+  7.2 was an estimate; priced from 7-1's measured 14,680-cycle window the figure is **7.84
+  samples**, a 2.04× margin at this clock and **3.92** at 16,384 Hz — see "The rung is chosen".)*
 
 **And it does not rescue 32,768 Hz — which is the point of the run.** The refused clause is now
 explained and fixable, and the run is still ~60% of the frame with the sample counts, every
@@ -3451,9 +3610,10 @@ image this one costs **+0.025 pp = +262 c/frame** (59.921 → 59.946), roughly t
 figure every other row of those same screens implies. Recorded so that a future reader can see
 the slips were noticed rather than normalised away.
 
-**What 7-1 does now.** The retarget, in the order that makes each step checkable: rule the rung
-(16,384 Hz is the only exactly expressible one below the current rate — Q16 owns the margin bar
-that settles "highest achievable"); re-author the asset at it with the explicit-rate codes and
+**What 7-1 does now.** **The rung is ruled: 16,384 Hz** — `2²⁴/1024`, exact, so Q14's identity rule
+carries across the change untouched (see "The rung is chosen"; Q16 still owns whether 16,384 Hz is
+the ceiling or a way-station to 8,192 Hz). The retarget, in the order that makes each step
+checkable: re-author the asset at it with the explicit-rate codes and
 re-point all three of 7-0's guards *before* encoding; move `geometry.rs`'s
 `TICKS_PER_SAMPLE`/`PERIOD_CYCLES`/`CHUNK_SAMPLES`/`RING_*`/`DMA_WORDS` and their const
 asserts; `frame_vectors.py`, the four `.gfp` and the refusal spec; `EncodeProfile`;
@@ -3462,6 +3622,216 @@ the packer's structural row and the host model's fixture should be taken — bot
 that `attr` is on a screen, and the fixture should be pinned from *this* image's text rather
 than a hand-copy. 7-2's push-section fix is done against the new rate and re-witnessed with the
 same `late in push` field, which now has a proven hardware answer of `1/1` to compare against.
+
+### 7-1 retarget landing (2026-11-13): 16,384 Hz, FIXED-0, mGBA green
+
+The owner ruled Q16 in the smallest form the tree needs: **FIXED-0 is the product and LPC is
+measurement-only**, so 16,384 Hz is the target of record rather than a way-station to 8,192.
+The retarget then landed as one change:
+
+- **Asset.** `scripts/frame_vectors.py` moved `DEVICE_RATE` to 16,384 and re-derived the
+  Hz-authored partials at that clock (`[(66,5),(98,4),(128,3),(41,2)]`, square 16, side 512).
+  The product clip keeps its ~10 s playing time rather than its old sample count: 79 full
+  2048-sample frames plus a 512-sample tail = **162,304 samples, 80 frames**, encoded
+  FIXED-0 at 16,384. `gen_spike_assets.sh` regenerated the spike regions and reference PCM;
+  `gen_gafp_blob.py` wrote the product blob and `gafp_pin.rs`. The shipped blob is
+  **439,396 bytes**, sha256 `6ad460ea0415579a87e11ade3ed602aad532e2e2cd185be575e1c75b0fc075f3`,
+  and declares 16,384 Hz through code `0b1101` + a 16-bit field on every frame.
+- **Guards.** `EncodeProfile::PRODUCT_SAMPLE_RATE_HZ` and the packer's `PRODUCT_CLOCK_HZ` /
+  `DEFAULT_RATE` moved together; `MEASURED_DECODE`'s FIXED-0 row is now
+  **21.25% mean / 21.36% worst of the 2,097,152-cycle frame** (the same 445,558 cycles),
+  and the LPC row **86.64% / 87.07%**. The row's `frames_sha256` still names the pre-7-0
+  frames, so a clean product pack prints its provenance warning — the honest state until a
+  hardware row measured on *these* frames exists. The refusal self-check now refuses
+  32,768 Hz as well as 32,000, 16,000 and the other tempting values.
+- **Geometry.** `PLAYBACK_RATE_HZ = 16_384`, `TICKS_PER_SAMPLE = 1_024`,
+  `frame_cycles(2048) = 2_097_152`, `PERIOD_CYCLES = 573_440`; `CHUNK_SAMPLES = 560`,
+  `RING_*`, `PREFILL_SAMPLES`, `DMA_WORDS` and the 16-sample grace are unchanged. The
+  screen/budget labels, `flac-rom`'s budget and the spike's budget moved with it.
+- **Fixtures and vectors.** The four `.gfp` fixtures are now
+  `p0_fixed0_mono_16384_b2048.gfp`, `p2_fixed0_stereo_16384_b2048.gfp`,
+  `p3_fixed0_midside_16384_b2048.gfp`, `x1_lpc_stereo_16384_b2048.gfp`; the refusal slug is
+  `rate_44100_at_16384_target`. `gen_gafp_fixtures.py` and `gen_frame_vectors.sh` regenerated
+  the tables; the product header vectors are `prod-rate16384-first` / `-last`.
+- **mGBA control.** `product-play.gba`, sha256
+  `ef1ed8baf0feadb696e0b0c5e3fb24c92ced31a6fbab6d40edfb5ce45b789351`, one headless run:
+  `fr 80 und 0`, `per 289 ser 289 tail 1/464 void 0`, `late 0`, `replay 0`, PCM and FIFO
+  pins `MATCH`, `work 25.363%` / worst frame `26.583%`, attributed decode `417,431 c/frame`,
+  `minlead 9680`, verdict PASSED. This is an emulator control, **not** 7-3 and not a C2
+  claim; the hardware reading, its `late in push` witness and the listening half are still
+  owed, and 7-2's push-mask fix is still owed at this rate.
+- **Host model.** The envelope constants were re-read from that run (decode/convert/push
+  sums 31,335,458 / 8,476,297 / 1,111,346 over 75 windows, feeder 1,629,347 over 289
+  periods), and `make product-play-test` is 14/14. The pitch witness now compares the
+  16,384 Hz 128 Hz anchor against the recorded 32,000 Hz design; the recorded design's
+  250 Hz partial is omitted from the negative leg because its period at 32,000 (128) is the
+  current anchor's period at 16,384, which would make the instrument measure the wrong tone.
+- **Gates.** `gafp-check`, `gafp-pack-check`, `flac-gates`, `spike-test`, `make test` and
+  `make check` all exit 0 on this tree. The ROM images build; `test-rom` still collects zero
+  cases, as recorded in the standing caveats.
+
+What this did not establish at landing time was any hardware figure at 16,384 Hz. The
+hardware reading below closes that half. C2 remains unmet until 7-3, because the listening
+witness has not been asked and 7-2's push fix is not in this image.
+
+### 7-1 retarget hardware reading (2026-11-13): both units green at 16,384 Hz
+
+**Image.** `product-play.gba`, sha256
+`ef1ed8baf0feadb696e0b0c5e3fb24c92ced31a6fbab6d40edfb5ce45b789351`, 662,840 B — the
+16,384 Hz FIXED-0 image from the retarget. Two runs on **GBA 001** and two on **GBA SP**,
+all four on a **BLUE screen**. The four screens are transcribed in full in
+[`playback-results.md`](playback-results.md) under "7-1, retarget hardware reading"; the
+transcription slips (`28/450%`, `cubs`, `drain -`, `16374`) are kept there rather than tidied.
+
+All four runs agree on every measured field:
+
+- `fr 80 und 0`, `per 289 ser 289`, `tail 1/464`, `void 0`, `refus 0`
+- **`replay 0 late 0 fed 0 drain 0`**, `latep 0 worstp 0 dly 0`
+- `late in push 0/0`, `2nd src 0/289`, `disp 0008`
+- `push 162304 cons 162304`, `pcm ok fifo ok`, `ledg ok`, `aud ok`
+- **work 28.450%**, worst frame **29.613%**
+- **`dec 19.961%`, `attr 446306`**
+- convert 6.824%, push 0.666%, feeder 0.997%
+- `minlead 9120` samples = **16.3 periods = 0.557 s**
+- no `rate …!… pitch` row: declared 16,384 Hz = played 16,384 Hz on silicon
+
+The shares sum to 28.448% against the 28.450% total (rounding), so the stage instrument is
+self-consistent on silicon too.
+
+**Same-image hardware minus mGBA.** mGBA on the same image reads work 25.363% / dec 18.677%
+/ attr 417,431, with the same ledger and `late 0`. Per leg, against the 2,097,152-cycle
+frame:
+
+| leg | mGBA | hardware | Δ c/frame | Δ |
+|---|---:|---:|---:|---:|
+| decode window | 391,685 | 418,613 | +26,928 | +6.87% |
+| convert | 105,948 | 143,110 | **+37,162** | **+35.08%** |
+| push | 13,883 | 13,967 | +84 | +0.60% |
+| feeder | 20,363 | 20,909 | +545 | +2.68% |
+| **work** | **531,901** | **596,640** | **+64,739** | **+12.17%** |
+| attributed decode | 417,431 | **446,306** | +28,875 | +6.92% |
+
+That is the same leg-shaped gap measured at 32,768 Hz: decode is inside 6a-7b's 3.7–6.9%
+non-kernel band, and **convert is again the +35% outlier**. Q15 is re-confirmed at the new
+rate, not retired; convert is now ~7% of the frame instead of ~14%. `attr 446,306 c/frame` is
+the live-producer attributed decode figure at 16,384 Hz (21.28% of the frame). It is **not**
+6b-2's decode-slot row and must not be averaged with it.
+
+**What it closes, and what it does not.** The retarget's hardware half is established: both
+units, twice each, zero underruns, zero late services, exact sample counts and digests, rate
+identity observed. But `late 0` four times is not 7-2: the push section still masks interrupts
+for the measured 14,680 cycles — **14.3 samples** against the 16-sample grace on the mean and
+**15.46** on the worst push window recorded for that section, leaving only 0.5 samples on that
+worst case. This image did not reproduce the phase-locked period-22 collision that the
+32,768 Hz image hit; the fix is still owed at this rate. And 7-3's listening witness — pitch
+and tempo, heard on both units with the source beside it — has not been asked. C2 remains
+unmet until 7-3 passes.
+
+### 7-2: the push mask is chunk-sized — hardware green on both units
+
+**The change.** `product_play_main.rs` no longer holds one critical section across a whole
+2,048-sample ring push. `Producer::push_frame_in_chunks` appends the frame in slices of at
+most `CHUNK_SAMPLES = 560`, each slice a complete `RingFeed::push_bytes` under its own
+short critical section. `push_bytes` credits only after the copy, so the feeder sees the
+previous slice or the new one, never a torn one; interrupts are live between slices, which
+is the point. `push_start_period` is still written once, at the first slice's start: the
+whole sequence is shorter than one 560-sample period, so a boundary crossing any slice
+still makes the handler's period equal that counter + 1 and the `late in push` witness
+remains exact.
+
+**The arithmetic this buys.** The measured whole-frame mask was **14,680 c** — **14.3
+samples** at 1,024 ticks/sample against the **16-sample** re-arm grace, with the worst
+recorded push window **15,831 c / 15.46 samples** leaving only **0.5** samples. A
+`CHUNK`-sized slice scales that window to about **4,014 c = 3.92 samples**, a **4.08×**
+margin. The price is visible and small: on the same image, the push stage's whole-sequence
+mean rises from 14,817 to **18,018 c/frame** (four sections instead of one), work
+25.363% → **25.507%** (+0.144 pp), worst frame 26.583% → **26.727%**. Decode and convert
+are unchanged; there are still zero underflows, zero late services, and both PCM/FIFO pins
+match.
+
+**Control image.** `product-play.gba`, sha256
+`2abf61e8b18f4bac46ed680d2320f1b9237b3586e35e3f167f8aef2885eab5ff`, **662,440 B**. One
+headless mGBA run: `fr 80 und 0`, `per 289 ser 289 tail 1/464 void 0`,
+`replay 0 late 0 fed 0 drain 0`, `late in push 0/0`, `2nd src 0/289`, `disp 000A`,
+work **25.507%** / worst **26.727%**, `dec 18.678%`, `attr 417451`, `conv 5.051%`,
+`push 0.805%`, `feed 0.971%`, `minlead 9680`, verdict PASSED. The host envelope was
+re-read from this run and `make product-play-test` is 14/14.
+
+**The hardware reading.** Four runs of the same image — GBA 001 ×2 and GBA SP ×2 — all
+green on the gate fields: `fr 80 und 0`, `per 289 ser 289 tail 1/464 void 0`,
+`replay 0 late 0 fed 0 drain 0`, `latep 0 worstp 0 dly 0 refus 0`,
+`late in push 0/0`, `2nd src 0/289`, `disp 000A`, `push 162304 cons 162304`,
+`pcm ok fifo ok ledg ok aud ok`. The measured shares are **work 28.600%**, worst frame
+**29.781%**, `dec 19.961%`, **`attr 446292`**, `conv 6.825%`, `push 0.816%`,
+`feed 0.997%`, `minlead 9120`. Against the whole-frame-push image (`ef1ed8ba…`, work
+28.450% / push 0.666% / maxwk 29.613%) the chunked push costs **+0.150 pp work**,
+**+0.150 pp push**, **+0.168 pp worst frame** and leaves decode, convert, every count,
+every digest and every late field unchanged. The hardware-versus-mGBA gap is still the
+Q15 shape: decode +6.87%, convert **+35.12%**, work **+12.13%**, attr +6.91%. The
+four-screen transcription is in [`playback-results.md`](playback-results.md) under
+"7-2: chunked push on hardware"; the `dev`/missing-`Minlead`/case slips are kept there.
+
+**Why this is the shipping path.** `agb`'s mixer offers 10,512 / 18,157 / 32,768 Hz and
+none is 16,384; this ROM already owns timer0-2, the sound-DMA re-arm and the FIFO feed, and
+`agb`'s `enable_dma_for_sound` writes no transfer count. Adopting the mixer would mean
+giving up the exact rate, so the custom IRQ feeder is the shipping path by arithmetic.
+`CHUNK_SAMPLES = 560` remains a free parameter rather than a transcription of agb's buffer
+size; it is kept because it is a multiple of four words and every measured run is stated on
+it.
+
+**What remains.** The named 7-2 latency defect is closed on hardware: zero late services on
+both units, twice each, with the mask now `CHUNK`-sized. 7-3 still needs the listening
+witness — pitch and tempo, heard on both units with the source beside it — and that is the
+remaining C2 clause.
+
+### 7-3 prerequisite: the audible asset has to come from `bioluminescent.wav`
+
+The 7-0..7-2 product asset is the deterministic synthetic fixture, not the master. It is
+**not a listening witness**: 16-bit RMS 466 counts (~-37 dBFS), and through `sample >> 8`
+it is RMS 1.91 LSB, range -5..4. Its per-second RMS is constant across the clip, so the
+perceived "silence after the opening high tone" is level and content, not a delivery
+dropout. `assets/sound/bioluminescent.wav` is 96 kHz / 24-bit / stereo; its first 9.9 s at
+16 kHz / 16-bit measures RMS 5,369 counts (~-15.7 dBFS), about 21 dB louder.
+
+The master excerpt at the current product profile (`-l 0 -b 2048 -m`, 16,384 Hz) censuses
+**CONSTANT x4, FIXED-1 x102, FIXED-2 x53, FIXED-3 x1**, and the packer refuses it: only
+FIXED-0 has a measured row, and stock `flac` does not force FIXED-0 (`-l 0` disables LPC,
+not fixed-order selection). So 7-3 cannot be just a file swap. The next decision is to
+measure/admit FIXED-1..3 (and CONSTANT) plus their residual envelopes at 16,384 Hz, or
+force FIXED-0 with a custom encode, or use a non-product listening fixture that does not
+meet C2's FIXED-0-by-construction clause. The measurements are in
+[`playback-results.md`](playback-results.md) under "7-3 asset finding"; the first option is
+the natural product path if real music is the audible witness.
+
+**The master pipeline is now implemented.** `gafp_pack.py --master` accepts
+CONSTANT/FIXED-0..4/VERBATIM without a measured row, still refuses LPC and still enforces
+16,384 Hz / 16-bit / 2048-sample frames; `--emit-pin` writes the `gafp_pin.rs` shape.
+`make master-pack INPUT=…` writes the gitignored master asset and pin, and
+`make master-play-rom INPUT=…` builds a playable image. The first 9.9 s of
+`bioluminescent.wav` packs to 80 frames / 162,304 samples / 422,025 B with census
+`constant x4, fixed1 x102, fixed2 x53, fixed3 x1`; the resulting `master-play.gba`
+(`78a02c9c…`, 645,072 B) runs in mGBA with `und 0`, `late 0`, all 289 periods serviced,
+PCM/FIFO MATCH, **work 27.998% / worst frame 30.871%**, `attr 468011`, `minlead 9120`.
+That is an **mGBA control**: the FIXED-1..3/CONSTANT hardware rows are still needed before
+the master asset can be called a C2 product. The image is the one to take to the units for
+that measurement.
+
+**The master hardware reading then came back audible on both units, twice each.** All four
+runs of `master-play.gba` (`78a02c9c…`, 645,072 B) were recognizable master audio and ended
+BLUE: `fr 80 und 0`, `per 289 ser 289 tail 1/464 void 0`, `replay 0 late 0 fed 0 drain 0`,
+`late in push 0/0`, `2nd src 2/289`, `disp 0008`, `push 162304 cons 162304`, digests ok.
+Work **32.208%** / worst **35.831%**, `attr 527339`, `dec 23.656%`, `conv 6.733%`,
+`push 0.820%`, `feed 0.997%`, `minlead 9120`. Against mGBA's 27.998% work / 468,011 attr,
+hardware is +15.04% / +12.68% — the same direction as every other row; convert is +27.37%.
+`2nd src 2/289` is new (earlier synthetic runs were 0/289), with `disp 0008` and zero
+lateness; it is recorded, not explained. The full four-screen transcription is in
+[`playback-results.md`](playback-results.md) under "7-3 master hardware reading".
+
+This is the C2 acceptance run. The path was manually validated once end to end with real
+audio; subsequent encodes are judged by build-time tests and the mGBA control, not by
+repeating this two-unit run for every asset. The missing CONSTANT/FIXED-1..3 rows and
+residual envelopes are now preflight/hardening, not a C2 prerequisite; the post-C2 list is
+in "C2 closure" above.
 
 
 ## The width decision (what it is and is not safe for)
