@@ -16,6 +16,15 @@ publish = false
 uli-lite = { path = "../uli-lite", features = ["kernels", "product"] }
 
 [features]
+# Operation counts (`Ops`) and format-rule diagnostics (`xover`/`hfnz`) on the
+# hot path. Off by default: they cost ~30,000 cycles on the measured worst frame
+# (PR C-3b), because they are a counter increment per symbol and two compares per
+# nonzero coefficient. The product build compiles them out; every witness that
+# quotes `FrameInfo::ops`/`cycles`/`xover`/`hfnz` (the twins) must build with this
+# on, and `examples/uli_bench` gates its ops line on it. The format rules are
+# still witnessed in a product build by the core decoder's pass in the bench.
+verify = []
+
 # Copies the 8,672 B of synthesis tables (PERM/PRE/POST/TW/WIN) into `.iwram`
 # instead of reading them from the cartridge. The reference GBA port does this
 # (9.4 KB of tables in IWRAM); it is a separate arm because it spends a

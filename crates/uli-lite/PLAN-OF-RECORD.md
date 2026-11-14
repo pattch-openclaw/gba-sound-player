@@ -5,15 +5,16 @@ plan for the ULI2 product codec. [`../../ULI2.md`](../../ULI2.md) remains the de
 (why ULI2, what it is, the licensing and encoder risks); this file owns the
 phases, gates, measurement ledger and the order of work.
 
-**PR C-2, executed as C-3a, has landed (2026-11-14) together with C-3c**:
-the measured product frame is **488,685 worst / 429,339 mean (186% / 164%)**,
-down from 523,267 / 456,187 — a **measured saving of 35,000 cycles/frame where
-the plan projected 90,000**. Every twin is green and the pins are unchanged.
-The ledger section below carries the arm table and the measured decomposition of
-the remaining entropy cost; the short version is that C-3b (stats behind
-`verify`) is now the largest measured lever, and parity is **not reachable on
-the current item list** without a per-stage attribution of what entropy still
-costs.
+**PR C-2 (as C-3a, with C-3c) landed 2026-11-14** — 523,267 → **488,685 worst /
+429,339 mean (200% → 186%)**, a measured 35,000 where 90,000 was projected.
+**PR C-3b landed the same day**: the operation counters and format-rule
+diagnostics moved behind a `verify` feature, and the product build measures
+**457,863 worst / 410,912 mean (175% / 157%)** — a further **30,822 / 18,427**,
+which is the attribution's prediction met (it predicted 30,482 / ~20,000). The
+ladder is now 2526% → 1133% → 698% → 204% → 186% → **175%**. Every twin and pin
+is green in both builds; the ledger carries the arms. Next: coefficient buffers
+to IWRAM with C-1. Parity (69.4%) still needs the symbol-path codegen gap the
+attribution localized.
 
 The target is **C-class performance** (the C/asm product decoder's 69.4% worst
 decode wall), not merely a decode frame under the 262,144-cycle period. A parity
@@ -397,9 +398,11 @@ forecast.
 and each changes the frame the next one is measured against — so every arm keeps
 its control in the same image (PR A's rule).
 
-1. **C-3b (+ C-3c, landed)** — delete the diagnostics from the product hot loop.
-   Measured at ~30,000 cycles/frame, the largest item the attribution found. It
-   is the only remaining step that is pure deletion.
+1. **C-3b (+ C-3c, landed 2026-11-14)** — the counters and format-rule
+   diagnostics now sit behind `verify`; measured **−30,822 worst / −18,427 mean**
+   (the attribution predicted −30,482 / ~20,000). Gate unchanged: `verify` is off
+   for the product arm, on for the twins and for the arm that witnesses the
+   product decoder's own `xover/hfnz`.
 2. **Coefficient buffers to IWRAM** — the attribution's second item, and new:
    M/S plus coefficient traffic pays EWRAM wait states (the reference's `X`/`P`
    are in IWRAM and its M/S is ~4,400 against our 16,067). Blocked on the
@@ -470,7 +473,7 @@ may rest on the 129-frame number alone** — U4's witness is this analysis.
 | **U1 — reference** | `uli-lite` remains a bit-exact, host-testable reference (no longer a portable-product claim). | Met (Phase 0/1); redefined 2026-11-14. |
 | **U2 — bit-exact host** | The reference matches the C-pinned corpus, frame for frame, on **valid** streams. Malformed input only has to be rejected safely — no arithmetic-exactness promise (decided 2026-11-14). | Met. |
 | **U3 — bit-exact product** | The product kernel set produces the pinned int8/int16 frames, on target and in the host twin. | **Met for the full hot path (PR B).** `tests/product_twin.rs` (host, frame-for-frame) + `make uli-bench` on-target pins. |
-| **U4 — real-time decode** | Worst full frame within the product budget at WAITCNT 4/2 — read as **C-class (≤~70–75% decode wall)**, because the gate total adds convert + IRQ + DMA to whatever the decoder costs. **The ceiling itself is measured, not assigned** (2026-11-14): it is written down at the first near-real-time arm, from the measured gate total plus this tree's non-audio cost. Its worst-frame witness is PR E, not the 129-frame corpus. | **Not met.** PR B measured 204% worst / 177% mean; PR C added the attribution and a split-`huff` win to **200% worst / 174% mean** (523,267 / 456,187) and scoped the remainder as two rewrites (C-1 asm kernels 63%, C-2 entropy 33%). C-1 + C-2 projected to ~91%. **C-3a + C-3c landed 2026-11-14 and measured 488,685 worst / 429,339 mean (186% / 164%)** — a real 35,000-cycle cut where 90,000 was projected. Re-based on that, the remaining item list (C-1, C-3b, the diagnostics, OLA fusion, `iwram-tables`) projects **~250,000–280,000 (95–107%)**, which is the period at best, **not parity**. C-3b is the largest measured lever left; parity needs a per-stage attribution of the remaining ~140,000 cycles of entropy+dequant. See the ledger section “PR C-2 / C-3a”.  |
+| **U4 — real-time decode** | Worst full frame within the product budget at WAITCNT 4/2 — read as **C-class (≤~70–75% decode wall)**, because the gate total adds convert + IRQ + DMA to whatever the decoder costs. **The ceiling itself is measured, not assigned** (2026-11-14): it is written down at the first near-real-time arm, from the measured gate total plus this tree's non-audio cost. Its worst-frame witness is PR E, not the 129-frame corpus. | **Not met.** PR B measured 204% worst / 177% mean; PR C added the attribution and a split-`huff` win to **200% worst / 174% mean** (523,267 / 456,187) and scoped the remainder as two rewrites (C-1 asm kernels 63%, C-2 entropy 33%). C-1 + C-2 projected to ~91%. **C-3a/C-3c then measured 488,685 / 429,339 (186% / 164%)**, and **C-3b measured 457,863 / 410,912 (175% / 157%)** — 66,000 cycles cut in two PRs, both measured against same-image controls. What remains: C-1's kernel prize (~194,000, the largest single item), coefficient buffers to IWRAM (~10,000–15,000, unblocked by C-1), OLA fusion, and the symbol-path codegen gap the attribution localized (~260 cycles/symbol against the record's ~114). The current item list alone still lands near the period rather than parity. See the ledger sections “PR C-3b” and “PR C-2 / C-3a”.  |
 | **U5 — product playback** | 32,768 Hz path, zero underruns, clean period audit. | Not started (gated by U4). |
 | **U6 — memory** | IWRAM/EWRAM/stack inside the product budget with UI and feeder. | **Open, and now the binding constraint.** The product path needs ≈15.0 KiB of stack. Budget at PR C: `.iwram` 11,072 B baseline, 32,512 B usable, so 21,440 B spare — but 8,672 B of synthesis tables in IWRAM leaves 12,768 B, under the stack need, and `iwram-tables` **crashes** (stack overruns `__iwram_end` into code; the CPU jumps to an invalid address). IWRAM tables are therefore blocked until the stack requirement or the code size falls — and C-3's re-specification of C-1 (asm that also cuts the spilled intermediates) is the intended way to fall under it. `HotState` and the tables are both EWRAM now. **Priority decided 2026-11-14: audio first** — IWRAM budget goes to code, hot state and stack; synthesis tables next if the stack allows; UI affordances are the slack and may be dropped to buy audio headroom. Full `huff` inlining was rejected on this row: +4,252 B for 2.7% (U6 is binding), vs +896 B for 1.6% with the split. |
 | **U7 — licensing/spec** | Permissive license + standalone format spec before publishing; otherwise `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** Revisit only if a publish decision is taken; the license and `FORMAT.md` remain prerequisites for it. |
@@ -534,6 +537,33 @@ so synthesis is back to 63% of the frame.** The PR B gate (≤2×) is met at
 Placement: `HotState` (8 KiB) is in EWRAM, not IWRAM — an IWRAM placement
 stack-overflowed on target (≈15.0 KiB of stack needed; see PR B above). The
 host twin was green either way, so this was a target placement defect only.
+
+### PR C-3b (2026-11-14, mGBA, WAITCNT 4/2)
+
+Full frame, 129-frame corpus, 262,144-cycle period, same-environment baseline.
+
+| arm | worst | mean | min |
+|---|---:|---:|---:|
+| C-3a + C-3c (before) | 488,685 (186%) | 429,339 (164%) | 353,340 |
+| **C-3b product build** (`verify` off) | **457,863 (175%)** | **410,912 (157%)** | 352,940 |
+| C-3b `verify` build (counters on) | 488,682 (186%) | 429,336 (164%) | 353,337 |
+| core kernels (control, same image) | 2,643,897 (1009%) | 2,152,958 (821%) | 1,376,966 |
+| overlay kernels (`ArmKernels`) | 1,640,505 (626%) | 1,148,486 (438%) | 371,523 |
+
+**−30,822 worst / −18,427 mean**, against a prediction of −30,482 / ~20,000. The
+`verify` build reproduces the previous arm to within 3 cycles (488,682 vs
+488,685), which is the layout noise this file records elsewhere — so the feature
+is a switch, not a re-implementation. Both builds pin `e6e87652` / `b3530978`,
+`xover=0 hfnz=0`, no wrapped window, overlay twin PASS.
+
+Design: `uli-lite-gba`'s `verify` feature gates the per-symbol counters (a
+no-op call per increment otherwise) and the two diagnostic compares per nonzero
+coefficient; `Diag` is empty and `FrameInfo::ops/cycles/xover/hfnz` are zeroed in
+the product build. The format rules are **not** unwitnessed: `examples/uli_bench`
+reads `xover/hfnz` from the core decoder's correctness pass, and
+`tests/product_twin.rs` compares full `FrameInfo` under `--features verify` plus
+a samples/bits/bitpos twin without it; `make uli-overlay-test` runs both. A guard
+test fails if anything re-enables the counters outside the gate.
 
 ### PR C-2 / C-3a (2026-11-14, mGBA, WAITCNT 4/2)
 
@@ -749,6 +779,18 @@ coefficient against the C bench's entropy+dequant (~41 c/coef) is ~6.6×.
 ---
 
 ## Decision log
+
+- **2026-11-14 — C-3b landed; the prediction held.** The counters and format-rule
+  diagnostics moved behind `uli-lite-gba`'s `verify` feature: the product build
+  measures **457,863 worst / 410,912 mean (175% / 157%)**, **−30,822 / −18,427**
+  against the attribution's predicted −30,482 / ~20,000 — the first projection in
+  this file to land on its number. The `verify` build reproduces the previous arm
+  within 3 cycles, so it is a switch rather than a rewrite. The product decoder is
+  no longer the arm that witnesses `xover=0 hfnz=0`: that stays with the core
+  decoder's pass in the bench and with the `verify` twins
+  (`make uli-overlay-test` now runs both builds, and a guard test fails if the
+  counters come back outside the gate). Ladder: 2526% → 1133% → 698% → 204% →
+  186% → **175%**. Next is coefficient buffers to IWRAM with C-1.
 
 - **2026-11-14 — the attribution is built, run, and it reorders the work.** Two
   instruments: a per-frame dump in the bench (`--features per-frame`, which
