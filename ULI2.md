@@ -11,8 +11,10 @@ mean = 204% / 177%** of the 262,144-cycle period, both pinned — PR B's ≤2× 
 met, but U4 (≤100%) still **not met**, so playback has not started. **PR C
 (2026-11-14) measured where the frame actually goes — 63% synthesis kernels, 33%
 entropy, 4% M/S + wrapper — and took it to 200% / 174% with a split-`huff` fast
-path; the remainder is scoped as two rewrites (C-1 asm kernels, C-2 entropy),
-not tuning.** This file is the decision record (why
+path. The remainder was scoped as C-1 (asm kernels) and C-2 (entropy). A parity
+audit (2026-11-14) found that C-1 + C-2 project to ~91% — the period, not the C
+record's 69.4% — so the plan now carries C-3, a differential port against the C
+product decoder, and re-reads U4 as C-class.** This file is the decision record (why
 ULI2, what it is, the licensing and encoder risks); the live plan, gates and
 measurement ledger are [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md).
 
@@ -187,6 +189,13 @@ is stable.
   source material in Rust, removing the `gba-audio`/C-source dependency. General
   Python orchestration and reusable external tools such as `ffmpeg` stay
   allowed.
+- **No C, no dependency, everything in-repo.** Arm-mode asm may be adapted from
+  the reference implementation; **C source may not be incorporated,** and there
+  is **no build, link or vendoring dependency on `gba-audio`** — the encoder of
+  record is used *off-tree* to produce assets, and every artefact this project
+  builds, tests or ships lives in this repository and is twinned against this
+  repository's oracle. This is the form the isolation rule takes for the asm
+  work (PR C-1) and it is unchanged for tooling.
 - **No `agb` in the core.** The core is platform-free; the product ROM composes
   it with the playback layer. This is what makes host tests and future reuse
   possible.
@@ -474,8 +483,9 @@ PR C measured the worst frame before optimising it: **63% synthesis kernels /
 33% entropy / 4% M/S + wrapper**, and found the codegen is not short of
 instructions (6 `SMULL` + 6 `SMLAL` per butterfly, no `__aeabi_lmul`) but short
 of **registers** — the radix-4 butterfly spills 66 intermediates. It split into
-**C-1 (hand-written ARM asm kernels, ~182,000 cycles saved)** and **C-2 (entropy
-rewrite, ~90,000 saved)**, projected ~94% together. This section's original
+**C-1 (hand-written ARM asm kernels, ~194,000 cycles saved)** and **C-2 (entropy
+rewrite, ~90,000 saved)**, projected ~91–94% together and **not parity** — the plan
+of record carries PR C-3 for the difference. This section's original
 framing follows.
 
 The reference asm is `gba-audio/src/uli/gba/uli_imdct_arm.S` (author’s
@@ -497,8 +507,10 @@ the full frame inside the budget with margin.
 1. Reuse the 32,768 Hz ring/FIFO feeder built for the FLAC product path.
    ULI2 frames are 512 samples/channel; adjust the chunk/period arithmetic but
    keep the same timer/DMA/IRQ discipline.
-2. Feed int8 directly (headphone profile) and the optional int16 path to the
-   speaker profile. Preserve ULI2’s fused 8-bit rounding
+2. Feed int8 directly (headphone profile) and the optional pre-DAC int16 path.
+   The **speaker profile is in scope** and is served by the *output stage*, not
+   the decoder: full stereo decode always, mono fold-down after it (see the
+   plan of record, PR D). Preserve ULI2’s fused 8-bit rounding
    (`(acc + 2^39) >> 40`); do not silently replace it with the FLAC path’s
    truncation.
 3. Drive the UI from the `ULA2` track/seek/strings tables. The existing GAFP
@@ -530,10 +542,10 @@ claims to be measured, not inherited from `gba-audio`.
 | **U1 — reference** | `uli-lite` remains a bit-exact, host-testable reference and oracle (no longer a portable-product claim). | `make uli-test`; committed corpus; thumbv4t `check` |
 | **U2 — bit-exact host** | The Rust core matches the C integer reference frame-for-frame on the committed corpus and rejects malformed frames without panic. | `make uli-test`; pinned hashes |
 | **U3 — bit-exact product** | The product kernel set (`ArmKernels`) decodes the corpus to the pinned int8/int16 frames, in the host full-frame twin and on the target. **Met (PR A).** | `make uli-bench` (both arms + on-target twin); `make uli-overlay-test` (host kernel + decoder twins) |
-| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Not met. PR B: 204% / 177%. PR C (2026-11-14): 200% / 174% (523,267 / 456,187), with the frame attributed 63% kernels / 33% entropy / 4% M/S + wrapper; remainder scoped as C-1 asm kernels and C-2 entropy, projected ~94%.** | `make uli-bench`; mGBA, then hardware |
+| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Not met. PR B: 204% / 177%. PR C (2026-11-14): 200% / 174% (523,267 / 456,187), with the frame attributed 63% kernels / 33% entropy / 4% M/S + wrapper; remainder scoped as C-1 asm kernels and C-2 entropy, projected ~91% with the C kernel row pinned at 134,600 — which is the period, not parity (69.4%); see C-3 in the plan of record.** | `make uli-bench`; mGBA, then hardware |
 | **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | `product-play` equivalent for ULI2; hardware runs |
 | **U6 — memory** | IWRAM/EWRAM/stack stay inside the product budget with the UI and feeder linked. | linker map + runtime stack check |
-| **U7 — licensing/spec** | A public crate, if published, has a permissive license and a standalone format specification; otherwise it remains `publish = false`. | license file + `uli-docs/format.md` |
+| **U7 — licensing/spec** | A public crate, if published, has a permissive license and a standalone format specification; otherwise it remains `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** |
 
 The gate ceiling for U4 is not copied from `gba-audio`’s 75%: this tree’s UI,
 feeder and animation budget decide it. Start from the measured 73.63% gate
@@ -577,14 +589,18 @@ product codec without pretending one codec covers both jobs.
 
 ## Risks and open questions
 
-1. **Licensing.** `gba-audio` has no LICENSE file. Before publishing `uli-lite`,
-   get a written permissive license (MIT/Apache-2.0/Unlicense) from the author,
-   or keep the crate `publish = false`. A clean-room Rust implementation does
-   not by itself grant rights to the encoder or the format name.
+1. **Licensing — deferred by decision (2026-11-14).** `gba-audio` has no LICENSE
+   file, so `uli-lite` stays `publish = false` and **no license work is done
+   now**. What stays true if a publish decision is ever taken: a written
+   permissive license (MIT/Apache-2.0/Unlicense) from the author, or a
+   clean-room rewrite, plus the format name — and the adapted asm counts as
+   derived work, so it is only acceptable while nothing is published.
 2. **Format stability.** ULI2 is versioned (`ULA2` version 1) but not a
    standard. Pin the reference commit, write a standalone `FORMAT.md` before
    publishing, and treat bitstream changes as breaking.
-3. **Tonal/sustained material.** Fixed hop 512 regressed on the harpsichord
+3. **Tonal/sustained material — accepted for v1 (2026-11-14).** The format is
+   fixed: no long-block mode, no window switching. Recorded for fidelity
+   reporting, not as work. Fixed hop 512 regressed on the harpsichord
    track in `gba-audio` (24.8 dB plain vs 28.4 dB at hop 1024). ULC’s window
    switching is the alternative. Measure the repertoire before claiming ULI2 is
    universally better; a long-block ULI2 mode would be a format change.
@@ -606,15 +622,17 @@ product codec without pretending one codec covers both jobs.
    mean** and the synthesis kernels (2.51× the C/asm reference) are the whole
    remaining gap. The reference’s 73.63% must not be read as a transferable
    number.
-6. **Encoder packaging and independence.** A decoder-only crate is useful
-   internally, but external users need an encoder. The current C encoder is
-   reused from `gba-audio` and must eventually be replaced by a Rust encoder.
-   General Python tooling and `ffmpeg` are not the problem; the C tooling and
-   source dependency are. Until the C tooling is reimplemented, the project is
-   not fully isolated and ULI2 is not yet the public-reuse answer.
-7. **Rate flexibility.** ULI2 is fixed at 32,768 Hz. Goal #5 (higher rates such
-   as 65,536 Hz) would require a format/encoder change. Do not block the
-   current product on that; record it as future work.
+6. **Encoder packaging and independence — v1 boundary set (2026-11-14).** For
+   v1 the encoder of record is used **off-tree** to produce assets; this project
+   builds nothing from it and vendors no C source. That keeps the repo free of
+   C while the decoder work proceeds, and it means ULI2 is still not the
+   public-reuse answer: packaging a codec needs an in-repo encoder. The Rust
+   encoder milestone stays deferred, with the same rule — no C source, no
+   dependency, every artefact in this repository.
+7. **Rate flexibility — v1 fixed (2026-11-14).** 32,768 Hz, hop 512, stereo, no
+   long-block. Higher rates (65,536 Hz) would be a format/encoder change and are
+   explicitly out of scope; the v1 target is matching the C project's fidelity
+   in this repo, and their record does not reach 65 kHz either.
 8. **Output-stage fairness.** Compare ULI2 against FLAC/ULC through the same
    8-bit quantiser, or preserve ULI2’s fused rounding and account for the
    difference. Half an LSB matters at this noise floor.
@@ -623,6 +641,28 @@ product codec without pretending one codec covers both jobs.
 
 ## Decision log
 
+- **2026-11-14 — v1 scope frozen; asm is in-repo, C is not.** Arm-mode asm may
+  be adapted from the reference; C source may not be incorporated, and there is
+  no build/link/vendoring dependency on `gba-audio` — every artefact lives here
+  and is twinned against this repo's oracle. The speaker profile is **in
+  scope**, served by an output-stage mono fold-down over a full stereo decode
+  (never a one-IMDCT decoder path). The 129-frame corpus is the iteration
+  instrument and the worst-frame analysis is deferred until the decoder is near
+  real time. The U4 ceiling is measured, not assigned. IWRAM priority is audio
+  over UI. `publish = false`; no license work. No arithmetic promise for
+  malformed streams (rejection only). v1 format is fixed.
+- **2026-11-14 — stereo is the product target.** ULI2 playback and the decoder
+  stay stereo, aimed at the headphone output; fidelity is the project's purpose
+  and is not traded for CPU headroom. The GBA speaker is mono while the headphone
+  jack is stereo, so the **speaker profile is in scope but belongs to the output
+  stage**: full stereo decode always, mono fold-down after it. gba-audio's
+  `ULI_GBA_MONO`/`ULI_OUT_M16` one-IMDCT path is not taken, and U4 is read
+  against the two-channel frame, with both regimes measured. Their 69.4% is itself a
+  stereo figure, and their mono speaker profile measured 84.2% worst because the
+  collapse moved into the driver. Recorded with the same decision: the C
+  kernel-pair row is **134,600** (C's own per-kernel decomposition), striking an
+  earlier ~146,000, so C-1's prize is ~194,000 and the C-1 + C-2 + C-3
+  projection is ~193,000–213,000 (73–81%).
 - **2026-11-14 — ULI2 is GBA-first.** Portability is not a product
   requirement for a fixed-rate, single-target GBA codec. The `flac-lite`
   portability constraints are retired for the product path: `uli-lite`
