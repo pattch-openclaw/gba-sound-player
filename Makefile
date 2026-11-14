@@ -666,36 +666,64 @@ podman-%:
 # Housekeeping
 # ===========================================================================
 
-# Clean everything the build produces. Two rules shape it, both learned from this
-# tree's own history:
+# Clean, in two depths, because the two things a build leaves behind have
+# completely different prices:
 #
-#  1. **Workspaces are discovered, not listed.** The previous `clean` named six
-#     crate directories by hand while the tree held fifteen workspaces, so every
-#     crate added since (`uli-lite`, `uli-lite-gba`, `uli_spike`, `opus_spike`,
-#     the two archived instruments, the probe, the vendored opus) quietly kept a
-#     ~2 GB `target/` after `make clean`. That is the same failure `.gitignore`
+#   * build OUTPUTS — ROMs, saves, generated assets, run logs, `__pycache__`. Cheap
+#     to reproduce, and the thing you actually mean by "tidy the tree".
+#   * compiler CACHES — the fifteen workspaces' `target/` dirs, ~4.5 GB here. Not
+#     free to lose: the Tier-3 target has no prebuilt `core`, so every one of them
+#     re-runs `-Zbuild-std`. Measured on this host for the full verified set
+#     (`check` + seven ROMs + `flac-check`): 135 s cold against 22 s warm.
+#
+# So `clean` takes the outputs and keeps the caches, and `clean-deep` (or
+# `make clean DEEP=1`) takes both. Splitting them is also what makes the two
+# hand-written lists this target used to be unnecessary:
+#
+#  1. **Workspaces are discovered, not listed.** The old `clean` named six crate
+#     directories while the tree held fifteen workspaces, so nine `target/` dirs
+#     survived a "clean" (~2 GB of the 4.5). That is the failure `.gitignore`
 #     argues about for ROM names — "a rule that has to be extended for each new
 #     build is a rule that will be missed" — so the list comes from the manifests
-#     on disk. `cargo clean` run in a workspace *member* resolves to its root's
-#     target dir, so a member in this list is a harmless no-op, not a second clean.
-#  2. **ROMs and saves go by pattern, not by name.** `$(ROM)`-style lists are
-#     exactly what left the retired instruments' images (`flac-spike-6a5b.gba`,
-#     `flac-rate-*.gba`, `arm-kernels.gba`, `e5-fetch.gba`, …) sitting in the
-#     repository root after a "clean". No `.gba`/`.sav` is tracked (`.gitignore`
-#     says why), so removing them all cannot destroy source.
-clean:
-	@for d in $(WORKSPACE_DIRS); do (cd $$d && $(CARGO) clean) || exit 1; done
-	rm -f *.gba *.sav
-# Generated, gitignored assets that belong to those images: the master asset/pin
+#     on disk. `cargo clean` in a workspace *member* resolves to its root's target
+#     dir, so a member in this list is a harmless no-op, not a second clean.
+#  2. **ROMs and saves go by pattern.** Name lists are exactly what left the
+#     retired instruments' images (`flac-spike-6a7.gba`, `flac-rate-*.gba`,
+#     `arm-kernels.gba`, `e5-fetch.gba`, …) in the repository root after a "clean".
+#     No `.gba`/`.sav` is tracked (`.gitignore` says why), so removing them all
+#     cannot destroy source.
+#
+# Nothing here touches tracked generator output — `examples/flac_spike/assets/*.bin`
+# and `src/assets.rs`, the committed `GAFP` blob, the test fixtures — which the
+# build reads as input and regenerates only through their own generators.
+clean: clean-outputs
+	@if [ -n "$(DEEP)" ]; then \
+	  echo "clean: DEEP is set — dropping every workspace's target/ as well"; \
+	  $(MAKE) -s clean-caches; \
+	else \
+	  echo "clean: build outputs removed, compile caches KEPT (~4.5 GB here)."; \
+	  echo "       full rebuild cost if you do want them gone: 'make clean-deep'"; \
+	fi
+
+# The outputs: every ROM and emulator save, the generated master asset + its pin
 # (regenerate with `make master-pack INPUT=…`), the archived 10,512 Hz rate flow's
-# staged clips and modules, and the ULI2 harness's per-run log (`make uli-bench`
-# rewrites it; the numbers that matter live in ULI2.md).
+# staged clips and modules, the ULI2 harness's per-run log (`make uli-bench` rewrites
+# it; the numbers that matter live in ULI2.md), and python's bytecode caches.
+clean-outputs:
+	rm -f *.gba *.sav
 	@rm -f $(MASTER_ASSET) $(MASTER_PIN)
 	@rm -f $(SPIKE_CRATE_DIR)/src/rate_assets.rs $(SPIKE_CRATE_DIR)/src/rate_pcm.rs
 	@rm -f $(SPIKE_CRATE_DIR)/assets/rate_*.bin
 	@rm -f uli-bench*.log
-# `scripts/*.py` bytecode caches, ignored but never removed by anything until now.
 	@find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} + 2>/dev/null || true
+
+# The caches: the fifteen workspaces' `target/` dirs, discovered from the tree.
+clean-caches:
+	@for d in $(WORKSPACE_DIRS); do (cd $$d && $(CARGO) clean) || exit 1; done
+
+clean-deep: clean-outputs clean-caches
+	@echo "clean-deep: outputs AND every workspace's target/ are gone; the next build"
+	@echo "            pays the -Zbuild-std core/alloc compile again (135 s / 4.5 GB here)."
 
 # Drop the container build-cache volumes. Safe: they are pure build caches, so
 # the next container run rebuilds slowly once and repopulates them. Does NOT
@@ -773,7 +801,9 @@ help:
 	@echo "      uli-bench (headless run + PASS/FAIL read from the log)"
 	@echo "    Opus (OPUS.md): native-opus-rom, opus-test"
 	@echo "  Tests/format:  test (test-rom + flac-test + uli-test), test-rom, check, format"
-	@echo "  Housekeeping:  clean, clean-cache, toolchain-check, help"
+	@echo "  Housekeeping:  clean (outputs only; caches kept), clean-deep (+ every"
+	@echo "                 workspace's target/), clean-cache (container volumes),"
+	@echo "                 toolchain-check, help"
 	@echo ""
 	@echo "  Any target above also runs as podman-<target> (in the image; needs a"
 	@echo "  container runtime) and native-<target> (this host). Builds run 'format'"

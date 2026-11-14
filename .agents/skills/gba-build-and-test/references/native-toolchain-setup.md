@@ -75,7 +75,8 @@ Warm (the state a normal session ends in): ROM rebuilds finish in hundredths of 
 `make flac-gates` ~1 s of test time, `make test-rom` ~26 s (the test profile is its own
 artifact set), the whole verified set above runs in a few minutes.
 
-Cold (`make clean`, or a fresh checkout): every workspace×target pair pays the
+Cold (`make clean-deep`, or a fresh checkout — plain `make clean` is shallow and
+leaves these caches alone): every workspace×target pair pays the
 `-Zbuild-std` compile of `core`/`alloc` plus all dependencies — minutes per workspace, and
 the target dirs reach gigabytes. Don't clean a warm tree just to measure; if a cold
 number is genuinely wanted, say so first and expect several minutes.
