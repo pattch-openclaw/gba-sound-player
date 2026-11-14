@@ -1015,3 +1015,123 @@ the same day, on `late in push` arithmetic that a faster clock makes *worse*, no
 the packer row, the host fixture, and the listening witness are all still open — and the
 listening question at 0.376 s is still unanswered, now with a mechanism attached to it: at
 period 22 the re-arm was held 25 samples by the producer's own copy into the ring.
+
+## 7-1, retarget hardware reading (2026-11-13): 16,384 Hz is green on both units
+
+**Image.** `product-play.gba`, the 16,384 Hz FIXED-0 product image from PR #124,
+sha256 **`ef1ed8baf0feadb696e0b0c5e3fb24c92ced31a6fbab6d40edfb5ce45b789351`**,
+662,840 bytes. Two runs on **GBA 001** and two on **GBA SP**, all four ending on a
+**BLUE screen**. The readings are the first hardware run of the retargeted path:
+80 frames / 162,304 samples, 289 periods, the shipped 439,396 B / 16,384 Hz GAFP
+asset.
+
+**The four screens as transcribed.** All four agree on every measured field. Four
+transcription slips are kept as read and marked rather than silently corrected:
+`Work 28/450%` (slash for decimal point), `cubs` (`cons`), `drain -` (the other
+three rows say `drain 0`), and `PRODUCT PLAY 16374` (the header on the other three
+rows says `16384`; the ROM's own header is fixed-width and the measured fields on
+that screen are identical to the other three).
+
+```text
+GBA 001 (1)                          GBA 001 (2)
+BLUE SCREEN                          BLUE SCREEN
+PRODUCT PLAY 16384                   PRODUCT PLAY 16384
+Fr 80 und 0 pcm ok fifo ok           Fr 80 und 0 pcm ok fifo ok
+Ledg ok aud ok push 162304           Ledg ok aud ok push 162304 cons 162304
+     cubs 162304                      Work 28.450% dec 19.961% attr 446306
+Work 28/450% dec 19.961% attr 446306 Conv 6.824% push 0.666% feed 0.997%
+Conv 6.824% push 0.666% feed 0.997%  Minlead 9120 maxwk 29.613%
+Minlead 9120 maxwk 29.613%           Per 289 ser 289 tail 1/464 void 0
+Per 289 ser 289 tail 1/464 void 0    Replay 0 late 0 fed 0 drain 0
+Replay 0 late 0 fed 0 drain -        Latep 0 worstp 0 dly 0 refus 0
+Latep 0 worstp 0 dly 0 refus 0        Late in push 0/0 2nd src 0/289
+Late in push 0/0 2nd src 0/289            disp 0008
+     disp 0008                       Playback
+Playback
+
+GBA SP (1)                           GBA SP (2)
+BLUE SCREEN                          BLUE SCREEN
+PRODUCT PLAY 16384                   PRODUCT PLAY 16374
+Fr 80 und 0 pcm ok fifo ok           Fr 80 und 0 pcm ok fifo ok
+Ledg ok aud ok push 162304           Ledg ok aud ok push 162304 cons 162304
+     cons 162304                      Work 28.450% dec 19.961% attr 446306
+Work 28.450% dec 19.961% attr 446306 Conv 6.824% push 0.666% feed 0.997%
+Conv 6.824% push 0.666% feed 0.997%  Minlead 9120 maxwk 29.613%
+Minlead 9120 maxwk 29.613%           Per 289 ser 289 tail 1/464 void 0
+Per 289 ser 289 tail 1/464 void 0    Replay 0 late 0 fed 0 drain 0
+Replay 0 late 0 fed 0 drain 0        Latep 0 worstp 0 dly 0 refus 0
+Latep 0 worstp 0 dly 0 refus 0       Late in push 0/0 2nd src 0/289
+Late in push 0/0 2nd src 0/289            disp 0008
+     disp 0008                       Playback
+Playback
+```
+
+`drain -` is read as `drain 0`: `fed 0` and `late 0` leave no other reading, and
+the other three screens on the same image say `drain 0`. The `16374` header is read
+as `16384` for the same reason: the ROM prints the rate from
+`geometry::PLAYBACK_RATE_HZ`, the same field the `rate:` line and the manifest
+report as 16,384, and every other field on that screen is identical to the other
+three.
+
+| field | all four runs | reading |
+|---|---|---|
+| frames / periods | 80 frames, `per 289 ser 289` | every elapsed period was serviced |
+| underflows / voids / refusals | `und 0`, `void 0`, `refus 0` | no starvation; every window measurable |
+| replay / lateness | `replay 0 late 0 fed 0 drain 0`, `dly 0` | **no late re-arm on this image at this rate, on either unit** |
+| sample accounting | `push 162304 cons 162304` | exactly the manifest total |
+| digests | `pcm ok fifo ok`, `ledg ok` | exact over the bytes pushed and the converted FIFO bytes; not over what the DAC played |
+| audit | `aud ok` | all audit clauses pass |
+| attribution fields | `late in push 0/0`, `2nd src 0/289`, `disp 0008` | no late section to attribute; no shared interrupt entry; display VBlank request bit clear |
+| work | **28.450%**, worst frame **29.613%** | 596,640 c/frame mean, 621,030 c/frame worst, against the 2,097,152-cycle frame |
+| decode | `dec 19.961%`, `attr 446306` | 418,613 c/frame window mean; **446,306 c/frame** attributed, isolated decode |
+| convert / push / feeder | 6.824% / 0.666% / 0.997% | 143,110 / 13,967 / 20,909 c/frame; the four shares sum to 28.448% against the 28.450% total (rounding) |
+| lead | `minlead 9120` | 9,120 samples = **16.3 periods = 0.557 s**; the ring never approached empty |
+| tail | `tail 1/464` | the designed short final period |
+| rate contract | no `rate …!… pitch` row | declared 16,384 Hz = played 16,384 Hz on every run |
+| screen | **BLUE** on all four | the combined ledger/audit/PCM/FIFO gate passed |
+
+**Same-image hardware/minus-mGBA, per leg.** Both sides divide by the same
+2,097,152-cycle frame, so a percentage delta is a cycle delta. The mGBA control is
+the same image (`ef1ed8ba…`), run as `fr 80 und 0`, `per 289 ser 289`, `late 0`,
+`work 25.363%`.
+
+| leg | mGBA | hardware | Δ c/frame | Δ |
+|---|---:|---:|---:|---:|
+| decode window | 18.677% (391,685) | 19.961% (418,613) | +26,928 | +6.87% |
+| convert | 5.052% (105,948) | 6.824% (143,110) | **+37,162** | **+35.08%** |
+| push | 0.662% (13,883) | 0.666% (13,967) | +84 | +0.60% |
+| feeder | 0.971% (20,363) | 0.997% (20,909) | +545 | +2.68% |
+| **work** | **25.363% (531,901)** | **28.450% (596,640)** | **+64,739** | **+12.17%** |
+| attributed decode | 417,431 c | **446,306 c** | +28,875 | +6.92% |
+
+This is the same leg-shaped gap the 32,768 Hz reading measured: the decode window
+is inside the 3.7–6.9% non-kernel band 6a-7b established, and **convert is again
+the outlier at +35%**. The four shares sum to 28.448% against the reported 28.450%
+(hardware) and 25.362% against 25.363% (mGBA), so the instrument is
+self-consistent on both sides. Q15 is not retired by this run; it is re-confirmed
+at the new rate, where the convert leg is about 7% of the frame instead of 14%.
+
+**What this establishes, and what it does not.**
+
+- **It establishes 16,384 Hz on hardware**, on both units and twice each, with
+  zero underruns, zero late services, all 289 periods serviced, exact sample and
+  digest pins, and the rate identity observed on silicon (no rate/pitch row).
+  The product path now has a hardware reading at the rate of record, not only an
+  emulator projection.
+- **`attr 446,306 c/frame` is the new hardware attributed decode figure.** At
+  16,384 Hz it is 21.28% of the frame. It is the live-producer figure, not 6b-2's
+  decode-slot row (396,066 / 398,255 at 32,768), and the two must not be averaged;
+  6b-3 refused that comparison once and the refusal still stands.
+- **`late 0` four times does not close 7-2.** The push section still masks
+  interrupts for the measured 14,680 cycles: that is **14.3 samples** at
+  1,024 ticks/sample against the **16-sample** grace on the mean, and **15.46
+  samples** on the worst push window ever recorded for that section — inside by
+  only 0.5 samples on that worst case. This run did not hit the phase-locked
+  collision that the 32,768 Hz image hit at period 22. The fix (chunk-sized push
+  sections, a lock-free ring, or re-arming ahead) is still owed at this rate; the
+  retarget lowered the probability and consequence of a miss, it did not remove
+  the masked section.
+- **It is not 7-3/C2.** The hardware count/digest/late clauses are met on this
+  image, but the human listening witness — pitch and tempo, heard on both units
+  with the source beside it — has not been done, and 7-2's fix is not in this
+  image. C2 remains unmet until 7-3 passes on both units.

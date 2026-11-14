@@ -3637,8 +3637,62 @@ The retarget then landed as one change:
   `make check` all exit 0 on this tree. The ROM images build; `test-rom` still collects zero
   cases, as recorded in the standing caveats.
 
-What this does **not** establish: any hardware figure at 16,384 Hz, a `late`-free hardware
-run, or the listening witness. C2 remains unmet until 7-3 passes on both units, twice each.
+What this did not establish at landing time was any hardware figure at 16,384 Hz. The
+hardware reading below closes that half. C2 remains unmet until 7-3, because the listening
+witness has not been asked and 7-2's push fix is not in this image.
+
+### 7-1 retarget hardware reading (2026-11-13): both units green at 16,384 Hz
+
+**Image.** `product-play.gba`, sha256
+`ef1ed8baf0feadb696e0b0c5e3fb24c92ced31a6fbab6d40edfb5ce45b789351`, 662,840 B — the
+16,384 Hz FIXED-0 image from the retarget. Two runs on **GBA 001** and two on **GBA SP**,
+all four on a **BLUE screen**. The four screens are transcribed in full in
+[`playback-results.md`](playback-results.md) under "7-1, retarget hardware reading"; the
+transcription slips (`28/450%`, `cubs`, `drain -`, `16374`) are kept there rather than tidied.
+
+All four runs agree on every measured field:
+
+- `fr 80 und 0`, `per 289 ser 289`, `tail 1/464`, `void 0`, `refus 0`
+- **`replay 0 late 0 fed 0 drain 0`**, `latep 0 worstp 0 dly 0`
+- `late in push 0/0`, `2nd src 0/289`, `disp 0008`
+- `push 162304 cons 162304`, `pcm ok fifo ok`, `ledg ok`, `aud ok`
+- **work 28.450%**, worst frame **29.613%**
+- **`dec 19.961%`, `attr 446306`**
+- convert 6.824%, push 0.666%, feeder 0.997%
+- `minlead 9120` samples = **16.3 periods = 0.557 s**
+- no `rate …!… pitch` row: declared 16,384 Hz = played 16,384 Hz on silicon
+
+The shares sum to 28.448% against the 28.450% total (rounding), so the stage instrument is
+self-consistent on silicon too.
+
+**Same-image hardware minus mGBA.** mGBA on the same image reads work 25.363% / dec 18.677%
+/ attr 417,431, with the same ledger and `late 0`. Per leg, against the 2,097,152-cycle
+frame:
+
+| leg | mGBA | hardware | Δ c/frame | Δ |
+|---|---:|---:|---:|---:|
+| decode window | 391,685 | 418,613 | +26,928 | +6.87% |
+| convert | 105,948 | 143,110 | **+37,162** | **+35.08%** |
+| push | 13,883 | 13,967 | +84 | +0.60% |
+| feeder | 20,363 | 20,909 | +545 | +2.68% |
+| **work** | **531,901** | **596,640** | **+64,739** | **+12.17%** |
+| attributed decode | 417,431 | **446,306** | +28,875 | +6.92% |
+
+That is the same leg-shaped gap measured at 32,768 Hz: decode is inside 6a-7b's 3.7–6.9%
+non-kernel band, and **convert is again the +35% outlier**. Q15 is re-confirmed at the new
+rate, not retired; convert is now ~7% of the frame instead of ~14%. `attr 446,306 c/frame` is
+the live-producer attributed decode figure at 16,384 Hz (21.28% of the frame). It is **not**
+6b-2's decode-slot row and must not be averaged with it.
+
+**What it closes, and what it does not.** The retarget's hardware half is established: both
+units, twice each, zero underruns, zero late services, exact sample counts and digests, rate
+identity observed. But `late 0` four times is not 7-2: the push section still masks interrupts
+for the measured 14,680 cycles — **14.3 samples** against the 16-sample grace on the mean and
+**15.46** on the worst push window recorded for that section, leaving only 0.5 samples on that
+worst case. This image did not reproduce the phase-locked period-22 collision that the
+32,768 Hz image hit; the fix is still owed at this rate. And 7-3's listening witness — pitch
+and tempo, heard on both units with the source beside it — has not been asked. C2 remains
+unmet until 7-3 passes.
 
 
 ## The width decision (what it is and is not safe for)
