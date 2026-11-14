@@ -871,10 +871,11 @@ uli-spike-rom: format
 	cd $(ULI_SPIKE_DIR) && $(CARGO) build --release --target $(TARGET)
 	agb-gbafix $(ULI_SPIKE_BIN) -o $(ULI_SPIKE_ROM)
 
-# Phase 1b decoder cycle harness (examples/uli_bench/): prove the corpus pins
-# on the measured image, then time every frame and the four synthesis kernels
-# in timer2/3 windows at WAITCNT 4/2. An mGBA measurement of the *portable*
-# kernels; no playback, no hardware claim. See ULI2.md → "Phase 1b".
+# The ULI2 measurement vehicle (examples/uli_bench/): prove the corpus pins on
+# the measured image, then time full frames through BOTH kernel sets (portable
+# control + the product's ArmKernels) and the four synthesis kernels in
+# timer2/3 windows at WAITCNT 4/2. An mGBA measurement; no playback or
+# hardware claim. See crates/uli-lite/PLAN-OF-RECORD.md.
 ULI_BENCH_DIR := examples/uli_bench
 ULI_BENCH_BIN := $(ULI_BENCH_DIR)/target/$(TARGET)/release/uli-bench
 ULI_BENCH_ROM := uli-bench.gba
@@ -902,7 +903,7 @@ uli-overlay-test: toolchain-check
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(ULI_OVERLAY_MANIFEST) --target $(HOST_TRIPLE)
-	@echo "uli-overlay-test passed: overlay kernels are bit-exact with the portable reference"
+	@echo "uli-overlay-test passed: overlay kernels and the full decoder are bit-exact with the portable reference"
 
 uli-check: toolchain-check
 	cd crates/uli-lite && $(CARGO) fmt --check
@@ -1388,9 +1389,9 @@ help:
 	@echo "    uli-test          portable core: thumbv4t build + bit-exact host corpus"
 	@echo "    uli-check         fmt gate for uli-lite, uli-lite-gba and uli_bench"
 	@echo "    uli-spike-rom     Phase 1 decode-only ROM (correctness witness)"
-	@echo "    uli-bench-rom     Phase 1b cycle harness ROM"
-	@echo "    uli-bench         run it headless in mGBA and keep uli-bench.log"
-	@echo "    uli-overlay-test  overlay kernels vs the portable reference (host twin)"
+	@echo "    uli-bench-rom     full-frame cycle harness ROM (both kernel sets)"
+	@echo "    uli-bench         run it headless in mGBA (both kernel sets, full frames)"
+	@echo "    uli-overlay-test  kernel + full-decoder twins vs the portable reference"
 	@echo ""
 	@echo "  PERF-GATE SPIKE (FLAC.md step 4):"
 	@echo "    native-spike-rom  build $(SPIKE_ROM) natively"

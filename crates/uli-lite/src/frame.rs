@@ -6,6 +6,7 @@
 //! album borrow and decodes into caller-owned output slices.
 
 use core::fmt;
+use core::marker::PhantomData;
 
 use crate::Error;
 use crate::album::Album;
@@ -199,13 +200,63 @@ impl DecoderState {
     }
 }
 
-/// A decoder borrows a validated album and caller-owned state.
-pub struct Decoder<'a, 's> {
-    album: Album<'a>,
-    state: &'s mut DecoderState,
+/// The four synthesis kernels used by [`Decoder`].
+///
+/// This is the product seam: the portable core's default is
+/// [`PortableKernels`], while the GBA product supplies its ARM-mode
+/// realization (`uli_lite_gba::ArmKernels`) without duplicating
+/// `decode_frame`. The trait is monomorphized, so a build does not pay a
+/// per-call dispatch for it.
+pub trait Kernels {
+    fn pre(x: &[i32; M], z: &mut [i32; 2 * H]);
+    fn fft(z: &mut [i32; 2 * H]);
+    fn post(z: &[i32; 2 * H], y: &mut [i32; M]);
+    fn ola(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8], out16: Option<&mut [i16]>);
 }
 
-impl fmt::Debug for Decoder<'_, '_> {
+/// The portable, bit-exact reference kernels.
+///
+/// This is what [`Decoder::new`] uses, and it is the oracle every product
+/// kernel set is twinned against. On ARM targets these four functions carry
+/// `instruction_set(arm::a32)` (see `imdct.rs`), so even the reference uses
+/// `SMULL` there instead of a software 64-bit multiply.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PortableKernels;
+
+impl Kernels for PortableKernels {
+    #[inline]
+    fn pre(x: &[i32; M], z: &mut [i32; 2 * H]) {
+        imdct::pre(x, z);
+    }
+
+    #[inline]
+    fn fft(z: &mut [i32; 2 * H]) {
+        imdct::fft(z);
+    }
+
+    #[inline]
+    fn post(z: &[i32; 2 * H], y: &mut [i32; M]) {
+        imdct::post(z, y);
+    }
+
+    #[inline]
+    fn ola(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8], out16: Option<&mut [i16]>) {
+        imdct::ola(y, p, out8, out16);
+    }
+}
+
+/// A decoder borrows a validated album and caller-owned state.
+///
+/// `K` is the synthesis kernel set. It defaults to [`PortableKernels`], so
+/// `Decoder::new` is the portable decoder; the product opens
+/// `Decoder::<ArmKernels>::with_kernels`.
+pub struct Decoder<'a, 's, K: Kernels = PortableKernels> {
+    album: Album<'a>,
+    state: &'s mut DecoderState,
+    _kernels: PhantomData<fn() -> K>,
+}
+
+impl<K: Kernels> fmt::Debug for Decoder<'_, '_, K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Decoder")
             .field("album", &self.album)
@@ -214,13 +265,25 @@ impl fmt::Debug for Decoder<'_, '_> {
     }
 }
 
-impl<'a, 's> Decoder<'a, 's> {
-    /// Open a decoder over an album. This resets the state and parses the
-    /// album's tables blob; it does not decode anything.
+impl<'a, 's> Decoder<'a, 's, PortableKernels> {
+    /// Open the portable decoder over an album. This resets the state and
+    /// parses the album's tables blob; it does not decode anything.
     pub fn new(album: Album<'a>, state: &'s mut DecoderState) -> Result<Self, Error> {
+        Self::with_kernels(album, state)
+    }
+}
+
+impl<'a, 's, K: Kernels> Decoder<'a, 's, K> {
+    /// Open a decoder whose synthesis runs through `K`. Same state reset and
+    /// table parse as [`Decoder::new`].
+    pub fn with_kernels(album: Album<'a>, state: &'s mut DecoderState) -> Result<Self, Error> {
         state.reset();
         state.tables.parse_into(album.tables())?;
-        Ok(Self { album, state })
+        Ok(Self {
+            album,
+            state,
+            _kernels: PhantomData,
+        })
     }
 
     pub fn album(&self) -> &Album<'a> {
@@ -295,15 +358,15 @@ impl<'a, 's> Decoder<'a, 's> {
             }
         }
 
-        imdct::pre(&self.state.x[0], &mut self.state.buf);
-        imdct::fft(&mut self.state.buf);
-        imdct::post(&self.state.buf, &mut self.state.x[0]);
-        imdct::ola(&self.state.x[0], &mut self.state.p[0], out8l, out16l);
+        K::pre(&self.state.x[0], &mut self.state.buf);
+        K::fft(&mut self.state.buf);
+        K::post(&self.state.buf, &mut self.state.x[0]);
+        K::ola(&self.state.x[0], &mut self.state.p[0], out8l, out16l);
 
-        imdct::pre(&self.state.x[1], &mut self.state.buf);
-        imdct::fft(&mut self.state.buf);
-        imdct::post(&self.state.buf, &mut self.state.x[1]);
-        imdct::ola(&self.state.x[1], &mut self.state.p[1], out8r, out16r);
+        K::pre(&self.state.x[1], &mut self.state.buf);
+        K::fft(&mut self.state.buf);
+        K::post(&self.state.buf, &mut self.state.x[1]);
+        K::ola(&self.state.x[1], &mut self.state.p[1], out8r, out16r);
 
         self.state.bitpos = br.bitpos();
         self.state.ops = ops;

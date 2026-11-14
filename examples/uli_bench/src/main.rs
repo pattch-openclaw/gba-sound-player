@@ -1,24 +1,28 @@
-//! ULI2 Phase 1b: decoder cycle harness.
+//! ULI2 decoder cycle harness (Phase 1b, extended by PR A).
 //!
-//! This image is the measurement vehicle for `ULI2.md` gate **U4** (real-time
-//! decode). It embeds the committed Phase 0 corpus, proves its own decode
-//! against the C-reference album pins, and only then times work:
+//! This image is the measurement vehicle for the U4 gate (real-time decode)
+//! and for every hot-path PR that follows. It embeds the committed Phase 0
+//! corpus, proves its own decode against the C-reference album pins, and only
+//! then times work:
 //!
 //! 1. **Correctness first** — the whole corpus is decoded and folded into the
 //!    album-wide int8/int16 FNV pins (`e6e87652` / `b3530978`) with
 //!    `xover = 0`, `hfnz = 0`. A fast wrong decode measures nothing, so no
 //!    timing line is emitted unless this pass passes.
-//! 2. **Full-frame cost** — `Decoder::decode_frame` is timed once per frame
-//!    over a second, fresh decode of the album, in a free-running
-//!    timer2→timer3 window at 16.78 MHz. That is the U4 number: the portable
-//!    decoder's worst frame against the 262,144-cycle product frame period
-//!    (512 samples @ 32,768 Hz on the 2^24 Hz clock).
-//! 3. **Kernel share** — the four synthesis kernels (`pre`, `fft`, `post`,
-//!    `ola`, exposed by `uli-lite`'s `kernels` feature) are timed in isolation
-//!    on deterministic inputs, then as one per-channel sequence. This is the
-//!    ceiling on what an ARM/asm overlay can recover: cycles spent outside
-//!    these four kernels are entropy, dequantisation, M/S and glue, and no
-//!    kernel port touches them.
+//! 2. **Full-frame cost, both kernel sets** — PR A: `Decoder` is generic over
+//!    `uli_lite::Kernels`. A fresh album decode is timed frame by frame
+//!    through the portable reference kernels (the control) and through
+//!    `uli_lite_gba::ArmKernels` (the product's ARM-mode, unchecked, `.iwram`
+//!    kernels, called from the same bitstream/dequant/M/S/frame code). Both
+//!    passes are pinned. This is a *measured* full frame for the product
+//!    kernel set, not the Phase 1b projection.
+//! 3. **Kernel share** — the four synthesis kernels are timed in isolation on
+//!    deterministic inputs, then as one per-channel sequence. This separates
+//!    the kernel cost from entropy/dequant/M/S/glue, which no kernel port
+//!    touches.
+//! 4. **Overlay twin** — the image runs the reference and overlay kernels on
+//!    identical inputs and compares every sample, so the timing arm is
+//!    measuring the same arithmetic the host twin test proves.
 //!
 //! Measurement discipline (the same rules as the FLAC cycle harness, so the
 //! two records are comparable):
@@ -40,9 +44,10 @@
 //!   frame.
 //!
 //! What this image does NOT do: playback, FIFO/DMA, IRQ/underrun counting, or
-//! hardware. It is an mGBA measurement, and it measures the *portable* kernels
-//! only — the overlay's kernels do not exist yet. The kernel share is what
-//! decides whether building them is the next step.
+//! hardware. It is an mGBA measurement. It measures the product **kernel set**
+//! in a full frame; the product **hot path** (bit reader, Huffman, dequant,
+//! M/S in ARM/IWRAM) arrives in PR B, and this image is its before/after
+//! control.
 
 #![no_std]
 #![no_main]
@@ -264,6 +269,67 @@ fn fill_kx(buf: &mut [i32; M]) {
     }
 }
 
+/// One full-album decode through kernel set `K`, every frame timed, with the
+/// album pins folded on the same samples. `PortableKernels` is the control;
+/// `uli_lite_gba::ArmKernels` is the product arm.
+fn timed_pass<K: uli_lite::Kernels>(
+    album: Album<'_>,
+    state: &mut DecoderState,
+    counter: &mut Counter<'_>,
+    overhead: u32,
+) -> Result<(FrameCost, u32, u32), uli_lite::Error> {
+    let mut decoder = Decoder::<K>::with_kernels(album, state)?;
+    let mut l8 = [0i8; M];
+    let mut r8 = [0i8; M];
+    let mut l16 = [0i16; M];
+    let mut r16 = [0i16; M];
+    let mut cost = FrameCost::new();
+    let mut all8 = 2_166_136_261u32;
+    let mut all16 = 2_166_136_261u32;
+    for f in 0..album.n_frames() {
+        let (res, raw) = timed(counter, || {
+            decoder.decode_frame(&mut l8, &mut r8, Some(&mut l16), Some(&mut r16))
+        });
+        res?;
+        // Hash outside the window: proves the timed decode is the pinned
+        // decode, not just a decode that consumed the same number of cycles.
+        all8 = fnv_bytes(all8, &fnv_i8(2_166_136_261, &l8, &r8).to_le_bytes());
+        all16 = fnv_bytes(all16, &fnv_i16(2_166_136_261, &l16, &r16).to_le_bytes());
+        let net = raw.saturating_sub(overhead);
+        cost.observe(f, net, decoder.state().ops());
+    }
+    Ok((cost, all8, all16))
+}
+
+fn print_cost(label: &str, cost: &FrameCost) {
+    agb::println!(
+        "[uli-bench] frame {} count={} min={} min_frame={} max={} max_frame={} sum={} wrapped={}",
+        label,
+        cost.count,
+        cost.min,
+        cost.min_frame,
+        cost.max,
+        cost.max_frame,
+        cost.sum,
+        cost.wrapped
+    );
+    agb::println!(
+        "[uli-bench] {} worst ops bandsyms={} coded={} pairs={} quads={} nz={} zc={} raws={} escs={} ms={} long={} model={}",
+        label,
+        cost.worst_ops.bandsyms,
+        cost.worst_ops.coded_bands,
+        cost.worst_ops.pairs,
+        cost.worst_ops.quads,
+        cost.worst_ops.nz,
+        cost.worst_ops.zc,
+        cost.worst_ops.raws,
+        cost.worst_ops.escs,
+        cost.worst_ops.ms,
+        cost.worst_ops.long_codes,
+        cost.worst_model
+    );
+}
+
 fn run(gba: &mut agb::Gba) -> bool {
     let boot_waitcnt = waitcnt();
     // The U4 arm: 4/2, no prefetch. `agb` boots at 0x4317 (3/1 + prefetch).
@@ -365,66 +431,47 @@ fn run(gba: &mut agb::Gba) -> bool {
         overhead
     );
 
-    // Fresh decode of the album, every frame timed.
-    let mut decoder = match Decoder::new(album, state) {
-        Ok(d) => d,
-        Err(e) => {
-            agb::println!("[uli-bench] FAIL reopen: {:?}", e);
-            return false;
-        }
-    };
-    let mut cost = FrameCost::new();
-    let mut timed8 = 2_166_136_261u32;
-    let mut timed16 = 2_166_136_261u32;
-    for f in 0..album.n_frames() {
-        let (res, raw) = timed(&mut counter, || {
-            decoder.decode_frame(&mut l8, &mut r8, Some(&mut l16), Some(&mut r16))
-        });
-        if let Err(e) = res {
-            agb::println!("[uli-bench] FAIL timed decode frame {}: {:?}", f, e);
-            return false;
-        }
-        // Hash outside the window: proves the timed decode is the pinned
-        // decode, not just a decode that consumed the same number of cycles.
-        timed8 = fnv_bytes(timed8, &fnv_i8(2_166_136_261, &l8, &r8).to_le_bytes());
-        timed16 = fnv_bytes(timed16, &fnv_i16(2_166_136_261, &l16, &r16).to_le_bytes());
-        let net = raw.saturating_sub(overhead);
-        cost.observe(f, net, decoder.state().ops());
-    }
-    let timed_pin_ok = timed8 == EXPECTED_INT8 && timed16 == EXPECTED_INT16;
+    // -----------------------------------------------------------------
+    // 3. Full-frame timing through both kernel sets (PR A).
+    //    The core arm is the control; the overlay arm is the product path:
+    //    same bitstream/dequant/M/S/frame code, ARM-mode kernels in .iwram.
+    // -----------------------------------------------------------------
+    let (cost_core, core8, core16) =
+        match timed_pass::<uli_lite::PortableKernels>(album, state, &mut counter, overhead) {
+            Ok(v) => v,
+            Err(e) => {
+                agb::println!("[uli-bench] FAIL core timed pass: {:?}", e);
+                return false;
+            }
+        };
+    let core_pin_ok = core8 == EXPECTED_INT8 && core16 == EXPECTED_INT16;
+    print_cost("core", &cost_core);
     agb::println!(
-        "[uli-bench] timed decode int8={:08x} int16={:08x} [{}]",
-        timed8,
-        timed16,
-        if timed_pin_ok { "PASS" } else { "FAIL" }
+        "[uli-bench] core pins int8={:08x} int16={:08x} [{}]",
+        core8,
+        core16,
+        if core_pin_ok { "PASS" } else { "FAIL" }
     );
+
+    let (cost_ovl, ovl8, ovl16) =
+        match timed_pass::<uli_lite_gba::ArmKernels>(album, state, &mut counter, overhead) {
+            Ok(v) => v,
+            Err(e) => {
+                agb::println!("[uli-bench] FAIL overlay timed pass: {:?}", e);
+                return false;
+            }
+        };
+    let ovl_pin_ok = ovl8 == EXPECTED_INT8 && ovl16 == EXPECTED_INT16;
+    print_cost("ovl", &cost_ovl);
     agb::println!(
-        "[uli-bench] frame count={} min={} min_frame={} max={} max_frame={} sum={} wrapped={}",
-        cost.count,
-        cost.min,
-        cost.min_frame,
-        cost.max,
-        cost.max_frame,
-        cost.sum,
-        cost.wrapped
-    );
-    agb::println!(
-        "[uli-bench] worst ops bandsyms={} coded={} pairs={} quads={} nz={} zc={} raws={} escs={} ms={} long={} model={}",
-        cost.worst_ops.bandsyms,
-        cost.worst_ops.coded_bands,
-        cost.worst_ops.pairs,
-        cost.worst_ops.quads,
-        cost.worst_ops.nz,
-        cost.worst_ops.zc,
-        cost.worst_ops.raws,
-        cost.worst_ops.escs,
-        cost.worst_ops.ms,
-        cost.worst_ops.long_codes,
-        cost.worst_model
+        "[uli-bench] ovl pins int8={:08x} int16={:08x} [{}]",
+        ovl8,
+        ovl16,
+        if ovl_pin_ok { "PASS" } else { "FAIL" }
     );
 
     // -----------------------------------------------------------------
-    // 3. Kernel share.
+    // 4. Kernel share.
     // -----------------------------------------------------------------
     const KREP: u32 = 10;
     let kx = unsafe { &mut *core::ptr::addr_of_mut!(KX) };
@@ -491,7 +538,7 @@ fn run(gba: &mut agb::Gba) -> bool {
     );
 
     // -----------------------------------------------------------------
-    // 4. Overlay arm: the same four kernels, ARM mode + unchecked addressing.
+    // 5. Overlay arm: the same four kernels, ARM mode + unchecked addressing.
     //    This is a *kernel* reading, not a full-frame one: `Decoder` still
     //    calls the core kernels. The projection the record makes from it is
     //    `frame_rest + 2 * ovl_seq`, with `frame_rest = frame_mean - 2 *
@@ -586,7 +633,15 @@ fn run(gba: &mut agb::Gba) -> bool {
         if twin_ok { "PASS" } else { "FAIL" }
     );
 
-    let pass = pin_ok && timed_pin_ok && calib_ok && !cost.wrapped && kern_ok && ovl_ok && twin_ok;
+    let pass = pin_ok
+        && core_pin_ok
+        && ovl_pin_ok
+        && calib_ok
+        && !cost_core.wrapped
+        && !cost_ovl.wrapped
+        && kern_ok
+        && ovl_ok
+        && twin_ok;
     agb::println!(
         "[uli-bench] {}",
         if pass {

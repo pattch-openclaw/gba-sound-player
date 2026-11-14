@@ -49,7 +49,7 @@ pub mod tables_data;
 mod tables_data;
 
 pub use album::{Album, AlbumHeader, SeekEntry, TrackEntry};
-pub use frame::{Decoder, DecoderState, FrameInfo, Ops};
+pub use frame::{Decoder, DecoderState, FrameInfo, Kernels, Ops, PortableKernels};
 pub use tables::CodeTables;
 
 /// Errors returned by the decoder and container parser.

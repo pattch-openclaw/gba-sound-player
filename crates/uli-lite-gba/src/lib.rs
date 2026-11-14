@@ -288,3 +288,37 @@ pub fn ola(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8], mut out16: Option<&m
         }
     }
 }
+
+/// The ARM-mode kernel set, plugged into [`uli_lite::Decoder`] through the
+/// `Kernels` seam.
+///
+/// This is the product's synthesis path: `Decoder::<ArmKernels>::with_kernels`
+/// keeps the whole frame decode (bitstream, dequant, M/S, frame state) in the
+/// portable core while running the four synthesis kernels as the ARM-mode,
+/// unchecked, `.iwram`-resident functions above. PR B moves the remaining hot
+/// path here; until then this type is what makes a **full-frame** product
+/// measurement possible without duplicating `decode_frame`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ArmKernels;
+
+impl uli_lite::Kernels for ArmKernels {
+    #[inline]
+    fn pre(x: &[i32; M], z: &mut [i32; 2 * H]) {
+        crate::pre(x, z);
+    }
+
+    #[inline]
+    fn fft(z: &mut [i32; 2 * H]) {
+        crate::fft(z);
+    }
+
+    #[inline]
+    fn post(z: &[i32; 2 * H], y: &mut [i32; M]) {
+        crate::post(z, y);
+    }
+
+    #[inline]
+    fn ola(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8], out16: Option<&mut [i16]>) {
+        crate::ola(y, p, out8, out16);
+    }
+}
