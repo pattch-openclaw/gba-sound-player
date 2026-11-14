@@ -5,6 +5,16 @@ plan for the ULI2 product codec. [`../../ULI2.md`](../../ULI2.md) remains the de
 (why ULI2, what it is, the licensing and encoder risks); this file owns the
 phases, gates, measurement ledger and the order of work.
 
+**PR C-2, executed as C-3a, has landed (2026-11-14) together with C-3c**:
+the measured product frame is **488,685 worst / 429,339 mean (186% / 164%)**,
+down from 523,267 / 456,187 — a **measured saving of 35,000 cycles/frame where
+the plan projected 90,000**. Every twin is green and the pins are unchanged.
+The ledger section below carries the arm table and the measured decomposition of
+the remaining entropy cost; the short version is that C-3b (stats behind
+`verify`) is now the largest measured lever, and parity is **not reachable on
+the current item list** without a per-stage attribution of what entropy still
+costs.
+
 The target is **C-class performance** (the C/asm product decoder's 69.4% worst
 decode wall), not merely a decode frame under the 262,144-cycle period. A parity
 audit of C-1 + C-2 against the C product decoder found that they project to
@@ -259,13 +269,20 @@ Prize: **~194,000 cycles/frame**. Its per-kernel rows are the useful part — ou
 FFT is 170,130 for the pair against 62,800, and our OLA is 76,932 against 30,600
 — so FFT carries ~107,000 of the prize and OLA ~46,000.
 
-#### PR C-2 — entropy rewrite (the 33%)
+#### PR C-2 — entropy rewrite (the 33%) — **landed as C-3a, 2026-11-14**
 
 Redesign the bit-reader protocol. The 32-bit cached window from PR B is in
 place, so this is not “more of the same”: candidate directions are holding the
 reader state in registers across a whole band instead of behind `&mut`, a
 byte-oriented refill path, and folding `huff`+`skip`+sign into one symbol
 routine. Prize: ~90,000 cycles/frame.
+
+**Landed as C-3a plus C-3c**, with the reader as a `Copy` local whose position
+is derived from a stream cursor, packed `huff`+`skip`, the inline `clz6` escape
+path, `q3`/`rq` tables, direct coefficient writes with no pre-zero pass, and
+`nb`-bounded M/S. Measured: **−35,000 cycles/frame**, not the projected 90,000.
+See “PR C-2 / C-3a” in the measurement ledger. The rest of this section is the
+pre-measurement text and stays for context.
 
 Together C-1 and C-2 project to ~239,000 cycles (~91%) once the C kernel row is
 pinned at 134,600 (PR C recorded ~94% against the earlier ~146,000). Neither is
@@ -347,8 +364,9 @@ C's row never had.
 
 | after | frame | % of period | basis |
 |---|---:|---:|---|
-| PR C (today) | 523,267 | 200% | measured |
-| C-1: kernels → C's 134,600 | ~329,000 | 126% | C stage-2 per-kernel rows |
+| PR C | 523,267 | 200% | measured |
+| **+ C-3a/C-3c** | **488,685** | **186%** | **measured** — 35,000 saved, not 90,000 |
+| C-1: kernels → C's 134,600 | ~295,000 | ~112% | C's per-kernel rows; re-based on the measured frame |
 | C-3a: entropy/dequant → ~85,000 | ~239,000 | 91% | C-3a table; still ~2× C's 42–48k |
 | + C-3b/C-3c (counters, i64 gating) | ~224,000–234,000 | 85–89% | not yet measured |
 | + C-3d/C-3e (OLA single-format, `nb`-limited M/S) | ~202,000–222,000 | 77–85% | not yet measured |
@@ -362,13 +380,18 @@ that is what buys the IWRAM table budget back (see U6). These projections are no
 more trustworthy than PR C's levers were; they are ranges to be replaced by
 measurements, one arm at a time.
 
-**Read the range honestly.** The optimistic end (~193,000 ≈ 73%) is inside the
-±5% band this file calls parity; the pessimistic end (~213,000 ≈ 81%) is ~11
-points above it. So C-3 makes parity *plausible* without proving it: if every
-item lands and the frame is still ~81%, the residual needs its own attribution
-before U4 is claimed, and the first candidates are the FFT register story (C-1)
-and whatever entropy still sits above C's 42–48k after C-3a. Do not let the
-table become a forecast.
+**Read the range honestly — and it moved when C-3a was measured.** The rows
+above were projections; the C-3a/C-3c row is now a measurement, and it delivered
+**35,000 of the projected 90,000**. Re-based on that, the item list projects
+**~250,000–280,000 (95%–107%)**, i.e. the period at best, **not the ±5% band
+this file calls parity**. Two consequences are recorded rather than smoothed
+over: (1) C-3b and the diagnostics are the largest *measured* lever left
+(~11,000 for the stats alone, ~30,000 with the diagnostics) and are worth doing
+next; (2) parity now needs something the list does not contain — a per-stage
+attribution of the ~140,000 cycles entropy and dequant still cost (5.3× the C
+record per coefficient, down from 6.6×), because the structural port did not
+move that ratio nearly enough to close the gap. Do not let the table become a
+forecast.
 
 **Proposed order.** Each step is small enough to twin and measure on its own,
 and each changes the frame the next one is measured against — so every arm keeps
@@ -443,7 +466,7 @@ may rest on the 129-frame number alone** — U4's witness is this analysis.
 | **U1 — reference** | `uli-lite` remains a bit-exact, host-testable reference (no longer a portable-product claim). | Met (Phase 0/1); redefined 2026-11-14. |
 | **U2 — bit-exact host** | The reference matches the C-pinned corpus, frame for frame, on **valid** streams. Malformed input only has to be rejected safely — no arithmetic-exactness promise (decided 2026-11-14). | Met. |
 | **U3 — bit-exact product** | The product kernel set produces the pinned int8/int16 frames, on target and in the host twin. | **Met for the full hot path (PR B).** `tests/product_twin.rs` (host, frame-for-frame) + `make uli-bench` on-target pins. |
-| **U4 — real-time decode** | Worst full frame within the product budget at WAITCNT 4/2 — read as **C-class (≤~70–75% decode wall)**, because the gate total adds convert + IRQ + DMA to whatever the decoder costs. **The ceiling itself is measured, not assigned** (2026-11-14): it is written down at the first near-real-time arm, from the measured gate total plus this tree's non-audio cost. Its worst-frame witness is PR E, not the 129-frame corpus. | **Not met.** PR B measured 204% worst / 177% mean; PR C added the attribution and a split-`huff` win to **200% worst / 174% mean** (523,267 / 456,187) and scoped the remainder as two rewrites (C-1 asm kernels 63%, C-2 entropy 33%). C-1 + C-2 project to ~91% — the period with no feeder margin, and **not C-class**. PR C-3 (above) carries the ~57,000 remainder: stats-free build, `dec_chan` structure, OLA fusion, `nb`-limited M/S, and C-1's stack cut. Revised projection **~193,000–213,000 (~73–81%)** — parity plausible, not proven; parity remains the target. |
+| **U4 — real-time decode** | Worst full frame within the product budget at WAITCNT 4/2 — read as **C-class (≤~70–75% decode wall)**, because the gate total adds convert + IRQ + DMA to whatever the decoder costs. **The ceiling itself is measured, not assigned** (2026-11-14): it is written down at the first near-real-time arm, from the measured gate total plus this tree's non-audio cost. Its worst-frame witness is PR E, not the 129-frame corpus. | **Not met.** PR B measured 204% worst / 177% mean; PR C added the attribution and a split-`huff` win to **200% worst / 174% mean** (523,267 / 456,187) and scoped the remainder as two rewrites (C-1 asm kernels 63%, C-2 entropy 33%). C-1 + C-2 projected to ~91%. **C-3a + C-3c landed 2026-11-14 and measured 488,685 worst / 429,339 mean (186% / 164%)** — a real 35,000-cycle cut where 90,000 was projected. Re-based on that, the remaining item list (C-1, C-3b, the diagnostics, OLA fusion, `iwram-tables`) projects **~250,000–280,000 (95–107%)**, which is the period at best, **not parity**. C-3b is the largest measured lever left; parity needs a per-stage attribution of the remaining ~140,000 cycles of entropy+dequant. See the ledger section “PR C-2 / C-3a”.  |
 | **U5 — product playback** | 32,768 Hz path, zero underruns, clean period audit. | Not started (gated by U4). |
 | **U6 — memory** | IWRAM/EWRAM/stack inside the product budget with UI and feeder. | **Open, and now the binding constraint.** The product path needs ≈15.0 KiB of stack. Budget at PR C: `.iwram` 11,072 B baseline, 32,512 B usable, so 21,440 B spare — but 8,672 B of synthesis tables in IWRAM leaves 12,768 B, under the stack need, and `iwram-tables` **crashes** (stack overruns `__iwram_end` into code; the CPU jumps to an invalid address). IWRAM tables are therefore blocked until the stack requirement or the code size falls — and C-3's re-specification of C-1 (asm that also cuts the spilled intermediates) is the intended way to fall under it. `HotState` and the tables are both EWRAM now. **Priority decided 2026-11-14: audio first** — IWRAM budget goes to code, hot state and stack; synthesis tables next if the stack allows; UI affordances are the slack and may be dropped to buy audio headroom. Full `huff` inlining was rejected on this row: +4,252 B for 2.7% (U6 is binding), vs +896 B for 1.6% with the split. |
 | **U7 — licensing/spec** | Permissive license + standalone format spec before publishing; otherwise `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** Revisit only if a publish decision is taken; the license and `FORMAT.md` remain prerequisites for it. |
@@ -507,6 +530,57 @@ so synthesis is back to 63% of the frame.** The PR B gate (≤2×) is met at
 Placement: `HotState` (8 KiB) is in EWRAM, not IWRAM — an IWRAM placement
 stack-overflowed on target (≈15.0 KiB of stack needed; see PR B above). The
 host twin was green either way, so this was a target placement defect only.
+
+### PR C-2 / C-3a (2026-11-14, mGBA, WAITCNT 4/2)
+
+Full frame, 129-frame corpus, 262,144-cycle period. The baseline was rebuilt
+from `main` in this environment immediately before the change (its numbers
+reproduce PR C's record exactly, which is what makes the arms comparable).
+
+| arm | worst | mean | min |
+|---|---:|---:|---:|
+| baseline (PR C, `main`) | 523,267 (200%) | 456,187 (174%) | 351,446 |
+| **C-3a + C-3c** | **488,685 (186%)** | **429,339 (164%)** | 353,340 |
+| core kernels (control, same image) | 2,643,897 (1009%) | 2,152,958 (821%) | 1,376,966 |
+| overlay kernels (`ArmKernels`) | 1,640,505 (626%) | 1,148,486 (438%) | 371,523 |
+
+All arms pinned `e6e87652` / `b3530978`, `xover=0 hfnz=0`, no wrapped window,
+overlay twin PASS; calibration overhead 35 cycles, spread 0. The worst frame
+moved 101 → 106, so the **mean is the comparable number** (−5.9%); worst is
+−6.6%. The controls moved too (1009% vs PR C's 1023%), which is the recorded
+image-specificity effect, not a kernel change.
+
+**What landed**: reader as a `Copy` local over a stream cursor with the bit
+position *derived* rather than maintained; `huff` returning the packed
+`(sym << 5) | len` already consumed; the inline `clz6` escape path; `q3` and
+`clz6` generated in-repo; `rq`/`dq15` precomputed at album parse; coefficients
+written straight into `x` with no pre-zero pass and an EOB tail fill; M/S
+bounded by `nb`; and C-3c's 32-bit dequant (approved: no arithmetic promise on
+malformed streams). Host twins, the in-file bit-reader fuzz (4,000 random
+windows × 64 steps) and the on-target pins are all green.
+
+**Measured decomposition of what is left** — each arm built and run on target,
+same image, varying only the counters and diagnostics:
+
+| variant | worst | mean | vs landed |
+|---|---:|---:|---:|
+| C-3a + C-3c (landed) | 488,685 | 429,339 | — |
+| …counters hoisted into locals | 509,888 | 439,098 | **worse, +21,000** |
+| …`Ops` counters removed (C-3b) | 477,370 | 422,173 | −11,315 |
+| …`Ops` and `Diag` removed | 458,203 | 411,253 | −30,482 |
+
+Two findings worth keeping. **Hoisting the counters into locals costs 21,000
+cycles** — register pressure displaces the reader, the same failure mode that
+made PR C's dequant fusion neutral; recorded so it is not attempted again. And
+**C-3b is worth ~11,000 alone, ~30,000 with the diagnostics** — the largest
+measured lever left, and still open because gating it behind `verify` changes
+the twin's comparison basis and the bench's on-target `xover/hfnz` witness.
+
+Entropy + dequant is now ~140,000 cycles/frame against the C record's ~45,000
+(≈5.3× per coefficient, down from 6.6×). **The structural port did not close
+that ratio**, so the next entropy step has to be a per-stage attribution at
+sub-frame granularity (PR C's by-difference method one level down), not another
+structural guess.
 
 ### PR C (2026-11-14, mGBA, WAITCNT 4/2)
 
@@ -602,6 +676,17 @@ coefficient against the C bench's entropy+dequant (~41 c/coef) is ~6.6×.
 ---
 
 ## Decision log
+
+- **2026-11-14 — C-2 landed as C-3a (+C-3c), and it was measured, not assumed.**
+  The structural port and the 32-bit dequant measured **488,685 worst / 429,339
+  mean (186% / 164%)** against a re-measured `main` baseline of 523,267 /
+  456,187 — **35,000 saved where the plan projected 90,000**. Consequences
+  recorded: the counter-hoist idea was built, measured **worse** (+21,000,
+  register pressure) and rejected; C-3b is the largest measured lever left
+  (−11,000 alone, −30,000 with the diagnostics); and the item list now projects
+  95–107%, so **parity needs a per-stage attribution of the remaining ~140,000
+  cycles**, which the plan did not previously contain. All twins and pins green
+  (`xover=0 hfnz=0`, overlay twin PASS).
 
 - **2026-11-14 — the eight open questions are answered; scope is frozen for v1.**
   Recorded as one block because they interact:
