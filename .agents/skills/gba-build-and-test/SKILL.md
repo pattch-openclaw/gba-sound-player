@@ -52,9 +52,14 @@ make check
 `podman-*` target has ever been run here. Archived instruments no longer have targets: the
 spike's 6a-3/6a-5/6a-5b/6a-7 arms, the 10,512 Hz rate flow, `examples/arm-kernels/` and
 `examples/e5_fetch/`; `flac-docs/history.md` §"Retired Make entrypoints" gives the cargo
-command for each. Do **not** run `make clean` to "make sure": it drops ~5 GB of warm target
-dirs (every Tier-3 build re-compiles `core`/`alloc` from source) and deletes the generated
-master asset/pin.
+command for each. `make clean` is shallow and safe to reach for: it removes the build **outputs** (every
+`*.gba`/`*.sav`, the generated master asset/pin, the archived rate assets,
+`uli-bench*.log`, `__pycache__`) and **keeps every workspace's `target/`**, so the next
+build stays warm. `make clean-deep` (or `make clean DEEP=1`) also drops the caches — all
+fifteen workspaces, discovered from the `Cargo.toml`s on disk — and that is not free: on
+this host the full verified set takes **135 s cold against 22 s warm** and regrows
+**4.5 GB**, because the Tier-3 target re-compiles `core`/`alloc` from source per
+workspace. Do not deep-clean a warm tree just to "make sure".
 
 Builds never gate on tests; tests never reformat; only `check` fails on formatting. So a
 build that reformatted your tree is fine — run `make check` before committing.
@@ -148,9 +153,10 @@ instructions rather than half-running a gate.
   `verdict PASSED — screen BLUE`, `und 0`, `late 0`, every period serviced, PCM and FIFO
   pins matched — **with exit 124, because a pass loops forever and the timeout kills it.**
   That is the mGBA control, not a playback claim: nothing here has been heard.
-- Timing honesty: with warm target dirs a ROM rebuild is sub-second and the whole gate set
-  is a couple of minutes; the first build after `make clean` pays the `-Zbuild-std`
-  `core`/`alloc` compile per target per workspace. Quote warm numbers only, and say so.
+- Timing honesty (measured 2026-11-14, this host, `check` + seven ROMs + `flac-check`):
+  **22 s warm, 135 s after `make clean-deep`** — and the single ROM path
+  (`flac-test` + `native-flac-rom`) is 1 s warm against 15 s cold. Plain `make clean` does
+  not cost that, because it leaves the caches alone. Quote warm numbers only, and say so.
 
 Detail and the install failure modes: `references/native-toolchain-setup.md`.
 

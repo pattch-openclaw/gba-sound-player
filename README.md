@@ -254,9 +254,9 @@ requirements (nightly + `rust-src`, plus `agb-gbafix` for ROM fixing).
 | `make podman-test-rom` | ROM suite only, in the container | needs podman/docker |
 | `make podman-flac-test` | `flac-lite` gates only, in the container (fastest container loop) | needs podman/docker |
 | `make build` / `rom` / `flac-rom` | Lower-level primitives (no fixing / container); `rom` is what the container runs. All run `format` first; **none gate on tests** | — |
-| `make format` | `cargo fmt` (writes) across all three workspaces — the automatic build pre-step | either |
+| `make format` | `cargo fmt` (writes) across every workspace — the automatic build pre-step. `examples/flac_integration` goes through `scripts/fmt_with_generated_stub.sh`, so a fresh clone without the generated `master_pin.rs` still formats | either |
 | `make podman-check` | `cargo fmt --check` in the container (the CI formatting gate) | needs podman/docker |
-| `make clean` / `check` / `help` | Clean all workspaces incl. sub-crates; `cargo fmt --check` (**verify-only**, never writes); target list | either |
+| `make clean` / `clean-deep` / `check` / `help` | `clean` removes the build **outputs** — every `*.gba`/`*.sav`, the generated master asset + pin, the archived rate assets, `uli-bench*.log`, `__pycache__` — and **keeps the compiler caches**. `clean-deep` (or `make clean DEEP=1`) also drops every workspace's `target/` — the workspaces are **discovered from the `Cargo.toml`s on disk**, not listed by hand — and the next build pays the `-Zbuild-std` `core`/`alloc` compile again (measured here: 135 s and 4.5 GB against 22 s warm). `check` is `cargo fmt --check` (**verify-only**, never writes); `help` is the target list | either |
 | `make clean-cache` | Remove the container build-cache volumes (see [Containerized testing](#containerized-testing)) | needs podman/docker |
 
 #### Formatting: builds auto-format; nothing but `check` gates
