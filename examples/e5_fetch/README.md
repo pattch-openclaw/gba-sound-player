@@ -9,7 +9,9 @@ into `.iwram`. The same bytes, the same inputs, one calibration; the only
 variable is the address the instruction fetch reads from.
 
 ```
-make native-e5-fetch-rom        # build e5-fetch.gba
+# ARCHIVED 2026-11-14 — E5's Make entrypoints are retired (the measurement is
+# done and recorded; see flac-docs/history.md). Build it by hand:
+rustup run nightly-2026-09-04 cargo build --release --target thumbv4t-none-eabi   # e5-fetch.gba
 ```
 
 ## Running it

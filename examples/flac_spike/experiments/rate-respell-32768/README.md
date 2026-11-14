@@ -7,7 +7,7 @@ frames" row in [`flac-docs/measurements.md`](../../../../flac-docs/measurements.
 **run on 2026-11-11 and not committed at the time**, so the record had to spell
 its method out and no reader could re-run it; it is committed now under the
 standing rule that probes live in `examples/flac_spike/experiments/<name>/`
-([`method-and-gates.md`](../../../../flac-docs/method-and-gates.md)).
+([`measurements.md`](../../../../flac-docs/measurements.md)).
 
 **Sample code only**, like the other archives here: nothing in the product path
 imports it, and it is not a gate. `python3 probe.py` (needs `flac` on `PATH`;

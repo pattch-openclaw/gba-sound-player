@@ -20,8 +20,13 @@ edition = "2024"
 # links `-Tgba.ld` twice — FLAC.md "Second leak variant"). Same pattern as
 # examples/flac_spike/.
 #
-#   make native-kernel-rom   build + fix the kernel-check ROM (this host)
-#   make kernel-test         host twin witness tests (out-of-tree gate)
+# ARCHIVED 2026-11-14: this crate is E10's kernel groundwork — the source of the
+# shipped fold — and its Make entrypoints are retired. The shipped kernel's live
+# witnesses are `make overlay-gates`. To run this crate's own gates by hand:
+#
+#   rustup run <pinned> cargo build --release --target thumbv4t-none-eabi   # the sweep ROM
+#   cd /tmp && rustup run <pinned> cargo test --manifest-path <this>/Cargo.toml \
+#     --target <host triple>                                                # the host twins
 
 [dependencies]
 

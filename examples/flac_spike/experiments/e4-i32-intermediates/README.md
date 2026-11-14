@@ -1,12 +1,12 @@
 # E4 sample — i32-intermediates probe (measured 2026-09-23, **not integrated**)
 
-The reappliable sample code for the E4 experiment in [flac-docs/perf-results.md](../../../../flac-docs/perf-results.md). **Result: the LPC arm's cost was half
+The reappliable sample code for the E4 experiment in [flac-docs/history.md](../../../../flac-docs/history.md). **Result: the LPC arm's cost was half
 software 64-bit math** — switching the hot-path intermediates from `i64`
 to `i32` cut the LPC mean by **46.90%** (652% → 346% of the 1,048,750-cycle
 budget); the FIXED arm moved only **3.74%** because its FIXED-0 integrator
 early-returns and the width change is inert in its Rice hot loop. Full
 findings, proof, and reading:
-[`../../../../flac-docs/perf-results.md`](../../../../flac-docs/perf-results.md) →
+[`../../../../flac-docs/history.md`](../../../../flac-docs/history.md) →
 "E4 result — i32 intermediates halve the LPC arm; FIXED barely moves (2026-09-23)".
 
 This directory is **sample code only**: the probe never lands on `main`'s

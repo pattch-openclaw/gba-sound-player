@@ -64,7 +64,8 @@ flac-lite = { path = "../flac-lite" }
 #
 # What the lint was meant to watch — that the edge is used, not merely declared — is
 # watched by two things that can see a build: `overlay-test`'s `use
-# flac_lite::Error` in `src/lib.rs`'s test module, and 6a-3's `overlay-test-twin`,
+# flac_lite::Error` in `src/lib.rs`'s test module, and 6a-3's `overlay-test-twin`
+# (retired 2026-11-14 — run `cargo test --features rice-twin` from a gate-neutral cwd),
 # which compiles the arm for thumbv4t and runs the out-of-crate differential. An
 # allow that outlives its reason is how dead dependencies survive, so the answer
 # here is not to keep the allow silently but to record that it has become an allow
@@ -95,8 +96,8 @@ unused_dependencies = "allow"
 # the same reason: this suite is the out-of-crate seam witness, and both of its
 # tests need the arm compiled — without `required-features` a default
 # `make overlay-test` would report the suite's absence as a green it had not
-# earned. `make overlay-test-twin` is the gate that runs it; `overlay-test` does
-# not build it. New configuration, new gate — 6a-3 is allowed to move counts only
+# earned. The `rice-twin` gate runs it (`make overlay-test-twin`, retired 2026-11-14 —
+# run it by hand); `overlay-test` does not build it. New configuration, new gate — 6a-3 is allowed to move counts only
 # in its own new configuration (FLAC.md, item 6a "Per-PR rules").
 [[test]]
 name = "twin_from_outside"

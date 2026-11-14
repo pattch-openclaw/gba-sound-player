@@ -1,6 +1,6 @@
 # E10 sample — hybrid ARM-mode Rice codeword loop, three-arm probe (measured 2026-10-30, **not integrated**)
 
-The reappliable sample code for **E10** in flac-docs/perf-results.md (algorithm plan 2026-10-14, design of record 2026-10-16,
+The reappliable sample code for **E10** in flac-docs/history.md (algorithm plan 2026-10-14, design of record 2026-10-16,
 left-to-measure item 6): the whole non-escape Rice partition sample loop
 hand-written in ARM mode — tier-1 `ctz8` (q ≤ 7), C1 De Bruijn (8..=31),
 C2 word-skip (> 31), bit-reversed window with `rev8` refill — measured as
@@ -9,7 +9,7 @@ the menu has measured** — marginal `arm − tab` **−40.08%** FIXED /
 **−11.51%** LPC (both past the ≥ ~10% carry bar); FIXED mean 170.2% →
 **101.98%** of budget (522 c/sample), worst 102.5%. Nothing closes
 mean-and-worst alone; the reading is cumulative. Full findings:
-[`../../../../flac-docs/perf-results.md`](../../../../flac-docs/perf-results.md) →
+[`../../../../flac-docs/history.md`](../../../../flac-docs/history.md) →
 "E10 result — the ARM-mode hybrid codeword loop lands the menu's biggest FIXED-side win (2026-10-30)".
 
 This directory is **sample code only**: the probe never lands on `main`'s
@@ -54,7 +54,7 @@ reset outside the start→end span) and the wrap sentinel rides the
 calibration netting un-subtracted (`net_sentinel`). The first build's run
 convicted both halves of this rule (LPC arm frame 125 printed
 `4294967271` with `wrapped=false`); the closure arithmetic pre-dated the
-re-run — see the flac-docs/perf-results.md entry.
+re-run — see the flac-docs/history.md entry.
 
 ## Files
 
@@ -131,7 +131,7 @@ budget 1,048,750 cycles/frame; net of this image's own calibration):
 `tests/e10_witness.rs` 4, carried `e2`/`e2b` suites 3, `spike_witness` 8),
 `make flac-test` (120 passed, 1 ignored — unchanged; `crates/flac-lite/`
 untouched by the patch), `make check` clean, `make native-spike-rom`
-builds. `make kernel-test` untouched (arm-kernels crate unchanged).
+builds. `make kernel-test`, retired 2026-11-14 untouched (arm-kernels crate unchanged).
 
 ## Re-application note (item 6a-2, 2026-11-06)
 
@@ -147,7 +147,7 @@ port is compile-only: with it reverted (`header_bits: 0`) the image's `.text` an
 `.iwram` are byte-identical and the run log is unchanged.
 
 Re-measured on one image, both clips, two runs byte-identical (1,017 lines /
-84,654 B, `eq=1` 314/314, region FNVs `[OK]`); the tables are in `flac-docs/perf-results.md` →
+84,654 B, `eq=1` 314/314, region FNVs `[OK]`); the tables are in `flac-docs/history.md` →
 "6a-2 — landed (2026-11-06)". Two things a future re-application needs to know:
 
 1. **The four FIXED sums above reproduce exactly** — to the cycle — from this

@@ -19,7 +19,8 @@
 //!   therefore also rendered on the GBA screen (the committed OFL pixel font)
 //!   so a stock unit with an EverDrive can be read directly.
 //!
-//! Run it in mGBA first (`make native-e5-fetch-rom` then
+//! Run it in mGBA first (this crate is ARCHIVED since 2026-11-14 — build it with
+//! `cargo build --release --target thumbv4t-none-eabi`, then
 //! `mgba-test-runner e5-fetch.gba`) as the harness check: mGBA should read
 //! ~4.0 and ~1.4 cycles/add. The hardware run is the arbitration.
 

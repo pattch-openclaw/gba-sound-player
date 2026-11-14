@@ -14,7 +14,7 @@
 //!
 //! * the ROM renders exactly this string and logs it line for line, so the
 //!   serial log of an mGBA run and the pixels on a stock GBA cannot disagree;
-//! * `make item6a7-test` runs the host tests below, which pin the label rule,
+//! * `make item6a7-test`, retired 2026-11-14, runs the host tests below, which pin the label rule,
 //!   the fixed-point formatter, and the two delta signs the record quotes.
 //!
 //! The `agb` half (font, layout, fit check) is `examples/flac_spike/src/

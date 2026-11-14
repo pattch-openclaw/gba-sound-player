@@ -65,7 +65,7 @@
 //! escaped partition, no parameter above 8, no codeword within orders of
 //! magnitude of either guard. It is a tripwire, not a boast: widen the corpus and
 //! it fails and says so, at which point the synthesized arms stop being the only
-//! witness of those boundaries and `flac-docs/open-questions.md` Q10 has to be
+//! witness of those boundaries and `flac-docs/history.md` Q10 has to be
 //! re-stated. Q10 asked the question; the answer this file gives is that the
 //! corpora witness the *map* and not the *boundaries*, so the boundaries come from
 //! the packer.
@@ -663,7 +663,7 @@ fn the_tables_are_the_bytes_they_claim_and_their_addresses_are_reported_not_assu
         "tables: CTZ8 @ {ctz8_addr:#x}, REV8 @ {rev8_addr:#x}, BRUIJN_INDEX @ \
          {bruijn_addr:#x} (host addresses). The device-side placement witness is the \
          instrument ROM's own test and `nm`/`objdump` on its ELF — no kernel-check \
-         hard-codes a table address, per flac-docs/open-questions.md Q1."
+         hard-codes a table address, per flac-docs/history.md Q1."
     );
 }
 
@@ -1154,7 +1154,7 @@ fn the_arm_path_decodes_every_committed_partition_exactly_as_the_default_does() 
         "the corpus now contains {delegated} partitions above order {MAX_ORDER} — \
          good news about the encoder, but it means the synthesized delegation arms \
          above stopped being the only witness of that path and Q10's coverage claims \
-         in flac-docs/open-questions.md have to be re-stated"
+         in flac-docs/history.md have to be re-stated"
     );
     assert!(
         partitions >= 4 && samples >= 512 && params.len() >= 2,

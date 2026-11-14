@@ -1,6 +1,6 @@
 # Feeder-off control probe — A/B/C arms on the rate-play ROM (measured 2026-10-26, not integrated)
 
-The reappliable sample code for flac-docs/playback-results.md ordering step ③ (rate-play entry,
+The reappliable sample code for flac-docs/history.md ordering step ③ (rate-play entry,
 2026-10-22 revised ordering): split the decode path's claimed **+39 % live
 penalty** (1,643 c/s IRQ-live vs the rate ROM's recorded IME-off 1,180 c/s)
 into handler CPU, sound-DMA bus contention, and everything else — with
@@ -9,7 +9,7 @@ activity). **Result: the live path costs ≈ +1.5 % (≈ 3 ms/frame), not
 +39 %; the +39 % was a stale comparator — the committed rate ROM on the
 current tree prints FIXED mean 1,614.6 c/s, and a bisect convicts the E2b
 `rice_quotient` landing (`e455dba`, 2026-10-21) with +37.96 % decode.
-Full findings: [`../../../../flac-docs/perf-results.md`](../../../../flac-docs/perf-results.md) →
+Full findings: [`../../../../flac-docs/history.md`](../../../../flac-docs/history.md) →
 "Completed: rate-play ROM" entry, 2026-10-26 amendment.**
 
 ## Arms
@@ -54,8 +54,8 @@ Base commit: `5a27435` (PR #78 merge, current main).
 
 ```bash
 git apply examples/flac_spike/experiments/feeder-off-control/probe.patch
-make rate-assets INPUT=assets/sound/bioluminescent.wav RATE=10512
-make native-rate-play-rom
+# retired 2026-11-14: make rate-assets INPUT=assets/sound/bioluminescent.wav RATE=10512
+# retired 2026-11-14: make native-rate-play-rom
 shasum -a 256 flac-rate-play.gba    # expect 8ccb3dde… (provenance only)
 (mgba-test-runner flac-rate-play.gba > run.log 2>&1 &)   # runner hangs by design
 # poll: grep -q 'verdict' run.log  then:  pkill -f "mgba-test-runner flac-rate-play.gba"

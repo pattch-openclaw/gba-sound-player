@@ -14,7 +14,7 @@
 //! second ROM-side transcription of the expectation would be the
 //! hand-packed-vector failure):
 //!
-//! 1. **Host twin** (`make kernel-test`): the same algorithm as the
+//! 1. **Host twin** (`make kernel-test`, retired 2026-11-14): the same algorithm as the
 //!    assembly, written in plain Rust, judged against a naive bit-walk
 //!    oracle plus the committed table. The oracle is independent of both
 //!    `bit_length` and the De Bruijn identity, so a shared misreading

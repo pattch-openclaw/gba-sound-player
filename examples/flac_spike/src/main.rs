@@ -676,7 +676,7 @@ mod rom {
     // Why it exists: 6a-5's stack projection put the landed leg +48.2 c/sample
     // over E10's vendored leg — 5.2 K frames of margin on the decision. That
     // number is the only comparison in these records taken across TWO images,
-    // which method-and-gates.md forbids, and whose own next paragraph measures
+    // which measurements.md forbids, and whose own next paragraph measures
     // the class of effect at −36,543/−202,529 c/frame on UNCHANGED control code.
     // Static facts bound the seam bridge at ~0.15 c/sample (both legs make the
     // same 2 calls/frame through one in-crate generic, both keep a u32 word
@@ -685,7 +685,7 @@ mod rom {
     // either priced in one link here or it stops being a fact at all. The
     // reading is `asm − vend`, per frame, same link; the pre-registered fork
     // (±5.75 c/sample about the ~9 c/sample the 5-instruction delta predicts) is
-    // in plan-of-record 6a-5b, and neither branch unlands 6a-5.
+    // in history.md 6a-5b, and neither branch unlands 6a-5.
     // -----------------------------------------------------------------------
     #[cfg(any(feature = "item6a5-rust", feature = "item6a5-asm"))]
     mod item6a5 {

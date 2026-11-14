@@ -7,7 +7,7 @@
 //! that *this* tree now carries a copy of the archive's `src/e10.rs` and
 //! `asm/*.s` on the spike's live sources — behind `item6a5b-vendored`, off by
 //! default — because the rung's whole point is to time E10's vendored leg in the
-//! SAME link as the landed overlay realization (plan-of-record 6a-5b: the
+//! SAME link as the landed overlay realization (history.md 6a-5b: the
 //! +48.2 c/sample overhang 6a-5 recorded is a comparison of two *images*, and
 //! the only way to price it is a same-image pair). Two ports were needed, both
 //! mechanical and both recorded: `port-item6a2-header-bits.patch` for

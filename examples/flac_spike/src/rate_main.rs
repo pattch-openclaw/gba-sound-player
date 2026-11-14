@@ -19,11 +19,12 @@
 //! duplicated is anything carrying a pin: decode goes through the shared
 //! `driver`, the PCM fold through the shared `checksum::fold_i16le_stereo`,
 //! the stats fold and budget through the shared `stats` — host witness
-//! (`make rate-test`) drives those same library functions against the
+//! (`make rate-test`, retired 2026-11-14) drives those same library functions against
 //! generator's pins on the host before any ROM number counts.
 //!
-//! Assets are TEMPORARY and generated: `make rate-assets INPUT=… RATE=…`
-//! runs scripts/gen_rate_assets.sh, which fail-closes on the mixer domain
+//! Assets are TEMPORARY and generated: `make rate-assets INPUT=… RATE=…` ran
+//! scripts/gen_rate_assets.sh (both retired 2026-11-14 with the 10,512 Hz harness), which
+//! fail-closes on the mixer domain
 //! {10512, 18157, 32768}, encode rate == playback rate per FRAME, the
 //! 16-bit/2048-blocksize profile, and the subframe-walk census. The
 //! generated modules (src/rate_assets.rs, src/rate_pcm.rs — gitignored,
@@ -67,7 +68,7 @@ mod rom {
     use flac_spike::driver::{self, DriverError};
     use flac_spike::stats::{FrameCost, WORST_WRAPPED, cycles_between};
 
-    // Generated, temporary modules (make rate-assets). `//!` inner docs
+    // Generated, temporary modules (`make rate-assets`, retired 2026-11-14). `//!` inner docs
     // land legally because the expansion sits at the head of each module
     // body; include! keeps rustfmt from walking generated code.
     pub mod rate {

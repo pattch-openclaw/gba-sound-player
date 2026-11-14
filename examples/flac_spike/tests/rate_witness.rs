@@ -5,10 +5,10 @@
 //! Same correctness-before-speed layering as `spike_witness.rs` — but on
 //! temporary, input-derived assets instead of the committed ones, so it is
 //! a separate suite, gated by `required-features = ["rate-assets"]`:
-//! `make spike-test` never compiles it; `make rate-test` runs it. It fails
+//! `make spike-test` never compiles it; `make rate-test`, retired 2026-11-14 runs it. It fails
 //! (not skips) when the feature is on and the generated modules are missing
 //! — the `include!` paths name the files cargo needs generated first
-//! (`make rate-assets INPUT=… RATE=…`).
+//! (`make rate-assets INPUT=… RATE=…`, retired 2026-11-14).
 //!
 //! Layers (mirroring the committed suite's pin taxonomy):
 //! 1. provenance — every clip's rate == the generated RATE_HZ; the budget

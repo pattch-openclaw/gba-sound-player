@@ -232,7 +232,7 @@ BPS_ALLOWED = (16,)
 # shortfall" (GBA 001 + GBA SP, two runs each, all four identical to the cycle;
 # the `asm` arm of that table is the `rice-arm` kernel the product path uses, and
 # it is *kernel-only* — see the row's own note), and the 6b-1 record in
-# flac-docs/plan-of-record.md for the same clip end to end through the manifest
+# flac-docs/history.md for the same clip end to end through the manifest
 # facade.
 
 MEASURED_DECODE = {
@@ -313,12 +313,12 @@ MEASURED_DECODE = {
 # 2^24 Hz clock, while the instrument budgets with `stats.rs::GBA_CLOCK_HZ =
 # 16_780_000`, i.e. 1,048,750 cycles for the same frame — the number every
 # `verdict:` line and every published share in flac-docs/measurements.md and
-# perf-results.md is divided by. The two denominators differ by 174 cycles
+# history.md is divided by. The two denominators differ by 174 cycles
 # (0.0166%), which is under this 0.1 pp tolerance, so a row copied from either
 # source re-derives and passes here; e.g. 445,558 c re-derives to 21.25% against
 # this budget against the 21.24% a rounded-clock reading gives. That is why rows
 # are cited by source and condition, and why the reconciliation of the two clocks
-# is written down in flac-docs/method-and-gates.md before item 7-1 puts new
+# is written down in flac-docs/measurements.md before item 7-1 puts new
 # shares on the same table.
 ROW_CONSISTENCY_TOLERANCE_PCT = 0.1
 
@@ -865,7 +865,7 @@ def profile_verdict(info, facts, profile, region_sha=None):
         reasons.append(msg)
 
     if info["sample_rate"] != profile.rate:
-        bad("sample rate %d Hz is not the target %d Hz. Q14 (plan-of-record, "
+        bad("sample rate %d Hz is not the target %d Hz. Q14 (history.md, "
             "ruled 2026-11-11): a stream is encoded at the rate it is played at, "
             "and this packer does not reinterpret a declared rate to fit the "
             "clock — the only reinterpretation it ever carried, 32,000 Hz onto a "

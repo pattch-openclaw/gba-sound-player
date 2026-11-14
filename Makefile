@@ -1,98 +1,49 @@
-.PHONY: format build rom native-rom podman-rom flac-rom native-flac-rom podman-flac-rom \
-        spike-rom native-spike-rom podman-spike-rom \
-        item6a5-test item6a5-arms-rom native-item6a5-arms-rom podman-item6a5-arms-rom \
-        item6a5-asm-rom native-item6a5-asm-rom podman-item6a5-asm-rom \
-        item6a5b-test item6a5b-rom native-item6a5b-rom podman-item6a5b-rom \
-        item6a7-test item6a7-rom native-item6a7-rom podman-item6a7-rom \
-        e5-fetch-rom native-e5-fetch-rom podman-e5-fetch-rom \
-        rate-assets rate-test rate-rom native-rate-rom podman-rate-rom \
-        rate-play-rom native-rate-play-rom \
-        opus-rom native-opus-rom podman-opus-rom \
-        kernel-rom native-kernel-rom podman-kernel-rom \
-        test test-rom flac-test uli-test uli-check uli-fixture uli-spike-rom uli-bench-rom uli-bench uli-overlay-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check gafp-check \
-        product-play-rom native-product-play-rom product-play-test master-pack master-play-rom \
-        flac-rom-default-kernel native-flac-rom-default-kernel spike-test opus-test kernel-test \
-        overlay-check overlay-check-arm overlay-test overlay-test-twin overlay-test-arm overlay-objdump \
-        overlay-kernel-rom native-overlay-kernel-rom podman-overlay-kernel-rom overlay-kernel-test podman-overlay-kernel-test \
-        podman-test podman-test-rom podman-flac-test podman-opus-test podman-kernel-test podman-overlay-test podman-overlay-test-twin \
-        clean clean-cache check podman-check help toolchain-check
+.PHONY: format build rom flac-rom product-play-rom master-pack master-play-rom \
+        spike-rom spike-test \
+        overlay-check overlay-test overlay-check-arm overlay-test-arm \
+        overlay-objdump overlay-kernel-rom overlay-kernel-test overlay-gates \
+        test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
+        flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
+        product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
+        uli-bench-rom uli-bench uli-overlay-test \
+        uli-spike-rom clean clean-cache check help toolchain-check
 
-# ---------------------------------------------------------------------------
-# Build settings (all overridable, e.g. `make podman-rom CONTAINER=docker`)
+# ===========================================================================
+# Build settings
+# ===========================================================================
 #
-# nightly is REQUIRED: -Zbuild-std (in .cargo/config.toml) is a nightly-only
-# flag, used to compile core/alloc from source for this Tier-3 target. See
-# Dockerfile/README. Do NOT try to `rustup target add thumbv4t-none-eabi` — it
-# has no prebuilt artifacts on any toolchain.
+# nightly is REQUIRED: `-Zbuild-std` (in .cargo/config.toml) is nightly-only and
+# is how `core`/`alloc` get compiled for this Tier-3 target. Never run
+# `rustup target add thumbv4t-none-eabi` — no toolchain ships prebuilt core for
+# it. See README.md and flac-docs/measurements.md ("Cargo config inheritance").
 #
-# WHICH nightly is pinned in rust-toolchain.toml. Read the block below: the file
-# alone does NOT pin `make`, so the channel is read out of that file here.
-# ---------------------------------------------------------------------------
-# Toolchain resolution — deliberately NOT `cargo +nightly`.
+# The channel is pinned in ONE place, rust-toolchain.toml, and read here — it is
+# not duplicated as a string. Why the file alone is not enough: `rustup run
+# <name>` SELECTS a toolchain and therefore OVERRIDES the pin file, so a channel
+# that lived only in the file would not pin `make` at all. The read uses make's
+# own file function (the Dockerfile evaluates this same expression, so host and
+# image share one *rule* for reading it, not merely one string), and three layers
+# close the gaps:
+#   - a GNU make version guard, because `$(file <)` needs make 4.2 and Apple
+#     still ships 3.81 at /usr/bin/make;
+#   - a match-count guard at parse time, because this is a word-pattern match and
+#     not a TOML parse — a pin file that yields anything other than exactly one
+#     quoted word stops the build rather than silently falling back;
+#   - `toolchain-check`, which asks rustup what it resolves *in this tree* and
+#     compares it to the instance this build runs. That is the gap a word match
+#     cannot see: rustup ignores a commented-out `channel` line and falls back to
+#     the ambient default silently, exit 0.
+# The `nightly` fallback below is for a MISSING pin file only (partial checkout).
 #
-# `cargo +nightly` only works when the `cargo` on PATH is the **rustup shim**.
-# Conda (the `(base)` prompt) and some distro/Homebrew setups put a *plain*
-# cargo first on PATH; that binary treats `+nightly` as a subcommand and dies:
-#   error: no such command: `+nightly`
-#   help: invoke `cargo` through `rustup` to handle `+toolchain` directives
-#
-# `rustup run <toolchain> cargo` pins the toolchain through rustup no matter
-# which cargo (or none) is on PATH — so the same Makefile works in a conda
-# shell, a bare shell, and inside the container. Override if you truly have no
-# rustup: `make check CARGO=cargo RUSTC=rustc` (needs the pinned nightly as the
-# default — see rust-toolchain.toml).
-#
-# ---------------------------------------------------------------------------
-# The channel is PINNED in ONE place — rust-toolchain.toml — and read here.
-#
-# Why the file is not sufficient on its own: a toolchain file is consulted when a
-# bare `cargo`/`rustc` runs in the tree, but `rustup run <name>` SELECTS a
-# toolchain explicitly and therefore OVERRIDES it. Measured on this host: inside a
-# directory whose rust-toolchain.toml says nightly-2026-09-04, plain `rustc -V`
-# follows the file, while `rustup run stable rustc -V` prints stable 1.99.1. This
-# Makefile drives every build through `rustup run $(TOOLCHAIN)`, so a channel that
-# lived only in the file would not pin `make` at all.
-#
-# So: rust-toolchain.toml is the pin and the thing that pins bare cargo/rustc,
-# rust-analyzer and editors; TOOLCHAIN below is read out of it so that `make`
-# honours the same string rather than a second copy of it. `nightly` is the
-# fallback only if that file is absent (e.g. a partial checkout) — a fallback that
-# is deliberately loud: `make help` prints the resolved toolchain, and
-# `toolchain-check` fails fast naming the channel it wants.
-#
-# The read itself uses make's own file function rather than a sed pipeline (the
-# Dockerfile runs this same expression through `make --eval`, so host and image
-# do not merely share a string — they share one rule for reading it). Three
-# layers, each doing what only it can: a version guard and a match-count guard at
-# parse time, on every target (below), and a cross-check against rustup's own
-# resolution in `toolchain-check`, which every measurement-bearing target already
-# depends on — because the file's *format* is not the property that matters; "the
-# instance this build runs" and "the instance rustup/cargo/your editor pick in this
-# tree" being the same instance is.
-# ---------------------------------------------------------------------------
+# The instance is the instrument: flac-docs/measurements.md compares ROM shas and
+# cycle counts across sessions, so changing rust-toolchain.toml is a measured change
+# that owes a control build ("The toolchain pin", and history.md's landing record).
+# Try a different instance for one command with `make <target>
+# TOOLCHAIN=nightly-2026-09-11` — and say so in the record.
+
 RUSTUP ?= rustup
 RUST_TOOLCHAIN_FILE := $(dir $(lastword $(MAKEFILE_LIST)))rust-toolchain.toml
 
-# Reading the pin with no shell in the path: `$(file < X)` is make's own file read,
-# and the channel is the one word in that file wrapped end-to-end in double quotes,
-# so `$(filter "%", …)` selects exactly it and `$(subst)` drops the quotes. No sed,
-# no pipeline, no second copy of the string that could drift.
-#
-# What this read is NOT, and where each gap is closed:
-#   - It is a word-pattern match, not a TOML parse. Multi-word double-quoted phrases
-#     in that file's prose are safe (their words are only half-wrapped), but a
-#     single-word quoted term would match too — so the number of matches is counted,
-#     never trusted, and a wrong count stops the build naming what it found. (The
-#     canonical form of the pin file is load-bearing here: a space before the `]` of
-#     its `components` array would make `"rustfmt"` a standalone quoted word.)
-#   - It cannot tell a comment from a line. rustup can, and is silent about it:
-#     measured, `# channel = "nightly-2026-09-04"` makes rustup resolve the tree to
-#     the ambient default (exit 0) while this read still returns 2026-09-04. That
-#     one is caught by the rustup cross-check in `toolchain-check`, not by guessing
-#     at comment spellings here.
-#   - `$(file <)` does not exist before GNU make 4.2, and Apple still ships 3.81 at
-#     /usr/bin/make. Guarded by name below, so an old make is told which make to use
-#     rather than being told its pin file is malformed.
 ifndef MAKE_VERSION
 $(error reading the pinned channel uses make's own file function, $$(file <), which needs GNU make 4.2 or newer. This make is $(MAKE) and reports no MAKE_VERSION, so it is not GNU make. On GNU/Linux the system make is fine. On macOS install GNU make from Homebrew and run gmake, or build in the container with make podman-rom.)
 endif
@@ -100,28 +51,24 @@ ifneq ($(filter 3.% 4.0 4.1,$(MAKE_VERSION)),)
 $(error reading the pinned channel uses make's own file function, $$(file <), which needs GNU make 4.2 or newer — this is GNU make $(MAKE_VERSION). Linux system makes are normally new enough. macOS ships 3.81 at /usr/bin/make: install GNU make from Homebrew and run gmake, or build in the container with make podman-rom.)
 endif
 
+# The channel is the one word in the pin file wrapped end-to-end in double
+# quotes, so `$(filter "%", …)` selects exactly it and `$(subst)` drops the
+# quotes. No sed, no pipeline, no second copy of the string that could drift.
 PINNED_QUOTED := $(filter "%", $(file < $(RUST_TOOLCHAIN_FILE)))
 PINNED_TOOLCHAIN := $(subst ",,$(PINNED_QUOTED))
-# Try a different instance for one command: `make flac-test TOOLCHAIN=nightly-2026-09-11`
-# (then say so in the record — FLAC.md "Baselines to hold", the instance rule).
 TOOLCHAIN ?= $(if $(PINNED_TOOLCHAIN),$(PINNED_TOOLCHAIN),nightly)
 
-# A pin file that EXISTS but does not yield exactly one quoted value is a silent
-# instrument downgrade — the failure mode this file exists to prevent. Refuse rather
-# than fall back: the `nightly` fallback below is for a MISSING file (a partial
-# checkout, or a tool invoked outside the tree). These guards fire on any `make`,
-# including `make help`, so a malformed pin cannot be missed.
 ifneq ($(words $(PINNED_QUOTED)),1)
 ifneq ($(wildcard $(RUST_TOOLCHAIN_FILE)),)
 $(error $(RUST_TOOLCHAIN_FILE) — expected exactly one double-quoted word, the channel, and found $(words $(PINNED_QUOTED))$(if $(PINNED_QUOTED), which were $(PINNED_QUOTED),). Either the channel line is missing or unquoted, or the prose in that file contains a quoted single word. Refusing to build on a moving channel.)
 endif
 endif
 
-# Detect rustup instead of assuming the `cargo` on PATH is the rustup shim:
-#   - rustup present  -> pin through rustup (correct even when a non-shim cargo
-#                        from conda/Homebrew shadows it on PATH)
-#   - no rustup at all -> plain cargo/rustc, which must already BE nightly
-#                        (override with CARGO=/ RUSTC=/ TOOLCHAIN= as needed)
+# Invoke the toolchain through rustup when rustup is present: a *plain* cargo on
+# PATH (conda, some distro/Homebrew setups) reads `+nightly` as a subcommand and
+# dies, and a shadowed shim would silently build a different compiler. With no
+# rustup at all, fall back to a cargo that must already BE the pinned nightly
+# (override with CARGO= / RUSTC= / TOOLCHAIN=).
 HAS_RUSTUP := $(shell command -v $(RUSTUP) >/dev/null 2>&1 && echo 1)
 ifeq ($(HAS_RUSTUP),1)
 CARGO ?= $(RUSTUP) run $(TOOLCHAIN) cargo
@@ -130,23 +77,52 @@ else
 CARGO ?= cargo
 RUSTC ?= rustc
 endif
-# Container runtime: podman by default, override with `make podman-rom CONTAINER=docker`.
+
+TARGET := thumbv4t-none-eabi
+# Second bare-metal triple for the core's portability witness (a build fact, no
+# performance claim attached). Override with `SECOND_TARGET=<triple>`.
+SECOND_TARGET ?= thumbv7em-none-eabi
+# Cargo's runner env var is the target triple upper-cased with `-` → `_`:
+# CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER.
+TARGET_ENV := $(shell echo $(TARGET) | tr 'a-z-' 'A-Z_')
+GBA_TEST_RUNNER ?= mgba-test-runner
+
+# Host triple, used to defeat the inherited `target = thumbv4t-none-eabi` when a
+# host gate runs. Queried through the SAME toolchain the gate builds with, so a
+# stray rustc elsewhere on PATH cannot hand us the wrong triple.
+HOST_TRIPLE := $(shell $(RUSTC) -vV 2>/dev/null | sed -n 's|host: ||p')
+
+# Where every host gate runs: a directory OUTSIDE the repo, so cargo's upward
+# `.cargo/config.toml` walk finds nothing to inherit. This is not cosmetic — see
+# flac-docs/measurements.md, "Cargo config inheritance". The build dir still
+# derives from the manifest path, so the container cache volumes apply.
+GATE_NEUTRAL_CWD ?= /tmp/gba-sound-player-host-gate
+
+# Is rustfmt installed for the pinned toolchain? `format` degrades to a notice
+# rather than failing a build when it is absent: formatting is a convenience
+# pre-step to builds and is only ever *gated* by `make check`.
+HAS_RUSTFMT := $(shell $(CARGO) fmt --version >/dev/null 2>&1 && echo 1)
+
+# --- container path (the portable build for hosts without this toolchain) -----
+# Every bare target runs wherever it is invoked: natively, or inside the image
+# when a `podman-<target>` wrapper re-invokes it there. Nothing branches on "am I
+# in a container?". NOTE: no `podman-*` target has ever been run in the harness
+# that writes most of these records (rootless podman cannot start there) — the
+# native path is the witnessed one.
 CONTAINER ?= podman
-# Container image. ONE image serves builds AND tests: it carries nightly +
-# rust-src + rustfmt + agb-gbafix + mgba-test-runner, so the containerized
-# path needs no host tooling whatsoever (see Dockerfile).
 IMAGE ?= gba-builder
-# Persistent volumes for the three cargo build dirs. The project bind mount
-# shadows the image's /app/target, so without these every container run would
-# recompile core/alloc + every dependency from scratch. Named volumes are
-# auto-created by podman/docker on first run. `:Z` matches the project mount
-# (private SELinux label); it is inert on macOS, where podman runs no SELinux.
+# One image serves builds AND tests: it carries nightly + rust-src + rustfmt +
+# agb-gbafix + mgba-test-runner, so the containerized path needs no host tooling.
+# `builder` is the lighter stage (no emulator); `tester` adds mgba-test-runner.
+PODMAN_STAGE ?= builder
+# Named volumes for the per-workspace cargo dirs: the project bind mount shadows
+# the image's /app/target, so without these every container run rebuilds
+# core/alloc and every dependency from scratch. `:Z` is inert on macOS.
 CARGO_CACHE   ?= gba-cargo-target
 FLAC_CACHE    ?= gba-flac-lite-target
 FLACROM_CACHE ?= gba-flac-integration-target
 SPIKE_CACHE   ?= gba-flac-spike-target
 OPUS_CACHE    ?= gba-opus-spike-target
-KERNEL_CACHE ?= gba-arm-kernels-target
 OVERLAY_CACHE ?= gba-flac-lite-gba-target
 OVERLAY_ROM_CACHE ?= gba-overlay-kernel-check-target
 CACHE_MOUNTS := -v $(CARGO_CACHE):/app/target:Z \
@@ -155,422 +131,281 @@ CACHE_MOUNTS := -v $(CARGO_CACHE):/app/target:Z \
                 -v $(FLACROM_CACHE):/app/examples/flac_integration/target:Z \
                 -v $(SPIKE_CACHE):/app/examples/flac_spike/target:Z \
                 -v $(OPUS_CACHE):/app/examples/opus_spike/target:Z \
-                -v $(KERNEL_CACHE):/app/examples/arm-kernels/target:Z \
                 -v $(OVERLAY_ROM_CACHE):/app/examples/overlay-kernel-check/target:Z
-# Note, not fixed here: KERNEL_CACHE has been in $(CACHE_MOUNTS) since that
-# crate landed but was never added to `clean-cache` below. `clean-cache` now
-# lists $(OVERLAY_CACHE) because this change introduces it; the kernel volume's
-# absence is named so it is not mistaken for a deliberate exclusion.
-# GBA test harness (ROM tests boot headlessly in mGBA). Override to point
-# elsewhere, or set empty to see the raw cargo command.
-GBA_TEST_RUNNER ?= mgba-test-runner
-# Host triple, used to defeat the inherited `target = thumbv4t-none-eabi` when
-# running flac-lite's host tests. Queried through the SAME toolchain the tests
-# build with, so a stray rustc elsewhere on PATH can't hand us the wrong triple.
-# See "Cargo config leak" in FLAC.md.
-HOST_TRIPLE := $(shell $(RUSTC) -vV 2>/dev/null | sed -n 's|host: ||p')
 
-# Is rustfmt installed for the pinned toolchain? Asked the same way the
-# toolchain is resolved (through $(CARGO)), so a shadowed cargo can't confuse
-# it. `format` degrades to a notice instead of failing a build when it is
-# absent — formatting is a convenience pre-step, never a build gate. The
-# Dockerfile installs rustfmt so the standardized container path always
-# formats.
-HAS_RUSTFMT := $(shell $(CARGO) fmt --version >/dev/null 2>&1 && echo 1)
+# ===========================================================================
+# Where things live
+# ===========================================================================
 
-TARGET := thumbv4t-none-eabi
-# The `crc-check` witness (FLAC.md Phase 2 step 5, 2026-11-03): the same
-# flac-test shape with the feature ON — thumbv4t compile
-# half plus the full host suite, which under the feature also runs
-# tests/crc_check.rs (pass witness on the committed real frames + CRC
-# mutations). Verification is OFF in the default build by design (release
-# consumes the CRCs unchecked; "checked in debug, skippable in release"), so
-# this gate exists precisely to keep the OFF default honest about the ON arm.
-# It is invoked by hand: `test`/`podman-test` do not include it — see the
-# gate-aggregation TODO in README.md.
-flac-test-crc: toolchain-check
-	cd crates/flac-lite && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features crc-check
-	@echo "flac-test-crc passed: frame CRC verification compiles for $(TARGET) and the host witness is green with crc-check on"
-
-# The `scan` gate (4b's frame walk): same shape as flac-test-crc and for the same
-# reason. With the feature off the module and its suite do not exist in a default
-# build (`required-features = ["scan"]` in the crate manifest), so `flac-test`
-# cannot go green on the walk's witness by accident. Keep the counts straight when
-# reading logs: `flac-test` runs the crate WITHOUT the walk (its total is 4b's
-# total minus the walk's tests), `flac-test-scan` runs it WITH them. Like
-# flac-test-crc, this is not in `check-gba-all`: a GBA ROM does not link the walk
-# until item 6 rewires the facade onto it, and crates/flac-lite/Cargo.toml records
-# the measured code-size cost of doing that.
-flac-test-scan: toolchain-check
-	cd crates/flac-lite && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features scan
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features scan,instrument
-	@echo "flac-test-scan passed: the frame walk compiles for $(TARGET) and its witness suite is green with the scan feature on"
-
-# The `rice-hybrid` gate (split-ladder item 5 PR 3's portable hybrid Rice
-# kernel): the same shape again, and here the gate is the finding rather than a
-# convenience. With the feature off, the module, its unit tests and its
-# out-of-crate differential do not exist in a default build
-# (`required-features = ["rice-hybrid"]`), so `flac-test` cannot go green on the
-# twin's witness by accident — and the image is byte-for-byte the pre-PR-3 image.
-# With it on, the calibration instrument grows **+2,984 B of .text while `nm`
-# reports no hybrid symbol at all**: a second implementor of the `RiceKernel`
-# seam re-decides how the inliner treats the decode path beside it. That is the
-# 4b `scan` result one rung over, measured in full in crates/flac-lite/Cargo.toml
-# and FLAC.md, and it is why this is a feature: the default-flip decision has to
-# stay attributable to the swapped mechanism alone. Like the other two, this is
-# not in `check-gba-all`: no ROM links the twin, and the flip that would is
-# gated on an on-target cycle reading.
-# Counts when reading logs: `flac-test` runs the crate WITHOUT the twin, this
-# gate runs it WITH the twin and its differential.
-flac-test-rice: toolchain-check
-	cd crates/flac-lite && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features rice-hybrid
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features rice-hybrid
-	@echo "flac-test-rice passed: the portable hybrid kernel compiles for $(TARGET) and its two-mechanism differential is green with rice-hybrid on"
-
-# The `i32-integrator` companion gate (item 6a-6): the audited i64 reference
-# build, `--no-default-features`. `flac-test` runs the narrow default; this runs
-# the same suite with the wide leg end to end. `width_two_mechanism_differential`
-# is `required-features = ["i32-integrator"]`, so it is not built here — which
-# is the point: the two builds are pinned to the same external oracle
-# (`flac -d` PCM in the committed tables), so the pair is a differential rather
-# than two greens that could have been earned by the same arithmetic.
-flac-test-wide: toolchain-check
-	cd crates/flac-lite && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --no-default-features
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --no-default-features
-	@echo "flac-test-wide passed: the i64 reference leg compiles for $(TARGET) and the full host suite is green with i32-integrator off"
-
-# Second bare-metal target for the portability witness (`flac-portable-check`,
-# FLAC.md split-proposal ladder step 3, 2026-11-02). Cortex-M4F: a canonical
-# non-thumbv4t bare-metal ARM triple. Override with `SECOND_TARGET=<triple>`.
-SECOND_TARGET ?= thumbv7em-none-eabi
 ROM := gba-sound-player.gba
-FLAC_ROM := flac-integration.gba
-# 6b-1's same-source control: the default-kernel arm of the product A/B.
-FLAC_ROM_DEFAULT_KERNEL := flac-integration-default-kernel.gba
-# Standalone crate that bundles flac-lite into a ROM (the FLAC sanity build).
+
+# --- the FLAC product path (FLAC.md) -----------------------------------------
+# examples/flac_integration is the product crate: the `GAFP` asset, the manifest
+# facade over flac-lite's frame walk, the overlay's ARM kernel, and two binaries
+# built from one feature table, one lockfile and one set of pins —
+#   flac-integration  decode + verify + time (no sound)
+#   product-play      decode → convert → ring → sound DMA, and its own judge
 FLAC_CRATE_DIR := examples/flac_integration
-# Absolute manifest path for the flac-lite host gate (see `flac-test`: the gate
-# runs from outside the repo so the root's cargo config is not inherited).
-FLAC_CRATE_DIR_MANIFEST := $(abspath crates/flac-lite/Cargo.toml)
-# ULI2 portable core (Phase 0): the same out-of-tree host-gate shape as flac-test.
-ULI_CRATE_MANIFEST := $(abspath crates/uli-lite/Cargo.toml)
-# Phase 1 decode-only ROM (examples/uli_spike/ — standalone workspace).
-ULI_SPIKE_DIR := examples/uli_spike
-ULI_SPIKE_BIN := $(ULI_SPIKE_DIR)/target/$(TARGET)/release/uli-spike
-ULI_SPIKE_ROM := uli-spike.gba
-# The manifest of the crate that builds the product ROMs, for the same reason the
-# host gates above use a manifest path and a neutral cwd: the repository-root
-# .cargo/config.toml sets `[unstable] build-std` and a default ARM target, and a
-# host-target test built under it gets a rebuilt-from-source `core` that collides
-# with the toolchain's prebuilt one ("duplicate lang item `sized`"). Running from
-# $(GATE_NEUTRAL_CWD) is how every other host gate here sidesteps that;
-# product-play-test is a host gate too, so it takes the same route.
 FLAC_INTEGRATION_MANIFEST := $(abspath examples/flac_integration/Cargo.toml)
-FLAC_CRATE_BIN := target/$(TARGET)/release/flac-integration
-# Plan item 6b-3 (2026-11-11): the product PLAYBACK ROM. A second binary of the
-# same crate as $(FLAC_ROM) — same blob, same kernel, same pins, same lockfile —
-# and the first image in this repository built to make sound at the target rate
-# rather than to measure a decode. Its judge is a counted underflow, not a
-# percentage; see `examples/flac_integration/src/product_play_main.rs`.
+FLAC_CRATE_BIN := $(FLAC_CRATE_DIR)/target/$(TARGET)/release/flac-integration
+FLAC_ROM := flac-integration.gba
 PRODUCT_PLAY_ROM := product-play.gba
 PRODUCT_PLAY_BIN := $(FLAC_CRATE_DIR)/target/$(TARGET)/release/product-play
-# The master-audio path (7-3): a source master is resampled/encoded to the
-# product rate and packed into a GAFP asset, then the product-play binary is
-# rebuilt with that asset and its generated pin. The asset/pin are build
+# The master-audio path: a source master is resampled/encoded to the product
+# rate, packed into a GAFP asset, and the SAME product-play binary is rebuilt
+# against that asset and its generated pin. Both generated files are build
 # artifacts (gitignored), so the tracked product asset is never overwritten.
 MASTER_ASSET := $(FLAC_CRATE_DIR)/assets/master.gfp
 MASTER_PIN := $(FLAC_CRATE_DIR)/src/master_pin.rs
 MASTER_PLAY_ROM := master-play.gba
-MASTER_PLAY_BIN := $(FLAC_CRATE_DIR)/target/$(TARGET)/release/product-play
-# The perf-gate spike ROM crate (examples/flac_spike/) — Phase 1 step 4, see
-# FLAC.md "Perf gate spike". Its host witness gate runs the same out-of-tree
-# --manifest-path way as flac-test (cargo config leak; FLAC.md).
-SPIKE_ROM := flac-spike.gba
-# 6a-5's arm images (FLAC.md split-ladder item 6, PR 6a-5). Two builds of the same
-# instrument: `arms` carries ctrl + the Rust mechanism + the ARM embodiment in one
-# link (the three-way reading), `asm` carries ctrl + the ARM embodiment only (the
-# *product shape* — one extra kernel, no second mechanism). The default build is
-# untouched by both, which is the per-PR rule this rung lives under.
-SPIKE_6A5_ARMS_ROM := flac-spike-6a5-arms.gba
-SPIKE_6A5_ASM_ROM := flac-spike-6a5-asm.gba
-# 6a-5b's differential image: the product-shape instrument plus the E10
-# archive's vendored leg, so the landed realization and the archived one are
-# timed in ONE link (the +48.2 c/sample overhang 6a-5 recorded is a
-# cross-image number, and this is the image that retires it).
-SPIKE_6A5B_ROM := flac-spike-6a5b.gba
-# 6a-7's width + stack image: ctrl (i32 default), `wide` (the vendored pre-6a-6
-# i64 path), and the landed ARM kernel over the i32 default — three timed legs,
-# one calibration. Reads `ctrl − wide` (the width marginal 6a-6 left unread) and
-# `ctrl − asm` (the stack, re-anchored on the post-6a-6 tree).
-SPIKE_6A7_ROM := flac-spike-6a7.gba
-SPIKE_CRATE_DIR := examples/flac_spike
-SPIKE_CRATE_MANIFEST := $(abspath examples/flac_spike/Cargo.toml)
-SPIKE_CRATE_BIN := target/$(TARGET)/release/flac-spike
-# E5 — hardware arbitration of the ROM→IWRAM fetch ratio. A standalone crate:
-# the same synthetic ARM instruction stream assembled once into .text and once
-# into .iwram, timed in one image. The hardware run is the arbitration; the
-# mGBA run is the harness check (~4.0 vs ~1.4 cycles/add expected).
-E5_FETCH_ROM := e5-fetch.gba
-E5_FETCH_CRATE_DIR := examples/e5_fetch
-E5_FETCH_CRATE_BIN := target/$(TARGET)/release/e5-fetch
-# The Opus perf-gate spike crate (examples/opus_spike/) — OPUS.md "Measurement
-# plan — start here". Same standalone-workspace + inherited-config pattern as
-# the FLAC spike; its host gate runs out-of-tree the same way (cargo config
-# leak). PR 1 is the scaffold/compile-link gate; the decode witness grows into
-# `opus-test` with step 2's embedded arms.
-OPUS_ROM := opus-spike.gba
-# The constructor-shape probe ROM (deliberately-red repro control, PR 3
-# harness — src/ctor_probe.rs): built beside the proof ROM by `opus-rom`
-# because `cargo build` compiles both bins anyway; its expected on-target
-# death must never enter a test gate (a dead ROM wedges mgba-test-runner),
-# so it is a build-only artifact captured by hand (sha + serial tail).
-OPUS_PROBE_ROM := ctor-probe.gba
-OPUS_CRATE_DIR := examples/opus_spike
-OPUS_CRATE_MANIFEST := $(abspath examples/opus_spike/Cargo.toml)
-OPUS_CRATE_BIN := target/$(TARGET)/release/opus-spike
 
-# The E10 ARM-kernels crate (examples/arm-kernels/) — FLAC.md E10 groundwork:
-# isolated ARM-mode kernels, each with a host twin and an on-target sweep of
-# one committed golden table (no decode-path integration, no timing).
-# Standalone workspace, same inherited-config pattern as the spikes; its host
-# gate runs out-of-tree the same way (cargo config leak; FLAC.md).
-KERNEL_ROM := arm-kernels.gba
-KERNEL_CRATE_DIR := examples/arm-kernels
-KERNEL_CRATE_MANIFEST := $(abspath examples/arm-kernels/Cargo.toml)
-KERNEL_CRATE_BIN := target/$(TARGET)/release/arm-kernels
-
-# The GBA OVERLAY crate (crates/flac-lite-gba/) — FLAC.md split-ladder item 6,
-# 6a: the platform-bound Rice-kernel realizations written over flac-lite's
-# `residual::RiceKernel` seam. A LIBRARY, not a ROM: no agb, so there is no ROM
-# to build and no link step to witness (the crate's own docs carry that boundary
-# and its `unsafe` budget). Standalone workspace with the root's config
-# INHERITED on purpose — do NOT add a local .cargo/config.toml (cargo
-# concatenates target.<triple>.rustflags, so a local re-declaration links
-# `-Tgba.ld` twice; FLAC.md's double-link leak).
+# --- the core and its overlay -------------------------------------------------
+FLAC_CRATE_DIR_MANIFEST := $(abspath crates/flac-lite/Cargo.toml)
 OVERLAY_CRATE_DIR := crates/flac-lite-gba
 OVERLAY_CRATE_MANIFEST := $(abspath crates/flac-lite-gba/Cargo.toml)
-
-# 6a-4's INSTRUMENT ROM (examples/overlay-kernel-check/) — the device-side
-# correctness witness for the overlay's ARM kernel. A ROM, so unlike the overlay
-# library it has a link step; the only place in the tree that links the overlay
-# unconditionally. Standalone workspace, root config inherited, no local
-# .cargo/config.toml (same double-`-Tgba.ld` leak as every other ROM crate).
+# The overlay is a LIBRARY: no `agb`, so `overlay-check`/`overlay-test` have no
+# link step to witness. examples/overlay-kernel-check is the ROM that supplies
+# one, and it is the only place in the tree the assembled ARM kernel executes.
 OVERLAY_ROM := overlay-kernel-check.gba
 OVERLAY_ROM_DIR := examples/overlay-kernel-check
 OVERLAY_ROM_MANIFEST := $(abspath examples/overlay-kernel-check/Cargo.toml)
 OVERLAY_ROM_BIN := target/$(TARGET)/release/overlay-kernel-check
 
-# `rom` is the command run INSIDE the container (where agb-gbafix lives); the
-# *-rom targets above it are the host-facing entrypoints. Keep `rom` = the
-# native ROM build so containerized and native builds produce the same artifact.
+# --- the measurement instrument ----------------------------------------------
+# examples/flac_spike is the `ctrl` arm of every performance record in this
+# repository and the calibration anchor for the ledgers. Its feature-gated
+# instrument arms (6a-3/6a-5/6a-5b/6a-7) and its 10,512 Hz rate flow are
+# ARCHIVED: the sources stay for their records, their Make entrypoints are gone
+# (flac-docs/history.md names the runs they produced).
+SPIKE_CRATE_DIR := examples/flac_spike
+SPIKE_CRATE_MANIFEST := $(abspath examples/flac_spike/Cargo.toml)
+SPIKE_ROM := flac-spike.gba
+SPIKE_CRATE_BIN := $(SPIKE_CRATE_DIR)/target/$(TARGET)/release/flac-spike
 
-# ---------------------------------------------------------------------------
-# format — the build pre-step (writes files; all three workspaces).
+# --- other codec tracks (their own entry points; not FLAC) --------------------
+ULI_CRATE_MANIFEST := $(abspath crates/uli-lite/Cargo.toml)
+ULI_SPIKE_DIR := examples/uli_spike
+ULI_SPIKE_BIN := $(ULI_SPIKE_DIR)/target/$(TARGET)/release/uli-spike
+ULI_SPIKE_ROM := uli-spike.gba
+ULI_OVERLAY_MANIFEST := $(abspath crates/uli-lite-gba/Cargo.toml)
+# The ULI2 measurement vehicle (examples/uli_bench/): prove the corpus pins on the
+# measured image, then time full frames through both kernel sets. An mGBA
+# measurement; no playback or hardware claim. ULI2's plan, not FLAC's.
+ULI_BENCH_DIR := examples/uli_bench
+ULI_BENCH_BIN := $(ULI_BENCH_DIR)/target/$(TARGET)/release/uli-bench
+ULI_BENCH_ROM := uli-bench.gba
+ULI_BENCH_LOG ?= uli-bench.log
+OPUS_CRATE_DIR := examples/opus_spike
+OPUS_CRATE_MANIFEST := $(abspath examples/opus_spike/Cargo.toml)
+OPUS_ROM := opus-spike.gba
+OPUS_PROBE_ROM := ctor-probe.gba
+OPUS_CRATE_BIN := $(OPUS_CRATE_DIR)/target/$(TARGET)/release/opus-spike
+
+# ===========================================================================
+# format / build / baseline ROM
+# ===========================================================================
 #
-# Builds auto-format, so experimental code lands formatted without a separate
-# `make check` round trip. `check` stays the strict NON-writing gate
-# (`cargo fmt --check`) that humans/CI run to verify; `format` is the writer.
-#
-# `podman-rom` gets this too for free (the container runs `make rom` ->
-# `make build`), and the container mounts the project dir, so containerized
-# formats write back to your working tree.
-#
-# flac_integration is formatted through scripts/fmt_with_generated_stub.sh, not
-# a bare `cargo fmt`, because its `src/lib.rs` declares a feature-gated module
-# from a GENERATED, gitignored file (`master_pin.rs`, written by
-# `make master-pack`). rustfmt resolves `#[path]` modules regardless of `cfg`,
-# so a bare `cargo fmt` aborts on any tree where the master asset has never been
-# packed (a fresh clone). The helper writes a parse-only stub when the pin is
-# absent, formats, and removes the stub; a real pin is formatted in place and
-# never removed. `check` uses the same helper, so it stays a real gate.
-# ---------------------------------------------------------------------------
+# Builds auto-format (all workspaces) so experimental code lands rustfmt-clean;
+# `check` is the strict non-writing gate. Builds never depend on tests, and tests
+# never reformat — a CI `make test` must not mask drift that `make check` exists
+# to fail on.
+
+WORKSPACES := . crates/flac-lite crates/flac-lite-gba examples/flac_spike \
+              examples/overlay-kernel-check examples/opus_spike \
+              crates/uli-lite crates/uli-lite-gba examples/uli_spike examples/uli_bench
+
+# flac_integration is formatted through scripts/fmt_with_generated_stub.sh, NOT a
+# bare `cargo fmt`: its src/lib.rs declares a feature-gated module from a GENERATED,
+# gitignored file (`src/master_pin.rs`, written by `make master-pack`), and rustfmt
+# resolves `#[path]` modules statically regardless of `cfg` — so a bare `cargo fmt`
+# aborts on every tree where the master asset has never been packed, i.e. a fresh
+# clone. The helper writes a parse-only stub when the pin is absent, formats, and
+# removes it; a real pin is formatted in place and never removed. It takes the crate
+# dir as an argument and never changes the cwd (its own header says why), and it
+# exits with rustfmt's status, so `check` stays a real gate.
+
 ifeq ($(HAS_RUSTFMT),1)
 format:
-	$(CARGO) fmt
-	cd crates/flac-lite && $(CARGO) fmt
-	cd crates/uli-lite && $(CARGO) fmt
-	cd crates/uli-lite-gba && $(CARGO) fmt
-	cd $(ULI_SPIKE_DIR) && $(CARGO) fmt
-	cd $(ULI_BENCH_DIR) && $(CARGO) fmt
+	@for d in $(WORKSPACES); do (cd $$d && $(CARGO) fmt) || exit 1; done
 	CARGO='$(CARGO)' sh scripts/fmt_with_generated_stub.sh $(FLAC_CRATE_DIR)
-	cd $(SPIKE_CRATE_DIR) && $(CARGO) fmt
-	cd $(OPUS_CRATE_DIR) && $(CARGO) fmt
-	cd $(KERNEL_CRATE_DIR) && $(CARGO) fmt
-	cd $(OVERLAY_CRATE_DIR) && $(CARGO) fmt
-	cd $(OVERLAY_ROM_DIR) && $(CARGO) fmt
-	cd $(E5_FETCH_CRATE_DIR) && $(CARGO) fmt
 else
 format:
 	@echo "format: skipping — no rustfmt for '$(TOOLCHAIN)' (build continues)."
 	@echo "  enable with: rustup component add rustfmt --toolchain $(TOOLCHAIN)"
 endif
 
-# NOTE: `build` deliberately does NOT depend on `test`. Builds never gate on
-# tests — experimental/untested code must stay buildable. Gates are what
-# `make check` and `make test` are for, run explicitly (or in CI).
 build: format
 	$(CARGO) build --release --target $(TARGET)
 
-# Link + fix the baseline ROM. Needs agb-gbafix on PATH (the container image
-# installs it; natively: `cargo install agb-gbafix`).
+# Link + fix the baseline ROM. Needs agb-gbafix on PATH (the image installs it;
+# natively `cargo install agb-gbafix --version 0.25.0 --locked` — pinned because
+# it rewrites the header every recorded ROM sha is computed over).
 rom: build
 	agb-gbafix target/$(TARGET)/release/gba-sound-player -o $(ROM)
 	@echo "ROM built: $(ROM)"
 
-# ---------------------------------------------------------------------------
-# ROM build entrypoints — one per compute environment.
+# ===========================================================================
+# FLAC — the product path
+# ===========================================================================
 #
-#   native-rom    no virtualization required; uses this host's toolchain.
-#   podman-rom    reproducible containerized build (the standardized path).
+# The happy path, end to end, is two commands:
 #
-# Both produce the same $(ROM) artifact.
-# ---------------------------------------------------------------------------
-
-# Native: build + fix here. Requires nightly + rust-src + agb-gbafix locally.
-native-rom: rom
-	@echo "native-rom done: $(ROM)"
-
-# Containerized: build the image (builder stage only), then run `make rom`.
-podman-rom:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make rom
-
-# ---------------------------------------------------------------------------
-# EXPERIMENTAL: flac-lite bundled into a ROM (sanity check for FLAC.md option
-# (c) — our own decoder must keep fitting the GBA target end to end).
+#   make master-pack     INPUT=track.wav     # resample + encode + pack the asset
+#   make master-play-rom INPUT=track.wav     # …and build a playable ROM from it
 #
-#   native-flac-rom     build it here
-#   podman-flac-rom     build it in the container
-#
-# It compiles + links + boots; it does NOT play audio yet (flac-lite is still
-# scaffold). The root ROM crate stays FLAC-free either way.
-# ---------------------------------------------------------------------------
+# Product geometry (all of it derived from these numbers — see FLAC.md):
+# 16,384 Hz, 16-bit stereo, 2048-sample frames, 8-bit FIFO output, one 2^24 Hz
+# timer as the sample clock. `gafp_pack.py` refuses anything else, and the ROM
+# refuses an asset that declares a rate it does not play at (Q14).
 
-# 6b-1: the integration crate is the product path now — it embeds a `GAFP` blob
-# and decodes it with the overlay's ARM kernel. The blob is generated output
-# (committed, like the spike's assets) from `scripts/gen_gafp_blob.py`; the
-# `gafp-check` gate is the tripwire that it still matches its generator.
+# The decode/verify image: embeds the committed GAFP asset, parses its manifest,
+# decodes every frame through the facade with the overlay's ARM kernel, checks
+# the pinned PCM, then times a second pass. No sound — that is `product-play-rom`.
+# It is also the real LINK witness for the core (what `overlay-check`, an rlib,
+# structurally cannot be) and for the `scan` walk the facade is built on.
+# `gafp-check` is a prerequisite: no product image is built over a blob that no
+# longer matches its generator.
 flac-rom: gafp-check format
 	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
-	agb-gbafix $(FLAC_CRATE_DIR)/$(FLAC_CRATE_BIN) -o $(FLAC_ROM)
-	@echo "FLAC ROM built: $(FLAC_ROM) (product path: manifest facade + ArmRiceKernel)"
+	agb-gbafix $(FLAC_CRATE_BIN) -o $(FLAC_ROM)
+	@echo "FLAC ROM built: $(FLAC_ROM) (manifest facade + ArmRiceKernel; decode-only)"
 
-# The 6b-1 A/B: the *same* ROM source with the core's default kernel instead of
-# the overlay's, so the kernel's instantiation is the only difference. Its witness
-# is section-level — `readelf -S` on both images, compared by hand (there is no
-# `flac-rom-ab` target: that name was written here before it was ever added) —
-# plus the hardware pair; the build here is what a cycle reading on a unit needs.
-flac-rom-default-kernel: gafp-check format
-	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --no-default-features
-	agb-gbafix $(FLAC_CRATE_DIR)/$(FLAC_CRATE_BIN) -o $(FLAC_ROM_DEFAULT_KERNEL)
-	@echo "FLAC ROM built (default kernel): $(FLAC_ROM_DEFAULT_KERNEL)"
-
-native-flac-rom-default-kernel: flac-rom-default-kernel
-	@echo "native-flac-rom-default-kernel done: $(FLAC_ROM_DEFAULT_KERNEL)"
-
-# ---------------------------------------------------------------------------
-# PLAN ITEM 6b-3 — THE PRODUCT PLAYBACK PATH AT THE TARGET RATE (2026-11-11)
-#
-# `flac-rom` answers "can this frame be decoded inside a 32,768 Hz frame?". That
-# question is answered and pinned (37.765% mean / 37.974% worst on hardware).
-# C2's question is the one after it: can the frame be decoded, converted, pushed
-# and *heard* with zero underruns, on a real unit. Nothing in this tree has ever
-# made sound above 10,512 Hz, so this target is the first headless witness that
-# the product protocol runs at all at 32,768 Hz — through the shipped GAFP
-# manifest, not the throwaway harness's generated offset table.
-#
-# No link-script machinery: agb's build script writes its own `gba.ld` into
-# OUT_DIR and adds that directory to the linker search path, which is the only
-# reason the inherited `-Tgba.ld` resolves from a standalone crate directory at
-# all. This ROM's ~43 kB of ring and DMA buffers therefore sit in stock EWRAM
-# (256 kB, of which the image asks for 43 kB) — there is no custom script in this
-# repository, whatever an earlier note claimed. That placement has a cycle cost
-# (`flac-rom` measures the EWRAM per-byte penalty at 3.482 c/B); the playback ROM
-# measures its own decode stage in situ precisely so that cost is counted rather
-# than assumed, and the ring is the first knob to turn if the reading says it is
-# large.
-# ---------------------------------------------------------------------------
-
+# The playback image on the committed product asset. It drives
+# asset → manifest → Decoder → convert → ring → sound DMA/FIFO at 16,384 Hz,
+# counts its own underflows, gates its period audit and its played-form FIFO
+# pins, and prints a verdict to the log AND the screen. The image is not gated by
+# `make test`: build it, then run it by hand.
 product-play-rom: gafp-check format
 	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin product-play
 	agb-gbafix $(PRODUCT_PLAY_BIN) -o $(PRODUCT_PLAY_ROM)
-	@echo "product-play ROM built: $(PRODUCT_PLAY_ROM) — run it with 'timeout -k 5 120 $(GBA_TEST_RUNNER) $(PRODUCT_PLAY_ROM)' and read the [pp-rom] log"
-	@echo "  (a passing run ends in 'verdict PASSED — screen BLUE' and then loops forever, so the timeout kills it and exits 124: read the log, not the status)"
+	@echo "product-play ROM built: $(PRODUCT_PLAY_ROM)"
+	@echo "  run: timeout -k 5 120 $(GBA_TEST_RUNNER) $(PRODUCT_PLAY_ROM)   and read the [pp-rom] log"
+	@echo "  a PASS ends in 'verdict PASSED — screen BLUE' and then loops forever: the"
+	@echo "  timeout kills it, so exit 124 IS the passing result. Read the log, not the status."
 
-native-product-play-rom: product-play-rom
-	@echo "native-product-play-rom done: $(PRODUCT_PLAY_ROM)"
+# Encode an arbitrary source master into a playable GAFP asset at the product
+# rate/depth. `--master` is the path for real music: libFLAC chooses
+# CONSTANT/FIXED-1..4 from a real signal, so those shapes are accepted without a
+# measured product row — LPC is still refused, and 16,384 Hz / 16-bit /
+# 2048-sample frames are still enforced. `--emit-pin` writes the pins the ROM
+# checks its own embedded blob against.
+master-pack: toolchain-check
+	@test -n "$(INPUT)" || { echo "usage: make master-pack INPUT=source.wav"; exit 1; }
+	python3 scripts/gafp_pack.py --master --emit-pin "$(MASTER_PIN)" "$(INPUT)" "$(MASTER_ASSET)"
+	@echo "master-pack done: $(MASTER_ASSET) + $(MASTER_PIN)"
 
-# The host model behind the geometry: it replays the real frame sequence through
-# the SAME ring implementation and the SAME constants the ROM compiles (both come
-# from src/lib.rs), and it is where the flow-control rule and the buffer sizing
-# are justified instead of asserted. Separate from `rate-test` and `spike-test`
-# deliberately — those count the throwaway harness's witnesses, and this gate
-# grows as the product path's does.
-product-play-test:
-	@test $$(find $(FLAC_CRATE_DIR)/tests -name 'product_play_witness.rs' | wc -l) -eq 1 \
-	  || { echo "product-play-test: examples/flac_integration/tests/product_play_witness.rs is missing — the host model for this geometry has to exist before the geometry can be claimed"; exit 1; }
+# The same product-play binary built against that master asset. This is the image
+# C2 was accepted on (flac-docs/history.md): real audio, 16,384 Hz, both units.
+master-play-rom: master-pack format
+	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin product-play --features master-asset
+	agb-gbafix $(PRODUCT_PLAY_BIN) -o $(MASTER_PLAY_ROM)
+	@echo "master-play ROM built: $(MASTER_PLAY_ROM)"
+	@echo "  run: timeout -k 5 120 $(GBA_TEST_RUNNER) $(MASTER_PLAY_ROM)   (exit 124 = pass)"
+
+# ===========================================================================
+# FLAC — gates
+# ===========================================================================
+#
+# Two crates, deliberately separate gates, so a decoder bug is never confused
+# with an integration failure:
+#
+#   flac-test   flac-lite ALONE — the thumbv4t compile gate plus the host suites.
+#               No agb, no ROM, no emulator.
+#   test-rom    the root ROM's #[test_case] suite in headless mGBA.
+#
+# The core's non-default configurations each get their own gate because the
+# default build does not compile what they cover (`required-features` on the
+# suites makes that a checked fact, not a convention). `flac-gates` runs all of
+# them plus the combination arms in one command; anything touching
+# crates/flac-lite owes it.
+
+# Gate 1 is `cargo check --target $(TARGET) -Zbuild-std=core,alloc` run IN-TREE,
+# where inheriting the root config is the whole point: it is the gate symphonia
+# could never pass, because it keeps `std` out. Gate 2 is the host suite run from
+# $(GATE_NEUTRAL_CWD) with --manifest-path, so the root's GBA `target` AND
+# `build-std` are never inherited at all (an in-tree override is not durable:
+# cargo merges config arrays across layers). Every host gate below takes this
+# same shape; copy it, do not re-derive it.
+flac-test: toolchain-check
+	cd crates/flac-lite && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --release --manifest-path $(FLAC_INTEGRATION_MANIFEST) --target $(HOST_TRIPLE) --test product_play_witness
-	@echo "product-play-test passed: the product geometry's ring, flow control and sizing are modelled on the host against the shipped manifest"
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features instrument
+	@echo "flac-test passed: flac-lite compiles for $(TARGET) and passes host tests"
 
-# The generated blob's tripwire: rebuild it in memory and compare with the
-# committed copy. No encoder needed — it is assembled from committed generator
-# output (see scripts/gen_gafp_blob.py).
+# The audited i64 reference build (`--no-default-features`, i32-integrator off).
+# `flac-test` runs the narrow default, so this is the companion half of the width
+# differential: both configurations are pinned to the same external oracle
+# (`flac -d` PCM), which is what makes the pair a differential rather than two
+# greens earned by the same arithmetic.
+flac-test-wide: toolchain-check
+	cd crates/flac-lite && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --no-default-features
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --no-default-features
+	@echo "flac-test-wide passed: the i64 reference leg compiles for $(TARGET) and its suite is green"
+
+# Frame CRC verification ON. Verification is OFF in the default build by design
+# (release consumes the CRCs unchecked), so this gate is what keeps the OFF
+# default honest about the ON arm.
+flac-test-crc: toolchain-check
+	cd crates/flac-lite && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features crc-check
+	@echo "flac-test-crc passed: CRC verification compiles for $(TARGET) and its witness is green"
+
+# The table-less frame walk ON — the code the product facade is built on, so this
+# is the walk's thumbv4t compile plus its layout suite.
+flac-test-scan: toolchain-check
+	cd crates/flac-lite && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features scan
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features scan,instrument
+	@echo "flac-test-scan passed: the frame walk compiles for $(TARGET) and its witness suite is green"
+
+# The portable hybrid Rice kernel ON: the second `RiceKernel` mechanism and the
+# two-mechanism differential. It stays a feature (and not the default) because
+# the on-target reading declined the flip: +42.6 c/sample against the incumbent.
+flac-test-rice: toolchain-check
+	cd crates/flac-lite && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features rice-hybrid
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features rice-hybrid
+	@echo "flac-test-rice passed: the portable hybrid kernel compiles for $(TARGET) and its differential is green"
+
+# The portability witness: the core compiles for a SECOND bare-metal ARM target.
+# A build fact with no performance claim attached — nothing in this tree measures
+# a non-GBA target. `scan` and `rice-hybrid` are on deliberately: a feature-gated
+# module no gate builds for a second target has an asserted, not measured,
+# portability claim. `iwram-pin` stays off — no non-GBA target defines that section.
+flac-portable-check: toolchain-check
+	cd crates/flac-lite && \
+	  $(CARGO) check --release --target $(SECOND_TARGET) -Zbuild-std=core,alloc --features scan,rice-hybrid
+	@echo "flac-portable-check passed: flac-lite with the walk and the twin on compiles for $(SECOND_TARGET) (no perf claim)"
+
+# The committed product blob's tripwire: rebuild it in memory and compare byte
+# for byte. No encoder needed. Its reason for existing alongside the real packer:
+# it reads the *spike's* own committed frames, so it is the only gate that says
+# the asset the ROM plays is the asset the instrument measured.
 gafp-check: toolchain-check
 	python3 scripts/gen_gafp_blob.py --check
 	@echo "gafp-check passed: the committed GAFP blob still matches its generator"
 
-# The real GAFP packer (plan of record, item 6b-2) and the three things that
-# make its output mean something rather than merely exist:
-#
-#   1  byte-identity with the committed product blob. The FIXED-only reference
-#      clip is re-synthesized and re-encoded in a temp dir here — the `.flac` is
-#      a generator input, never a tracked file (only the frame/PCM regions under
-#      examples/flac_spike/assets/ are committed) — then packed and compared
-#      against examples/flac_integration/assets/spike_l0.gfp, the blob
-#      `gafp-check` guards and the one `flac-rom` embeds, which the 6b-1
-#      stand-in generator wrote. First run 2026-11-11: byte-identical, 865,996
-#      bytes, 157 frames, no first difference. That is the answer to "is there
-#      one container definition or two" — there is one, and the packer's own
-#      strict frame walk (every footer CRC-16 verified, every frame's exit
-#      landing on the next frame, 314 subframe slots censused) lands on the same
-#      bytes from the other side.
-#   2  the fixture set. `scripts/gen_gafp_fixtures.py --check` rebuilds the
-#      five-thousand-sample assets under crates/flac-lite/tests/gfp/ and the
-#      facts table that describes them, and re-runs the three refusal legs —
-#      real LPC subframes at the product profile, 44.1 kHz at a 32 kHz target,
-#      8-bit at a 16-bit profile — confirming they still refuse, still write no
-#      file, and still print the reason. The refusals are C2's guard, so they
-#      are witnesses here exactly as the accepted blobs are.
-#   3  the Rust half: `tests/gafp_asset_facts.rs`, reading those bytes back
-#      through `Manifest`, `scan::Frames` and `Decoder` and checking every
-#      offset-table entry, every frame footer CRC, and the PCM against the
-#      `flac -d` pins. `flac-test-scan` already runs it as part of the suite;
-#      this leg names it because the leg is about that suite — a leg that had
-#      quietly stopped being built would otherwise still read as a green.
-#
-# It stays a separate target from `gafp-check`, which still describes the
-# committed product blob through `scripts/gen_gafp_blob.py` and is what `flac-rom`
-# depends on — and that is now a decided role rather than a stand-in waiting to be
-# retired: reading the 6a-2 spike's own committed frames is what makes that script
-# the only gate saying the asset the ROM plays is the asset the spike measured,
-# which the packer's other path to the same bytes cannot say. The script's header
-# carries the same statement; full retirement is a later PR with a shape, spelled
-# out in plan-of-record.md item 6b-2's second half.
+# The real packer's gate, three legs: (1) `gafp_pack.py` reproduces the committed
+# product blob byte for byte; (2) `gen_gafp_fixtures.py --check` regenerates the
+# fixture set AND re-runs the pack-time refusals (real LPC at the product
+# profile, an off-target rate, 8-bit), which are C2's guard and therefore
+# witnesses in their own right; (3) `gafp_asset_facts.rs` reads all of it back
+# through `Manifest` / `scan::Frames` / `Decoder` against the `flac -d` pins.
+# This is the only FLAC leg that runs libFLAC: it needs `flac` + `metaflac` on
+# PATH, so a red here in an image without them is a missing tool, not a decoder
+# regression — check that before bisecting.
 gafp-pack-check: toolchain-check
 	@command -v flac >/dev/null && command -v metaflac >/dev/null || \
 	  { echo "gafp-pack-check needs flac and metaflac on PATH (the reference encoder, decoder and block lister)"; exit 1; }
@@ -584,700 +419,14 @@ gafp-pack-check: toolchain-check
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features scan,instrument --test gafp_asset_facts
-	@echo "gafp-pack-check passed: the real packer writes the committed product blob byte for byte, the fixture set and its three refusals still match their generator, and the crate re-reads all of it bit-exactly"
-
-# Encode an arbitrary source master into a playable GAFP asset at the target
-# rate/depth. This is the master-audio path: libFLAC chooses FIXED-1..4 and
-# sometimes CONSTANT/VERBATIM from real music, so `--master` accepts those
-# shapes without a measured product row, while still refusing LPC and still
-# enforcing 16,384 Hz / 16-bit / 2048-sample frames. The output is a MASTER
-# asset, not a C2 product asset until those decode rows are measured.
-master-pack: toolchain-check
-	@test -n "$(INPUT)" || { echo "usage: make master-pack INPUT=source.wav"; exit 1; }
-	python3 scripts/gafp_pack.py --master --emit-pin "$(MASTER_PIN)" "$(INPUT)" "$(MASTER_ASSET)"
-	@echo "master-pack done: $(MASTER_ASSET) + $(MASTER_PIN) — MASTER asset, not a C2 product until its shapes are measured"
-
-master-play-rom: master-pack format
-	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin product-play --features master-asset
-	agb-gbafix $(MASTER_PLAY_BIN) -o $(MASTER_PLAY_ROM)
-	@echo "master-play ROM built: $(MASTER_PLAY_ROM) — run it with 'timeout -k 5 120 $(GBA_TEST_RUNNER) $(MASTER_PLAY_ROM)' and read the [pp-rom] log"
-
-native-flac-rom: flac-rom
-	@echo "native-flac-rom done: $(FLAC_ROM)"
-
-podman-flac-rom:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make flac-rom
-
-# ---------------------------------------------------------------------------
-# PERF-GATE SPIKE ROM (Phase 1 step 4 — FLAC.md "Perf gate spike").
-#
-#   spike-rom           build + fix the spike ROM (bare name: runs anywhere)
-#   native-spike-rom    build it here
-#   podman-spike-rom    build it in the container
-#
-# The measurement vehicle for the go/no-go perf gate. The root ROM crate and
-# the flac_integration sanity ROM are untouched by it.
-# ---------------------------------------------------------------------------
-
-spike-rom: format
-	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
-	agb-gbafix $(SPIKE_CRATE_DIR)/$(SPIKE_CRATE_BIN) -o $(SPIKE_ROM)
-	@echo "Spike ROM built: $(SPIKE_ROM)"
-
-native-spike-rom: spike-rom
-	@echo "native-spike-rom done: $(SPIKE_ROM)"
-
-# E5's arbitration ROM. Build + fix for $(TARGET); then either
-#   timeout -k 5 60 mgba-test-runner $(E5_FETCH_ROM)   (harness check)
-# or flash $(E5_FETCH_ROM) to an EverDrive and read the on-screen table.
-e5-fetch-rom: format
-	cd $(E5_FETCH_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
-	agb-gbafix $(E5_FETCH_CRATE_DIR)/$(E5_FETCH_CRATE_BIN) -o $(E5_FETCH_ROM)
-	@echo "E5 fetch ROM built: $(E5_FETCH_ROM) (same stream in .text and .iwram)"
-
-native-e5-fetch-rom: e5-fetch-rom
-	@echo "native-e5-fetch-rom done: $(E5_FETCH_ROM)"
-
-podman-e5-fetch-rom:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make e5-fetch-rom
-
-# The 6a-5 instrument images, built from the same crate with the arm features on.
-# Both are start-to-finish readable in one headless run; the run loop is the
-# method file's: `timeout -k 5 280 mgba-test-runner <rom>` with serial captured,
-# then `grep -E "6a5|stats:|budget:"`.
-item6a5-arms-rom: format
-	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --features item6a5-arms
-	agb-gbafix $(SPIKE_CRATE_DIR)/$(SPIKE_CRATE_BIN) -o $(SPIKE_6A5_ARMS_ROM)
-	@echo "6a-5 arms ROM built: $(SPIKE_6A5_ARMS_ROM) (ctrl + rice-twin + rice-arm in one link)"
-
-native-item6a5-arms-rom: item6a5-arms-rom
-	@echo "native-item6a5-arms-rom done: $(SPIKE_6A5_ARMS_ROM)"
-
-podman-item6a5-arms-rom:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make item6a5-arms-rom
-
-item6a5-asm-rom: format
-	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --features item6a5-asm
-	agb-gbafix $(SPIKE_CRATE_DIR)/$(SPIKE_CRATE_BIN) -o $(SPIKE_6A5_ASM_ROM)
-	@echo "6a-5 asm ROM built: $(SPIKE_6A5_ASM_ROM) (ctrl + rice-arm only: the product shape)"
-
-native-item6a5-asm-rom: item6a5-asm-rom
-	@echo "native-item6a5-asm-rom done: $(SPIKE_6A5_ASM_ROM)"
-
-podman-item6a5-asm-rom:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make item6a5-asm-rom
-
-# 6a-5b — the realization differential (plan-of-record 6a-5b). One image, three
-# timed legs: ctrl, the landed ARM arm (`item6a5-asm`, the product shape), and the
-# E10 archive's vendored path (`item6a5b-vendored`, which implies the asm arm).
-# The reading is `asm − vend`, paired per frame in one link; the run loop is the
-# same: `timeout -k 5 280 mgba-test-runner flac-spike-6a5b.gba` and
-# `grep -E "6a5|6a5b|stats:|budget:"`.
-item6a5b-rom: format
-	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --features item6a5b-vendored
-	agb-gbafix $(SPIKE_CRATE_DIR)/$(SPIKE_CRATE_BIN) -o $(SPIKE_6A5B_ROM)
-	@echo "6a-5b differential ROM built: $(SPIKE_6A5B_ROM) (ctrl + landed rice-arm + the E10 archive's vendored leg in one link)"
-
-native-item6a5b-rom: item6a5b-rom
-	@echo "native-item6a5b-rom done: $(SPIKE_6A5B_ROM)"
-
-podman-item6a5b-rom:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make item6a5b-rom
-
-# 6a-7 — the width marginal and the stack confirmation in one image. Three legs:
-# `ctrl` (i32 default), `wide` (the vendored pre-6a-6 i64 path, src/wide.rs), and
-# `asm` (the landed kernel over the i32 default). The run loop is the method
-# file's: `timeout -k 5 280 mgba-test-runner flac-spike-6a7.gba`, then
-# `grep -E "6a7|6a5|stats:|budget:"`.
-item6a7-rom: format
-	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --features item6a7-wide
-	agb-gbafix $(SPIKE_CRATE_DIR)/$(SPIKE_CRATE_BIN) -o $(SPIKE_6A7_ROM)
-	@echo "6a-7 width/stack ROM built: $(SPIKE_6A7_ROM) (ctrl i32 + wide i64 + landed rice-arm in one link)"
-
-native-item6a7-rom: item6a7-rom
-	@echo "native-item6a7-rom done: $(SPIKE_6A7_ROM)"
-
-podman-item6a7-rom:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make item6a7-rom
-
-podman-spike-rom:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make spike-rom
-
-# ---------------------------------------------------------------------------
-# SAMPLE-RATE ROM (FLAC.md "Sample-rate reduction — tooling and profiling
-# proposal (2026-10-11)", Part 1 steps 1+2+3): real audio normalized to a
-# mixer-domain rate, embedded TEMPORARILY, decode measured against the
-# budget derived at that rate.
-#
-#   make rate-assets INPUT=path/to.wav RATE=10512   stage the clips (host tools:
-#                                                   ffmpeg + flac + python3)
-#   make rate-test                                  host witness on the staged
-#                                                   bytes (bit-exact vs flac -d)
-#   make native-rate-rom                            build $(RATE_ROM)
-#
-# COEXISTENCE: the committed spike assets (assets/spike_*.bin, src/assets.rs)
-# and the default flac-spike ROM are the E-menu's calibration anchor and are
-# NEVER touched by this flow — the rate bin/test are `required-features =
-# ["rate-assets"]` targets, invisible to spike-rom/spike-test. Everything the
-# rate flow writes is generated + gitignored + removed by `make clean`.
-# ---------------------------------------------------------------------------
-
-RATE_ROM := flac-rate-spike.gba
-# The rate-PLAY ROM (decode into audible playback via the custom IRQ
-# feeder, FLAC.md rate-flow playback entry) — same assets, same gate.
-RATE_PLAY_ROM := flac-rate-play.gba
-# The generated module whose presence means `make rate-assets` has run.
-RATE_CRATE_ASSETS := $(SPIKE_CRATE_DIR)/src/rate_assets.rs
-RATE_BIN := $(SPIKE_CRATE_DIR)/target/$(TARGET)/release/flac-rate-spike
-RATE_PLAY_BIN := $(SPIKE_CRATE_DIR)/target/$(TARGET)/release/flac-rate-play
-
-rate-assets:
-	@test -n "$(INPUT)" || { echo "usage: make rate-assets INPUT=path/to.wav RATE={10512|18157|32768}"; exit 1; }
-	@test -n "$(RATE)" || { echo "usage: make rate-assets INPUT=path/to.wav RATE={10512|18157|32768}"; exit 1; }
-	bash scripts/gen_rate_assets.sh "$(INPUT)" "$(RATE)"
-
-# The rate flow's host gate: same out-of-tree --manifest-path pattern as
-# spike-test (cargo config leak), plus --features rate-assets. Fails closed
-# when the generated modules are absent — stage them first.
-rate-test: toolchain-check
-	@test -f $(RATE_CRATE_ASSETS) || { echo "rate-test: no generated rate assets — run 'make rate-assets INPUT=… RATE=…' first"; exit 1; }
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(SPIKE_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features rate-assets
-	@echo "rate-test passed: the staged rate clips decode bit-exactly on the host"
-
-rate-rom: format
-	@test -f $(RATE_CRATE_ASSETS) || { echo "rate-rom: no generated rate assets — run 'make rate-assets INPUT=… RATE=…' first"; exit 1; }
-	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --features rate-assets
-	agb-gbafix $(RATE_BIN) -o $(RATE_ROM)
-	@echo "Rate ROM built: $(RATE_ROM)"
-
-native-rate-rom: rate-rom
-	@echo "native-rate-rom done: $(RATE_ROM)"
-
-# The playback ROM: identical gate to rate-rom (staged assets required).
-rate-play-rom: format
-	@test -f $(RATE_CRATE_ASSETS) || { echo "rate-play-rom: no generated rate assets — run 'make rate-assets INPUT=… RATE=…' first"; exit 1; }
-	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --features rate-assets --bin flac-rate-play
-	agb-gbafix $(RATE_PLAY_BIN) -o $(RATE_PLAY_ROM)
-	@echo "Rate-play ROM built: $(RATE_PLAY_ROM)"
-
-native-rate-play-rom: rate-play-rom
-	@echo "native-rate-play-rom done: $(RATE_PLAY_ROM)"
-
-podman-rate-rom:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make rate-rom
-
-# ---------------------------------------------------------------------------
-# OPUS PERF-GATE SPIKE ROM (OPUS.md "Measurement plan — start here").
-#
-#   opus-rom            build + fix the scaffold ROM (bare name: runs anywhere)
-#   native-opus-rom     build it here
-#   podman-opus-rom     build it in the container
-#
-# PR 1: the compile/link gate — the vendored patched opus-rs (see the crate's
-# vendor/opus-rs/PATCHES.md) LINKS into a bootable ROM image for $(TARGET),
-# the real link rather than a bare check. The root ROM crate stays Opus-free.
-# ---------------------------------------------------------------------------
-
-opus-rom: format
-	cd $(OPUS_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
-	agb-gbafix $(OPUS_CRATE_DIR)/$(OPUS_CRATE_BIN) -o $(OPUS_ROM)
-	agb-gbafix $(OPUS_CRATE_DIR)/target/$(TARGET)/release/ctor-probe -o $(OPUS_PROBE_ROM)
-	@echo "Opus spike ROM built: $(OPUS_ROM) (+ constructor probe $(OPUS_PROBE_ROM))"
-
-native-opus-rom: opus-rom
-	@echo "native-opus-rom done: $(OPUS_ROM)"
-
-podman-opus-rom:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make opus-rom
-
-# ---------------------------------------------------------------------------
-# E10 GROUNDWORK: ARM kernel-check ROM (FLAC.md "E10 — ARM-mode codeword
-# loop"; examples/arm-kernels/).
-#
-#   kernel-rom          build + fix the kernel-check ROM (bare name: runs anywhere)
-#   native-kernel-rom   build it here
-#   podman-kernel-rom   build it in the container
-#
-# Isolated ARM-mode kernels, unit-testable in isolation: the ROM sweeps the
-# assembly over the committed golden table on the emulator's ARM7TDMI — the
-# execution oracle, since the host has no ARM executor. No decode-path
-# integration and no cycle windows: correctness groundwork only; measurement
-# stays gated on the E10 probe plan (FLAC.md).
-# ---------------------------------------------------------------------------
-
-kernel-rom: format
-	cd $(KERNEL_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
-	agb-gbafix $(KERNEL_CRATE_DIR)/$(KERNEL_CRATE_BIN) -o $(KERNEL_ROM)
-	@echo "Kernel-check ROM built: $(KERNEL_ROM)"
-
-native-kernel-rom: kernel-rom
-	@echo "native-kernel-rom done: $(KERNEL_ROM)"
-
-podman-kernel-rom:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make kernel-rom
-
-# ---------------------------------------------------------------------------
-# Containerized testing.
-#
-# Same convention as the ROM builds: the BARE names (`rom`, `flac-rom`, `test`,
-# `test-rom`, `flac-test`) run wherever they are invoked — natively on a host,
-# or inside the container when the `podman-*` wrapper re-invokes them there.
-# The `podman-*` names are the host-facing containerized entrypoints. Nothing
-# branches on "am I in a container?", so no recursion and no surprise: a host
-# with the toolchain installed uses the bare names; a host without them (no
-# agb-gbafix, no mgba-test-runner, an unexpected nightly) uses `podman-*`.
-#   make podman-test        ROM suite + flac-lite gates, in the image
-#   make podman-flac-test   flac-lite alone, in the image
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# Tests. Deliberately separated so a decoder bug is never confused with a ROM
-# integration failure:
-#
-#   flac-test   flac-lite ALONE — host unit/integration tests + the GBA target
-#               compile gate. No agb, no ROM, no emulator.
-#   test        the ROM test suite (agb #[test_case] harness in mGBA).
-#
-# If flac-test passes but test/native-flac-rom fails, the problem is the
-# integration (linking, memory, mixer/scheduling), not the decoder.
-# ---------------------------------------------------------------------------
-
-# Where the host gate runs: a directory OUTSIDE the repo, so cargo's upward
-# `.cargo/config.toml` walk finds nothing to inherit. Must live outside the
-# tree — any in-repo directory still walks up into the root's GBA config.
-GATE_NEUTRAL_CWD ?= /tmp/gba-sound-player-host-gate
-
-# flac-lite in isolation. Both gates are load-bearing:
-#  1. target check  — the gate symphonia could never pass; keeps std out.
-#     Run in-tree, where inheriting the root config is exactly what we want.
-#  2. host tests    — run from $(GATE_NEUTRAL_CWD) with --manifest-path, so the
-#     root's GBA `target` AND `build-std` are never inherited at all. `--target
-#     $(HOST_TRIPLE)` stays explicit so the gate documents its own intent.
-#
-# Why not the old `-Zbuild-std=` (empty) + `cd` form: it held until nightly
-# ~2026-06-01, then rotted. On nightly 2026-09-03 the inherited build-std wins
-# over EVERY in-tree override — CLI `-Zbuild-std=`, the empty
-# `CARGO_UNSTABLE_BUILD_STD=` env var, and `--config unstable.build-std=[]` all
-# still recompile `core` from source under the prebuilt host `core`, giving
-# `E0152: duplicate lang item core::sized` (verified 2026-09-04; full A/B table
-# in FLAC.md → "Cargo config leak"). Config non-inheritance is positional, so it
-# cannot drift with nightly the way flag-precedence does. The build dir stays
-# `crates/flac-lite/target` (derived from the manifest, not the cwd), so the
-# container cache volumes still apply.
-flac-test: toolchain-check
-	cd crates/flac-lite && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features instrument
-	@echo "flac-test passed: flac-lite compiles for $(TARGET) and passes host tests"
-
-# ULI2 portable core, Phase 0. The two halves are the same shape as flac-test:
-#  1. thumbv4t compile — keeps std, alloc and platform dependencies out.
-#  2. host corpus — run outside the repo, so the root cargo config is not
-#     inherited; the committed fixture is bit-exact against the C reference,
-#     including int8/int16 hashes, per-frame ops, seek paths and malformed input.
-uli-test: toolchain-check
-	cd crates/uli-lite && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE)
-	@echo "uli-test passed: uli-lite compiles for $(TARGET) and is bit-exact on the host corpus"
-
-# Phase 1 decode-only ROM: parse the committed ULA2 corpus, decode every
-# frame through the portable core, and check the C-reference int8/int16 pins on
-# the target. This is a correctness image, not a player and not a cycle record.
-uli-spike-rom: format
-	cd $(ULI_SPIKE_DIR) && $(CARGO) build --release --target $(TARGET)
-	agb-gbafix $(ULI_SPIKE_BIN) -o $(ULI_SPIKE_ROM)
-
-# The ULI2 measurement vehicle (examples/uli_bench/): prove the corpus pins on
-# the measured image, then time full frames through BOTH kernel sets (portable
-# control + the product's ArmKernels) and the four synthesis kernels in
-# timer2/3 windows at WAITCNT 4/2. An mGBA measurement; no playback or
-# hardware claim. See crates/uli-lite/PLAN-OF-RECORD.md.
-ULI_BENCH_DIR := examples/uli_bench
-ULI_BENCH_BIN := $(ULI_BENCH_DIR)/target/$(TARGET)/release/uli-bench
-ULI_BENCH_ROM := uli-bench.gba
-ULI_BENCH_LOG ?= uli-bench.log
-
-uli-bench-rom: format
-	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET)
-	agb-gbafix $(ULI_BENCH_BIN) -o $(ULI_BENCH_ROM)
-	@echo "ULI2 bench ROM built: $(ULI_BENCH_ROM)"
-
-# Run it headlessly and keep the log. The ROM prints the runner's exit sentinel
-# after its verdict, so this returns in seconds; the timeout is a leash for a
-# hung image, not the normal path. The gate is the log's PASS/FAIL and the
-# numbers in it, not the exit status.
-uli-bench: uli-bench-rom
-	timeout -k 5 300 $(GBA_TEST_RUNNER) $(ULI_BENCH_ROM) 2>&1 | tee $(ULI_BENCH_LOG) || true
-	@grep -q '^\[uli-bench\] PASS' $(ULI_BENCH_LOG) || { echo "uli-bench: harness/pin failure — see $(ULI_BENCH_LOG)"; exit 1; }
-	@echo "uli-bench done: $(ULI_BENCH_LOG)"
-
-# The overlay's host twin: the ARM-mode, unchecked kernels must be bit-exact
-# with uli-lite's portable reference. This is what licenses the bench's overlay
-# arm to be called a realisation of the same arithmetic.
-ULI_OVERLAY_MANIFEST := $(abspath crates/uli-lite-gba/Cargo.toml)
-uli-overlay-test: toolchain-check
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(ULI_OVERLAY_MANIFEST) --target $(HOST_TRIPLE)
-	@echo "uli-overlay-test passed: overlay kernels and the full decoder are bit-exact with the portable reference"
-
-uli-check: toolchain-check
-	cd crates/uli-lite && $(CARGO) fmt --check
-	cd crates/uli-lite-gba && $(CARGO) fmt --check
-	cd $(ULI_BENCH_DIR) && $(CARGO) fmt --check
-
-# Regenerate the committed expected-vector file from the Rust generator. This
-# WRITES the fixture, so it is a maintenance command, not part of `make test`.
-# The committed file remains the frozen reference; see the fixture README.
-uli-fixture: toolchain-check
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) run --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE) --example gen_expected -- \
-	    $(abspath crates/uli-lite/tests/fixtures/uli2_tiny.uli) \
-	    $(abspath crates/uli-lite/tests/fixtures/uli2_tiny_expected.txt)
-
-# Second-target build witness (FLAC.md split-proposal ladder step 3, 2026-11-02):
-# records the PORTABILITY claim — flac-lite compiles for a non-thumbv4t
-# bare-metal ARM target — as a build fact, with NO performance claim attached
-# (the split's reading rules). Same in-tree compile-gate shape as flac-test's
-# thumbv4t half: `-Zbuild-std=core,alloc` compiles core/alloc from rust-src, so
-# the triple needs no prebuilt `rustup` rust-std — verified with the component
-# REMOVED, which is the container image's shape (nightly + rust-src only;
-# no Dockerfile change). Scope: rlib compile, not final link — a link wants a
-# board link script, same boundary as the thumbv4t `check` half (whose real
-# link is `make flac-rom`). Pin OFF: no `.iwram` reference compiles in on
-# non-GBA targets (step 2's gate made that the shape). `scan` is turned ON here on
-# purpose (review decision, 2026-11-05): the walk is `no_std` + `alloc` code whose
-# portability no other gate proves, and a feature-gated module that no gate builds
-# for a second target is a module whose portability claim is asserted rather than
-# measured. This is the only gate that compiles the walk for a non-thumbv4t
-# bare-metal target; `flac-test-scan` covers the thumbv4t half. `rice-hybrid`
-# joins it on the same argument, and it matters more here: PR 3's own title is
-# "the *portable*-twin default", and the one claim of the twin's that no other
-# gate proves is that the hybrid walk builds for a second bare-metal ARM target.
-flac-portable-check: toolchain-check
-	cd crates/flac-lite && \
-	  $(CARGO) check --release --target $(SECOND_TARGET) -Zbuild-std=core,alloc --features scan,rice-hybrid
-	@echo "flac-portable-check passed: flac-lite with the frame walk on compiles for $(SECOND_TARGET) (portability witness, no perf claim)"
-
-# The spike's assets witness: the host tests (examples/flac_spike/tests/) decode
-# the EXACT embedded clips bit-exactly against flac -d reference PCM. Same
-# out-of-tree pattern as flac-test's host half — the spike crate inherits the
-# root's GBA config otherwise (cargo config leak, FLAC.md). The thumbv4t half
-# of the spike's compile gate is `make spike-rom` itself (it links the real
-# ROM, so a bare `check` would understate it).
-# 6a-5's arm witness: every arm decodes the committed clips to the pinned PCM,
-# frame window by frame window, through the product call path. New configuration,
-# new gate — `spike-test` (default features) is unchanged and still runs no arm
-# code, which the manifest's `required-features` makes a checked fact.
-item6a5-test: toolchain-check
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(SPIKE_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features item6a5-arms
-	@echo "item6a5-test passed: ctrl, the Rust mechanism and the ARM embodiment all reach the committed PCM pins and agree frame by frame on the host (the asm leg is the model here; the assembled body is overlay-kernel-test's)"
-
-# 6a-5b's host witness. Both feature sets at once: `item6a5-arms` keeps 6a-5's
-# arm witness running (the differential image changes nothing about the arms), and
-# `item6a5b-vendored` brings in the vendored leg's own suite — bit-exact against
-# the reference PCM, frame-by-frame agreement with the production driver, the tier
-# census, and the fold-source equality check that proves both kernels in the
-# differential link paste the SAME committed fold body. On the host the leg's
-# kernel is its Rust twin (the assembled body is `overlay-kernel-test`'s and the
-# ROM's own per-frame sample-equality witness); that is the same division of
-# labour 6a-4/6a-5 recorded, not a weaker one.
-item6a5b-test: toolchain-check
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(SPIKE_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features item6a5-arms,item6a5b-vendored
-	@echo "item6a5b-test passed: the arms still reach the pinned PCM and agree frame by frame, and the E10 leg's own witness (reference PCM, driver agreement, tier census, byte-identical fold source) passes beside them"
-
-# 6a-7's host witness: the vendored i64 width leg decodes the committed clips to
-# the reference PCM and agrees with the product i32 path frame by frame. New
-# configuration, new gate — `spike-test` still runs no arm/vendored/wide code.
-item6a7-test: toolchain-check
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(SPIKE_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features item6a7-wide
-	@echo "item6a7-test passed: the i64 width leg reaches the pinned PCM and agrees with the i32 control frame by frame"
-
-spike-test: toolchain-check
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(SPIKE_CRATE_MANIFEST) --target $(HOST_TRIPLE)
-	@echo "spike-test passed: spike clips decode bit-exactly on the host"
-
-# The Opus spike's host gate: same out-of-tree --manifest-path pattern (cargo
-# config leak). PR 1 pins the scaffold facts (constructor contract, derived
-# budget, state size, seam forwarding); step 2 grows it into the decode
-# witness against the ffmpeg/libopus reference. The thumbv4t half of the
-# compile gate is `make opus-rom` itself (it links the real image).
-opus-test: toolchain-check
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(OPUS_CRATE_MANIFEST) --target $(HOST_TRIPLE)
-	@echo "opus-test passed: opus spike scaffold pins hold on the host"
-
-podman-opus-test:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make opus-test
-
-# Host witness for the E10 ARM kernels: kernel twins vs the naive bit-walk
-# oracle and the committed golden table. Same out-of-tree --manifest-path
-# pattern (cargo config leak). The thumbv4t half of the compile gate is
-# `make kernel-rom` itself (the real link, not a bare check).
-kernel-test: toolchain-check
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(KERNEL_CRATE_MANIFEST) --target $(HOST_TRIPLE)
-	@echo "kernel-test passed: E10 kernel twins match the oracle and the committed table"
-
-podman-kernel-test:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make kernel-test
-
-# ---------------------------------------------------------------------------
-# THE GBA OVERLAY (FLAC.md split-ladder item 6, 6a; crates/flac-lite-gba/).
-#
-#   overlay-check        the crate COMPILES for $(TARGET) and flac-lite resolves
-#                        through the path dependency, in a release check
-#   overlay-test         the crate's host witness, run out-of-tree (config leak)
-#   overlay-test-twin    6a-3's configuration: both arms above with
-#                        --features rice-twin on. New configuration, NEW GATE —
-#                        never a broadening of the two above it.
-#   overlay-check-arm    6a-4's configuration, compile half: the asm, the FFI and
-#                        the state-struct ABI type-check for $(TARGET)
-#   overlay-test-arm     6a-4's configuration, witness half: the host differential
-#                        (`tests/arm_from_outside.rs`, required-features = rice-arm)
-#   overlay-objdump      the ELF fact a sweep cannot show: ARM mode, four-byte
-#                        encodings, `pop {…, lr}` + `bx lr`, no LDM-to-PC
-#   overlay-kernel-rom   build + fix the 6a-4 kernel-check ROM, then run the
-#                        objdump witness on the same ELF
-#   overlay-kernel-test  6a-4's `#[test_case]` suite in mGBA — the device-side
-#                        witness, and the first ROM suite in this repo with tests
-#
-# What neither one witnesses, stated plainly because both absences are the point
-# of 6a-1: no link step exists in an rlib, so there is no link witness and no
-# codegen charge claimed here (6a-1 builds no ROM — the crate carries no `agb`),
-# no cycle is claimed, and no ROM in this repo links the overlay yet. The
-# thumbv4t half is `cargo check` rather than a ROM build precisely because there
-# is no ROM to build; the real link witness for this crate arrives with 6a-3, as
-# an arm of an existing instrument. And the rule the crate manifest follows
-# because of this file: the overlay has NO local .cargo/config.toml, because
-# cargo CONCATENATES `target.<triple>.rustflags` across config layers, so a local
-# re-declaration would double-link `-Tgba.ld` (README, agb-build gotcha 2 and its
-# two variants). 6a-1 cannot convict that leak either way — there is no link step
-# in an rlib — so the rule is inherited from the tree rather than tested here; the
-# first rung in this item with a link step next to asm is 6a-4, in an instrument.
-#
-# One limit of `overlay-check`, found by 6a-1's own mutation witness (FLAC.md, the
-# 6a-1 record): `cargo check` does not compile `#[cfg(test)]` source, so an
-# `unsafe` inside a test is convicted by `overlay-test` and never here; and
-# deleting the path dependency outright leaves `overlay-check` GREEN — it asserts
-# nothing about the edge being USED. What it witnesses is that cargo resolves
-# `flac-lite` through this manifest and type-checks it for $(TARGET), which is the
-# `Checking flac-lite` line in its own log. The live-edge witness is
-# `overlay-test`.
-#
-# Deliberately NOT part of `flac-gates`: that aggregate is every configuration of
-# `crates/flac-lite`, and this is a different crate whose features do not exist
-# there. Deliberately NOT in `test` either, and hand-invoked like
-# flac-test-crc/-scan/-rice. There is no $(SECOND_TARGET) arm here on purpose — a
-# portability witness for a crate whose whole purpose is being platform-bound
-# would be a claim this item never makes; portability stays witnessed by
-# `flac-portable-check`, on the core.
-#
-# 6a-4 changes one of those absences and only one: there IS now a link step, in
-# `examples/overlay-kernel-check/` (a ROM crate, not this one — the overlay still
-# carries no `agb`). So `overlay-kernel-rom`/`-test` are the link and device
-# witnesses, and this section's host gates are unchanged in kind. Per-PR rule
-# this rung lives under: **6a-4 may not move the default configuration at all**,
-# which is why `overlay-check`/`overlay-test` (no features) are re-run unchanged
-# and why the new configuration gets names of its own rather than widening them.
-# ---------------------------------------------------------------------------
-
-overlay-check: toolchain-check
-	cd $(OVERLAY_CRATE_DIR) && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc
-	@echo "overlay-check passed: the overlay AND the core it depends on both type-check for $(TARGET) (compile witness only: an rlib has no link step, and the live-edge witness is overlay-test)"
-
-overlay-test: toolchain-check
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(OVERLAY_CRATE_MANIFEST) --target $(HOST_TRIPLE)
-	@echo "overlay-test passed: the overlay's DEFAULT configuration is green — one lib test, and no kernel, asm, FFI or unsafe exists in a default build"
-
-# 6a-4's configuration, both halves, the `overlay-test-twin` shape one rung on:
-#   1. the thumbv4t COMPILE witness — `global_asm!` assembles, the FFI and the
-#      state-struct ABI type-check, and the tables' placement attributes compile
-#      for $(TARGET). `overlay-check` structurally cannot see any of it: it builds
-#      the default set, in which `src/rice_arm.rs` does not exist;
-#   2. the host differential `tests/arm_from_outside.rs` — `required-features =
-#      ["rice-arm"]`, so a default `overlay-test` does not even build it (the same
-#      checked-absence rule 6a-3 landed).
-# On the host this differential runs `model_partition`, a label-for-label Rust
-# model of the asm; it witnesses the contract, not the instruction stream. The
-# stream is `overlay-kernel-test`'s and `overlay-objdump`'s.
-overlay-check-arm: toolchain-check
-	cd $(OVERLAY_CRATE_DIR) && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features rice-arm
-	@echo "overlay-check-arm passed: the rice-arm configuration type-checks for $(TARGET) — asm assembled, FFI and KernelAbi declared, no link step (an rlib has none; overlay-kernel-rom is the link witness)"
-
-overlay-test-arm: toolchain-check
-	cd $(OVERLAY_CRATE_DIR) && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features rice-arm
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(OVERLAY_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features rice-arm
-	@echo "overlay-test-arm passed: the rice-arm configuration is green — the boundary arms (q = 31, w == 0, p = 0, both 9.2.7.3 guards, five end-of-stream shapes, the delegated domain) and the committed-corpus differential are green against the packer's values and the incumbent. This is the CONTRACT witness; the asm runs only in the kernel-check ROM"
-
-# The ELF fact. A green sweep cannot distinguish a four-byte ARM body from a
-# Thumb build of the same algorithm — both compute the same answers — so the mode
-# and the two return rules are read out of the built ELF. Host binutils is
-# enough (`objdump -i` lists elf32-littlearm); no arm-none-eabi toolchain needed.
-# The rules and their provenance are in the script's own header.
-overlay-objdump: toolchain-check
-	sh scripts/check_arm_kernel_objdump.sh $(OVERLAY_ROM_DIR)/$(OVERLAY_ROM_BIN)
-	@echo "overlay-objdump passed: arm_rice_partition is four-byte ARM code with a pop {{..., lr}} + bx lr return and no LDM-to-PC"
-
-# 6a-4's device witness. Build + fix the ROM (the link step), then read the ELF
-# fact on the exact image that was fixed. No cycle is claimed here: E10's
-# -349/-348 cyc/sample is a different image with a different driver, and 6a-5
-# owns the realization reading.
-overlay-kernel-rom: format
-	cd $(OVERLAY_ROM_DIR) && $(CARGO) build --release --target $(TARGET)
-	agb-gbafix $(OVERLAY_ROM_DIR)/$(OVERLAY_ROM_BIN) -o $(OVERLAY_ROM)
-	sh scripts/check_arm_kernel_objdump.sh $(OVERLAY_ROM_DIR)/$(OVERLAY_ROM_BIN)
-	@echo "Kernel-check ROM built: $(OVERLAY_ROM) (iwram-pin on: the tables' placement is the ROM's own test)"
-
-native-overlay-kernel-rom: overlay-kernel-rom
-	@echo "native-overlay-kernel-rom done: $(OVERLAY_ROM)"
-
-podman-overlay-kernel-rom:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make overlay-kernel-rom
-	@echo "podman-overlay-kernel-rom done: $(OVERLAY_ROM) built in $(CONTAINER)."
-
-# The `#[test_case]` suite on mGBA's ARM7TDMI. Debug profile on purpose: overflow
-# checks and the model's `debug_assert` domain guard are part of what is being
-# witnessed, and this is a correctness gate, not a timing one. Eight cases, one
-# per family; a failure names its boundary.
-overlay-kernel-test: toolchain-check
-	cd $(OVERLAY_ROM_DIR) && \
-	  CARGO_TARGET_$(TARGET_ENV)_RUNNER=$(GBA_TEST_RUNNER) \
-	  $(CARGO) test --target $(TARGET)
-	@echo "overlay-kernel-test passed: the assembled ARM kernel, the model and the core's incumbent agree on the committed corpus and on the synthesized boundaries, on mGBA's ARM7TDMI — the only place the asm runs"
-
-podman-overlay-kernel-test:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make overlay-kernel-test
-	@echo "podman-overlay-kernel-test done: the device suite ran in $(CONTAINER)."
-
-# The `rice-twin` configuration, named as its OWN gate rather than by broadening
-# `overlay-test` — the `flac-test-crc`/`-scan`/`-rice` pattern one rung over, and
-# required by 6a-3's own per-PR rule ("it may move counts only in its own new
-# configuration"). Two arms, both with `--features rice-twin` on:
-#   1. the thumbv4t COMPILE witness — that a `RiceKernel` impl declared in this
-#      crate, i.e. outside the core, builds for the GBA target. This is the half
-#      `overlay-check` structurally cannot see: it builds the default set, in which
-#      `src/rice_twin.rs` does not exist;
-#   2. the host differential `tests/twin_from_outside.rs`, which is declared
-#      `required-features = ["rice-twin"]` in the manifest, so a default
-#      `overlay-test` does not even build it. That declaration is what makes "the
-#      default build of this crate contains no kernel" a checked statement instead
-#      of a claim: without it, cargo would report the suite's absence as a green it
-#      had not earned.
-# Same split-ladder rule as the two gates above it: hand-invoked, not in
-# `flac-gates` (a different crate whose features do not exist there), not in `test`
-# (nothing links this crate). And the same limit, stated because it is now sharper:
-# this gate is a compile witness and a correctness witness, NOT a codegen or cycle
-# witness — an rlib still has no link step, so the "second implementor present"
-# charge that item 5 measured can only be read in an image that links this crate,
-# which is the instrument arm in examples/flac_spike/src/item6a3_probe.rs under the
-# `item6a3-*` features (FLAC.md, 6a-3 paragraph 2), not anything here. That file is a
-# permanent instrument arm, not an E-series patch, so it lives in the spike's `src/`
-# rather than under `experiments/` — the deviation from "probes never land on main's
-# spike sources" is recorded here and in the 6a-3 landing record.
-overlay-test-twin: toolchain-check
-	cd $(OVERLAY_CRATE_DIR) && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features rice-twin
-	@mkdir -p $(GATE_NEUTRAL_CWD)
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(OVERLAY_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features rice-twin
-	@echo "overlay-test-twin passed: the rice-twin configuration is green — an out-of-crate RiceKernel impl compiles for $(TARGET), and the out-of-crate corpus differential (independent width walk + incumbent + carried arm + spec-order leg vs exit_bits) is green on $(HOST_TRIPLE). Neither arm is a decode path; neither owes a cycle."
-
-podman-overlay-test:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make overlay-test
-	@echo "podman-overlay-test done: overlay host witness ran in $(CONTAINER)."
-
-# 6a-3's configuration in the image, for the same reason the arm above exists in
-# both environments. NOT run for the 6a-3 record — no container runtime on the host
-# that wrote it, exactly the caveat 6a-1's record carries; `make podman-overlay-test-twin`
-# on a capable host is that missing arm.
-podman-overlay-test-twin:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make overlay-test-twin
-	@echo "podman-overlay-test-twin done: overlay rice-twin configuration ran in $(CONTAINER)."
-
-# Cargo's runner env var is the upper-cased target triple with dashes replaced
-# by underscores: CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER.
-TARGET_ENV := $(shell echo $(TARGET) | tr 'a-z-' 'A-Z_')
-
-# ROM test suite on target. Needs mgba-test-runner on PATH:
-#   natively    -> `cargo install --git https://github.com/agbrs/agb.git --tag v0.25.0 --locked mgba-test-runner`
-#                  (also needs cmake + clang/libclang + libelf to build libmgba)
-#   in the image -> preinstalled by the Dockerfile; use `make podman-test-rom`
-#                  and none of that host setup applies.
-test-rom: toolchain-check
-	CARGO_TARGET_$(TARGET_ENV)_RUNNER=$(GBA_TEST_RUNNER) \
-	  $(CARGO) test --target $(TARGET)
-
-# Top-level test: everything except the intentionally-broken symphonia probe.
-# Deliberately does NOT depend on `format`: a test run must never rewrite your
-# working tree as a side effect (that would also let CI's `make test` silently
-# fix drift that `make check` is supposed to fail on). Builds format; tests
-# verify. `check` is the formatting gate.
-test: test-rom flac-test uli-test uli-overlay-test
-	@echo "test passed: ROM suite + flac-lite isolation gates + uli-lite host corpus + uli-lite-gba twin"
-
-# The aggregate README's "TODO: one aggregate for the non-default-configuration
-# gates" asked for by name, landed with split-ladder item 5 PR 2 (2026-11-05):
-# one command covering every `crates/flac-lite` configuration. It adds nothing
-# that the named gates do not already witness — it is the same commands, and the
-# two combination arms at the end (both features on: the thumbv4t `cargo check`
-# and the host witness) are the only arms that were not already runnable, added
-# because a *feature combination* is the only way to see a second instantiation,
-# and PR 2 is the PR where the instantiation count changes rather than the code.
-# PR 3 (2026-11-06) added the `rice-hybrid` configuration and a second
-# combination arm (`crc-check,scan,rice-hybrid`): the one build in which the
-# walk, the CRC verification and BOTH Rice mechanisms are compiled at once —
-# which is also the shape a future default flip would ship in.
-# Item 6b-2 (2026-11-11) added `gafp-pack-check`: the real GAFP packer's
-# byte-identity against the committed product blob, its fixture/refusal set, and
-# the suite that reads those bytes back through the facade. It needs `flac` and
-# `metaflac` on PATH, which no other arm of this aggregate does — every other
-# arm reads tables and blobs that were generated earlier and committed. That is
-# worth knowing when a CI image is missing libFLAC tools: the failure is this
-# leg, not a decoder regression.
-# Nothing here is parallel-safe-by-design: like `test:`, it is a plain
-# prerequisite aggregate, so `make -j flac-gates` interleaves output.
+	@echo "gafp-pack-check passed: the packer writes the committed blob byte for byte, the fixtures and their refusals still match their generator, and the crate reads it all back bit-exactly"
+
+# One command for every `crates/flac-lite` configuration. It adds nothing the
+# named gates do not witness; the two combination arms at the end are the only
+# builds that were not otherwise runnable, and a *combination* is the only way to
+# see a second instantiation. Counts move with the tree: they are recorded in
+# flac-docs/measurements.md, and a green run's value is its exit status.
+# Not parallel-safe by design — `make -j flac-gates` interleaves output.
 flac-gates: flac-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-portable-check gafp-check gafp-pack-check
 	cd crates/flac-lite && \
 	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check,scan
@@ -1288,85 +437,265 @@ flac-gates: flac-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice
 	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check,scan,rice-hybrid
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features crc-check,scan,rice-hybrid
-	@echo "flac-gates passed: every crates/flac-lite configuration is green — default, crc-check, scan, rice-hybrid, both, all three, and the second bare-metal target — plus the real GAFP packer's byte-identity and its fixture suite"
+	@echo "flac-gates passed: every flac-lite configuration is green (default, wide, crc, scan, rice, both, all three, the second target, and both gafp legs)"
 
-# ---------------------------------------------------------------------------
-# Containerized test entrypoints (the portable path — the image ships
-# mgba-test-runner + agb-gbafix + nightly + rust-src, so NO host tooling is
-# needed). These build the image, then run the same bare gate targets inside,
-# with the project dir mounted so artifacts and reports land back on the host.
+# The product geometry's host model: it replays the shipped manifest's real frame
+# lengths through the SAME `RingFeed` and the SAME `geometry` constants the ROM
+# compiles (both `#[path]`-shared from src/lib.rs) against a credit-per-period
+# clock. This is where flow control, the two tolerances and the ring sizing are
+# *justified* rather than asserted — so the geometry's comments are not the only
+# witness. It fails closed if the model file is missing: a geometry with no host
+# model is a geometry nobody checked.
+product-play-test:
+	@test $$(find $(FLAC_CRATE_DIR)/tests -name 'product_play_witness.rs' | wc -l) -eq 1 \
+	  || { echo "product-play-test: examples/flac_integration/tests/product_play_witness.rs is missing — the host model for this geometry has to exist before the geometry can be claimed"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --release --manifest-path $(FLAC_INTEGRATION_MANIFEST) --target $(HOST_TRIPLE) --test product_play_witness
+	@echo "product-play-test passed: the product geometry's ring, flow control and sizing are modelled on the host against the shipped manifest"
+
+# ===========================================================================
+# FLAC — the GBA overlay and its ARM kernel (crates/flac-lite-gba)
+# ===========================================================================
 #
-# Use these when the native path can't run (missing toolchain pieces, an
-# unexpected nightly, conda, etc.) — same commands, same gates, same result.
-# ---------------------------------------------------------------------------
+# The overlay holds the platform-bound `RiceKernel` realizations, each behind its
+# own feature: a default build of it contains no kernel, no asm, no FFI and no
+# `unsafe`. Like the core's configurations, a non-default configuration is
+# witnessed by its OWN gate — which is also what keeps a green default honest
+# about what the default does not contain.
+#
+# The crate has NO local .cargo/config.toml and must not get one: cargo
+# CONCATENATES `target.<triple>.rustflags` across config layers, so a local
+# re-declaration links `-Tgba.ld` twice (`region 'ewram' already defined`).
 
-# Full suite: ROM #[test_case] suite in headless mGBA + flac-lite gates.
-podman-test:
-	$(CONTAINER) build --target tester -t $(IMAGE)-tester .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-tester make test
-	@echo "podman-test done: ROM suite + flac-lite gates ran in $(CONTAINER)."
+# Compile witnesses. An rlib has no link step, so neither of these claims a codegen
+# charge or a link; the link witness is `overlay-kernel-rom` (and, for the product
+# configuration, `flac-rom`).
+overlay-check: toolchain-check
+	cd $(OVERLAY_CRATE_DIR) && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc
+	@echo "overlay-check passed: the overlay AND the core it depends on both type-check for $(TARGET)"
 
-# ROM #[test_case] suite only.
-podman-test-rom:
-	$(CONTAINER) build --target tester -t $(IMAGE)-tester .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-tester make test-rom
-	@echo "podman-test-rom done: ROM suite ran in $(CONTAINER)."
+overlay-check-arm: toolchain-check
+	cd $(OVERLAY_CRATE_DIR) && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features rice-arm
+	@echo "overlay-check-arm passed: rice-arm type-checks for $(TARGET) — asm assembled, FFI and KernelAbi declared"
 
-# flac-lite alone (target compile gate + host tests) — the fastest container
-# loop; no agb, no ROM, no emulator. Runs in the lighter builder stage.
-podman-flac-test:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make flac-test
-	@echo "podman-flac-test done: flac-lite gates ran in $(CONTAINER)."
+# Host witnesses. `overlay-test-arm` runs the boundary differential (q = 31, the
+# w == 0 handoff, p = 0, both §9.2.7.3 guards, the end-of-stream shapes) — but on
+# the host that differential runs a Rust MODEL of the asm. It witnesses the
+# contract; the instruction stream is the ROM's and objdump's.
+overlay-test: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(OVERLAY_CRATE_MANIFEST) --target $(HOST_TRIPLE)
+	@echo "overlay-test passed: the overlay's DEFAULT configuration is green (no kernel, asm, FFI or unsafe exists in it)"
 
-# Formatting gate in the container too (CI-friendly; identical rustfmt).
-podman-check:
-	$(CONTAINER) build --target builder -t $(IMAGE)-builder .
-	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-builder make check
-	@echo "podman-check done: formatting verified in $(CONTAINER)."
+overlay-test-arm: toolchain-check
+	cd $(OVERLAY_CRATE_DIR) && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features rice-arm
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(OVERLAY_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features rice-arm
+	@echo "overlay-test-arm passed: the rice-arm contract witness is green (the asm itself runs only in the kernel-check ROM)"
 
-# ---------------------------------------------------------------------------
+# The ELF fact a correctness sweep cannot show: a Thumb build of the same
+# algorithm computes the same answers, so ARM mode, the four-byte encodings and
+# the `pop {…, lr}` + `bx lr` return are read out of the bytes. Host binutils is
+# enough; no arm-none-eabi toolchain needed. Rules and provenance: the script.
+overlay-objdump: toolchain-check
+	sh scripts/check_arm_kernel_objdump.sh $(OVERLAY_ROM_DIR)/$(OVERLAY_ROM_BIN)
+	@echo "overlay-objdump passed: arm_rice_partition is four-byte ARM code with a pop {…, lr} + bx lr return and no LDM-to-PC"
+
+# The device witness: the only place the assembled kernel executes (this host has
+# no ARM executor, so mGBA's ARM7TDMI is the oracle). Debug profile on purpose —
+# overflow checks and the model's debug_assert domain guard are part of what is
+# being witnessed. This is a correctness gate, not a timing one.
+overlay-kernel-rom: format
+	cd $(OVERLAY_ROM_DIR) && $(CARGO) build --release --target $(TARGET)
+	agb-gbafix $(OVERLAY_ROM_DIR)/$(OVERLAY_ROM_BIN) -o $(OVERLAY_ROM)
+	sh scripts/check_arm_kernel_objdump.sh $(OVERLAY_ROM_DIR)/$(OVERLAY_ROM_BIN)
+	@echo "Kernel-check ROM built: $(OVERLAY_ROM) (its own test asserts the tables' .iwram addresses at runtime)"
+
+overlay-kernel-test: toolchain-check
+	cd $(OVERLAY_ROM_DIR) && \
+	  CARGO_TARGET_$(TARGET_ENV)_RUNNER=$(GBA_TEST_RUNNER) \
+	  $(CARGO) test --target $(TARGET)
+	@echo "overlay-kernel-test passed: the assembled ARM kernel, the model and the core's incumbent agree on the committed corpus and the synthesized boundaries, on mGBA's ARM7TDMI"
+
+# One command for the kernel the product links.
+overlay-gates: overlay-check overlay-test overlay-check-arm overlay-test-arm overlay-kernel-rom overlay-kernel-test
+	@echo "overlay-gates passed: both overlay configurations compile for $(TARGET), their host contracts are green, and the assembled kernel is witnessed on mGBA's ARM7TDMI"
+
+# ===========================================================================
+# FLAC — the measurement instrument (examples/flac_spike)
+# ===========================================================================
+#
+# The host witness over the EXACT embedded clips, then the on-target decode proof
+# and the cycle harness. Keep the default arm's bytes honest: cross-session cycle
+# records are anchored on this image (flac-docs/measurements.md).
+
+spike-test: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(SPIKE_CRATE_MANIFEST) --target $(HOST_TRIPLE)
+	@echo "spike-test passed: spike clips decode bit-exactly on the host"
+
+spike-rom: format
+	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
+	agb-gbafix $(SPIKE_CRATE_BIN) -o $(SPIKE_ROM)
+	@echo "Spike ROM built: $(SPIKE_ROM)"
+	@echo "  run: timeout -k 5 280 $(GBA_TEST_RUNNER) $(SPIKE_ROM) | grep -E 'stats:|budget:|verdict'"
+
+# ===========================================================================
+# Other codec tracks (see OPUS.md / ULI2.md — not the FLAC path)
+# ===========================================================================
+
+opus-rom: format
+	cd $(OPUS_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
+	agb-gbafix $(OPUS_CRATE_DIR)/target/$(TARGET)/release/opus-spike -o $(OPUS_ROM)
+	agb-gbafix $(OPUS_CRATE_DIR)/target/$(TARGET)/release/ctor-probe -o $(OPUS_PROBE_ROM)
+	@echo "Opus spike ROM built: $(OPUS_ROM) (+ constructor probe $(OPUS_PROBE_ROM))"
+	@echo "  the ctor-probe image is a deliberately-red compile/link witness; never run it in a test gate"
+
+opus-test: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(OPUS_CRATE_MANIFEST) --target $(HOST_TRIPLE)
+	@echo "opus-test passed: opus spike scaffold pins hold on the host"
+
+uli-test: toolchain-check
+	cd crates/uli-lite && \
+	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE)
+	@echo "uli-test passed: uli-lite compiles for $(TARGET) and is bit-exact on the host corpus"
+
+uli-check: toolchain-check
+	cd crates/uli-lite && $(CARGO) fmt --check
+	cd crates/uli-lite-gba && $(CARGO) fmt --check
+	cd $(ULI_BENCH_DIR) && $(CARGO) fmt --check
+
+# Phase 1 decode-only ROM: a correctness image, not a player and not a cycle record.
+uli-spike-rom: format
+	cd $(ULI_SPIKE_DIR) && $(CARGO) build --release --target $(TARGET)
+	agb-gbafix $(ULI_SPIKE_BIN) -o $(ULI_SPIKE_ROM)
+	@echo "ULI2 spike ROM built: $(ULI_SPIKE_ROM)"
+
+uli-bench-rom: format
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET)
+	agb-gbafix $(ULI_BENCH_BIN) -o $(ULI_BENCH_ROM)
+	@echo "ULI2 bench ROM built: $(ULI_BENCH_ROM)"
+
+# Run it headlessly and keep the log. The ROM prints the runner's exit sentinel
+# after its verdict, so this returns in seconds; the timeout is a leash for a hung
+# image, not the normal path. The gate is the log's PASS/FAIL and the numbers in it,
+# NOT the exit status (contrast the FLAC playback ROMs, which loop forever on a pass).
+uli-bench: uli-bench-rom
+	timeout -k 5 300 $(GBA_TEST_RUNNER) $(ULI_BENCH_ROM) 2>&1 | tee $(ULI_BENCH_LOG) || true
+	@grep -q '^\[uli-bench\] PASS' $(ULI_BENCH_LOG) || { echo "uli-bench: harness/pin failure — see $(ULI_BENCH_LOG)"; exit 1; }
+	@echo "uli-bench done: $(ULI_BENCH_LOG)"
+
+# The overlay's host twin: the ARM-mode, unchecked kernels must be bit-exact with
+# uli-lite's portable reference. This is what licenses the bench's overlay arm to be
+# called a realisation of the same arithmetic.
+uli-overlay-test: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(ULI_OVERLAY_MANIFEST) --target $(HOST_TRIPLE)
+	@echo "uli-overlay-test passed: overlay kernels and the full decoder are bit-exact with the portable reference"
+
+# Regenerate the committed expected-vector file. This WRITES a fixture, so it is
+# a maintenance command and never part of `make test`.
+uli-fixture: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) run --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE) --example gen_expected -- \
+	    $(abspath crates/uli-lite/tests/fixtures/uli2_tiny.uli) \
+	    $(abspath crates/uli-lite/tests/fixtures/uli2_tiny_expected.txt)
+
+# ===========================================================================
+# Aggregates
+# ===========================================================================
+
+# The ROM's own #[test_case] suite. KNOWN STATE, not this run's bug: the root
+# crate currently COLLECTS ZERO CASES and exits 0, so a green `test-rom` is
+# evidence that build → link → boot works, nothing more. (The repo's first ROM
+# suite with assertions in it is `make overlay-kernel-test`.)
+test-rom: toolchain-check
+	CARGO_TARGET_$(TARGET_ENV)_RUNNER=$(GBA_TEST_RUNNER) \
+	  $(CARGO) test --target $(TARGET)
+
+test: test-rom flac-test uli-test uli-overlay-test
+	@echo "test passed: ROM suite + flac-lite isolation gates + uli-lite host corpus + uli-lite-gba twin"
+
+# Everything a FLAC-track change owes. `flac-gates` is the core, `overlay-gates`
+# is the kernel, `product-play-test` is the geometry the playback claim stands on.
+flac-check: flac-gates overlay-gates product-play-test spike-test
+	@echo "flac-check passed: core configurations, overlay/kernel witnesses, product geometry, instrument"
+
+# ===========================================================================
+# Environment aliases
+# ===========================================================================
+#
+# `native-<target>` says "build <target> on this host" out loud; `podman-<target>`
+# re-invokes the same bare target inside the image, which carries the whole
+# toolchain (nightly + rust-src + rustfmt + agb-gbafix + mgba-test-runner) so the
+# host needs nothing. Both produce the same artifact; nothing here branches on
+# which environment it is in.
+# The two containerized suites that need the emulator get the `tester` stage.
+podman-test podman-test-rom: PODMAN_STAGE := tester
+
+native-%: %
+	@echo "native-$*: done"
+
+podman-%:
+	$(CONTAINER) build --target $(PODMAN_STAGE) -t $(IMAGE)-$(PODMAN_STAGE) .
+	$(CONTAINER) run --rm $(CACHE_MOUNTS) -v "$(PWD):/app:Z" -w /app $(IMAGE)-$(PODMAN_STAGE) make $*
+	@echo "podman-$*: done in $(CONTAINER) ($(PODMAN_STAGE) stage)"
+
+# ===========================================================================
+# Housekeeping
+# ===========================================================================
 
 clean:
 	$(CARGO) clean
 	cd crates/flac-lite && $(CARGO) clean
 	cd $(FLAC_CRATE_DIR) && $(CARGO) clean
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) clean
-	cd $(KERNEL_CRATE_DIR) && $(CARGO) clean
 	cd $(OVERLAY_CRATE_DIR) && $(CARGO) clean
 	cd $(OVERLAY_ROM_DIR) && $(CARGO) clean
-	rm -f $(ROM) $(FLAC_ROM) $(SPIKE_ROM) $(SPIKE_6A5_ARMS_ROM) $(SPIKE_6A5_ASM_ROM) $(SPIKE_6A5B_ROM) $(OPUS_ROM) $(OPUS_PROBE_ROM) $(KERNEL_ROM) $(RATE_ROM) $(RATE_PLAY_ROM) $(OVERLAY_ROM)
-# The rate flow's generated assets are TEMPORARY (gitignored, like ROMs —
-# FLAC.md "Sample-rate reduction"); they regenerate from
-# `make rate-assets INPUT=… RATE=…`, so they leave with `make clean`.
+	cd $(ULI_BENCH_DIR) && $(CARGO) clean
+	rm -f $(ROM) $(FLAC_ROM) $(PRODUCT_PLAY_ROM) $(MASTER_PLAY_ROM) $(SPIKE_ROM) \
+	      $(OPUS_ROM) $(OPUS_PROBE_ROM) $(OVERLAY_ROM) $(ULI_SPIKE_ROM) $(ULI_BENCH_ROM)
+# Generated, gitignored assets that belong to the ROMs above — including the
+# master asset/pin (they regenerate from `make master-pack INPUT=…`).
+	@rm -f $(MASTER_ASSET) $(MASTER_PIN)
 	@rm -f $(SPIKE_CRATE_DIR)/src/rate_assets.rs $(SPIKE_CRATE_DIR)/src/rate_pcm.rs
 	@rm -f $(SPIKE_CRATE_DIR)/assets/rate_*.bin
-# mGBA drops a .sav beside each ROM on local runs — emulator state,
-# remove it with the ROMs it belongs to.
-	@rm -f $(ROM:.gba=.sav) $(FLAC_ROM:.gba=.sav) *.sav
+# mGBA drops a .sav beside each ROM on local runs: emulator state, not a build output.
+	@rm -f *.sav
 
-# Drop the container build caches (the named volumes behind $(CACHE_MOUNTS)).
-# Safe: they are pure build caches — the next container run rebuilds from
-# scratch, slowly once, then repopulates them. Does NOT touch ./target.
+# Drop the container build-cache volumes. Safe: they are pure build caches, so
+# the next container run rebuilds slowly once and repopulates them. Does NOT
+# touch ./target.
 clean-cache:
 	-$(CONTAINER) volume rm $(CARGO_CACHE) $(FLAC_CACHE) $(FLACROM_CACHE) $(SPIKE_CACHE) $(OPUS_CACHE) $(OVERLAY_CACHE) $(OVERLAY_ROM_CACHE) 2>/dev/null || true
-	@echo "container build-cache volumes removed ($(CARGO_CACHE), $(FLAC_CACHE), $(FLACROM_CACHE), $(SPIKE_CACHE), $(OPUS_CACHE), $(OVERLAY_CACHE), $(OVERLAY_ROM_CACHE))."
+	@echo "container build-cache volumes removed."
 
 check:
-	$(CARGO) fmt --check
-	cd crates/flac-lite && $(CARGO) fmt --check
-	cd crates/uli-lite && $(CARGO) fmt --check
-	cd $(ULI_SPIKE_DIR) && $(CARGO) fmt --check
+	@for d in $(WORKSPACES); do (cd $$d && $(CARGO) fmt --check) || exit 1; done
 	CARGO='$(CARGO)' sh scripts/fmt_with_generated_stub.sh $(FLAC_CRATE_DIR) --check
-	cd $(SPIKE_CRATE_DIR) && $(CARGO) fmt --check
-	cd $(OPUS_CRATE_DIR) && $(CARGO) fmt --check
-	cd $(KERNEL_CRATE_DIR) && $(CARGO) fmt --check
-	cd $(OVERLAY_CRATE_DIR) && $(CARGO) fmt --check
-	cd $(OVERLAY_ROM_DIR) && $(CARGO) fmt --check
-	cd $(E5_FETCH_CRATE_DIR) && $(CARGO) fmt --check
+	@echo "check: all workspaces rustfmt-clean"
 
-# Fail early and legibly when the pinned toolchain isn't reachable, instead of
-# half-running a gate (e.g. `--target ''` when the host triple can't be probed).
+# Fail early and legibly when the pinned toolchain is not reachable, instead of
+# half-running a gate (e.g. `--target ''` when the host triple cannot be probed).
+# The second half is the one this file cannot answer for itself: is the instance
+# this build runs ALSO the one rustup hands to a bare cargo, an editor or
+# rust-analyzer in this tree? Two instruments in one tree is the exact failure the
+# pin exists to prevent, so it is checked by asking rustup, not by pattern-guessing
+# at the pin file's format.
 toolchain-check:
 	@$(RUSTC) -V >/dev/null 2>&1 || { \
 	  echo "error: cannot run '$(RUSTC)'. This build needs rustup + the '$(TOOLCHAIN)' toolchain:"; \
@@ -1379,18 +708,6 @@ toolchain-check:
 ifeq ($(HAS_RUSTUP),1)
 ifneq ($(wildcard $(RUST_TOOLCHAIN_FILE)),)
 ifeq ($(TOOLCHAIN),$(PINNED_TOOLCHAIN))
-	@# The other half of the pin. Everything above asks "does the instance the
-	@# Makefile chose run?"; this asks the question the Makefile cannot answer by
-	@# itself: is that instance also the one rustup hands to a bare cargo, an
-	@# editor, or rust-analyzer in this tree? rustup skips comment lines and says
-	@# nothing about a [toolchain] table that has no channel — measured: with
-	@# `# channel = "nightly-2026-09-04"` in the pin file, `rustup show
-	@# active-toolchain` reports the ambient DEFAULT (stable 1.99.1, exit 0, and it
-	@# happily installs components for it) while a word-level read of that same file
-	@# still returns 2026-09-04. Two instruments in one tree is the exact failure the
-	@# pin exists to prevent, so it is checked by asking rustup what it resolves and
-	@# comparing the rustc it would run to the rustc this build runs — not by
-	@# pattern-guessing at the file's format.
 	@bld=$$($(RUSTC) -V 2>/dev/null); \
 	actfull=$$($(RUSTUP) show active-toolchain 2>/dev/null | head -1); \
 	act=$${actfull%% *}; got=$$($(RUSTUP) run "$$act" rustc -V 2>/dev/null); \
@@ -1398,7 +715,7 @@ ifeq ($(TOOLCHAIN),$(PINNED_TOOLCHAIN))
 	  echo "error: this build runs '$$bld' (from $(TOOLCHAIN), read out of $(RUST_TOOLCHAIN_FILE)),"; \
 	  echo "  but rustup resolves this tree to '$$act', which runs '$$got'."; \
 	  echo "  rustup is not taking a channel from the pin file — a commented-out or mis-sectioned channel line makes it fall back to the ambient default silently; a RUSTUP_TOOLCHAIN environment override does the same."; \
-	  echo "  fix the tree, not the build: the instance cargo and your editor see must be the string that builds the ROM (FLAC.md, the instance rule)."; \
+	  echo "  fix the tree, not the build: the instance cargo and your editor see must be the string that builds the ROM."; \
 	  exit 1; \
 	fi
 else
@@ -1408,93 +725,40 @@ endif
 endif
 
 help:
-	@echo "gba-sound-player build targets"
+	@echo "gba-sound-player — build targets"
 	@echo ""
-	@echo "  ROMs (same artifact, two environments):"
-	@echo "    native-rom        build $(ROM) with this host's toolchain"
-	@echo "    podman-rom        build $(ROM) in the $(CONTAINER) image (standardized)"
+	@echo "  Baseline ROM:          native-rom | podman-rom   -> $(ROM)"
 	@echo ""
-	@echo "  EXPERIMENTAL FLAC ROMs (flac-lite bundled for $(TARGET)):"
-	@echo "    native-flac-rom   build $(FLAC_ROM) natively"
-	@echo "    podman-flac-rom   build $(FLAC_ROM) in the container"
-	@echo "    master-pack       encode a source master to the master GAFP asset + pin (INPUT=…)"
-	@echo "    master-play-rom   pack that master and build $(MASTER_PLAY_ROM) (INPUT=…)"
+	@echo "  FLAC happy path (16,384 Hz, FIXED/16-bit/2048-sample frames):"
+	@echo "    make master-pack     INPUT=track.wav     -> $(MASTER_ASSET) + generated pin"
+	@echo "    make master-play-rom INPUT=track.wav     -> $(MASTER_PLAY_ROM) (playable)"
+	@echo "    make native-product-play-rom               -> $(PRODUCT_PLAY_ROM) (committed asset)"
+	@echo "    make native-flac-rom                       -> $(FLAC_ROM) (decode/verify only)"
+	@echo "    make native-spike-rom                      -> $(SPIKE_ROM) (measurement instrument)"
+	@echo "  A playback ROM's run ends in loop {}: with mgba-test-runner, exit 124 IS the pass."
 	@echo ""
-	@echo "  ULI2 (ULI2.md — product codec):"
-	@echo "    uli-test          portable core: thumbv4t build + bit-exact host corpus"
-	@echo "    uli-check         fmt gate for uli-lite, uli-lite-gba and uli_bench"
-	@echo "    uli-spike-rom     Phase 1 decode-only ROM (correctness witness)"
-	@echo "    uli-bench-rom     full-frame cycle harness ROM (both kernel sets)"
-	@echo "    uli-bench         run it headless in mGBA (both kernel sets, full frames)"
-	@echo "    uli-overlay-test  kernel + full-decoder twins vs the portable reference"
+	@echo "  FLAC gates:"
+	@echo "    flac-check           EVERYTHING a FLAC change owes (the four below)"
+	@echo "    flac-gates           every crates/flac-lite configuration + gafp-check + gafp-pack-check"
+	@echo "    overlay-gates        crates/flac-lite-gba + the ARM kernel's mGBA witness"
+	@echo "    product-play-test    the product geometry's host model"
+	@echo "    spike-test           the instrument's host witness (bit-exact vs flac -d)"
+	@echo "    (individually: flac-test, flac-test-wide/-crc/-scan/-rice, flac-portable-check,"
+	@echo "     gafp-check, gafp-pack-check, overlay-check/-test/-check-arm/-test-arm,"
+	@echo "     overlay-objdump, overlay-kernel-rom, overlay-kernel-test)"
 	@echo ""
-	@echo "  PERF-GATE SPIKE (FLAC.md step 4):"
-	@echo "    native-spike-rom  build $(SPIKE_ROM) natively"
-	@echo "    podman-spike-rom  build $(SPIKE_ROM) in the container"
-	@echo "    spike-test        spike asset witness tests (host, bit-exact)"
-	@echo "    item6a5-arms-rom  6a-5 instrument: ctrl + Rust mechanism + ARM kernel in one image"
-	@echo "    item6a5-asm-rom   6a-5 instrument: ctrl + ARM kernel only (the product shape)"
-	@echo "    item6a5-test      6a-5 arm witness (host: all arms reach the PCM pins, frame by frame)"
-	@echo "    item6a5b-rom      6a-5b differential image: the product shape + the E10 archive's vendored leg"
-	@echo "    item6a5b-test     6a-5b witnesses (host: the arms' PCM-pin witness + the vendored leg's own witness)"
+	@echo "  Other tracks:"
+	@echo "    ULI2 (ULI2.md — the repository's product codec): uli-test, uli-overlay-test,"
+	@echo "      uli-check, uli-fixture, native-uli-spike-rom, native-uli-bench-rom,"
+	@echo "      uli-bench (headless run + PASS/FAIL read from the log)"
+	@echo "    Opus (OPUS.md): native-opus-rom, opus-test"
+	@echo "  Tests/format:  test (test-rom + flac-test + uli-test), test-rom, check, format"
+	@echo "  Housekeeping:  clean, clean-cache, toolchain-check, help"
 	@echo ""
-	@echo "  SAMPLE-RATE ROM (FLAC.md 'Sample-rate reduction', Part 1):"
-	@echo "    rate-assets       stage TEMPORARY clips from a real WAV (INPUT=… RATE={10512|18157|32768})"
-	@echo "    rate-test         host witness on the staged bytes (bit-exact vs flac -d)"
-	@echo "    native-rate-rom   build $(RATE_ROM) from the staged assets"
-	@echo "    native-rate-play-rom build $(RATE_PLAY_ROM) — decode→playback via the custom timer-IRQ feeder"
-	@echo "    podman-rate-rom   build it in the container (assets must be staged on the host)"
-	@echo "    flow: make rate-assets INPUT=clip.wav RATE=10512 && make rate-test && make native-rate-rom"
+	@echo "  Any target above also runs as podman-<target> (in the image; needs a"
+	@echo "  container runtime) and native-<target> (this host). Builds run 'format'"
+	@echo "  first and never gate on tests; tests never reformat; only 'check' fails"
+	@echo "  on formatting."
 	@echo ""
-	@echo "  OPUS PERF-GATE SPIKE (OPUS.md):"
-	@echo "    native-opus-rom   build $(OPUS_ROM) + $(OPUS_PROBE_ROM) natively (vendored opus-rs link gate)"
-	@echo "    podman-opus-rom   build $(OPUS_ROM) in the container"
-	@echo "    opus-test         opus spike host gate (scaffold pins; step-2 witness grows in)"
-	@echo ""
-	@echo "  E10 ARM KERNELS (FLAC.md — isolated-kernel groundwork):"
-	@echo "    native-kernel-rom build $(KERNEL_ROM) natively (on-target kernel sweep ROM)"
-	@echo "    podman-kernel-rom build $(KERNEL_ROM) in the container"
-	@echo "    kernel-test       kernel twins vs oracle + committed table (host)"
-	@echo ""
-	@echo "  GBA OVERLAY (FLAC.md split-ladder item 6a; crates/flac-lite-gba):"
-	@echo "    overlay-check     the overlay COMPILES for $(TARGET) against flac-lite (compile only: an rlib has no link step)"
-	@echo "    overlay-test      the overlay's host witness (6a-1: one no-op test by design; hand-invoked, not in test/flac-gates)"
-	@echo "    overlay-test-twin the overlay's \`rice-twin\` configuration: out-of-crate RiceKernel impl compiles for $(TARGET) + the out-of-crate corpus differential (hand-invoked; new configuration, new gate)"
-	@echo "    podman-overlay-test  that host witness in the container"
-	@echo "    podman-overlay-test-twin  the \`rice-twin\` configuration in the container"
-	@echo "    overlay-check-arm the \`rice-arm\` configuration COMPILES for $(TARGET) (asm + FFI + ABI; an rlib has no link step)"
-	@echo "    overlay-test-arm  the \`rice-arm\` host differential (contract only: the asm runs only on mGBA)"
-	@echo "    overlay-kernel-rom build + fix $(OVERLAY_ROM), then read the objdump witness"
-	@echo "    overlay-objdump   ARM-mode / pop+bx / no-LDM-to-PC on the built ELF"
-	@echo "    overlay-kernel-test  the device \`#[test_case]\` suite in mGBA (the asm's own witness)"
-	@echo "    podman-overlay-kernel-rom / podman-overlay-kernel-test  the same in the container"
-	@echo ""
-	@echo "  Tests — native gates (need nightly + agb-gbafix + mgba-test-runner locally):"
-	@echo "    test              test-rom + flac-test (verify-only: no reformat)"
-	@echo "    test-rom          ROM #[test_case] suite in mGBA"
-	@echo "    flac-test         flac-lite alone (target compile gate + host tests)"
-	@echo "    flac-portable-check  flac-lite second-target build witness ($(SECOND_TARGET); with the frame walk on: portability fact, no perf claim)"
-	@echo "    flac-test-crc     flac-lite host suite + thumbv4t compile with crc-check ON (hand-invoked; see README gate-aggregation TODO)"
-	@echo "    flac-test-scan    flac-lite host suite + thumbv4t compile with the frame walk (\`scan\`) ON (hand-invoked; see README gate-aggregation TODO)"
-	@echo "    flac-test-rice    flac-lite host suite + thumbv4t compile with the portable hybrid Rice kernel (\`rice-hybrid\`) ON (hand-invoked; see README gate-aggregation TODO)"
-	@echo "    flac-gates        EVERY flac-lite configuration in one command, plus the combination arms"
-	@echo ""
-	@echo "  Tests — containerized (same gates, no host tooling needed):"
-	@echo "    podman-test       test-rom + flac-test in the $(CONTAINER) image"
-	@echo "    podman-test-rom   ROM #[test_case] suite in the container"
-	@echo "    podman-flac-test  flac-lite alone in the container"
-	@echo "    podman-kernel-test E10 kernel host gate in the container"
-	@echo "    podman-check      cargo fmt --check in the container"
-	@echo ""
-	@echo "  Formatting:"
-	@echo "    format            cargo fmt all workspaces (writes; runs before builds)"
-	@echo "    check             cargo fmt --check (verify-only gate; never writes)"
-	@echo ""
-	@echo "  Other: build, rom, flac-rom, spike-rom, clean, clean-cache, help"
-	@echo ""
-	@echo "  Builds never gate on tests; they DO auto-run 'format' first."
-	@echo "  (no rustfmt for $(TOOLCHAIN)? format prints a notice and skips.)"
-	@echo ""
-	@echo "  Toolchain: $(RUSTC)  (override: RUSTUP= / TOOLCHAIN= / CARGO=)"
-	@echo "  Container: $(CONTAINER)  image: $(IMAGE)  (override: CONTAINER=docker IMAGE=)"
-	@echo "  Host triple: $(HOST_TRIPLE)"
+	@echo "  Toolchain: $(TOOLCHAIN) via $(RUSTC)"
+	@echo "  Container: $(CONTAINER)  image: $(IMAGE)  Host triple: $(HOST_TRIPLE)"

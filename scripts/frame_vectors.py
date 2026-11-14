@@ -232,7 +232,7 @@ def synth_pcm(seconds, rate, center_partials, side_period, side_weight,
     # `square_period` used to be a literal 32 here. It is a parameter because a
     # fixture authored in Hz has to derive EVERY periodic component from the rate
     # it declares: the 32,000-era fixture's square sat at period 32 = 1,000 Hz,
-    # and a period copied across a rate change is the exact defect plan-of-record
+    # and a period copied across a rate change is the exact defect history.md
     # Q14 ruled out (41.06 cents). `SQUARE_PERIOD_DEVICE` below carries the
     # device-rate value; the default stays 32 so the format-witness streams do
     # not move with this item.
