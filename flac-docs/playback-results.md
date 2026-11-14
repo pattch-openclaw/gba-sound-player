@@ -1128,44 +1128,94 @@ at the new rate, where the convert leg is about 7% of the frame instead of 14%.
   samples** on the worst push window ever recorded for that section — inside by
   only 0.5 samples on that worst case. This run did not hit the phase-locked
   collision that the 32,768 Hz image hit at period 22. The chunk-sized push fix has
-  since landed in code (the 7-2 control below); its hardware re-run is the remaining
-  7-2 step. The retarget lowered the probability and consequence of a miss, it did
-  not remove the masked section by itself.
+  since landed in code and its hardware reading below is green on both units, twice
+  each. The retarget lowered the probability and consequence of a miss; the chunked
+  push is what removed the long masked section.
 - **It is not 7-3/C2.** The hardware count/digest/late clauses are met on this
   image, but the human listening witness — pitch and tempo, heard on both units
   with the source beside it — has not been done, and 7-2's fix is not in this
   image. C2 remains unmet until 7-3 passes on both units.
 
-## 7-2 implementation control (2026-11-13, mGBA headless — not hardware): chunked push
+## 7-2: chunked push on hardware (2026-11-13): four green runs, both units
 
-**The change under test.** `Producer::push_frame_in_chunks` appends a frame in slices of at
-most `CHUNK_SAMPLES = 560`, each under its own critical section, instead of one
-interrupt-masked 2,048-sample copy. The measured whole-frame mask was 14,680 c (14.3 samples
-at this clock, worst recorded 15.46) against the 16-sample re-arm grace; a chunk-sized slice
-is about 4,014 c = 3.92 samples, a 4.08x margin.
+**The change.** `Producer::push_frame_in_chunks` appends a frame in slices of at most
+`CHUNK_SAMPLES = 560`, each under its own critical section, instead of one interrupt-masked
+2,048-sample copy. The measured whole-frame mask was 14,680 c (14.3 samples at this clock,
+worst recorded 15.46) against the 16-sample re-arm grace; a chunk-sized slice is about
+4,014 c = 3.92 samples, a 4.08x margin. `push_bytes` credits only after the copy, so the
+feeder sees the previous slice or the new one, never a torn one.
 
 **Image.** `product-play.gba`, sha256
-**`2abf61e8b18f4bac46ed680d2320f1b9237b3586e35e3f167f8aef2885eab5ff`**, 662,440 B. One
-headless mGBA run:
+**`2abf61e8b18f4bac46ed680d2320f1b9237b3586e35e3f167f8aef2885eab5ff`**, 662,440 B.
+Four hardware runs: **GBA 001 ×2** and **GBA SP ×2**.
+
+**The four screens as transcribed.** The transcription did not include a colour line; every
+on-screen gate field is `ok`/zero on all four. The slips — `dev` for `dec` on the first GBA
+001 screen, the missing `Minlead` line on that same screen, and `minlead`/`Minlead`
+capitalisation — are kept as read rather than silently corrected.
 
 ```text
-fr 80 und 0 pcm ok fifo ok
-per 289 ser 289 tail 1/464 void 0
-replay 0 late 0 fed 0 drain 0
-late in push 0/0 2nd src 0/289 disp 000A
-work 25.507% dec 18.678% attr 417451
-conv 5.051% push 0.805% feed 0.971%
-minlead 9680 maxwk 26.727%
-verdict PASSED — screen BLUE
+GBA 001 (1)                          GBA 001 (2)
+PRODUCT PLAY 16384                   PRODUCT PLAY 16384
+Fr 80 und 0 pcm ok fifo ok           Fr 80 und 0 pcm ok fifo ok
+Ledg ok aud ok push 162304           Ledg ok aud ok push 162304 cons 162304
+     cons 162304                      Work 28.600% dec 19.961% attr 446292
+Work 28.600% dev 19.961% attr 446292 Conv 6.825% push 0.816% feed 0.997%
+Conv 6.825% push 0.816% feed 0.997%  Minlead 9120 maxwk 29.781%
+Per 289 ser 289 tail 1/464 void 0    Per 289 ser 289 tail 1/464 void 0
+Replay 0 late 0 fed 0 drain 0        Replay 0 late 0 fed 0 drain 0
+Latep 0 worstp 0 dly 0 refus 0       Latep 0 worstp 0 dly 0 refus 0
+Late in push 0/0 2nd src 0/289       Late in push 0/0 2nd src 0/289
+     disp 000A                            disp 000A
+Playback                             Playback
+[Minlead line not transcribed]
+
+GBA SP (1)                           GBA SP (2)
+PRODUCT PLAY 16384                   PRODUCT PLAY 16384
+Fr 80 und 0 pcm ok fifo ok           Fr 80 und 0 pcm ok fifo ok
+Ledg ok aud ok push 162304           Ledg ok aud ok push 162304 cons 162304
+     cons 162304                      Work 28.600% dec 19.961% attr 446292
+Work 28.600% dec 19.961% attr 446292 Conv 6.825% push 0.816% feed 0.997%
+Conv 6.825% push 0.816% feed 0.997%  Minlead 9120 maxwk 29.781%
+minlead 9120 maxwk 29.781%           Per 289 ser 289 tail 1/464 void 0
+Per 289 ser 289 tail 1/464 void 0    Replay 0 late 0 fed 0 drain 0
+Replay 0 late 0 fed 0 drain 0        Latep 0 worstp 0 dly 0 refus 0
+Latep 0 worstp 0 dly 0 refus 0       Late in push 0/0 2nd src 0/289
+Late in push 0/0 2nd src 0/289            disp 000A
+     disp 000A                       Playback
+Playback
 ```
 
-The price of splitting the mask is the push stage's whole-sequence mean: **14,817 →
-18,018 c/frame** (four sections instead of one), work **25.363 → 25.507%** (+0.144 pp),
-worst frame **26.583 → 26.727%**. Decode (417,826 c mean, 417,451 attributed) and convert
-(113,011 c) are unchanged; every count, every digest, `void 0`, `refus 0` and `late 0` are
-unchanged. The host envelope was re-read from this run (`make product-play-test` 14/14).
+| field | all four runs | reading |
+|---|---|---|
+| frames / periods | 80 frames, `per 289 ser 289` | every elapsed period serviced |
+| underflows / voids / refusals | `und 0`, `void 0`, `refus 0` | no starvation, every window measurable |
+| replay / lateness | `replay 0 late 0 fed 0 drain 0`, `dly 0` | **zero late services on both units, twice each** |
+| sample accounting | `push 162304 cons 162304` | exactly the manifest total |
+| digests | `pcm ok fifo ok`, `ledg ok`, `aud ok` | exact over pushed bytes and converted FIFO bytes |
+| attribution | `late in push 0/0`, `2nd src 0/289`, `disp 000A` | no late section to attribute; no shared interrupt entry |
+| work | **28.600%**, worst frame **29.781%** | 599,785 c/frame mean, 624,553 c/frame worst |
+| decode | `dec 19.961%`, `attr 446292` | 418,613 c/frame window mean; **446,292 c/frame** attributed |
+| convert / push / feeder | 6.825% / 0.816% / 0.997% | 143,131 / 17,113 / 20,909 c/frame |
+| lead | `minlead 9120` on the three screens that carry it | 9,120 samples = 16.3 periods = 0.557 s |
+| tail | `tail 1/464` | the designed short final period |
+| rate contract | no rate/pitch row | declared 16,384 Hz = played 16,384 Hz |
 
-**Not a hardware result.** The 7-1 retarget hardware reading above belongs to the previous,
-whole-frame-push image `ef1ed8ba…`; this image has not been on a unit. The hardware re-run
-(name the sha before flashing, both units twice, read the same late-attribution fields) is
-what closes 7-2, and then 7-3 asks the listening question.
+**Hardware versus the whole-frame-push image.** Against `ef1ed8ba…` (work 28.450%, push
+0.666%, maxwk 29.613%) the chunked push costs **+0.150 pp work**, **+0.150 pp push**,
+**+0.168 pp worst frame**; decode 19.961%, convert 6.824→6.825%, feeder 0.997%, minlead
+9,120, every count, every digest and every late field are unchanged. That is the expected
+price of four sections instead of one, and it is the whole of the cost.
+
+**Hardware versus the same-image mGBA control.** The mGBA run on this image is work 25.507%
+/ dec 18.678% / attr 417,451 / conv 5.051% / push 0.805% / feed 0.971% / minlead 9,680.
+Hardware minus mGBA is decode **+6.87%**, convert **+35.12%**, work **+12.13%**, attr
+**+6.91%** — the same leg-shaped Q15 gap measured at 32,768 Hz and on the 7-1 retarget
+image, not a new effect.
+
+**What this closes.** The named 7-2 latency defect is closed on hardware: the whole-frame
+interrupt mask is gone, the chunk-sized mask has a 4.08x arithmetic margin, and four runs on
+both units show zero late services with no new underruns or digest changes.
+
+**What remains.** 7-3's listening witness — pitch and tempo, heard on both units with the
+source beside it — is still the acceptance half, and C2 remains unmet until it is asked.

@@ -540,14 +540,19 @@ leg-shaped result measured at 32,768 Hz: decode +6.87%, convert **+35.08%**, wor
 [`flac-docs/playback-results.md`](flac-docs/playback-results.md) under "7-1,
 retarget hardware reading".
 
-This is **not** C2 yet: `late 0` four times did not close 7-2 by itself, because
-the push section still masked interrupts for ~14.3 samples against the 16-sample
-grace (15.46 on the worst push window ever recorded). **The chunk-sized push fix
-has since landed in code**: one critical section per 560-sample slice, each about
-3.92 samples / 4.08× margin, at a cost of push mean 14,817 → 18,018 c and work
-25.363 → 25.507%. Its mGBA control is green on the same counts and pins; its
-**hardware re-run is the remaining 7-2 step**, and 7-3's listening witness is
-after that.
+**7-2 is now closed on hardware.** The chunk-sized push — one critical section
+per 560-sample slice, about 3.92 samples / 4.08× margin — was run on GBA 001 ×2
+and GBA SP ×2, and all four runs are green: `fr 80 und 0`, `per 289 ser 289`,
+`replay 0 late 0 fed 0 drain 0`, `late in push 0/0`, `2nd src 0/289`,
+`disp 000A`, exact sample counts and digests. Work is **28.600%** / worst frame
+**29.781%**, `dec 19.961%`, **`attr 446292`**, `conv 6.825%`, `push 0.816%`,
+`feed 0.997%`, `minlead 9120`. Against the whole-frame-push image the cost is
++0.150 pp work and +0.150 pp push; decode/convert are unchanged. The four screens
+are in [`flac-docs/playback-results.md`](flac-docs/playback-results.md) under
+"7-2: chunked push on hardware".
+
+This is **still not C2**: 7-3's listening witness — pitch and tempo, heard on
+both units with the source beside it — is the remaining acceptance half.
 
 ## What is next
 
@@ -623,9 +628,10 @@ unchanged, and the per-rung state lives in the plan of record:
    [`flac-docs/playback-results.md`](flac-docs/playback-results.md). What 7-1 still owes is
    narrower: the packer's `fixed0 @ b2048` row transcribed from these bytes, and the host
    model's envelope pinned from a ROM-generated fixture rather than hand-copied from a run.
-   `late 0` does not close 7-2 — the masked push section is still inside the grace by only
-   ~1.7 samples on the mean and 0.5 on the worst recorded window — and 7-3's listening
-   witness is still the acceptance half.
+   The chunked push has since landed and closed 7-2 on hardware: four runs on both units,
+   zero late services, `late in push 0/0`, work 28.600% / worst 29.781% (the expected
+   +0.150 pp price of four sections). 7-3's listening witness is the remaining acceptance
+   half.
    **C2 is met at 7-3**, and C2 says in terms that the stream declares the rate it is played
    at — a clause that survives the rate change, and indeed matters more for it: a rate chosen by
    measurement is exactly where a silent 1.024x reinterpretation would creep back in.

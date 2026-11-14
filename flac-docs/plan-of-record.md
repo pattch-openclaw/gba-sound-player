@@ -3694,7 +3694,7 @@ worst case. This image did not reproduce the phase-locked period-22 collision th
 and tempo, heard on both units with the source beside it — has not been asked. C2 remains
 unmet until 7-3 passes.
 
-### 7-2: the push mask is chunk-sized (landed in code, mGBA control; hardware run owed)
+### 7-2: the push mask is chunk-sized — hardware green on both units
 
 **The change.** `product_play_main.rs` no longer holds one critical section across a whole
 2,048-sample ring push. `Producer::push_frame_in_chunks` appends the frame in slices of at
@@ -3724,10 +3724,32 @@ work **25.507%** / worst **26.727%**, `dec 18.678%`, `attr 417451`, `conv 5.051%
 `push 0.805%`, `feed 0.971%`, `minlead 9680`, verdict PASSED. The host envelope was
 re-read from this run and `make product-play-test` is 14/14.
 
-**Still owed.** A hardware re-run of this image on GBA 001 and GBA SP, twice each, reading
-the same audit fields (`late`, `latep`, `worstp`, `dly`, `late in push`, `2nd src`, `disp`)
-and the stage shares. It is the hardware witness that the chunked mask does what the mGBA
-control predicts. Until that run is recorded, 7-2 is landed in code but not closed.
+**The hardware reading.** Four runs of the same image — GBA 001 ×2 and GBA SP ×2 — all
+green on the gate fields: `fr 80 und 0`, `per 289 ser 289 tail 1/464 void 0`,
+`replay 0 late 0 fed 0 drain 0`, `latep 0 worstp 0 dly 0 refus 0`,
+`late in push 0/0`, `2nd src 0/289`, `disp 000A`, `push 162304 cons 162304`,
+`pcm ok fifo ok ledg ok aud ok`. The measured shares are **work 28.600%**, worst frame
+**29.781%**, `dec 19.961%`, **`attr 446292`**, `conv 6.825%`, `push 0.816%`,
+`feed 0.997%`, `minlead 9120`. Against the whole-frame-push image (`ef1ed8ba…`, work
+28.450% / push 0.666% / maxwk 29.613%) the chunked push costs **+0.150 pp work**,
+**+0.150 pp push**, **+0.168 pp worst frame** and leaves decode, convert, every count,
+every digest and every late field unchanged. The hardware-versus-mGBA gap is still the
+Q15 shape: decode +6.87%, convert **+35.12%**, work **+12.13%**, attr +6.91%. The
+four-screen transcription is in [`playback-results.md`](playback-results.md) under
+"7-2: chunked push on hardware"; the `dev`/missing-`Minlead`/case slips are kept there.
+
+**Why this is the shipping path.** `agb`'s mixer offers 10,512 / 18,157 / 32,768 Hz and
+none is 16,384; this ROM already owns timer0-2, the sound-DMA re-arm and the FIFO feed, and
+`agb`'s `enable_dma_for_sound` writes no transfer count. Adopting the mixer would mean
+giving up the exact rate, so the custom IRQ feeder is the shipping path by arithmetic.
+`CHUNK_SAMPLES = 560` remains a free parameter rather than a transcription of agb's buffer
+size; it is kept because it is a multiple of four words and every measured run is stated on
+it.
+
+**What remains.** The named 7-2 latency defect is closed on hardware: zero late services on
+both units, twice each, with the mask now `CHUNK`-sized. 7-3 still needs the listening
+witness — pitch and tempo, heard on both units with the source beside it — and that is the
+remaining C2 clause.
 
 
 ## The width decision (what it is and is not safe for)
