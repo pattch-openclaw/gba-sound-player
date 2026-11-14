@@ -562,6 +562,16 @@ decision and new measured rows, not just a file swap; see
 [`flac-docs/playback-results.md`](flac-docs/playback-results.md) under "7-3 asset
 finding".
 
+**The master pipeline is implemented:** `gafp_pack.py --master` accepts real
+CONSTANT/FIXED-0..4/VERBATIM material without a measured product row (still no
+LPC, still 16,384 Hz / 16-bit / 2048-sample frames), `--emit-pin` writes the ROM
+pins, and `make master-pack INPUT=…` / `make master-play-rom INPUT=…` build the
+asset and a playable image. The first 9.9 s of `bioluminescent.wav` packs at
+80 frames / 162,304 samples, and `master-play.gba` (`78a02c9c…`, 645,072 B) runs
+in mGBA with `und 0`, `late 0`, 289/289 periods, PCM/FIFO MATCH, work **27.998%**
+/ worst **30.871%**, `attr 468011`. That is an mGBA control; the master shapes
+still need hardware rows before this is a C2 product.
+
 ## What is next
 
 One line per rung; the full plan, bars and invariants are in

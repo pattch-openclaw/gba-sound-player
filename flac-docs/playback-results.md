@@ -1259,3 +1259,31 @@ LPC, not fixed-order selection). So the next decision is one of:
 
 The first is the natural product path if real music is to be the audible witness; it needs
 hardware decode rows and a profile decision, not just a new `.gfp`.
+
+**The master pipeline now has a control.** `gafp_pack.py --master` accepts
+CONSTANT/FIXED-0..4/VERBATIM without a measured row while still refusing LPC and still
+enforcing 16,384 Hz / 16-bit / 2048-sample frames; `--emit-pin` writes the `gafp_pin.rs`
+shape, and `make master-play-rom INPUT=…` packs a source master into the gitignored
+`assets/master.gfp` + `src/master_pin.rs` and builds a playable image.
+
+Using the first 9.9 s of `bioluminescent.wav` (resampled to 16,384 Hz s16), the packer
+writes an 80-frame / 162,304-sample / 422,025 B master GAFP with census
+`constant x4, fixed1 x102, fixed2 x53, fixed3 x1`. The resulting
+`master-play.gba`, sha256
+`78a02c9c1f751570904e9f8a8f0f0796740db883cabcb861e4bb02ee6e785b21`, 645,072 B, runs
+headless in mGBA:
+
+```text
+manifest: frames=80 samples=162304 rate=16384 ch=2 bps=16 block=2048 max_fixed_order=3
+feed: pushed=162304 expected=162304 consumed=162304 frames=80/80 underflows=0
+period audit: hw_periods=289 serviced=289 und=0 coalesced=0 late=0 tail_periods=1 tail_real=464
+work/frame 587163 c = 27.998% (decode 20.935% convert 5.286% push 0.804% feeder 0.971%)
+worst frame 647432 c = 30.871%; attr 468011; minlead 9120
+PCM and FIFO pins MATCH; verdict PASSED — screen BLUE
+```
+
+So real master material at FIXED-1..3 is **inside the 16,384 Hz frame on the emulator**
+at ~28% work. That is an mGBA control, not hardware: the FIXED-1..3/CONSTANT rows still
+need the hardware measurement before the master asset can be a C2 product rather than a
+master-mode asset. It is the first end-to-end encode → GAFP → decode → playback run on
+the master path, and the image is the one to take to the units for that measurement.

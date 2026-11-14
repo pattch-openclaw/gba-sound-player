@@ -230,6 +230,9 @@ mod rom {
     /// The clip: the same FIXED-0 asset `gafp-check` guards and `flac-rom`
     /// decodes. Nothing here is generated for this ROM — the manifest, the frame
     /// walk and the pins all come from the shipped blob.
+    #[cfg(feature = "master-asset")]
+    static SONG: &[u8] = include_bytes!("../assets/master.gfp");
+    #[cfg(not(feature = "master-asset"))]
     static SONG: &[u8] = include_bytes!("../assets/spike_l0.gfp");
 
     // ------------------------------------------------- geometry, by shorter name

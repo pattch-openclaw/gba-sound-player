@@ -3770,6 +3770,19 @@ meet C2's FIXED-0-by-construction clause. The measurements are in
 [`playback-results.md`](playback-results.md) under "7-3 asset finding"; the first option is
 the natural product path if real music is the audible witness.
 
+**The master pipeline is now implemented.** `gafp_pack.py --master` accepts
+CONSTANT/FIXED-0..4/VERBATIM without a measured row, still refuses LPC and still enforces
+16,384 Hz / 16-bit / 2048-sample frames; `--emit-pin` writes the `gafp_pin.rs` shape.
+`make master-pack INPUT=…` writes the gitignored master asset and pin, and
+`make master-play-rom INPUT=…` builds a playable image. The first 9.9 s of
+`bioluminescent.wav` packs to 80 frames / 162,304 samples / 422,025 B with census
+`constant x4, fixed1 x102, fixed2 x53, fixed3 x1`; the resulting `master-play.gba`
+(`78a02c9c…`, 645,072 B) runs in mGBA with `und 0`, `late 0`, all 289 periods serviced,
+PCM/FIFO MATCH, **work 27.998% / worst frame 30.871%**, `attr 468011`, `minlead 9120`.
+That is an **mGBA control**: the FIXED-1..3/CONSTANT hardware rows are still needed before
+the master asset can be called a C2 product. The image is the one to take to the units for
+that measurement.
+
 
 ## The width decision (what it is and is not safe for)
 
