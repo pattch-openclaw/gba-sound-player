@@ -16,6 +16,12 @@ edition = "2024"
 # The corpus is the committed Phase 0 fixture, byte-for-byte, so the image is
 # measured only after its own decode reproduces the C-reference album pins.
 
+[features]
+# Per-frame dump for attribution work: one CSV-ish line per frame with the
+# measured window and the decoder's operation counts, fitted host-side. Off by
+# default so the gate's log stays the record.
+per-frame = []
+
 [dependencies]
 uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }
 # The overlay's ARM-mode, unchecked kernels (the measurement's second arm).

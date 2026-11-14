@@ -361,6 +361,28 @@ fn product_pass(
         all16 = fnv_bytes(all16, &fnv_i16(2_166_136_261, l16, r16).to_le_bytes());
         let net = raw.saturating_sub(overhead);
         cost.observe(f, net, decoder.ops());
+        #[cfg(feature = "per-frame")]
+        {
+            // Attribution rows, printed outside the window. `cyc` already has
+            // the calibration overhead subtracted, so a host-side fit sees the
+            // same number the summary reports.
+            let o = decoder.ops();
+            agb::println!(
+                "[uli-bench] pf f={} cyc={} bandsyms={} coded={} pairs={} quads={} nz={} zc={} raws={} escs={} ms={} long={}",
+                f,
+                net,
+                o.bandsyms,
+                o.coded_bands,
+                o.pairs,
+                o.quads,
+                o.nz,
+                o.zc,
+                o.raws,
+                o.escs,
+                o.ms,
+                o.long_codes
+            );
+        }
     }
     Ok((cost, all8, all16))
 }
