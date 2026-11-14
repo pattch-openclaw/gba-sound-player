@@ -3590,6 +3590,110 @@ that `attr` is on a screen, and the fixture should be pinned from *this* image's
 than a hand-copy. 7-2's push-section fix is done against the new rate and re-witnessed with the
 same `late in push` field, which now has a proven hardware answer of `1/1` to compare against.
 
+### 7-1 retarget landing (2026-11-13): 16,384 Hz, FIXED-0, mGBA green
+
+The owner ruled Q16 in the smallest form the tree needs: **FIXED-0 is the product and LPC is
+measurement-only**, so 16,384 Hz is the target of record rather than a way-station to 8,192.
+The retarget then landed as one change:
+
+- **Asset.** `scripts/frame_vectors.py` moved `DEVICE_RATE` to 16,384 and re-derived the
+  Hz-authored partials at that clock (`[(66,5),(98,4),(128,3),(41,2)]`, square 16, side 512).
+  The product clip keeps its ~10 s playing time rather than its old sample count: 79 full
+  2048-sample frames plus a 512-sample tail = **162,304 samples, 80 frames**, encoded
+  FIXED-0 at 16,384. `gen_spike_assets.sh` regenerated the spike regions and reference PCM;
+  `gen_gafp_blob.py` wrote the product blob and `gafp_pin.rs`. The shipped blob is
+  **439,396 bytes**, sha256 `6ad460ea0415579a87e11ade3ed602aad532e2e2cd185be575e1c75b0fc075f3`,
+  and declares 16,384 Hz through code `0b1101` + a 16-bit field on every frame.
+- **Guards.** `EncodeProfile::PRODUCT_SAMPLE_RATE_HZ` and the packer's `PRODUCT_CLOCK_HZ` /
+  `DEFAULT_RATE` moved together; `MEASURED_DECODE`'s FIXED-0 row is now
+  **21.25% mean / 21.36% worst of the 2,097,152-cycle frame** (the same 445,558 cycles),
+  and the LPC row **86.64% / 87.07%**. The row's `frames_sha256` still names the pre-7-0
+  frames, so a clean product pack prints its provenance warning — the honest state until a
+  hardware row measured on *these* frames exists. The refusal self-check now refuses
+  32,768 Hz as well as 32,000, 16,000 and the other tempting values.
+- **Geometry.** `PLAYBACK_RATE_HZ = 16_384`, `TICKS_PER_SAMPLE = 1_024`,
+  `frame_cycles(2048) = 2_097_152`, `PERIOD_CYCLES = 573_440`; `CHUNK_SAMPLES = 560`,
+  `RING_*`, `PREFILL_SAMPLES`, `DMA_WORDS` and the 16-sample grace are unchanged. The
+  screen/budget labels, `flac-rom`'s budget and the spike's budget moved with it.
+- **Fixtures and vectors.** The four `.gfp` fixtures are now
+  `p0_fixed0_mono_16384_b2048.gfp`, `p2_fixed0_stereo_16384_b2048.gfp`,
+  `p3_fixed0_midside_16384_b2048.gfp`, `x1_lpc_stereo_16384_b2048.gfp`; the refusal slug is
+  `rate_44100_at_16384_target`. `gen_gafp_fixtures.py` and `gen_frame_vectors.sh` regenerated
+  the tables; the product header vectors are `prod-rate16384-first` / `-last`.
+- **mGBA control.** `product-play.gba`, sha256
+  `ef1ed8baf0feadb696e0b0c5e3fb24c92ced31a6fbab6d40edfb5ce45b789351`, one headless run:
+  `fr 80 und 0`, `per 289 ser 289 tail 1/464 void 0`, `late 0`, `replay 0`, PCM and FIFO
+  pins `MATCH`, `work 25.363%` / worst frame `26.583%`, attributed decode `417,431 c/frame`,
+  `minlead 9680`, verdict PASSED. This is an emulator control, **not** 7-3 and not a C2
+  claim; the hardware reading, its `late in push` witness and the listening half are still
+  owed, and 7-2's push-mask fix is still owed at this rate.
+- **Host model.** The envelope constants were re-read from that run (decode/convert/push
+  sums 31,335,458 / 8,476,297 / 1,111,346 over 75 windows, feeder 1,629,347 over 289
+  periods), and `make product-play-test` is 14/14. The pitch witness now compares the
+  16,384 Hz 128 Hz anchor against the recorded 32,000 Hz design; the recorded design's
+  250 Hz partial is omitted from the negative leg because its period at 32,000 (128) is the
+  current anchor's period at 16,384, which would make the instrument measure the wrong tone.
+- **Gates.** `gafp-check`, `gafp-pack-check`, `flac-gates`, `spike-test`, `make test` and
+  `make check` all exit 0 on this tree. The ROM images build; `test-rom` still collects zero
+  cases, as recorded in the standing caveats.
+
+What this did not establish at landing time was any hardware figure at 16,384 Hz. The
+hardware reading below closes that half. C2 remains unmet until 7-3, because the listening
+witness has not been asked and 7-2's push fix is not in this image.
+
+### 7-1 retarget hardware reading (2026-11-13): both units green at 16,384 Hz
+
+**Image.** `product-play.gba`, sha256
+`ef1ed8baf0feadb696e0b0c5e3fb24c92ced31a6fbab6d40edfb5ce45b789351`, 662,840 B — the
+16,384 Hz FIXED-0 image from the retarget. Two runs on **GBA 001** and two on **GBA SP**,
+all four on a **BLUE screen**. The four screens are transcribed in full in
+[`playback-results.md`](playback-results.md) under "7-1, retarget hardware reading"; the
+transcription slips (`28/450%`, `cubs`, `drain -`, `16374`) are kept there rather than tidied.
+
+All four runs agree on every measured field:
+
+- `fr 80 und 0`, `per 289 ser 289`, `tail 1/464`, `void 0`, `refus 0`
+- **`replay 0 late 0 fed 0 drain 0`**, `latep 0 worstp 0 dly 0`
+- `late in push 0/0`, `2nd src 0/289`, `disp 0008`
+- `push 162304 cons 162304`, `pcm ok fifo ok`, `ledg ok`, `aud ok`
+- **work 28.450%**, worst frame **29.613%**
+- **`dec 19.961%`, `attr 446306`**
+- convert 6.824%, push 0.666%, feeder 0.997%
+- `minlead 9120` samples = **16.3 periods = 0.557 s**
+- no `rate …!… pitch` row: declared 16,384 Hz = played 16,384 Hz on silicon
+
+The shares sum to 28.448% against the 28.450% total (rounding), so the stage instrument is
+self-consistent on silicon too.
+
+**Same-image hardware minus mGBA.** mGBA on the same image reads work 25.363% / dec 18.677%
+/ attr 417,431, with the same ledger and `late 0`. Per leg, against the 2,097,152-cycle
+frame:
+
+| leg | mGBA | hardware | Δ c/frame | Δ |
+|---|---:|---:|---:|---:|
+| decode window | 391,685 | 418,613 | +26,928 | +6.87% |
+| convert | 105,948 | 143,110 | **+37,162** | **+35.08%** |
+| push | 13,883 | 13,967 | +84 | +0.60% |
+| feeder | 20,363 | 20,909 | +545 | +2.68% |
+| **work** | **531,901** | **596,640** | **+64,739** | **+12.17%** |
+| attributed decode | 417,431 | **446,306** | +28,875 | +6.92% |
+
+That is the same leg-shaped gap measured at 32,768 Hz: decode is inside 6a-7b's 3.7–6.9%
+non-kernel band, and **convert is again the +35% outlier**. Q15 is re-confirmed at the new
+rate, not retired; convert is now ~7% of the frame instead of ~14%. `attr 446,306 c/frame` is
+the live-producer attributed decode figure at 16,384 Hz (21.28% of the frame). It is **not**
+6b-2's decode-slot row and must not be averaged with it.
+
+**What it closes, and what it does not.** The retarget's hardware half is established: both
+units, twice each, zero underruns, zero late services, exact sample counts and digests, rate
+identity observed. But `late 0` four times is not 7-2: the push section still masks interrupts
+for the measured 14,680 cycles — **14.3 samples** against the 16-sample grace on the mean and
+**15.46** on the worst push window recorded for that section, leaving only 0.5 samples on that
+worst case. This image did not reproduce the phase-locked period-22 collision that the
+32,768 Hz image hit; the fix is still owed at this rate. And 7-3's listening witness — pitch
+and tempo, heard on both units with the source beside it — has not been asked. C2 remains
+unmet until 7-3 passes.
+
 
 ## The width decision (what it is and is not safe for)
 

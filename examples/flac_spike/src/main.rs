@@ -109,22 +109,20 @@ mod rom {
     const COLOR_PASS: agb::display::Rgb15 = Rgb::new(0, 0, 255).to_rgb15();
     const COLOR_FAIL: agb::display::Rgb15 = Rgb::new(255, 0, 0).to_rgb15();
 
-    /// Real-time decode budget per frame at the initial profile, derived
+    /// Real-time decode budget per frame at the 16,384 Hz rung, derived
     /// through the shared `stats::real_time_budget` at compile time (never
-    /// recalled, never divides at runtime): 2048 samples / 32768 Hz = 1/16 s
-    /// = 0.0625 s; 0.0625 s × 16,780,000 Hz = 1,048,750 cycles/frame —
-    /// the FLAC.md plan's number.
+    /// recalled, never divides at runtime): 2048 samples / 16,384 Hz = 1/8 s
+    /// = 0.125 s; 0.125 s × 16,780,000 Hz = 2,097,500 cycles/frame.
     ///
     /// Since plan item 7-0 this is also the window the embedded frames
     /// actually get: a stream is encoded at the rate it is played at, so the
     /// budget the screen verdict compares against and the stream's own
     /// nominal frame period are one and the same number —
     /// `tests/spike_witness.rs` pins the two derivations meeting.
-    /// Before 7-0 the clips declared 32,000 Hz, whose true window is
-    /// 1,073,920: this budget was then 2.34375% tighter than real-time at
-    /// the declared rate, and that gap was the Q14 defect, not a margin.
+    /// The retarget moved this from the 32,768 Hz rung (1,048,750 cycles) to
+    /// 16,384 Hz; the old figures stay in the records as historical rows.
     /// The screen verdict compares each arm's worst NET window against this.
-    const BUDGET_CYCLES_PER_FRAME: u32 = real_time_budget(2048, 32_768);
+    const BUDGET_CYCLES_PER_FRAME: u32 = real_time_budget(2048, 16_384);
 
     /// Calibration samples per arm. Determinism is the premise of the whole
     /// harness, so the calibration doubles as a determinism probe: 5 empty

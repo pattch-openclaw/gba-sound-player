@@ -513,6 +513,39 @@ stages are still mGBA-only.
 Which numbers may be quoted, how eras and denominators differ, and the full
 ledger: [`flac-docs/measurements.md`](flac-docs/measurements.md).
 
+## Retarget status (2026-11-13): 16,384 Hz, FIXED-0, green on both units
+
+The owner ruled Q16 as the product needs it — **FIXED-0 is the product, LPC is
+measurement-only** — and the 16,384 Hz retarget has landed in the tree. The
+product asset is now 80 frames / 162,304 samples / 439,396 B, declares 16,384 Hz
+on every frame, and the geometry is `1,024` ticks/sample, `2,097,152` cycles per
+2048-sample frame, `573,440` cycles per period; `CHUNK`, ring, prefill and the
+16-sample grace are unchanged. The packer, profile, fixtures, vectors and the
+spike's budget moved with it. A headless mGBA run of `product-play.gba`
+(`ef1ed8ba…`) is green — 289/289 periods, `und 0`, `late 0`, PCM/FIFO pins
+matched, `work 25.363%`, worst frame `26.583%`, attributed decode `417,431
+c/frame` — and `make product-play-test` is 14/14. The full landing record,
+including the provenance warning that still prints for the inherited FIXED-0
+cost row, is in [`flac-docs/plan-of-record.md`](flac-docs/plan-of-record.md)
+under "7-1 retarget landing".
+
+**7-1's retarget hardware reading then came back green on both units, twice each:
+BLUE screen, `fr 80 und 0`, `per 289 ser 289`, `replay 0 late 0 fed 0 drain 0`,
+`late in push 0/0`, exact sample counts and digests, and no rate/pitch row.**
+Hardware work is **28.450%** / worst frame **29.613%**, decode window **19.961%**,
+attributed decode **446,306 c/frame**, convert 6.824%, push 0.666%, feeder 0.997%,
+minimum lead 9,120 samples (0.557 s). The hardware-versus-mGBA gap is the same
+leg-shaped result measured at 32,768 Hz: decode +6.87%, convert **+35.08%**, work
++12.17% — Q15 re-confirmed, not retired. The four screens are transcribed in
+[`flac-docs/playback-results.md`](flac-docs/playback-results.md) under "7-1,
+retarget hardware reading".
+
+This is **not** C2 yet: `late 0` four times does not close 7-2, because the push
+section still masks interrupts for ~14.3 samples against the 16-sample grace
+(15.46 on the worst push window ever recorded), and 7-3's listening witness has
+not been asked. The push fix at this rate and the listening run are the remaining
+steps.
+
 ## What is next
 
 One line per rung; the full plan, bars and invariants are in
@@ -581,7 +614,15 @@ unchanged, and the per-rung state lives in the plan of record:
    chosen". "Highest achievable" still needs a margin bar to be judgeable, which is **Q16**; and
    because LPC projects to 86.6% of a 16,384 Hz frame, **8,192 Hz stays the only rung where
    predicted frames are plausible** — so whether 16,384 Hz is the ceiling or a way-station is that
-   bar's answer. 7-0 and 7-1 re-run at 16,384 Hz.
+   bar's answer. 7-0 and 7-1 were re-run at 16,384 Hz: the retarget hardware reading is
+   green on both units, twice each (`fr 80 und 0`, `per 289 ser 289`, `late 0`, `late in
+   push 0/0`, work 28.450% / worst 29.613%, `attr 446306`), recorded in
+   [`flac-docs/playback-results.md`](flac-docs/playback-results.md). What 7-1 still owes is
+   narrower: the packer's `fixed0 @ b2048` row transcribed from these bytes, and the host
+   model's envelope pinned from a ROM-generated fixture rather than hand-copied from a run.
+   `late 0` does not close 7-2 — the masked push section is still inside the grace by only
+   ~1.7 samples on the mean and 0.5 on the worst recorded window — and 7-3's listening
+   witness is still the acceptance half.
    **C2 is met at 7-3**, and C2 says in terms that the stream declares the rate it is played
    at — a clause that survives the rate change, and indeed matters more for it: a rate chosen by
    measurement is exactly where a silent 1.024x reinterpretation would creep back in.

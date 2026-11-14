@@ -45,7 +45,7 @@ and Q14's ruling are the reason: `gafp_pack.py` refuses a stream that declares a
 rate other than the clock it budgets against, so a 32,000 Hz fixture could only
 ever be a refusal leg here — and a test set that had to *resample* its way to the
 product clock would be proving a path the product does not take. The sample counts
-and periods are therefore stated at 32,768 Hz like the product clip's: 5,000
+and periods are therefore stated at 16,384 Hz like the product clip's: 5,000
 samples is 5000/2**15 s, exact in binary, and the periods come from
 `frame_vectors.PARTIALS_DEVICE` (Hz-authored), not from periods chosen at another
 rate.
@@ -107,14 +107,14 @@ def fixtures():
     """
     return [
         dict(
-            name="p0_fixed0_mono_32768_b2048.gfp", src="mono_5000.wav",
+            name="p0_fixed0_mono_16384_b2048.gfp", src="mono_5000.wav",
             channels=1, lpc=0, midside=False, allow=[],
             why=("product profile, mono: the smallest shape the container has to "
                  "carry and the one the manifest's mono channel-config code is "
                  "written for; 3 frames, the last 904 samples."),
         ),
         dict(
-            name="p2_fixed0_stereo_32768_b2048.gfp", src="stereo_5000.wav",
+            name="p2_fixed0_stereo_16384_b2048.gfp", src="stereo_5000.wav",
             channels=2, lpc=0, midside=False, allow=[],
             why=("product profile, independent L/R stereo (`--no-midside`): the "
                  "assignment whose two subframes are plain left and right. "
@@ -123,7 +123,7 @@ def fixtures():
                  "redundant."),
         ),
         dict(
-            name="p3_fixed0_midside_32768_b2048.gfp", src="stereo_5000.wav",
+            name="p3_fixed0_midside_16384_b2048.gfp", src="stereo_5000.wav",
             channels=2, lpc=0, midside=True, allow=[],
             why=("product profile, mid/side (`-m`): the decorrelated assignment "
                  "whose side slot is coded at bps + 1 (the measured seam in "
@@ -132,7 +132,7 @@ def fixtures():
                  "PCM pins below are what prove it did."),
         ),
         dict(
-            name="x1_lpc_stereo_32768_b2048.gfp", src="stereo_5000.wav",
+            name="x1_lpc_stereo_16384_b2048.gfp", src="stereo_5000.wav",
             channels=2, lpc=4, midside=True,
             allow=["allow-lpc", "allow-over-budget"],
             why=("NOT a product blob, and the reason this file exists: the same "
@@ -157,13 +157,13 @@ def refusals():
     return [
         dict(name="lpc at the product profile", slug="lpc_at_product_profile",
              src="l4_stereo.flac", extra=[],
-             want=["real LPC subframes", "decodes at 174.14% of the frame"],
+             want=["real LPC subframes", "decodes at 87.07% of the frame"],
              why="the asset C2 cannot play, refused by the frames, not by a "
                  "header field that reads 0"),
-        dict(name="44,100 Hz at the 32,768 Hz target",
-             slug="rate_44100_at_32768_target", src="r44100_stereo.flac",
+        dict(name="44,100 Hz at the 16,384 Hz target",
+             slug="rate_44100_at_16384_target", src="r44100_stereo.flac",
              extra=[],
-             want=["sample rate 44100 Hz is not the target 32768 Hz"],
+             want=["sample rate 44100 Hz is not the target 16384 Hz"],
              why="a rate the container can express and this target has no "
                  "measured path for — and, since Q14 and plan item 7-0, no "
                  "interpretation either: the packer refuses it rather than "
@@ -270,11 +270,11 @@ TABLE_HEADER = """# flac-lite GAFP asset facts -- GENERATED
 #   came from -- a second implementation, not the encoder's own word.
 # encoder: %(version)s
 #
-# Every accepted blob here declares 32,768 Hz, and so does every source WAV this
+# Every accepted blob here declares 16,384 Hz, and so does every source WAV this
 # file synthesizes. That is not incidental: since Q14 (ruled 2026-11-11) and plan
 # item 7-0, `gafp_pack.py` refuses any stream whose declared rate is not the clock
 # its measured rows are budgeted against, so an off-rate source could only ever
-# reach this table as a refusal leg. `rate_44100_at_32768_target` is that leg, and
+# reach this table as a refusal leg. `rate_44100_at_16384_target` is that leg, and
 # the reason it is kept. A rate that *looks* close to the target — 32,000 Hz,
 # 1.024x, +41.06 cents — is refused exactly like 44,100 Hz is: the declared rate is
 # a validity check, never something the packer reinterprets.

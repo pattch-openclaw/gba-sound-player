@@ -95,7 +95,7 @@ impl Leg {
 pub struct ClipSummary {
     /// Frames timed — the divisor of every mean below.
     pub count: usize,
-    /// The frame budget the "%" column divides by (32,768 Hz, 2048 samples).
+    /// The frame budget the "%" column divides by (16,384 Hz, 2048 samples).
     pub budget: u32,
     /// The i32 product path (`TableCountKernel`): 6a-7's control and the
     /// baseline both marginals are read against.
