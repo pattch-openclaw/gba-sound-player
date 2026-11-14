@@ -44,6 +44,10 @@
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod decoder;
+
+pub use decoder::{GbaDecoder, HotState};
+
 use uli_lite::format::{H, M};
 
 /// The synthesis tables: cartridge-resident by default (they are read-only
@@ -86,14 +90,30 @@ fn hi32(v: i64) -> i32 {
     (v >> 32) as i32
 }
 
+// Explicit compares rather than `i32::clamp`: LLVM lowers `clamp` to an
+// out-of-line generic that the ARM kernels then call through an interworking
+// thunk. On this target that thunk resolved into an ARM function and hung the
+// kernel; the compare form is also two instructions instead of a call.
 #[inline(always)]
 fn sat16(v: i32) -> i16 {
-    v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+    if v > i16::MAX as i32 {
+        i16::MAX
+    } else if v < i16::MIN as i32 {
+        i16::MIN
+    } else {
+        v as i16
+    }
 }
 
 #[inline(always)]
 fn sat8(v: i32) -> i8 {
-    v.clamp(i8::MIN as i32, i8::MAX as i32) as i8
+    if v > i8::MAX as i32 {
+        i8::MAX
+    } else if v < i8::MIN as i32 {
+        i8::MIN
+    } else {
+        v as i8
+    }
 }
 
 /// Pre-twiddle, ARM mode, unchecked addressing.

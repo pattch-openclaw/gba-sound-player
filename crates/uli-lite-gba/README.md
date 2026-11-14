@@ -53,12 +53,28 @@ WAITCNT 4/2, 262,144-cycle period:
 
 Both arms pinned; the overlay frame equals `core_rest + 2 × overlay_seq`
 within 0.02%. Kernel sequence per channel: 243,619 vs the core's 667,264.
-The remaining 837,092 cycles/frame of non-synthesis work is PR B's target.
+
+## Measured result (PR B, 2026-11-14)
+
+`GbaDecoder` (`src/decoder.rs`) now carries the entropy/bit-reader/dequant/M/S
+hot path in ARM mode with the 32-bit cached bit window. Full frame:
+
+| arm | worst | mean |
+|---|---:|---:|
+| core kernels (same-image control) | 2,681,000 (1023%) | 2,175,635 (830%) |
+| `ArmKernels` | 1,677,608 (640%) | 1,171,161 (447%) |
+| **`GbaDecoder` (full product path)** | **533,605 (204%)** | **463,660 (177%)** |
+
+All pinned, `xover=0 hfnz=0`, on-target twin passed. `HotState` is placed in
+EWRAM in the bench: an 8 KiB `.iwram` placement left less stack than the
+≈15.0 KiB the product path needs and overflowed on target. Synthesis is now
+63% of the frame; the kernels are PR C's target.
 
 ## What it is not
 
-- Not yet the full product decoder: the bit reader, Huffman, dequant and M/S
-  are still the core's Thumb/ROM code. PR B moves them here.
+- Not yet the complete product decoder: `GbaDecoder` (PR B) covers the bit
+  reader, Huffman, dequant, M/S and synthesis for the measured path, but
+  playback, the UI and the feeder are PR D.
 - Not asm. It is Rust code with ARM-mode codegen and placement; hand-written
   kernels (PR C) are a later, measured decision.
 - Not portable: `.iwram`, ARM state and unchecked addressing are deliberate

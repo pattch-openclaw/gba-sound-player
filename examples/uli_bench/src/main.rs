@@ -55,8 +55,9 @@
 use agb::display::Rgb;
 use agb::timer::{Divider, Timers};
 use uli_lite::format::{H, M};
-use uli_lite::{Album, Decoder, DecoderState, imdct};
+use uli_lite::{Album, CodeTables, Decoder, DecoderState, imdct};
 use uli_lite_gba as overlay;
+use uli_lite_gba::{GbaDecoder, HotState};
 
 /// The committed Phase 0 corpus, byte-for-byte.
 static ALBUM: &[u8] = include_bytes!("../../../crates/uli-lite/tests/fixtures/uli2_tiny.uli");
@@ -64,6 +65,36 @@ static ALBUM: &[u8] = include_bytes!("../../../crates/uli-lite/tests/fixtures/ul
 /// Caller-owned decoder state, in EWRAM (the ~100 KiB Huffman LUTs dominate).
 #[unsafe(link_section = ".ewram")]
 static mut STATE: DecoderState = DecoderState::new();
+
+/// The product decoder's code tables (~100 KiB) belong in EWRAM.
+#[unsafe(link_section = ".ewram")]
+static mut PRODUCT_TABLES: CodeTables = CodeTables::new();
+
+/// The product decoder's hot transform/FFT/overlap buffers (8 KiB), in EWRAM.
+///
+/// PR B first placed these in IWRAM and the image hung on target: the product
+/// path needs ~15 KiB of stack (measured 0x03007f00 -> 0x03004440), and an 8 KiB
+/// `.iwram` static leaves only ~14 KiB between `__iwram_end` and the stack top,
+/// so the stack overflowed into `PRODUCT_HOT` and then into the ARM/Thumb
+/// interworking thunks past `__iwram_end`. The CPU then branched into
+/// uninitialised IWRAM (`pc=0x00000004`, the undefined-instruction vector).
+/// 8 KiB of buffers is a U6 placement decision; it is EWRAM here so the
+/// measurement is of the hot *path*, not of an IWRAM budget accident.
+#[unsafe(link_section = ".ewram")]
+static mut PRODUCT_HOT: HotState = HotState::new();
+
+/// Shared output buffers for the measurement passes. Keeping them out of the
+/// stack matters: the product code and its 8 KiB hot state occupy most of
+/// IWRAM, and the bench's ~3 KiB per-pass arrays pushed the stack into the
+/// hot state (PR B's first on-target run did exactly that).
+#[unsafe(link_section = ".ewram")]
+static mut OUT8L: [i8; M] = [0; M];
+#[unsafe(link_section = ".ewram")]
+static mut OUT8R: [i8; M] = [0; M];
+#[unsafe(link_section = ".ewram")]
+static mut OUT16L: [i16; M] = [0; M];
+#[unsafe(link_section = ".ewram")]
+static mut OUT16R: [i16; M] = [0; M];
 
 /// Kernel inputs/outputs live in EWRAM here. The overlay's job is to move the
 /// hot ones to IWRAM; this arm deliberately keeps the as-shipped placement.
@@ -272,31 +303,64 @@ fn fill_kx(buf: &mut [i32; M]) {
 /// One full-album decode through kernel set `K`, every frame timed, with the
 /// album pins folded on the same samples. `PortableKernels` is the control;
 /// `uli_lite_gba::ArmKernels` is the product arm.
+#[inline(never)]
 fn timed_pass<K: uli_lite::Kernels>(
     album: Album<'_>,
     state: &mut DecoderState,
     counter: &mut Counter<'_>,
     overhead: u32,
+    l8: &mut [i8; M],
+    r8: &mut [i8; M],
+    l16: &mut [i16; M],
+    r16: &mut [i16; M],
 ) -> Result<(FrameCost, u32, u32), uli_lite::Error> {
     let mut decoder = Decoder::<K>::with_kernels(album, state)?;
-    let mut l8 = [0i8; M];
-    let mut r8 = [0i8; M];
-    let mut l16 = [0i16; M];
-    let mut r16 = [0i16; M];
     let mut cost = FrameCost::new();
     let mut all8 = 2_166_136_261u32;
     let mut all16 = 2_166_136_261u32;
     for f in 0..album.n_frames() {
         let (res, raw) = timed(counter, || {
-            decoder.decode_frame(&mut l8, &mut r8, Some(&mut l16), Some(&mut r16))
+            decoder.decode_frame(l8, r8, Some(l16), Some(r16))
         });
         res?;
         // Hash outside the window: proves the timed decode is the pinned
         // decode, not just a decode that consumed the same number of cycles.
-        all8 = fnv_bytes(all8, &fnv_i8(2_166_136_261, &l8, &r8).to_le_bytes());
-        all16 = fnv_bytes(all16, &fnv_i16(2_166_136_261, &l16, &r16).to_le_bytes());
+        all8 = fnv_bytes(all8, &fnv_i8(2_166_136_261, l8, r8).to_le_bytes());
+        all16 = fnv_bytes(all16, &fnv_i16(2_166_136_261, l16, r16).to_le_bytes());
         let net = raw.saturating_sub(overhead);
         cost.observe(f, net, decoder.state().ops());
+    }
+    Ok((cost, all8, all16))
+}
+
+/// One full-album decode through the GBA-first product decoder: ARM-mode,
+/// unchecked hot path, 32-bit bit reader, product tables in EWRAM and hot
+/// buffers in IWRAM.
+#[inline(never)]
+fn product_pass(
+    album: Album<'_>,
+    tables: &mut CodeTables,
+    hot: &mut HotState,
+    counter: &mut Counter<'_>,
+    overhead: u32,
+    l8: &mut [i8; M],
+    r8: &mut [i8; M],
+    l16: &mut [i16; M],
+    r16: &mut [i16; M],
+) -> Result<(FrameCost, u32, u32), uli_lite::Error> {
+    let mut decoder = GbaDecoder::new(album, tables, hot)?;
+    let mut cost = FrameCost::new();
+    let mut all8 = 2_166_136_261u32;
+    let mut all16 = 2_166_136_261u32;
+    for f in 0..album.n_frames() {
+        let (res, raw) = timed(counter, || {
+            decoder.decode_frame(l8, r8, Some(l16), Some(r16))
+        });
+        res?;
+        all8 = fnv_bytes(all8, &fnv_i8(2_166_136_261, l8, r8).to_le_bytes());
+        all16 = fnv_bytes(all16, &fnv_i16(2_166_136_261, l16, r16).to_le_bytes());
+        let net = raw.saturating_sub(overhead);
+        cost.observe(f, net, decoder.ops());
     }
     Ok((cost, all8, all16))
 }
@@ -358,10 +422,10 @@ fn run(gba: &mut agb::Gba) -> bool {
     );
 
     let state = unsafe { &mut *core::ptr::addr_of_mut!(STATE) };
-    let mut l8 = [0i8; M];
-    let mut r8 = [0i8; M];
-    let mut l16 = [0i16; M];
-    let mut r16 = [0i16; M];
+    let l8 = unsafe { &mut *core::ptr::addr_of_mut!(OUT8L) };
+    let r8 = unsafe { &mut *core::ptr::addr_of_mut!(OUT8R) };
+    let l16 = unsafe { &mut *core::ptr::addr_of_mut!(OUT16L) };
+    let r16 = unsafe { &mut *core::ptr::addr_of_mut!(OUT16R) };
 
     // -----------------------------------------------------------------
     // 1. Correctness pass: the pins the C reference produced.
@@ -377,12 +441,12 @@ fn run(gba: &mut agb::Gba) -> bool {
     let mut all16 = 2_166_136_261u32;
     let mut frames = 0u32;
     for _ in 0..album.n_frames() {
-        if let Err(e) = decoder.decode_frame(&mut l8, &mut r8, Some(&mut l16), Some(&mut r16)) {
+        if let Err(e) = decoder.decode_frame(l8, r8, Some(l16), Some(r16)) {
             agb::println!("[uli-bench] FAIL decode frame {}: {:?}", frames, e);
             return false;
         }
-        all8 = fnv_bytes(all8, &fnv_i8(2_166_136_261, &l8, &r8).to_le_bytes());
-        all16 = fnv_bytes(all16, &fnv_i16(2_166_136_261, &l16, &r16).to_le_bytes());
+        all8 = fnv_bytes(all8, &fnv_i8(2_166_136_261, l8, r8).to_le_bytes());
+        all16 = fnv_bytes(all16, &fnv_i16(2_166_136_261, l16, r16).to_le_bytes());
         frames += 1;
     }
     let diag_ok = decoder.state().xover() == 0 && decoder.state().hfnz() == 0;
@@ -436,14 +500,22 @@ fn run(gba: &mut agb::Gba) -> bool {
     //    The core arm is the control; the overlay arm is the product path:
     //    same bitstream/dequant/M/S/frame code, ARM-mode kernels in .iwram.
     // -----------------------------------------------------------------
-    let (cost_core, core8, core16) =
-        match timed_pass::<uli_lite::PortableKernels>(album, state, &mut counter, overhead) {
-            Ok(v) => v,
-            Err(e) => {
-                agb::println!("[uli-bench] FAIL core timed pass: {:?}", e);
-                return false;
-            }
-        };
+    let (cost_core, core8, core16) = match timed_pass::<uli_lite::PortableKernels>(
+        album,
+        state,
+        &mut counter,
+        overhead,
+        l8,
+        r8,
+        l16,
+        r16,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            agb::println!("[uli-bench] FAIL core timed pass: {:?}", e);
+            return false;
+        }
+    };
     let core_pin_ok = core8 == EXPECTED_INT8 && core16 == EXPECTED_INT16;
     print_cost("core", &cost_core);
     agb::println!(
@@ -453,14 +525,22 @@ fn run(gba: &mut agb::Gba) -> bool {
         if core_pin_ok { "PASS" } else { "FAIL" }
     );
 
-    let (cost_ovl, ovl8, ovl16) =
-        match timed_pass::<uli_lite_gba::ArmKernels>(album, state, &mut counter, overhead) {
-            Ok(v) => v,
-            Err(e) => {
-                agb::println!("[uli-bench] FAIL overlay timed pass: {:?}", e);
-                return false;
-            }
-        };
+    let (cost_ovl, ovl8, ovl16) = match timed_pass::<uli_lite_gba::ArmKernels>(
+        album,
+        state,
+        &mut counter,
+        overhead,
+        l8,
+        r8,
+        l16,
+        r16,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            agb::println!("[uli-bench] FAIL overlay timed pass: {:?}", e);
+            return false;
+        }
+    };
     let ovl_pin_ok = ovl8 == EXPECTED_INT8 && ovl16 == EXPECTED_INT16;
     print_cost("ovl", &cost_ovl);
     agb::println!(
@@ -468,6 +548,37 @@ fn run(gba: &mut agb::Gba) -> bool {
         ovl8,
         ovl16,
         if ovl_pin_ok { "PASS" } else { "FAIL" }
+    );
+
+    // PR B: the GBA-first product decoder (ARM/IWRAM hot path, 32-bit bit
+    // reader, unchecked Huffman/dequant/M/S) with its tables in EWRAM and its
+    // hot buffers in IWRAM.
+    let product_tables = unsafe { &mut *core::ptr::addr_of_mut!(PRODUCT_TABLES) };
+    let product_hot = unsafe { &mut *core::ptr::addr_of_mut!(PRODUCT_HOT) };
+    let (cost_prod, prod8, prod16) = match product_pass(
+        album,
+        product_tables,
+        product_hot,
+        &mut counter,
+        overhead,
+        l8,
+        r8,
+        l16,
+        r16,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            agb::println!("[uli-bench] FAIL product timed pass: {:?}", e);
+            return false;
+        }
+    };
+    let prod_pin_ok = prod8 == EXPECTED_INT8 && prod16 == EXPECTED_INT16;
+    print_cost("prod", &cost_prod);
+    agb::println!(
+        "[uli-bench] prod pins int8={:08x} int16={:08x} [{}]",
+        prod8,
+        prod16,
+        if prod_pin_ok { "PASS" } else { "FAIL" }
     );
 
     // -----------------------------------------------------------------
@@ -636,9 +747,11 @@ fn run(gba: &mut agb::Gba) -> bool {
     let pass = pin_ok
         && core_pin_ok
         && ovl_pin_ok
+        && prod_pin_ok
         && calib_ok
         && !cost_core.wrapped
         && !cost_ovl.wrapped
+        && !cost_prod.wrapped
         && kern_ok
         && ovl_ok
         && twin_ok;

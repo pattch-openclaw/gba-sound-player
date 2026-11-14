@@ -29,7 +29,8 @@ make uli-bench       # run headless in mGBA, write uli-bench.log
 
 PR B uses this image as its before/after control: the core arm and the
 overlay arm share the bitstream/dequant/M/S/frame code, so a change there
-moves both; a kernel-only change moves only the overlay arm.
+moves both; a kernel-only change moves only the overlay arm. The product arm
+(`GbaDecoder`, the full PR B hot path) is timed in the same image.
 
 The ROM prints `PASS`/`FAIL` and then the `mgba-test-runner` exit sentinel, so
 the run ends immediately instead of waiting for a timeout. It is an mGBA
@@ -49,11 +50,14 @@ Full frame, mGBA, WAITCNT 4/2, 129-frame corpus, 262,144-cycle period:
 
 | arm | worst | mean |
 |---|---:|---:|
-| core kernels (control) | 2,676,986 (1021%) | 2,171,620 (828%) |
-| `ArmKernels` | 1,829,247 (698%) | 1,322,800 (505%) |
+| core kernels (control) | 2,681,000 (1023%) | 2,175,635 (830%) |
+| `ArmKernels` | 1,677,608 (640%) | 1,171,161 (447%) |
+| **`GbaDecoder` (PR B product path)** | **533,605 (204%)** | **463,660 (177%)** |
 
-The overlay frame equals `core_rest + 2 × overlay_seq` within 0.02%, which is
-why the per-kernel arms are kept. Absolute frame numbers are image-specific at
+The overlay frame equals `core_rest + 2 × overlay_seq` within 0.1%, which is
+why the per-kernel arms are kept. For the product arm, `rest = frame − 2 ×
+overlay_seq` = 195,484 cycles/frame (837,092 at PR A), so synthesis is 63% of
+the frame. Absolute frame numbers are image-specific at
 this fetch-dominated scale (the core control moved ~8% from the Phase 1b image
 with an unchanged kernel sequence); compare arms **within one image**. The
 numbers, the caveats and the plan consequences are in

@@ -14,6 +14,12 @@ categories = ["multimedia::audio", "no-std"]
 # not promise these functions, and the portable kernels are the correctness
 # reference the overlay's kernels are tested against.
 kernels = []
+# The GBA product's hot-path view of the parsed tables. `product` implies
+# `kernels` (the product also needs the synthesis constants). The safe core
+# keeps its fields private in every other build; this feature exists so
+# `uli-lite-gba` can run the same table layout with ARM-mode, unchecked code
+# instead of duplicating the parser.
+product = ["kernels"]
 
 [dependencies]
 # Intentionally EMPTY. The GBA target is core-only, and the decoder is

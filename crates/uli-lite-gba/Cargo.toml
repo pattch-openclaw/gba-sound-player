@@ -13,7 +13,7 @@ publish = false
 [dependencies]
 # `kernels` exposes the portable kernels (the correctness reference) and the
 # synthesis tables the overlay twin is tested against.
-uli-lite = { path = "../uli-lite", features = ["kernels"] }
+uli-lite = { path = "../uli-lite", features = ["kernels", "product"] }
 
 [features]
 # Copies the 8,672 B of synthesis tables (PERM/PRE/POST/TW/WIN) into `.iwram`
