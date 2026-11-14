@@ -3694,6 +3694,41 @@ worst case. This image did not reproduce the phase-locked period-22 collision th
 and tempo, heard on both units with the source beside it — has not been asked. C2 remains
 unmet until 7-3 passes.
 
+### 7-2: the push mask is chunk-sized (landed in code, mGBA control; hardware run owed)
+
+**The change.** `product_play_main.rs` no longer holds one critical section across a whole
+2,048-sample ring push. `Producer::push_frame_in_chunks` appends the frame in slices of at
+most `CHUNK_SAMPLES = 560`, each slice a complete `RingFeed::push_bytes` under its own
+short critical section. `push_bytes` credits only after the copy, so the feeder sees the
+previous slice or the new one, never a torn one; interrupts are live between slices, which
+is the point. `push_start_period` is still written once, at the first slice's start: the
+whole sequence is shorter than one 560-sample period, so a boundary crossing any slice
+still makes the handler's period equal that counter + 1 and the `late in push` witness
+remains exact.
+
+**The arithmetic this buys.** The measured whole-frame mask was **14,680 c** — **14.3
+samples** at 1,024 ticks/sample against the **16-sample** re-arm grace, with the worst
+recorded push window **15,831 c / 15.46 samples** leaving only **0.5** samples. A
+`CHUNK`-sized slice scales that window to about **4,014 c = 3.92 samples**, a **4.08×**
+margin. The price is visible and small: on the same image, the push stage's whole-sequence
+mean rises from 14,817 to **18,018 c/frame** (four sections instead of one), work
+25.363% → **25.507%** (+0.144 pp), worst frame 26.583% → **26.727%**. Decode and convert
+are unchanged; there are still zero underflows, zero late services, and both PCM/FIFO pins
+match.
+
+**Control image.** `product-play.gba`, sha256
+`2abf61e8b18f4bac46ed680d2320f1b9237b3586e35e3f167f8aef2885eab5ff`, **662,440 B**. One
+headless mGBA run: `fr 80 und 0`, `per 289 ser 289 tail 1/464 void 0`,
+`replay 0 late 0 fed 0 drain 0`, `late in push 0/0`, `2nd src 0/289`, `disp 000A`,
+work **25.507%** / worst **26.727%**, `dec 18.678%`, `attr 417451`, `conv 5.051%`,
+`push 0.805%`, `feed 0.971%`, `minlead 9680`, verdict PASSED. The host envelope was
+re-read from this run and `make product-play-test` is 14/14.
+
+**Still owed.** A hardware re-run of this image on GBA 001 and GBA SP, twice each, reading
+the same audit fields (`late`, `latep`, `worstp`, `dly`, `late in push`, `2nd src`, `disp`)
+and the stage shares. It is the hardware witness that the chunked mask does what the mGBA
+control predicts. Until that run is recorded, 7-2 is landed in code but not closed.
+
 
 ## The width decision (what it is and is not safe for)
 

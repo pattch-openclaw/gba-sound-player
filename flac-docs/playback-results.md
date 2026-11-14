@@ -1127,11 +1127,45 @@ at the new rate, where the convert leg is about 7% of the frame instead of 14%.
   1,024 ticks/sample against the **16-sample** grace on the mean, and **15.46
   samples** on the worst push window ever recorded for that section — inside by
   only 0.5 samples on that worst case. This run did not hit the phase-locked
-  collision that the 32,768 Hz image hit at period 22. The fix (chunk-sized push
-  sections, a lock-free ring, or re-arming ahead) is still owed at this rate; the
-  retarget lowered the probability and consequence of a miss, it did not remove
-  the masked section.
+  collision that the 32,768 Hz image hit at period 22. The chunk-sized push fix has
+  since landed in code (the 7-2 control below); its hardware re-run is the remaining
+  7-2 step. The retarget lowered the probability and consequence of a miss, it did
+  not remove the masked section by itself.
 - **It is not 7-3/C2.** The hardware count/digest/late clauses are met on this
   image, but the human listening witness — pitch and tempo, heard on both units
   with the source beside it — has not been done, and 7-2's fix is not in this
   image. C2 remains unmet until 7-3 passes on both units.
+
+## 7-2 implementation control (2026-11-13, mGBA headless — not hardware): chunked push
+
+**The change under test.** `Producer::push_frame_in_chunks` appends a frame in slices of at
+most `CHUNK_SAMPLES = 560`, each under its own critical section, instead of one
+interrupt-masked 2,048-sample copy. The measured whole-frame mask was 14,680 c (14.3 samples
+at this clock, worst recorded 15.46) against the 16-sample re-arm grace; a chunk-sized slice
+is about 4,014 c = 3.92 samples, a 4.08x margin.
+
+**Image.** `product-play.gba`, sha256
+**`2abf61e8b18f4bac46ed680d2320f1b9237b3586e35e3f167f8aef2885eab5ff`**, 662,440 B. One
+headless mGBA run:
+
+```text
+fr 80 und 0 pcm ok fifo ok
+per 289 ser 289 tail 1/464 void 0
+replay 0 late 0 fed 0 drain 0
+late in push 0/0 2nd src 0/289 disp 000A
+work 25.507% dec 18.678% attr 417451
+conv 5.051% push 0.805% feed 0.971%
+minlead 9680 maxwk 26.727%
+verdict PASSED — screen BLUE
+```
+
+The price of splitting the mask is the push stage's whole-sequence mean: **14,817 →
+18,018 c/frame** (four sections instead of one), work **25.363 → 25.507%** (+0.144 pp),
+worst frame **26.583 → 26.727%**. Decode (417,826 c mean, 417,451 attributed) and convert
+(113,011 c) are unchanged; every count, every digest, `void 0`, `refus 0` and `late 0` are
+unchanged. The host envelope was re-read from this run (`make product-play-test` 14/14).
+
+**Not a hardware result.** The 7-1 retarget hardware reading above belongs to the previous,
+whole-frame-push image `ef1ed8ba…`; this image has not been on a unit. The hardware re-run
+(name the sha before flashing, both units twice, read the same late-attribution fields) is
+what closes 7-2, and then 7-3 asks the listening question.

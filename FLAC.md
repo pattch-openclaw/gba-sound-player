@@ -540,11 +540,14 @@ leg-shaped result measured at 32,768 Hz: decode +6.87%, convert **+35.08%**, wor
 [`flac-docs/playback-results.md`](flac-docs/playback-results.md) under "7-1,
 retarget hardware reading".
 
-This is **not** C2 yet: `late 0` four times does not close 7-2, because the push
-section still masks interrupts for ~14.3 samples against the 16-sample grace
-(15.46 on the worst push window ever recorded), and 7-3's listening witness has
-not been asked. The push fix at this rate and the listening run are the remaining
-steps.
+This is **not** C2 yet: `late 0` four times did not close 7-2 by itself, because
+the push section still masked interrupts for ~14.3 samples against the 16-sample
+grace (15.46 on the worst push window ever recorded). **The chunk-sized push fix
+has since landed in code**: one critical section per 560-sample slice, each about
+3.92 samples / 4.08× margin, at a cost of push mean 14,817 → 18,018 c and work
+25.363 → 25.507%. Its mGBA control is green on the same counts and pins; its
+**hardware re-run is the remaining 7-2 step**, and 7-3's listening witness is
+after that.
 
 ## What is next
 
