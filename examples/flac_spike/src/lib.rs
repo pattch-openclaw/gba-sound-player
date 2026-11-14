@@ -56,7 +56,7 @@ pub mod driver;
 // measurement leg. Off by default: a default build of this crate contains no
 // vendored decoder, and every pre-6a-5b number in these docs was taken without
 // it. Why a *vendored* leg rather than another `RiceKernel` arm is the point of
-// the rung — plan-of-record 6a-5b.
+// the rung — history.md 6a-5b.
 #[cfg(feature = "item6a5b-vendored")]
 pub mod e10;
 // 6a-7's width leg: the pre-6a-6 i64 decode path, vendored so both arithmetic

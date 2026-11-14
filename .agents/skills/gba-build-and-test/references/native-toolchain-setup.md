@@ -8,11 +8,13 @@ automates everything below and is idempotent.
 
 | Gate | Mechanism | Extra tooling |
 |---|---|---|
-| `make native-rom` / `native-flac-rom` / `native-spike-rom` / `native-opus-rom` / `native-kernel-rom` | `cargo build --release --target thumbv4t-none-eabi` (`-Zbuild-std` from `.cargo/config.toml`) then `agb-gbafix` | nightly + `rust-src` + `agb-gbafix` |
-| `make flac-test`, `flac-test-crc`, `flac-test-scan`, `flac-test-rice`, `flac-gates` | an in-tree `cargo check --release --target …` arm **plus** a host-triple `cargo test --manifest-path …` arm run from a gate-neutral cwd | nightly + `rust-src` |
+| `make native-rom` / `native-flac-rom` / `native-product-play-rom` / `native-spike-rom` / `native-overlay-kernel-rom` / `native-opus-rom` | `cargo build --release --target thumbv4t-none-eabi` (`-Zbuild-std` from `.cargo/config.toml`) then `agb-gbafix` | nightly + `rust-src` + `agb-gbafix` |
+| `make flac-test`, `flac-test-wide`, `flac-test-crc`, `flac-test-scan`, `flac-test-rice`, `flac-gates`, `overlay-*` gates, `product-play-test` | an in-tree `cargo check --release --target …` arm **plus** a host-triple `cargo test --manifest-path …` arm run from a gate-neutral cwd | nightly + `rust-src` |
 | `make flac-portable-check` | `cargo check --release --target thumbv7em-none-eabi` | nothing else — `rust-src` supplies `core` for that triple too, so no `rustup target add` |
 | `make test-rom` | builds the target test binary and runs it through `CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER=mgba-test-runner` | `mgba-test-runner` (libmgba: cmake + C compiler + zlib + libelf + libclang/bindgen) |
-| `make rate-*` | as above, plus staged assets (`make rate-assets INPUT=… RATE=…`, needs ffmpeg + flac + python3) | generated files are gitignored and deleted by `make clean` |
+| `make master-pack` / `master-play-rom INPUT=…` | `scripts/gafp_pack.py`, which needs **ffmpeg** (only when the input must be resampled to 16,384 Hz) and **flac**; the generated `assets/master.gfp` + `src/master_pin.rs` are gitignored and removed by `make clean` |
+| `make gafp-pack-check` | **flac + metaflac** — the only FLAC gate that runs the reference encoder; a red here without them is a missing tool, not a decode regression |
+| archived instruments (`item6a*`, `item6a7*`, `rate-*`, `kernel-*`, `e5-fetch`) | **no Make target as of 2026-11-14** — build them by hand with `cargo build --release --target thumbv4t-none-eabi --features <arm>` in the crate that holds them; `flac-docs/history.md` §"Retired Make entrypoints" maps each name |
 
 ## The one expensive install: `mgba-test-runner`
 

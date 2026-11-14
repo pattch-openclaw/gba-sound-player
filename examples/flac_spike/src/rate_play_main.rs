@@ -44,8 +44,8 @@
 //! 64-bit MUL) on the producer wall, and the asset bytes are verified
 //! before the ROM is built, not at boot. The chain of custody for the
 //! staged bytes now lives entirely in the gates: the generator's
-//! fail-closed census (`make rate-assets`) and the host witness
-//! (`make rate-test`), which folds the embedded bytes through the library
+//! fail-closed census (`make rate-assets`, retired 2026-11-14,) and the host witness
+//! (`make rate-test`, retired 2026-11-14), which folds the embedded bytes through the library
 //! path against the generator's FIFO8 pins. This ROM trusts the staged
 //! assets and only measures what it plays: the underflow count, the
 //! period audit, and the sample ledger still judge the verdict; the last
@@ -84,7 +84,7 @@ mod rom {
     use flac_spike::playback::{Chunk, RingFeed, convert_frame};
 
     // Generated, temporary module — the same one the rate ROM and its host
-    // witness include (make rate-assets).
+    // witness include (`make rate-assets`, retired 2026-11-14 — run scripts/gen_rate_assets.sh).
     pub mod rate {
         include!("rate_assets.rs");
     }

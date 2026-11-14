@@ -29,7 +29,7 @@ Full retirement is a later PR with a defined shape, not this one: commit the per
 clip as a `.flac` so the packer can pack it as it stands, move `gafp_pin.rs`
 generation onto the packer's own walk, and — the part that is not a refactor —
 replace the spike-table tie with anything that still proves, from two sources, that
-one asset is being measured and played. See `flac-docs/plan-of-record.md`, item
+one asset is being measured and played. See `flac-docs/history.md`, item
 6b-2's second half, "The decision about the 6b-1 stand-in".
 
 Outputs (both committed inputs to `flac-integration`):

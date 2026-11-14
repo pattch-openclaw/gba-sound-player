@@ -54,8 +54,8 @@ Verification (all from this tree):
   the 79,922 was the torn read, and the +0.328 points are the median's read cost.
 
 Records updated: `flac-docs/measurements.md` (new verdict-integrity row + hash/reading
-rules), `flac-docs/plan-of-record.md` (two dated notes), `flac-docs/open-questions.md`
-(53.390%/53.062% parenthetical), `README.md`, `flac-docs/method-and-gates.md`, `FLAC.md`.
+rules), `flac-docs/history.md` (two dated notes), `flac-docs/history.md`
+(53.390%/53.062% parenthetical), `README.md`, `flac-docs/measurements.md`, `FLAC.md`.
 
 ## Step 2 — FIFO / played-bytes witness (#2) — done (working tree)
 
@@ -84,7 +84,7 @@ rules), `flac-docs/plan-of-record.md` (two dated notes), `flac-docs/open-questio
 ## Step 3 — verification and hygiene — done (working tree)
 
 - **#5 docs-only rate clarification.** `geometry.rs` (`playback_rate_for_stream`),
-  `scripts/gafp_pack.py` and `flac-docs/open-questions.md` now say the two sets
+  `scripts/gafp_pack.py` and `flac-docs/history.md` now say the two sets
   explicitly: `agb` 0.25 can *play* 10,512 / 18,157 / 32,768 Hz (the product geometry is
   32,768), while a FLAC *stream* may declare any table rate or a 16-bit Hz value. The Q14
   guard is about the declarable stream rate; the exhaustive form is a cheap host sweep
@@ -107,7 +107,7 @@ rules), `flac-docs/plan-of-record.md` (two dated notes), `flac-docs/open-questio
   `flac-lite`'s `EncodeProfile.allowed_sample_rates_hz` rather than staying a product-side
   allow-list — so the library, the packer and the ROM all ask the same question. The guard is
   now `ruled_rate_policy_allows_no_reinterpretation_of_a_declared_rate`; the suite is 14
-  tests. Record: item 7's 7-0 entry in `flac-docs/plan-of-record.md`.)* The sampled refusal list is unchanged
+  tests. Record: item 7's 7-0 entry in `flac-docs/history.md`.)* The sampled refusal list is unchanged
   in step 3 (the exhaustive sweep stays docs-only, per #5); step 4 added the
   arithmetically exact non-product rates to it.
 - Verification: `make check` clean; `make product-play-test` 12/12; ROM
@@ -131,7 +131,7 @@ was done:
   65,079,938 / 17,331,888 / 2,263,016 over 152 windows → **557,070 raw**, less 159
   boundaries at 5,641 c → **551,170 attributed**, decode half **422,257** — which is that
   image's own printed `isolated_estimate`, so model and ROM now derive the same number.
-  The sustained ceilings quoted in `plan-of-record.md` and `geometry.rs` follow: **152.9%
+  The sustained ceilings quoted in `history.md` and `geometry.rs` follow: **152.9%
   / 190.6% / 178.1%**, bound 843,237 c/frame (they are computed by
   `sustained_overage_tolerance`, not scaled). `ROM_WORST_WORK` deliberately keeps the
   larger recorded 565,939 c rather than this run's 565,867.

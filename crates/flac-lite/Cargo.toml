@@ -41,7 +41,7 @@ instrument = []
 # `subframe::lpc_accumulator_fits_i32`, and a frame whose bound fails takes
 # the i64 escape leg and reports it. `--no-default-features` is exactly the
 # audited i64 reference build (`make flac-test-wide`), guardless and
-# end-to-end. See `flac-docs/plan-of-record.md`, the width decision.
+# end-to-end. See `flac-docs/history.md`, the width decision.
 i32-integrator = []
 # Pin the E2b `LEADING_ONES` table to `.iwram` (GBA link-script contract, see
 # `bits.rs`). OFF by default: portable consumers and other ARM bare-metal

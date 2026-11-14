@@ -1,4 +1,4 @@
-//! Host witness for the E10 C1 kernel (`make kernel-test`).
+//! Host witness for the E10 C1 kernel (`make kernel-test`, retired 2026-11-14).
 //!
 //! Three layers, each judged against an independent oracle:
 //! - the committed table's own expectations are re-derived by a naive

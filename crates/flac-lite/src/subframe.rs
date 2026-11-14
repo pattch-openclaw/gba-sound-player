@@ -798,7 +798,7 @@ fn integrate_lpc_i32(
 /// `max|past| ≤ 2^(subframe_bits−1)`. The `>> shift` site is exact in i32 iff
 /// the true `acc` fits i32; the following `+ residual` and the store are ring
 /// operations that truncate identically either way (E4's proof,
-/// `flac-docs/perf-results.md`).
+/// `flac-docs/history.md`).
 ///
 /// This sums `|c_j|` rather than taking `order × max|c|`: the same O(order)
 /// walk over the coefficients just parsed, and strictly tighter for

@@ -1,4 +1,4 @@
-//! Host witness for the E10 PR B `refill_merge` kernel (`make kernel-test`).
+//! Host witness for the E10 PR B `refill_merge` kernel (`make kernel-test`, retired 2026-11-14).
 //!
 //! Layers: the committed table's expectations re-derived by the naive
 //! bit-loop reversal oracle (`oracle_rev8` — independent of the committed

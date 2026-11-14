@@ -1,4 +1,4 @@
-//! Host witness for the E10 PR B C2 kernel (`word_skip`, `make kernel-test`).
+//! Host witness for the E10 PR B C2 kernel (`word_skip`, `make kernel-test`, retired 2026-11-14).
 //!
 //! Layers, each judged against independent formulations:
 //! - the committed table's expectations re-derived by the naive bit-walk

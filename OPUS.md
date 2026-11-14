@@ -8,7 +8,7 @@ real target, witnesses over recollection). Opened 2026-09-27.
 
 The FLAC perf gate is not passing: measured on-target, `flac-lite` runs at
 **≈219% of the real-time budget on the FIXED arm and ≈654% on LPC** (the
-2026-09-21 baseline, see [flac-docs/perf-results.md](flac-docs/perf-results.md)),
+2026-09-21 baseline, see [flac-docs/history.md](flac-docs/history.md)),
 and experiments E1–E7 ruled out every cheap lever at that time — no probe
 has moved the mean meaningfully. Opus is the alternative worth pricing in:
 far higher compression (less ROM per minute of audio) and *potentially* cheaper
@@ -18,7 +18,7 @@ The honest caveat up front: **Opus is more compressed, not obviously cheaper to
 decode on this hardware.** CELT is MDCT-heavy and float-based; the ARM7TDMI has
 no FPU, so every butterfly is soft-float. Any Opus path must clear the same
 correctness-before-speed perf gate the FLAC work already defines
-([flac-docs/method-and-gates.md](flac-docs/method-and-gates.md)).
+([flac-docs/measurements.md](flac-docs/measurements.md)).
 
 ## The Constraint (unchanged)
 
@@ -159,7 +159,7 @@ Probe crates lived in `/tmp/opus_probe*` during the survey (throwaway). If this
 evaluation proceeds, promote to `examples/opus_probe/` with the vendored patch,
 and add Makefile gates in the `flac-test` pattern (host tests outside the repo
 tree — the cargo-config-inheritance rule,
-[flac-docs/method-and-gates.md](flac-docs/method-and-gates.md); target check inside it).
+[flac-docs/measurements.md](flac-docs/measurements.md); target check inside it).
 
 ## Minimal proposal — an Opus ROM, shaped like the FLAC ROM
 

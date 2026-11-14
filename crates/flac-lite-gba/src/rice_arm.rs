@@ -19,7 +19,7 @@
 //!
 //! E10 wrote the whole partition sample loop in ARM mode and measured it:
 //! **−349 / −348 cycles per sample**, the largest FIXED-side win in the
-//! menu (perf-results.md "E10 result"). The kernel was never landed: it lived
+//! menu (history.md "E10 result"). The kernel was never landed: it lived
 //! in a sample patch, `examples/flac_spike/experiments/e10-three-arm-probe/`,
 //! whose own docs called the missing step "stitching": the probe drove a
 //! vendored copy of the bit reader, not the shipped seam. This module is that
@@ -31,7 +31,7 @@
 //!
 //! **The lift, and where its source actually is.** `asm/rice_partition.s` is
 //! lifted from the E10 patch (the path above is inside the patch, not on main
-//! — `plan-of-record` 6a-4 says "lifted from `examples/arm-kernels/`", and
+//! — `history.md` 6a-4 says "lifted from `examples/arm-kernels/`", and
 //! for the *fold* that is exactly right but for this kernel it points at the
 //! wrong tree; the asm file's header says so, and 6a-4's landing record
 //! corrects the plan line). The kernel body is the patch's line-for-line

@@ -8,7 +8,7 @@ sample-resolution, per frame, IRQ-live. **Result: decode alone is
 1,643 c/sample — +39 % over the rate ROM's IME-off 1,180 c/s); the push
 critical section is 12.7 ms (not the "~µs" claimed by the hoist); convert
 is 14.1 ms; wait is 0.9 ms.** Full findings and the revised ordering:
-[`../../../../flac-docs/perf-results.md`](../../../../flac-docs/perf-results.md) →
+[`../../../../flac-docs/history.md`](../../../../flac-docs/history.md) →
 "Completed: rate-play ROM" entry, 2026-10-22 attribution amendment.
 
 This directory is **sample code only**. The probe never lands on the live
@@ -50,8 +50,8 @@ Base commit: `1ee3033` (PR #76 tip, branch `feat/playback-fix-e2b`).
 
 ```bash
 git apply examples/flac_spike/experiments/playback-attribution/probe.patch
-make rate-assets INPUT=path/to/bioluminescent.wav RATE=10512   # staged assets are temporary
-make native-rate-play-rom
+# retired 2026-11-14: make rate-assets INPUT=path/to/bioluminescent.wav RATE=10512   # staged assets are temporary
+# retired 2026-11-14: make native-rate-play-rom
 shasum -a 256 flac-rate-play.gba        # expect cb682591… (provenance only)
 (mgba-test-runner flac-rate-play.gba > run.log 2>&1 &)          # runner hangs by design
 # poll: grep -q verdict run.log   then:  pkill -f "mgba-test-runner flac-rate-play.gba"

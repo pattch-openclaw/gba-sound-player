@@ -83,9 +83,9 @@ RUN CHANNEL="$(make -f /dev/null \
     && rm /tmp/rust-toolchain-pinned.toml
 
 # Install the GBA ROM fixing tool — pinned, like the mGBA runner further down.
-# Not for cycles: gbafix costs no runtime. But it rewrites the ROM header, so it
-# is part of the ROM BYTES every FLAC.md record compares by sha, and an unpinned
-# gbafix would silently change those shas on another machine. 0.25.0 is the agb
+# Not for cycles: gbafix costs no runtime. But it rewrites the ROM header, so it is
+# part of the ROM BYTES every record in flac-docs/measurements.md compares by sha, and
+# an unpinned gbafix would silently change those shas on another machine. 0.25.0 is the agb
 # release this project depends on (Cargo.toml: agb = "0.25.0", AGB_REF below) and
 # the version every ROM in those records was fixed with — this host's installed
 # gbafix is 0.25.0, which is why the pin changes no byte here.
