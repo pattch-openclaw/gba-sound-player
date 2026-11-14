@@ -1,0 +1,31 @@
+[package]
+name = "uli-lite-gba"
+version = "0.1.0"
+edition = "2024"
+description = "GBA overlay for uli-lite: ARM-mode synthesis kernels (measurement realisation)"
+# Licensing of the ULI2 format/reference is unresolved; see ../../ULI2.md.
+publish = false
+
+# Standalone workspace, like crates/flac-lite-gba: the root ROM crate's target
+# config must not leak into host-side tests, and vice versa.
+[workspace]
+
+[dependencies]
+# `kernels` exposes the portable kernels (the correctness reference) and the
+# synthesis tables the overlay twin is tested against.
+uli-lite = { path = "../uli-lite", features = ["kernels"] }
+
+[features]
+# Copies the 8,672 B of synthesis tables (PERM/PRE/POST/TW/WIN) into `.iwram`
+# instead of reading them from the cartridge. The reference GBA port does this
+# (9.4 KB of tables in IWRAM); it is a separate arm because it spends a
+# different budget (IWRAM) than the code placement.
+iwram-tables = []
+
+[lib]
+name = "uli_lite_gba"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"

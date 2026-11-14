@@ -58,8 +58,19 @@ Phase 0 is complete, and the Phase 1 decode-only ROM passes in mGBA:
 - `examples/uli_spike` decodes the corpus on the target and matches the
   album-wide int8/int16 pins (`e6e87652` / `b3530978`), with `xover=0 hfnz=0`.
 
-That ROM is a correctness witness, not a player or a cycle record: the portable
-Rust kernels are still slow and have no real-time claim.
+That ROM is a correctness witness, not a player. The cycle record is Phase 1b's
+`make uli-bench` (`examples/uli_bench`): on the same corpus it measures the
+worst frame at 2,970,042 cycles = 1133% of the 262,144-cycle product period,
+after compiling the four synthesis kernels in ARM mode (which replaced 44
+`__aeabi_lmul` software-multiply sites with `SMULL`; 25.3x before that). The
+result, the kernel breakdown and the revised plan are in
+[`../../ULI2.md`](../../ULI2.md) → “Phase 1b”. No real-time claim is made.
+
+The synthesis kernels are exposed behind the off-by-default `kernels` feature
+(`uli_lite::imdct`), so the GBA overlay and the bench can time and twin-test
+them without widening the product facade. On ARM targets those four functions
+carry `#[instruction_set(arm::a32)]`; on the host they are unchanged, and the
+committed corpus pins prove the codegen change is bit-exact.
 
 `make uli-test` runs both halves from the repository root. The host half runs
 from a neutral directory with `--manifest-path`, because the repository's
@@ -67,7 +78,10 @@ from a neutral directory with `--manifest-path`, because the repository's
 
 Not in this crate yet:
 
-- the GBA overlay's ARM kernels and memory placement;
+- a full-frame decode through the GBA overlay (the overlay's kernels exist and
+  are bit-exact, but `Decoder` still calls the core kernels; Phase 1c);
+- the entropy/bit-reader hot path in ARM/IWRAM form (Phase 1c);
+- hand-written asm kernels (Phase 1d);
 - a product ROM or playback integration;
 - a Rust encoder (the offline C encoder remains the encoder of record);
 - a public license/publish decision (the crate remains `publish = false`).

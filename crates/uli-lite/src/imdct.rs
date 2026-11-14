@@ -11,6 +11,20 @@ use crate::format::{H, M};
 use crate::tables_data::{PERM, POST, PRE, TW, WIN};
 
 #[inline]
+#[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+fn mul32(a: i32, b: i32) -> i64 {
+    // Thumb-1 has no 64-bit multiply, so this expression emits `__aeabi_lmul`
+    // (a software 64-bit multiply) unless it is compiled in ARM mode. The
+    // Phase 1b measurement (ULI2.md) found 44 such call sites and a kernel
+    // sequence ~37x the C reference's, because every twiddle product took that
+    // path.
+    // The kernels carry `instruction_set(arm::a32)`, where LLVM lowers this
+    // exact expression to SMULL -- the instruction the C reference's gcc ARM
+    // build uses. The arithmetic is unchanged (full 64-bit signed product).
+    (a as i64) * (b as i64)
+}
+
+#[inline]
 fn hi32(v: i64) -> i32 {
     (v >> 32) as i32
 }
@@ -25,18 +39,20 @@ fn sat8(v: i32) -> i8 {
     v.clamp(i8::MIN as i32, i8::MAX as i32) as i8
 }
 
-pub(crate) fn pre(x: &[i32; M], z: &mut [i32; 2 * H]) {
+#[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+pub fn pre(x: &[i32; M], z: &mut [i32; 2 * H]) {
     for k in 0..H {
-        let xr = x[2 * k] as i64;
-        let xi = x[M - 1 - 2 * k] as i64;
-        let wr = PRE[2 * k] as i64;
-        let wi = PRE[2 * k + 1] as i64;
-        z[2 * k] = hi32(xr * wr + xi * -wi);
-        z[2 * k + 1] = hi32(xr * wi + xi * wr);
+        let xr = x[2 * k];
+        let xi = x[M - 1 - 2 * k];
+        let wr = PRE[2 * k];
+        let wi = PRE[2 * k + 1];
+        z[2 * k] = hi32(mul32(xr, wr).wrapping_add(mul32(xi, wi.wrapping_neg())));
+        z[2 * k + 1] = hi32(mul32(xr, wi).wrapping_add(mul32(xi, wr)));
     }
 }
 
-pub(crate) fn fft(x: &mut [i32; 2 * H]) {
+#[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+pub fn fft(x: &mut [i32; 2 * H]) {
     let n = H;
     let mut tw = 0usize;
     let mut l = n;
@@ -76,12 +92,12 @@ pub(crate) fn fft(x: &mut [i32; 2 * H]) {
         }
 
         for j in 0..q {
-            let w1r = TW[tw] as i64;
-            let w1i = TW[tw + 1] as i64;
-            let w2r = TW[tw + 2] as i64;
-            let w2i = TW[tw + 3] as i64;
-            let w3r = TW[tw + 4] as i64;
-            let w3i = TW[tw + 5] as i64;
+            let w1r = TW[tw];
+            let w1i = TW[tw + 1];
+            let w2r = TW[tw + 2];
+            let w2i = TW[tw + 3];
+            let w3r = TW[tw + 4];
+            let w3i = TW[tw + 5];
             tw += 6;
 
             let mut p = 2 * j;
@@ -108,20 +124,20 @@ pub(crate) fn fft(x: &mut [i32; 2 * H]) {
                 x[p] = t0r.wrapping_add(t2r) >> 2;
                 x[p + 1] = t0i.wrapping_add(t2i) >> 2;
 
-                let yr = t1r.wrapping_add(t3i) as i64;
-                let yi = t1i.wrapping_sub(t3r) as i64;
-                x[p1] = hi32(yr * w1r + yi * -w1i);
-                x[p1 + 1] = hi32(yr * w1i + yi * w1r);
+                let yr = t1r.wrapping_add(t3i);
+                let yi = t1i.wrapping_sub(t3r);
+                x[p1] = hi32(mul32(yr, w1r).wrapping_add(mul32(yi, w1i.wrapping_neg())));
+                x[p1 + 1] = hi32(mul32(yr, w1i).wrapping_add(mul32(yi, w1r)));
 
-                let yr = t0r.wrapping_sub(t2r) as i64;
-                let yi = t0i.wrapping_sub(t2i) as i64;
-                x[p2] = hi32(yr * w2r + yi * -w2i);
-                x[p2 + 1] = hi32(yr * w2i + yi * w2r);
+                let yr = t0r.wrapping_sub(t2r);
+                let yi = t0i.wrapping_sub(t2i);
+                x[p2] = hi32(mul32(yr, w2r).wrapping_add(mul32(yi, w2i.wrapping_neg())));
+                x[p2 + 1] = hi32(mul32(yr, w2i).wrapping_add(mul32(yi, w2r)));
 
-                let yr = t1r.wrapping_sub(t3i) as i64;
-                let yi = t1i.wrapping_add(t3r) as i64;
-                x[p3] = hi32(yr * w3r + yi * -w3i);
-                x[p3 + 1] = hi32(yr * w3i + yi * w3r);
+                let yr = t1r.wrapping_sub(t3i);
+                let yi = t1i.wrapping_add(t3r);
+                x[p3] = hi32(mul32(yr, w3r).wrapping_add(mul32(yi, w3i.wrapping_neg())));
+                x[p3 + 1] = hi32(mul32(yr, w3i).wrapping_add(mul32(yi, w3r)));
 
                 p += 2 * l;
             }
@@ -130,26 +146,30 @@ pub(crate) fn fft(x: &mut [i32; 2 * H]) {
     }
 }
 
-pub(crate) fn post(z: &[i32; 2 * H], y: &mut [i32; M]) {
+#[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+pub fn post(z: &[i32; 2 * H], y: &mut [i32; M]) {
     for k in 0..H {
         let p = PERM[k] as usize * 2;
-        let zr = z[p] as i64;
-        let zi = z[p + 1] as i64;
-        let wr = POST[2 * k] as i64;
-        let wi = POST[2 * k + 1] as i64;
-        y[2 * k] = hi32(zr * wr + zi * -wi);
-        y[M - 1 - 2 * k] = hi32(zr * wi + zi * wr).wrapping_neg();
+        let zr = z[p];
+        let zi = z[p + 1];
+        let wr = POST[2 * k];
+        let wi = POST[2 * k + 1];
+        y[2 * k] = hi32(mul32(zr, wr).wrapping_add(mul32(zi, wi.wrapping_neg())));
+        y[M - 1 - 2 * k] = hi32(mul32(zr, wi).wrapping_add(mul32(zi, wr))).wrapping_neg();
     }
 }
 
-pub(crate) fn ola(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8], mut out16: Option<&mut [i16]>) {
+#[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+pub fn ola(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8], mut out16: Option<&mut [i16]>) {
     for i in 0..H {
-        let a = y[H + i] as i64;
-        let b = p[H - 1 - i] as i64;
-        let wa = WIN[i] as i64;
-        let wb = WIN[M - 1 - i] as i64;
-        let acc1 = a * wa + b * -wb;
-        let acc2 = a * -wb + b * -wa;
+        let a = y[H + i];
+        let b = p[H - 1 - i];
+        let wa = WIN[i];
+        let wb = WIN[M - 1 - i];
+        let nwa = wa.wrapping_neg();
+        let nwb = wb.wrapping_neg();
+        let acc1 = mul32(a, wa).wrapping_add(mul32(b, nwb));
+        let acc2 = mul32(a, nwb).wrapping_add(mul32(b, nwa));
         out8[i] = sat8(hi32(acc1.wrapping_add(1i64 << 39)) >> 8);
         out8[M - 1 - i] = sat8(hi32(acc2.wrapping_add(1i64 << 39)) >> 8);
         if let Some(o16) = out16.as_deref_mut() {

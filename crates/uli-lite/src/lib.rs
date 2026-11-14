@@ -28,9 +28,24 @@ pub mod album;
 pub mod bitstream;
 pub mod format;
 pub mod frame;
+// The synthesis kernels are an implementation seam, not part of the product
+// API: the GBA overlay replaces them and the on-target benchmark times them.
+// `kernels` exposes them for exactly those two consumers; the default build
+// keeps the narrow facade (the overlay is the only expected feature user).
+#[cfg(feature = "kernels")]
 pub mod imdct;
+#[cfg(not(feature = "kernels"))]
+mod imdct;
 pub mod tables;
 
+// The synthesis tables (PRE/POST/TW/WIN/PERM) are needed by the overlay that
+// reimplements the kernels with unchecked addressing. Exposed only under
+// `kernels`, and hidden from docs: they are constants of the format's
+// reference implementation, not API.
+#[cfg(feature = "kernels")]
+#[doc(hidden)]
+pub mod tables_data;
+#[cfg(not(feature = "kernels"))]
 mod tables_data;
 
 pub use album::{Album, AlbumHeader, SeekEntry, TrackEntry};

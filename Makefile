@@ -9,7 +9,7 @@
         rate-play-rom native-rate-play-rom \
         opus-rom native-opus-rom podman-opus-rom \
         kernel-rom native-kernel-rom podman-kernel-rom \
-        test test-rom flac-test uli-test uli-check uli-fixture uli-spike-rom flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check gafp-check \
+        test test-rom flac-test uli-test uli-check uli-fixture uli-spike-rom uli-bench-rom uli-bench uli-overlay-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-gates flac-portable-check gafp-check \
         product-play-rom native-product-play-rom product-play-test \
         flac-rom-default-kernel native-flac-rom-default-kernel spike-test opus-test kernel-test \
         overlay-check overlay-check-arm overlay-test overlay-test-twin overlay-test-arm overlay-objdump \
@@ -385,7 +385,9 @@ format:
 	$(CARGO) fmt
 	cd crates/flac-lite && $(CARGO) fmt
 	cd crates/uli-lite && $(CARGO) fmt
+	cd crates/uli-lite-gba && $(CARGO) fmt
 	cd $(ULI_SPIKE_DIR) && $(CARGO) fmt
+	cd $(ULI_BENCH_DIR) && $(CARGO) fmt
 	cd $(FLAC_CRATE_DIR) && $(CARGO) fmt
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) fmt
 	cd $(OPUS_CRATE_DIR) && $(CARGO) fmt
@@ -869,8 +871,43 @@ uli-spike-rom: format
 	cd $(ULI_SPIKE_DIR) && $(CARGO) build --release --target $(TARGET)
 	agb-gbafix $(ULI_SPIKE_BIN) -o $(ULI_SPIKE_ROM)
 
+# Phase 1b decoder cycle harness (examples/uli_bench/): prove the corpus pins
+# on the measured image, then time every frame and the four synthesis kernels
+# in timer2/3 windows at WAITCNT 4/2. An mGBA measurement of the *portable*
+# kernels; no playback, no hardware claim. See ULI2.md → "Phase 1b".
+ULI_BENCH_DIR := examples/uli_bench
+ULI_BENCH_BIN := $(ULI_BENCH_DIR)/target/$(TARGET)/release/uli-bench
+ULI_BENCH_ROM := uli-bench.gba
+ULI_BENCH_LOG ?= uli-bench.log
+
+uli-bench-rom: format
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET)
+	agb-gbafix $(ULI_BENCH_BIN) -o $(ULI_BENCH_ROM)
+	@echo "ULI2 bench ROM built: $(ULI_BENCH_ROM)"
+
+# Run it headlessly and keep the log. The ROM prints the runner's exit sentinel
+# after its verdict, so this returns in seconds; the timeout is a leash for a
+# hung image, not the normal path. The gate is the log's PASS/FAIL and the
+# numbers in it, not the exit status.
+uli-bench: uli-bench-rom
+	timeout -k 5 300 $(GBA_TEST_RUNNER) $(ULI_BENCH_ROM) 2>&1 | tee $(ULI_BENCH_LOG) || true
+	@grep -q '^\[uli-bench\] PASS' $(ULI_BENCH_LOG) || { echo "uli-bench: harness/pin failure — see $(ULI_BENCH_LOG)"; exit 1; }
+	@echo "uli-bench done: $(ULI_BENCH_LOG)"
+
+# The overlay's host twin: the ARM-mode, unchecked kernels must be bit-exact
+# with uli-lite's portable reference. This is what licenses the bench's overlay
+# arm to be called a realisation of the same arithmetic.
+ULI_OVERLAY_MANIFEST := $(abspath crates/uli-lite-gba/Cargo.toml)
+uli-overlay-test: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(ULI_OVERLAY_MANIFEST) --target $(HOST_TRIPLE)
+	@echo "uli-overlay-test passed: overlay kernels are bit-exact with the portable reference"
+
 uli-check: toolchain-check
 	cd crates/uli-lite && $(CARGO) fmt --check
+	cd crates/uli-lite-gba && $(CARGO) fmt --check
+	cd $(ULI_BENCH_DIR) && $(CARGO) fmt --check
 
 # Regenerate the committed expected-vector file from the Rust generator. This
 # WRITES the fixture, so it is a maintenance command, not part of `make test`.
@@ -1183,8 +1220,8 @@ test-rom: toolchain-check
 # working tree as a side effect (that would also let CI's `make test` silently
 # fix drift that `make check` is supposed to fail on). Builds format; tests
 # verify. `check` is the formatting gate.
-test: test-rom flac-test uli-test
-	@echo "test passed: ROM suite + flac-lite isolation gates + uli-lite host corpus"
+test: test-rom flac-test uli-test uli-overlay-test
+	@echo "test passed: ROM suite + flac-lite isolation gates + uli-lite host corpus + uli-lite-gba twin"
 
 # The aggregate README's "TODO: one aggregate for the non-default-configuration
 # gates" asked for by name, landed with split-ladder item 5 PR 2 (2026-11-05):
@@ -1346,6 +1383,14 @@ help:
 	@echo "  EXPERIMENTAL FLAC ROMs (flac-lite bundled for $(TARGET)):"
 	@echo "    native-flac-rom   build $(FLAC_ROM) natively"
 	@echo "    podman-flac-rom   build $(FLAC_ROM) in the container"
+	@echo ""
+	@echo "  ULI2 (ULI2.md — product codec):"
+	@echo "    uli-test          portable core: thumbv4t build + bit-exact host corpus"
+	@echo "    uli-check         fmt gate for uli-lite, uli-lite-gba and uli_bench"
+	@echo "    uli-spike-rom     Phase 1 decode-only ROM (correctness witness)"
+	@echo "    uli-bench-rom     Phase 1b cycle harness ROM"
+	@echo "    uli-bench         run it headless in mGBA and keep uli-bench.log"
+	@echo "    uli-overlay-test  overlay kernels vs the portable reference (host twin)"
 	@echo ""
 	@echo "  PERF-GATE SPIKE (FLAC.md step 4):"
 	@echo "    native-spike-rom  build $(SPIKE_ROM) natively"

@@ -8,6 +8,13 @@ publish = false
 keywords = ["uli2", "audio", "no_std", "decoder", "gba"]
 categories = ["multimedia::audio", "no-std"]
 
+[features]
+# Exposes `uli_lite::imdct` (the four synthesis kernels) for the GBA overlay
+# and the on-target measurement ROM. OFF by default: the product facade does
+# not promise these functions, and the portable kernels are the correctness
+# reference the overlay's kernels are tested against.
+kernels = []
+
 [dependencies]
 # Intentionally EMPTY. The GBA target is core-only, and the decoder is
 # caller-owned state plus borrowed slices. Do not add dependencies without

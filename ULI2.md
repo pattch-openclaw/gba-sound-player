@@ -1,11 +1,14 @@
 # ULI2.md — product codec decision: ULI2 in a standalone `uli-lite` crate
 
-Status: **accepted 2026-11-13**. Implementation is in progress: Phase 0 (portable
-core) is complete and bit-exact on the host corpus, and the Phase 1 decode-only
-ROM passes its int8/int16 pins in mGBA. It is **not** a playback or cycle claim.
-The live plan, gates and measurement ledger move to `uli-docs/` once the
-playback path lands, in the same shape as [`FLAC.md`](FLAC.md) /
-[`flac-docs/`](flac-docs/).
+Status: **accepted 2026-11-13**. Implementation: the portable core (Phase 0) is
+complete and bit-exact on the host corpus; the Phase 1 decode-only ROM passes
+its int8/int16 pins in mGBA; and **Phase 1b (2026-11-13) measured the decoder on
+target** — the portable path is **11.3x over the frame budget** after a 2.2x
+ARM-mode codegen fix, against the C/asm reference's 0.69x. U4 is **not met** and
+Phase 2 has not started. This file records correctness and cost only; it is not
+a playback or hardware claim. The live plan, gates and measurement ledger move
+to `uli-docs/` once the playback path lands, in the same shape as
+[`FLAC.md`](FLAC.md) / [`flac-docs/`](flac-docs/).
 
 Companion files:
 
@@ -130,24 +133,31 @@ The important reading:
 
 ```
 crates/uli-lite/           portable core: no_std, zero deps, zero alloc
-  src/lib.rs               public facade
-  src/bitstream.rs         MSB-first u16 reader, EG0, canonical Huffman + LUT
-  src/tables.rs            ULA2 tables-blob parser; Huffman LUT construction
-  src/dequant.rs           band classes, pair/quad symbols, escapes, dequant
-  src/imdct.rs             integer pre/FFT/post and window/OLA
-  src/frame.rs             frame decode: 512 samples/channel, int8/int16 output
-  src/album.rs             ULA2 header, track/seek tables, strings (optional)
-  tests/                   host vectors, malformed streams, width/overflow tests
+  src/lib.rs               public facade (`kernels` exposes the synthesis seam)
+  src/bitstream.rs         MSB-first u16 reader, EG0
+  src/format.rs            ULI2/ULA2 constants
+  src/tables.rs            ULA2 tables-blob parser; canonical Huffman + LUT
+  src/tables_data.rs       synthesis tables generated from the reference
+  src/imdct.rs             integer pre/FFT/post and window/OLA (the reference;
+                           compiled in ARM mode on ARM targets since 1b)
+  src/frame.rs             dequant, M/S, frame decode, int8/int16 output
+  src/album.rs             ULA2 header, track/seek tables, strings
+  tests/reference_corpus.rs + tests/fixtures/
+  examples/gen_expected.rs frozen-vector maintenance tool
 
-crates/uli-lite-gba/       GBA overlay: platform-bound realizations
-  src/lib.rs               safe wrapper, feature-gated kernels
-  asm/imdct.s              ARM-mode pre/FFT/post/OLA kernels (ported with permission)
-  src/placement.rs         .iwram/.ewram tables and hot state
-  tests/                   out-of-crate witnesses; no agb dependency
+crates/uli-lite-gba/       GBA overlay (Phase 1b: measurement realisation)
+  src/lib.rs               ARM-mode, unchecked kernels, code in `.iwram`;
+                           `iwram-tables` copies the 8,672 B tables as well
+  tests/twin.rs            host differential vs the portable reference
+  (asm/imdct.s does not exist yet: 1b's result moved asm to Phase 1d)
 
 examples/uli_spike/        Phase 1 decode-only ROM
   src/main.rs              embeds the corpus, parses ULA2, decodes, hashes int8/int16
   assets/uli2_tiny.uli     the committed Phase 0 corpus
+
+examples/uli_bench/        Phase 1b cycle harness ROM
+  src/main.rs              proves the pins, then times every frame and both
+                           kernel realisations in timer2→timer3 windows
 ```
 
 Both crates are **standalone workspaces** with their own `[workspace]` table,
@@ -254,12 +264,117 @@ platforms without asm.
 - **Phase 1 — decode-only target witness.** `make uli-spike-rom` builds
   `examples/uli_spike`; in mGBA it decodes all 129 frames, prints
   `int8=e6e87652` and `int16=b3530978` (the C-reference album pins), reports
-  `xover=0 hfnz=0`, and PASSes. This is a **correctness** witness only: the
-  portable Rust kernels are slow (tens of seconds of emulated time for two
-  seconds of audio), so it makes no real-time or cycle claim.
-- **Not yet:** the GBA overlay's ARM kernels, IWRAM placement, playback, cycle
-  measurement, hardware runs, any product-path change, or the from-scratch Rust
+  `xover=0 hfnz=0`, and PASSes.
+- **Phase 1b — measured (2026-11-13).** `make uli-bench` builds
+  `examples/uli_bench`; the image proves its own decode (twice, both pins),
+  then times every frame and both kernel realisations. Headline: **worst
+  frame 2,970,042 cycles = 1133% of the 262,144-cycle frame period** with the
+  portable core (25.3x before the ARM-mode kernel fix); a bounds-check-free
+  ARM overlay in IWRAM projects 2,122,748 = **810%**. The C/asm reference is
+  69.4%. U4 is **not met**; no playback claim is made. The measurement and
+  its consequences are below, and in “Decision log”.
+- **Not yet:** a full-frame decode through overlay kernels, the entropy /
+  bit-reader hot path in the overlay, hand-written asm (now Phase 1d),
+  playback, hardware runs, any product-path change, or the from-scratch Rust
   encoder/asset pipeline.
+
+### Phase 1b — what the on-target measurement found (2026-11-13)
+
+**Instrument.** `examples/uli_bench` (standalone workspace; `make
+uli-bench-rom` / `make uli-bench`). It sets `WAITCNT` to `0x0000` (4/2, no
+prefetch; `agb` boots at `0x4317` and the log prints both), times inside
+timer2→timer3 windows at 16.78 MHz with IRQs off, subtracts a measured
+empty-window overhead (35 cycles; 5-sample spread 0 in the final run), and
+reports sums and counts — no divide on the measured path. It runs two full
+post-pin decodes and a per-frame timed decode; the timed pass is hashed too.
+All numbers are mGBA, not hardware. The overlay's kernels are proven
+bit-exact on the host (`make uli-overlay-test`) *and* on-target (the image
+runs both realisations on identical inputs and compares).
+
+**Full frames** (129-frame corpus, `uli2_tiny.uli`; percentage of the
+262,144-cycle frame period; synthesis = 2 × the measured per-channel
+`pre+fft+post+ola` sequence):
+
+| arm | worst | mean | synthesis / frame | non-synthesis / frame |
+|---|---:|---:|---:|---:|
+| portable core, Thumb-1, code in ROM (before 1b's fix) | 6,622,160 (**2526%**) | 5,897,421 (2250%) | 5,026,842 | 870,579 |
+| portable core, ARM-mode kernels, code in ROM | 2,970,042 (**1133%**) | 2,245,992 (857%) | 1,334,527 | 911,465 |
+| overlay kernels (projection, not a measured frame) | 2,122,748 (**810%**) | 1,398,699 (534%) | 487,233 | 911,465 |
+| C/asm reference, `gba-audio` record | ~182,000 (69.4%) | ~153,000 (58.4%) | ~134,600 | ~45,000 |
+
+The overlay row is arithmetic, not a decode: `Decoder` still calls the core
+kernels. It is `non-synthesis + 2 × overlay_seq` from the measured sums, with
+the worst frame's non-synthesis part derived from its own measured total.
+Wiring the overlay into `Decoder` is Phase 1c's first step, not a claim of
+this record.
+
+**Kernel cost**, cycles per channel per frame (sum of 10 calls ÷ 10):
+
+| realisation | pre | fft | post | ola | sequence | vs C |
+|---|---:|---:|---:|---:|---:|---:|
+| core, Thumb-1, ROM | 426,678 | 1,065,200 | 440,231 | 563,619 | 2,513,421 | 37x |
+| core, ARM mode, ROM | 48,705 | 268,775 | 52,445 | 296,959 | 667,263 | 9.9x |
+| overlay, ARM, unchecked, ROM | 51,779 | 249,731 | 52,446 | 259,568 | 614,115 | 9.1x |
+| overlay, ARM, unchecked, **`.iwram`** | 21,260 | 85,065 | 20,640 | 116,061 | 243,617 | 3.6x |
+| overlay + `iwram-tables` (8,672 B) | 17,676 | 81,537 | 16,032 | 112,477 | 228,313 | 3.4x |
+| C/asm reference | ~9,700 | ~31,400 | ~10,900 | ~15,300 | ~67,300 | 1x |
+
+**What moved the numbers, in order:**
+
+1. **Thumb-1 has no 64-bit multiply.** The first measurement found **44
+   `__aeabi_lmul` call sites and zero `SMULL`** in the image: every twiddle
+   product in every kernel was a software 64-bit multiply. Compiling the four
+   kernels in ARM mode (`#[instruction_set(arm::a32)]`, a source-level no-op
+   that is bit-exact and host-tested) cut the frame 2.2x and synthesis 3.8x.
+   Four `lmul` sites remain, all in the Thumb dequant path (1 per nonzero
+   coefficient).
+2. **Code location dominates instruction count.** The same overlay kernels
+   move from 614,115 to 243,617 cycles/channel (**2.5x**) when their code is
+   placed in `.iwram` instead of the cartridge. At `WAITCNT 4/2` with prefetch
+   off, the 32-bit ARM fetch is the hot cost. This is the same reason the
+   reference port describes “5 KB of ARM code” in IWRAM.
+3. **Bounds checks are a small residual once the code is ARM mode.** Removing
+   them in the overlay (raw pointers, audited `unsafe`) is 8% on ROM
+   (667,263 → 614,115). They were a bigger multiplier only because they
+   forced spill-heavy code in Thumb.
+4. **The remaining kernel gap is real, and OLA is the outlier.** ARM-mode,
+   unchecked, IWRAM code is still 3.6x the C/asm kernel total, and OLA alone
+   is 7.6x (116,061 vs 15,300). That is the case for Phase 1d's hand-written
+   asm — *after* the hot path is ARM/IWRAM, not instead of it.
+5. **The entropy/bit-reader path is now the larger blocker.** It is 911,465
+   cycles/frame and unchanged by any kernel work — 41% of today's portable
+   frame and 65% of the projected overlay frame. It is still Thumb-1 code in
+   ROM with checked slices and `Result` plumbing on the bit path. The same two
+   levers (ARM mode, IWRAM) have not been applied there at all.
+
+The encoder cycle model is not a usable proxy for this code: the worst frame
+(index 72, 248 quads / 140 escapes / 616 nonzero coefficients) is modelled at
+193,782 cycles and measured at 2,970,042 — **15.3x** the model. The model is a
+C/asm estimate; the gap is codegen, not a model defect to “fix” by moving
+constants.
+
+**Plan consequences (the decision this measurement buys):**
+
+- **Playback (Phase 2) does not start yet.** At 8–11x the frame period the
+  feeder would underrun continuously; building it now would only measure
+  underruns. U4 is the gate.
+- **The next milestone is Phase 1c — the entropy hot path in the overlay —
+  not hand-written asm.** The measurement says the dominant losses are
+  codegen and placement, which the overlay can fix in portable Rust
+  arithmetic; asm for four kernels cannot recover a 6x non-kernel deficit.
+- **The asm milestone moves to Phase 1d**, and its scope is decided by the
+  Phase 1c re-measurement. The kernel table already bounds what asm can buy:
+  even a perfect kernel port saves 487,233 cycles/frame over the current
+  projection, which alone leaves 1.64M (624%) because the non-synthesis part
+  dominates.
+- **Keep 1b's ARM-mode kernel fix in the core.** It is a pure codegen
+  attribute, bit-exact on the host corpus and in the ROM, and every ARM build
+  benefits. It does not make the core platform-bound: the attribute is gated on
+  `cfg(target_arch = "arm")`, and the API is unchanged.
+- **IWRAM budget:** the overlay's four kernels are **1,596 B** of code. The
+  tables are **8,672 B** for a 6.3% kernel gain (243,617 → 228,313) and are
+  **not** taken by default; the reference port spends 9.4 KB there, and this
+  tree's UI/audio budget will decide later (U6).
 
 ### Phase 0 — reference and vectors (host)
 
@@ -275,23 +390,53 @@ platforms without asm.
 Exit gate: **host decode is bit-exact against the C reference** on the committed
 corpus, including error paths that must reject rather than panic.
 
-### Phase 1 — GBA decode-only
+### Phase 1 — GBA decode-only (landed)
 
-1. Add a `uli_spike` / `uli_decode` example ROM: embed a small album, parse the
-   `ULA2` header, decode frames, hash the int8 output, compare with the host
-   pin.
-2. Put `UliDec` in EWRAM and the hot `X`, `buf`, `P` buffers plus the IMDCT
-   tables in IWRAM, as the reference port does. Measure section sizes and stack.
-3. Start with the portable Rust kernels; measure. If the frame budget is not
-   met, port the three asm kernels (`pre`, `fft`, `post`) and the OLA from
-   `gba-audio/src/uli/gba/uli_imdct_arm.S` with the author’s permission. The
-   reference ARM build is 6.3 KB of code and 9.4 KB of tables; the Rust/asm
-   image will be its own measured number, not that one.
+1. `examples/uli_spike`: embed a small album, parse the `ULA2` header, decode
+   frames, hash the int8 output, compare with the host pin. **Landed.**
+2. Put `DecoderState` in EWRAM (the ~100 KiB Huffman LUTs dominate). The hot
+   `X`, `buf`, `P` buffers are still inside that EWRAM state; the overlay's
+   placement work is Phase 1c. **Partially landed.**
+3. Start with the portable Rust kernels and measure. **Landed as Phase 1b** —
+   and the measurement reordered the plan: asm is not the next step.
 
 Exit gate: **GBA decode hash matches the host pin**, with no overflows, no
-`|X| >= 2^29` violations, and a measured worst frame.
+`|X| >= 2^29` violations, and a measured worst frame. — **Met** (both pins,
+`xover=0 hfnz=0`; the worst frame is measured in Phase 1b).
+
+### Phase 1c — hot-path codegen and placement (next)
+
+The 1b measurement puts the losses here, not in the absence of asm. Port the
+**entropy, bit-reader, dequant and M/S** hot path into `uli-lite-gba` as an
+ARM-mode, `.iwram`-resident realisation with a 32-bit cached bit window instead
+of the 64-bit slice-rebuild `peek`; keep the core as the correctness reference
+and extend `tests/twin.rs` to cover it. Then wire the overlay into `Decoder`
+behind a feature so `examples/uli_bench` measures a **full frame** through the
+overlay (`frame` timing, not the current projection), and keep the core binding
+as the control.
+
+Exit gate: the measured full-frame worst is **≤ 2× the 262,144-cycle period**
+(the point at which a 1× product path is a codegen question rather than a
+rewrite), with unchanged pins. Record `rest` (non-synthesis) explicitly: at
+911,465 cycles it is the number to move. If that gate is missed, stop and
+re-plan rather than starting Phase 1d.
+
+### Phase 1d — synthesis kernels in asm (scope decided by 1c)
+
+The reference asm is `gba-audio/src/uli/gba/uli_imdct_arm.S` (author’s
+permission required). 1b already bounds the prize: the four kernels are
+243,617 cycles/channel in ARM/IWRAM Rust against ~67,300 in the reference, so
+a perfect port saves at most 176,000/channel — 352,000/frame — while the
+non-synthesis path is 911,465. The asm milestone is therefore only worth
+opening once Phase 1c has made the non-synthesis path small; if 1c’s ARM/IWRAM
+kernels land close enough to the reference, 1d may be a narrow OLA-only port
+(116,061 vs 15,300 is the outlier) rather than four kernels.
 
 ### Phase 2 — product playback
+
+**Gated on U4.** At the 1b measurement (8–11x the frame period) a feeder would
+underrun continuously, so this phase starts only after Phase 1c’s full-frame
+re-measurement is inside the budget.
 
 1. Reuse the 32,768 Hz ring/FIFO feeder built for the FLAC product path.
    ULI2 frames are 512 samples/channel; adjust the chunk/period arithmetic but
@@ -328,8 +473,8 @@ claims to be measured, not inherited from `gba-audio`.
 |---|---|---|
 | **U1 — standalone core** | `uli-lite` is `no_std`, zero-dependency, zero-allocation, no `agb`, no GBA registers; a stranger can drive the facade. | `make uli-check`; host tests; `cargo build --target thumbv4t-none-eabi -Zbuild-std=core,alloc` |
 | **U2 — bit-exact host** | The Rust core matches the C integer reference frame-for-frame on the committed corpus and rejects malformed frames without panic. | `make uli-test`; pinned hashes |
-| **U3 — bit-exact GBA** | The GBA overlay produces the same int8/int16 frames as the host pin. | `make uli-rom-test`; mGBA hash |
-| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. | instrument ROM; mGBA, then hardware |
+| **U3 — bit-exact GBA** | The portable core produces the pinned int8/int16 frames on the target; the overlay's kernels are bit-exact with the core. **Met** for the decode path; a full frame *through* the overlay is Phase 1c. | `make uli-spike-rom`; `make uli-bench` (pins + on-target twin); `make uli-overlay-test` (host twin) |
+| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Not met (measured 2026-11-13): worst 2,970,042 cycles = 1133% of the 262,144-cycle period with the portable core after the ARM-mode fix (25.3x before it); an IWRAM ARM overlay projects 810%.** | `make uli-bench`; mGBA, then hardware |
 | **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | `product-play` equivalent for ULI2; hardware runs |
 | **U6 — memory** | IWRAM/EWRAM/stack stay inside the product budget with the UI and feeder linked. | linker map + runtime stack check |
 | **U7 — licensing/spec** | A public crate, if published, has a permissive license and a standalone format specification; otherwise it remains `publish = false`. | license file + `uli-docs/format.md` |
@@ -338,6 +483,12 @@ The gate ceiling for U4 is not copied from `gba-audio`’s 75%: this tree’s UI
 feeder and animation budget decide it. Start from the measured 73.63% gate
 total, add this tree’s non-audio cost, and write the number down before the
 first real-time claim.
+
+What 1b measured is the **decode wall**, not the gate total, and it is far
+outside any ceiling: 1133% worst with the core kernels, 810% projected with
+the IWRAM ARM overlay. The 73.63% inheritance question is therefore not open
+yet — the first issue is reaching 100% at all. Phase 1c owns that; U5/U6 stay
+untouched until it lands.
 
 ---
 
@@ -384,9 +535,18 @@ product codec without pretending one codec covers both jobs.
    the GBA port uses ~22.6 KB IWRAM and ~96 KB EWRAM. The LUT width is an
    implementation detail, not part of the bitstream, so an 8-bit or smaller LUT
    is possible at a CPU cost. Measure before deciding.
-5. **CPU inheritance.** 73.63% is the `gba-audio` gate total on its driver, not
-   this tree’s. The Rust port may be slower or faster than the C/asm original;
-   the ARM asm kernels are likely necessary for the real-time gate.
+5. **CPU inheritance — measured, and the gap is codegen.** 73.63% is the
+   `gba-audio` gate total on its C/ARM build, not this tree’s. Phase 1b
+   measured the portable Rust decoder at **1133% worst** (ARM-mode kernels,
+   code in ROM) and projects **810%** with the same kernels bounds-check-free
+   in IWRAM. The dominant losses are Thumb-1’s software 64-bit multiply
+   (44 `__aeabi_lmul` sites before the fix), cartridge instruction fetch at
+   4/2/no-prefetch (2.5x for moving the same code to IWRAM), and the
+   entropy/bit-reader path, which is still Thumb/ROM and is now 65% of the
+   projected frame. Hand-written asm for four kernels cannot close a deficit
+   that is mostly outside those kernels; the next step is the entropy hot path
+   (Phase 1c). The reference’s 73.63% must not be read as a transferable
+   number.
 6. **Encoder packaging and independence.** A decoder-only crate is useful
    internally, but external users need an encoder. The current C encoder is
    reused from `gba-audio` and must eventually be replaced by a Rust encoder.
@@ -407,6 +567,19 @@ product codec without pretending one codec covers both jobs.
 - **2026-11-13 — accepted.** ULI2 is the product codec. Decoder-only port in
   `crates/uli-lite` + `crates/uli-lite-gba`; no new repository yet; FLAC stays
   as the reusable lossless library; ULC is documented but not planned.
+- **2026-11-13 — Phase 1b: codegen is the gap, not the absence of asm.**
+  `make uli-bench` measured 25.3x the frame period before the kernel codegen
+  fix, 11.3x after ARM mode, and 8.1x projected with unchecked ARM kernels in
+  IWRAM. Thumb-1’s `__aeabi_lmul` and cartridge instruction fetch dominate;
+  bounds checks are 8%. Decision: Phase 1c is the entropy/bit-reader hot path
+  in the overlay (ARM, IWRAM, 32-bit bit window), with a full-frame overlay
+  decode and a ≤2× worst-frame exit gate; hand-written asm moves to Phase 1d
+  and its scope is decided by 1c. Playback does not start before U4.
+- **2026-11-13 — the core's synthesis kernels compile in ARM mode on ARM
+  targets.** `#[instruction_set(arm::a32)]` on `pre`/`fft`/`post`/`ola` is a
+  source-level no-op that lets LLVM use `SMULL` instead of `__aeabi_lmul`; it
+  is bit-exact on the host corpus and in the ROM, and no API or platform
+  dependency changes. Measured 2.2x on the frame, 3.8x on synthesis.
 - **2026-11-13 — encoder independence target.** For the time being the
   `gba-audio` C encoder is reused for asset generation. The target is to
   reimplement that encoder and any other C-language tooling/source material in

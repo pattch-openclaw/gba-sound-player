@@ -446,6 +446,11 @@ fn dec_chan(
             let a = v.unsigned_abs() as usize;
             let idx = a.min(15);
             let rq = 16i64 * a as i64 - dq[idx] as i64;
+            // Stays a 64-bit product: this function is Thumb-1, where 64-bit
+            // multiplies go through `__aeabi_lmul`. That is 1 call per
+            // nonzero coefficient, not the 2-4 per coefficient the twiddle
+            // kernels were paying before their ARM-mode build; measure the
+            // entropy share before moving this path too (ULI2.md, Phase 1b).
             let xv = rq * step as i64;
             if xv >= XLIM {
                 diag.xover = diag.xover.wrapping_add(1);
