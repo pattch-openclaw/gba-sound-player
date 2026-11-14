@@ -8,8 +8,11 @@ measured a **full frame through the product's ARM/IWRAM kernels at 698% worst /
 505% mean**. **PR B (2026-11-14) then moved the entropy/bit-reader/dequant/M/S
 hot path into `uli-lite-gba` and measured a full frame at 533,605 worst / 463,660
 mean = 204% / 177%** of the 262,144-cycle period, both pinned — PR B's ≤2× gate
-met, but U4 (≤100%) still **not met**, so playback has not started. The remaining
-delta is now the synthesis kernels (PR C). This file is the decision record (why
+met, but U4 (≤100%) still **not met**, so playback has not started. **PR C
+(2026-11-14) measured where the frame actually goes — 63% synthesis kernels, 33%
+entropy, 4% M/S + wrapper — and took it to 200% / 174% with a split-`huff` fast
+path; the remainder is scoped as two rewrites (C-1 asm kernels, C-2 entropy),
+not tuning.** This file is the decision record (why
 ULI2, what it is, the licensing and encoder risks); the live plan, gates and
 measurement ledger are [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md).
 
@@ -465,10 +468,19 @@ period — under the ≤2× gate, pins unchanged. `rest` fell from 837,092 to
 IWRAM placement hung on target because the product path needs ≈15.0 KiB of
 stack and 8 KiB in `.iwram` left less than that.
 
-### Phase 1d — close the gap (PR C, scoped by 1c-2)
+### Phase 1d — close the gap (PR C, measured 2026-11-14)
+
+PR C measured the worst frame before optimising it: **63% synthesis kernels /
+33% entropy / 4% M/S + wrapper**, and found the codegen is not short of
+instructions (6 `SMULL` + 6 `SMLAL` per butterfly, no `__aeabi_lmul`) but short
+of **registers** — the radix-4 butterfly spills 66 intermediates. It split into
+**C-1 (hand-written ARM asm kernels, ~182,000 cycles saved)** and **C-2 (entropy
+rewrite, ~90,000 saved)**, projected ~94% together. This section's original
+framing follows.
 
 The reference asm is `gba-audio/src/uli/gba/uli_imdct_arm.S` (author’s
-permission required). The kernel prize is now the **whole** remaining delta:
+permission required — a clean-room asm is the alternative). The kernel prize is
+now the **whole** remaining delta:
 PR B measured `ArmKernels` seq/channel at **169,061** against the C/asm
 reference’s ~67,300 (2.51×), and synthesis is 63% of the 533,605-cycle PR B
 frame. A perfect kernel port would remove at most ~2 × 98,000 = ~196,000
@@ -518,7 +530,7 @@ claims to be measured, not inherited from `gba-audio`.
 | **U1 — reference** | `uli-lite` remains a bit-exact, host-testable reference and oracle (no longer a portable-product claim). | `make uli-test`; committed corpus; thumbv4t `check` |
 | **U2 — bit-exact host** | The Rust core matches the C integer reference frame-for-frame on the committed corpus and rejects malformed frames without panic. | `make uli-test`; pinned hashes |
 | **U3 — bit-exact product** | The product kernel set (`ArmKernels`) decodes the corpus to the pinned int8/int16 frames, in the host full-frame twin and on the target. **Met (PR A).** | `make uli-bench` (both arms + on-target twin); `make uli-overlay-test` (host kernel + decoder twins) |
-| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Not met (PR B, 2026-11-14): the full product hot path is 533,605 worst = 204% (463,660 mean = 177%); same-image core control 1023% / 828%, `ArmKernels` 640% / 447%. PR B gate ≤200% met; PR C target ≤100%.** | `make uli-bench`; mGBA, then hardware |
+| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Not met. PR B: 204% / 177%. PR C (2026-11-14): 200% / 174% (523,267 / 456,187), with the frame attributed 63% kernels / 33% entropy / 4% M/S + wrapper; remainder scoped as C-1 asm kernels and C-2 entropy, projected ~94%.** | `make uli-bench`; mGBA, then hardware |
 | **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | `product-play` equivalent for ULI2; hardware runs |
 | **U6 — memory** | IWRAM/EWRAM/stack stay inside the product budget with the UI and feeder linked. | linker map + runtime stack check |
 | **U7 — licensing/spec** | A public crate, if published, has a permissive license and a standalone format specification; otherwise it remains `publish = false`. | license file + `uli-docs/format.md` |
@@ -628,6 +640,17 @@ product codec without pretending one codec covers both jobs.
   decomposition to 0.02%. Absolute frame numbers are image-specific at this
   fetch-dominated scale; every future arm keeps its control in the same
   image.
+- **2026-11-14 — PR C: the remaining gap is architectural, not tuning.**
+  Measured frame 101 (worst) at 63% synthesis kernels / 33% entropy / 4% M/S +
+  wrapper. The kernels are not short of instructions — the FFT butterfly emits
+  the optimal 6 `SMULL` + 6 `SMLAL` — but short of registers: it spills 66
+  intermediates because 14 values are live at once. Entropy is ~6.6× the C
+  reference per coefficient. Four cheap levers were built and measured: dequant
+  fusion neutral, full `huff` inlining +2.7% for 4,252 B of IWRAM (rejected on
+  U6), split `huff` +1.6% for 896 B (kept → **200% / 174%**), frame pointers
+  inert, `iwram-tables` crashes (stack 13,664 B vs ~15,040 needed). U4 stays
+  open; the work is scoped as C-1 (asm kernels, ~182k cycles) and C-2 (entropy
+  rewrite, ~90k), projected ~94%.
 - **2026-11-14 — PR B landed: the hot path is GBA-first and the ≤2× gate is
   met.** `uli_lite_gba::GbaDecoder` (32-bit cached bit reader, unchecked
   canonical Huffman, dequant, M/S, ARM-mode `.iwram`) measures a full frame at

@@ -244,19 +244,49 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// Canonical Huffman decode against the raw table views. The table parser
-/// validated every index this can produce.
-#[inline(never)]
+/// The 10-bit LUT fast path, inlined at the call sites.
+///
+/// Nearly every symbol resolves in the first ten bits (the committed corpus
+/// misses on ~8% of them), so the common case is a `peek`, one `u16` load and
+/// a `skip`. Inlining *only this* keeps the call out of the hot path without
+/// duplicating the long-code search at every call site: inlining the whole of
+/// `huff` measured 2.7% but cost 4.3 KiB of IWRAM, which the product cannot
+/// afford (U6 — the UI and feeder still need room, and IWRAM tables are
+/// already blocked by the stack, see the plan of record).
+///
+/// Returns `None` when the symbol is not in the LUT, leaving the reader
+/// untouched for [`huff_slow`].
+#[inline(always)]
 #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
-#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
-fn huff(br: &mut BitReader<'_>, p: &HuffmanParts<'_>, ops: &mut Ops) -> u16 {
+fn huff_fast(br: &mut BitReader<'_>, p: &HuffmanParts<'_>) -> Option<u16> {
     let idx = br.peek(LUTB as u32) as usize;
     // SAFETY: peek(LUTB) < 1024 == p.lut.len().
     let e = unsafe { *p.lut.get_unchecked(idx) };
-    if e != 0 {
-        br.skip((e & 31) as u32);
-        return e >> 5;
+    if e == 0 {
+        return None;
     }
+    br.skip((e & 31) as u32);
+    Some(e >> 5)
+}
+
+/// Canonical Huffman decode against the raw table views. The table parser
+/// validated every index this can produce.
+#[inline(always)]
+#[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+fn huff(br: &mut BitReader<'_>, p: &HuffmanParts<'_>, ops: &mut Ops) -> u16 {
+    match huff_fast(br, p) {
+        Some(v) => v,
+        None => huff_slow(br, p, ops),
+    }
+}
+
+/// The canonical-code search for a symbol longer than the LUT covers. Rare
+/// enough to stay out of line; kept `#[inline(never)]` and in `.iwram` so the
+/// ~8% of symbols that reach it do not pay a ROM fetch.
+#[inline(never)]
+#[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
+fn huff_slow(br: &mut BitReader<'_>, p: &HuffmanParts<'_>, ops: &mut Ops) -> u16 {
     let mut l = LUTB + 1;
     while l <= MAXLEN {
         // SAFETY: l <= MAXLEN < p.first/count/offs.len().
