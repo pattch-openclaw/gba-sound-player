@@ -67,22 +67,64 @@ struct Diag {
     hfnz: u32,
 }
 
+/// The quad-digit expansion table (PR C-3a).
+///
+/// The 81-code quad symbol encodes four base-3 digits. Packing them into 2-bit
+/// fields turns the hot loop's three divisions into one load, a shift and a
+/// mask. Generated here, so the table's provenance is this repository.
+const fn make_q3() -> [u8; 81] {
+    let mut t = [0u8; 81];
+    let mut s = 0;
+    while s < 81 {
+        let d0 = (s / 27) as u8;
+        let d1 = ((s / 9) % 3) as u8;
+        let d2 = ((s / 3) % 3) as u8;
+        let d3 = (s % 3) as u8;
+        t[s] = (d0 << 6) | (d1 << 4) | (d2 << 2) | d3;
+        s += 1;
+    }
+    t
+}
+
+const Q3: [u8; 81] = make_q3();
+
+/// Leading zeros in the top six bits, 6 when none are set (PR C-3a's escape
+/// fast path).
+const fn make_clz6() -> [u8; 64] {
+    let mut t = [0u8; 64];
+    let mut i = 0;
+    while i < 64 {
+        let mut z = 0u8;
+        while z < 6 && (i >> (5 - z)) & 1 == 0 {
+            z += 1;
+        }
+        t[i] = z;
+        i += 1;
+    }
+    t
+}
+
+const CLZ6: [u8; 64] = make_clz6();
+
 /// A 32-bit bit reader over the ULA2 halfword stream.
 ///
 /// The stream is 16-bit little-endian halfwords consumed MSB-first. The reader
-/// keeps the next 32 bits in `hw` (bit 31 is the next bit) and appends whole
-/// halfwords, so the common `peek(<=16)` and `skip` are shifts and ORs — no
-/// 64-bit window, no variable 64-bit shift helper, no per-peek bounds-checked
-/// slice construction. `peek` of more bits than are buffered (only long raw
-/// fields and EG extensions) reads one extra halfword and combines with two
-/// 32-bit shifts.
-struct BitReader<'a> {
-    stream: &'a [u8],
-    halfwords: usize,
-    /// Index of the next halfword to append.
-    next_hw: usize,
-    /// Absolute bit position of the next unconsumed bit.
-    bitpos: u32,
+/// keeps the next 32 bits in `hw` (bit 31 is the next bit) and walks a cursor
+/// over the stream, so a refill is a byte-pair load plus a cursor advance — no
+/// index arithmetic and no separate bit-position counter (PR C-3a). The
+/// position is *derived* from the cursor and `valid`, which is what a frame
+/// reports when it ends.
+///
+/// `Copy` and free of borrows, so a channel decode holds it in a local (and, on
+/// ARM, keeps the window in registers) and the caller re-seats it when the frame
+/// ends.
+#[derive(Clone, Copy)]
+struct BitReader {
+    base: *const u8,
+    /// Next halfword to append.
+    next: *const u8,
+    /// One past the last whole halfword of the stream.
+    end: *const u8,
     /// Next bits, MSB-aligned.
     hw: u32,
     /// Valid bits in `hw` (0..=32).
@@ -91,54 +133,61 @@ struct BitReader<'a> {
     bad: bool,
 }
 
-impl<'a> BitReader<'a> {
+impl BitReader {
     #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
-    fn new(stream: &'a [u8], bitpos: u32) -> Self {
+    fn new(stream: &[u8], bitpos: u32) -> Self {
+        let base = stream.as_ptr();
+        // Whole halfwords only: the format's stream is a halfword sequence, so
+        // a trailing odd byte is not addressable.
+        let end = base.wrapping_add(stream.len() & !1);
         let mut br = Self {
-            stream,
-            halfwords: stream.len() / 2,
-            next_hw: 0,
-            bitpos,
+            base,
+            next: base,
+            end,
             hw: 0,
             valid: 0,
             bad: false,
         };
-        br.rebuild();
+        br.set_pos(bitpos);
         br
     }
 
-    /// Load the halfword at `i`. The caller has checked `i + 1 < halfwords`.
+    /// Load the halfword at `p`. The caller has checked that both bytes exist.
     #[inline(always)]
     #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
-    unsafe fn load(stream: &[u8], i: usize) -> u32 {
-        // SAFETY: the caller checked that the halfword exists.
-        unsafe {
-            let p = stream.as_ptr().add(i * 2);
-            // Two byte loads: the stream's byte alignment is not guaranteed to
-            // be halfword-aligned, and ARM7TDMI has no unaligned halfword
-            // access.
-            *p as u32 | ((*p.add(1) as u32) << 8)
-        }
+    unsafe fn load(p: *const u8) -> u32 {
+        // Two byte loads: the stream's byte alignment is not guaranteed, and
+        // ARM7TDMI has no unaligned halfword access.
+        unsafe { *p as u32 | ((*p.add(1) as u32) << 8) }
     }
 
-    /// Reset the window to start at `self.bitpos`. Used at construction and
-    /// when a skip consumes more than the buffered bits.
+    /// Absolute bit position of the next unconsumed bit.
+    #[inline(always)]
     #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
-    fn rebuild(&mut self) {
-        let idx = (self.bitpos >> 4) as usize;
-        let off = self.bitpos & 15;
+    fn pos(&self) -> u32 {
+        let loaded = (self.next as usize).wrapping_sub(self.base as usize) as u32;
+        loaded.wrapping_mul(8).wrapping_sub(self.valid)
+    }
+
+    /// Move the cursor to absolute bit `p` and rebuild the window there. Used at
+    /// construction and when a skip consumes more than the window holds.
+    #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+    fn set_pos(&mut self, p: u32) {
+        let idx = (p >> 4) as usize;
+        let off = p & 15;
+        self.next = self.base.wrapping_add(idx * 2);
         self.hw = 0;
         self.valid = 0;
-        self.next_hw = idx + 2;
-        if idx + 2 > self.halfwords {
+        if self.next.wrapping_add(4) > self.end {
             self.bad = true;
             return;
         }
-        // SAFETY: idx + 1 < halfwords by the check above.
-        let h0 = unsafe { Self::load(self.stream, idx) };
-        let h1 = unsafe { Self::load(self.stream, idx + 1) };
+        // SAFETY: the check above leaves two halfwords readable from `next`.
+        let h0 = unsafe { Self::load(self.next) };
+        let h1 = unsafe { Self::load(self.next.add(2)) };
         self.hw = ((h0 << 16) | h1) << off;
         self.valid = 32 - off;
+        self.next = self.next.wrapping_add(4);
     }
 
     /// Append halfwords until at least 17 bits are buffered (or the stream
@@ -148,13 +197,13 @@ impl<'a> BitReader<'a> {
     #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
     fn refill(&mut self) {
         while self.valid <= 16 {
-            if self.next_hw >= self.halfwords {
+            if self.next.wrapping_add(2) > self.end {
                 self.bad = true;
                 return;
             }
-            // SAFETY: next_hw < halfwords, so both bytes of the halfword exist.
-            let h = unsafe { Self::load(self.stream, self.next_hw) };
-            self.next_hw += 1;
+            // SAFETY: the check above leaves one halfword readable at `next`.
+            let h = unsafe { Self::load(self.next) };
+            self.next = self.next.wrapping_add(2);
             self.hw |= h << (16 - self.valid);
             self.valid += 16;
         }
@@ -176,12 +225,12 @@ impl<'a> BitReader<'a> {
         } else {
             // valid is 17..=23 here, so d = n - valid is 1..=7.
             let d = n - self.valid;
-            if self.next_hw >= self.halfwords {
+            if self.next.wrapping_add(2) > self.end {
                 self.bad = true;
                 return 0;
             }
-            // SAFETY: next_hw < halfwords.
-            let h = unsafe { Self::load(self.stream, self.next_hw) };
+            // SAFETY: the check above leaves one halfword readable at `next`.
+            let h = unsafe { Self::load(self.next) };
             // Right-align the n-bit value: the fast path above shifts by
             // 32-n, so this path must produce the same alignment. `hw`'s top
             // `valid` bits are the high part of the result; the next d bits
@@ -196,7 +245,6 @@ impl<'a> BitReader<'a> {
         if n == 0 {
             return;
         }
-        self.bitpos = self.bitpos.wrapping_add(n);
         if n < self.valid {
             self.hw <<= n;
             self.valid -= n;
@@ -204,14 +252,15 @@ impl<'a> BitReader<'a> {
                 self.refill();
             }
         } else {
-            self.rebuild();
+            let p = self.pos().wrapping_add(n);
+            self.set_pos(p);
         }
     }
 
     #[inline(always)]
     #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
     fn bitpos(&self) -> u32 {
-        self.bitpos
+        self.pos()
     }
 
     #[inline(always)]
@@ -221,63 +270,70 @@ impl<'a> BitReader<'a> {
         self.skip(n);
         v
     }
+}
 
-    /// EG(k): unary zero count, the terminating one, `z` value bits, then `k`
-    /// raw low bits. Mirrors `uli_lite::bitstream::BitReader::eg`.
-    #[inline(never)]
-    #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
-    #[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
-    fn eg(&mut self, k: u32) -> u32 {
-        let mut z = 0u32;
-        while self.get(1) == 0 {
-            z += 1;
-            if z > 24 {
-                self.bad = true;
-                return 0;
-            }
-        }
-        let mut v = (1u32 << z) - 1 + self.get(z);
-        if k != 0 {
-            v = v.wrapping_shl(k) | self.get(k);
-        }
-        v
+/// EG(k) with the reference's fast path (PR C-3a): when the unary prefix has at
+/// most five zeros, the terminating one, the `z` value bits and the `k` raw low
+/// bits form one `2z + 1 + k`-bit field `F`, and `EG = F - 2^k`. The rare long
+/// prefix (and a truncated window) falls through to [`eg_slow`].
+#[inline(always)]
+#[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+fn esc(br: &mut BitReader, k: u32) -> u32 {
+    br.refill();
+    let z = CLZ6[(br.hw >> 26) as usize] as u32;
+    let t = 2 * z + 1 + k;
+    if z < 6 && t <= 32 && br.valid >= t {
+        let f = br.hw >> (32 - t);
+        br.skip(t);
+        f.wrapping_sub(1u32 << k)
+    } else {
+        eg_slow(br, k)
     }
 }
 
-/// The 10-bit LUT fast path, inlined at the call sites.
+/// EG(k) bit by bit: the unary zero count, the terminating one, the `z` value
+/// bits, then `k` raw low bits. Mirrors `uli_lite::bitstream::BitReader::eg`.
+#[inline(never)]
+#[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
+fn eg_slow(br: &mut BitReader, k: u32) -> u32 {
+    let mut z = 0u32;
+    while br.get(1) == 0 {
+        z += 1;
+        if z > 24 {
+            br.bad = true;
+            return 0;
+        }
+    }
+    let mut v = (1u32 << z) - 1 + br.get(z);
+    if k != 0 {
+        v = v.wrapping_shl(k) | br.get(k);
+    }
+    v
+}
+/// Decode one canonical symbol and consume its code.
+///
+/// Returns the LUT entry — symbol in the high bits, code length in the low five
+/// — **already consumed** (PR C-3a), so a call site does not issue a second
+/// `skip`. `1` (a zero symbol with a one-bit code) is the "stream rejected"
+/// sentinel: a real length is never zero, and a symbol of zero is legitimate, so
+/// the caller checks [`BitReader::bad`] once per band rather than per symbol.
 ///
 /// Nearly every symbol resolves in the first ten bits (the committed corpus
-/// misses on ~8% of them), so the common case is a `peek`, one `u16` load and
-/// a `skip`. Inlining *only this* keeps the call out of the hot path without
-/// duplicating the long-code search at every call site: inlining the whole of
-/// `huff` measured 2.7% but cost 4.3 KiB of IWRAM, which the product cannot
-/// afford (U6 — the UI and feeder still need room, and IWRAM tables are
-/// already blocked by the stack, see the plan of record).
-///
-/// Returns `None` when the symbol is not in the LUT, leaving the reader
-/// untouched for [`huff_slow`].
+/// misses on ~8% of them), so the common case is a `peek`, one `u16` load and a
+/// `skip`. Keeping the long-code search out of line measured better than
+/// inlining all of it (+1.6% for 896 B rather than +2.7% for 4,252 B; PR C).
 #[inline(always)]
 #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
-fn huff_fast(br: &mut BitReader<'_>, p: &HuffmanParts<'_>) -> Option<u16> {
+fn huff(br: &mut BitReader, p: &HuffmanParts<'_>, ops: &mut Ops) -> u16 {
     let idx = br.peek(LUTB as u32) as usize;
     // SAFETY: peek(LUTB) < 1024 == p.lut.len().
     let e = unsafe { *p.lut.get_unchecked(idx) };
-    if e == 0 {
-        return None;
+    if e != 0 {
+        br.skip((e & 31) as u32);
+        return e;
     }
-    br.skip((e & 31) as u32);
-    Some(e >> 5)
-}
-
-/// Canonical Huffman decode against the raw table views. The table parser
-/// validated every index this can produce.
-#[inline(always)]
-#[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
-fn huff(br: &mut BitReader<'_>, p: &HuffmanParts<'_>, ops: &mut Ops) -> u16 {
-    match huff_fast(br, p) {
-        Some(v) => v,
-        None => huff_slow(br, p, ops),
-    }
+    huff_slow(br, p, ops)
 }
 
 /// The canonical-code search for a symbol longer than the LUT covers. Rare
@@ -286,7 +342,7 @@ fn huff(br: &mut BitReader<'_>, p: &HuffmanParts<'_>, ops: &mut Ops) -> u16 {
 #[inline(never)]
 #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
 #[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
-fn huff_slow(br: &mut BitReader<'_>, p: &HuffmanParts<'_>, ops: &mut Ops) -> u16 {
+fn huff_slow(br: &mut BitReader, p: &HuffmanParts<'_>, ops: &mut Ops) -> u16 {
     let mut l = LUTB + 1;
     while l <= MAXLEN {
         // SAFETY: l <= MAXLEN < p.first/count/offs.len().
@@ -299,105 +355,166 @@ fn huff_slow(br: &mut BitReader<'_>, p: &HuffmanParts<'_>, ops: &mut Ops) -> u16
             let i = unsafe { *p.offs.get_unchecked(l) } as usize + c as usize;
             // SAFETY: the canonical table parser guarantees offs + count <=
             // 256, and c < count.
-            return unsafe { *p.sym.get_unchecked(i) };
+            let sym = unsafe { *p.sym.get_unchecked(i) } as u32;
+            return ((sym << 5) | l as u32) as u16;
         }
         l += 1;
     }
     br.bad = true;
-    0
+    1
+}
+
+/// Write one zero band: 16 coefficients, four words at a time (PR C-3a).
+#[inline(always)]
+#[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+unsafe fn zero16(p: *mut i32) {
+    // SAFETY: the caller guarantees 16 writable i32 at `p`.
+    unsafe {
+        let mut i = 0;
+        while i < BANDW {
+            p.add(i).cast::<[i32; 4]>().write([0; 4]);
+            i += 4;
+        }
+    }
+}
+
+/// Dequantise one coefficient straight into its slot.
+///
+/// `16 * m - dq[c][m]`, then one multiply by the frame step: the reference's
+/// arithmetic, with the `m < 16` shape read from the album's precomputed
+/// [`uli_lite::CodeTables::rq`] and escaped magnitudes using the `m = 15` shape
+/// (PR C-3a). The sign bit is consumed here, in the same order the reference
+/// reads it.
+#[inline(always)]
+#[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+unsafe fn put_coef(
+    p: *mut i32,
+    m: u32,
+    rq: &[i16; 16],
+    dq15: i8,
+    step: u32,
+    index: usize,
+    br: &mut BitReader,
+    ops: &mut Ops,
+    diag: &mut Diag,
+) {
+    if m == 0 {
+        ops.zc = ops.zc.wrapping_add(1);
+        // SAFETY: the caller guarantees `p` is a coefficient slot.
+        unsafe { p.write(0) };
+        return;
+    }
+    // SAFETY: `rq` has 16 entries and the branch constrains `m < 16`.
+    let r = if m < 16 {
+        unsafe { *rq.get_unchecked(m as usize) as i32 }
+    } else {
+        ((m as i32) << 4) - dq15 as i32
+    };
+    let xv = r.wrapping_mul(step as i32);
+    if xv >= XLIM as i32 {
+        diag.xover = diag.xover.wrapping_add(1);
+    }
+    let q = xv;
+    let v = if br.get(1) != 0 { q.wrapping_neg() } else { q };
+    // SAFETY: the caller guarantees `p` is a coefficient slot.
+    unsafe { p.write(v) };
+    ops.nz = ops.nz.wrapping_add(1);
+    if index >= NCODED {
+        diag.hfnz = diag.hfnz.wrapping_add(1);
+    }
 }
 
 /// One channel: band classes, tuples, escapes, dequantisation.
 ///
-/// The arithmetic and operation counters are the core's `dec_chan`; only the
-/// addressing (unchecked), the bit reader and the instruction set differ.
+/// Structurally the reference's `dec_chan` (PR C-3a): the reader is a local, a
+/// band's coefficients are written straight into `x` as they decode, zero bands
+/// and the tail after EOB are whole-band stores, and the dequant is a table load
+/// plus one multiply. Nothing is pre-zeroed, so every coefficient is written
+/// exactly once per frame.
+///
+/// Returns the number of bands before EOB, which the caller uses to bound M/S.
+/// `br.bad` signals a rejected stream; the caller discards the frame, so a
+/// partially written `x` is never observable.
 #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
 #[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
 #[inline(never)]
-fn dec_chan(
+unsafe fn dec_chan(
     tables: &CodeTables,
-    x: &mut [i32; M],
+    x: *mut i32,
     step: u32,
-    br: &mut BitReader<'_>,
+    br: &mut BitReader,
     ops: &mut Ops,
     diag: &mut Diag,
-) {
-    // Manual zero-fill: the slice `fill` goes through a compiler-builtins
-    // interworking call, and this loop is on the hottest path.
-    {
-        let xp = x.as_mut_ptr();
-        let mut i = 0;
-        while i < M {
-            // SAFETY: i < M.
-            unsafe { xp.add(i).write(0) };
-            i += 1;
-        }
-    }
+) -> usize {
     let k = tables.k;
     if k > MAXK {
         br.bad = true;
-        return;
+        return 0;
     }
-    let ctype = &tables.ctype;
-    let rbits = &tables.rbits;
-    let esck = &tables.esck;
-    let dq = &tables.dq;
     let mut ctx = k;
-
     let mut b = 0usize;
     while b < NBANDS {
-        let h = tables.band_table(ctx);
-        let c = huff(br, &h.parts(), ops) as usize;
+        let band = tables.band_table(ctx).parts();
+        let e = huff(br, &band, ops);
         ops.bandsyms = ops.bandsyms.wrapping_add(1);
         if br.bad {
-            return;
+            return b;
         }
+        let c = (e >> 5) as usize;
         if c == k {
-            return;
+            break;
         }
-        if c > k {
+        if c >= MAXK {
             br.bad = true;
-            return;
+            return b;
         }
         ctx = c;
+        // SAFETY: b < NBANDS, so the band's 16 slots are inside the channel.
+        let xp = unsafe { x.add(b * BANDW) };
         // SAFETY: c < MAXK == ctype.len().
-        let ct = unsafe { *ctype.get_unchecked(c) };
+        let ct = unsafe { *tables.ctype.get_unchecked(c) };
         if ct == CT_ZERO {
+            unsafe { zero16(xp) };
             b += 1;
             continue;
         }
         ops.coded_bands = ops.coded_bands.wrapping_add(1);
-        let hc = tables.class_table(c);
-        let hcp = hc.parts();
+        let cls = tables.class_table(c).parts();
         // SAFETY: c < MAXK.
-        let dqc = unsafe { dq.get_unchecked(c) };
-        let esc = unsafe { *esck.get_unchecked(c) } as u32;
-        let r = unsafe { *rbits.get_unchecked(c) } as u32;
-        let mut m = [0i32; BANDW];
-
+        let rq = unsafe { tables.rq.get_unchecked(c) };
+        let dq15 = unsafe { *tables.dq15.get_unchecked(c) };
+        let esck = unsafe { *tables.esck.get_unchecked(c) } as u32;
         if ct == CT_PAIR {
+            let r = unsafe { *tables.rbits.get_unchecked(c) } as u32;
             let mut i = 0usize;
             while i < BANDW {
-                let s = huff(br, &hcp, ops) as u32;
+                let e = huff(br, &cls, ops);
                 ops.pairs = ops.pairs.wrapping_add(1);
-                let nib = [s >> 4, s & 15];
+                let symb = (e >> 5) as u32;
                 let mut kk = 0usize;
                 while kk < 2 {
-                    let mut hh = nib[kk];
-                    if hh == 15 {
-                        hh = hh.wrapping_add(br.eg(esc));
+                    let mut m = if kk == 0 { symb >> 4 } else { symb & 15 };
+                    if m == 15 {
+                        m = m.wrapping_add(esc(br, esck));
                         ops.escs = ops.escs.wrapping_add(1);
                     }
-                    let mm = hh.wrapping_shl(r) | br.get(r);
+                    let mm = m.wrapping_shl(r) | br.get(r);
                     if r != 0 {
                         ops.raws = ops.raws.wrapping_add(1);
                     }
-                    let val = mm as i32;
-                    // SAFETY: i + kk < BANDW.
-                    *unsafe { m.get_unchecked_mut(i + kk) } = if mm != 0 && br.get(1) != 0 {
-                        val.wrapping_neg()
-                    } else {
-                        val
+                    // SAFETY: i < BANDW and kk < 2.
+                    unsafe {
+                        put_coef(
+                            xp.add(i + kk),
+                            mm,
+                            rq,
+                            dq15,
+                            step,
+                            b * BANDW + i + kk,
+                            br,
+                            ops,
+                            diag,
+                        )
                     };
                     kk += 1;
                 }
@@ -406,70 +523,45 @@ fn dec_chan(
         } else {
             let mut i = 0usize;
             while i < BANDW {
-                let s = huff(br, &hcp, ops) as u32;
+                let e = huff(br, &cls, ops);
                 ops.quads = ops.quads.wrapping_add(1);
-                let dg = [s / 27, (s / 9) % 3, (s / 3) % 3, s % 3];
+                // SAFETY: a CT_QUAD class table has exactly 81 symbols.
+                let q3 = unsafe { *Q3.get_unchecked((e >> 5) as usize) };
                 let mut kk = 0usize;
                 while kk < 4 {
-                    let mut mm = dg[kk];
-                    if mm == 2 {
-                        mm = mm.wrapping_add(br.eg(esc));
+                    let mut m = ((q3 >> (6 - 2 * kk)) & 3) as u32;
+                    if m == 2 {
+                        m = m.wrapping_add(esc(br, esck));
                         ops.escs = ops.escs.wrapping_add(1);
                     }
-                    let val = mm as i32;
-                    // SAFETY: i + kk < BANDW.
-                    *unsafe { m.get_unchecked_mut(i + kk) } = if mm != 0 && br.get(1) != 0 {
-                        val.wrapping_neg()
-                    } else {
-                        val
+                    // SAFETY: i < BANDW and kk < 4.
+                    unsafe {
+                        put_coef(
+                            xp.add(i + kk),
+                            m,
+                            rq,
+                            dq15,
+                            step,
+                            b * BANDW + i + kk,
+                            br,
+                            ops,
+                            diag,
+                        )
                     };
                     kk += 1;
                 }
                 i += 4;
             }
         }
-
-        let xp = x.as_mut_ptr();
-        let mut i = 0usize;
-        while i < BANDW {
-            let v = m[i];
-            if v == 0 {
-                ops.zc = ops.zc.wrapping_add(1);
-                i += 1;
-                continue;
-            }
-            let a = v.unsigned_abs();
-            // Explicit compare, not `Ord::min`: `min` lowers to an
-            // out-of-line generic that ARM code calls through an interworking
-            // thunk (the same class of call that hung `ola`'s `clamp`).
-            let idx = if a > 15 { 15 } else { a as usize };
-            // SAFETY: idx < 16 == dqc.len().
-            let dqv = unsafe { *dqc.get_unchecked(idx) } as i32;
-            let rq = 16i64 * a as i64 - dqv as i64;
-            // The valid-stream path is a 32x32 product (SMULL in ARM mode);
-            // the fallback keeps an escaped magnitude exact on malformed
-            // streams, matching the reference's i64 arithmetic.
-            let xv = if rq >= i32::MIN as i64 && rq <= i32::MAX as i64 {
-                (rq as i32 as i64) * (step as i64)
-            } else {
-                rq * step as i64
-            };
-            if xv >= XLIM {
-                diag.xover = diag.xover.wrapping_add(1);
-            }
-            let q = xv as i32;
-            let out = if v < 0 { q.wrapping_neg() } else { q };
-            let off = b * BANDW + i;
-            // SAFETY: off < NBANDS * BANDW == M.
-            unsafe { xp.add(off).write(out) };
-            ops.nz = ops.nz.wrapping_add(1);
-            if off >= NCODED {
-                diag.hfnz = diag.hfnz.wrapping_add(1);
-            }
-            i += 1;
-        }
         b += 1;
     }
+    // Tail after EOB: whole bands of zeros, so no coefficient is ever stale.
+    while b < NBANDS {
+        // SAFETY: b < NBANDS.
+        unsafe { zero16(x.add(b * BANDW)) };
+        b += 1;
+    }
+    b
 }
 
 /// The product decoder: same output as `uli_lite::Decoder`, GBA-first hot path.
@@ -586,7 +678,7 @@ impl<'a, 's> GbaDecoder<'a, 's> {
         let mut ops = Ops::ZERO;
         let mut diag = Diag::default();
 
-        let z = br.eg(0);
+        let z = esc(&mut br, 0);
         let g = self.state_g(z);
         self.g_prev = g;
         let ms = br.get(1) as i32;
@@ -601,22 +693,45 @@ impl<'a, 's> GbaDecoder<'a, 's> {
             return Err(Error::BadBitstream);
         }
 
-        {
+        let (nb0, nb1) = {
             let tables = self.tables;
             let hot = &mut *self.hot;
-            dec_chan(tables, &mut hot.x[0], step, &mut br, &mut ops, &mut diag);
-            dec_chan(tables, &mut hot.x[1], step, &mut br, &mut ops, &mut diag);
-        }
+            // SAFETY: each row is M coefficients and `dec_chan` is band-bounded.
+            unsafe {
+                let nb0 = dec_chan(
+                    tables,
+                    hot.x[0].as_mut_ptr(),
+                    step,
+                    &mut br,
+                    &mut ops,
+                    &mut diag,
+                );
+                let nb1 = dec_chan(
+                    tables,
+                    hot.x[1].as_mut_ptr(),
+                    step,
+                    &mut br,
+                    &mut ops,
+                    &mut diag,
+                );
+                (nb0, nb1)
+            }
+        };
         if br.bad {
             return Err(Error::BadBitstream);
         }
 
         if ms != 0 {
+            // The reference transforms only the coded coefficients
+            // (`nb = max(nb0, nb1)`); everything past them is zero in both
+            // channels, so the result is identical and the loop is shorter
+            // (PR C-3a).
+            let n = if nb0 > nb1 { nb0 } else { nb1 } * BANDW;
             let l = self.hot.x[0].as_mut_ptr();
             let r = self.hot.x[1].as_mut_ptr();
-            // SAFETY: l and r are the two M-length rows; i < M.
+            // SAFETY: l and r are the two M-length rows and n <= M.
             unsafe {
-                for i in 0..M {
+                for i in 0..n {
                     let a = (*l.add(i)) as u32;
                     let b = (*r.add(i)) as u32;
                     (*l.add(i)) = a.wrapping_add(b) as i32;
@@ -691,7 +806,7 @@ impl<'a, 's> GbaDecoder<'a, 's> {
 
 #[cfg(test)]
 mod tests {
-    use super::BitReader;
+    use super::{BitReader, esc};
     use uli_lite::Album;
 
     const BLOB: &[u8] = include_bytes!("../../uli-lite/tests/fixtures/uli2_tiny.uli");
@@ -762,11 +877,10 @@ mod tests {
                 pos += take;
                 assert_eq!(br.bitpos(), pos);
                 assert_eq!(
-                    br.next_hw * 16,
+                    (br.next as usize - br.base as usize) * 8,
                     pos as usize + br.valid as usize,
-                    "invariant case={case} step={step} pos={pos} take={take} valid={} next_hw={}",
-                    br.valid,
-                    br.next_hw
+                    "invariant case={case} step={step} pos={pos} take={take} valid={}",
+                    br.valid
                 );
                 if step % 4 == 0 {
                     rng ^= rng << 13;
@@ -775,7 +889,7 @@ mod tests {
                     let k = rng % 24;
                     let mut rp = pos;
                     let want = ref_eg(stream, &mut rp, k);
-                    let got = br.eg(k);
+                    let got = esc(&mut br, k);
                     assert_eq!(got, want, "eg case={case} step={step} pos={pos} k={k}");
                     pos = rp;
                 }
@@ -807,7 +921,7 @@ mod tests {
                     let k = ((step * 5 + start) % 24) as u32;
                     let mut rp = pos;
                     let want_eg = ref_eg(stream, &mut rp, k);
-                    let got_eg = br.eg(k);
+                    let got_eg = esc(&mut br, k);
                     assert_eq!(
                         got_eg, want_eg,
                         "eg start={start} step={step} pos={pos} k={k}"
