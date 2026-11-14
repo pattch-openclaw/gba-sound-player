@@ -397,17 +397,21 @@ forecast.
 and each changes the frame the next one is measured against — so every arm keeps
 its control in the same image (PR A's rule).
 
-1. **C-3b + C-3c** — delete work from the hot loop first: cheapest, and it makes
-   the product arm comparable to the C record before anything is tuned against
-   it.
-2. **C-1** — asm kernels, specified as *bit-exact and stack-reducing*; the
-   `iwram-tables` arm is re-measured afterwards and is expected to become legal
-   (today it crashes: 13,664 B of stack against ~15,040 needed).
-3. **C-2 = C-3a** — the entropy/dequant structure port, item by item from the
-   table, each twinned against the core.
-4. **C-3d, C-3e** — OLA fusion and `nb`-limited M/S; re-time the bench on the
-   **production output format** instead of the dual int8+int16 write.
-5. **Re-measure and take the U4 verdict** against the parity target, not against
+1. **C-3b (+ C-3c, landed)** — delete the diagnostics from the product hot loop.
+   Measured at ~30,000 cycles/frame, the largest item the attribution found. It
+   is the only remaining step that is pure deletion.
+2. **Coefficient buffers to IWRAM** — the attribution's second item, and new:
+   M/S plus coefficient traffic pays EWRAM wait states (the reference's `X`/`P`
+   are in IWRAM and its M/S is ~4,400 against our 16,067). Blocked on the
+   ≈15.0 KiB stack; unblock it *with* C-1 rather than before.
+3. **C-1** — asm kernels, specified as *bit-exact and stack-reducing*; that is
+   what makes both `iwram-tables` and the coefficient buffers legal (today
+   `iwram-tables` crashes: 13,664 B of stack against ~15,040 needed).
+4. **C-3d, C-3e (`nb` landed with C-3a)** — OLA output fusion; re-time the bench
+   on the **production output format** instead of the dual int8+int16 write.
+5. **C-2 = C-3a (landed 2026-11-14, −35,000 measured)** — the structure port; the
+   attribution above replaces the guesswork it was scoped with.
+6. **Re-measure and take the U4 verdict** against the parity target, not against
    100%.
 
 **Parity target, stated so it can be checked.** "C-class" means within ~5% of
@@ -582,6 +586,75 @@ that ratio**, so the next entropy step has to be a per-stage attribution at
 sub-frame granularity (PR C's by-difference method one level down), not another
 structural guess.
 
+### PR C-2 attribution: where the remaining ~140,000 cycles go (2026-11-14)
+
+Two instruments, both run rather than reasoned about:
+
+1. **Per-frame dump.** `examples/uli_bench --features per-frame` prints one row
+   per frame with the measured window and the decoder's operation counts
+   (`make uli-bench` is unchanged; the feature is off by default). The dump
+   build reproduces the gate arm exactly — worst 488,685, sum 55,384,726 — so
+   the instrument does not perturb what it measures.
+2. **By-difference arms.** Each rebuild removes exactly one part and re-runs the
+   bench. These are **timing-only**: the pins fail by construction (their output
+   is no longer the album), and only the window is quoted.
+
+Fitting the 129 dumped rows with a per-event model
+
+    cycles = c + Σ (events × cycles_per_event)
+
+explains the corpus at **R² = 0.9994** with a residual sd of **1,170 cycles**.
+Per-event costs (cycles, ± the fit's standard error): **pair symbol ≈ 302 ± 19**,
+**quad symbol ≈ 341 ± 23**, **escape ≈ 134 ± 9**, **raw field ≈ 57 ± 4**,
+**long code ≈ 221 ± 16**, **M/S frame ≈ 18,124 ± 440**, nonzero-over-zero
+coefficient ≈ +25 ± 9. The band-symbol term is **not identifiable** and must not
+be quoted: `coded = pairs/8 + quads/4` exactly (`nz + zc = 16 × coded`), so the
+band term is a collinear proxy — it fits negative, which is the tell that it is
+absorbing something else, not that zero bands are free.
+
+By-difference arms against the landed arm (worst / mean):
+
+| part removed | worst | mean | Δ worst | Δ mean |
+|---|---:|---:|---:|---:|
+| — (landed C-3a + C-3c) | 488,685 | 429,339 | — | — |
+| M/S loop | 472,618 | 419,852 | 16,067 | 9,487 |
+| dequant arithmetic | 465,655 | 414,434 | 23,030 | 14,905 |
+| zero-band + EOB fills | 486,874 | 421,937 | 1,811 | 7,402 |
+| `Ops` + `Diag` (measured earlier) | 458,203 | 411,253 | 30,482 | ~20,000 |
+
+**What that says, and the harvest order it implies:**
+
+1. **The diagnostics are the biggest single item: ~30,000 cycles.** They are two
+   compares plus a counter per coefficient/symbol — work the C product build
+   does not do at all. **C-3b is therefore 3× the harvest of the M/S loop.**
+2. **M/S costs 16,067 but its loop shape is not the problem.** Rewriting it as
+   four-coefficient blocks — the unit the reference's `uli_ms_asm` moves — was
+   built and measured: it recovers only 1,776 worst / 896 mean. The cost is
+   **memory traffic**: our `HotState` (and therefore `x`) is in EWRAM, while the
+   reference's `uli_g_X`/`uli_g_P` live in IWRAM (`uli_gba_dec.iwram.c`), where
+   the same M/S is ~4,400. Every coefficient written or transformed pays 16-bit
+   EWRAM wait states. **The lever is coefficient buffers in IWRAM**, which is
+   blocked on the ≈15.0 KiB stack — and C-1's asm is what removes the spills that
+   need it. This is now the second-largest identified item and it is *not* an
+   entropy rewrite.
+3. **The dequant arithmetic is only ~4,000.** Of the 23,030 in its row, ~19,200
+   is the `xover` diagnostic compare that the `Ops`+`Diag` arm also captures. The
+   32-bit `rq` path is already near its floor; do not spend more here.
+4. **Fills cost ~7,400 mean and are not removable.** Zero bands and the post-EOB
+   tail must be written because `pre`/`post` read all `M` coefficients. They do
+   set the floor: sparse frames drop from 353,340 to 325,109 without them.
+5. **Per event, escapes (134) and long codes (221) are the most expensive things
+   after the symbol itself** — 74 escapes and 8 long codes in the mean frame,
+   ≈11,700 cycles. Worth a look once 1 and 2 are done; not before.
+
+**Conclusion.** The huff/field path is ~200 cycles per symbol, which is the same
+order as the C record's whole non-synthesis budget per symbol. The remaining gap
+is therefore **not** an unexplained per-symbol inefficiency: it is diagnostics
+(~30,000) plus **EWRAM traffic on the coefficient buffers**, and both of those
+are understood. Re-based: C-3b alone puts the frame at ~458,000 (175%); C-3b plus
+IWRAM coefficient buffers is the path to ~170% before C-1 lands, after which the
+kernel prize (~194,000) is what closes the budget.
+
 ### PR C (2026-11-14, mGBA, WAITCNT 4/2)
 
 Full frame, 129-frame corpus, 262,144-cycle period:
@@ -676,6 +749,22 @@ coefficient against the C bench's entropy+dequant (~41 c/coef) is ~6.6×.
 ---
 
 ## Decision log
+
+- **2026-11-14 — the attribution is built, run, and it reorders the work.** Two
+  instruments: a per-frame dump in the bench (`--features per-frame`, which
+  reproduces the gate arm exactly, so it does not perturb the measurement) and
+  by-difference arms. The 129 rows fit a per-event model at R² = 0.9994 (residual
+  sd 1,170 cycles); the notable coefficients are pair 302, quad 341, escape 134,
+  raw field 57, long code 221, M/S frame 18,124. Findings: **the diagnostics are
+  the biggest item (~30,000)**; **M/S costs 16,067 but a four-coefficient block
+  rewrite recovers only 1,776**, so the cost is EWRAM traffic, not loop shape —
+  the reference's coefficient buffers are in IWRAM; the dequant arithmetic is
+  only ~4,000 (its row is mostly the `xover` compare); and the fills (~7,400
+  mean) are required because `pre`/`post` read all `M` coefficients. The
+  band-symbol term is **not identifiable** (collinear) and is not quoted. Work
+  order becomes C-3b → IWRAM coefficient buffers (with C-1) → C-1 → OLA, and the
+  remaining gap is now explained rather than mysterious: diagnostics plus
+  memory placement, not an unexplained per-symbol cost.
 
 - **2026-11-14 — C-2 landed as C-3a (+C-3c), and it was measured, not assumed.**
   The structural port and the 32-bit dequant measured **488,685 worst / 429,339
