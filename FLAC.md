@@ -569,8 +569,17 @@ pins, and `make master-pack INPUT=…` / `make master-play-rom INPUT=…` build 
 asset and a playable image. The first 9.9 s of `bioluminescent.wav` packs at
 80 frames / 162,304 samples, and `master-play.gba` (`78a02c9c…`, 645,072 B) runs
 in mGBA with `und 0`, `late 0`, 289/289 periods, PCM/FIFO MATCH, work **27.998%**
-/ worst **30.871%**, `attr 468011`. That is an mGBA control; the master shapes
-still need hardware rows before this is a C2 product.
+/ worst **30.871%**, `attr 468011`. That is an mGBA control.
+
+**The master hardware reading is green:** four runs of `master-play.gba`
+(`78a02c9c…`) on GBA 001 and GBA SP, twice each, were audible and recognizable
+as `bioluminescent.wav`, all ended BLUE, and all showed `und 0`, `late 0`,
+289/289 periods, exact digests, work **32.208%** / worst **35.831%**,
+`attr 527339`, `minlead 9120`. `2nd src 2/289` is new versus the synthetic
+asset's 0/289, with no lateness; it is recorded, not explained. This is the
+audible half of 7-3 for the master path, but **not C2 yet**: the asset is still
+MASTER-mode, and the packer lacks measured CONSTANT/FIXED-1..3 rows and residual
+envelopes to promote it to the product profile.
 
 ## What is next
 

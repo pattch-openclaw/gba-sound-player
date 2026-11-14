@@ -1287,3 +1287,90 @@ at ~28% work. That is an mGBA control, not hardware: the FIXED-1..3/CONSTANT row
 need the hardware measurement before the master asset can be a C2 product rather than a
 master-mode asset. It is the first end-to-end encode → GAFP → decode → playback run on
 the master path, and the image is the one to take to the units for that measurement.
+
+## 7-3 master hardware reading (2026-11-13): real audio, audible on both units
+
+**Image.** `master-play.gba`, sha256
+**`78a02c9c1f751570904e9f8a8f0f0796740db883cabcb861e4bb02ee6e785b21`**, 645,072 B:
+the first 9.9 s of `bioluminescent.wav`, resampled to 16,384 Hz / 16-bit, packed by
+`gafp_pack.py --master` to an 80-frame / 162,304-sample master GAFP with census
+`constant x4, fixed1 x102, fixed2 x53, fixed3 x1`. Four runs: **GBA 001 x2** and
+**GBA SP x2**. All four were **audible and recognizable as the master**, and all four
+ended on a **BLUE screen**.
+
+**The four screens as transcribed.** The one transcription slip, `Minleda` on the
+second GBA 001 screen, is kept as read.
+
+```text
+GBA 001 (1)                          GBA 001 (2)
+BLUE SCREEN                          BLUE SCREEN
+PRODUCT PLAY 16384                   PRODUCT PLAY 16384
+Fr 80 und 0 pcm ok fifo ok           Fr 80 und 0 pcm ok fifo ok
+Ledg ok aud ok push 162304           Ledg ok aud ok push 162304 cons 162304
+     cons 162304                      Work 32.208% dec 23.656% attr 527339
+Work 32.208% dec 23.656% attr 527339 Conv 6.733% push 0.820% feed 0.997%
+Conv 6.733% push 0.820% feed 0.997%  Minleda 9120 maxwk 35.831%
+Minlead 9120 maxwk 35.831%           Per 289 ser 289 tail 1/464 void 0
+Per 289 ser 289 tail 1/464 void 0    Replay 0 late 0 fed 0 drain 0
+Replay 0 late 0 fed 0 drain 0        Latep 0 worstp 0 dly 0 refus 0
+Latep 0 worstp 0 dly 0 refus 0       Late in push 0/0 2nd src 2/289
+Late in push 0/0 2nd src 2/289            disp 0008
+     disp 0008                       Playback
+Playback
+
+GBA SP (1)                           GBA SP (2)
+BLUE SCREEN                          BLUE SCREEN
+PRODUCT PLAY 16384                   PRODUCT PLAY 16384
+Fr 80 und 0 pcm ok fifo ok           Fr 80 und 0 pcm ok fifo ok
+Ledg ok aud ok push 162304           Ledg ok aud ok push 162304 cons 162304
+     cons 162304                      Work 32.208% dec 23.656% attr 527339
+Work 32.208% dec 23.656% attr 527339 Conv 6.733% push 0.820% feed 0.997%
+Conv 6.733% push 0.820% feed 0.997%  Minlead 9120 maxwk 35.831%
+Minlead 9120 maxwk 35.831%           Per 289 ser 289 tail 1/464 void 0
+Per 289 ser 289 tail 1/464 void 0    Replay 0 late 0 fed 0 drain 0
+Replay 0 late 0 fed 0 drain 0        Latep 0 worstp 0 dly 0 refus 0
+Latep 0 worstp 0 dly 0 refus 0       Late in push 0/0 2nd src 2/289
+Late in push 0/0 2nd src 2/289            disp 0008
+     disp 0008                       Playback
+Playback
+```
+
+| field | all four runs | reading |
+|---|---|---|
+| audible | **yes, on both units** | recognizable master audio; pitch and tempo accepted |
+| screen | **BLUE** | every gate passed |
+| frames / periods | 80 frames, `per 289 ser 289` | all elapsed periods serviced |
+| underflows / lateness | `und 0`, `replay 0 late 0 fed 0 drain 0`, `dly 0` | zero underruns and zero late re-arms |
+| sample accounting | `push 162304 cons 162304` | exactly the manifest total |
+| digests | `pcm ok fifo ok`, `ledg ok`, `aud ok` | exact for pushed bytes and converted FIFO bytes |
+| work | **32.208%**, worst frame **35.831%** | 675,451 c/frame mean, 751,431 c/frame worst |
+| decode | `dec 23.656%`, `attr 527339` | 496,102 c/frame window mean; **527,339 c/frame** attributed |
+| convert / push / feeder | 6.733% / 0.820% / 0.997% | 141,201 / 17,197 / 20,909 c/frame |
+| lead | `minlead 9120` | 9,120 samples = 16.3 periods = 0.557 s |
+| tail | `tail 1/464` | the designed short final period |
+| rate contract | no rate/pitch row | declared 16,384 Hz = played 16,384 Hz |
+| interrupt co-entry | `2nd src 2/289` | two audio entries shared an entry with another source, with `disp 0008` and **no lateness** |
+
+**Hardware versus the mGBA master control.** mGBA on the same master image reads work
+27.998% / dec 20.935% / attr 468,011 / conv 5.286% / push 0.804% / feed 0.971%. Hardware
+is decode **+13.00%**, convert **+27.37%**, work **+15.04%**, attr **+12.68%**. That is
+the same hardware-above-emulator direction as every prior row; the convert leg is the
+largest, as it has been since 7-1.
+
+**`2nd src 2/289` is the one new observation.** Earlier hardware readings on the synthetic
+FIXED-0 asset reported `2nd src 0/289`; this master run reports two co-entries, on both units
+and both runs, with `disp 0008` and **zero late services**. It is not a 7-2 failure and did
+not move the audit; whether it is a master-decode effect or just a VBlank collision is not
+settled by this run. It is recorded because a zero was previously used as evidence against a
+second interrupt source, and this is the first hardware reading where that zero is not zero.
+
+**What this establishes.** The master path is real end to end on hardware: encode →
+GAFP → decode → playback works with actual programme material, audible and recognizable on
+both units, with zero underruns and zero late services at 16,384 Hz. Work is 32.208% / worst
+35.831%, so the master path has ample frame headroom.
+
+**What it does not establish.** This is a **MASTER-mode** asset, not yet a C2 product asset:
+the packer still refuses CONSTANT/FIXED-1..3 as unmeasured product shapes. The run gives the
+whole-asset hardware figures, not the per-shape rows and residual envelopes needed to widen
+the product profile. The remaining step is to measure those rows (or accept a different
+product policy), promote the master profile, and then re-run with the product asset/pin.

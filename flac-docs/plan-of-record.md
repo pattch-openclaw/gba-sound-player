@@ -3783,6 +3783,21 @@ That is an **mGBA control**: the FIXED-1..3/CONSTANT hardware rows are still nee
 the master asset can be called a C2 product. The image is the one to take to the units for
 that measurement.
 
+**The master hardware reading then came back audible on both units, twice each.** All four
+runs of `master-play.gba` (`78a02c9c…`, 645,072 B) were recognizable master audio and ended
+BLUE: `fr 80 und 0`, `per 289 ser 289 tail 1/464 void 0`, `replay 0 late 0 fed 0 drain 0`,
+`late in push 0/0`, `2nd src 2/289`, `disp 0008`, `push 162304 cons 162304`, digests ok.
+Work **32.208%** / worst **35.831%**, `attr 527339`, `dec 23.656%`, `conv 6.733%`,
+`push 0.820%`, `feed 0.997%`, `minlead 9120`. Against mGBA's 27.998% work / 468,011 attr,
+hardware is +15.04% / +12.68% — the same direction as every other row; convert is +27.37%.
+`2nd src 2/289` is new (earlier synthetic runs were 0/289), with `disp 0008` and zero
+lateness; it is recorded, not explained. The full four-screen transcription is in
+[`playback-results.md`](playback-results.md) under "7-3 master hardware reading".
+
+This is the audible half of 7-3 for the master path, and it is green. It is **not C2 yet**
+because the asset is still a MASTER-mode asset: the packer does not have measured
+CONSTANT/FIXED-1..3 rows or residual envelopes to promote it to the product profile.
+
 
 ## The width decision (what it is and is not safe for)
 
