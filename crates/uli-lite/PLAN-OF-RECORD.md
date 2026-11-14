@@ -1,7 +1,7 @@
 # ULI2 plan of record
 
-Status: **live since 2026-11-14**. This is the working plan for the ULI2
-product codec. [`../../ULI2.md`](../../ULI2.md) remains the decision record
+Status: **live since 2026-11-14; PR C open, U4 not met.** This is the working
+plan for the ULI2 product codec. [`../../ULI2.md`](../../ULI2.md) remains the decision record
 (why ULI2, what it is, the licensing and encoder risks); this file owns the
 phases, gates, measurement ledger and the order of work.
 
@@ -177,13 +177,72 @@ Open item this buys: the remaining synthesis gap. `ArmKernels` seq/channel is
 169,061 against the C/asm reference's ~67,300 (2.51×); the OLA is still the
 outlier. PR C is now scoped to kernels, not to the entropy path.
 
-### PR C — close the gap (scoped by PR B)
+### PR C — real-time: attribution first, then the two rewrites (in progress)
 
-- Tuning, block moves, asm kernels if Rust codegen stalls (OLA is the measured
-  outlier), optionally IWRAM tables.
-- Gate: **≤1×** worst (the C/asm reference is 69.4%), then U4. Fold into PR B
-  only if B lands comfortably and the remaining delta is small; otherwise keep
-  it separate so the delta stays attributable.
+PR C opened by measuring where the 523,267-cycle worst frame actually goes,
+because at 2.0× the period a guessed optimisation is as likely to move code
+into a worse register allocation as to help. The attribution below is the
+substance of this PR; the code change it produced is small and the remaining
+gap is scoped as two named rewrites.
+
+**Attribution, worst frame (frame 101), 523,267 cycles, mGBA 4/2:**
+
+| part | cycles | share | of which |
+|---|---:|---:|---|
+| synthesis kernels (2 × pre+fft+post+ola) | 328,502 | 63% | fft 170,130, ola 76,932, pre 42,478, post 41,238 |
+| entropy + dequant (`dec_chan` × 2) | ~175,000 | 33% | huff, bit reader, dequant |
+| M/S + frame wrapper | ~20,000 | 4% | |
+
+Measured by difference on one image: total frame, then the same frame with
+the eight kernel calls removed (194,765), then with `dec_chan` removed too
+(~20,600). The kernel figure agrees with `2 × overlay_seq` to 3%.
+
+The two numbers that set the work:
+
+- **Kernels are 2.4–2.7× the C/asm reference** (328,502 vs ~146,000 for the
+  C `asm_all` row). The FFT butterfly alone spills 66 intermediates to the
+  stack because 14 values are live at once against 16 architectural registers;
+  the multiply codegen is already optimal (6 `SMULL` + 6 `SMLAL`, no
+  `__aeabi_lmul`). This is a register-allocation problem, and Rust cannot
+  express the allocation: **the kernels need hand-written ARM asm** (the
+  milestone ULI2.md always placed after the hot path).
+- **Entropy is ~6.6× the C reference per coefficient** (~272 c/coef against
+  the C bench's measured ~41 for entropy+dequant). This is *not* explained by
+  the obvious suspects — see “ruled out” below — so it needs a redesign of the
+  bit-reader protocol, not tuning.
+
+**Cheap levers, measured and ruled out** (each built and run on target):
+
+| lever | result |
+|---|---|
+| fuse dequant into the coefficient loop, drop the `m[16]` scratch array | **neutral** (535,941 vs 533,605) — LLVM already handled the two-pass form |
+| inline all of `huff` at the call sites | +2.7% (519,397) but **+4,252 B of IWRAM** — poor trade where U6 is binding |
+| inline only the `huff` LUT fast path, keep the long search out of line | **+1.6% (523,267) for +896 B** — kept |
+| `-Cforce-frame-pointers=no` | inert (identical cycles), matches the FLAC track's E7 |
+| synthesis tables in IWRAM (`iwram-tables`) | **crashes**: `.iwram` 18,848 B leaves 13,664 B of stack against ~15,040 needed, so the stack overruns `__iwram_end` into code and the CPU jumps to an invalid address (the same failure class as PR B's hang). Quantified in the U6 row. |
+
+Gate: **≤1×** worst. **Not met by this PR** (523,267 = 200%); it is a
+measurement, one small win, and the scope statement for the two rewrites
+below. U4 stays open.
+
+#### PR C-1 — asm kernels (the 63%)
+
+Hand-written ARM kernels in `.iwram`, twinned bit-exactly against the Rust
+reference (the existing `tests/twin.rs` and `tests/decoder_twin.rs` are the
+witness). Target the C `asm_all` row: ~146,000 cycles/frame for the pair.
+Prize: ~182,000 cycles/frame.
+
+#### PR C-2 — entropy rewrite (the 33%)
+
+Redesign the bit-reader protocol. The 32-bit cached window from PR B is in
+place, so this is not “more of the same”: candidate directions are holding the
+reader state in registers across a whole band instead of behind `&mut`, a
+byte-oriented refill path, and folding `huff`+`skip`+sign into one symbol
+routine. Prize: ~90,000 cycles/frame.
+
+Together C-1 and C-2 project to ~247,000 cycles (~94%), which is the first
+plan that reaches U4's ceiling. Neither is a tuning change, which is why PR C
+splits into them rather than closing here.
 
 ### PR D — playback (after U4)
 
@@ -200,9 +259,9 @@ outlier. PR C is now scoped to kernels, not to the entropy path.
 | **U1 — reference** | `uli-lite` remains a bit-exact, host-testable reference (no longer a portable-product claim). | Met (Phase 0/1); redefined 2026-11-14. |
 | **U2 — bit-exact host** | The reference matches the C-pinned corpus, frame for frame, including error paths. | Met. |
 | **U3 — bit-exact product** | The product kernel set produces the pinned int8/int16 frames, on target and in the host twin. | **Met for the full hot path (PR B).** `tests/product_twin.rs` (host, frame-for-frame) + `make uli-bench` on-target pins. |
-| **U4 — real-time decode** | Worst full frame within the product budget at WAITCNT 4/2. | **Not met, but close.** PR B measured **204% worst / 177% mean** for the full product hot path (was 698% at PR A). PR C target ≤100%, then hardware. |
+| **U4 — real-time decode** | Worst full frame within the product budget at WAITCNT 4/2. | **Not met.** PR B measured 204% worst / 177% mean; PR C added the attribution and a split-`huff` win to **200% worst / 174% mean** (523,267 / 456,187) and scoped the remainder as two rewrites (C-1 asm kernels 63%, C-2 entropy 33%). Projected ~94% when both land. |
 | **U5 — product playback** | 32,768 Hz path, zero underruns, clean period audit. | Not started (gated by U4). |
-| **U6 — memory** | IWRAM/EWRAM/stack inside the product budget with UI and feeder. | **Open, and now the binding constraint.** PR B found the product path needs ≈15.0 KiB of stack (floor `0x03004440`); an 8 KiB `HotState` in `.iwram` left only ≈14 KiB between `__iwram_end` and the stack top and overflowed (hang). `HotState` is EWRAM in the bench. Any future "hot buffers in IWRAM" move must budget stack first. |
+| **U6 — memory** | IWRAM/EWRAM/stack inside the product budget with UI and feeder. | **Open, and now the binding constraint.** The product path needs ≈15.0 KiB of stack. Budget at PR C: `.iwram` 11,072 B baseline, 32,512 B usable, so 21,440 B spare — but 8,672 B of synthesis tables in IWRAM leaves 12,768 B, under the stack need, and `iwram-tables` **crashes** (stack overruns `__iwram_end` into code; the CPU jumps to an invalid address). IWRAM tables are therefore blocked until the stack requirement or the code size falls. `HotState` and the tables are both EWRAM. Full `huff` inlining was rejected on this row: +4,252 B for 2.7% (U6 is binding), vs +896 B for 1.6% with the split. |
 | **U7 — licensing/spec** | Permissive license + standalone format spec before publishing; otherwise `publish = false`. | Open; crate stays `publish = false`. |
 
 ---
@@ -265,14 +324,37 @@ Placement: `HotState` (8 KiB) is in EWRAM, not IWRAM — an IWRAM placement
 stack-overflowed on target (≈15.0 KiB of stack needed; see PR B above). The
 host twin was green either way, so this was a target placement defect only.
 
+### PR C (2026-11-14, mGBA, WAITCNT 4/2)
+
+Full frame, 129-frame corpus, 262,144-cycle period:
+
+| arm | worst | mean | min |
+|---|---:|---:|---:|
+| core kernels (control) | 2,681,000 (1023%) | 2,175,635 (830%) | 1,376,906 |
+| overlay kernels (`ArmKernels`) | 1,677,608 (640%) | 1,171,161 (447%) | 371,463 |
+| **product hot path, split `huff`** | **523,267 (200%)** | **456,187 (174%)** | 351,446 |
+
+All arms pinned, `xover=0 hfnz=0`, on-target twin passed. PR B was 533,605 /
+463,660; the split-`huff` change is the 1.6% in between (IWRAM +896 B).
+
+Frame-101 attribution of the 523,267 (by difference, one image): kernels
+328,502 (63%), `dec_chan` × 2 ≈175,000 (33%), M/S + wrapper ≈20,000 (4%).
+Kernels against the C `asm_all` row (~146,000) are 2.25×; entropy per
+coefficient against the C bench's entropy+dequant (~41 c/coef) is ~6.6×.
+
 ---
 
 ## Risks and open questions
 
-1. **LLVM's ARM7TDMI codegen vs gcc.** At equal conditions (ARM, IWRAM,
-   unchecked) the kernels are 3.6x the C/asm reference; the OLA is the
-   outlier. If restructuring stalls, PR C uses asm, which Rust supports
-   (`global_asm!`/`.s`, already used by `flac-lite-gba`).
+1. **LLVM's ARM7TDMI codegen vs gcc — now diagnosed, and it is register
+   allocation.** PR C measured that the codegen is *not* missing instructions:
+   the FFT butterfly carries 6 `SMULL` + 6 `SMLAL` and zero `__aeabi_lmul`
+   (the PR B fix held). What it does instead is **spill 66 intermediates to the
+   stack**: the radix-4 butterfly has 14 values live at once against 16
+   architectural registers, and the 32-bit `i64` accumulation widens every live
+   range. That is a decision Rust gives to the allocator and cannot express, so
+   the kernels need hand-written ARM asm (`global_asm!`, already used by
+   `flac-lite-gba`) — PR C-1. The same is true of the OLA (2.5x).
 2. **IWRAM budget — and the stack is the real limit.** The reference spends
    ~22.6 KB (17.6 KB tables/buffers + 5 KB ARM code) of 32 KB. PR B measured
    that the product path needs **≈15.0 KiB of stack** (floor `0x03004440`), so
@@ -292,6 +374,19 @@ host twin was green either way, so this was a target placement defect only.
 ---
 
 ## Decision log
+
+- **2026-11-14 — PR C: measured the gap instead of guessing at it.** Frame 101
+  (the worst) is **63% synthesis kernels / 33% entropy (`dec_chan`) / 4% M/S +
+  wrapper**. Four cheap levers were built and run on target: fusing dequant was
+  neutral, full `huff` inlining bought 2.7% for 4,252 B of IWRAM (rejected on
+  U6), a split `huff` LUT fast path bought 1.6% for 896 B (kept), frame
+  pointers were inert, and `iwram-tables` crashed because 8,672 B of tables
+  leave less stack than the ~15,040 B the path needs. Consequence: the product
+  frame is **523,267 worst / 456,187 mean (200% / 174%)**, and U4 stays open
+  with the remaining work scoped as PR C-1 (asm kernels, ~182,000 cycles) and
+  PR C-2 (entropy rewrite, ~90,000 cycles) — projected ~94% together. Recorded
+  because the plan had assumed tuning might close this; measurement says the
+  gap is architectural.
 
 - **2026-11-14 — PR B landed: the hot path is GBA-first and the ≤2× gate is met.**
   `uli_lite_gba::GbaDecoder` (32-bit cached bit reader, unchecked canonical
