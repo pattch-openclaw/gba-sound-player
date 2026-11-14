@@ -162,6 +162,13 @@ pub struct CodeTables {
     pub rbits: [u8; MAXK],
     pub esck: [u8; MAXK],
     pub dq: [[i8; 16]; MAXK],
+    /// `rq[c][m] = 16 * m - dq[c][m]` for `m < 16`, precomputed once per album
+    /// so the hot dequant is a load instead of a multiply and a clamp
+    /// (PR C-3a). Values stay in `i16`: `16 * 15 + 128` is the extreme.
+    pub rq: [[i16; 16]; MAXK],
+    /// `dq[c][15]`, the shape reused for escaped magnitudes `m >= 16`, where
+    /// the reference computes `16 * m - dq[c][15]`.
+    pub dq15: [i8; MAXK],
     cb: [Huffman; MAXK + 1],
     cls: [Huffman; MAXK],
 }
@@ -185,6 +192,8 @@ impl CodeTables {
             rbits: [0; MAXK],
             esck: [0; MAXK],
             dq: [[0; 16]; MAXK],
+            rq: [[0; 16]; MAXK],
+            dq15: [0; MAXK],
             cb: [Huffman::ZERO; MAXK + 1],
             cls: [Huffman::ZERO; MAXK],
         }
@@ -243,6 +252,14 @@ impl CodeTables {
                 self.dq[c][j] = blob[p] as i8;
                 p += 1;
             }
+        }
+        // PR C-3a: the dequant shape `16 * m - dq[c][m]` is fixed per album, so
+        // compute it once here instead of per nonzero coefficient.
+        for c in 0..k {
+            for j in 0..16 {
+                self.rq[c][j] = 16 * j as i16 - self.dq[c][j] as i16;
+            }
+            self.dq15[c] = self.dq[c][15];
         }
         Ok(())
     }
