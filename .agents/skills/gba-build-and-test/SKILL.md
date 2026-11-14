@@ -52,9 +52,11 @@ make check
 `podman-*` target has ever been run here. Archived instruments no longer have targets: the
 spike's 6a-3/6a-5/6a-5b/6a-7 arms, the 10,512 Hz rate flow, `examples/arm-kernels/` and
 `examples/e5_fetch/`; `flac-docs/history.md` §"Retired Make entrypoints" gives the cargo
-command for each. Do **not** run `make clean` to "make sure": it drops ~5 GB of warm target
-dirs (every Tier-3 build re-compiles `core`/`alloc` from source) and deletes the generated
-master asset/pin.
+command for each. Do **not** run `make clean` to "make sure": it drops **every** workspace's warm
+`target/` — the list is discovered from the `Cargo.toml`s on disk, so all fifteen of them,
+~10 GB on a fully built tree (every Tier-3 build re-compiles `core`/`alloc` from source) —
+plus every `*.gba`/`*.sav`, the generated master asset/pin, `uli-bench*.log` and
+`__pycache__`.
 
 Builds never gate on tests; tests never reformat; only `check` fails on formatting. So a
 build that reformatted your tree is fine — run `make check` before committing.
