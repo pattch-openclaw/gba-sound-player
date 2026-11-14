@@ -3,7 +3,7 @@
 //! (`src/product_play_main.rs`) and the host model
 //! (`tests/product_play_witness.rs`).
 //!
-//! Item 6b-3 (plan-of-record: "rate-play through a real `GAFP` manifest at the
+//! Item 6b-3 (history.md: "rate-play through a real `GAFP` manifest at the
 //! target rate"). Before this module, the target-rate geometry lived in
 //! `examples/flac_spike/src/rate_play_main.rs` beside the throwaway harness that
 //! used it, and the throwaway harness turned out to be load-bearing in
@@ -222,7 +222,7 @@ pub const REARM_GRACE_SAMPLES: u16 = 16;
 /// sound DMA each period. It is *not* what sizes a period: in sound-FIFO mode the FIFO
 /// pulls 4 words per request, and `agb`'s own sound enable (`hw.rs:56-68`) writes no
 /// count at all. The count is ours, and it is the shape the rate ROM already ran on
-/// silicon with (`flac-docs/playback-results.md`, the 10,512 Hz row).
+/// silicon with (`flac-docs/history.md`, the 10,512 Hz row).
 pub const DMA_WORDS: u16 = (CHUNK_SAMPLES / 4) as u16;
 
 // ---------------------------------------------------------------------------
@@ -247,7 +247,7 @@ pub const DMA_WORDS: u16 = (CHUNK_SAMPLES / 4) as u16;
 /// cost 32,768/32,000 = 1.024x — **2.4% faster, 41.06 cents sharp** — a defect no
 /// sample-level pin in this repository could see, because the samples were
 /// identical either way; the pitch and tempo are not in the digest. That is
-/// recorded in `flac-docs/open-questions.md` Q14 and in the cents arithmetic
+/// recorded in `flac-docs/history.md` Q14 and in the cents arithmetic
 /// `tests/product_play_witness.rs` still computes, and it is why the cost rows in
 /// the packer are keyed to *structure* (block size, predictor kind/order, residual
 /// envelope) rather than to a declared rate: the rate is a validity check, and the

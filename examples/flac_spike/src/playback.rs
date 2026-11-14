@@ -509,7 +509,7 @@ impl<const RING: usize> RingFeed<RING> {
 }
 
 // Unit tests ride the rate-assets gate: the module itself always
-// compiles (shared lib), but its suite belongs to `make rate-test` —
+// compiles (shared lib), but its suite belongs to `make rate-test`, retired 2026-11-14 —
 // `make spike-test`'s counts stay untouched (coexistence contract).
 #[cfg(all(test, feature = "rate-assets"))]
 mod tests {

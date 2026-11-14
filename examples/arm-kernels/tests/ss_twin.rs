@@ -1,5 +1,5 @@
 //! Host witness for the E10 PR B composite kernel (`sample_step`,
-//! `make kernel-test`).
+//! `make kernel-test`, retired 2026-11-14).
 //!
 //! Layers, each judged against independent formulations:
 //! - the committed table's expectations re-derived by the naive oracle

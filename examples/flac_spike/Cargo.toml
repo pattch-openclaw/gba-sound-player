@@ -54,7 +54,10 @@ flac-lite-gba = { path = "../../crates/flac-lite-gba", optional = true }
 # off — verified: a required-features [[bin]] with a missing path file does
 # not break default `cargo build` / `cargo test` / `cargo fmt`). The flow's
 # generated modules (src/rate_assets.rs, src/rate_pcm.rs) are TEMPORARY
-# (gitignored, `make clean` removes): build `make rate-assets` first.
+# (gitignored, `make clean` removes): the rate flow's Make entrypoints were
+# retired 2026-11-14 with the 10,512 Hz harness it measured (flac-docs/history.md);
+# stage its assets with `bash scripts/gen_rate_assets.sh IN RATE` if this arm is
+# rebuilt by hand.
 [features]
 rate-assets = []
 
@@ -107,10 +110,10 @@ item6a5-rust = ["dep:flac-lite-gba", "flac-lite-gba/rice-twin", "flac-lite-gba/i
 item6a5-asm = ["dep:flac-lite-gba", "flac-lite-gba/rice-arm", "flac-lite-gba/iwram-pin"]
 item6a5-arms = ["item6a5-rust", "item6a5-asm"]
 
-# 6a-5b's fourth measurement leg (plan-of-record 6a-5b; the pass lives in the
+# 6a-5b's fourth measurement leg (history.md 6a-5b; the pass lives in the
 # same `mod item6a5` in src/main.rs). 6a-5's stack projection — the landed asm
 # leg +48.2 c/sample against E10's vendored leg — is the one comparison in these
-# records taken across TWO images, which method-and-gates.md forbids, and whose
+# records taken across TWO images, which measurements.md forbids, and whose
 # own next paragraph measures the class of effect at -36,543/-202,529 c/frame on
 # UNCHANGED control code. So the two realizations have to be timed in one link.
 #
@@ -131,7 +134,7 @@ item6a5-arms = ["item6a5-rust", "item6a5-asm"]
 # relaxation (see src/lib.rs), and the shipped instrument image is unchanged.
 item6a5b-vendored = ["item6a5-asm"]
 
-# 6a-7's width leg (plan-of-record 6a-7). `item6a6` moved the core's default
+# 6a-7's width leg (history.md 6a-7). `item6a6` moved the core's default
 # arithmetic width to i32 but left its cycle marginal unread — a same-image pair
 # needs both widths in one link. `src/wide.rs` is the pre-6a-6 i64 decode path,
 # vendored; the pass times `ctrl` (i32), `wide` (i64) and `asm` (the landed
@@ -157,7 +160,7 @@ path = "src/main.rs"
 test = false
 bench = false
 
-# The rate ROM (make native-rate-rom): real audio at a mixer-domain rate,
+# The rate ROM (`make native-rate-rom`, retired 2026-11-14): real audio at a mixer-domain rate,
 # measured. Gated by `rate-assets` so the committed spike ROM build is
 # byte-identical to the E-menu's calibration image (coexistence contract,
 # FLAC.md rate-proposal amendment).
@@ -168,7 +171,7 @@ required-features = ["rate-assets"]
 test = false
 bench = false
 
-# The rate-play ROM (make native-rate-play-rom): FLAC decode INTO audible
+# The rate-play ROM (`make native-rate-play-rom`, retired 2026-11-14): FLAC decode INTO audible
 # playback at the mixer-domain rate via the custom IRQ feeder (FLAC.md rate
 # flow playback entry). Same `rate-assets` gate as the rate ROM — invisible
 # to the committed spike build.

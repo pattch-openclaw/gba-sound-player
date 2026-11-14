@@ -1,6 +1,6 @@
 # E9 sample — composite arms: stacked variants vs isolated gains (measured 2026-10-31, **not integrated**)
 
-The reappliable sample code for **E9** in flac-docs/perf-results.md: every menu gain had been measured in isolation; E9 measures
+The reappliable sample code for **E9** in flac-docs/history.md: every menu gain had been measured in isolation; E9 measures
 the levers **stacked** on one image. Four arms per frame: **ctrl / arm /
 i32 / iw**, where `i32` = E10's ARM hybrid codeword kernel + E4's i32
 arithmetic width, and `iw` = the same decode writing `.iwram` static scratch
@@ -11,7 +11,7 @@ in-budget FIXED decode in the menu's history** (mGBA; pending E5 hardware
 arbitration and the landing). LPC lands 216.3% (fits 10,512 Hz at 69.4%,
 misses 18,157 Hz at ~120%). E3's scratch pin is **inert** (+20 cyc/frame,
 both clips). Full findings:
-[`../../../../flac-docs/perf-results.md`](../../../../flac-docs/perf-results.md) →
+[`../../../../flac-docs/history.md`](../../../../flac-docs/history.md) →
 "E9 result — stacking ARM and i32 lands the first in-budget FIXED decode (2026-10-31)".
 
 This directory is **sample code only**: the probe never lands on `main`'s
@@ -46,7 +46,7 @@ pass spans ≈ 7 G cycles):
    `addr_of_mut!`). `iw − i32` is E3's scratch-placement lever measured
    *renormalized* against the stacked frame.
 
-**E1 was excluded by design** (ordering decision, recorded in the flac-docs/perf-results.md entry): staging relieves the position-only reader's per-byte ROM re-fetch
+**E1 was excluded by design** (ordering decision, recorded in the flac-docs/history.md entry): staging relieves the position-only reader's per-byte ROM re-fetch
 premium, which the ARM kernel's windowed refills already absorbed; shipping
 decode reads ROM regardless, and E1 was ruled out as a production
 mitigation. Stacking it would double-count the same relief.

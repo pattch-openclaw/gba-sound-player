@@ -157,7 +157,7 @@ fn decoded_frames(manifest: &Manifest<'_>) -> Vec<FrameBytes> {
 
 // The envelope is **derived from the run's own sums**, not transcribed from its
 // printed means. A transcribed figure is the failure mode this project has already
-// paid for once (the hand-computed FNV vector, `method-and-gates.md`'s false-green
+// paid for once (the hand-computed FNV vector, `measurements.md`'s false-green
 // catalogue), and the first version of this block was a transcription that got the
 // attribution wrong: it priced 538 period boundaries because 538 is the count the
 // *closure* line reports across all four stages, while only 158 of them fall inside
@@ -229,7 +229,7 @@ const MEASURED: u64 = MEASURED_RAW - FEEDER_PER_PERIOD * DECODE_BOUNDARIES_INSID
 /// The plan's standing hardware derate for memory-heavy stages, applied as a second
 /// scenario wherever a claim is meant to survive silicon. It is a *measured* ratio
 /// for the one thing it was measured on — the kernel A/B ran +7.09% on hardware
-/// against mGBA's +7.90%, `flac-docs/plan-of-record.md` — and is used here as a
+/// against mGBA's +7.90%, `flac-docs/history.md` — and is used here as a
 /// deliberately blunt penalty, not a claim about the mechanism behind it.
 const HARDWARE_DERATE_PERCENT: u64 = 7;
 
@@ -1656,7 +1656,7 @@ fn ruled_rate_policy_allows_no_reinterpretation_of_a_declared_rate() {
 // sample axis means, and 6b-3 proved that on hardware: its run was 571/571 periods
 // with zero underflows, its digests matched, and it was 41 cents sharp. A run that
 // passes every digest and is out of tune is exactly the kind of green this project
-// has already paid for once (`method-and-gates.md`'s false-green catalogue), so the
+// has already paid for once (`measurements.md`'s false-green catalogue), so the
 // pitch question needs its own instrument.
 //
 // It belongs here, in 7-0, rather than in 7-3 for a practical reason: 7-3 asks a

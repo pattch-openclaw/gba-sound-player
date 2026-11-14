@@ -1,6 +1,6 @@
 # E2a sample — bit-reader refill-accumulator probe (measured 2026-09-24, **not integrated**)
 
-The reappliable sample code for the E2 experiment in [flac-docs/perf-results.md](../../../../flac-docs/perf-results.md) (the reader-swap variant, **E2a** — the
+The reappliable sample code for the E2 experiment in [flac-docs/history.md](../../../../flac-docs/history.md) (the reader-swap variant, **E2a** — the
 unary quotient-count idea is E2b territory and is deliberately NOT in this
 probe). **Result: the accumulator reader did NOT collapse the FIXED arm** —
 mean **−3.14%** (217.4% → 210.5% of the 1,048,750-cycle budget, still
@@ -8,7 +8,7 @@ mean **−3.14%** (217.4% → 210.5% of the 1,048,750-cycle budget, still
 deterministically **1.41% slower**. The reader *implementation* is ruled
 out as the cost center; the per-bit unary loop and generic decode plumbing
 remain. Full findings and reading:
-[`../../../../flac-docs/perf-results.md`](../../../../flac-docs/perf-results.md) →
+[`../../../../flac-docs/history.md`](../../../../flac-docs/history.md) →
 "E2 result — the accumulator reader does not collapse the FIXED arm (2026-09-24)".
 
 This directory is **sample code only**: the probe never lands on `main`'s

@@ -51,8 +51,9 @@
 //!   one copy of that walk. Rung 6a-4's own docs note what changes if it wants
 //!   them.
 //!   **6a-3 changes no decode path**, and it adds one configuration behind one new
-//!   gate (`make overlay-test-twin` — both the thumbv4t compile witness and the
-//!   host differential) rather than changing an existing one; the counts of every
+//!   gate (then `make overlay-test-twin`; that gate was retired 2026-11-14 with the
+//!   rung it witnessed — run `cargo test --features rice-twin` from a gate-neutral
+//!   cwd to reproduce it) rather than changing an existing one; the counts of every
 //!   existing configuration are unchanged, which is that rung's own rule.
 //! * **6a-4** (this PR) — the ARM-mode kernel itself: `src/rice_arm.rs` + the
 //!   `rice-arm` feature, assembling `asm/rice_partition.s` (lifted from the E10
@@ -165,8 +166,9 @@
 //!   cwd for the same reason the core's host gates are (the config leak). In
 //!   6a-1 that witness is one no-op test; see the test module for what it does
 //!   and does not claim.
-//! * `make overlay-test-twin` — what 6a-3 adds: the same two witnesses as above
-//!   with `--features rice-twin` on, in one gate. Its first arm is the compile
+//! * `overlay-test-twin` (retired 2026-11-14; the `rice-twin` configuration is still
+//!   in the crate and its witnesses run by hand) — what 6a-3 added: the same two
+//!   witnesses as above with `--features rice-twin` on, in one gate. Its first arm is the compile
 //!   witness that an out-of-crate `RiceKernel` impl builds for `thumbv4t-none-eabi`
 //!   (the half `overlay-check` cannot see, since in its default build
 //!   `src/rice_twin.rs` does not exist); its second runs the corpus differential

@@ -27,7 +27,7 @@ libraries that other GBA ROMs can build on top of.
    | Track | Entry point | Status |
    |---|---|---|
    | **ULI2** | **[ULI2.md](ULI2.md)** + **[crates/uli-lite/PLAN-OF-RECORD.md](crates/uli-lite/PLAN-OF-RECORD.md)** | **accepted 2026-11-13 as the product codec; GBA-first since 2026-11-14.** Phase 0/1 are bit-exact; Phase 1b measured the portable decoder; **PR A (2026-11-14)** wired the product kernel set into `Decoder` and measured a full frame at **698% worst / 505% mean**; **PR B (2026-11-14)** moved the entropy/bit-reader/dequant/M/S hot path into `uli-lite-gba` and measured **204% worst / 177% mean** of the 262,144-cycle period — PR B's ≤2× gate met, but **U4 is not met** and playback has not started. PR C (synthesis kernels) is the whole remaining gap. The live plan and ledger are the plan of record; `ULI2.md` is the decision record. |
-   | **FLAC** | **[FLAC.md](FLAC.md)** | the lossless library, built and bit-exact; its live plan is **[flac-docs/plan-of-record.md](flac-docs/plan-of-record.md)** — **the only live plan *for FLAC***, governing `crates/flac-lite`, `crates/flac-lite-gba`, `examples/flac_integration` and the `GAFP` asset, and nothing outside them. Detail split into **[flac-docs/](flac-docs/)** (architecture, format notes, measurements, experiments, method, plan of record, open questions). |
+   | **FLAC** | **[FLAC.md](FLAC.md)** | the lossless library: **done and accepted**. `no_std`, bit-exact against `flac -d`, and playing real audio at 16,384 Hz on two GBA units with zero underruns. Governs `crates/flac-lite`, `crates/flac-lite-gba`, `examples/flac_integration` and the `GAFP` asset, and nothing outside them. Detail in **[flac-docs/](flac-docs/)** — architecture, format notes, the measurements/method ledger, the ARM kernel, and the rulings and history. |
    | **ULC** | **[ULC.md](ULC.md)** | scope and intent recorded; **not currently planned**. |
    | **Opus** | **[OPUS.md](OPUS.md)** | an evaluation opened 2026-09-27 while the FLAC perf gate was failing; not a build plan. |
 
@@ -84,11 +84,26 @@ the top-level ROM depends on.
 - `examples/pcm_playback.rs` — demonstrates sample-based (PCM) audio playback using `agb`'s native software mixer and a pre-converted 32kHz `.wav` file.
 - `src/main.rs` is a clean slate baseline (no FLAC dependency, builds clean).
 - `examples/symphonia_flac_probe/` — standalone FLAC compile probe (`symphonia-bundle-flac` from the keks no-std fork, with its own `Cargo.toml`). **Expected to fail compilation**; it is the evidence for the decision to write our own decoder — see [flac-docs/architecture.md](flac-docs/architecture.md) → "Why we wrote our own decoder".
-- `crates/flac-lite/` — our own `no_std`, zero-dependency, zero-allocation FLAC frame decoder, now **portable** (the GBA is the founding platform, not the boundary). The Phase-1 decode path is **complete** through `frame::decode_frame`, plus the stream layer, the per-frame `driver`, CRC verification (`crc-check`), the table-less `scan` walk (feature) and the `RiceKernel` seam; witnessed bit-exact vs `flac -d` on host and in the ROM image. **The `todo!()` list is closed** (6b-1, 2026-11-10): the public entry point is now the manifest-driven `decoder::Decoder` facade over the table-less `scan` walk, with `format::Manifest` parsing real `GAFP`/`STREAM` bytes, `Blocksize::samples`, `EncodeProfile::validate` and the typed `SampleRate` — and a re-grep of `crates/*/src/` for `todo!`/`unimplemented!` returns nothing (re-checked 2026-11-11). Plan in [flac-docs/plan-of-record.md](flac-docs/plan-of-record.md). Decision + design in [FLAC.md](FLAC.md) and [flac-docs/architecture.md](flac-docs/architecture.md); byte-level `GAFP` contract in [`crates/flac-lite/README.md`](crates/flac-lite/README.md).
-- `crates/flac-lite-gba/` — **the GBA overlay for `flac-lite`, and since 6b-1 the crate the product ROM links.** Created landed-empty by 6a-3 (2026-11-07); 6a-4 added the ARM-mode Rice kernel (`global_asm!` + the FFI contract); 6a-5d moved it from `.text` to `.iwram` on a measured 4.000 vs ~1.4 cycles/instruction; **6b-1 (2026-11-10) made it the kernel `flac-integration.gba` actually selects by default**, with `make native-flac-rom-default-kernel` as the same-source A/B control (same ROM, `arm-kernel` off, so the decode runs through the core's `TableCountKernel`). `no_std`, `#![deny(unsafe_code)]` (the unsafe budget: 0 items in a default build, 3 with `rice-arm`, 6 with `iwram-pin` as well — placement attributes and the FFI blocks), a path dependency on the core, no `agb` dependency. What it is *for*: the core's portable Rice realization and the GBA/ARM realization of the same map have **opposite** measured performance (+42.6 vs −349 cycles/sample), so the platform-bound one belongs over the core's `residual::RiceKernel` seam in its own crate rather than as ARM-shaped code inside the portable core — and the core's portability claim is untouched. 6a-4 adds the ARM kernels, the `global_asm!`/FFI boundary and its `SAFETY` blocks, and turns on `iwram-pin`. Plan of record: [flac-docs/plan-of-record.md](flac-docs/plan-of-record.md). Gates: `make overlay-check` (overlay **and the core it depends on** type-check for `thumbv4t-none-eabi` — a compile witness; an rlib has no link step), `make overlay-test`, `make overlay-test-twin`.
+- `crates/flac-lite/` + `crates/flac-lite-gba/` + `examples/flac_integration/` — **the FLAC
+  track, complete and accepted**: a `no_std`, zero-dependency, zero-allocation decoder whose
+  public entry point is the manifest-driven `decoder::Decoder` facade over the table-less
+  `scan` walk, witnessed bit-exact against `flac -d` on host and in the ROM; a GBA overlay
+  crate holding the platform-bound `RiceKernel` realizations (the shipped one is an
+  ARM-mode codeword loop resident in `.iwram`); and the product crate that embeds a `GAFP`
+  asset and *plays* it at 16,384 Hz with zero underruns on real hardware. Gates:
+  `make flac-check` (core configurations), `make overlay-gates` (the kernel, including its
+  mGBA device suite), `make product-play-test` (the geometry's host model).
+  Entry point: [FLAC.md](FLAC.md); detail in [flac-docs/](flac-docs/).
 - `crates/uli-lite/` + `crates/uli-lite-gba/` + `examples/uli_spike/` + `examples/uli_bench/` — the ULI2 product-codec port. Since 2026-11-14 it is **GBA-first**: `uli-lite` is the bit-exact reference and oracle (ULA2 parsing, safe decode, host corpus), and `uli-lite-gba` is the product path (ARM-mode, unchecked kernels in `.iwram`, `ArmKernels`, evolving into the full hot-path decoder in PR B). `Decoder<K>` selects the kernel set through `uli_lite::Kernels`. `make uli-spike-rom` is the Phase 1 correctness ROM; `make uli-bench` is the measurement vehicle: it proves its own decode, times full frames through the core control, `ArmKernels`, and the full product hot path (`GbaDecoder`), and checks them bit-exact on target. PR B measured the full product hot path at **204% worst / 177% mean** of the 262,144-cycle period (533,605 / 463,660 cycles), against `ArmKernels` at 640% and the same-image core control at 1023%; the C/asm reference is 69.4%. Non-synthesis `rest` fell 837,092 → 195,484 cycles/frame, so the synthesis kernels are now the whole remaining gap (PR C). No playback or hardware claim yet. Live plan, gates and ledger: [crates/uli-lite/PLAN-OF-RECORD.md](crates/uli-lite/PLAN-OF-RECORD.md); decision record: [ULI2.md](ULI2.md); the public stock-ULC scope that is **not** currently planned: [ULC.md](ULC.md).
-- `examples/flac_spike/` — the perf-gate measurement vehicle (and the `ctrl` arm of every performance record), with each experiment preserved as a reappliable sample under `examples/flac_spike/experiments/`. It also carries the rate-play harness that plays real music at 10,512 Hz. Results: [flac-docs/measurements.md](flac-docs/measurements.md) and [flac-docs/perf-results.md](flac-docs/perf-results.md).
-- `examples/flac_integration/` — **the product path** (6b-1/6b-2): a bootable ROM that embeds the committed `GAFP` asset, parses its manifest, and decodes it end to end through `flac-lite`'s public facade with `flac-lite-gba`'s ARM kernel, verifying against the pinned reference PCM before timing a second pass (`FLAC-VERIFY`, `FLAC-DECODE`, `FLAC-IMG-BUDGET`). It is also the consumer that makes the kernel swap attributable — `make native-flac-rom-default-kernel` builds the same source with `flac-lite-gba`'s `rice-arm` off, decoding through the core's table-counting kernel instead. Still **no mixer and no sound output**: that is item 7.
+- `examples/flac_spike/` — the perf-gate measurement vehicle (and the `ctrl` arm of every
+  performance record), with each experiment preserved as a reappliable sample under
+  `examples/flac_spike/experiments/`. Its archived arms — the 6a-3/6a-5/6a-5b/6a-7
+  instruments and the 10,512 Hz rate-play harness that first played real music at tempo —
+  have no Make target any more; [flac-docs/history.md](flac-docs/history.md) says what each
+  measured and how to rebuild one by hand.
+- `examples/arm-kernels/`, `examples/e5_fetch/` — archived FLAC groundwork (the E10 kernel
+  set the shipped asm came from; the emulator-vs-hardware fetch arbitration). Sources and
+  records kept, no Make entrypoints.
 - The project also includes a basic `#[test_case]` suite runnable via `mgba-test-runner`.
 - `Makefile` — standardized build/test entrypoints, see **[Build Process](#build-process-standardized)**.
 - `Dockerfile` — the containerized build (Debian 12 / `rust:slim-bookworm`,
@@ -223,17 +238,16 @@ requirements (nightly + `rust-src`, plus `agb-gbafix` for ROM fixing).
 |---|---|---|
 | `make native-rom` | Build + link + fix `gba-sound-player.gba` with the host toolchain | no virtualization needed |
 | `make podman-rom` | Build the `gba-builder` image and run the same ROM build inside it; `CONTAINER=docker` works | needs podman/docker |
-| `make native-flac-rom` | **EXPERIMENTAL** — build `flac-integration.gba`: a bootable ROM that links `crates/flac-lite` in | no virtualization needed |
-| `make podman-flac-rom` | Same FLAC integration ROM, built in the container | needs podman/docker |
-| `make native-flac-rom-default-kernel` | 6b-1's A/B control for the image above: the same source with `flac-lite-gba`'s `rice-arm` off, decoding through the core's `TableCountKernel` (`flac-integration-default-kernel.gba`) | no virtualization needed |
-| `make product-play-rom` / `native-product-play-rom` | **EXPERIMENTAL, and the only image built to play at the 32,768 Hz target** (6b-3; **never heard** — mGBA headless only so far): `product-play.gba`, a second binary of the same product crate driving decode → 8-bit FIFO convert → ring → sound DMA at 32,768 Hz, counting its own underflows, gating its period audit (coalesced / late / clock / tail / void) and the played-form FIFO pins, and printing a verdict to log and screen. The ROM image is not gated: build it and run it by hand (its geometry model is gated by `make product-play-test`); a **pass ends in `loop {}`, so the timeout's exit 124 is expected** — read the log. Its asset is **not** a product asset yet (`Q14`) | no virtualization needed |
-| `make product-play-test` | 6b-3's **host model** (12 tests): the ROM's own `RingFeed` and `geometry` constants replayed on the host against a credit-per-period clock — where the flow control, the two tolerances and the buffer sizing are justified rather than asserted | no virtualization needed |
-| `make flac-test` | `flac-lite` **in isolation**: GBA target compile gate + host unit tests. No agb, no ROM, no emulator. Default features — the frame walk (`scan`) and the portable hybrid Rice kernel (`rice-hybrid`) are **off**, so no ROM links either. `make flac-test-crc` is the same shape with `crc-check` on | native |
-| `make flac-test-scan` | The same two steps with `--features scan` on: the walk's thumbv4t compile plus its witness suite (`tests/scan_frame_walk_layout.rs` is `required-features = ["scan"]`, so it is not built at all without the feature). Deliberately **not** in `check-gba-all` — the thing that must not carry the walk yet is the ROM. `flac-portable-check` runs with `scan` (and `rice-hybrid`) **on** so the second bare-metal target keeps compiling them | native |
-| `make flac-test-rice` | Same shape again with `--features rice-hybrid` on: the portable hybrid Rice kernel's thumbv4t compile plus the **two-mechanism Rice differential** (`tests/rice_two_mechanism_differential.rs` is `required-features = ["rice-hybrid"]`). The gate exists because the module's cost is measured, not assumed: with the feature off the ROM-links image is byte-for-byte the pre-PR-3 image; with it on the calibration instrument grows **+2,984 B of `.text` while `nm` reports no hybrid symbol in the image**. Also deliberately **not** in `check-gba-all` — no ROM links the twin, and the default flip was gated on an on-target cycle reading and **declined** ([flac-docs/measurements.md](flac-docs/measurements.md)) | native |
-| `make flac-gates` | **Every `crates/flac-lite` configuration in one command**: `flac-test` + `flac-test-wide` + `flac-test-crc` + `flac-test-scan` + `flac-test-rice` + `flac-portable-check` + `gafp-check` + `gafp-pack-check`, plus the combination arms — `crc-check,scan`, and `crc-check,scan,rice-hybrid` (the one build where the walk, the CRC verification and **both** Rice mechanisms compile at once). Adds no new witness: it is the aggregate the TODO below asked for, by the name it gave it, landed 2026-11-05, extended with the third configuration on 2026-11-06, with the no-default-features arm (`flac-test-wide`) on 2026-11-07 and with the two `gafp` legs on 2026-11-11. The count moves with the tree, so it is recorded per landing, not here — see the per-arm table in [flac-docs/plan-of-record.md](flac-docs/plan-of-record.md) | native |
-| `make overlay-check` | **`crates/flac-lite-gba` and the core it depends on both type-check for the GBA target** (item 6 PR 6a-1's gate). A *compile* witness only: an rlib has no link step, it claims no codegen charge. Since 6b-1 the product image **does** link this overlay, and the link witness moved to `make flac-rom` + `make native-flac-rom` plus the `nm` `.iwram` witness in 6a-5d — this target remains the type-check of the crate on its own. Deliberately not in `flac-gates` — that aggregate is every configuration **of the core**, and this is a different crate | native |
-| `make overlay-test` | the overlay crate's own host witness, run out-of-tree (the cargo-config rule) — in 6a-1 that is one no-op test by design, and it is the live-edge witness for the path dependency. Also not in `test` or `flac-gates`: plumbing gates, hand-invoked like `flac-test-crc/-scan/-rice` | native |
+| `make master-pack INPUT=track.wav` → `make master-play-rom INPUT=track.wav` | **the FLAC happy path**: resample/encode a real master to the product profile, pack the `GAFP` asset and its pins, then build `master-play.gba` — the image that *plays* it at 16,384 Hz | native (needs `ffmpeg` if the input must be resampled, `flac` to encode) |
+| `make native-flac-rom` | `flac-integration.gba`: links the core + overlay, embeds the committed asset, decodes every frame through the facade, checks the pinned PCM, then times a second pass. No sound. Also the real **link** witness for the core (what `overlay-check`, an rlib, cannot be) | native or container |
+| `make product-play-rom` / `native-product-play-rom` | `product-play.gba`: the same crate's second binary on the committed asset — decode → 8-bit FIFO convert → ring → sound DMA at 16,384 Hz, counting its own underflows, gating its period audit and its played-form FIFO pins, verdict to log **and** screen. Not gated: run it by hand, and a **pass ends in `loop {}`, so the timeout's exit 124 is expected** — read the log | native |
+| `make product-play-test` | the product geometry's **host model**: the ROM's own `RingFeed` and `geometry` constants replayed against a credit-per-period clock, where flow control, the tolerances and the ring sizing are justified rather than asserted | native |
+| `make flac-test` (+ `flac-test-wide` / `-crc` / `-scan` / `-rice`, `flac-portable-check`) | `flac-lite` **in isolation**, one gate per build configuration: GBA target compile + host tests, no agb / ROM / emulator. Each non-default feature gets its own gate because the default build does not compile what it covers | native |
+| `make gafp-check` / `make gafp-pack-check` | the committed product blob still matches its generator; and the **real packer** reproduces it byte for byte, re-runs its fixture set with the pack-time **refusals**, and reads it all back through the facade (needs `flac` + `metaflac`) | native |
+| `make flac-gates` | every `crates/flac-lite` configuration in one command, plus the `crc-check,scan` and `crc-check,scan,rice-hybrid` combination arms — the only builds in which a *second instantiation* is visible | native |
+| `make overlay-gates` | `crates/flac-lite-gba` in one command: both configurations' compile + host witnesses, the objdump fact (the ELF really is four-byte ARM code), and the assembled kernel's device suite on mGBA's ARM7TDMI — the only place that assembly executes. Individually: `overlay-check`, `overlay-test`, `overlay-check-arm`, `overlay-test-arm`, `overlay-objdump`, `overlay-kernel-rom`, `overlay-kernel-test` | native |
+| `make spike-rom` / `make spike-test` | the measurement instrument (`flac-spike.gba`) and its host bit-exactness witness. It is the `ctrl` arm of every performance record | native |
+| **`make flac-check`** | everything a FLAC-track change owes: `flac-gates` + `overlay-gates` + `product-play-test` + `spike-test` | native |
 | `make test-rom` | ROM `#[test_case]` suite, headless in mGBA via `mgba-test-runner` | native (needs `mgba-test-runner`) |
 | `make test` | Top-level: `test-rom` + `flac-test`. Verify-only — never reformats your tree | native |
 | `make podman-test` | **The same suite**, running inside the image (`make test` in there) — no host tooling | needs podman/docker |
@@ -274,60 +288,19 @@ the result is gate-green. If `rustfmt` is missing for the pinned toolchain,
 `format` prints a notice and the build continues — formatting is a convenience,
 never a hard dependency of building.
 
-#### TODO: one aggregate for the non-default-configuration gates
+#### Invoking the gates
 
-`make test` runs `test-rom` + `flac-test`, and the repo has no CI workflows. The
-gates that exercise a **non-default build configuration** are therefore manual by
-omission: `flac-test-crc` (frame CRC verification ON), `flac-test-scan` (the frame
-walk ON), `flac-test-rice` (the portable hybrid Rice kernel ON) and
-`flac-portable-check` (second bare-metal target) run only when someone
-remembers them — and an un-run gate is an un-witnessed gate, which is exactly the
-risk a by-default-OFF feature like `crc-check`, `scan` or `rice-hybrid` creates.
-`scan` and `rice-hybrid` make the point twice over: a module no default build
-compiles is witnessed by `flac-test-scan` / `flac-test-rice` (their rules, and the
-GBA-target compile) and by `flac-portable-check`'s `--features scan,rice-hybrid`
-(the second target) — nothing else builds them at all. Tracked here so it is not forgotten; when written it was deliberately
-not part of any feature PR, since each gate lands with its own PR's gate work —
-that part changed on 2026-11-05, when the aggregate landed inside split-ladder
-item 5 PR 2 (the PR where the *instantiation count* changes rather than the code,
-which is the natural home for a feature *combination*). The invocation hook below
-is still open.
-
-- ✅ **Landed 2026-11-05** — a single `flac-gates` aggregate: `flac-test` + `flac-test-crc` +
-  `flac-test-scan` + `flac-portable-check`, **plus** the two `--features
-  crc-check,scan` arms (thumbv4t `cargo check`, and the host test run from the
-  gate-neutral cwd) that no single-feature gate runs — one command covering every
-  `crates/flac-lite` configuration. Measured on the `crc-check` landing tree with warm caches: the
-  extra thumbv4t `cargo check` and host test run complete in hundredths of a
-  second; cold caches pay the usual `-Zbuild-std` cost, once. Measured on item 5
-  PR 2's landing host, twice, with every cache warm and everything already built:
-  **0.72 s** and **0.75 s** for the aggregate, of which the two combination arms
-  are **0.18–0.21 s** — the four suite runs dominate, exactly as the sentence
-  above predicts. (The first run after a source edit costs more — 2.95 s on the
-  re-run following this PR's own doc-text change — because "warm" is not the state
-  a tree is in immediately after an edit.)
-- ✅ **Extended 2026-11-06 (split-ladder item 5 PR 3)** — the aggregate gained a
-  third feature configuration and a second combination arm: `flac-test-rice`
-  (`--features rice-hybrid`, the portable hybrid Rice kernel) and the
-  `crc-check,scan,rice-hybrid` pair, which is the only build in which the frame
-  walk, CRC verification and **both** Rice mechanisms compile together. `flac-portable-check`
-  now compiles the twin for the second bare-metal target too. The counts are what
-  a feature gate is supposed to produce: **178 / 181 / 198 / 194 / 201 / 217, one
-  ignored each** — the default configuration's number **unchanged** by a PR that
-  adds 16 tests, because those tests are not in the build the ROM links (1,169
-  passed + 6 ignored across the six configurations). Warm timings moved the way
-  adding two arms predicts: **1.00 s** warm for the aggregate (PR 2's four
-  configurations were 0.72–0.75 s; a run taken straight after a source edit is
-  2.15 s and is not a warm number), `flac-test-rice` itself 0.17 s.
-- Something to *invoke* it: with no CI, the cheap honest hook is local (a
-  pre-commit/pre-push hook, or a documented rule that any commit touching
-  `crates/flac-lite` runs `make flac-gates` first). [flac-docs/method-and-gates.md](flac-docs/method-and-gates.md)
-  names the gate for each landed feature — only the automation is missing.
-- Still open alongside it, left out of the aggregate's own PR on purpose: a
-  `podman-flac-gates` sibling, so the container path covers the same set. Today
-  `make podman-flac-test` covers the **default** configuration only — the
-  non-default configurations have no containerized path, which is the same
-  omission this section was written about.
+`make test` is the fast top-level suite (`test-rom` + `flac-test` + `uli-test`); the gates
+that exercise a **non-default build configuration** are deliberately separate
+(`flac-test-crc`, `flac-test-scan`, `flac-test-rice`, `flac-test-wide`,
+`flac-portable-check`, the `overlay-*` set), because an un-run gate is an un-witnessed gate
+and that is exactly the risk a by-default-OFF feature creates. The aggregate that closes the
+gap is **`make flac-gates`** (every `crates/flac-lite` configuration plus the combination
+arms, landed 2026-11-05 and extended since) and **`make flac-check`** for the whole FLAC
+surface. The rule they exist to encode: **any commit touching `crates/flac-lite` runs
+`make flac-gates` first.** `.githooks/pre-commit` runs `make test` on every commit; wiring it
+to `make flac-check` for FLAC-touching commits is an open (non-FLAC-specific) convenience, and
+there is no `podman-flac-gates` sibling — the aggregate is native-only.
 
 ### Containerized testing
 
@@ -351,13 +324,14 @@ containers, exactly like `rom` — so the commands, flags, and gate semantics ar
 identical on both paths, and the artifacts/reports land back in your working tree.
 
 **Build caches.** The bind mount shadows the image's `/app/target`, so the
-targets mount three named volumes (`gba-cargo-target`, `gba-flac-lite-target`,
-`gba-flac-integration-target`) over the crates' build dirs. Without them every
-container run would rebuild `core`/`alloc` and every dependency from scratch
-(`-Zbuild-std` is not cheap). They are pure caches: `make clean-cache` drops them
-safely, and the next run just rebuilds slowly once. Override the names with
-`CARGO_CACHE=` / `FLAC_CACHE=` / `FLACROM_CACHE=` / `SPIKE_CACHE=` /
-`OPUS_CACHE=` / `KERNEL_CACHE=` / `OVERLAY_CACHE=`, or the runtime with
+`podman-*` build targets mount one named volume per workspace (`gba-cargo-target`,
+`gba-flac-lite-target`, `gba-flac-lite-gba-target`, `gba-flac-integration-target`,
+`gba-flac-spike-target`, `gba-opus-spike-target`, `gba-overlay-kernel-check-target`) over
+the crates' build dirs. Without them every container run would rebuild `core`/`alloc` and
+every dependency from scratch (`-Zbuild-std` is not cheap). They are pure caches:
+`make clean-cache` drops them safely, and the next run just rebuilds slowly once. Override
+the names with `CARGO_CACHE=` / `FLAC_CACHE=` / `FLACROM_CACHE=` / `SPIKE_CACHE=` /
+`OPUS_CACHE=` / `OVERLAY_CACHE=` / `OVERLAY_ROM_CACHE=`, or the runtime with
 `CONTAINER=docker`.
 
 **Native still wins for iteration speed** when the host has the tooling — no
@@ -382,14 +356,13 @@ budget, scheduling — not the decoder. That isolation is the whole point of (1)
 the FLAC library is deliberately *not* a dependency of the root ROM crate, so a
 broken experiment can never take the baseline down with it.
 
-> **Current state of the FLAC ROM build:** `flac-integration.gba` compiles,
-> links, fixes, and boots (purple backdrop, logs the linked anchor address).
-> The decoder behind it is now complete and bit-exact, but this ROM deliberately
-> still runs only a live `BitReader` proof: it references the decode path through
-> a `#[used]` link anchor that is never called, so the image exercises the full
-> build path without running a decode loop. Replacing the anchor with a real
-> decode loop plus mixer/DMA playback is Phase 2 step 9 in
-> [flac-docs/plan-of-record.md](flac-docs/plan-of-record.md).
+> **Current state:** all three signals are live and separate. `flac-integration.gba`
+> embeds the committed `GAFP` asset, parses its manifest and decodes every frame through the
+> facade with the overlay's ARM kernel, checking the pinned PCM before timing a second pass;
+> `product-play.gba` / `master-play.gba` go on to *play* it at 16,384 Hz through the ring and
+> the sound DMA, counting their own underflows. The `#[used]` link-anchor scaffold this note
+> described was replaced by items 6b-1…6b-3; playback closed at 7-3
+> ([flac-docs/history.md](flac-docs/history.md)).
 
 ### Toolchain resolution (conda / non-rustup `cargo` on PATH)
 
@@ -450,7 +423,7 @@ silently install a different compiler. It pins
 `agb-gbafix` at `0.25.0` for the same reason it pins the mGBA runner to
 `v0.25.0`: gbafix rewrites the ROM header, so it is part of the ROM bytes the
 records compare by sha. Changing the pin changes the instrument — carry a control
-build and a section/symbol dump ([flac-docs/plan-of-record.md](flac-docs/plan-of-record.md)
+build and a section/symbol dump ([flac-docs/history.md](flac-docs/history.md)
 → "Baselines to hold").
 
 Overrides: `TOOLCHAIN=`, `RUSTUP=`, `CARGO=`, `RUSTC=`. `make help` prints the
@@ -511,9 +484,12 @@ You have two main ways to build and develop:
    ```
    Compiles, links, and fixes the ROM for `thumbv4t` (via `-Zbuild-std`) using the
    host toolchain — the fast iteration loop. Requires `nightly` + `rust-src` +
-   `agb-gbafix` on PATH. Raw cargo equivalent:
+   `agb-gbafix` on PATH. Raw cargo equivalent — through the rustup shim, with the
+   channel read out of `rust-toolchain.toml`, and *not* `cargo +nightly` for the
+   reason two sections down:
    ```sh
-   cargo +nightly build --release --target thumbv4t-none-eabi
+   rustup run "$(sed -n 's/.*channel = "\(.*\)"/\1/p' rust-toolchain.toml)" \
+     cargo build --release --target thumbv4t-none-eabi
    ```
 
    On macOS you may need the toolchain's `lib` on the dynamic loader path so
@@ -558,14 +534,15 @@ repo so the config walk finds nothing, and point it at the crate explicitly. The
 
 ```sh
 mkdir -p /tmp/gba-sound-player-host-gate && cd /tmp/gba-sound-player-host-gate && \
-  cargo +nightly test --manifest-path <repo>/crates/flac-lite/Cargo.toml \
-    --target "$(rustc -vV | sed -n 's|host: ||p')"
+  rustup run <pinned-channel> cargo test \
+    --manifest-path <repo>/crates/flac-lite/Cargo.toml \
+    --target "$(rustup run <pinned-channel> rustc -vV | sed -n 's|host: ||p')"
 ```
 
 Artifacts still land in `crates/flac-lite/target/` (derived from the manifest, not
 the cwd). Full write-up, including the dated A/B matrix and the `-Tgba.ld`
 double-pass variant that breaks linking in standalone sub-crates, lives in
-**[flac-docs/method-and-gates.md](flac-docs/method-and-gates.md)** → "Cargo config
+**[flac-docs/measurements.md](flac-docs/measurements.md)** → "Cargo config
 inheritance".
 
 ## References

@@ -1,4 +1,4 @@
-//! Host witness for the E10 PR A `rice_unmap` fold kernel (`make kernel-test`).
+//! Host witness for the E10 PR A `rice_unmap` fold kernel (`make kernel-test`, retired 2026-11-14).
 //!
 //! Four layers, per the crate's dual-witness rule, with the sign convention
 //! anchored to the encoder side (the step-3a history: the scaffold's doc had

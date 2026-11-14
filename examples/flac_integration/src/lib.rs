@@ -55,7 +55,7 @@ pub mod checksum;
 //
 // `allow(unexpected_cfgs)`: `playback.rs`'s unit-test suite rides a feature
 // (`rate-assets`) that belongs to the crate the file *comes from*, not to this
-// one. The predicate is false here on purpose — that suite is `make rate-test`'s
+// one. The predicate is false here on purpose — that suite was `make rate-test`'s (retired 2026-11-14)
 // to run, and moving it would change the counts that gate reports (the
 // coexistence contract in the Makefile). The attribute is here so cargo's
 // unexpected-cfg lint doesn't call a deliberate boundary a mistake.

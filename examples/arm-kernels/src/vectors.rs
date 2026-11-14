@@ -1,7 +1,7 @@
 //! Committed golden vector table for the E10 C1 kernel (`ctz32`).
 //!
 //! `(input, expected)` pairs — the single ground truth shared by the host
-//! witness tests (`make kernel-test`) and the kernel-check ROM sweep, so the
+//! witness tests (`make kernel-test`, retired 2026-11-14) and the kernel-check ROM sweep, so the
 //! host twin and the assembly are judged against the SAME bytes. This is the
 //! repo's shared-consumer rule: one transcription of the expectation, never
 //! a second ROM-side copy that could share a mistake.

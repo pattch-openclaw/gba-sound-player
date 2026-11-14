@@ -6,7 +6,7 @@ This is the probe behind the 6b-3 record's "the rate question, measured from the
 shipped frames" row (`flac-docs/measurements.md`) and the uncommon-form row in
 `flac-docs/format-notes.md`. It was run on 2026-11-11 and **not committed at the
 time**; it is committed now so its claims are re-appliable instead of quoted
-(method-and-gates: "Probes live in `examples/flac_spike/experiments/<name>/`").
+(measurements.md: "Probes live in `examples/flac_spike/experiments/<name>/`").
 
 What it does, per shipped frame:
 

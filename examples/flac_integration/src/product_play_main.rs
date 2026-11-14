@@ -1072,7 +1072,7 @@ mod rom {
     /// check accepts is the identity: the asset declares 16,384 Hz because that
     /// is the rate this geometry and the packer's budget use.
     /// Anything else is refused here rather than played 41 cents sharp
-    /// (`flac-docs/open-questions.md` Q14; [`geometry::RATE_BRIDGE`] is `None`).
+    /// (`flac-docs/history.md` Q14; [`geometry::RATE_BRIDGE`] is `None`).
     fn manifest() -> Option<Manifest<'static>> {
         let manifest = match Manifest::parse(SONG) {
             Ok(m) => m,

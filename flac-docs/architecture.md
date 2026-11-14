@@ -1,338 +1,250 @@
-# Architecture — what exists, and why it is shaped this way
+# Architecture — what the FLAC track is made of, and why it is shaped this way
 
 > **Scope: the FLAC line of work.** This file describes `crates/flac-lite`,
-> `crates/flac-lite-gba` and the seam between them, and the design decisions of that track only.
-> It is not a repository-wide architecture document; the other codec tracks are recorded in
-> [`../ULI2.md`](../ULI2.md), [`../ULC.md`](../ULC.md) and [`../OPUS.md`](../OPUS.md), and the
-> baseline audio/input stack in [`../README.md`](../README.md).
-
-This is the design file: the constraint, the decision that produced the decoder,
-what the tree actually contains today, the seam between the portable core and the
-GBA overlay, and the rules that must survive implementation. Measurements live in
-[`measurements.md`](measurements.md); the live work plan in
-[`plan-of-record.md`](plan-of-record.md).
+> `crates/flac-lite-gba`, the `GAFP` container and the seam between the portable core and
+> the GBA overlay. It is not a repository-wide architecture document: the other codec
+> tracks live in [`../ULI2.md`](../ULI2.md), [`../ULC.md`](../ULC.md) and
+> [`../OPUS.md`](../OPUS.md), and the baseline audio/input stack in
+> [`../README.md`](../README.md). Numbers live in [`measurements.md`](measurements.md);
+> byte-level format facts in [`format-notes.md`](format-notes.md); how it got here in
+> [`history.md`](history.md).
 
 ## The constraint
 
-Goal #4 is FLAC decoding to fit more audio on a cartridge. The hard constraint is
-the target: `thumbv4t-none-eabi` is Tier-3 bare-metal, `#![no_std]`, **`core` +
-`alloc` only**. Any crate that references `std` — directly or through a transitive
-dependency — cannot compile for this target. `alloc` exists but the decode path
-does not use it.
+`thumbv4t-none-eabi` is Tier-3 bare-metal: `#![no_std]`, **`core` + `alloc` only**. Any
+crate that references `std`, directly or through a transitive dependency, cannot compile
+for this target. `alloc` exists; the decode path does not use it. The ARM7TDMI has no
+hardware divide and Thumb-1 has no `CLZ`/`RBIT`/`REV`, which together decide most of what
+the hot loop looks like ([`arm-kernels.md`](arm-kernels.md)).
 
-The sibling evaluation for the alternative codec is [`../OPUS.md`](../OPUS.md);
-same constraint, same methodology.
+## Why there is a decoder of our own (2026-08-30)
 
-## Why we wrote our own decoder (decision of 2026-08-30)
+The mature Rust FLAC decoders are built on `std::io`, and in symphonia's no-std fork the
+blockers are structural rather than a dependency-tree accident: `Error::IoError(std::io::Error)`
+as the single error type, an `io/` module on `Read`/`Seek`/`BufRead`, a `HashMap` codec
+registry, `std::sync::Arc` in metadata (~27 non-trivial `std` usages across
+core/common/metadata), and no `#![no_std]` on the FLAC crate at all. Waiting on upstream is
+not an option — that work has languished for years.
 
-The mature Rust FLAC decoders are built on `std::io` abstractions, and the port is
-not a dependency-tree accident: in symphonia's no-std fork the blockers are
-structural — `Error::IoError(std::io::Error)` as the single error type, an `io/`
-module built on `Read`/`Seek`/`BufRead`, `HashMap` in the codec registry, and
-`std::sync::Arc` in `symphonia-metadata`. Waiting on upstream is not an option;
-the no-std work has languished for years.
+The decision was **option (c): write a minimal `no_std`, zero-dependency, zero-allocation
+FLAC frame decoder**. The alternatives were (a) fork the community no-std branch, which is
+permanently tracking a WIP fork of a moving upstream for a ~200–400-line diff, and (b) port
+`clac`, the same cost against someone else's `std::io` architecture. (c) was chosen because
+**controlling both ends deletes the entire stack that made the port impossible**: encoding is
+offline and ours, the "filesystem" is a memory-mapped fixed-layout ROM, so there is no
+`Read`/`Seek` trait, no container probe, no runtime registry, no `HashMap`, no `IoError`. A
+decoder over `&'static [u8]` with a cursor needs none of it, and the math is integer
+shifts/adds/multiply-accumulate — **no division**, which matters on this CPU.
 
-The decision was **option (c): write a minimal, `no_std`, zero-dependency,
-zero-allocation FLAC frame decoder ourselves.** Rationale, still the reason the
-design is small:
+The reproduction of the symphonia failure is kept at `examples/symphonia_flac_probe/` (its
+own `Cargo.toml`; expected to fail compilation). It is the evidence for the decision, not a
+live component. The root ROM crate carries no FLAC dependency either way.
 
-- We control **both ends**. Encoding is offline and ours; the "filesystem" is a
-  memory-mapped fixed-layout ROM. That deletes the entire stack that makes
-  symphonia unportable — no `Read`/`Seek` traits, no container probe, no runtime
-  codec registry, no `HashMap`, no `IoError`.
-- A decoder over `&'static [u8]` with a cursor needs none of it.
-- The decode math is integer shifts/adds/multiply-accumulate — **no division**,
-  which matters because ARM7TDMI has no hardware divide.
-
-The reproduction of the symphonia failure is kept at
-`examples/symphonia_flac_probe/` (own `Cargo.toml`; expected to fail compilation).
-It is the evidence for the decision, not a live component. The root ROM carries no
-FLAC dependency.
-
-## Alternatives considered (surveyed 2026-08-29)
-
-The mature Rust FLAC decoders were `symphonia` (`symphonia-bundle-flac` — the
-best-engineered pure-Rust decoder; full `no_std` still upstream WIP), `clac` (MIT,
-smaller surface), `ferrosintesis-flac` (minimal, patchy API), and the thin,
-largely unmaintained `flac-rs`/`flac-decoder` wrappers. None was `no_std` in a
-usable form at the time.
-
-The candidate probed was the community no-std fork — keks `Symphonia`, branch
-`chore/core-step-towards-nostd-0.6`, commit `8301d26` (2025-10-18), *a step
-towards* no-std, not *at* it. `examples/symphonia_flac_probe/` fails before
-symphonia's own code compiles: `E0463: can't find crate for std` from
-`lazy_static` and `num-traits` in the dependency graph (which crate aborts first
-depends on cargo's build order). The FLAC crate carries no `#![no_std]` at all,
-and the hard blockers are structural: `Error::IoError(std::io::Error)` as the
-single error type, an `io/` module built on `Read`/`Seek`/`BufRead`, a `HashMap`
-codec registry, and `std::sync::Arc` in `symphonia-metadata` — ~27 non-trivial
-`std` usages across core/common/metadata.
-
-| Option | Cost |
-|---|---|
-| (a) Fork the keks branch | ~200–400-line diff, mechanical-to-moderate, but permanently tracking a WIP fork of a moving upstream. |
-| (b) Port `clac` | The same porting cost as (c), against someone else's architecture, which assumes `std::io` too. |
-| (c) Write a minimal decoder | ~500 lines of integer math; deletes the metadata/demuxer/seek/registry stack because we own both ends. **Chosen.** |
-
-## What the tree contains today
+## What the tree contains
 
 ```
-crates/flac-lite/          portable core: no_std, zero deps, zero alloc
-  bits.rs                  MSB-first reader (u32 refill accumulator), UTF-8 coded
+crates/flac-lite/          the portable core — no_std, zero deps, zero alloc on the
+  bits.rs                    decode path, deny(unsafe_code)
+                           MSB-first reader (u32 refill accumulator), UTF-8 coded
                            numbers, wasted bits, CRC-8/CRC-16, KernelWindow bridge
-  stream.rs                fLaC magic, §8.1 metadata chain, §8.2 streaminfo
-  frame.rs                 frame header parse, decode_frame, derived width bounds
+  stream.rs                fLaC magic, §8.1 metadata chain, §8.2 STREAMINFO, SeekTable,
+                           the fixed-block number line, frame_data_offset
+  frame.rs                 frame header parse + decode_frame, derived width bounds
   subframe.rs              CONSTANT / VERBATIM / FIXED / LPC, integrators, pad_block
-  residual.rs              partitioned Rice/Rice2/escape, RiceKernel seam
+  residual.rs              partitioned Rice / Rice2 / escape, and the RiceKernel seam
   stereo.rs                mid-side, left-side, right-side decorrelation
-  driver.rs                per-frame loop over a borrowed frame index
-  decoder.rs               the facade: `Decoder::new(&Manifest)` + `decode_next_with::<K>`;
-                           a shell over `scan::Frames`, deliberately not a third loop
-                           (6b-1, 2026-11-10 — the facade `todo!()`s are closed)
-  format.rs                the `GAFP`/manifest layer: `Manifest` (parse, `frame_region`,
-                           `blocksize`, `max_fixed_order`, stream defaults, bounds),
-                           `Blocksize::samples`, `EncodeProfile::validate`,
-                           `StreamInfo::from_stream` — all landed (6b-1/6b-2)
-  scan.rs                  table-less frame walk + resync (feature `scan`)
-  rice_hybrid.rs           portable hybrid Rice twin (feature `rice-hybrid`)
+  scan.rs                  the table-less frame walk + resync        (feature `scan`)
+  rice_hybrid.rs           the portable second Rice mechanism  (feature `rice-hybrid`)
+  driver.rs                per-frame loop over a borrowed frame index (instrument-facing)
+  decoder.rs               the facade: Decoder::new(&Manifest) + decode_next_with::<K>.
+                           A shell over scan::Frames — deliberately not a third loop
+  format.rs                the GAFP layer: Manifest (parse, frame_region, blocksize,
+                           max_fixed_order, stream defaults), Blocksize::samples,
+                           EncodeProfile::validate, StreamInfo::from_stream
 
-crates/flac-lite-gba/      GBA overlay: no_std, deny(unsafe_code)
-  rice_twin.rs             an out-of-crate RiceKernel arm (feature `rice-twin`)
-  rice_arm.rs              the ARM-mode kernel, FFI, KernelAbi, three tables
-                           (feature `rice-arm`); 0 unsafe in a default build,
-                           3 items with rice-arm, 6 with iwram-pin as well
-  asm/rice_partition.s     the assembled body (E10's, plus the four 6a-4 deltas),
-                           placed in `.iwram` rather than `.text` since 6a-5d —
-                           measured 4.000 cycles/instruction in ROM vs ~1.4 in
-                           IWRAM, i.e. 48.3% of the 32 kHz frame instead of 109.8%
+crates/flac-lite-gba/      the GBA overlay — no_std, deny(unsafe_code), no `agb`
+  rice_arm.rs              the shipped ARM-mode kernel, its FFI, KernelAbi, three tables
+                                                              (feature `rice-arm`)
+  rice_twin.rs             an out-of-crate arm forwarding to the core's twin
+                                                              (feature `rice-twin`)
+  asm/rice_partition.s     the assembled body, in `.iwram` (see the placement finding)
 
-examples/overlay-kernel-check/  the kernel-check ROM (`rice-arm` + `iwram-pin`):
-                           corpus + synthesized boundaries through incumbent,
-                           assembled kernel and model, on mGBA's ARM7TDMI
-examples/flac_spike/       the measurement instrument (the `ctrl` arm of every E
-                           record) + experiments/<name>/ reappliable samples
-  src/e10.rs + asm/        6a-5b: one archived experiment re-applied as a live
-                           *measurement leg* (feature `item6a5b-vendored`), with
-                           its kernel symbol and local labels renamed so both
-                           kernels link, and `tests/e10_witness.rs` as its gate
-examples/flac_integration/ standalone ROM that links the decoder (build sanity)
-examples/arm-kernels/      ARM-mode kernels + dual witness, outside the decode path
-examples/symphonia_flac_probe/  the compile-failure probe (documentation)
-scripts/                   vector/asset generators, pack_flac.sh (stub)
+examples/flac_integration/ THE PRODUCT CRATE: a GAFP blob + manifest + facade + kernel.
+                           Two binaries from one feature table, one lockfile, one set of
+                           pins — `flac-integration` (decode/verify/time) and
+                           `product-play` (decode → convert → ring → sound DMA, with its
+                           own underflow count, period audit and verdict).
+                           tests/product_play_witness.rs is the host model of the geometry.
+examples/overlay-kernel-check/  the kernel's device witness — the only place the asm runs
+examples/flac_spike/       the measurement instrument (the `ctrl` arm of every record)
+                           + experiments/<name>/, every probe as a reappliable sample
+crates/flac-lite/tests/    committed libFLAC vector tables + the layout/decode suites
+scripts/                   gafp_pack.py (the packer), gen_gafp_blob.py, frame_vectors.py
+                           and the gen_* asset/fixture generators
+
+examples/arm-kernels/      ARCHIVED — E10's isolated kernel groundwork (source of the
+examples/e5_fetch/         shipped asm; the fetch-ratio arbitration). No Make target.
+examples/symphonia_flac_probe/  the compile-failure probe; documentation of the constraint
 ```
 
-**Features, all off by default, and the gate that covers each.** Most defer a
-measured cost or a configuration; the gate is how the configuration stays
-covered. `strict-profile` is the exception — it is declared and unimplemented.
+**Features, all off by default except `i32-integrator`, and the gate that covers each.**
+A non-default configuration is witnessed by its own gate, because the default build does not
+compile what it covers — `required-features` on the witness suites is what makes "the default
+build contains no kernel" a checked statement rather than a claim.
 
 | Feature | What it changes | Gate |
 |---|---|---|
-| `iwram-pin` | pins the hot lookup **tables** to `.iwram` on ARM targets (the crate's only `unsafe` surface: placement attributes on immutable tables). The ARM kernel **body** is pinned to `.iwram` unconditionally and is *not* this feature's business — 6a-5d measured a ROM-resident body at 4.000 cycles/instruction against ~1.4 in IWRAM, and there is no configuration in which that is the code you want | GBA ROM builds + `nm` witness |
-| `crc-check` | verifies header CRC-8 and footer CRC-16 instead of consuming them | `flac-test-crc` |
-| `scan` | compiles the table-less frame walk | `flac-test-scan` |
-| `rice-hybrid` | compiles the portable hybrid Rice twin | `flac-test-rice` |
-| `strict-profile` | Holds a manifest to `format::DEFAULT_PROFILE` — blocksize, bits per sample, and the recorded maximum FIXED order — plus the per-frame order refusal that stays in `subframe`. **Implemented**: `EncodeProfile::validate` has a body and `Decoder::new` calls it under `cfg!(feature = "strict-profile")`. | **no gate builds the feature** — `validate()` itself is tested directly (`tests/decoder_manifest_walk.rs`, `tests/gafp_asset_facts.rs`), but the `cfg`'d call site inside `Decoder::new` has never been compiled by any gate, and the product ROM does not enable it (`flac_integration` builds `iwram-pin, scan` + `arm-kernel`). That is deliberate per 6b-2: the profile guarantee moved to pack time, where the packer *measures* the frames instead of trusting a header, and a profile-strict runtime re-check is optional insurance. If one is ever wanted, a gate leg is owed first. |
-| `rice-twin` (overlay) | forwards to `flac-lite/rice-hybrid`; exposes the out-of-crate arm | `overlay-test-twin` |
-| `rice-arm` (overlay) | assembles `asm/rice_partition.s`, declares the FFI and `KernelAbi`, owns the three tables — correct-only, nothing names it as a default | `overlay-test-arm` (host contract, 15 arms) + `overlay-kernel-test` (8 device arms) + `overlay-objdump` |
-| `iwram-pin` (overlay) | forwards to `flac-lite/iwram-pin`; pins the overlay's three tables and the core's `LEADING_ONES` | `overlay-kernel-rom`, whose own test asserts the runtime addresses are inside `.iwram` |
+| `i32-integrator` (core, **on** by default) | i32 arithmetic width, armed per subframe by `Σ|c_j|·2^(b−1) ≤ i32::MAX`, with the i64 leg as the always-correct escape for off-profile streams. `ArithmeticWidth` reports which leg answered | `flac-test` + `flac-test-wide` (the pair *is* the differential) |
+| `iwram-pin` (core) | pins the hot lookup **tables** to `.iwram` on ARM — the crate's only `unsafe` surface (placement attributes on immutable tables), off by default so a target with no `.iwram` section gets a loud link failure and not a silent one | GBA ROM builds + the `nm`/address witness |
+| `crc-check` (core) | verifies header CRC-8 and footer CRC-16 instead of consuming them | `flac-test-crc` |
+| `scan` (core) | compiles the table-less frame walk | `flac-test-scan`, `flac-portable-check` |
+| `rice-hybrid` (core) | compiles the portable hybrid Rice twin | `flac-test-rice`, `flac-portable-check` |
+| `strict-profile` (core) | holds a manifest to `format::DEFAULT_PROFILE` — implemented, and **no gate builds it**: `validate()` is tested directly and the product ROM does its own start-up profile check. The guarantee moved to **pack time**, where the packer measures the frames instead of trusting a header | none — deliberate; a runtime-strict profile is optional insurance and owes a gate leg before it is wanted |
+| `rice-arm` (overlay) | assembles `asm/rice_partition.s`, declares the FFI and `KernelAbi`, owns the three tables. This is what the product links | `overlay-check-arm`, `overlay-test-arm` (contract), `overlay-kernel-test` (device), `overlay-objdump` |
+| `rice-twin` (overlay) | forwards to `flac-lite/rice-hybrid`; the out-of-crate arm the seam's reachability was proven with | the core's `flac-test-rice` covers the mechanism; the overlay's own twin suite is `required-features`-gated |
+| `master-asset` (product crate) | builds `product-play` against the generated `assets/master.gfp` + `src/master_pin.rs` instead of the committed asset | `master-play-rom`, and `product-play-test` on the tracked asset |
 
-**These are landed, not outstanding.** The `decoder` facade and the `format` items
-above went in with 6b-1 (2026-11-10) and the packer/seek-table work with 6b-2
-(2026-11-11); the crate's `todo!()` list is closed and `crates/flac-lite/README.md`
-plus `src/lib.rs` carry what is genuinely still open inside it. What remains in
-this area: `scripts/pack_flac.sh` is still the documented stub (its header records
-what landed around it), the *spike* still builds on a generated per-frame offset
-table as its stand-in, and `gen_gafp_blob.py` is still the hand-authoring generator
-that `gafp-check` pins byte for byte — with `gafp_pack.py` now being the real
-packer, retiring that generator is a safe but unwritten step. The product path no
-longer depends on any of the stand-ins: `examples/flac_integration` reads the
-manifest out of the embedded blob and walks the frames from it. The open product
-work in this area is item **6b-3** — 32,768 Hz rate-play through that manifest —
-not the facade.
-
-**One experiment runs inside the tree, and it is the exception that proves the
-`experiments/` rule.** 6a-5b needed the *same image* to contain both the landed ARM
-realization and the probe's vendored one, which no patch applied to a scratch
-checkout can give a per-frame paired reading. So E10's module, its asm body and its
-witness were vendored into the spike crate behind `item6a5b-vendored` — a feature
-that implies `item6a5-asm`, because a differential leg without the landed leg in the
-link measures nothing. It is **not** a `RiceKernel` arm, deliberately: a leg that
-goes through the seam prices the seam, and the point was to price what the seam does
-not cover. Two mechanics that only show up when a second kernel is in the same link:
-`global_asm!` symbols are not namespaced (`arm_rice_partition` →
-`e10_rice_partition`), and a crate's `global_asm!` blocks assemble into one unit, so
-`.Lloop`-style local labels collide and must be renamed too. The default build
-doesn't have the module at all: it stays `forbid(unsafe_code)` outside 6a-5b
-builds, and the E10 witness is `required-features`-gated so a green cannot name
-nothing.
-
-**The seam now reaches the frame.** 6a-5 threaded the kernel choice up the
-caller-facing chain — `frame::decode_frame_with<K>` → `subframe::decode_subframe_with<K>`
-→ `residual::decode_residual_with<K>` → the partition seam — with each non-generic
-entry point a one-line delegation to `…::<TableCountKernel>` (`decode_residual`'s
-line is where the default lives now; the retired private `decode_rice_partition`
-held it while nothing above it took a kernel, and that function's own docs deferred
-the threading to item 6). This is what lets a *product* name an overlay kernel
-without the core depending on the overlay, and it is why 6a-5's reading is a
-product-path reading rather than a probe.
-
-**One thing links `flac-lite-gba` outside the instrument features: the correctness
-instrument**
-(`examples/overlay-kernel-check/`), and only with `rice-arm` on. No shipped decode
-path, no spike build and no product crate names it. That is the item-6a shape: the
-overlay's rungs exist so the build plumbing, the seam's reachability and the
-kernel's correctness are settled before any cycle is read (6a-5) or any default is
-moved (6a-6).
+**Note which pin is *not* a feature.** The ARM kernel **body** is pinned to `.iwram`
+unconditionally, and there is no configuration in which ROM residency is the code you want:
+6a-5d measured the same instruction stream at **4.000 cycles per instruction fetched from
+cartridge ROM against ~1.4 from IWRAM** — 2.9× on the decode, from one section directive,
+with nothing else changed. E6's "instruction fetch is ruled out" does not contradict this;
+it pinned a Rust path where every instruction carried many cycles of work, which is exactly
+the case a 4× fetch price is invisible in.
 
 ## The seam: a whole-partition `RiceKernel`
 
-The kernels replace the per-sample codeword step inside
-`residual::decode_rice_partition`, so the core exposes a small generic trait whose
-default is the shipped table-count loop:
+The kernels replace the per-sample codeword step inside `residual::decode_rice_partition`,
+so the core exposes a small generic trait whose default is the shipped table-count loop:
 
-- **Whole-partition, not per-sample.** The kernel owns the byte window
-  (`KernelWindow { w, v, ptr, end }`, handed out and taken back through
-  `bits`), because that is the only shape that has ever produced a measured
-  number. `examples/arm-kernels/src/sample_step.rs` deliberately excludes the
-  rev8 reversal and the `w_{t+1}` straddle merge; stitching those in is the
-  vendored seam's job.
-- **Monomorphized, never `dyn`.** The E2b lesson: landing codegen coupling is
-  where measured samples die.
-- **Unsealed, default `TableCountKernel`.** `decode_rice_partition` names the
-  default on one line; `decode_rice_partition_with::<K>` is the seam.
-- **Two mechanisms in every differential.** `bits::rice_quotient` and
-  `LEADING_ONES` are not deleted even when a kernel replaces them: the
-  differentials consume two live mechanisms, and `LEADING_ONES @ 0x0300022c` is
-  the `nm` anchor cited by E2b, E10, the `iwram-pin` witness and item 5.
-- **Correctness is the core's.** The overlay owns no decode semantics; it is
-  judged by the core's witnesses (same golden tables, same `flac -d`
-  bit-exactness).
+- **Whole-partition, not per-sample.** A kernel owns the byte window (`KernelWindow { w, v,
+  ptr, end }`, handed out and taken back through `bits`), because that is the only shape
+  that has ever produced a measured number.
+- **Monomorphized, never `dyn`.** And note the measured cost of *instantiation*, not of
+  dispatch: a second `RiceKernel` body merely present in a link re-decides inlining for the
+  shared decode path (+2,984 B of `.text` with no symbol of it in the image, and tens of
+  millions of cycles on the *default* arm).
+- **Unsealed, default `TableCountKernel`** named on one line; `decode_rice_partition_with::<K>`
+  is the seam. The choice is threaded up the caller-facing chain — `frame::decode_frame_with`
+  → `subframe::decode_subframe_with` → `residual::decode_residual_with` — with each
+  non-generic entry point a one-line delegation to `…::<TableCountKernel>`. That is what lets
+  a product name an overlay kernel without the core depending on the overlay; the dependency
+  arrow is overlay → core.
+- **Two mechanisms stay live.** `bits::rice_quotient` and `LEADING_ONES` are not deleted even
+  where a kernel replaces them: the differentials consume two live mechanisms, and
+  `LEADING_ONES` is the `nm` anchor cited by half the ledger — as an anchor, not a constant
+  (it relocates when a second body becomes reachable, with its bytes unchanged).
+- **Correctness is the core's.** The overlay owns no decode semantics; it is judged by the
+  core's witnesses — same golden tables, same `flac -d` bit-exactness.
 
-## Why two crates: the map is not the finding
+## Why two crates
 
-**What actually travels, measured.** It is worth stating plainly, because the
-menu's headline numbers suggest more portability than exists:
+Not "GBA needs different semantics" — it needs the same semantics written in the machine's
+own idiom. The core and the overlay implement the *same* Rice codeword map, and on this
+platform that map measured two opposite things: the portable hybrid twin of it is
+**+42.6 c/sample slower** than the incumbent, and the ARM-mode realization of the same map
+is **−349 c/sample faster**. So the platform-bound realization lives in its own crate rather
+than as ARM-shaped code inside a portable one, and the core's "as portable as a laptop
+userspace FLAC decoder" claim stays intact.
 
-- **In the core and portable already:** the E2a `u32` refill accumulator and the
-  E2b `LEADING_ONES` table count — pure Rust, zero unsafe, no platform import.
-- **Does not travel: E4's i32 win.** Its safety is profile-bound (precision ≤ 11,
-  `|coeff| ≤ 751`; profile precision 15 is *not* safe), and its −46.9% LPC result
-  is an **ARMv4T artifact** — 64-bit arithmetic is software-emulated there. On
-  64-bit hosts `i64` is native, so the narrow leg is expected to buy little. Only
-  the *guarded* form (item 6a-6) is portable, and it is the core's by decision.
-- **Does not travel: E10.** ARM-mode encodings are thumbv4t-only, and asm is
-  unsafe by construction. Overlay material.
-- **Closed/inert/negative and not extractable:** E1, E3, E6, E7.
-- **The core's only GBA residue** is the `.iwram` *section name* — a link-script
-  contract other ARM bare-metal targets do not define (a loud link failure, not a
-  silent one) — and it sits behind `iwram-pin`, off by default.
-- **Full-profile correctness is the core's job, not a profile precondition:** LPC
-  ≤ 32, escaped partitions and wasted bits stay correct for arbitrary FLAC; the
-  constrained encode profile is enforced at the product's pack time.
+What actually travels, measured:
 
-The core and the overlay implement the *same* Rice codeword map, and on the
-founding platform that map measured two opposite things:
+- **Portable already:** the E2a `u32` refill accumulator and the E2b `LEADING_ONES` table
+  count — pure Rust, zero unsafe, no platform import.
+- **Does not travel: E4's i32 win.** Its safety is profile-bound and its −46.9% LPC result is
+  an **ARMv4T artifact** (64-bit arithmetic is software-emulated there). Only the *guarded*
+  form is portable, and it is the core's by decision: on a 64-bit host `i64` is native, so
+  the narrow leg buys nothing there and might cost.
+- **Does not travel: E10.** ARM-mode encodings are thumbv4t-only and asm is unsafe by
+  construction.
+- **The core's only GBA residue** is the `.iwram` *section name* — a link-script contract
+  other bare-metal ARM targets do not define — behind `iwram-pin`, off by default.
+- **Full-profile correctness is the core's job, not a precondition:** LPC ≤ 32, escaped
+  partitions and wasted bits all stay correct for arbitrary FLAC. The constrained encode
+  profile is enforced at the product's **pack** time.
 
-| Realization | Reading |
-|---|---|
-| Core's incumbent (`TableCountKernel`, E2a reader + E2b table) | the live baseline |
-| Core's portable hybrid twin, same map, same tables pinned | **+42.60 / +42.72 cycles per decoded sample slower** (314/314 frames) |
-| E10's ARM-mode asm realization, same map | **−349 / −348 cycles per sample** |
+## The container, and where frames come from
 
-So the split is not "GBA needs different semantics" — it needs the same semantics
-written in the machine's own idiom. That is why the platform-bound realization
-lives in its own crate instead of as ARM-shaped code inside the portable core,
-and why the core's "as portable as a laptop userspace FLAC decoder" claim stays
-intact. Full numbers and the `nm`/section attribution: [`measurements.md`](measurements.md).
-
-## The container: where frames come from (status: specified, not built)
-
-The product plans to ship `GAFP` blobs: raw FLAC frames plus a small manifest
-(stream info + a frame-offset index), produced offline by `scripts/pack_flac.sh`.
-Consequences of that shape:
+`GAFP` (byte contract in [`../crates/flac-lite/README.md`](../crates/flac-lite/README.md)):
+raw FLAC frames plus a small manifest and a frame-offset table, written offline by
+`scripts/gafp_pack.py`. Consequences of that shape:
 
 - Seek is an O(1) table lookup — no `Seek`/`SeekFrom` trait anywhere.
-- Decode walks a `&[u8]` cursor; the manifest is borrowed, so the decode path is
-  zero-allocation.
-- Non-conforming files are rejected at **pack** time, not decode time.
-- The frame index is one frame source, not the decoder's contract — hence
-  `scan` (the table-less walk) lives in the core, and `Manifest` is product-side.
+- Decode walks a `&[u8]` cursor; the manifest is borrowed, so the decode path allocates nothing.
+- **Non-conforming files are rejected at pack time, not at decode time.**
+- The frame index is *one* frame source, not the decoder's contract — hence `scan` (the
+  table-less walk) lives in the core and `Manifest` is product-side, with the facade a shell
+  over the walk rather than a third loop.
 
-Today the spike embeds the same shape as a generated offset table (`assets.rs`),
-which is why the decode path has needed no manifest to be measured.
+`scripts/gen_gafp_blob.py` is not redundant with the packer and is not waiting to be
+retired: it re-assembles the committed product blob from the **spike's** own committed frames,
+which makes it the only gate that can say the asset the ROM plays is the asset the instrument
+measured. `gafp_pack.py` reaches the same bytes by a different route and cannot say that.
 
-## Playback path
+## The playback path
 
-The measured playback harness (`flac-rate-play`) is a ring buffer + FIFO8
-DMA/timer feed: one decoded frame fills half a double buffer, the FIFO consumes
-the other half, with a word-copy push and a branch-free convert fast path. At
-2048 samples / 32 kHz that is ≈64 ms of audio per frame. The shipping
-`agb` mixer/DMA integration is still Phase 2 step 9; the harness exists to prove
-the seam, not to be the mixer. Measurements: [`playback-results.md`](playback-results.md).
+`examples/flac_integration/src/product_play_main.rs` is the shipping path, and it is not
+`agb`'s mixer: the ROM programs timer0 as the sample clock, the timer1 cascade as the period
+IRQ, the sound-DMA enable and every per-period re-arm itself, and states the mixer's absence
+as a safety precondition. The chain is
+`Decoder` → `convert_frame` (i32 → 8-bit FIFO bytes, `sample >> 8`) → `RingFeed` (36 chunks of
+560 samples per channel, prefill 16) → sound DMA/FIFO, with the push taken in `CHUNK`-sized
+interrupt-masked sections. It counts its own underflows, gates its period audit (coalesced /
+late / clock refusal / tail / void) and folds the **played form** — the 8-bit FIFO bytes per
+channel — as well as the 16-bit decode PCM.
 
-## Design rules that must survive implementation
+Two things that path learned the hard way and should not re-learn:
 
-1. **No `alloc` in the decode path.** Scratch is caller-provided and borrowed.
-   That is what keeps the path free of unsafe code (`#![deny(unsafe_code)]`, one
-   named `cfg`-gated pin attribute).
+- **The 16-bit digests are decode witnesses and say nothing about what the speaker plays.**
+  That is why `FNV_FIFO_L/R` exist. Folding them on the *push* path was tried and measured:
+  the house FNV-1a is 64-bit, ARM7TDMI has no 64-bit multiply, and 4,096 FIFO bytes per frame
+  costs ≈800,000 cycles — the run failed at 128% work/frame. The witness therefore runs in the
+  post-audio proof pass, and the residual gap is stated: it is the converter's output for the
+  same frames, not a capture of the DMA/DAC, with `RingFeed`'s byte copy as the
+  host-witnessed bridge in between.
+- **A critical section is measured in samples by the thing it must not delay, and in cycles
+  by the code that holds it.** Holding IME off for a whole 2,048-sample frame's ring copy
+  (14,680 c) overshot a 16-sample re-arm grace and made one service in 582 late,
+  deterministically, on both units. `CHUNK`-sized sections cut that window to 4,014 c.
+
+## Design rules that must survive any edit
+
+1. **No `alloc` in the decode path.** Scratch is caller-provided and borrowed. That is what
+   keeps the path free of unsafe code.
 2. **No I/O traits.** `&[u8]` + cursor, forward only.
-3. **No division, ever.** ARM7TDMI has no hardware divide: shifts and adds only.
-4. **Fixed-size predictor state** (`[i32; MAX_LPC_ORDER]`), never a growable
-   buffer.
-5. **Per-frame scheduling granularity.** One decode call = one frame ≈ 64 ms at
-   2048/32 kHz, so the caller can pin decode work to DMA IRQ boundaries.
-6. **Frames are independently decodable.** Warm-up lives inside each subframe, so
-   a manifest offset is a safe seek and `PredictorState` is scratch, not history.
-7. **A rejection writes nothing.** Cursor and output are left exactly as they were
-   before the failing read.
-8. **The core makes no real-time claim; the overlay makes no correctness claim of
-   its own.** Real-time belongs to the overlay measured on mGBA, pending hardware
-   arbitration.
+3. **No division, ever.** Shifts and adds only.
+4. **Fixed-size predictor state** (`[i32; MAX_LPC_ORDER]`), never a growable buffer.
+5. **Per-frame scheduling granularity.** One decode call = one 2048-sample frame = 125 ms at
+   the product rate, so a caller can pin decode work to DMA IRQ boundaries.
+6. **Frames are independently decodable.** Warm-up lives inside each subframe, so a manifest
+   offset is a safe seek and `PredictorState` is scratch, not history.
+7. **A rejection writes nothing.** Cursor and output are left exactly as they were before the
+   failing read.
+8. **The core makes no real-time claim; the overlay makes no correctness claim of its own.**
+   Real-time belongs to the product image measured on hardware; correctness belongs to the
+   core's witnesses.
+9. **Sub-crates inherit the root `.cargo/config.toml` and must not re-declare it** —
+   `rustflags` concatenate across config layers, so a second `-Tgba.ld` double-links.
 
-**Memory.** Per frame: two channel buffers of `blocksize × i32` — 2048 × 2 × 4 B =
-16 KiB scratch, plus ≤32 warm-up samples per subframe, plus the DMA double buffer.
-Fits EWRAM (256 KB) with room to spare. IWRAM is 32 KB minus a 256 B BIOS
-reservation; item 5 measured that pinning *data* tables helps and pinning *code*
-hurts (E6).
-
-## The portability ladder — delivered
-
-| Rung | Status |
-|---|---|
-| 1. Metadata + docs reframed (portable core; GBA is the founding platform) | landed 2026-11-02 |
-| 2. `iwram-pin` feature gate (pin surface off by default) | landed 2026-11-02 |
-| 3. Second-target build witness (`thumbv7em-none-eabi`) | landed 2026-11-02 |
-| 4a. Stream layer (`fLaC`, metadata chain, streaminfo) | landed 2026-11-04 |
-| 4b. Per-frame loop (`driver`) | landed 2026-11-04 |
-| 4c. Table-less frame walk (`scan`) | landed 2026-11-04, feature-gated |
-| 5. `crc8`/`crc16` + verification behind `crc-check` | landed 2026-11-03 |
-| 6. `RiceKernel` seam + window bridge + portable twin + the flip reading | landed 2026-11-05/06; the default **did not flip** (measured negative) |
-| 7. Overlay crate, seam passable from outside | item 6a-1 and 6a-3 landed 2026-11-06/07 |
-| 8. Guarded i32 default width | item 6a-6 **landed** 2026-11-09 (default `i32-integrator`, per-subframe guard, i64 escape leg) |
-| 9. ARM kernel over the seam | item 6a-4 **landed** 2026-11-08 (correctness only, no default moved); item 6a-5 **measured** it through the seam at −584,856 c/frame (FIXED), fork resolved to *carry* — the one-line placement lands with the product path (6b) |
-| 10. Manifest + packer + facade rewired onto `scan` | item 6b, planned |
+**Memory.** Per frame: two channel buffers of `blocksize × i32` = 2048 × 2 × 4 B = **16 KiB**
+of scratch, plus ≤32 warm-up samples per subframe, plus the ring (40,320 B) and the DMA
+buffers. That fits EWRAM (256 KB) with room to spare and does **not** fit IWRAM (32,768 B
+total) at this rate — which is a live design fact, not a preference: E3 measured the
+EWRAM-write penalty at **3.482 c/B** on real hardware, and the ring's placement is the
+standing target on the producer's convert leg.
 
 ## Decisions of record
 
-- **2026-08-30 — option (c):** write `flac-lite`. (This file, top.)
-- **2026-09-07 — the encode profile is a *max LPC order* plus flags**, never a
-  "reject LPC" switch; `-l 4` emits real LPC-4 frames. See
-  [`format-notes.md`](format-notes.md) Correction 3.
-- **2026-10-11 — cumulative gains:** no lever substitutes for another; the rate
-  track grows the denominator while decoder levers shrink the numerator, and the
-  product is what clears. See [`plan-of-record.md`](plan-of-record.md).
-- **2026-11-01 — the two-crate split**, corrected by measurement on 2026-11-06:
-  the portable twin stays an alternative, the overlay owns the realization.
-- **2026-11-06 — i32 becomes the core's default arithmetic width**, feature-gated
-  and armed per **subframe** by a bound computed from values the parse already
-  has, with i64 kept as the always-correct escape leg for off-profile streams
-  (landed in item 6a-6; the frame reports the OR of its subframes). The width
-  needs no seam.
-- **2026-11-06 — the toolchain is a pin, not a note** (`nightly-2026-09-04`).
-- **2026-11-08 — the seam is threaded to the frame, and the ARM kernel is carried**
-  (item 6a-5). The `…_with<K>` chain is monomorphized (no `dyn`), the default stays
-  one line, and the placement of the carry is the product's line, not the core's:
-  the dependency arrow is overlay → core. Numbers:
-  [`measurements.md`](measurements.md).
-- **Unchanged throughout — correctness before speed**, one variable per run, and
-  no cycle quoted across records.
+| Date | Decision |
+|---|---|
+| 2026-08-30 | Option (c): write `flac-lite`. |
+| 2026-09-07 | The encode profile is a **max LPC order plus flags**, never a "reject LPC" switch (`-l 4` emits real LPC-4 frames); frame fixed fields are 32 bits. [`format-notes.md`](format-notes.md) |
+| 2026-10-11 | **Cumulative gains:** no lever substitutes for another; the rate track grows the denominator while decoder levers shrink the numerator. |
+| 2026-11-01 | The two-crate split. Corrected by measurement on 2026-11-06: the portable twin stays an alternative, the overlay owns the realization. |
+| 2026-11-06 | Guarded i32 becomes the core's **default** width, armed per subframe, with i64 as the escape leg. The toolchain becomes a pin, not a note. |
+| 2026-11-08 | The seam is threaded to the frame and the ARM kernel is carried; the placement of the carry is the product's line, not the core's. |
+| 2026-11-09 | The kernel body is **IWRAM-resident** (6a-5d: placement outranks every local optimization). |
+| 2026-11-10 | The kernel ships in the product ROM (6b-1) and C1/C2 become the only definition of done. |
+| 2026-11-11 | Non-conformance is refused **at pack time**, by reading frames rather than trusting headers (6b-2); and the declared-rate identity rule is ruled (Q14). |
+| 2026-11-13 | The rate is a measured result, not a commitment; **16,384 Hz** is the product clock; push sections are `CHUNK`-sized; C2 is met and acceptance becomes per-path rather than per-asset. [`history.md`](history.md) |
+| Throughout | **Correctness before speed**, one variable per run, and no cycle quoted across records. |

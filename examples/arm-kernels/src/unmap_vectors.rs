@@ -1,7 +1,7 @@
 //! Committed golden vector table for the E10 `rice_unmap` fold kernel (PR A).
 //!
 //! `(folded input, expected unmapped i32)` pairs — the single ground truth shared
-//! by the host witness tests (`make kernel-test`) and the kernel-check ROM sweep,
+//! by the host witness tests (`make kernel-test`, retired 2026-11-14) and the kernel-check ROM sweep,
 //! so the host twin and the assembly are judged against the SAME bytes (the
 //! repo's shared-consumer rule — one transcription, never a second ROM-side copy
 //! that could share a mistake).
