@@ -1,10 +1,16 @@
 # ALBUM-PLAYER.md — proposal: the Album Player application
 
-Status: **proposal, opened 2026-11-14. Nothing in this file is built, measured or
-claimed.** It is a plan to be argued with, a scope statement, and a budget the
-first probe ROM has to contradict usefully. Three things have already been settled
+Status: **proposal, opened 2026-11-14; Phase 0 (AP-0) landed the same day** — the
+three probe ROMs are built, run and measured, and their numbers live in
+[`examples/album_probe/README.md`](examples/album_probe/README.md). Everything from
+Phase 1 on is still unbuilt and unclaimed. It is a plan to be argued with, a scope
+statement, and a budget the first probe ROM has to contradict usefully — and it did:
+AP-0 refuted one row of §4.4's observable table, and the fix is recorded there rather
+than quietly applied. Four things have already been settled
 in review and are recorded inline rather than left open: **a skip is allowed a
-short, bounded delay (§4.4)**; **the session clock is one `u32` in `.iwram`
+short, bounded delay (§4.4)**; **a skip drops the queue by *truncating* the ring, and
+the shared feeder must grow that one method (§4.4, Q13b — ruled 2026-11-14 on AP-0's
+measurement)**; **the session clock is one `u32` in `.iwram`
 (§10.4)**; and **U4 closed on 2026-11-14**, which moves what this application is
 waiting on from decoder speed to the lossy backend's **playback (U5) and output
 stage (PR D)** gates (§2, §10.2, §11). Every number below is either
@@ -345,7 +351,7 @@ in terms of what the user may observe, not in cycles:
 | observable | v1 target (measured at AP-1, not asserted) |
 |---|---|
 | Screen changes to the new track (title, index, bar reset) | within one video frame of the button press |
-| Audio of the new track begins | ≤ ~0.6 s, and that number is `SKIP_PRIME_CHUNKS`, a policy knob (§4.4 below) |
+| Audio of the new track begins | ≤ ~0.6 s, and that number is `SKIP_PRIME_CHUNKS`, a policy knob (§4.4 below). **AP-0's precondition: this is only reachable if step 2 truncates the ring (Q13b) — measured at the ring's ceiling depth, both drops the application can perform today read 39–53 periods = 1.33–1.81 s, which fails this row at every prime setting.** |
 | Clicks / pops at the transition | none: fades, never a mid-waveform splice |
 | Underruns attributed to a skip | 0, including the silence fed during the re-prime |
 
@@ -360,7 +366,7 @@ re-primes**:
 ```
 skip(direction)
   1. fade out over FADE_SAMPLES (256 = 15.6 ms at 16,384 Hz, 7.8 ms at 32,768)
-  2. mark the ring stale: the queued chunks are dropped, not played
+  2. truncate the ring: the queued chunks are dropped, not played   ← needs Q13b
   3. source.start_track(i ± 1)                  — the seam call; per-backend seek is adapter-internal
   4. feed *silence* chunks so the DMA keeps getting a whole chunk every period
   5. re-prime the ring to SKIP_PRIME_CHUNKS
@@ -376,6 +382,39 @@ ROM bytes are all cold. During a skip **none of that is cold**. So the skip path
 gets its own, smaller watermark, and the host model (the `product-play-test`
 sibling) is what says whether `SKIP_PRIME_CHUNKS = 4` still survives the measured
 per-frame cost, rather than this file guessing it.
+
+**What AP-0 measured, and the ruling it forced (2026-11-14).** Step 2 says *dropped,
+not played*, and the probe wrote both versions of that against the real
+`RingFeed`, at the ring's **ceiling** — 35 queued chunks plus the fade push, filling all 36
+(`examples/album_probe/README.md` → "The deep arm"; 20 skips per arm, `underflows = 0`
+throughout). The shipped producer's steady state is `RING − 2,048` ≈ 32 chunks, the same
+regime and one quarter shallower, so these rows are the ceiling of it rather than a
+different case:
+
+| step 2, at the ring's 36-chunk ceiling | old track still handed to the DMA | silence handed to the DMA | until new-track audio |
+|---|---|---|---|
+| drain (play the queue out) | 37 periods = 1,264 ms | prime | **39–53 periods = 1.33–1.81 s** |
+| consume-and-discard (take the chunks, hand the DMA zeros) | 1 period | 38–52 periods | **39–53 periods — identical** |
+| truncate (`consumed = pushed` in one step) | 0 | prime | **3–17 periods = 102.5–581.1 ms** (derived, not yet measured) |
+
+The two rows the application can write *today* are the same length, because
+`RingFeed::consumed` moves only by `take_chunk` — one hardware period per queued
+chunk — so discarding a deep queue buys silence *instead of* the old track, not
+time. Only a truncate meets the ≤ ~0.6 s observable above, and a truncate is not
+something this layer can do to a structure it does not own.
+
+**Ruled: truncate is the mechanism, and the shared feeder grows it.**
+`RingFeed` gains `truncate()` (equivalently `skip_to_producer()`) setting
+`consumed = pushed` inside the same critical section `take_chunk` uses, preserving
+`consumed <= pushed` and "a starved period consumes nothing", plus a host test that a
+truncated ring reads `ready() == 0` and delivers the next push whole. It lives in a
+codec-track file (`examples/flac_spike/src/playback.rs`, compiled into both shipped
+product images, witnessed by `make flac-check`), so the change is **requested of that
+track as Q13b** rather than made here — which is exactly the boundary Q13 draws, and
+why it needed a number to be argued with. Until it lands `SKIP_PRIME_CHUNKS` stays
+**un-chosen**: with drain-or-discard the only remaining lever is the queue's
+steady-state depth, and that is a decode-margin decision (less room for a slow FLAC
+frame), not a skip-policy one (§11 Phase 1, R4, AP-1).
 
 **The clock the UI shows.** `position.rs` stays deliberately boring, because §4.4's
 drop-and-reprime removes the hard case: the feeder already counts every chunk it
@@ -945,7 +984,7 @@ that rather than promote an internal constant into a headline.
 
 | Phase | Ships | Exit gate |
 |---|---|---|
-| **0 — Probes.** Three throwaway ROMs and no product code: (a) UI spike — 3 BGs + 1 OBJ + text + palette fade, VBlank-paced, *with the shipped lossless feeder playing underneath*; (b) art spike — a PNG on screen from a hand-written `ART1`; (c) skip spike — fade/drop/re-prime against the real ring, measuring the silence gap and proving the re-prime costs no underrun | `make album-probe-rom` + logs; **AP-0**: the frame cost breakdown closes with UI terms, the VRAM/OBJ split is recorded, `SKIP_PRIME_CHUNKS` gets its first number, and the *targets in §10 are replaced by measurements* |
+| **0 — Probes.** Three throwaway ROMs and no product code: (a) UI spike — 3 BGs + 1 OBJ + text + palette fade, VBlank-paced, *with the shipped lossless feeder playing underneath*; (b) art spike — a PNG on screen from a hand-written `ART1`; (c) skip spike — fade/drop/re-prime against the real ring, measuring the silence gap and proving the re-prime costs no underrun | `make album-probe-rom` + logs; **AP-0**: the frame cost breakdown closes with UI terms, the VRAM/OBJ split is recorded, `SKIP_PRIME_CHUNKS` gets its first number, and the *targets in §10 are replaced by measurements*. **Landed 2026-11-14** (`examples/album_probe/README.md`; `make album-probe-art/-test/-rom`, `make album-probe`): UI full arm **1.93%** of a period (≤2% target, and a lower bound), feeder 0.91%, video period **280,896 c** (§4.5's ~281,000 confirmed), one 4bpp tile write 726 c, art upload **0.58 period** live (+0.37% over audio-disarmed, n=1, emulator), `late_max` 4 samples inside the 16-sample grace — and `SKIP_PRIME_CHUNKS` came back **blocked on the truncate ruling (§4.4, Q13b)**, which is the finding Phase 0 existed to produce |
 | **1 — It plays an album.** A1–A4, A6, A10: 2–3 tracks (lossless backend, hand-packed), play/pause, next/prev with fade+drop+re-prime, title + elapsed/remaining on screen; the 32-bit session clock (§10.4, ruled); **the `stub` and both backend arms compile and run the same screen suite from here on** | **AP-1**, **AP-2**, **AP-9** |
 | **2 — The shell.** A5, A7, A8, A11, A12: layout module, title card, now-playing, track list, pause menu, progress bar, cover art | **AP-3**, **AP-4** |
 | **3 — Bake.** A3, A13: `album.toml` + `scripts/album_bake.py` end to end, WAVs → ROM, determinism and refusals | **AP-5** |
@@ -1051,7 +1090,7 @@ authorities on decode, and an app change never re-decides them.
 | R1b | **The app's UI cost is an input to the codec's own gate ceiling**, so an unmeasured UI blocks U5's gate total on the lossy backend | U4's ceiling is "measured, not assigned": the gate total **plus this tree's non-audio cost** — and U4 has now closed, so the addend missing from that sum is this application's | AP-0/AP-6 publish the UI + viz + game cost in the same units the codec ledger uses and hand it across; §10.2's targets are explicitly targets until then |
 | R2 | **The lossless backend cannot hold a whole album** — the shipped clip carries 354.8 kbit/s (439,396 B for 9.91 s, `spike_l0.gfp`) ⇒ arithmetic puts ~12.6 min of that material on 32 MiB | that clip is a perf fixture, not a measure of real music, and no amount of FLAC tuning makes lossless reach album length at this depth | Phase 3 measures a real master's bitrate and the bake tool reports minutes-per-cart honestly. This risk is also the *reason* the lossy backend is not a nice-to-have: an album player that can only hold an EP is why §4.2b exists. Quote a measured number from here on, not 354.8 kbit/s |
 | R3 | **Cartridge bus contention**: the app adds ROM *data* traffic (VIZ reads, tile uploads, art) around decoder *instruction* and audio-data fetches | mGBA does **not** model the ROM prefetch buffer, and this tree already had to arbitrate emulator-vs-hardware fetch once (`examples/e5_fetch/`); ULI2's method note says on-target numbers stay unclaimed until hardware | the ≥20% reserve; a hardware run per phase from Phase 5; the watermark rule keeps the risk off the audio deadline |
-| R4 | **A skip that sounds broken**: too long a silence, a pop at the splice, or a re-prime that starves the ring | §4.4: 1.23 s is queued and must be dropped, then replaced while the DMA keeps consuming | the fade/silence/re-prime sequence with `SKIP_PRIME_CHUNKS` chosen by the host model, not guessed; AP-1 measures the gap and holds `underflows = 0` across it |
+| R4 | **A skip that sounds broken**: too long a silence, a pop at the splice, or a re-prime that starves the ring | §4.4: 1.23 s is queued and must be dropped, then replaced while the DMA keeps consuming. **AP-0 found the stronger version of this risk: without a ring truncate the drop cannot be faster than one period per queued chunk, so at the ring's ceiling the skip is 1.33–1.81 s no matter what `SKIP_PRIME_CHUNKS` is (§4.4, Q13b)** | the fade/drop/re-prime sequence with `SKIP_PRIME_CHUNKS` chosen by the host model, not guessed; AP-1 measures the gap and holds `underflows = 0` across it; and Q13b ruled in the app's favour, so step 2 becomes a truncate rather than a drain |
 | R5 | **Silent failure modes** (a bad blob, an album longer than the manifest's own arithmetic, an off-profile asset) | the bake tool is the only place with enough information to notice, and it is not currently the place that decides | refuse at bake time; show a named on-screen verdict ("DATA ERROR") at run time; a decode error skips to the next track and stops at the album end; the 32-bit session clock (§10.4) so a long run is still measurable |
 | R6 | **IWRAM is already nearly full** on the album-length path | ULI2 port ~22.6 KiB + a 15 KiB stack, per PR B | AP-7 flags `.iwram`/stack growth; new non-hot code stays out of IWRAM by rule; the "a few hundred bytes of RAM growth breaks playback silently" failure mode is one this project has already recorded, so the map diff is a gate and not a courtesy |
 | R7 | **The lossy backend has no encoder in this repository**, so `BACKEND=uli2` cannot be baked here today | `make gafp-pack-check` covers FLAC end to end; nothing in `scripts/` encodes the lossy format | the bake tool calls encode behind one indirection with a declared interface (§9); the app is built and gated on the lossless backend in the meantime, so this blocks a *backend*, never the application (Q3) |
@@ -1079,6 +1118,7 @@ Numbered in this file's own space (the codec tracks keep theirs).
 | Q11 | One album per cart, or a picker? | **One album per ROM.** A picker is a filesystem and an allocator, and the encoder's album-wide rate allocation makes a mixed cart a worse product. |
 | Q12 | Mono vs stereo, and 8-bit vs int16 tap for viz? | **Stereo is the product target, ruled 2026-11-14** — fidelity is the project's purpose and is not traded for CPU headroom. The app receives int16 from `PcmSource` and owns the int8 conversion at the output stage, so a speaker fold-down or dither change never reopens the seam (§4.2). |
 | Q13 | Where does the codec track's PR D stop and this application start — the output stage, the feeder, **and whether the UI reads the codec's tables or the app's manifest**? | Overlapping ground, named rather than papered over. The feeder is already shared in this repo's idiom (`RingFeed` and `geometry.rs` are compiled by several consumers through `#[path]`), and the lossy track's PR D claims "reuse the ring/FIFO feeder … int8 direct … UI from the container's tables" — that last clause is the boundary §4.3 pushes back on. **Proposal:** the feeder / convert / fold-down lives in one shared module that both the product ROM and this app link (PR D's fold-down measurement lands there), the *player* (screens, manifest, keys, viz) lives here, and the adapter cross-checks the container's tables against the manifest so both statements hold at once. Needs an owner's ruling, because it decides where U5's gate gets written. |
+| Q13b | **May the shared feeder *truncate* the ring at a skip?** (raised by AP-0, 2026-11-14) | **Ruled: yes — this is the mechanism §4.4 step 2 means, and `RingFeed` must grow it.** `consumed` is private and only `take_chunk` moves it, so the only drop the application can write today costs one hardware period (34.18 ms) per queued chunk: at the 36-chunk ceiling that is 1,230.5 ms of either the old track or silence, measured at 39–53 periods to new-track audio against §4.4's ≤ ~0.6 s, where a truncate reads 3–17 periods (102.5–581.1 ms) and comes inside it at every prime setting. **Ask of the codec track:** `truncate()` (or `skip_to_producer()`) setting `consumed = pushed` under the same critical section `take_chunk` uses, keeping `consumed <= pushed` and "a starved period consumes nothing" intact, plus a host test that a truncated ring reads `ready() == 0` and delivers the next push whole. It is `examples/flac_spike/src/playback.rs` — compiled into both shipped product images and witnessed by `make flac-check` — so it is the same owner boundary as Q13, and this application does not make it unilaterally. **Consequence while unshipped:** `SKIP_PRIME_CHUNKS` is un-chosen, and a skip on the current feeder is 1.33–1.81 s whichever drop the app picks. |
 | Q14 | Does the app's reaction data need the lossy backend's int16 path, or is int8 enough? | Neither, as designed: the visualiser reads the **album timeline**, not the PCM (§8). This only reopens if the runtime-analysis experiment is taken, and then it is a measured cost against the gate total, not a free tap. |
 
 ---
@@ -1124,3 +1164,7 @@ backend is ready, with every target number in §10 replaced by a measurement.
 - [`README.md`](README.md) — "Project ideas (top-level ROMs)" lists this as an
   idea; this file is where that idea stops being one. The README should gain a
   pointer to this document when Phase 0 lands.
+- [`examples/album_probe/README.md`](examples/album_probe/README.md) — **AP-0, the
+  Phase 0 measurement record** (landed 2026-11-14): the probe ROMs' tables, §10's
+  target→measured annotations, the deep-queue drain/drop sweep behind §4.4's ruling
+  and Q13b, and the NOT VERIFIED list of everything an emulator run cannot claim.
