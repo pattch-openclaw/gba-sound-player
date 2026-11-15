@@ -70,17 +70,18 @@ static mut STATE: DecoderState = DecoderState::new();
 #[unsafe(link_section = ".ewram")]
 static mut PRODUCT_TABLES: CodeTables = CodeTables::new();
 
-/// The product decoder's hot transform/FFT/overlap buffers (8 KiB), in EWRAM.
+/// The product decoder's hot transform/FFT/overlap buffers (8,192 B) — **in
+/// IWRAM**, matching the C reference (`uli_g_X`/`uli_g_buf`/`uli_g_P` are all
+/// IWRAM statics there). Coefficient writes and the M/S pass are the hottest
+/// memory traffic in the decoder, and EWRAM charges 16-bit wait states on every
+/// one of them (C-3).
 ///
-/// PR B first placed these in IWRAM and the image hung on target: the product
-/// path needs ~15 KiB of stack (measured 0x03007f00 -> 0x03004440), and an 8 KiB
-/// `.iwram` static leaves only ~14 KiB between `__iwram_end` and the stack top,
-/// so the stack overflowed into `PRODUCT_HOT` and then into the ARM/Thumb
-/// interworking thunks past `__iwram_end`. The CPU then branched into
-/// uninitialised IWRAM (`pc=0x00000004`, the undefined-instruction vector).
-/// 8 KiB of buffers is a U6 placement decision; it is EWRAM here so the
-/// measurement is of the hot *path*, not of an IWRAM budget accident.
-#[unsafe(link_section = ".ewram")]
+/// This was EWRAM until 2026-11-15. The earlier IWRAM attempt (PR B) hung on
+/// target because the *stack* was believed to need ~15 KiB; that figure was an
+/// artifact of stack-local twin buffers and is now **measured at 768 B**
+/// (`stack prod high-water` below), so the 8,192 B fits with ~1.1 KiB to spare
+/// once the superseded v1/v2 FFT kernels stopped consuming IWRAM.
+#[unsafe(link_section = ".iwram")]
 static mut PRODUCT_HOT: HotState = HotState::new();
 
 /// Shared output buffers for the measurement passes. Keeping them out of the
@@ -550,6 +551,10 @@ fn print_cost(label: &str, cost: &FrameCost, counted: bool) {
 }
 
 fn run(gba: &mut agb::Gba) -> bool {
+    // Whole-instrument stack high-water probe: fill the free IWRAM below this
+    // frame and report the deepest touch at the end of the run, so the budget is
+    // sized from the instrument's real maximum rather than one pass's.
+    let (run_lo, run_hi) = stack_probe_fill();
     let boot_waitcnt = waitcnt();
     // The U4 arm: 4/2, no prefetch. `agb` boots at 0x4317 (3/1 + prefetch).
     set_waitcnt(0x0000);
@@ -1123,6 +1128,12 @@ fn run(gba: &mut agb::Gba) -> bool {
         && ovl_ok
         && asm_ok
         && twin_ok;
+    agb::println!(
+        "[uli-bench] run stack high-water {} B (iwram_end=0x{:08x}, ceiling=0x{:08x})",
+        stack_probe_used(run_lo, run_hi),
+        run_lo,
+        run_hi
+    );
     agb::println!(
         "[uli-bench] {}",
         if pass {
