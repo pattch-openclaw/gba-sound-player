@@ -83,6 +83,77 @@ found”. The instrument is [`../../examples/uli_bench`](../../examples/uli_benc
 
 ---
 
+## Critical path to real time (2026-11-15)
+
+**This is the first thing to read if the question is "what next".** Status lines
+above are history; this section is the live order of work.
+
+### Where we are
+
+Production frame **274,198 worst / 232,090 mean = 105% / 89%** of the
+262,144-cycle period. The mean already fits; the worst frame is **12,054 cycles
+(4.6%) over**. Against the C record (181,928 = 69.4%) we are **1.51x**.
+
+Two different targets, not one:
+
+- **to work** — the decode wall must fit with room for the gate total (DMA, IRQ,
+  convert) and this tree's UI: target **<= ~85%**, so cut **>= ~50,000** cycles.
+- **to match C** — cut ~92,000. Not a requirement; C has 31% slack by design.
+
+### The structural gap: C hand-wrote four kernels, we hand-wrote one
+
+This is the whole remaining synthesis story, and it is why a Rust build still
+trails a C build on the same machine. Per channel, **measured 2026-11-15 before
+C-3** (buffers were still in EWRAM then, so treat the absolutes as stale — the
+*ratios* and the "who wrote it" column are the point):
+
+| stage | ours | C/asm record | ratio | in C | in ours |
+|---|---:|---:|---:|---|---|
+| `pre` | 17,654 | 9,700 | 1.82x | hand-written asm | **Rust, ARM-mode** |
+| `fft` | 61,852 | 31,400 | 1.97x | hand-written asm | **hand-written asm (v4)** |
+| `post` | 16,010 | 10,900 | 1.47x | hand-written asm | **Rust, ARM-mode** |
+| `ola` | 21,418 (fused s8) | 15,300 | 1.40x | hand-written asm | **Rust, ARM-mode** |
+| entropy / dequant / M-S | ~127,000/frame | ~47,000 | ~2.7x | hand-written C, IWRAM | **Rust, IWRAM** |
+
+So: **one of four synthesis kernels is hand-written assembly.** The other three
+are compiler-generated ARM — good codegen (no software multiply, real
+`SMULL`/`SMLAL`), but not the hand scheduling C applied. The FFT is the proof of
+what asm buys here: it went 88,205 -> 71,635 -> **61,852** once placed and
+scheduled by hand, and it is now near its 12-multiply-per-butterfly floor. The
+same treatment has simply not been applied to `pre`, `post` or `ola`.
+
+### The order of work
+
+**Step 0 — re-measure the decomposition (do this first).** The per-kernel table
+above predates C-3: moving `x`/`buf`/`p` to IWRAM took 87,040 cycles out of the
+frame and we do **not** know how that split between the kernels and the entropy
+path. Choosing the next kernel from stale numbers is the mistake this file has
+made three times (stack, twiddles, OLA). One by-difference arm, PR C's method,
+one image.
+
+Then, in decreasing order of expected value *given the current evidence*:
+
+1. **`pre` asm** — largest single kernel headroom (~15,900/frame on the pre-C-3
+   numbers). On those numbers alone it would clear the 12,054 gap.
+2. **`post` asm** — ~10,200/frame.
+3. **`ola` asm** on the fused `s8` kernel — ~12,200/frame. (`ola_s8` is fused
+   Rust today, not asm.)
+4. **The entropy/dequant/symbol path** — the deepest pool (~80,000/frame of the
+   C gap) and the only route to C-class numbers. Needs the sub-frame attribution
+   and the C structural comparison before code, not a guess.
+5. **PR E — full-album worst frame**, and the gate total (decode + convert + IRQ
+   + DMA). This is U4's real witness.
+
+### Caveats that must travel with these numbers
+
+- Every item above is a **projection** until it lands as its own measured arm,
+  with a same-image control, twinned bit-exactly (the discipline that has held).
+- **105% is the worst of a 129-frame iteration corpus, not a worst-case
+  guarantee** — C's hardest frame was #27,806 of 167,222. Plan for margin.
+- Hand-written asm is only worth it once placement is right. Placement is now
+  right (code, tables and hot buffers all in IWRAM); that is the precondition
+  these steps depend on, and it is met.
+
 ## Decision (2026-11-14): ULI2 is GBA-first
 
 ULI2 is a GBA product codec by definition: one fixed rate (32,768 Hz), one
@@ -398,7 +469,7 @@ The two numbers that set the work:
 | inline all of `huff` at the call sites | +2.7% (519,397) but **+4,252 B of IWRAM** — poor trade where U6 is binding |
 | inline only the `huff` LUT fast path, keep the long search out of line | **+1.6% (523,267) for +896 B** — kept |
 | `-Cforce-frame-pointers=no` | inert (identical cycles), matches the FLAC track's E7 |
-| synthesis tables in IWRAM (`iwram-tables`) | **crashes**: `.iwram` 18,848 B leaves 13,664 B of stack against ~15,040 needed, so the stack overruns `__iwram_end` into code and the CPU jumps to an invalid address (the same failure class as PR B's hang). Quantified in the U6 row. |
+| synthesis tables in IWRAM (`iwram-tables`) | **superseded** — recorded as *crashes* on the then-believed ~15,040 B stack. The stack is now measured at ~2,960 B total and `iwram-tables` runs and wins (148% -> see "Memory layout"). Kept here only as a record of what was believed at the time. |
 
 Gate: **≤1×** worst. **Not met by this PR** (523,267 = 200%); it is a
 measurement, one small win, and the scope statement for the two rewrites
@@ -557,15 +628,17 @@ its control in the same image (PR A's rule).
    figure) and the prize was ~6x the 10,000–15,000 projection, because it
    captures all coefficient traffic through `x`/`buf`/`p`, not just M/S. See the
    C-3 section below.
-3. **C-1** — asm kernels, specified as *bit-exact and stack-reducing*; that is
-   what makes both `iwram-tables` and the coefficient buffers legal (today
-   `iwram-tables` crashes: 13,664 B of stack against ~15,040 needed).
-4. **C-3d, C-3e (`nb` landed with C-3a)** — OLA output fusion; re-time the bench
-   on the **production output format** instead of the dual int8+int16 write.
-5. **C-2 = C-3a (landed 2026-11-14, −35,000 measured)** — the structure port; the
-   attribution above replaces the guesswork it was scoped with.
-6. **Re-measure and take the U4 verdict** against the parity target, not against
-   100%.
+3. ~~**C-1** — asm kernels~~ — **one of four landed** (the FFT, v1→v4). The other
+   three (`pre`, `post`, `ola`) are still Rust and are now the critical path:
+   see **"Critical path to real time"** at the top of this file for the ordered
+   list and the measured headroom. (This item's original justification — that
+   `iwram-tables` crashes on a ~15,040 B stack — was disproven by measurement.)
+4. ~~**C-3d**~~ — **DONE 2026-11-15**: OLA output fused per format; production
+   OLA is 1.40x C and the int8-only frame dropped 148% → 138%.
+5. ~~**C-2 = C-3a (landed 2026-11-14, −35,000 measured)**~~ — done.
+6. **Re-measure and take the U4 verdict** against the **real-time budget**, not
+   against a percentage borrowed from C, and not against the 129-frame corpus
+   alone (PR E is the witness).
 
 **The target is the real-time budget, not a percentage borrowed from C
 (clarified 2026-11-15).** The C record's 69.4% is **not a benchmark to match** —
@@ -1105,9 +1178,12 @@ Stack: usable from `0x03007F00` is 3,660 B, high-water ≈2,960 B, leaving **~70
 (UI + feeder) must re-check it before shipping. `HotState` size is pinned by a
 compile-time assert so the budget cannot drift silently.
 
-**PLANNED NEXT — `pre`/`post`/`ola` as asm (the rest of C-1), 2026-11-15.** The
-FFT is now near its multiply floor; the next synthesis target is the *other three
-kernels*, which are still the **Rust ARM-mode** kernels. Measured per channel
+**PLANNED NEXT — `pre`/`post`/`ola` as asm (the rest of C-1), 2026-11-15.**
+*(Live version, with the step-0 re-measurement caveat, is the "Critical path to
+real time" section at the top of this file. The numbers below predate C-3 —
+buffers were still in EWRAM — so they bound the ratios, not today's absolutes.)*
+The FFT is now near its multiply floor; the next synthesis target is the *other
+three kernels*, which are still the **Rust ARM-mode** kernels. Measured per channel
 with tables in IWRAM, against the C record (`ovl` arm of `uli_bench`):
 
 | kernel | ours (Rust ARM) | C/asm record | ratio | headroom vs C |
