@@ -24,8 +24,13 @@ Step 1 (2026-11-15) then landed the entropy/dequant item: a five-arm sub-frame
 instrument plus a rewrite of the bit-reader contract, the long-code search and the
 per-band live set took the entropy path **111,227 -> 86,826 at the worst frame
 (-22%)** and the product frame to **249,835 worst / 220,757 mean = 95.3% / 84.2%
-of the period** — the decode wall is under the frame period for the first time, at
-1.37x the C decode wall, with both twin builds still bit-exact. That is the decode
+of the period** — the decode wall under the frame period for the first time, with
+both twin builds still bit-exact. Step 1a the same day put the bit window into
+`let mut` scalars with the reader as macros over them (the reference's
+`REFILL`/`SKIP` shape) for another **-12,583 / -9,686**, to **237,252 worst /
+211,071 mean = 90.5% / 80.5%** and **1.30x** the C decode wall, **-36,946** off
+the worst frame in two steps. With entropy down 37.6% the deficit to C is now
+42% entropy / 57% synthesis, so the FFT is the next item. That is the decode
 wall, not the gate total: convert + IRQ + DMA and this tree's UI are not in it, so
 U4 and playback remain open.
 This file is the decision record (why

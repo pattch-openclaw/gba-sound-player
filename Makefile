@@ -967,6 +967,8 @@ help:
 	@echo "    ULI2 (ULI2.md — the repository's product codec): uli-test, uli-overlay-test,"
 	@echo "      uli-check, uli-fixture, native-uli-spike-rom, native-uli-bench-rom,"
 	@echo "      uli-bench (headless run + PASS/FAIL read from the log)"
+	@echo "    ULI2 attribution (timing-only; pins fail by design): uli-attrib,"
+	@echo "      uli-attrib-subframe, uli-frame-ops"
 	@echo "    Opus (OPUS.md): native-opus-rom, opus-test"
 	@echo "    Album Player, Phase 0 (AP-0 — the probe aggregate; nothing here is"
 	@echo "      wired into flac-check or test): album-probe-rom (three probe ROMs),"
