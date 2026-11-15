@@ -5,7 +5,8 @@
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
-        uli-bench-rom uli-bench uli-attrib uli-frame-ops uli-overlay-test \
+        uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
+        uli-overlay-test \
         album-probe-art album-probe-test album-probe-rom album-probe \
         uli-spike-rom clean clean-cache check help toolchain-check
 
@@ -635,6 +636,32 @@ uli-bench: uli-bench-rom
 # cycles per window in this image (control 274,214 vs the product 274,198) —
 # deltas are unaffected; quote absolutes from the product arm.
 ULI_ATTRIB_ARMS := control synth pre fft post ola ms entropy synth-entropy
+
+# --- Sub-frame entropy attribution (Step 0b) --------------------------------
+#
+# The entropy/dequant path owns 69% of the worst frame's distance to the C shape,
+# so it is attributed one level down before its rewrite: `attrib-entropy-{reader,
+# nolut,nodequant,nowrite}` remove one layer each (`attrib-count` adds the
+# `huff_slow` hit counter). Same method and same caveats as `uli-attrib`: these
+# are TIMING-ONLY images whose pins fail by construction, and `attrib-dump` costs
+# a constant +16 cycles per window. Quote `frame prod8` / `pfc`, never the pins.
+ULI_SUBFRAME_ARMS := s-base s-reader s-nolut s-nodequant s-nowrite s-count
+uli-attrib-subframe: toolchain-check
+	@for arm in $(ULI_SUBFRAME_ARMS); do \
+	  case $$arm in \
+	    s-base) feats="attrib-dump,attrib-synth,attrib-entropy" ;; \
+	    s-reader) feats="attrib-dump,attrib-synth,attrib-entropy-reader" ;; \
+	    s-count) feats="attrib-dump,attrib-synth,attrib-count" ;; \
+	    *) feats="attrib-dump,attrib-synth,attrib-entropy-$${arm#s-}" ;; \
+	  esac; \
+	  echo "uli-attrib-subframe: $$arm ($$feats)"; \
+	  ( cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features "$$feats" ) || exit 1; \
+	  agb-gbafix $(ULI_BENCH_BIN) -o uli-subframe-$$arm.gba || exit 1; \
+	  timeout -k 5 300 $(GBA_TEST_RUNNER) uli-subframe-$$arm.gba > uli-subframe-$$arm.log 2>&1 || true; \
+	  grep -E '^\[uli-bench\] frame prod8' uli-subframe-$$arm.log || exit 1; \
+	  grep -E '^\[uli-bench\] (attrib|prod8 slow_hits)' uli-subframe-$$arm.log || true; \
+	done
+	@echo "uli-attrib-subframe done: uli-subframe-<arm>.log (timing-only arms; pins fail by design)"
 uli-attrib: toolchain-check
 	@for arm in $(ULI_ATTRIB_ARMS); do \
 	  feats="attrib-dump"; \

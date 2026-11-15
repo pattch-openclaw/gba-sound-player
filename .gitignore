@@ -117,8 +117,10 @@ __pycache__/
 # ULI2.md, and `make uli-bench` can regenerate the raw log.
 /uli-bench*.log
 
-# Timing-only by-difference attribution arms (`make uli-attrib`).
+# Timing-only by-difference attribution arms (`make uli-attrib`), and the
+# sub-frame entropy arms below the frame level (`make uli-attrib-subframe`).
 /uli-attrib*.log
+/uli-subframe*.log
 
 # The Album Player Phase 0 probe crate (examples/album_probe/ — own workspace,
 # same pattern; builds for the GBA target and for the host triple, so the paths

@@ -20,6 +20,14 @@ product decoder, and re-reads U4 as C-class.**
 product image: on the worst frame entropy/dequant/M-S is 40% of the frame and 69% of
 the distance to the C worst-frame shape, the three Rust kernels are 1.10-1.22x
 hand-written asm, and the already-asm FFT (1.33x) is the largest kernel item.
+Step 1 (2026-11-15) then landed the entropy/dequant item: a five-arm sub-frame
+instrument plus a rewrite of the bit-reader contract, the long-code search and the
+per-band live set took the entropy path **111,227 -> 86,826 at the worst frame
+(-22%)** and the product frame to **249,835 worst / 220,757 mean = 95.3% / 84.2%
+of the period** — the decode wall is under the frame period for the first time, at
+1.37x the C decode wall, with both twin builds still bit-exact. That is the decode
+wall, not the gate total: convert + IRQ + DMA and this tree's UI are not in it, so
+U4 and playback remain open.
 This file is the decision record (why
 ULI2, what it is, the licensing and encoder risks); the live plan, gates and
 measurement ledger are [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md).

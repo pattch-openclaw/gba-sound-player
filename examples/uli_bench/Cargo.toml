@@ -58,6 +58,16 @@ attrib-synth = ["uli-lite-gba/attrib-synth"]
 attrib-entropy = ["uli-lite-gba/attrib-entropy"]
 attrib-ms = ["uli-lite-gba/attrib-ms"]
 
+# Sub-frame entropy attribution (PLAN-OF-RECORD.md, Step 0b): one layer inside
+# `dec_chan` removed per arm, so the ~101,000 cycles the entropy/dequant path
+# owns at the worst frame can be partitioned. Timing-only, same rules.
+attrib-entropy-nolut = ["uli-lite-gba/attrib-entropy-nolut"]
+attrib-entropy-nodequant = ["uli-lite-gba/attrib-entropy-nodequant"]
+attrib-entropy-nowrite = ["uli-lite-gba/attrib-entropy-nowrite"]
+attrib-entropy-reader = ["uli-lite-gba/attrib-entropy-reader"]
+# Counts `huff_slow` hits (uli-lite-gba/attrib-count); printed as `prod8 slow_hits=`.
+attrib-count = ["uli-lite-gba/attrib-count"]
+
 # Per-frame timing dump for the attribution arms: one `pfc f=<frame> cyc=<net>`
 # line per frame, printed outside the timed window. Deliberately independent of
 # `per-frame` (which implies `verify` and so measures a different build): the

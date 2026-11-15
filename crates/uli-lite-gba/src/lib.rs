@@ -56,7 +56,7 @@
 
 pub mod decoder;
 
-pub use decoder::{GbaDecoder, HotState};
+pub use decoder::{GbaDecoder, HotState, slow_hit_count};
 
 /// `HotState` is the decoder's hot working set — the transform buffers (`x`),
 /// the FFT scratch (`buf`) and the overlap state (`p`). It is the same 8,192 B
