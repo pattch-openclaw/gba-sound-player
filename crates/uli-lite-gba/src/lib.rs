@@ -176,6 +176,22 @@ pub fn pre(x: &[i32; M], z: &mut [i32; 2 * H]) {
     }
 }
 
+/// The pre-twiddle the product decoder (and [`ArmKernels`]) should call: the
+/// hand-written cursor kernel when `asm-pre` is on, otherwise the Rust ARM-mode
+/// [`pre`]. Mirrors [`fft_kernel`], and for the same reason — the `#[cfg]` lives
+/// here so the hot path does not repeat it.
+#[inline]
+pub fn pre_kernel(x: &[i32; M], z: &mut [i32; 2 * H]) {
+    #[cfg(all(target_arch = "arm", feature = "asm-pre"))]
+    {
+        crate::pre_asm_call(x, z);
+    }
+    #[cfg(not(all(target_arch = "arm", feature = "asm-pre")))]
+    {
+        crate::pre(x, z);
+    }
+}
+
 /// 256-point radix-4 DIF FFT, ARM mode, unchecked addressing.
 ///
 /// IWRAM placement is gated on `asm-fft` being **off**: when the hand-written
@@ -451,7 +467,7 @@ pub struct ArmKernels;
 impl uli_lite::Kernels for ArmKernels {
     #[inline]
     fn pre(x: &[i32; M], z: &mut [i32; 2 * H]) {
-        crate::pre(x, z);
+        crate::pre_kernel(x, z);
     }
 
     #[inline]
@@ -556,6 +572,35 @@ mod fft_asm {
     }
 }
 
+/// Hand-written ARM pre-twiddle (`asm/pre_arm.s`). Off unless `asm-pre` is on;
+/// the Rust ARM-mode [`pre`] stays the default so every existing arm keeps its
+/// control in the same image.
+///
+/// The loop is the reference's shape — four post-indexed cursors, one `stmia`
+/// per output pair, a pointer bound — which is **11 instructions per output pair
+/// against LLVM's 15**. The four multiplies are the algorithm's own.
+#[cfg(all(target_arch = "arm", feature = "asm-pre"))]
+mod pre_asm {
+    core::arch::global_asm!(include_str!("../asm/pre_arm.s"));
+
+    // `(x, z, pre)` — pointers, so the asm never depends on a Rust symbol's
+    // mangled name and `iwram-tables` moves PRE for free.
+    unsafe extern "C" {
+        fn uli_pre_arm(x: *const i32, z: *mut i32, pre: *const i32);
+    }
+
+    /// Pre-twiddle via the cursor kernel. Same contract as [`crate::pre`], and
+    /// bit-exact with it — which is what licenses quoting a cycle number.
+    #[inline]
+    pub fn pre(x: &[i32; uli_lite::format::M], z: &mut [i32; 2 * uli_lite::format::H]) {
+        // SAFETY: `x` is M i32, `z` is 2H i32, and PRE is the 512-word twiddle
+        // table the asm reads exactly once, forward, in step with X.
+        unsafe {
+            uli_pre_arm(x.as_ptr(), z.as_mut_ptr(), crate::tables::PRE.as_ptr());
+        }
+    }
+}
+
 #[cfg(all(target_arch = "arm", feature = "asm-fft"))]
 pub use fft_asm::fft as fft_asm_call;
 #[cfg(all(target_arch = "arm", feature = "asm-fft"))]
@@ -568,6 +613,8 @@ pub use fft_asm::fft_v4 as fft_asm_v4_call;
 pub use fft_asm::fft_v4_tw as fft_asm_v4_tw_call;
 #[cfg(all(target_arch = "arm", feature = "asm-fft"))]
 pub use fft_asm::fft_v5 as fft_asm_v5_call;
+#[cfg(all(target_arch = "arm", feature = "asm-pre"))]
+pub use pre_asm::pre as pre_asm_call;
 
 /// The FFT the product decoder (and [`ArmKernels`]) should call: the best
 /// hand-written kernel (**v5**) when the `asm-fft` feature is on, otherwise the

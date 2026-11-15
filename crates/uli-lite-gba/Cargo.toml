@@ -24,7 +24,7 @@ uli-lite = { path = "../uli-lite", features = ["kernels", "product"] }
 # (`frame core`, and the isolated `kern`/`ovl` arms), so turning the fast path on
 # does not remove the comparison — it just stops the product being slow by
 # default. Use `--no-default-features` to get the pure-Rust-kernel build.
-default = ["asm-fft", "iwram-tables"]
+default = ["asm-fft", "asm-pre", "iwram-tables"]
 
 # Operation counts (`Ops`) and format-rule diagnostics (`xover`/`hfnz`) on the
 # hot path. Off by default: they cost ~30,000 cycles on the measured worst frame
@@ -60,6 +60,13 @@ iwram-tw = []
 # default** — the Rust ARM-mode `fft` remains the in-image control (`frame
 # core`, `kern`, `ovl`).
 asm-fft = []
+
+# Hand-written ARM pre-twiddle (`asm/pre_arm.s`): four post-indexed cursors and
+# one `stmia` per output pair, matching the reference's loop shape — 11
+# instructions per pair where LLVM's is 15. The four multiplies are the
+# algorithm's own. On by default, with the Rust ARM-mode `pre` left in place as
+# the in-image control.
+asm-pre = []
 
 # **Measurement-only: by-difference attribution arms.** Each flag removes exactly
 # one part of the product frame so `examples/uli_bench` can attribute the frame

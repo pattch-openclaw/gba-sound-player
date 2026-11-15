@@ -1270,7 +1270,7 @@ impl<'a, 's> GbaDecoder<'a, 's> {
         // and `attrib-synth` which implies all four). In the default build the
         // `cfg` folds away and this is exactly the product sequence.
         #[cfg(not(feature = "attrib-pre"))]
-        crate::pre(&self.hot.x[0], &mut self.hot.buf);
+        crate::pre_kernel(&self.hot.x[0], &mut self.hot.buf);
         #[cfg(not(feature = "attrib-fft"))]
         crate::fft_kernel(&mut self.hot.buf);
         #[cfg(not(feature = "attrib-post"))]
@@ -1279,7 +1279,7 @@ impl<'a, 's> GbaDecoder<'a, 's> {
         crate::ola_kernel(&self.hot.x[0], &mut self.hot.p[0], out8l, out16l);
 
         #[cfg(not(feature = "attrib-pre"))]
-        crate::pre(&self.hot.x[1], &mut self.hot.buf);
+        crate::pre_kernel(&self.hot.x[1], &mut self.hot.buf);
         #[cfg(not(feature = "attrib-fft"))]
         crate::fft_kernel(&mut self.hot.buf);
         #[cfg(not(feature = "attrib-post"))]

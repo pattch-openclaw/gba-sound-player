@@ -121,7 +121,7 @@ __pycache__/
 # sub-frame entropy arms below the frame level (`make uli-attrib-subframe`).
 /uli-attrib*.log
 /uli-subframe*.log
-/uli-fft-twin*.log
+/uli-kernel-twin*.log
 
 # The Album Player Phase 0 probe crate (examples/album_probe/ — own workspace,
 # same pattern; builds for the GBA target and for the host triple, so the paths

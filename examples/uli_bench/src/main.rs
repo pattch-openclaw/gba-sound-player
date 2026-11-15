@@ -1258,15 +1258,27 @@ fn run(gba: &mut agb::Gba) -> bool {
     };
     #[cfg(not(feature = "asm-fft"))]
     let twin_fft_asm = true;
+    #[cfg(feature = "asm-pre")]
+    let twin_pre_asm = {
+        use core::ptr::addr_of_mut;
+        let want = unsafe { &mut *addr_of_mut!(ZWANT) };
+        let work = unsafe { &mut *addr_of_mut!(ZWORK) };
+        overlay::pre(kx, want);
+        overlay::pre_asm_call(kx, work);
+        *work == *want
+    };
+    #[cfg(not(feature = "asm-pre"))]
+    let twin_pre_asm = true;
     let twin_ok = twin_pre
         && twin_fft
         && twin_post
         && twin_ola
         && twin_ola_s8
         && twin_ola_s16
-        && twin_fft_asm;
+        && twin_fft_asm
+        && twin_pre_asm;
     agb::println!(
-        "[uli-bench] ovl twin pre={} fft={} post={} ola={} ola8={} ola16={} fftasm={} [{}]",
+        "[uli-bench] ovl twin pre={} fft={} post={} ola={} ola8={} ola16={} fftasm={} preasm={} [{}]",
         twin_pre,
         twin_fft,
         twin_post,
@@ -1274,6 +1286,7 @@ fn run(gba: &mut agb::Gba) -> bool {
         twin_ola_s8,
         twin_ola_s16,
         twin_fft_asm,
+        twin_pre_asm,
         if twin_ok { "PASS" } else { "FAIL" }
     );
 

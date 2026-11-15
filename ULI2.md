@@ -36,7 +36,12 @@ further **-9,516 / -9,517**: the product frame is **227,736 worst / 201,554 mean
 **1.14x** C and **-46,462** off the worst frame across the three steps. The two
 halves of the remaining gap are now within 10% of each other (52% entropy / 47%
 synthesis) and ~4,900 cycles separate the decode wall from the <=85% headroom
-target. That is the decode
+target. Step 1c then took `pre` to the reference's four-cursor shape (10
+instructions per output pair against LLVM's 15, with the four multiplies
+irreducible on a non-overlapping ARM7TDMI multiply) for **26,458 -> 23,889 at the
+gate frame**, taking the product frame to **225,168 worst / 198,992 mean = 85.9%
+/ 75.9%** of the period at **1.24x** the C decode wall, and the headroom target
+to ~2,350 cycles away. That is the decode
 wall, not the gate total: convert + IRQ + DMA and this tree's UI are not in it, so
 U4 and playback remain open.
 This file is the decision record (why

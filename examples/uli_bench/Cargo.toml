@@ -82,6 +82,10 @@ attrib-dump = []
 # asm twin lives. See `make uli-fft-twin`.
 tw-iwram-arm = []
 
+# The hand-written pre-twiddle (uli-lite-gba/asm-pre). Enable it to build the
+# image that runs the `preasm` twin.
+asm-pre = ["uli-lite-gba/asm-pre"]
+
 [dependencies]
 uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }
 # The overlay's ARM-mode, unchecked kernels (the measurement's second arm).
