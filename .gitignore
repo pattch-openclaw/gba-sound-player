@@ -111,3 +111,16 @@ __pycache__/
 # Cycle-harness logs are per-run output; the numbers that matter live in
 # ULI2.md, and `make uli-bench` can regenerate the raw log.
 /uli-bench*.log
+
+# The Album Player Phase 0 probe crate (examples/album_probe/ — own workspace,
+# same pattern; builds for the GBA target and for the host triple, so the paths
+# vary). Its assets/probe_art1.bin and src/art_pin.rs are deliberately TRACKED —
+# committed generator output is the witness the AP-0 host gate reads, so the blob
+# is the evidence the script ran, not a build artifact. Its Cargo.lock is
+# committed like uli_bench's: the probe's dependency graph is part of the record.
+/examples/album_probe/target/
+!/examples/album_probe/Cargo.lock
+
+# AP-0's per-run gate/ROM logs are output; `make album-probe-*` rewrites them and
+# the numbers that matter live in the probe log.
+/album-probe*.log

@@ -43,6 +43,11 @@ libraries that other GBA ROMs can build on top of.
 The top-level behaviour of this ROM is intentionally minimal for now. Future
 ROMs built on the shared libraries could include:
 
+- **The Album Player** — one cartridge, one album: a title card, the whole record
+  playable with pause/skip/track-list, cover art and a progress bar, on either
+  backend through one codec seam. [`ALBUM-PLAYER.md`](ALBUM-PLAYER.md) is the plan;
+  Phase 0 (AP-0) has landed as the probe ROMs and measurements in
+  [`examples/album_probe/`](examples/album_probe/README.md) (`make album-probe`).
 - **A high-fidelity song player** — play a full arrangement using as much of the
   APU's capability as the real-time budget allows.
 - **A playable instrument** — accept MIDI (or similar) input over a cable and
