@@ -331,6 +331,87 @@ pub fn ola(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8], mut out16: Option<&m
     }
 }
 
+/// Window and overlap-add, **int8 only**, format fixed outside the sample loop.
+///
+/// This is C-3d's output fusion: the C reference ships one kernel per output
+/// format (`uli_ola_s8_asm`, `uli_ola_s8w_asm`, `uli_ola_s16_asm`) and selects
+/// the format *before* the loop, so no sample pays a per-sample format branch or
+/// the arithmetic of the format it is not writing. [`ola`] branches on
+/// `Option<&mut [i16]>` every sample and computes both formats; this kernel
+/// computes and stores only int8, which is the shipping headphone path.
+///
+/// Bit-exact with `ola(.., Some(..))`'s int8 half. `out8` must be `M` long (it
+/// writes `i` and `M - 1 - i`).
+#[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
+#[inline(never)]
+pub fn ola_s8(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8]) {
+    let yp = y.as_ptr();
+    let pp = p.as_mut_ptr();
+    let o8 = out8.as_mut_ptr();
+    // SAFETY: `i < H`; `H + i < M`; `M - 1 - i` is inside `M`; the caller
+    // guarantees `out8` is `M` long.
+    unsafe {
+        for i in 0..H {
+            let a = *yp.add(H + i);
+            let b = *pp.add(H - 1 - i);
+            let wa = WIN[i];
+            let wb = WIN[M - 1 - i];
+            let nwa = wa.wrapping_neg();
+            let nwb = wb.wrapping_neg();
+            let acc1 = mul32(a, wa).wrapping_add(mul32(b, nwb));
+            let acc2 = mul32(a, nwb).wrapping_add(mul32(b, nwa));
+            o8.add(i)
+                .write(sat8(hi32(acc1.wrapping_add(1i64 << 39)) >> 8));
+            o8.add(M - 1 - i)
+                .write(sat8(hi32(acc2.wrapping_add(1i64 << 39)) >> 8));
+            *pp.add(H - 1 - i) = *yp.add(H - 1 - i);
+        }
+    }
+}
+
+/// Window and overlap-add, **int16 only**, format fixed outside the sample loop.
+///
+/// The pre-DAC int16 profile's fused kernel (C's `uli_ola_s16_asm` shape).
+/// Bit-exact with `ola(.., Some(..))`'s int16 half; `out16` must be `M` long.
+#[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
+#[inline(never)]
+pub fn ola_s16(y: &[i32; M], p: &mut [i32; H], out16: &mut [i16]) {
+    let yp = y.as_ptr();
+    let pp = p.as_mut_ptr();
+    let o16 = out16.as_mut_ptr();
+    // SAFETY: as for [`ola_s8`]; `out16` must be `M` long.
+    unsafe {
+        for i in 0..H {
+            let a = *yp.add(H + i);
+            let b = *pp.add(H - 1 - i);
+            let wa = WIN[i];
+            let wb = WIN[M - 1 - i];
+            let nwa = wa.wrapping_neg();
+            let nwb = wb.wrapping_neg();
+            let acc1 = mul32(a, wa).wrapping_add(mul32(b, nwb));
+            let acc2 = mul32(a, nwb).wrapping_add(mul32(b, nwa));
+            *o16.add(i) = sat16(hi32(acc1.wrapping_add(0x8000_0000)));
+            *o16.add(M - 1 - i) = sat16(hi32(acc2.wrapping_add(0x8000_0000)));
+            *pp.add(H - 1 - i) = *yp.add(H - 1 - i);
+        }
+    }
+}
+
+/// The OLA the product decoder should call. With no int16 buffer this is the
+/// **fused int8-only kernel** (no per-sample format branch, no int16 arithmetic);
+/// with one it is the dual-output [`ola`] the int16 profile and the bench pins
+/// need. Same shape as [`fft_kernel`]: the `Option` is resolved once here rather
+/// than per sample.
+#[inline]
+pub fn ola_kernel(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8], out16: Option<&mut [i16]>) {
+    match out16 {
+        Some(o16) => crate::ola(y, p, out8, Some(o16)),
+        None => crate::ola_s8(y, p, out8),
+    }
+}
+
 /// The ARM-mode kernel set, plugged into [`uli_lite::Decoder`] through the
 /// `Kernels` seam.
 ///
@@ -364,7 +445,7 @@ impl uli_lite::Kernels for ArmKernels {
 
     #[inline]
     fn ola(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8], out16: Option<&mut [i16]>) {
-        crate::ola(y, p, out8, out16);
+        crate::ola_kernel(y, p, out8, out16);
     }
 }
 

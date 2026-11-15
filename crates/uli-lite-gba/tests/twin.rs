@@ -69,6 +69,7 @@ fn pre_fft_post_ola_match_the_reference() {
         uli_lite_gba::post(&z_ov, &mut y_ov);
         assert_eq!(y_ref, y_ov, "post diverged at case {case}");
 
+        let p_before_ola = p_ov; // OLA advances `p`; replay the fused kernels from here
         core::ola(&y_ref, &mut p_ref, &mut o8_ref_l, Some(&mut o16_ref));
         uli_lite_gba::ola(&y_ov, &mut p_ov, &mut o8_ov_l, Some(&mut o16_ov));
         assert_eq!(o8_ref_l, o8_ov_l, "ola int8 diverged at case {case}");
@@ -80,6 +81,46 @@ fn pre_fft_post_ola_match_the_reference() {
         uli_lite_gba::ola(&y_ov, &mut p_ov, &mut o8_ov_r, None);
         assert_eq!(o8_ref_r, o8_ov_r, "ola int8-only diverged at case {case}");
         assert_eq!(p_ref, p_ov, "ola int8-only overlap diverged at case {case}");
+
+        // C-3d: the fused per-format kernels must reproduce the dual kernel's
+        // halves bit-exactly. OLA mutates the overlap state, so replay each from
+        // the same starting `p` (the dual run above already advanced it).
+        let p_start = p_before_ola;
+        let mut p_f = p_start;
+        let mut o8_f = [0i8; M];
+        uli_lite_gba::ola_s8(&y_ov, &mut p_f, &mut o8_f);
+        assert_eq!(
+            o8_f, o8_ov_l,
+            "ola_s8 diverged from dual int8 at case {case}"
+        );
+        assert_eq!(p_f, p_ov, "ola_s8 overlap diverged at case {case}");
+
+        let mut p_g = p_start;
+        let mut o16_f = [0i16; M];
+        uli_lite_gba::ola_s16(&y_ov, &mut p_g, &mut o16_f);
+        assert_eq!(
+            o16_f, o16_ov,
+            "ola_s16 diverged from dual int16 at case {case}"
+        );
+        assert_eq!(p_g, p_ov, "ola_s16 overlap diverged at case {case}");
+
+        // ...and the dispatcher must choose the same kernels.
+        let mut p_h = p_start;
+        let mut o8_h = [0i8; M];
+        uli_lite_gba::ola_kernel(&y_ov, &mut p_h, &mut o8_h, None);
+        assert_eq!(o8_h, o8_ov_l, "ola_kernel(None) diverged at case {case}");
+        let mut p_i = p_start;
+        let mut o8_i = [0i8; M];
+        let mut o16_i = [0i16; M];
+        uli_lite_gba::ola_kernel(&y_ov, &mut p_i, &mut o8_i, Some(&mut o16_i));
+        assert_eq!(
+            o8_i, o8_ov_l,
+            "ola_kernel(Some) int8 diverged at case {case}"
+        );
+        assert_eq!(
+            o16_i, o16_ov,
+            "ola_kernel(Some) int16 diverged at case {case}"
+        );
     }
 }
 
