@@ -16,6 +16,16 @@ publish = false
 uli-lite = { path = "../uli-lite", features = ["kernels", "product"] }
 
 [features]
+# The product synthesis path is the fast path by default: the hand-written ARM
+# FFT (v4) and the synthesis tables in `.iwram` (the C reference's own layout).
+# Both are measured wins and both now fit the IWRAM budget (6,196 B headroom
+# after the 768 B measured product stack). The Rust ARM-mode `fft` is still
+# compiled and is still the control the bench times in the same image
+# (`frame core`, and the isolated `kern`/`ovl` arms), so turning the fast path on
+# does not remove the comparison — it just stops the product being slow by
+# default. Use `--no-default-features` to get the pure-Rust-kernel build.
+default = ["asm-fft", "iwram-tables"]
+
 # Operation counts (`Ops`) and format-rule diagnostics (`xover`/`hfnz`) on the
 # hot path. Off by default: they cost ~30,000 cycles on the measured worst frame
 # (PR C-3b), because they are a counter increment per symbol and two compares per
@@ -26,25 +36,29 @@ uli-lite = { path = "../uli-lite", features = ["kernels", "product"] }
 verify = []
 
 # Copies the 8,672 B of synthesis tables (PERM/PRE/POST/TW/WIN) into `.iwram`
-# instead of reading them from the cartridge. The reference GBA port does this
-# (9.4 KB of tables in IWRAM); it is a separate arm because it spends a
-# different budget (IWRAM) than the code placement.
+# instead of reading them from the cartridge. This is the C reference's own
+# layout (it keeps all five tables in IWRAM), and it is the single largest
+# placement win measured: product frame 411,431 -> 387,879 (157% -> 148%),
+# because PRE/POST/WIN are read on every pre/post/OLA sample. It now fits
+# (`.iwram` 23,532 B of 32,512, 768 B measured stack) after the stale ~15 KiB
+# stack figure was withdrawn — see PLAN-OF-RECORD.md "Memory layout".
+# **On by default.**
 iwram-tables = []
 
-# Only the FFT twiddle table (TW, 504 words = 2,016 B) in `.iwram`. The full
-# `iwram-tables` set is 8,672 B and does not fit alongside the asm kernels and
-# the ~15 KiB product stack; TW alone is the table the hot butterfly reads on
-# every output, so this isolates its cost. Off by default; superseded by
-# `iwram-tables` if both are on.
+# Only the FFT twiddle table (TW, 504 words = 2,016 B) in `.iwram`. This was the
+# isolating A/B that found the placement lever (FFT 69,034 -> 61,852, -10.4%);
+# `iwram-tables` now delivers more and is on by default, so this is retained only
+# to reproduce that A/B. It is a no-op when `iwram-tables` is on.
 iwram-tw = []
 
-# Hand-written ARM FFT kernels (`asm/`, PR C-1): v1 (fft_arm.s), v2, v3. Off by
-# default so every arm keeps the Rust ARM-mode `fft` as its control in the same
-# image. With the feature on, `fft_kernel` (and so `ArmKernels::fft` and the
-# product `GbaDecoder`) call the best variant, v3 (`fft_arm_v3.s`); v1/v2 stay
-# addressable via `fft_asm_call`/`fft_asm_v2_call` as measured comparison arms.
-# Only assembles for `target_arch = "arm"`; the host twin exercises the dispatch
-# and falls back to the Rust kernel.
+# Hand-written ARM FFT kernels (`asm/`, PR C-1): v1 (fft_arm.s), v2, v3, v4.
+# With this on, `fft_kernel` (and so `ArmKernels::fft` and the product
+# `GbaDecoder`) call the best variant, **v4** (`fft_arm_v4.s`, block transfers +
+# trivial butterfly); v1/v2/v3 stay addressable via `fft_asm_call` etc. as
+# measured comparison arms. Only assembles for `target_arch = "arm"`; the host
+# twin exercises the dispatch and falls back to the Rust kernel. **On by
+# default** — the Rust ARM-mode `fft` remains the in-image control (`frame
+# core`, `kern`, `ovl`).
 asm-fft = []
 
 [lib]
