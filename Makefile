@@ -6,6 +6,7 @@
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
         uli-bench-rom uli-bench uli-overlay-test \
+        album-probe-art album-probe-test album-probe-rom album-probe \
         uli-spike-rom clean clean-cache check help toolchain-check
 
 # ===========================================================================
@@ -201,6 +202,20 @@ OPUS_ROM := opus-spike.gba
 OPUS_PROBE_ROM := ctor-probe.gba
 OPUS_CRATE_BIN := $(OPUS_CRATE_DIR)/target/$(TARGET)/release/opus-spike
 
+# --- the Album Player's Phase 0 probes (ALBUM-PLAYER.md §11, §13 AP-0) -------
+# Three throwaway probe ROMs and one host gate, all from examples/album_probe/
+# (its own workspace, same pattern). The shared modules are `#[path]` includes of
+# flac_integration's geometry and flac_spike's playback/checksum — one
+# implementation, two consumers — so nothing in crates/ or the other examples/
+# moves for them. The ART1 blob and its pin are TRACKED generator output (the
+# flac_spike assets/ rule): the witness the host test reads.
+ALBUM_PROBE_DIR := examples/album_probe
+ALBUM_PROBE_MANIFEST := $(abspath examples/album_probe/Cargo.toml)
+ALBUM_PROBE_TARGET_DIR := $(ALBUM_PROBE_DIR)/target/$(TARGET)/release
+ALBUM_PROBE_ART := $(ALBUM_PROBE_DIR)/assets/probe_art1.bin
+ALBUM_PROBE_ART_PIN := $(ALBUM_PROBE_DIR)/src/art_pin.rs
+ALBUM_PROBE_ART_TOOL := scripts/album_probe_art.py
+
 # ===========================================================================
 # format / build / baseline ROM
 # ===========================================================================
@@ -212,7 +227,8 @@ OPUS_CRATE_BIN := $(OPUS_CRATE_DIR)/target/$(TARGET)/release/opus-spike
 
 WORKSPACES := . crates/flac-lite crates/flac-lite-gba examples/flac_spike \
               examples/overlay-kernel-check examples/opus_spike \
-              crates/uli-lite crates/uli-lite-gba examples/uli_spike examples/uli_bench
+              crates/uli-lite crates/uli-lite-gba examples/uli_spike examples/uli_bench \
+              examples/album_probe
 
 # Every cargo workspace root in the tree, derived from the manifests on disk (see
 # `clean`). Pruned so a warm `target/`'s vendored manifests are never mistaken for
@@ -623,6 +639,83 @@ uli-fixture: toolchain-check
 	    $(abspath crates/uli-lite/tests/fixtures/uli2_tiny_expected.txt)
 
 # ===========================================================================
+# Album Player — Phase 0 (AP-0): probes only, never gate inputs
+# ===========================================================================
+#
+# The point of AP-0 is to replace ALBUM-PLAYER.md §10's target percentages with
+# measurements, so the artifact is a log: three throwaway probe ROMs (UI, art,
+# skip), one host gate, and the logs the ROM leg leaves behind. A probe is a
+# witness, never a gate input (the ctor-probe rule): nothing here is wired into
+# `flac-check` or `test`, and `album-check` (AP-0…AP-9) does not exist yet.
+
+# Regenerate the tracked ART1 blob + pin, then audit the tool itself. Writes
+# tracked files, so this is a maintenance command and never part of `make test`.
+album-probe-art: toolchain-check
+	python3 $(ALBUM_PROBE_ART_TOOL) --out $(ALBUM_PROBE_ART) --pin $(ALBUM_PROBE_ART_PIN)
+	python3 $(ALBUM_PROBE_ART_TOOL) --self-test
+
+# The AP-0 host gate: the ART1 round-trip and every refusal ART1.md names, §6's
+# exactness with the one tagged bake-time divide, the session clock's invariants,
+# and the ring's rules at both clocks. Three legs fail closed: a missing suite is
+# refused; a cargo invocation that fails or a log with no `test result: ok.` line
+# is reported as the suite not passing (whatever the log's tail says); and a green
+# that collected (nearly) nothing is refused too — the count is read from the log
+# only once the suite has passed, because a suite that names no test is not a green.
+album-probe-test: toolchain-check
+	@test $$(find $(ALBUM_PROBE_DIR)/tests -name 'album_probe_host.rs' | wc -l) -eq 1 \
+	  || { echo "album-probe-test: $(ALBUM_PROBE_DIR)/tests/album_probe_host.rs is missing — the AP-0 host half has to exist before the probes can be believed"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	@cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --release --manifest-path $(ALBUM_PROBE_MANIFEST) --target $(HOST_TRIPLE) --test album_probe_host > $(abspath album-probe-test.log) 2>&1; \
+	  status=$$?; \
+	  cat $(abspath album-probe-test.log); \
+	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath album-probe-test.log) \
+	    || { echo "album-probe-test: the host suite did not pass — see album-probe-test.log"; exit 1; }; \
+	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath album-probe-test.log)); \
+	  [ -n "$$n" ] && [ "$$n" -gt 40 ] || { echo "album-probe-test: collected '$$n' tests, needs > 40 — a green that names nothing is not a green"; exit 1; }
+	@tracked=$$(sha256sum $(ALBUM_PROBE_ART) | cut -d' ' -f1); \
+	  tmp=$$(mktemp -d); \
+	  python3 $(ALBUM_PROBE_ART_TOOL) --out $$tmp/probe_art1.bin --pin $$tmp/art_pin.rs >/dev/null \
+	    || { rm -rf $$tmp; exit 1; }; \
+	  regenerated=$$(sha256sum $$tmp/probe_art1.bin | cut -d' ' -f1); \
+	  rm -rf $$tmp; \
+	  [ "$$tracked" = "$$regenerated" ] || { echo "album-probe-test: the art tool is not deterministic — tracked $$tracked vs regenerated $$regenerated"; exit 1; }
+	@echo "album-probe-test passed: ART1 round-trip + every refusal, §6 exactness, the session clock, both clocks' geometry, and a byte-identical regeneration"
+
+# The three probe images. `cargo build` in the standalone workspace builds the
+# library and every [[bin]] (ui-probe, art-probe, skip-probe), then each raw image
+# is header-fixed for the cartridge — the uli-bench shape. Run one with
+# `timeout -k 5 300 $(GBA_TEST_RUNNER) album-probe-<name>.gba` and read the
+# `[album-probe]` lines: each image prints its verdict and then the runner's exit
+# sentinel, so it RETURNS instead of hanging (contrast a playback ROM, whose pass
+# is exit 124). Section sizes are printed because AP-0 has to record .text/.iwram/
+# .bss for each probe, not estimate them.
+album-probe-rom: format
+	cd $(ALBUM_PROBE_DIR) && $(CARGO) build --release --target $(TARGET) --features probe-roms
+	agb-gbafix $(ALBUM_PROBE_TARGET_DIR)/ui-probe -o album-probe-ui.gba
+	agb-gbafix $(ALBUM_PROBE_TARGET_DIR)/art-probe -o album-probe-art.gba
+	agb-gbafix $(ALBUM_PROBE_TARGET_DIR)/skip-probe -o album-probe-skip.gba
+	@ls -l album-probe-ui.gba album-probe-art.gba album-probe-skip.gba
+	@size -A $(ALBUM_PROBE_TARGET_DIR)/ui-probe $(ALBUM_PROBE_TARGET_DIR)/art-probe \
+	          $(ALBUM_PROBE_TARGET_DIR)/skip-probe | grep -E '^(File|\.text|\.iwram|\.bss|\.rodata)'
+	@echo "  run: timeout -k 5 300 $(GBA_TEST_RUNNER) album-probe-<ui|art|skip>.gba"
+	@echo "  the verdict is the log's '[album-probe] PASS' line, never the exit status"
+
+# Run all three headless and keep one log each. The gate is the log, not the exit
+# status (the uli-bench model): the PASS line names the measurement, and the
+# sentinel proves the run reached its end rather than a timeout. A log that ends
+# at the leash is a FAIL even if it printed a stale PASS earlier.
+album-probe: album-probe-rom
+	@for probe in ui art skip; do \
+	  timeout -k 5 300 $(GBA_TEST_RUNNER) album-probe-$$probe.gba > album-probe-$$probe.log 2>&1 || true; \
+	  grep -q '^\[album-probe\] PASS' album-probe-$$probe.log \
+	    || { echo "album-probe: album-probe-$$probe.gba printed no PASS verdict — see album-probe-$$probe.log"; exit 1; }; \
+	  grep -q '^Tests finished successfully' album-probe-$$probe.log \
+	    || { echo "album-probe: album-probe-$$probe.gba never reached the exit sentinel (a timeout, not a pass) — see album-probe-$$probe.log"; exit 1; }; \
+	done
+	@echo "album-probe done: album-probe-{ui,art,skip}.log hold the tables and the verdicts"
+
+# ===========================================================================
 # Aggregates
 # ===========================================================================
 
@@ -715,6 +808,7 @@ clean-outputs:
 	@rm -f $(SPIKE_CRATE_DIR)/src/rate_assets.rs $(SPIKE_CRATE_DIR)/src/rate_pcm.rs
 	@rm -f $(SPIKE_CRATE_DIR)/assets/rate_*.bin
 	@rm -f uli-bench*.log
+	@rm -f album-probe*.log
 	@find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} + 2>/dev/null || true
 
 # The caches: the fifteen workspaces' `target/` dirs, discovered from the tree.
@@ -800,6 +894,11 @@ help:
 	@echo "      uli-check, uli-fixture, native-uli-spike-rom, native-uli-bench-rom,"
 	@echo "      uli-bench (headless run + PASS/FAIL read from the log)"
 	@echo "    Opus (OPUS.md): native-opus-rom, opus-test"
+	@echo "    Album Player, Phase 0 (AP-0 — the probe aggregate; nothing here is"
+	@echo "      wired into flac-check or test): album-probe-rom (three probe ROMs),"
+	@echo "      album-probe (run all three headless; PASS read from each log),"
+	@echo "      album-probe-art (regenerate the tracked ART1 blob + pin),"
+	@echo "      album-probe-test (the AP-0 host gate)."
 	@echo "  Tests/format:  test (test-rom + flac-test + uli-test), test-rom, check, format"
 	@echo "  Housekeeping:  clean (outputs only; caches kept), clean-deep (+ every"
 	@echo "                 workspace's target/), clean-cache (container volumes),"

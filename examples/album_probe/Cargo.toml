@@ -1,0 +1,70 @@
+[package]
+name = "album-probe"
+version = "0.1.0"
+edition = "2024"
+
+# The Album Player Phase 0 probe crate (ALBUM-PLAYER.md §11 "Phase 0", §13 AP-0).
+# Throwaway by intent: three probe ROMs plus the host gate that proves the parts
+# they measure are arithmetic and not hope. A probe is a witness, never a gate
+# input — nothing in the product path depends on this crate.
+#
+#   make album-probe-art    regenerate the tracked ART1 blob + its pin
+#   make album-probe-test   the host suite (ART1 round-trip + every refusal,
+#                           no-divide exactness, the session clock, both clocks' geometry)
+#   make album-probe-rom    the probe ROMs (Stage B)
+#
+# Standalone workspace, cargo config INHERITED from the repo root — do NOT add a
+# local .cargo/config.toml: cargo concatenates target.<triple>.rustflags across
+# config layers, and a local re-declaration links `-Tgba.ld` twice.
+#
+# The library is platform-free (`src/lib.rs`): the host suite compiles it for the
+# host triple, the ROMs compile the same modules for the GBA. `agb` is gated on
+# `target_arch = "arm"` for exactly that reason — it cannot compile for a host at
+# all (portable-atomic's `unsafe-assume-single-core` is a `compile_error!` off ARM).
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+agb = "0.25.0"
+
+[[test]]
+name = "album_probe_host"
+path = "tests/album_probe_host.rs"
+
+# The three probe ROMs (AP-0 Stage B). Each is arm-only and owns its own
+# `#[agb::entry]`. They ride a feature because cargo builds EVERY [[bin]] when an
+# integration test runs (a test may read `CARGO_BIN_EXE_<name>`), and `agb` is only
+# a dependency on the ARM target — without `required-features` the host gate would
+# try to compile three GBA entry points and fail on a missing crate. The ROM
+# recipe passes `--features probe-roms`; nothing else does.
+[features]
+probe-roms = []
+
+[[bin]]
+name = "ui-probe"
+path = "src/bin/ui_probe.rs"
+test = false
+required-features = ["probe-roms"]
+bench = false
+
+[[bin]]
+name = "art-probe"
+path = "src/bin/art_probe.rs"
+test = false
+required-features = ["probe-roms"]
+bench = false
+
+[[bin]]
+name = "skip-probe"
+path = "src/bin/skip_probe.rs"
+test = false
+required-features = ["probe-roms"]
+bench = false
+
+[workspace]
+
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true
