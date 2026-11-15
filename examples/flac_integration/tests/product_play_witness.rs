@@ -13,7 +13,7 @@
 //! before the first period, same classification of a short final period as a
 //! `Tail`. A model that disagreed with the ROM about `CHUNK_SAMPLES`, or that
 //! modelled a friendlier ring, would prove nothing; that is why both sides read
-//! `src/geometry.rs` and `examples/flac_spike/src/playback.rs` rather than each
+//! `src/geometry.rs` and `crates/gba-playback`'s `playback` module rather than each
 //! keeping a copy.
 //!
 //! ## What the model is *for*

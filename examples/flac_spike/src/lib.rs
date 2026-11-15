@@ -50,7 +50,12 @@
 extern crate alloc;
 
 pub mod assets;
-pub mod checksum;
+// The playback data path and its FNV-1a pins now live in `crates/gba-playback`
+// (ALBUM-PLAYER.md §2.2's lift). The spike re-exports both module names rather
+// than re-declaring them, so every `crate::checksum`, `flac_spike::playback::*`
+// and `flac_spike::checksum::*` path in this crate's bins and witnesses keeps
+// resolving — and the spike still runs the exact code the product ROM runs.
+pub use gba_playback::{checksum, playback};
 pub mod driver;
 // [6a-5b] the E10 archive's vendored decode path, kept verbatim, as the fourth
 // measurement leg. Off by default: a default build of this crate contains no
@@ -59,10 +64,6 @@ pub mod driver;
 // the rung — history.md 6a-5b.
 #[cfg(feature = "item6a5b-vendored")]
 pub mod e10;
-// 6a-7's width leg: the pre-6a-6 i64 decode path, vendored so both arithmetic
-// widths can be timed in one link (item 6a-6 left its cycle marginal unread).
-// Off by default: a default build contains no second decoder.
-pub mod playback;
 pub mod stats;
 // [6a-7b] the on-screen summary's pure half: the three legs a pass leaves
 // behind, the sign conventions the record quotes, and the text the ROM renders.
@@ -71,5 +72,8 @@ pub mod stats;
 // mGBA run prints cannot drift apart. Off by default.
 #[cfg(feature = "item6a7-wide")]
 pub mod summary;
+// 6a-7's width leg: the pre-6a-6 i64 decode path, vendored so both arithmetic
+// widths can be timed in one link (item 6a-6 left its cycle marginal unread).
+// Off by default: a default build contains no second decoder.
 #[cfg(feature = "item6a7-wide")]
 pub mod wide;

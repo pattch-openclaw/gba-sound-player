@@ -17,14 +17,15 @@
 //!
 //! The ring, the chunk classification and the 8-bit conversion are not a second
 //! implementation. This ROM, and the host model in
-//! `tests/product_play_witness.rs`, compile the *same*
-//! `examples/flac_spike/src/playback.rs` and the *same* [`geometry`] module
-//! through `src/lib.rs`; so do the [`gafp_pin`] constants and the [`checksum`]
-//! fold the proof runs. A model that disagreed with the ROM about `CHUNK_SAMPLES`
-//! would prove nothing, and a ring protocol the ROM bent would not be the one the
-//! model analysed. That is the reason for the `#[path]` include rather than a
-//! copy — the pattern `crates/flac-lite-gba/tests/arm_from_outside.rs` already
-//! uses across these directories for the same reason.
+//! `tests/product_play_witness.rs`, compile the *same* `crates/gba-playback`
+//! modules (re-exported by `src/lib.rs`) and the *same* [`geometry`] module;
+//! so do the [`gafp_pin`] constants and the [`checksum`] fold the proof runs. A
+//! model that disagreed with the ROM about `CHUNK_SAMPLES` would prove nothing,
+//! and a ring protocol the ROM bent would not be the one the model analysed. That
+//! is the reason for the path dependency rather than a copy — the pattern
+//! `crates/flac-lite-gba/tests/arm_from_outside.rs` already uses across these
+//! directories for the same reason, and the ring lives in a crate of its own since
+//! ALBUM-PLAYER.md §2.2's lift (2026-11-15).
 //!
 //! Every constant comes from [`geometry`], and the clock is the GBA's 2^24 Hz
 //! timer clock (this ROM does not instantiate `agb`'s mixer). In register terms:

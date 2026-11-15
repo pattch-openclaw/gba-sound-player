@@ -101,8 +101,16 @@ the top-level ROM depends on.
   ARM-mode codeword loop resident in `.iwram`); and the product crate that embeds a `GAFP`
   asset and *plays* it at 16,384 Hz with zero underruns on real hardware. Gates:
   `make flac-check` (core configurations), `make overlay-gates` (the kernel, including its
-  mGBA device suite), `make product-play-test` (the geometry's host model).
+  mGBA device suite), `make product-play-test` (the geometry's host model), and
+  `make playback-test` (the lifted ring/FIFO data path, `crates/gba-playback`).
   Entry point: [FLAC.md](FLAC.md); detail in [flac-docs/](flac-docs/).
+- `crates/gba-playback/` — **the shared playback data path**, lifted out of the FLAC spike on
+  2026-11-15 (ALBUM-PLAYER.md §2.2, Phase 1 PR-1) because an application that outlives the
+  development instruments cannot stand on a directory whose purpose is to be thrown away.
+  It owns `RingFeed` (the ring, chunk classification, `convert_frame`, `fold_bytes`) and the
+  `Fnv1a64` fold it reaches as `checksum`, and it is where `RingFeed::truncate()` — §4.4's
+  skip seam — lives. Compiled by the spike, the product ROM and the album probe alike, so a
+  change here re-baselines all three images and `make flac-check` is the witness.
 - `crates/uli-lite/` + `crates/uli-lite-gba/` + `examples/uli_spike/` + `examples/uli_bench/` — the ULI2 product-codec port. Since 2026-11-14 it is **GBA-first**: `uli-lite` is the bit-exact reference and oracle (ULA2 parsing, safe decode, host corpus), and `uli-lite-gba` is the product path (ARM-mode, unchecked kernels in `.iwram`, `ArmKernels`, evolving into the full hot-path decoder in PR B). `Decoder<K>` selects the kernel set through `uli_lite::Kernels`. `make uli-spike-rom` is the Phase 1 correctness ROM; `make uli-bench` is the measurement vehicle: it proves its own decode, times full frames through the core control, `ArmKernels`, and the full product hot path (`GbaDecoder`), and checks them bit-exact on target. PR B measured the full product hot path at **204% worst / 177% mean** of the 262,144-cycle period (533,605 / 463,660 cycles), against `ArmKernels` at 640% and the same-image core control at 1023%; the C/asm reference is 69.4%. Non-synthesis `rest` fell 837,092 → 195,484 cycles/frame, so the synthesis kernels are now the whole remaining gap (PR C). No playback or hardware claim yet. Live plan, gates and ledger: [crates/uli-lite/PLAN-OF-RECORD.md](crates/uli-lite/PLAN-OF-RECORD.md); decision record: [ULI2.md](ULI2.md); the public stock-ULC scope that is **not** currently planned: [ULC.md](ULC.md).
 - `examples/flac_spike/` — the perf-gate measurement vehicle (and the `ctrl` arm of every
   performance record), with each experiment preserved as a reappliable sample under
@@ -265,8 +273,9 @@ fixed set of note assets may sensibly commit them.
 | `make gafp-check` / `make gafp-pack-check` | the committed product blob still matches its generator; and the **real packer** reproduces it byte for byte, re-runs its fixture set with the pack-time **refusals**, and reads it all back through the facade (needs `flac` + `metaflac`) | native |
 | `make flac-gates` | every `crates/flac-lite` configuration in one command, plus the `crc-check,scan` and `crc-check,scan,rice-hybrid` combination arms — the only builds in which a *second instantiation* is visible | native |
 | `make overlay-gates` | `crates/flac-lite-gba` in one command: both configurations' compile + host witnesses, the objdump fact (the ELF really is four-byte ARM code), and the assembled kernel's device suite on mGBA's ARM7TDMI — the only place that assembly executes. Individually: `overlay-check`, `overlay-test`, `overlay-check-arm`, `overlay-test-arm`, `overlay-objdump`, `overlay-kernel-rom`, `overlay-kernel-test` | native |
+| `make playback-test` | **`crates/gba-playback`'s own suite** (since 2026-11-15): the FIFO conversion and truncation rule, the two-channel fold, the ring's producer/consumer ledger and underflow classification, and `RingFeed::truncate()` (§4.4's skip seam). 24 tests, fails closed below the floor | native |
 | `make spike-rom` / `make spike-test` | the measurement instrument (`flac-spike.gba`) and its host bit-exactness witness. It is the `ctrl` arm of every performance record | native |
-| **`make flac-check`** | everything a FLAC-track change owes: `flac-gates` + `overlay-gates` + `product-play-test` + `spike-test` | native |
+| **`make flac-check`** | everything a FLAC-track change owes: `flac-gates` + `overlay-gates` + `product-play-test` + `playback-test` + `spike-test` | native |
 | `make test-rom` | ROM `#[test_case]` suite, headless in mGBA via `mgba-test-runner` | native (needs `mgba-test-runner`) |
 | `make test` | Top-level: `test-rom` + `flac-test`. Verify-only — never reformats your tree | native |
 | `make podman-test` | **The same suite**, running inside the image (`make test` in there) — no host tooling | needs podman/docker |

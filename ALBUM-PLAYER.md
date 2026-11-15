@@ -68,7 +68,7 @@ can each be built, measured and refused.
 |---|---|---|---|
 | Lossless decode → sound at 16,384 Hz | `crates/flac-lite`, `crates/flac-lite-gba`, `examples/flac_integration/src/product_play_main.rs` | **accepted, C1+C2 closed 2026-11-13**; real audio on two GBA units, `underflows = 0` | a working producer/consumer playback pipeline today, at ~19% of audio time |
 | The geometry (clock, chunk, ring, prefill, re-arm grace) | `examples/flac_integration/src/geometry.rs` | shipped, host-modelled (`make product-play-test`) | every timing number in §4 and §10, transcribed not re-derived |
-| The feeder (ring, chunk classification, 8-bit convert, DMA/timer/IRQ discipline) | `examples/flac_spike/src/playback.rs` (`RingFeed`), shared by ROM and host model by `#[path]` | shipped and depended on — **and it is in a spike directory, which §2.2 rules must not last** | pause, skip and track-end are *states of this feeder*, not new machinery |
+| The feeder (ring, chunk classification, 8-bit convert, DMA/timer/IRQ discipline) | `crates/gba-playback/src/playback.rs` (`RingFeed`), linked by the FLAC product ROM, the instrument and the album probe | shipped and depended on; **lifted out of the spike by §2.2 on 2026-11-15** (PR-1), with `RingFeed::truncate()` landed and `make playback-test` as its host gate | pause, skip and track-end are *states of this feeder*, not new machinery |
 | A second decoder in the tree | `crates/uli-lite`, `crates/uli-lite-gba` | **U4 (real-time decode) is NOT met.** This checkout does carry the ledger, and it says so: [`PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) → "Critical path to real time" (2026-11-15) records the production frame at **274,198 worst / 232,090 mean = 105% / 89%** of the 262,144-cycle period after C-3's HotState-to-IWRAM — the mean fits, the worst frame is **12,054 cycles (4.6%) over**, and the codec's own working target is **≤ ~85%** so that the gate total (convert + IRQ + DMA) and this tree's UI fit beside it. Still **decode-only** even at parity: **U5** (playback — zero underruns, clean period audit, mGBA then hardware) and **PR D** (the output stage) are open behind it. Ladder for context: PR C 200% / 174% → C-3a/c 186% → C-3b 175% → C-1 164% → v4 162% → `iwram-tw` 157% → fused OLA 148/138% → **C-3 HotState 105%** *(corrected 2026-11-15; an earlier revision of this row read "U4 met", which no codec document says)* | the lossy backend is close, and is a candidate for the album-length build **once U4 lands with margin**. What this app waits on is **real-time decode, then playback and the output stage** — and everything it needs arrives **through the seam**, so the ordering is invisible above it |
 | Two codec containers, and neither is the application's | `GAFP` (`crates/flac-lite`), `ULA2` (`crates/uli-lite`) | both owned by codec tracks, both pinned by those tracks' evidence | **the reason A1/A6/A10/A11 are answered by an application manifest and not by either container** (§4.3). The app must not make a product feature depend on a field one codec happens to carry and the other does not |
 | On-screen text with a measured fit check | `examples/flac_integration/src/text.rs` | shipped | A10/A11/A12's font, layout settings and the "does it fit 240×160" verdict |
@@ -120,36 +120,43 @@ one gets lifted into general project source first.** Concretely:
 
 | what the app needs | where it lives today | where it goes |
 |---|---|---|
-| `RingFeed` — the ring, chunk classification, `convert_frame`, `fold_bytes` (`§4.4`'s states of the feeder) | `examples/flac_spike/src/playback.rs` | a real crate (proposal: `crates/gba-playback`), linked by the app, the FLAC product ROM and the host models alike |
-| `Fnv1a64` / the fold helpers `playback.rs` reaches as `crate::checksum` | `examples/flac_spike/src/checksum.rs` | the same crate — it travels with its consumer, exactly as `flac_integration/src/lib.rs` is forced to include the pair together today |
+| `RingFeed` — the ring, chunk classification, `convert_frame`, `fold_bytes` (`§4.4`'s states of the feeder) | `crates/gba-playback/src/playback.rs` — **landed 2026-11-15** | a real crate, `crates/gba-playback`, linked by the app, the FLAC product ROM (`flac_integration` re-exports it), the instrument and the album probe alike. Discharged, Phase 1 PR-1 |
+| `Fnv1a64` / the fold helpers `playback.rs` reaches as `crate::checksum` | `crates/gba-playback/src/checksum.rs` — **landed 2026-11-15** | the same crate, which is where it went: it travels with its consumer, so `flac_spike`, `flac_integration` and `album_probe` all re-export the pair from one place now |
 | the timer2→timer3 cycle `Counter`, `timed`, `calibrate` (§10's instrument) | `examples/e5_fetch/src/timer.rs`, with private copies in `examples/uli_bench/` | the same crate or a sibling `…-bench` support crate — one implementation, and `uli_bench`'s copy stops being a third transcription |
 
 `examples/flac_integration/src/geometry.rs` is **not** in this list, because the
 product crate is not a spike and because §4.2b already rules that the app derives and
 owns its own `geometry.rs` per backend; the FLAC module stays where it is and remains
-that track's to change. Phase 0's probe crate deliberately *does* lean on the spike
+that track's to change. Phase 0's probe crate deliberately *did* lean on the spike
 files by `#[path]` — that is exactly the debt this section names, taken on purpose
-because the probes are throwaway, and it is discharged by the lift, not by the probes.
+because the probes are throwaway. **It was discharged by the lift, not by the probes:
+Phase 1 PR-1 landed `crates/gba-playback` on 2026-11-15** (`playback.rs` + `checksum.rs`
+moved, `RingFeed::truncate()` with them, `make playback-test` added to `make flac-check`),
+and the probe now takes the crate as a path dependency.
 
 Two consequences worth writing down before anyone does the move:
 
-1. **The lift is a measured change, not a file rename.** `playback.rs` is compiled into
-   both shipped product images today, so moving it re-baselines their bytes and hashes
-   (`flac-docs/measurements.md` compares ROM shas), and its unit suite has to travel
-   with it or `make flac-check` silently stops witnessing it. The tree's own rule for a
-   shared file — "changing that file changes this crate's images too, and both crates'
-   gates are the witness that it didn't" — applies with a third consumer, so the gate is
-   the existing `flac-check` + `product-play-test` + `album-probe-test` set run together,
-   not a new one.
-2. **It settles Q13b's ownership.** `truncate()` (§4.4) is a method on the ring, the ring
-   is what this lift moves, and the reason it looked like a codec-track ask is that the
-   ring is parked in a spike directory today. **The application owns it**: the lift lands
-   first, the method lands with it, and `SKIP_PRIME_CHUNKS` stops being blocked on a
-   request to another track.
+1. **The lift was a measured change, not a file rename — and it measured.** `playback.rs`
+   is compiled into both shipped product images, so moving it re-baselined their bytes and
+   hashes: the four ROMs' `sha256`/section tables were re-recorded in
+   `flac-docs/measurements.md` as a *re-baseline from the move* (a comment edit alone moves a
+   ROM hash). Actual gate deltas at PR-1: **`spike-test` 25 → 17** (the 8 `checksum::tests`
+   left the spike workspace), **`playback-test` +24** (12 playback + 8 checksum + the 4 new
+   truncate tests), so `flac-check`'s aggregate moved by exactly that net −8/+24. The tree's
+   own rule for a shared file — "changing that file changes this crate's images too, and
+   both crates' gates are the witness that it didn't" — now has three consumers, and the
+   witness is the existing `flac-check` (which gained `playback-test`) + `product-play-test`
+   + `album-probe-test` set run together, not a new gate set.
+2. **It settled Q13b's ownership, as predicted.** `truncate()` (§4.4) is a method on the
+   ring, and the ring is what the lift moves — the reason it looked like a codec-track ask
+   was that the ring was parked in a spike directory. **The application owns it:** the lift
+   landed first (2026-11-15, PR-1), `RingFeed::truncate()` landed with it, and
+   `SKIP_PRIME_CHUNKS` is no longer blocked on a request to another track — it is a Phase-1
+   product choice, still un-chosen (§4.4).
 
-This is deliberately **not** part of the Phase 0 PR: Phase 0's job was to measure, and a
+This was deliberately **not** part of the Phase 0 PR: Phase 0's job was to measure, and a
 probe that carried a refactor of the product path with it would have made its own
-numbers hard to read.
+numbers hard to read. It landed as Phase 1 PR-1 instead, which is where §11 puts it.
 
 ### 2.3 Per-album assets are build output; scaffolding assets are tracked (ruled 2026-11-15)
 
@@ -507,7 +514,7 @@ in terms of what the user may observe, not in cycles:
 | observable | v1 target (measured at AP-1, not asserted) |
 |---|---|
 | Screen changes to the new track (title, index, bar reset) | within one video frame of the button press |
-| Audio of the new track begins | ≤ ~0.6 s, and that number is `SKIP_PRIME_CHUNKS`, a policy knob (§4.4 below). **AP-0's precondition: this is only reachable if step 2 truncates the ring (Q13b) — measured at the ring's ceiling depth, both drops the application can perform today read 39–53 periods = 1.33–1.81 s, which fails this row at every prime setting.** |
+| Audio of the new track begins | ≤ ~0.6 s, and that number is `SKIP_PRIME_CHUNKS`, a policy knob (§4.4 below). **The precondition is met: step 2 truncates the ring (Q13b, landed 2026-11-15). Measured at the ring's ceiling depth, the truncate reads `SKIP_PRIME_CHUNKS + 1` periods — 3/5/9/17 periods = 102.5/170.9/307.6/581.1 ms for prime 2/4/8/16 — inside this row at every setting; drain and consume-and-discard still read 39–53 periods = 1.33–1.81 s.** |
 | Clicks / pops at the transition | none: fades, never a mid-waveform splice |
 | Underruns attributed to a skip | 0, including the silence fed during the re-prime |
 
@@ -522,7 +529,7 @@ re-primes**:
 ```
 skip(direction)
   1. fade out over FADE_SAMPLES (256 = 15.6 ms at 16,384 Hz, 7.8 ms at 32,768)
-  2. truncate the ring: the queued chunks are dropped, not played   ← needs Q13b
+  2. truncate the ring: the queued chunks are dropped, not played   ← Q13b, landed (PR-1)
   3. source.start_track(i ± 1)                  — the seam call; per-backend seek is adapter-internal
   4. feed *silence* chunks so the DMA keeps getting a whole chunk every period
   5. re-prime the ring to SKIP_PRIME_CHUNKS
@@ -539,8 +546,9 @@ gets its own, smaller watermark, and the host model (the `product-play-test`
 sibling) is what says whether `SKIP_PRIME_CHUNKS = 4` still survives the measured
 per-frame cost, rather than this file guessing it.
 
-**What AP-0 measured, and the ruling it forced (2026-11-14).** Step 2 says *dropped,
-not played*, and the probe wrote both versions of that against the real
+**What AP-0 measured, and the ruling it forced (2026-11-14; the third row measured
+2026-11-15).** Step 2 says *dropped, not played*, and the probe wrote all three versions of
+that against the real
 `RingFeed`, at the ring's **ceiling** — 35 queued chunks plus the fade push, filling all 36
 (`examples/album_probe/README.md` → "The deep arm"; 20 skips per arm, `underflows = 0`
 throughout). The shipped producer's steady state is `RING − 2,048` ≈ 32 chunks, the same
@@ -549,29 +557,39 @@ different case:
 
 | step 2, at the ring's 36-chunk ceiling | old track still handed to the DMA | silence handed to the DMA | until new-track audio |
 |---|---|---|---|
-| drain (play the queue out) | 37 periods = 1,264 ms | prime | **39–53 periods = 1.33–1.81 s** |
-| consume-and-discard (take the chunks, hand the DMA zeros) | 1 period | 38–52 periods | **39–53 periods — identical** |
-| truncate (`consumed = pushed` in one step) | 0 | prime | **3–17 periods = 102.5–581.1 ms** (derived, not yet measured) |
+| drain (play the queue out) | **36 periods = 1,230 ms** (raw `old_periods` 37) | prime | **39–53 periods = 1.33–1.81 s** |
+| consume-and-discard (take the chunks, hand the DMA zeros) | **0 periods** — the stale chunk is taken and then overwritten with zeros before the DMA re-arms (raw 1) | 38–52 periods | **39–53 periods — identical** |
+| truncate (`consumed = pushed` in one step) | **0 periods** — the queued span, fade-out chunk included, is stepped over (raw 1) | prime | **3–17 periods = 102.5–581.1 ms — measured 2026-11-15**, `min == max` over 20 skips at each prime, on the shipped method |
 
-The two rows the application can write *today* are the same length, because
+**One metric, read three ways.** The instrument reports `old_periods` = periods from the mark
+until the *first silent chunk* on the wire, so its last period is already silence and the
+old-track **deliveries** are that reading minus one: 36 for the drain (those chunks *are* the
+old track), 0 for the two drops. The **1** the two non-drain rows read is the wire watch's
+floor rather than a delivery — with the arm's chunks silent, `watch.silent_at` latches at the
+first period boundary after the arm (`at + 1`), so a policy whose chunks are silent from the
+first period after the mark cannot read 0 (`min == max == 1` over 20 skips per arm, the log
+line in `examples/album_probe/README.md` → "The deep arm"). Every row satisfies
+`to_new = delivered + silence + 1`, which is the check that the three arms are comparable.
+
+Drain and consume-and-discard are the same length, because without a truncate
 `RingFeed::consumed` moves only by `take_chunk` — one hardware period per queued
 chunk — so discarding a deep queue buys silence *instead of* the old track, not
-time. Only a truncate meets the ≤ ~0.6 s observable above, and a truncate is not
-something this layer can do to a structure it does not own.
+time. Only the truncate meets the ≤ ~0.6 s observable above, and it meets it because
+it removes the queue term instead of trading against it: `to_new` becomes
+`SKIP_PRIME_CHUNKS + 1` periods regardless of how full the ring was.
 
-**Ruled: truncate is the mechanism, and the application grows it.**
-`RingFeed` gains `truncate()` (equivalently `skip_to_producer()`) setting
-`consumed = pushed` inside the same critical section `take_chunk` uses, preserving
-`consumed <= pushed` and "a starved period consumes nothing", plus a host test that a
-truncated ring reads `ready() == 0` and delivers the next push whole. It reads today
-like a codec-track ask, because the file it would go in
-(`examples/flac_spike/src/playback.rs`) is a spike directory that the product path
-happens to compile — **and §2.2 rules that this application must not build on a
-spike**. So the order is: lift the feeder into project source (§2.2), and land
-`truncate()` on the lifted type. Both are the app's to do. Until they are done,
-`SKIP_PRIME_CHUNKS` stays **un-chosen** — not because another track must agree, but
-because the only ring available to the app is one it does not own and cannot
-shorten without touching a decoder-margin decision that is not its to trade.
+**Ruled: truncate is the mechanism — landed 2026-11-15 (Phase 1 PR-1).**
+`crates/gba-playback/src/playback.rs` carries `RingFeed::truncate()` (equivalently
+`skip_to_producer()`) setting `consumed = pushed` inside the same critical section
+`take_chunk` uses, so `consumed <= pushed` and "a starved period consumes nothing"
+hold unchanged, and `make playback-test` witnesses it: `ready() == 0` afterwards, the
+producer ledger untouched, and the next push delivered whole — including across a ring
+wrap. The skip probe's `truncate` arm drives the shipped method on mGBA and reads the
+3/5/9/17-period table above, so the mechanism and its number are both measured rather
+than derived. `SKIP_PRIME_CHUNKS` itself stays **un-chosen** in this PR: with the queue
+term gone, the observable no longer decides it — what is left to choose is the length
+of silence the listener hears between tracks, which is a Phase-1 product decision and
+not a budget one.
 
 **The clock the UI shows.** `position.rs` stays deliberately boring, because §4.4's
 drop-and-reprime removes the hard case: the feeder already counts every chunk it
@@ -1223,7 +1241,7 @@ that rather than promote an internal constant into a headline.
 | Phase | Ships | Exit gate |
 |---|---|---|
 | **0 — Probes.** Three throwaway ROMs and no product code: (a) UI spike — 3 BGs + 1 OBJ + text + palette fade, VBlank-paced, *with the shipped lossless feeder playing underneath*; (b) art spike — a PNG on screen from a hand-written `ART1`; (c) skip spike — fade/drop/re-prime against the real ring, measuring the silence gap and proving the re-prime costs no underrun | `make album-probe-rom` + logs; **AP-0**: the frame cost breakdown closes with UI terms, the VRAM/OBJ split is recorded, `SKIP_PRIME_CHUNKS` gets its first number, and the *targets in §10 are replaced by measurements*. **Landed 2026-11-14** (`examples/album_probe/README.md`; `make album-probe-art/-test/-rom`, `make album-probe`): UI full arm **1.89%** of a period (≤2% target, and a lower bound), feeder 0.92%, video period **280,896 c** (§4.5's ~281,000 confirmed), one 4bpp tile write 726 c, art upload **0.60 period** live (+2.08% over audio-disarmed, n=1, emulator — the same upload has now read three ways and AP-4 re-prices it), `late_max` 4 samples in the skip sweep's total, inside the 16-sample grace — and `SKIP_PRIME_CHUNKS` came back **blocked on the truncate ruling (§4.4, Q13b)**, which is the finding Phase 0 existed to produce |
-| **1 — It builds an album, and it plays one.** A1–A4, A6, A10, **A3a**. In order: **§2.2's lift of the feeder out of `examples/flac_spike/` into project source, with `truncate()` (§4.4) landing on the lifted type** — Phase 1 may not `#[path]` a spike; then **the pack step (§2.3, §9.0): `examples/album_player/album.toml` (tracked) → `scripts/album_bake.py`'s Phase 1 subset → N `GAFP` blobs + `ALBM1` + `src/assets.rs`, all generated and gitignored**, default material N entries over the tracked reference master plus one short clip (Q15) so a fresh clone builds with no untracked input; then the app crate — `PcmSource` + `backend/{flac,stub}` (§4.2b), the app's derived `geometry.rs`, `meta.rs` (the validating `ALBM1` reader over the per-track ROM-location map), the fade→**truncate**→re-seek→silence-cover→re-prime→fade-in feeder (§4.4), the 32-bit session clock (§10.4, ruled), the no-divide arithmetic (§6), play/pause/next/prev/restart, and title + elapsed/remaining on screen. **The `stub` and both backend arms compile from here on, and the suite runs on `stub` + `flac`; `uli2` runs when U4/U5 land (Phase 5, AP-9).** | **AP-1**, **AP-2**, **AP-9** — and the phase that hands the codec track its UI-cost addend (§10.2, R1b) and its first per-track real-music census (§10.2b, Q16). Landing it also updates `README.md` → "Build Process" and the `gba-build-and-test` skill with the new `album-*` targets |
+| **1 — It builds an album, and it plays one.** A1–A4, A6, A10, **A3a**. In order: **§2.2's lift of the feeder out of `examples/flac_spike/` into project source, with `truncate()` (§4.4) landing on the lifted type** — Phase 1 may not `#[path]` a spike. **Landed 2026-11-15 as PR-1**: `crates/gba-playback` holds `playback` + `checksum`, `RingFeed::truncate()` is on the lifted type with four host tests, `make playback-test` is part of `make flac-check`, and the skip probe's `truncate` arm measures it (3–17 periods = 102.5–581.1 ms). `SKIP_PRIME_CHUNKS` remains un-chosen; then **the pack step (§2.3, §9.0): `examples/album_player/album.toml` (tracked) → `scripts/album_bake.py`'s Phase 1 subset → N `GAFP` blobs + `ALBM1` + `src/assets.rs`, all generated and gitignored**, default material N entries over the tracked reference master plus one short clip (Q15) so a fresh clone builds with no untracked input; then the app crate — `PcmSource` + `backend/{flac,stub}` (§4.2b), the app's derived `geometry.rs`, `meta.rs` (the validating `ALBM1` reader over the per-track ROM-location map), the fade→**truncate**→re-seek→silence-cover→re-prime→fade-in feeder (§4.4), the 32-bit session clock (§10.4, ruled), the no-divide arithmetic (§6), play/pause/next/prev/restart, and title + elapsed/remaining on screen. **The `stub` and both backend arms compile from here on, and the suite runs on `stub` + `flac`; `uli2` runs when U4/U5 land (Phase 5, AP-9).** | **AP-1**, **AP-2**, **AP-9** — and the phase that hands the codec track its UI-cost addend (§10.2, R1b) and its first per-track real-music census (§10.2b, Q16). Landing it also updates `README.md` → "Build Process" and the `gba-build-and-test` skill with the new `album-*` targets |
 | **2 — The shell.** A5, A7, A8, A11, A12: layout module, title card, now-playing, track list, pause menu, progress bar, cover art | **AP-3**, **AP-4** |
 | **3 — The bake becomes a verdict.** A3b, A13: the **same** `scripts/album_bake.py` grows §9's remaining refusal set (budget, 32-track cap, palette count, title fit, unused viz streams, the §10.4 audit ceiling), plus `album_art.py` / `album_viz.py`, the `[art]`/`[viz]`/`[game]` config sections, and two full runs → one byte-identical `.gba` (its audio-only half has been checked since Phase 1) | **AP-5** |
 | **4 — It moves.** A9: `ALVZ1` + `bar` + `skyline`, `beat`-driven sprite; art+breathe | **AP-6** |
@@ -1335,7 +1353,7 @@ authorities on decode, and an app change never re-decides them.
 | R7 | **The lossy backend has no encoder in this repository**, so `BACKEND=uli2` cannot be baked here today | `make gafp-pack-check` covers FLAC end to end; nothing in `scripts/` encodes the lossy format | the bake tool calls encode behind one indirection with a declared interface (§9); the app is built and gated on the lossless backend in the meantime, so this blocks a *backend*, never the application (Q3) |
 | R8 | **Scope**: fifteen features, two backends, a UI toolkit, an art pipeline, an analysis pipeline and a game | the natural failure is a demo that does all of them badly | phases are ordered so each one is *usable*, and A9/A14/A15 are labelled reach; §16 lists what we will not build |
 | R9 | Font/charset limits and licensing | 96-glyph ASCII subset; OFL fonts; ULI2 licensing (U7) unresolved | fold at bake time and print offenders (Q9); the app is not the vehicle that forces a publication decision |
-| R10 | **The app's foundation includes a spike directory** — its feeder (`examples/flac_spike/src/playback.rs`) and its cycle counter (`examples/e5_fetch/src/timer.rs`) live where the tree's own purpose statement says code goes to be thrown away | `flac_spike` is the perf-gate `ctrl` arm and `e5_fetch` has no Make target any more; a product feature implemented there has no owner, and Q13b's ownership looked genuinely ambiguous for exactly this reason | §2.2: lift the feeder + checksum + counter into project source before Phase 1 links them, keep `flac-check`/`product-play-test` as their witnesses, and re-baseline the shipped ROM bytes the move touches. Phase 0's probes lean on them on purpose and are throwaway |
+| R10 | **The app's foundation includes a spike directory** — its feeder (`crates/gba-playback/src/playback.rs` since 2026-11-15; `examples/flac_spike/src/playback.rs` before that) and its cycle counter (`examples/e5_fetch/src/timer.rs`) live where the tree's own purpose statement says code goes to be thrown away | `flac_spike` is the perf-gate `ctrl` arm and `e5_fetch` has no Make target any more; a product feature implemented there has no owner, and Q13b's ownership looked genuinely ambiguous for exactly this reason. **The feeder half is closed** (Phase 1 PR-1) | §2.2: lift the feeder + checksum + counter into project source before Phase 1 links them, keep `flac-check`/`product-play-test` as their witnesses, and re-baseline the shipped ROM bytes the move touches. Feeder + checksum **landed** in `crates/gba-playback` (2026-11-15, `make playback-test`); the `e5_fetch` counter is still owed. Phase 0's probes lean on them on purpose and are throwaway |
 | R11 | **A generated asset can go stale** — the policy that keeps album audio out of the repository (§2.3) means a build can silently link *yesterday's* blob | this is the price of the policy, not an accident of it: `master.gfp`, the rate clips and every future `album_player` asset are build output, and build output outlives its config more often than source does | `gafp_pack.py --emit-pin` already writes the sha256 pins the **ROM** checks its own embedded blob against at boot, so a mismatch is a named verdict (R5's "DATA ERROR") rather than a plausible-sounding track; `make album-rom` depends on the pack step so a build cannot skip it; `make clean` removes the generated paths; and AP-1's pack-twice check plus AP-5's byte-identical-ROM check make "generated" mean **regenerable**, not "whatever is lying around" |
 
 ---
@@ -1358,8 +1376,8 @@ Numbered in this file's own space (the codec tracks keep theirs).
 | Q10 | Resume position in SRAM? | Optional, cheap (agb has `save`), and needs a save-type header decision. Phase 5. |
 | Q11 | One album per cart, or a picker? | **One album per ROM.** A picker is a filesystem and an allocator, and the encoder's album-wide rate allocation makes a mixed cart a worse product. |
 | Q12 | Mono vs stereo, and 8-bit vs int16 tap for viz? | **Stereo is the product target, ruled 2026-11-14** — fidelity is the project's purpose and is not traded for CPU headroom. The app receives int16 from `PcmSource` and owns the int8 conversion at the output stage, so a speaker fold-down or dither change never reopens the seam (§4.2). |
-| Q13 | Where does the codec track's PR D stop and this application start — the output stage, the feeder, **and whether the UI reads the codec's tables or the app's manifest**? | Overlapping ground, named rather than papered over. The feeder is already shared in this repo's idiom (`RingFeed` and `geometry.rs` are compiled by several consumers through `#[path]`), and the lossy track's PR D claims "reuse the ring/FIFO feeder … int8 direct … UI from the container's tables" — that last clause is the boundary §4.3 pushes back on. **Proposal:** the feeder / convert / fold-down lives in one shared module that both the product ROM and this app link (PR D's fold-down measurement lands there), the *player* (screens, manifest, keys, viz) lives here, and the adapter cross-checks the container's tables against the manifest so both statements hold at once. One piece of that boundary has since settled on its own terms: the ring/feeder becomes project source the *application* owns (§2.2), so `truncate()` (Q13b) is not a cross-track ask at all. What still needs an owner's ruling is where PR D's output stage stops and the player begins, because that decides where U5's gate gets written. |
-| Q13b | **May the shared feeder *truncate* the ring at a skip?** (raised by AP-0, 2026-11-14) | **Ruled: yes — this is the mechanism §4.4 step 2 means, and the application grows it.** `consumed` is private and only `take_chunk` moves it, so the only drop the application can write today costs one hardware period (34.18 ms) per queued chunk: at the 36-chunk ceiling that is 1,230.5 ms of either the old track or silence, measured at 39–53 periods to new-track audio against §4.4's ≤ ~0.6 s, where a truncate reads 3–17 periods (102.5–581.1 ms) and comes inside it at every prime setting. **The method:** `truncate()` (or `skip_to_producer()`) setting `consumed = pushed` under the same critical section `take_chunk` uses, keeping `consumed <= pushed` and "a starved period consumes nothing" intact, plus a host test that a truncated ring reads `ready() == 0` and delivers the next push whole. **Whose:** ours. It looked like a codec-track ask only because the ring sits in `examples/flac_spike/src/playback.rs`, a spike directory that both shipped product images happen to compile; §2.2 rules the application must not build on a spike, so the feeder is lifted into project source first and the method lands on the lifted type. Both are Phase 1 work (§11), and `flac-check` + `product-play-test` stay its witnesses because the lift re-baselines the shipped images. **Consequence until it lands:** `SKIP_PRIME_CHUNKS` is un-chosen, and a skip on the current feeder is 1.33–1.81 s whichever drop the app picks. |
+| Q13 | Where does the codec track's PR D stop and this application start — the output stage, the feeder, **and whether the UI reads the codec's tables or the app's manifest**? | Overlapping ground, named rather than papered over. The feeder is already shared in this repo's idiom (`RingFeed` through `crates/gba-playback` since 2026-11-15; `geometry.rs` through `#[path]` to this day), and the lossy track's PR D claims "reuse the ring/FIFO feeder … int8 direct … UI from the container's tables" — that last clause is the boundary §4.3 pushes back on. **Proposal:** the feeder / convert / fold-down lives in one shared module that both the product ROM and this app link (PR D's fold-down measurement lands there), the *player* (screens, manifest, keys, viz) lives here, and the adapter cross-checks the container's tables against the manifest so both statements hold at once. One piece of that boundary has since settled on its own terms: the ring/feeder is project source the *application* owns (§2.2) — `crates/gba-playback` since 2026-11-15 — so `truncate()` (Q13b) is not a cross-track ask at all. What still needs an owner's ruling is where PR D's output stage stops and the player begins, because that decides where U5's gate gets written. |
+| Q13b | **May the shared feeder *truncate* the ring at a skip?** (raised by AP-0, 2026-11-14) | **Landed 2026-11-15 (Phase 1 PR-1).** The 2026-11-14 ruling was *yes — this is the mechanism §4.4 step 2 means, and the application grows it*, and it is now the shipped method: `RingFeed::truncate()` in `crates/gba-playback/src/playback.rs` sets `consumed = pushed` under the same critical section `take_chunk` uses, keeping `consumed <= pushed` and "a starved period consumes nothing" intact. **Witnessed:** four host tests in `make playback-test` (it returns exactly the prior `ready()`; `ready() == 0` afterwards with the producer ledger untouched; the next push delivered whole, across a ring wrap too), and — measured, not derived — the skip probe's `truncate` arm reads 3/5/9/17 periods = 102.5/170.9/307.6/581.1 ms to new-track audio at prime 2/4/8/16 (`min == max` over 20 skips each), against the 39–53 periods (1.33–1.81 s) that drain and consume-and-discard still read at the 36-chunk ceiling. **Ownership:** ours, because §2.2's lift put the ring in project source; the old "the codec track's file" framing was wrong and is recorded as such in `examples/album_probe/README.md`. **Consequence:** `SKIP_PRIME_CHUNKS` is a Phase-1 product choice — still un-chosen by this PR — because `to_new = SKIP_PRIME_CHUNKS + 1` periods regardless of queue depth, so the ≤ ~0.6 s observable is met at every prime in the sweep and what remains to decide is the length of silence the listener hears between tracks. |
 | Q14 | Does the app's reaction data need the lossy backend's int16 path, or is int8 enough? | Neither, as designed: the visualiser reads the **album timeline**, not the PCM (§8). This only reopens if the runtime-analysis experiment is taken, and then it is a measured cost against the gate total, not a free tap. |
 | Q15 | What is Phase 1's album made of, given per-album assets are not committed (§2.3)? | **Ruled 2026-11-15: N entries over one properly-encoded master.** The fixture repeats the same encoded `assets/sound/bioluminescent.wav` as full-length tracks titled "Bioluminescent 1", "Bioluminescent 2", …, plus at least one short **"Bioluminescent Clip 1"** so the list carries *unequal* durations, alternating clips and full tracks to scale to whatever portion of the cart a test wants. Real music, zero new tracked bytes, and it exercises the source → ROM pipeline Phase 1 exists to build instead of a synthetic stand-in for it. The consequences are measured, and they are this ruling's to handle: |
 | Q16 | Who measures the decode rows an album actually hits — FIXED-1/2/3 at 2048-sample frames — and does Phase 1 wait for them? | **Recorded, and not the app's to close** (§2.1: this file reopens no codec decision). `MEASURED_DECODE` holds one row at the product block size, `(2048, "fixed", 0)`, and real music contains no order-0 frames (§10.2b) — so every album-shaped build packs under `--master`'s blanket waiver instead of against a measurement. **The ask of the FLAC track:** three hardware rows for `(2048,"fixed",1/2/3)`, taken on frames whose `frames_sha256` the album bake can reproduce, so the guard can check real music against real numbers and retire the waiver on the product path. **Phase 1 does not wait:** it budgets against C2's measured real-audio aggregate (decode 23.656%, work/frame 32.208% on hardware) and labels that, in its own log, as an asset-level mean rather than a worst-frame row. The per-track census the bake already prints is the app's contribution, handed across with the UI-cost addend. |

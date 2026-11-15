@@ -136,3 +136,8 @@ __pycache__/
 # AP-0's per-run gate/ROM logs are output; `make album-probe-*` rewrites them and
 # the numbers that matter live in the probe log.
 /album-probe*.log
+
+# `make playback-test`'s log (crates/gba-playback's host gate) is the same shape:
+# per-run output, rewritten on every run, with the counts recorded per landing in
+# flac-docs/measurements.md rather than here.
+/playback-test.log

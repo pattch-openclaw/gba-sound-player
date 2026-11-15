@@ -37,6 +37,13 @@ edition = "2024"
 # charged here rather than to every image.
 flac-lite = { path = "../../crates/flac-lite", features = ["iwram-pin", "scan"] }
 
+# The playback data path — the FIFO conversion, the chunk ring and the FNV folds.
+# Lifted out of the instrument into a crate of its own (ALBUM-PLAYER.md §2.2), so
+# this is a plain path dependency rather than two `#[path]` includes of spike
+# sources. Platform-free like the core, so it is NOT under the arm-target block:
+# the host model compiles the same code the ROM runs.
+gba-playback = { path = "../../crates/gba-playback" }
+
 # 6b-1: the overlay, with its ARM-mode Rice kernel on. This is the first product
 # path to name `rice-arm` — before this rung the kernel existed only in an
 # instrument (6a-4/6a-5). Optional so the codegen A/B can build the same ROM

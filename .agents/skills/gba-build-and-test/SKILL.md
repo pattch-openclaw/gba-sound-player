@@ -4,7 +4,7 @@ description: >-
   How to build and test the gba-sound-player GBA ROMs natively: which Make targets to
   run for thumbv4t-none-eabi (native-rom; the FLAC product path master-pack/master-play-rom,
   flac-rom, product-play-rom, spike-rom, overlay-kernel-rom; the flac-check / flac-gates /
-  overlay-gates / product-play-test gate set; test-rom), what has to be installed (Rust
+  overlay-gates / product-play-test / playback-test gate set; test-rom), what has to be installed (Rust
   nightly + rust-src + -Zbuild-std, agb-gbafix, mgba-test-runner, flac/metaflac, ffmpeg for
   master encoding), and the measured gotchas of this repo — the Tier-3 target has no
   prebuilt core, cargo's config inheritance breaks host tests, agb v0.25.0 needs aarch64
@@ -38,7 +38,8 @@ make native-rom native-flac-rom native-product-play-rom native-master-play-rom \
 make flac-check    # the whole FLAC surface in one command: flac-gates (every flac-lite
                    # configuration, both gafp legs) + overlay-gates (the ARM kernel's
                    # compile, host contract, objdump fact and mGBA device suite) +
-                   # product-play-test + spike-test. Needs `flac` + `metaflac` on PATH.
+                   # product-play-test + playback-test (the lifted ring/FIFO data path in
+                   # crates/gba-playback) + spike-test. Needs `flac` + `metaflac` on PATH.
 make test          # test-rom (the root #[test_case] suite, which collects 0 cases)
                    # + flac-test + uli-test
 make opus-test     # the Opus track's host gate (OPUS.md, not FLAC)
@@ -56,7 +57,9 @@ command for each. `make clean` is shallow and safe to reach for: it removes the 
 `*.gba`/`*.sav`, the generated master asset/pin, the archived rate assets,
 `uli-bench*.log`, `__pycache__`) and **keeps every workspace's `target/`**, so the next
 build stays warm. `make clean-deep` (or `make clean DEEP=1`) also drops the caches — all
-fifteen workspaces, discovered from the `Cargo.toml`s on disk — and that is not free: on
+eighteen workspaces, discovered from the `Cargo.toml`s on disk (18 measured 2026-11-15, after
+`crates/gba-playback` joined; it counts the vendored `opus-rs` manifest too) — and that is not
+free: on
 this host the full verified set takes **135 s cold against 22 s warm** and regrows
 **4.5 GB**, because the Tier-3 target re-compiles `core`/`alloc` from source per
 workspace. Do not deep-clean a warm tree just to "make sure".
@@ -148,6 +151,10 @@ instructions rather than half-running a gate.
   mGBA device suite; `product-play-test` green; `spike-test` green; `make check` clean.
   The prior record at `main` (2026-11-11) was 1,498 / 3 across 72 — counts move with the
   tree and are recorded per landing, which is why no doc here treats one as a threshold.
+  Re-measured 2026-11-15 after the §2.2 lift: `make flac-check` **1,581 passed / 0 failed
+  over 89 `test result: ok` lines**, `flac-gates` unchanged at 1,509/79, `playback-test` 24
+  (new), `spike-test` 25 → 17 (its `checksum` suite moved with the files),
+  `album-probe-test` 52 — detail in `flac-docs/measurements.md`.
 - The happy path works end to end here: `make master-pack INPUT=…` packs (80 frames,
   162,304 samples, predictor census printed), and `master-play.gba` runs headless to
   `verdict PASSED — screen BLUE`, `und 0`, `late 0`, every period serviced, PCM and FIFO

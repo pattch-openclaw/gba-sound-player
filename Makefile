@@ -1,5 +1,5 @@
 .PHONY: format build rom flac-rom product-play-rom master-pack master-play-rom \
-        spike-rom spike-test \
+        spike-rom spike-test playback-test \
         overlay-check overlay-test overlay-check-arm overlay-test-arm \
         overlay-objdump overlay-kernel-rom overlay-kernel-test overlay-gates \
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
@@ -183,6 +183,13 @@ SPIKE_CRATE_MANIFEST := $(abspath examples/flac_spike/Cargo.toml)
 SPIKE_ROM := flac-spike.gba
 SPIKE_CRATE_BIN := $(SPIKE_CRATE_DIR)/target/$(TARGET)/release/flac-spike
 
+# The playback data path, lifted out of the instrument into a crate of its own
+# (ALBUM-PLAYER.md §2.2). The instrument, the product ROM and the album probe
+# all depend on it, so its host suite is where the conversion, the ring
+# accounting, `truncate()` and the FNV folds are witnessed — once, for every
+# consumer.
+PLAYBACK_MANIFEST := $(abspath crates/gba-playback/Cargo.toml)
+
 # --- other codec tracks (their own entry points; not FLAC) --------------------
 ULI_CRATE_MANIFEST := $(abspath crates/uli-lite/Cargo.toml)
 ULI_SPIKE_DIR := examples/uli_spike
@@ -229,7 +236,8 @@ ALBUM_PROBE_ART_TOOL := scripts/album_probe_art.py
 # never reformat — a CI `make test` must not mask drift that `make check` exists
 # to fail on.
 
-WORKSPACES := . crates/flac-lite crates/flac-lite-gba examples/flac_spike \
+WORKSPACES := . crates/flac-lite crates/flac-lite-gba crates/gba-playback \
+              examples/flac_spike \
               examples/overlay-kernel-check examples/opus_spike \
               crates/uli-lite crates/uli-lite-gba examples/uli_spike examples/uli_bench \
               examples/album_probe
@@ -568,6 +576,24 @@ spike-test: toolchain-check
 	  $(CARGO) test --manifest-path $(SPIKE_CRATE_MANIFEST) --target $(HOST_TRIPLE)
 	@echo "spike-test passed: spike clips decode bit-exactly on the host"
 
+# The lifted playback data path (crates/gba-playback). Fails closed the way
+# `album-probe-test` does: a cargo invocation that fails or a log with no
+# `test result: ok.` line is reported as the suite not passing, and a green that
+# collected (nearly) nothing is refused too — the count is read from the log only
+# after the suite has passed. `--lib` on purpose: the whole suite lives in `src/`,
+# so exactly one result line exists and the count cannot pick up a doc-test line.
+playback-test: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	@cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(PLAYBACK_MANIFEST) --target $(HOST_TRIPLE) --lib > $(abspath playback-test.log) 2>&1; \
+	  status=$$?; \
+	  cat $(abspath playback-test.log); \
+	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath playback-test.log) \
+	    || { echo "playback-test: the library suite did not pass — see playback-test.log"; exit 1; }; \
+	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath playback-test.log)); \
+	  [ -n "$$n" ] && [ "$$n" -ge 24 ] || { echo "playback-test: collected '$$n' tests, needs >= 24 — a green that names nothing is not a green"; exit 1; }
+	@echo "playback-test passed: FIFO conversion, ring accounting, truncate()'s ledger, and both FNV folds"
+
 spike-rom: format
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
 	agb-gbafix $(SPIKE_CRATE_BIN) -o $(SPIKE_ROM)
@@ -730,10 +756,13 @@ album-probe-test: toolchain-check
 # library and every [[bin]] (ui-probe, art-probe, skip-probe), then each raw image
 # is header-fixed for the cartridge — the uli-bench shape. Run one with
 # `timeout -k 5 300 $(GBA_TEST_RUNNER) album-probe-<name>.gba` and read the
-# `[album-probe]` lines: each image prints its verdict and then the runner's exit
-# sentinel, so it RETURNS instead of hanging (contrast a playback ROM, whose pass
-# is exit 124). Section sizes are printed because AP-0 has to record .text/.iwram/
-# .bss for each probe, not estimate them.
+# `[album-probe]` lines. Each image prints its verdict, its `Tests finished
+# successfully` sentinel, and then loops forever on the verdict colour: the runner
+# returns as soon as it sees the sentinel, and a run that never printed one ends at
+# the leash (124). So the log is the verdict — `make album-probe` greps it and does
+# not trust an exit status — and the ROMs loop rather than return. Section sizes are
+# printed because AP-0 has to record .text/.iwram/.bss for each probe, not estimate
+# them.
 album-probe-rom: format
 	cd $(ALBUM_PROBE_DIR) && $(CARGO) build --release --target $(TARGET) --features probe-roms
 	agb-gbafix $(ALBUM_PROBE_TARGET_DIR)/ui-probe -o album-probe-ui.gba
@@ -775,9 +804,11 @@ test: test-rom flac-test uli-test uli-overlay-test
 	@echo "test passed: ROM suite + flac-lite isolation gates + uli-lite host corpus + uli-lite-gba twin"
 
 # Everything a FLAC-track change owes. `flac-gates` is the core, `overlay-gates`
-# is the kernel, `product-play-test` is the geometry the playback claim stands on.
-flac-check: flac-gates overlay-gates product-play-test spike-test
-	@echo "flac-check passed: core configurations, overlay/kernel witnesses, product geometry, instrument"
+# is the kernel, `product-play-test` is the geometry the playback claim stands on,
+# `playback-test` is the lifted ring/conversion suite (§2.2), and `spike-test` is
+# the instrument.
+flac-check: flac-gates overlay-gates product-play-test playback-test spike-test
+	@echo "flac-check passed: core configurations, overlay/kernel witnesses, product geometry, playback data path, instrument"
 
 # ===========================================================================
 # Environment aliases
@@ -927,10 +958,11 @@ help:
 	@echo "  A playback ROM's run ends in loop {}: with mgba-test-runner, exit 124 IS the pass."
 	@echo ""
 	@echo "  FLAC gates:"
-	@echo "    flac-check           EVERYTHING a FLAC change owes (the four below)"
+	@echo "    flac-check           EVERYTHING a FLAC change owes (the five below)"
 	@echo "    flac-gates           every crates/flac-lite configuration + gafp-check + gafp-pack-check"
 	@echo "    overlay-gates        crates/flac-lite-gba + the ARM kernel's mGBA witness"
 	@echo "    product-play-test    the product geometry's host model"
+	@echo "    playback-test        the playback data path's host suite (ring, truncate, FNV folds)"
 	@echo "    spike-test           the instrument's host witness (bit-exact vs flac -d)"
 	@echo "    (individually: flac-test, flac-test-wide/-crc/-scan/-rice, flac-portable-check,"
 	@echo "     gafp-check, gafp-pack-check, overlay-check/-test/-check-arm/-test-arm,"

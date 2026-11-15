@@ -114,6 +114,52 @@ embedded clips and absolute panic locations, so it moves with the asset and with
 edit. `LEADING_ONES` relocates when a second `RiceKernel` body becomes reachable, with its
 bytes unchanged.
 
+**Re-baseline 2026-11-15 — the §2.2 file move plus its two review fix rounds, not a
+regression.** `examples/flac_spike/src/{playback,checksum}.rs` MOVED into
+`crates/gba-playback` (ALBUM-PLAYER.md §2.2, Phase 1 PR-1), and the probe's `truncate` arm
+plus that arm's review fixes landed on top of the move in the same PR, so every image that
+compiles them was rebuilt and re-hashed. Same host, same toolchain instance
+(`nightly-2026-09-04` = `rustc 1.100.0-nightly (a69a63265 2026-09-03)`), same command: `make
+spike-rom flac-rom product-play-rom album-probe-rom`, then `sha256sum *.gba` and `size -A`
+on each ELF. The control column is the same command on the pre-move tree, minutes earlier on
+this host:
+
+| image | bytes (control → after PR-1) | `.text` | `.rodata` | `.iwram` / `.bss` | sha256 after PR-1, move + truncate arm (control) |
+|---|---|---|---|---|---|
+| `flac-spike.gba` | 1,042,156 → **1,042,156** | 50,132 → **50,132** | 990,464 → **990,464** | 812 / 12 | `69ef5d18f68b5fd1d2e0ad92372c17aac22f66ea0c5bbe3da7b8362d790f2876` (`aa100efb…`) |
+| `flac-integration.gba` | 644,340 → **644,340** | 68,528 → **68,528** | 572,992 → **572,992** | 2,036 / 20 | `8b26e9a410f998322fed66282c3e1d2c86d588b7da0cf0bec4b801423866f66c` (`ea0eda67…`) |
+| `product-play.gba` | 662,440 → **662,480** (+40) | 81,172 → **81,172** | 578,360 → **578,400** (+40) | 2,036 / 42,608 | `8dc5b72cc55e0d8ca8842a13f7471c58b6415ec99ea5ff5d4a704160ab7c8542` (`35a4d6c1…`) |
+| `album-probe-skip.gba` | 170,376 → **170,880** (+504) | 44,608 → **45,008** (+400) | 124,432 → **124,536** (+104) | 556 / 42,696 | **`6105a46103fbbff219cd5a0d470a4d07ad3ba36a9741daf487a487971925ead5`** (`ebefc9e1…`; the move-only build was `672ff95a…`, 170,456 B, `.text` 44,584 — the fix rounds are the rest, and review round 3's **doc-comment rewording alone** moved the hash again — `8ade97e3…` — with `.text`/`.rodata`/`.iwram`/`.bss` byte-for-byte as recorded, which is this document's warning demonstrated on the spot) |
+
+**Every sha moved and only two images' sections did.** That is the class this document warns
+about two paragraphs up: a comment edit alone moves a ROM hash (panic locations, debug
+info), and the move changes which crate a codegen unit belongs to, which is what the +40 B
+of `.rodata` in `product-play` and the +104 B in the skip probe are — inlining boundaries,
+not new code. The skip probe's +400 B of `.text` is the truncate arm and its review fix
+rounds: `probe_hw::truncate_stale` (which pushes the cover's head inside the same critical
+section as the truncate, closing the empty-ring window that could count an underflow, then
+counts the discarded chunks before its fallible push and rounds the head to a whole chunk).
+Only the move's own +104 B of `.rodata` is attributable to the lift — the move-only skip
+build was `672ff95a…`. The arm's period rows are unchanged throughout
+(`examples/album_probe/README.md` → "The deep arm"), and re-verified after round 3's rewording:
+`timeout -k 5 300 mgba-test-runner album-probe-skip.gba` → `PASS … underflows=0`, every row
+identical (deep `drain` raw `old_periods` 37 / silence 2·4·8·16 / `to_new` 39·41·45·53; deep
+`truncate` raw 1 / same cover / `to_new` 3·5·9·17, `min == max` over all 20 skips at each
+setting) — so the hash moved and the measurement did not. The instrument and the decode image
+are section-for-section identical to the control. The skip
+probe's measurement comparison is on the **shared rows**, not on the whole-run totals: the
+control image carried no truncate arm (16 settings — `policies=[drain, drop]`), so its total
+cannot be the baseline for a 20-setting run, and the totals carry a VBlank-quantised play
+phase that moves with an image's layout. What the control printed over its 16 settings is
+`periods=10097 feeder_sum=224062697 feeder_max=34560 wrap=0 late_max=4 late_over_grace=0`;
+the post-PR-1 image prints `periods=11000 feeder_sum=245259002 feeder_max=34563 wrap=0
+late_max=4 late_over_grace=0` over 20, `underflows=0`. Every `old_periods`,
+`silence_periods`, `to_new_periods`, `dropped` and `wait_periods_max` row is identical
+between the two logs (diffed line for line), so the move left every period measurement
+standing; the totals' delta is the four added settings plus that clock noise, and is not
+quoted as a cost. `overlay-kernel-check.gba` sits at 221,020 B throughout: it does not
+compile these modules.
+
 ## Rules every run follows
 
 - **Correctness before speed.** No number is reported from an image whose decode has not
@@ -251,7 +297,8 @@ and four runs, which is what makes it safe to read.
 | `overlay-objdump` | The ELF fact a green sweep cannot show: `arm_rice_partition` is four-byte ARM code, returns `pop {…, lr}` + `bx lr`, and has no LDM-to-PC. A Thumb build of the same algorithm computes the same answers and would pass the sweep too. |
 | `overlay-kernel-test` | The only place the assembled kernel runs: mGBA's ARM7TDMI sweeps the committed corpus and the synthesized boundaries through the incumbent, the kernel and the model. Debug profile on purpose (overflow checks and the model's domain guard are part of what is witnessed). |
 | `product-play-test` | The product geometry's host model: the shipped manifest's real frame lengths replayed through the **same** `RingFeed` and the **same** `geometry` constants the ROM compiles, against a credit-per-period clock. Where flow control, the two tolerances and the ring sizing are justified rather than asserted. Its cost envelope is transcribed from one named run's printed `stages:`/`attribution:` lines — `the_envelope_is_the_runs_own_sums` locks those to each other, but **no host test reads a ROM log**, so re-reading them after a build is record-keeping, not a gate. |
-| `spike-test` | The instrument's host witness: the exact embedded clips decode bit-exactly against `flac -d`, the pins reproduce, the shared fold reaches them. |
+| `spike-test` | The instrument's host witness: the exact embedded clips decode bit-exactly against `flac -d`, the pins reproduce, the shared fold reaches them. Collected count **17** since the §2.2 lift (2026-11-15): 7 `stats` unit tests + 10 `spike_witness` tests. It was 25 before, because the 8 `checksum` unit tests lived in this workspace; they now run in `playback-test`. |
+| `playback-test` | The lifted playback data path's own suite (`crates/gba-playback`, ALBUM-PLAYER.md §2.2): the FIFO truncation rule, the two-channel fold, the ring's producer/consumer accounting and underflow classification, and **`RingFeed::truncate()`** — §4.4's skip seam (Q13b): it drops exactly the queued span, leaves `ready() == 0` with `consumed() == pushed()` and the producer ledger untouched, and the next push comes back whole, across a ring wrap too. 24 tests (12 playback + 8 checksum + 4 truncate). Gate-neutral cwd with `--lib`, and it fails closed: a failed run, a log without `test result: ok.`, or fewer than 24 collected tests is a red (the floor is the whole suite, so losing `truncate()`'s four tests cannot stay green). |
 | `test-rom` / `test` | The root ROM's `#[test_case]` suite (currently **collects 0 cases** — a build/link/boot check, not evidence) and `test`'s aggregate with `flac-test` + `uli-test`. |
 | `check` | `cargo fmt --check` across the workspaces. The only style gate; builds auto-format, tests never write. |
 
@@ -264,6 +311,16 @@ binaries**; the previous record at `main` on 2026-11-11 was 1,498 / 3 across 72,
 drift between them is test-name attributable. Count the *aggregate plus the arms*, not
 `test result:` lines — the run also prints 9 empty `Doc-tests` lines, which are not among
 the 75.
+
+**Update 2026-11-15 (after the §2.2 lift, Phase 1 PR-1).** Same host and instance:
+`make flac-check` = **1,581 passed / 0 failed** summed over the 89 `test result: ok` lines
+it prints (control on the pre-move tree, minutes earlier: 1,565 over 80). The `flac-gates`
+leg on its own is **unchanged at 1,509 passed over 79 result lines / 72 `Running …`
+binaries**, which is the figure this section's method counts. Exactly two counts moved, and
+both were intended: `spike-test` **25 → 17** and the new `playback-test` **24**. Do not
+subtract the 1,526/75 record above from today's numbers — different tree, and the binary
+count was read with a slightly different method.
+
 `make test-rom` exits 0 with `Running 0 tests`; that is the standing state of the root
 crate, and the first ROM suite with assertions in it is `overlay-kernel-test`.
 

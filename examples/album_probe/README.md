@@ -9,27 +9,30 @@ images and one host gate that replace §10.2's target percentages with witnesses
 fade, VBlank-paced, with the shipped lossless feeder playing synthetic PCM underneath),
 the art spike (a 120×120 `ART1` card on screen from the committed blob), the skip spike
 (fade → mark stale → re-seek → silence cover → re-prime → fade in, against the real ring,
-swept over *two queue policies* — drain and drop — at *two queue depths*), and the host
-suite that pins the ART1 reader, §6's arithmetic, the session clock, the ring geometry,
-and what §4.4's drop costs on the shipped `RingFeed`. Each ROM prints `[album-probe] …` lines, a `PASS` verdict, and the runner's
+swept over *three queue policies* — drain, drop and truncate — at *two queue depths*), and
+the host suite that pins the ART1 reader, §6's arithmetic, the session clock, the ring
+geometry, and what §4.4's step 2 costs on the shipped `RingFeed`. Each ROM prints `[album-probe] …` lines, a `PASS` verdict, and the runner's
 `Tests finished successfully` sentinel.
 
 **What it is not:** a probe is a witness, never a gate input (the `ctor-probe` rule).
 There is no `album_player` crate here, no product code, no screens, no bake tool, no
 `PcmSource`, no ULI2; nothing here is wired into `flac-check` or `test`, and `album-check`
-(AP-0…AP-9) does not exist yet. The shared code is consumed by `#[path]` include only —
-`geometry` from `examples/flac_integration`, the `playback` + `checksum` pair from
-`examples/flac_spike`, the timer2/3 `Counter` from `examples/e5_fetch` — so no file under
-`crates/` or the other `examples/` changed to build this.
+(AP-0…AP-9) does not exist yet. The shared code now comes from one crate and two `#[path]`
+includes — `geometry` from `examples/flac_integration`, the timer2/3 `Counter` from
+`examples/e5_fetch`, and `playback` + `checksum` from **`crates/gba-playback`** (a plain path
+dependency since 2026-11-15).
 
-Two of those three sources are **spike and instrument directories**, which is a debt this
-crate takes on purpose and the plan refuses to carry forward: `flac_spike` and `e5_fetch`
-exist to gather information while the FLAC implementation is developed, and an
-application that outlives that work cannot be founded on them. `ALBUM-PLAYER.md` §2.2
-rules the lift (into project source, proposal `crates/gba-playback`) and makes it Phase 1
-work — before any `album_player` module links any of it. Phase 0 borrows the shipped
-`RingFeed` precisely *so that* its skip numbers are statements about the ring the product
-runs on rather than a model of one; moving that ring is the follow-up, not this PR's job.
+That last one used to be part of the debt. The 2026-11-14 record here said Phase 0 borrowed
+the shipped `RingFeed` straight out of `examples/flac_spike/` and that moving it was the
+follow-up; **`ALBUM-PLAYER.md` §2.2's lift landed on 2026-11-15** — `playback.rs` and
+`checksum.rs` MOVED (not copied) into `crates/gba-playback`, `RingFeed::truncate()` landed
+with them, and `make flac-check` now includes `make playback-test` (24 host tests, the 12
+conversion/ring tests plus 8 checksum tests plus the 4 truncate tests). Phase 0 borrowed the
+shipped `RingFeed` precisely *so that* its skip numbers are statements about the ring the
+product runs on rather than a model of one; the ring it measures is now the crate's, and the
+truncate arm below measures the shipped method rather than an arithmetic sketch of one.
+Borrowing `geometry` from `examples/flac_integration` and the `Counter` from
+`examples/e5_fetch` is still open debt — §2.2 lifts those separately.
 
 ## Reproduce
 
@@ -50,8 +53,8 @@ table's log line is quoted where the columns need it. The three verdicts:
 
 ```
 [album-probe] PASS ui arms=5 audio=live=yes video=disarmed tile=ime-off underflows=0
-[album-probe] PASS art tiles=225 live=346057 disarmed=339013 period=573440
-[album-probe] PASS skip policies=[drain, drop] queues=[shallow, deep] primes=[2, 4, 8, 16] underflows=0 audio=live
+[album-probe] PASS art tiles=225 live=343032 disarmed=335990 period=573440
+[album-probe] PASS skip policies=[drain, drop, truncate] queues=[shallow, deep] primes=[2, 4, 8, 16] underflows=0 audio=live
 ```
 
 **Context for every number:** Linux aarch64 host, `mgba-test-runner` (mGBA headless) on
@@ -83,6 +86,14 @@ feeder service taken out) is identical in both rounds to within 3 cycles/frame.
 | `bg3` | three backgrounds, one scrolling | 52,880 → 52,875 / 60 = **881** | 1,799 (0.31%) | 5,138 → 5,150 | 5,189 |
 | `obj` | `bg3` + one animated `DynamicSprite16` | 132,708 → 138,755 / 60 = **2,313** | 4,721 (0.82%) | 5,165 → 5,190 | 5,260 |
 | `full` | `obj` + a palette fade every frame | 324,572 → 318,362 / 60 = **5,306** | 10,832 (**1.89%**) | 5,212 → 5,238 | 5,260 |
+
+**How current this table is.** The `round 2` sums above (17,698 / 29,471 / 52,875 / 138,755 /
+318,362) are quoted from an earlier image of this same PR; the image this branch ships reads
+17,697 / 29,519 / 52,880 / 138,868 / 318,283 — the same ~0.2% image-layout sensitivity the art
+section documents, which moves the derived per-frame and share columns in their last digit
+only (the `full` arm stays 1.89%). The `feeder` columns are from the shipped image and did not
+move, and no claim in this file turns on the difference. AP-4 re-prices this arm with the art
+leg anyway.
 
 **Why `obj` rose 6,047 and `full` fell 6,210 while the UI work did not move.** The arms are
 measured with interrupts **live**, so a feeder period that lands between `t0` and `t1` is
@@ -199,7 +210,11 @@ mean is not a worst case" warning bites (1,242 mean, 5.6× worst). §10.2 allows
 for this job: measured 0.60.
 
 **A third reading, and a caveat about comparability.** The three readings of this table are
-334,686 / 333,461 (round 1), and 346,057 / 339,013 now. The pair is **not** a clean F2 delta:
+334,686 / 333,461 (round 1), and 346,057 / 339,013 (round 2). **A fourth, taken 2026-11-15
+after the §2.2 lift added `truncate_stale` to the shared `probe_hw` (so this image's layout
+moved and nothing in the art path changed), reads 343,032 / 335,990 — the same 1–3% class of
+address-sensitivity, and the reason the "Reproduce" verdict block quotes the newest log
+rather than this table's.** The pair is **not** a clean F2 delta:
 with the old zero-filling `fill_frame` restored (nothing else changed) the probe reads
 334,871 / 333,676, and with the new one plus a harmless 96-byte `.rodata` pad it reads
 337,583 / 330,591. All three legs are the same instructions doing the same work — what moves
@@ -266,62 +281,113 @@ skip policy=drain queue=deep queue_chunks=35 prime_chunks=4 audio=live to_new_pe
 skip policy=drop queue=deep queue_chunks=35 prime_chunks=4 audio=live old_periods count=20 sum=20 min=1 max=1 wrap=0
 skip policy=drop queue=deep queue_chunks=35 prime_chunks=4 audio=live silence_periods count=20 sum=800 min=40 max=40 wrap=0
 skip policy=drop queue=deep queue_chunks=35 prime_chunks=4 audio=live to_new_periods count=20 sum=820 min=41 max=41 wrap=0
-skip policy=drop queue=deep queue_chunks=35 prime_chunks=4 audio=live underflows=0 starved=0 dropped=720 wait_periods_max=0 latency count=20 sum=470155078 min=23314207 max=23595211 wrap=0
+skip policy=drop queue=deep queue_chunks=35 prime_chunks=4 audio=live underflows=0 starved=0 dropped=720 wait_periods_max=0 latency count=20 sum=470155087 min=23314219 max=23595183 wrap=0
+skip policy=truncate queue=deep queue_chunks=35 prime_chunks=4 audio=live old_periods count=20 sum=20 min=1 max=1 wrap=0
+skip policy=truncate queue=deep queue_chunks=35 prime_chunks=4 audio=live silence_periods count=20 sum=80 min=4 max=4 wrap=0
+skip policy=truncate queue=deep queue_chunks=35 prime_chunks=4 audio=live to_new_periods count=20 sum=100 min=5 max=5 wrap=0
+skip policy=truncate queue=deep queue_chunks=35 prime_chunks=4 audio=live underflows=0 starved=0 dropped=720 wait_periods_max=0 latency count=20 sum=114542008 min=5562822 max=5898809 wrap=0
 ```
 
 Both re-read after round 2's synth fix (the source is continuous now, see the UI section):
-the deep rows are unchanged to the period — `old_periods` 37/1, `silence_periods` 2/4/8/16 and
-38/40/44/52, `to_new_periods` 39/41/45/53 — because the skip sweep never leaves tracks 0↔1
+the drain/drop deep rows are unchanged to the period — `old_periods` 37/1 (the drop `1` is
+the watch's floor, not a delivery: see the table's † note), `silence_periods`
+2/4/8/16 and 38/40/44/52, `to_new_periods` 39/41/45/53 — because the skip sweep never leaves tracks 0↔1
 (`track + 1` / `track + N_TRACKS - 1` from 0) and both are longer than the ≤ 37 chunks a
 setting queues. Only the clock-derived columns moved at all: the shallow `drop` arm at prime
-8 discarded 180 chunks over 20 skips against round 1's 179 (mean 9.00, not 8.95); the sweep
-total is now `periods=10097`; and `late_max` read 4 instead of 1 (service jitter, still 12
-samples inside the 16-sample grace, `late_over_grace=0`).
+8 discarded 180 chunks over 20 skips against round 1's 179 (mean 9.00, not 8.95), and
+`late_max` read 4 instead of 1 (service jitter, still 12 samples inside the 16-sample grace,
+`late_over_grace=0`). Every period row on this page — plus `silence_chunks_max`, `dropped`
+and `wait_periods_max` — is identical to the pre-truncate round-2 image's, diffed line for
+line: the truncate arm adds 4 settings and 4 × 20 × 36 = 2,880 discarded chunks to the
+sweep's `dropped` tally, and it changed no shared row. The two images' **totals** are not
+comparable and are not a witness: the play phase is VBlank-quantised, so the control printed
+`periods=10097 feeder_sum=224062697 feeder_max=34560 wrap=0 late_max=4 late_over_grace=0` and
+this image prints `periods=11000 feeder_sum=245259002 feeder_max=34563 wrap=0 late_max=4
+late_over_grace=0`, its `latency` sums moving by up to a period per skip for the same reason
+(this image's own code layout moved). Read the per-setting rows below, not the totals.
 
-| policy | prime | old audio periods | old audio ms | silence periods | silence ms | **to_new periods** | **to_new ms** | discarded/skip | underflows |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| drain | 2 | **37** | **1,264.6** | 2 | 68.4 | 39 | 1,333.0 | 0 | 0 |
-| drain | 4 | **37** | **1,264.6** | 4 | 136.7 | 41 | 1,401.4 | 0 | 0 |
-| drain | 8 | **37** | **1,264.6** | 8 | 273.4 | 45 | 1,538.1 | 0 | 0 |
-| drain | 16 | **37** | **1,264.6** | 16 | 546.9 | 53 | 1,811.5 | 0 | 0 |
-| drop | 2 | 1 | 34.2 | 38 | 1,298.8 | 39 | 1,333.0 | 36 | 0 |
-| drop | 4 | 1 | 34.2 | 40 | 1,367.2 | 41 | 1,401.4 | 36 | 0 |
-| drop | 8 | 1 | 34.2 | 44 | 1,503.9 | 45 | 1,538.1 | 36 | 0 |
-| drop | 16 | 1 | 34.2 | 52 | 1,777.3 | 53 | 1,811.5 | 36 | 0 |
+| policy | prime | `old_periods` (raw) | **old periods delivered** | old audio ms | silence periods | silence ms | **to_new periods** | **to_new ms** | discarded/skip | underflows |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| drain | 2 | 37 | **36** | **1,230.5** | 2 | 68.4 | 39 | 1,333.0 | 0 | 0 |
+| drain | 4 | 37 | **36** | **1,230.5** | 4 | 136.7 | 41 | 1,401.4 | 0 | 0 |
+| drain | 8 | 37 | **36** | **1,230.5** | 8 | 273.4 | 45 | 1,538.1 | 0 | 0 |
+| drain | 16 | 37 | **36** | **1,230.5** | 16 | 546.9 | 53 | 1,811.5 | 0 | 0 |
+| drop | 2 | 1 † | **0** | 0.0 | 38 | 1,298.8 | 39 | 1,333.0 | 36 | 0 |
+| drop | 4 | 1 † | **0** | 0.0 | 40 | 1,367.2 | 41 | 1,401.4 | 36 | 0 |
+| drop | 8 | 1 † | **0** | 0.0 | 44 | 1,503.9 | 45 | 1,538.1 | 36 | 0 |
+| drop | 16 | 1 † | **0** | 0.0 | 52 | 1,777.3 | 53 | 1,811.5 | 36 | 0 |
+| truncate | 2 | 1 † | **0** | 0.0 | 2 | 68.4 | **3** | **102.5** | 36 | 0 |
+| truncate | 4 | 1 † | **0** | 0.0 | 4 | 136.7 | **5** | **170.9** | 36 | 0 |
+| truncate | 8 | 1 † | **0** | 0.0 | 8 | 273.4 | **9** | **307.6** | 36 | 0 |
+| truncate | 16 | 1 † | **0** | 0.0 | 16 | 546.9 | **17** | **581.1** | 36 | 0 |
+
+† **One instrument reading, one convention, all three arms.** The raw column is what the log
+prints, and `old_periods` is defined above as *periods from the mark until the first silent
+chunk on the wire* — so its last period is already silence, and the delivered column is that
+reading **minus one**, arithmetic shown: drain 37 − 1 = 36 (the whole queue — those chunks
+*are* the old track), drop and truncate 1 − 1 = 0. No arm can read 0 raw: `silent_at` latches
+at `at + 1` when the first post-mark chunk is silent, so 1 is the wire watch's floor, not a
+delivery. That the two non-drain arms deliver nothing is a separate fact from the mechanism —
+`drop` takes the stale chunk and fills the buffer with zeros before re-arming the DMA
+(`probe_hw::feeder`); `truncate` steps over the queued span, the fade-out chunk included,
+without delivering it. **Every row in this table satisfies `to_new = delivered + silence + 1`**
+— 36 + 2 + 1 = 39, 0 + 38 + 1 = 39, 0 + 2 + 1 = 3 — which is the check that the columns are
+one metric read three ways and not three metrics.
 
 All 20 skips of every deep setting read the same `min` and `max` (the stale window is a
 fixed number of chunks), so these are means that are also minima and maxima.
 
+**The truncate arm is the one that shortens the window, and it reads `to_new = prime + 1` at
+every setting** (`3/5/9/17` periods, `min == max`, 20 skips each). The 36-chunk queue
+contributes nothing at all: `RingFeed::truncate` steps the consumer cursor to the producer's
+frontier inside the same critical section `take_chunk` runs in, so the stale span is never
+delivered — the fade-out chunk included, which is why **zero periods of old-track audio
+reach the DMA** — and the cover is immediately the newest data. The silence gap is exactly
+the cover (`silence_chunks_max` = 2/4/8/16 chunks = 68.4/136.7/273.4/546.9 ms), not the cover
+*plus* 36 discards.
+
 **The measurement §4.4's 1.23 s sentence is about: the old track's audio keeps reaching the
-DMA for 37 periods = 1,264.6 ms** — 36 queued chunks plus the period in flight when the mark
-lands, identical at every prime setting because the cover is queued *behind* the queue.
+DMA for 36 periods = 1,230.5 ms** (raw `old_periods` 37 — the 36 deliveries plus the boundary
+period the † note prices), identical at every prime setting because the cover is queued
+*behind* the queue: the 36 chunks resident at the mark go out one per period. The chunk
+already in the DMA when the mark lands was handed *before* it and is in neither column.
 (`deep` fills 35 chunks and lets the fade-out push take the 36th; the product's own producer
 waits for room for a 2,048-sample frame, so it settles at `RING − 2,048` ≈ 32 chunks ≈ 33
 periods — the arm is the ceiling of the same regime, not a different one.)
 
 **And the drop policy does not shorten it.** On the deep rows `to_new_periods` is *identical*
-on the drain and drop rows at every setting (39/41/45/53 periods = 1.33/1.40/1.54/1.81 s).
-What the policy decides is what is *heard* during that window: the drain plays 37 periods of
-the old track, the drop replaces them with 38/40/44/52 periods of silence. The `1` on the
-drop rows is the period in flight when the mark lands — inferred from the delivery order,
-not measured on the wire: the drop arm's watch never observes a non-silent chunk, so
-`silent_at` is `at + 1` on all 20 skips. **Neither policy is inside §4.4's ≤ ~0.6 s at the
-deep depth — the ceiling of the shipped ~32-chunk regime, so the shipped depth is no
-faster.** The silence cover (`SKIP_PRIME_CHUNKS`, 2–16 periods = 68–547 ms) is a rounding
-error next to the queue.
+on the drain and drop rows at every setting (39/41/45/53 periods = 1.33/1.40/1.54/1.81 s) —
+only the truncate row moves, and it moves all the way.
+What the policy decides is what is *heard* during that window: the drain plays 36 periods of
+the old track (raw 37), the drop replaces them with 38/40/44/52 periods of silence, the
+truncate with the cover alone. Neither drop nor truncate lets a single period of the old track through —
+the drop's buffer is zeroed before the DMA re-arms, the truncate's span is never taken — and
+both watches read `old_periods` 1 only because `silent_at` is `at + 1` on all 20 skips, the
+metric's floor, not a delivery (see the table's † note). **Neither drain nor drop is inside
+§4.4's ≤ ~0.6 s at the deep depth — the ceiling of the shipped ~32-chunk regime, so the
+shipped depth is no faster. The truncate arm is inside it at every prime setting measured
+(102.5–581.1 ms).** The silence cover (`SKIP_PRIME_CHUNKS`, 2–16 periods = 68–547 ms) is a
+rounding error next to the queue — until the queue is truncated, when it becomes the entire
+cost.
 
 #### The shallow arm — round 1's rows, re-derived and relabelled
 
-| policy | prime | old audio periods (mean, min/max) | silence periods | to_new periods (mean, min/max) | to_new ms | discarded/skip | underflows |
-|---|---:|---|---:|---|---:|---:|---:|
-| drain | 2 | 4.65 (93/20), 4/17 | 2 | 6.65 (133/20), 6/19 | 227.3 | 0 | 0 |
-| drain | 4 | 6.0, 6/6 | 4 | 10.0, 10/10 | 341.8 | 0 | 0 |
-| drain | 8 | 10.0, 10/10 | 8 | 18.0, 18/18 | 615.2 | 0 | 0 |
-| drain | 16 | 18.0, 18/18 | 16 | 34.0, 34/34 | 1,162.1 | 0 | 0 |
-| drop | 2 | 1.0, 1/1 | 5.7 (114/20), 5/19 | 6.7 (134/20), 6/20 | 229.0 | 3.7 | 0 |
-| drop | 4 | 1.0, 1/1 | 9 | 10.0, 10/10 | 341.8 | 5 | 0 |
-| drop | 8 | 1.0, 1/1 | 17.0 (340/20), 17/17 | 18.0, 18/18 | 615.2 | 9.00 | 0 |
-| drop | 16 | 1.0, 1/1 | 33 | 34.0, 34/34 | 1,162.1 | 17 | 0 |
+| policy | prime | `old_periods` raw (mean, min/max) | old periods delivered | silence periods | to_new periods (mean, min/max) | to_new ms | discarded/skip | underflows |
+|---|---:|---|---|---:|---|---:|---:|---:|
+| drain | 2 | 4.65 (93/20), 4/17 | 3.65 (73/20), 3/16 | 2 | 6.65 (133/20), 6/19 | 227.3 | 0 | 0 |
+| drain | 4 | 6.0, 6/6 | 5.0, 5/5 | 4 | 10.0, 10/10 | 341.8 | 0 | 0 |
+| drain | 8 | 10.0, 10/10 | 9.0, 9/9 | 8 | 18.0, 18/18 | 615.2 | 0 | 0 |
+| drain | 16 | 18.0, 18/18 | 17.0, 17/17 | 16 | 34.0, 34/34 | 1,162.1 | 0 | 0 |
+| drop | 2 | 1 †, 1/1 | **0** | 5.7 (114/20), 5/19 | 6.7 (134/20), 6/20 | 229.0 | 3.7 | 0 |
+| drop | 4 | 1 †, 1/1 | **0** | 9 | 10.0, 10/10 | 341.8 | 5 | 0 |
+| drop | 8 | 1 †, 1/1 | **0** | 17.0 (340/20), 17/17 | 18.0, 18/18 | 615.2 | 9.00 | 0 |
+| drop | 16 | 1 †, 1/1 | **0** | 33 | 34.0, 34/34 | 1,162.1 | 17 | 0 |
+
+† Same convention as the deep table, and the delivered column is the raw reading minus one
+*per skip* — so a mean of 4.65 over 20 skips is 3.65 delivered, its min/max 4/17 are 3/16, and
+the raw sums (93, 133, …) are not the delivered sums. The `drop` rows' raw 1 is the
+instrument's floor (`silent_at = at + 1`), so nothing of the old track reaches the DMA after
+the mark; the `drain` rows' readings are the old track playing out.
 
 The shallow arm's `to_new` is `queue + 1 + cover + 1` ≈ `2 × prime + 2` periods, so it reads
 the *sum* of the two knobs this sweep varies. That is why the two depths are not redundant:
@@ -334,40 +400,46 @@ The `silence_chunks_max` line is still the longest run of all-zero chunks the fe
 for `drain` rows it re-states the cover exactly (`prime` chunks × 560 = `gap_samples`, by
 construction), and for `drop` rows it is the discards **plus** the cover (e.g. 36 + 4 = 40 at
 `deep`, prime 4). The sweep's feeder total is
-`periods=10097 feeder_sum=224062697 feeder_max=34560 wrap=0 late_max=4 late_over_grace=0`; that worst period
+`periods=11000 feeder_sum=245259002 feeder_max=34563 wrap=0 late_max=4 late_over_grace=0` (the
+20-setting sweep); that worst period
 is the probe's own silence-run scan — 34,560 against the UI probe's 5,260 is the scan's
 ~29,000 cycles — an instrument cost, not a shipped one.
 
 #### The ceiling, honestly: consuming-and-discarding costs one period per queued chunk
 
-The DMA cannot be emptied faster than the hardware reads it. `RingFeed` cannot truncate —
-`consumed` is private and only `take_chunk` moves it — so every implementation of "dropped,
-not played" that the *application* can write costs exactly one period per stale chunk, and
-at the ring's 36-chunk ceiling that is 36 × 34.18 = **1,230.5 ms**. Both host tests pin the arithmetic
-against the real ring type (`discarding_a_full_ring_costs_one_period_per_queued_chunk`,
-`a_skip_at_the_shipped_depth_costs_the_queue_plus_the_cover`). That test name says "shipped
-depth" and means the ceiling; the identifier is the one older than the correction in
-"The deep arm" above, and the README's prose is what should be believed.
+The DMA cannot be emptied faster than the hardware reads it, so *consume-and-discard* costs
+exactly one period per stale chunk: at the ring's 36-chunk ceiling, 36 × 34.18 = **1,230.5
+ms**. Two host tests pin that arithmetic against the real ring type
+(`discarding_a_full_ring_costs_one_period_per_queued_chunk`,
+`a_skip_at_the_shipped_depth_costs_the_queue_plus_the_cover`); both live in
+`examples/album_probe/tests/album_probe_host.rs` and drive `album_probe::playback::RingFeed`,
+i.e. the crate's type now, not a model of it.
 
-A **truncate** — advancing the consumer cursor past the queue in one step — would delete
-exactly that window, leaving only the cover in front of the new track:
+**`RingFeed::truncate()` landed with the §2.2 lift on 2026-11-15**, so this is no longer a
+sketch: the `truncate` arm in "The deep arm" above drives the shipped method and its four
+`playback-test` unit tests, and the rows below are the emulator's readings rather than
+the ring's arithmetic.
 
-| prime | measured `to_new` (both policies) | with a truncate | what a truncate buys |
+| prime | measured `to_new`, drain/drop | measured `to_new`, truncate | what truncate buys |
 |---:|---|---:|---:|
 | 2 | 39 periods = 1,333.0 ms | 3 periods = **102.5 ms** | 36 periods = 1,230.5 ms |
 | 4 | 41 periods = 1,401.4 ms | 5 periods = **170.9 ms** | 36 periods = 1,230.5 ms |
 | 8 | 45 periods = 1,538.1 ms | 9 periods = **307.6 ms** | 36 periods = 1,230.5 ms |
 | 16 | 53 periods = 1,811.5 ms | 17 periods = **581.1 ms** | 36 periods = 1,230.5 ms |
 
-Every truncate row is inside §4.4's observable; every measured row is outside it. The
-truncate would need a new method on `examples/flac_spike/src/playback.rs`, a file whose own
-docs say changing it changes both shipped product images and whose witness is
-`make flac-check` — **so this change was not made**, and the `SKIP_PRIME_CHUNKS` decision is
-**blocked** on the owner ruling below. **Ruled 2026-11-14: truncate is the mechanism.**
-Ruled again on 2026-11-15 about *whose* ruling it was: the blocker is now
-`ALBUM-PLAYER.md` §2.2's lift of this feeder out of a spike directory into project
-source, which this application owns. The value stays un-chosen here; nothing is
-waiting on another track.
+Two things the measurement settles, and one it deliberately does not:
+
+- **The queue's depth stops mattering.** Every truncate row is `prime + 1` periods at the
+  ring's maximum depth (35 queued chunks + the fade-out's 36th). The 36-chunk term that
+  dominates drain and drop is gone, not reduced.
+- **§4.4's ≤ ~0.6 s holds at prime 4** — 5 periods = 170.9 ms, 12.6 periods of margin — and
+  also at prime 16 (17 periods = 581.1 ms, inside by half a period). At prime 2 it is
+  102.5 ms. So the answer is **not** insensitive to prime: it is linear in it
+  (`to_new = prime + 1`), and the budget the observable sets only starts to bind somewhere
+  past prime 16. With a truncate in the ring, `SKIP_PRIME_CHUNKS` is not a gap-budget
+  question any more — what it still buys is the length of the silence the listener hears
+  between tracks, which this probe cannot hear. **The constant stays un-chosen here**
+  (§4.4 below): it is a Phase-1 product choice, and this PR is not the place to make it.
 
 #### AP-0's question, adopted into `ALBUM-PLAYER.md` §15 as Q13b — including the part AP-0 got wrong
 
@@ -390,20 +462,21 @@ waiting on another track.
 > is a decode-margin decision (a shallow queue means less room for a slow FLAC frame), not a
 > skip-policy one.
 
-**Corrected 2026-11-15.** The paragraph above reads "the codec track's file, not the
-application's, which is exactly the boundary Q13 draws", and that was wrong in a way
-worth keeping visible: `examples/flac_spike/` is a **spike directory** — code that lives
-there exists to gather information while the Rust + ASM FLAC implementation is
-developed, and is meant to be thrown away. Nothing that answers to "the codec track"
-ever owned the ring; the ring is simply parked somewhere it should not be depended on.
-`ALBUM-PLAYER.md` §2.2 now rules that no Phase 1 module may `#[path]`-include a spike or
-instrument directory, and that `playback.rs` (with `checksum.rs`, and the `e5_fetch`
-cycle counter this probe also borrows) is lifted into project source first — proposal:
-`crates/gba-playback`. **`truncate()` lands on the lifted type, and the application owns
-both moves.** The lift is a measured change rather than a rename: `playback.rs` is
-compiled into both shipped product images, so moving it re-baselines their bytes, and its
-unit suite has to travel with it or `make flac-check` quietly stops witnessing it. That
-work is deliberately out of this PR — see "What this directory is not" above.
+**Landed 2026-11-15.** The paragraph above reads "the codec track's file, not the
+application's, which is exactly the boundary Q13 draws", and that was wrong in a way worth
+keeping visible: `examples/flac_spike/` is a **spike directory** — code that lives there
+exists to gather information while the Rust + ASM FLAC implementation is developed, and is
+meant to be thrown away. Nothing that answers to "the codec track" ever owned the ring; the
+ring was simply parked somewhere it should not be depended on. `ALBUM-PLAYER.md` §2.2 now
+rules that no Phase 1 module may `#[path]`-include a spike or instrument directory, and the
+lift has happened: `playback.rs` and `checksum.rs` MOVED (not copied) to
+`crates/gba-playback`, so the quoted `examples/flac_spike/src/playback.rs` above no longer
+exists — the crate named in the table row is its home now. The
+probe and both product images depend on that crate, `RingFeed::truncate()` landed on it with
+four host tests, and `make flac-check` gained `make playback-test`. The skip ROM's own
+`truncate` arm is the measurement the ruling owed — see the table above. What the lift did
+*not* do is choose `SKIP_PRIME_CHUNKS` (§4.4 below); the `e5_fetch` cycle counter and
+`geometry.rs` remain borrowed, so §2.2's debt list is shorter but not empty.
 
 #### Where `underflows = 0` is a measurement and where it is structural
 
@@ -420,7 +493,17 @@ The reviewer's check, answered where it can be answered:
   that finds the ring empty cannot happen *while stale chunks remain* — the drop arm's
   `starved=0` is a weaker statement than the drain arm's, and it is why the two are
   reported separately.
-- **Structurally impossible in both:** the fade-out push itself, which always lands in a
+- **`truncate` arms: structural for one period, then a margin.** Step 2's
+  `probe_hw::truncate_stale` truncates and pushes the cover's first chunk inside one critical
+  section, so the feeder never observes an empty ring with the producer still running: it
+  either took its chunk before that section (the ring was full) or it takes the cover's head
+  after it. That head is what makes the first period safe by construction; the rest of the
+  cover merely has to land inside the period that head buys, and a chunk push is ~1% of a
+  period (5,000 cycles against 573,440), so the margin is wide but it is a margin, not a
+  proof. 0 underflows in 80 truncate skips (`starved=0`, `dropped=720` per setting = 20 × 36
+  whole chunks, 2,880 across the four settings) is that combination — not the drain arm's
+  timing measurement, and not a structural guarantee either.
+- **Structurally impossible in all three:** the fade-out push itself, which always lands in a
   non-empty ring.
 - **Not witnessed at all:** whether a *real* decoder could miss a period during a skip's
   re-prime. The synth's chunk costs ~1% of a period; the shipped FLAC worst frame is 18.99%
@@ -442,7 +525,7 @@ belongs on.
 | feeder (convert + push + IRQ) | shipped figure, carried in | 5,238 cyc/period mean, 5,260 max (`full` arm) = **0.92%** | measured here, shipped path |
 | UI: key read, position, bar + 2 text lines, palette fade | **≤ 2% of audio time** | **1.89%** (5,306 cyc/frame ⇒ 10,832 of a 573,440-cycle period; 1.92% of the closure window) | **AP-0 measured — a lower bound** |
 | viz tick (1–2 ROM reads + table + tiles/sprites) | ≤ 1% | not measured | AP-6 |
-| art upload (rare, on screen change) | ≤ 1 period, off the audio path | 346,057 live = **0.60 period** (339,013 disarmed) | AP-0 first data point; AP-4 owns |
+| art upload (rare, on screen change) | ≤ 1 period, off the audio path | 343,032 live = **0.60 period** (335,990 disarmed; fourth reading of the same code, see the art section) | AP-0 first data point; AP-4 owns |
 | game tick (≤ 12 objects) | ≤ 3%, admitted by watermark | not measured | AP-8 |
 | **reserve** | **≥ 20%** | not measured | after AP-6 and AP-8 |
 
@@ -462,30 +545,28 @@ are carried in from the product log, not re-measured by a probe.
 `~281,000 cycles/frame` → **280,896 measured, min = max over 59 windows** (59.73 Hz). The
 period is 573,440 and a 2,048-sample frame is 3.657 periods, as geometry pins them.
 
-### §4.4 — `SKIP_PRIME_CHUNKS`: **blocked**, not chosen
+### §4.4 — `SKIP_PRIME_CHUNKS`: un-chosen, and no longer blocked
 
-*Status 2026-11-15: the decision (truncate the ring at step 2) is ruled, and so is the
-ownership — `ALBUM-PLAYER.md` §2.2 lifts the feeder out of `examples/flac_spike/` into
-project source that this application owns, and `truncate()` lands with it. The value is
-still un-chosen because that lift has not happened yet, not because another track has to
-agree.*
+*Status 2026-11-15 (updated): the mechanism (truncate the ring at step 2) is ruled and
+**landed** — `RingFeed::truncate()` moved with the §2.2 lift into `crates/gba-playback`, the
+skip ROM's `truncate` arm measures the shipped method, and `make playback-test` witnesses it
+on the host. The constant itself is still un-chosen: it is a Phase-1 product choice, and this
+record is not the place to make it.*
 
-**No value is chosen, because the number §4.4's observable turns on is the queue's depth, not
-the cover.** At the ceiling depth both available policies read 39–53 periods (1.33–1.81 s)
-to new-track audio against the ≤ ~0.6 s observable, and the cover accounts for only 2–16 of
-those periods. The shallow rows price the cover by itself (2–16 periods = 68–547 ms) and put
-the depth term beside it: `to_new ≈ queue + 1 + cover + 1`. To come inside the observable
-with drain-or-drop the queue would have to be ≤ 13 chunks at prime 2 (`17.6 − 2 − 2`), which
-is a decode-margin decision (a shallow queue is less room for a slow FLAC frame), not a
-skip-policy one. With a truncate, every prime in the sweep fits: 102.5 / 170.9 / 307.6 /
-581.1 ms.
+**What changed, and what did not.** Before the truncate landed, the number §4.4's observable
+turned on was the queue's depth: at the ceiling depth drain and drop both read 39–53 periods
+(1.33–1.81 s) against the ≤ ~0.6 s observable, and the cover accounted for only 2–16 of
+those periods (`to_new ≈ queue + 1 + cover + 1`). With the truncate measured, the queue term
+is gone and `to_new = prime + 1` at every prime in the sweep: **102.5 / 170.9 / 307.6 / 581.1
+ms**, all inside the observable. So the observable no longer constrains the constant; what it
+still buys is the silence the listener hears between tracks, which is a musical decision and
+unmeasured here.
 
-The decision is therefore blocked on **Q13b** (proposed above, beside Q13 in §15 — the same
-"where does the codec track end and the app begin" boundary). What AP-0 can state now, all
-measured: `underflows=0` and `starved=0` in all 320 skips across the 16 settings; the old
-track keeps reaching the DMA for 37 periods (1,264.6 ms) at the ceiling depth; the drop
-policy buys *silence instead of old-track audio* and buys **no time at all** under the
-shipped `RingFeed`; and the cover is the small term.
+What AP-0 can state, all measured: `underflows=0` and `starved=0` in all 400 skips across the
+20 settings; the old track keeps reaching the DMA for 36 periods (1,230.5 ms) at the ceiling
+depth under `drain` and for **none** of them under `drop` or `truncate`; the drop policy buys
+*silence instead of old-track audio* and buys **no time at all**; the truncate buys the whole
+queue's worth of time (1,230.5 ms) and leaves only the cover in front of the new track.
 
 Round 1's `SKIP_PRIME_CHUNKS = 4` reading (4,007,200 cycles = 238.8 ms) was a **shallow
 drain**, not §4.4's policy at §4.4's depth: the equivalent row here is
@@ -526,7 +607,7 @@ correctness from an mGBA run.
   a screenshot) that all three backgrounds persist every frame, the object animates, the
   fade moves, and the 120×120 card renders with its colour bars, dither ramp and tile grid.
 - **The 16-sample re-arm grace.** `late_max=0` in the UI and art arms, and `late_max=4`
-  with `late_over_grace=0` over the skip sweep's 10,097 periods: mGBA never delayed the
+  with `late_over_grace=0` over the skip sweep's 11,000 periods: mGBA never delayed the
   period IRQ meaningfully, so the grace path was never exercised — the probe proves the
   *normal* path is nowhere near it, nothing more.
   *Settling run:* hardware, where IRQ latency is real, reading `late_max`/`late_over_grace`
@@ -537,11 +618,19 @@ correctness from an mGBA run.
   probe can say which bytes went to the DMA, not what they sounded like. *Settling run:* the
   same skip ROM on hardware with line-out recorded, both policies, listening for the seam and
   for a click at the discard-to-new-audio boundary.
-- **The truncate's numbers are arithmetic, not a measurement.** A `RingFeed` truncate was
-  not implemented (Q13b), so 102.5–581.1 ms is what the ring's own geometry says a
-  one-step cursor advance would leave in front of the new track — host-side arithmetic, not
-  an emulator reading, and it assumes nothing else changes (the cover and fade-in still have
-  to be pushed).
+- **The truncate now has numbers, and what they still cannot say.** `RingFeed::truncate`
+  landed with the §2.2 lift, so 102.5–581.1 ms is an emulator reading (`to_new` 3/5/9/17
+  periods over 20 skips per prime, `min == max`) rather than the geometry's arithmetic. What
+  is unverified is the part no counter can reach: whether stepping the consumer cursor over
+  a queued span sounds like a clean seam or like the track starting late, which needs the
+  recorded-line-out run below. **And the skip this arm measures is a hard cut, not a faded
+  one:** `truncate_stale` steps over the fade-out chunk along with the rest of the queue, so
+  no fade is delivered, and the chunk already in the DMA when the mark lands is spliced
+  straight into silence. §4.4's observable row — "Clicks / pops at the transition: none:
+  fades, never a mid-waveform splice" — is therefore **not** met by the mechanism this PR
+  lands; it is met by the sequence, and the splice at a truncate is AP-1's to hear (or to
+  re-shape, by truncating to the fade's end rather than to the producer's frontier). The four `playback-test` host tests witness the ring's side of
+  it only (`ready() == 0`, `consumed() == pushed()`, the next frame delivered whole).
 - **A real decoder during a skip's re-prime.** The probe's producer is a synth chunk that
   costs ~5,000 cycles against a 573,440-cycle period, so "the producer keeps up while the
   queue is discarded and re-primed" is a property of the probe. The shipped FLAC worst frame
@@ -571,13 +660,16 @@ Caveats that qualify the numbers:
   which one feeder period (5,032) is a named cause and the rest is the layout sensitivity
   above. One sample, one emulator, warm allocator — an artefact to re-measure, not a budget
   line.
-- **The skip's two policies read almost the same latency and different audio.** Measured,
-  not argued: `to_new_periods` is *identical* on the deep rows (39/41/45/53) and on the
+- **Drain and drop read almost the same latency and different audio; truncate reads both
+  different.** Measured, not argued: `to_new_periods` is *identical* on the drain and drop
+  deep rows (39/41/45/53) and on the
   shallow rows at primes 4/8/16 (10/18/34), and within one period at shallow prime 2 — drain
   mean 6.65 (sum 133, max 19) against drop 6.7 (sum 134, max 20), a difference the first
   skip's bootstrap prefill explains, not the policy — because consume-and-discard costs one
   period per queued chunk exactly as playing it does. The drop's contribution is that the
-  window is *silent* instead of the old track.
+  window is *silent* instead of the old track. The truncate arm was measured at the deep
+  depth only (that is the ceiling §4.4's row is about), and there it reads 3/5/9/17 periods —
+  the one place the policy itself moves `to_new`.
   Round 1's "plus ~100 ms of settle" note was wrong: the settling frames cost ~2 periods
   there, and the play phase is now bounded in periods (≥ 3) instead of frames, so `latency`
   reads `to_new` plus that play.
@@ -602,7 +694,7 @@ Caveats that qualify the numbers:
 - **The skip sweep's feeder max (34,560) is a probe instrument** (the silence-run scan), not
   a shipped cost; the shipped-feeder figure is the UI probes' 5,260 worst period.
 - **`late_max=0` is one emulator's ordering**, not proof the grace is redundant. The skip
-  sweep's total reads `late_max=4 late_over_grace=0` over 10,097 periods: four services
+  sweep's total reads `late_max=4 late_over_grace=0` over 11,000 periods: four services
   entered up to 4 samples into their period, all twelve samples inside the grace. The marks are
   cumulative across the sweep (they are not part of `reset_marks`'s per-setting reset), so
   that is the whole run, not the last setting.

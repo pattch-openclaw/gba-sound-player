@@ -1,5 +1,5 @@
 //! Skip spike: ALBUM-PLAYER.md §4.4's six steps against the real ring, sweeping
-//! `SKIP_PRIME_CHUNKS`, both queue policies and both queue depths (Phase 0 (c),
+//! `SKIP_PRIME_CHUNKS`, all three queue policies and both queue depths (Phase 0 (c),
 //! §13 AP-0).
 //!
 //! The observable the spec rules on is what the listener hears at a skip, and the
@@ -8,19 +8,26 @@
 //!
 //! ## §4.4 step 2: "the queued chunks are dropped, not played"
 //!
-//! The shipped `RingFeed` cannot truncate — `consumed` is private and only
-//! `take_chunk` moves it — so a drop has to be implemented where the feeder is:
-//! during the stale window the feeder keeps taking a whole chunk per period (so
-//! `consumed` advances and the DMA never sees a short buffer) and hands the DMA
-//! silence instead of the queued audio ([`probe_hw::drop_stale`]). That is the
-//! `drop` policy. `drain` is the opposite reading and round 1's implementation: the
-//! producer stops and the queue plays out to `ready() == 0`.
+//! Three policies, all against the shipped `RingFeed`:
+//!
+//! - `drain` — round 1's implementation: the producer stops and the queue plays
+//!   out to `ready() == 0`.
+//! - `drop` — the queued span has to be implemented where the feeder is: during
+//!   the stale window the feeder keeps taking a whole chunk per period (so
+//!   `consumed` advances and the DMA never sees a short buffer) and hands the DMA
+//!   silence instead of the queued audio ([`probe_hw::drop_stale`]).
+//! - `truncate` — `RingFeed::truncate`, landed with the §2.2 lift: the consumer's
+//!   cursor steps to the producer's frontier in the same critical section
+//!   `take_chunk` runs in ([`probe_hw::truncate_stale`]), so the stale span is
+//!   never delivered at all; the cover's first chunk is pushed in that same
+//!   section, so the feeder never observes the emptied ring either.
 //!
 //! Dropping costs one period per queued chunk, exactly as draining does: the DMA
-//! cannot be emptied faster than the hardware reads it. What the policy decides is
-//! what is *heard* during that window — the old track continuing, or silence — and
-//! only a `RingFeed` truncate would make it shorter. Both are measured, so the
-//! ceiling is a number rather than a caveat.
+//! cannot be emptied faster than the hardware reads it. What `drain` and `drop`
+//! decide is what is *heard* during that window — the old track continuing, or
+//! silence. Truncate is the only policy that makes the window shorter, because
+//! there is nothing left for the feeder to read out. All three are measured, so
+//! §4.4's ceiling is a number rather than a caveat.
 //!
 //! ## Two depths
 //!
@@ -38,7 +45,7 @@
 //! ## The three quantities every row reports
 //!
 //! All three come from [`probe_hw`]'s wire watch, i.e. from the bytes the DMA was
-//! handed, so both policies are asked the identical question:
+//! handed, so every policy is asked the identical question:
 //!
 //! - `old_periods` — periods from the skip until the first silent chunk on the
 //!   wire: how long the old track's audio kept reaching the DMA;
@@ -55,7 +62,8 @@
 //!    producer is still running, and that would be a counted underflow).
 //! 2. **Mark the ring stale**, by policy: `drain` plays the queue out to
 //!    `ready() == 0`; `drop` tells the feeder to consume-and-discard everything
-//!    queued so far, and the producer goes straight on to re-prime.
+//!    queued so far; `truncate` steps over it in one critical section. In the
+//!    last two the producer goes straight on to re-prime.
 //! 3. **Re-seek** the synthetic source (`Synth::start_track`, the seam call).
 //! 4. **Feed silence chunks** as *real* ring data (`push_bytes` of zeros), so the
 //!    DMA keeps getting a whole chunk every period and the underrun counter stays
@@ -117,6 +125,9 @@ enum Policy {
     Drain,
     /// The feeder consumes the queued chunks and puts silence on the wire.
     Drop,
+    /// The consumer's cursor steps to the producer's frontier: the queued span is
+    /// never delivered and the re-prime starts from an empty ring.
+    Truncate,
 }
 
 impl Policy {
@@ -124,6 +135,7 @@ impl Policy {
         match self {
             Policy::Drain => "drain",
             Policy::Drop => "drop",
+            Policy::Truncate => "truncate",
         }
     }
 }
@@ -165,8 +177,10 @@ struct Arm {
     depth: Depth,
 }
 
-/// The arms, shallow-drain first so its rows line up with round 1's.
-const ARMS: [Arm; 4] = [
+/// The arms, shallow-drain first so its rows line up with round 1's. Truncate
+/// runs at the deep queue only: the ceiling §4.4's row claims is the deep one, and
+/// the sweep is already ~340 s of emulated audio under the runner's 300 s leash.
+const ARMS: [Arm; 5] = [
     Arm {
         policy: Policy::Drain,
         depth: Depth::Shallow,
@@ -181,6 +195,10 @@ const ARMS: [Arm; 4] = [
     },
     Arm {
         policy: Policy::Drop,
+        depth: Depth::Deep,
+    },
+    Arm {
+        policy: Policy::Truncate,
         depth: Depth::Deep,
     },
 ];
@@ -295,6 +313,7 @@ fn run_setting(
         failed |= probe_hw::push_fade_out(synth, scratch).is_err();
 
         // 2. Mark the ring stale, by policy.
+        let mut covered = 0usize;
         match arm.policy {
             // Drain: producer stops, the feeder plays the queue out.
             Policy::Drain => {
@@ -308,6 +327,16 @@ fn run_setting(
             // period because that is how fast the DMA reads; the producer re-primes
             // immediately and waits for the room each discard frees.
             Policy::Drop => probe_hw::drop_stale(),
+            // Truncate: one critical section moves the cursor past the queued span
+            // *and* pushes the cover's first chunk, so there is neither a stale
+            // window to step through nor an empty-ring window for a period to land
+            // in. `truncate_stale` counts the discarded whole chunks into
+            // `Stats::dropped`, which is what the pass gate reads below; `covered`
+            // is the part of step 4's cover that critical section already pushed.
+            Policy::Truncate => match probe_hw::truncate_stale(cover) {
+                Ok(head) => covered = head,
+                Err(_) => failed = true,
+            },
         }
 
         // 3. Re-seek. Alternate direction so both `i ± 1` seams are exercised.
@@ -320,13 +349,16 @@ fn run_setting(
         synth.start_track(next);
 
         match arm.policy {
-            // 4. Silence cover: real ring data, one whole chunk per period.
+            // 4. Silence cover: real ring data, one whole chunk per period. The
+            // truncate arm shares the drain shape, and legally so: `truncate_stale`
+            // already pushed the cover's head inside its critical section, so the
+            // remainder fits in one push with no wait (`free() == RING - CHUNK`).
             Policy::Drain => failed |= probe_hw::push_silence(cover).is_err(),
+            Policy::Truncate => failed |= probe_hw::push_silence(cover - covered).is_err(),
             // The drop arm's ring is still full of stale chunks, so each cover chunk
             // waits for the discard that frees its room — and lands behind the stale
             // ones, which is why the policy cannot arrive any sooner.
             Policy::Drop => {
-                let mut covered = 0usize;
                 while covered < cover {
                     failed |= !probe_hw::wait_free(CHUNK);
                     failed |= probe_hw::push_silence(CHUNK).is_err();
@@ -335,9 +367,13 @@ fn run_setting(
             }
         }
 
-        // 5. Re-prime: fade-in at the head, then real audio behind it.
+        // 5. Re-prime: fade-in at the head, then real audio behind it. Truncate
+        // takes the drain shape on purpose — the point being measured is that the
+        // deep queue is restored *after* the seam, so `to_new_periods` stays
+        // comparable with the other policies' rows rather than being an artefact of
+        // a shallower re-prime.
         match arm.policy {
-            Policy::Drain => {
+            Policy::Drain | Policy::Truncate => {
                 failed |= probe_hw::push_fade_in(synth, scratch).is_err();
                 failed |= probe_hw::fill_to(synth, target + LEAD_CHUNKS * CHUNK, scratch).is_err();
             }
@@ -511,9 +547,9 @@ fn run(gba: &mut Gba) -> bool {
             report(&result);
             // An underflow during a skip is the one thing §4.4 forbids; a wrapped
             // window, an unresolved watch or a refused push is a failed instrument.
-            // A `drop` row that discarded nothing means the window never opened, so
-            // the policy was not actually measured — refuse it rather than print a
-            // clean number for it.
+            // A `drop` or `truncate` row that discarded nothing means the window
+            // never opened, so the policy was not actually measured — refuse it
+            // rather than print a clean number for it.
             pass &= !result.failed
                 && result.underflows == 0
                 && result.latency.wrapped == 0
@@ -538,7 +574,7 @@ fn run(gba: &mut Gba) -> bool {
 
     if pass {
         agb::println!(
-            "[album-probe] PASS skip policies=[drain, drop] queues=[shallow, deep] primes={:?} underflows=0 audio=live",
+            "[album-probe] PASS skip policies=[drain, drop, truncate] queues=[shallow, deep] primes={:?} underflows=0 audio=live",
             PRIME_SET
         );
     } else {

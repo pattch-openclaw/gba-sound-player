@@ -214,9 +214,23 @@ pub struct Stats {
     pub silence_run_max: u32,
     /// `Starved` while the producer was still running: the underflow count.
     pub underflows: u32,
-    /// Periods whose ring chunk was consumed and then replaced with silence,
-    /// because the producer had marked it stale ([`drop_stale`]): §4.4's
-    /// "dropped, not played" on a ring that cannot truncate.
+    /// Stale audio kept off the wire: for the `drop` policy, periods whose ring
+    /// chunk was consumed and then replaced with silence because the producer had
+    /// marked it stale ([`drop_stale`]); for the `truncate` policy, the whole
+    /// chunks [`truncate_stale`] stepped over. A truncate counts whole chunks only:
+    /// a remainder below one chunk is discarded, not counted, and it is **0 for
+    /// every skip this probe performs** — all three producers here (`push_fade_out`,
+    /// `push_silence`, `fill_to`) push whole chunks, so the frontier is always
+    /// chunk-aligned and the rule is defensive bookkeeping, not an uncounted discard.
+    ///
+    /// **The two units are not comparable**, so do not read the policies' values
+    /// against each other: `drop` counts *periods* (one chunk per period, however
+    /// much of the chunk was stale), `truncate` counts *whole chunks stepped over*.
+    /// The deep `drop` and `truncate` rows both reading 36 per skip (720 per
+    /// setting) is that coincidence of 35 queued chunks + the fade-out push, and it
+    /// is the same 36 chunks of old audio kept off the wire either way — what
+    /// differs between them is the **time** cost (36 feeder periods for `drop`, none
+    /// for `truncate`), not the amount discarded.
     pub dropped: u32,
     /// Worst lateness of a period service, in samples into the period, and how
     /// many services entered later than the 16-sample re-arm grace.
@@ -808,6 +822,56 @@ pub fn drop_stale() {
         let frontier = FEED.borrow_ref(cs).pushed();
         *DROP.borrow_ref_mut(cs) = frontier;
     });
+}
+
+/// Step over the queued span instead of waiting for the feeder to discard it
+/// (ALBUM-PLAYER.md §4.4 step 2, the skip probe's `truncate` policy):
+/// `RingFeed::truncate` moves the consumer's cursor to the producer's frontier, so
+/// the stale chunks are never delivered at all — no `wait_free` per chunk, no
+/// period spent playing silence that the queued span would otherwise have to be
+/// flushed through.
+///
+/// The first chunk of step 4's silence cover is pushed in the **same** critical
+/// section, for the same reason the truncate is one: between a bare truncate and a
+/// separate cover push the ring is empty with the producer still running, so a
+/// feeder period landing in that window is a `Starved` period the probe counts as
+/// an underflow. Pushing the cover's head here leaves no such window — the feeder
+/// either took its chunk before this section (the ring was full) or it takes the
+/// cover after it. `cover` is step 4's full cover length; the call pushes the whole
+/// chunks of it that fit in one chunk — `cover.min(CHUNK)`, rounded down to a
+/// multiple of [`CHUNK`], which is `CHUNK` for every cover of at least one chunk —
+/// and returns how many, so the caller pushes only the remainder. The rounding is
+/// load-bearing: `take_chunk` takes whole chunks only, so a partial head would be a
+/// chunk the feeder could never take. A cover shorter than one chunk therefore
+/// pushes nothing here, and the caller then owes a cover no `take_chunk` can take
+/// either (no in-tree caller can pass one: the probe's cover is `prime × CHUNK`).
+///
+/// The `DROP` window is cleared at the same time: a frontier recorded earlier
+/// points into bytes the truncate made unreachable, so leaving it open would let
+/// the feeder keep "discarding" chunks that can no longer arrive.
+///
+/// Whole chunks are counted into [`Stats::dropped`] so the field keeps meaning
+/// what it meant for the drop policy — a period's worth of stale audio kept off
+/// the wire — and the skip probe's `dropped > 0` clause stays load-bearing. The
+/// remainder below one chunk is discarded rather than rounded; every push in this
+/// probe is a whole chunk, so that remainder is 0 in practice and the rule only
+/// keeps the count honest for a future caller that pushes a tail.
+pub fn truncate_stale(cover: usize) -> Result<usize, PushError> {
+    const ZEROS: [u8; CHUNK] = [0u8; CHUNK];
+    let head = cover.min(CHUNK) / CHUNK * CHUNK;
+    critical_section::with(|cs| {
+        let dropped = FEED.borrow_ref_mut(cs).truncate();
+        *DROP.borrow_ref_mut(cs) = 0;
+        // Counted before the fallible push: the truncate has already happened, so a
+        // push that fails must not lose what it discarded.
+        {
+            let mut stats = STATS.borrow_ref_mut(cs);
+            stats.dropped = stats.dropped.wrapping_add((dropped / CHUNK) as u32);
+        }
+        FEED.borrow_ref_mut(cs)
+            .push_bytes(&ZEROS[..head], &ZEROS[..head])?;
+        Ok(head)
+    })
 }
 
 /// Arm the wire watch at the current period ([`Stats::periods`]).
