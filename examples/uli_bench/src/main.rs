@@ -815,7 +815,21 @@ fn run(gba: &mut agb::Gba) -> bool {
             asm_fft3_sum,
             asm_fft3_sum == u32::MAX
         );
-        asm_fft_sum != u32::MAX && asm_fft2_sum != u32::MAX && asm_fft3_sum != u32::MAX
+        let (_, asm_fft4_sum) = timed(&mut counter, || {
+            for _ in 0..KREP {
+                overlay::fft_asm_v4_call(core::hint::black_box(&mut *kz));
+            }
+        });
+        agb::println!(
+            "[uli-bench] asmfft4 n={} fft_sum={} wrapped={}",
+            KREP,
+            asm_fft4_sum,
+            asm_fft4_sum == u32::MAX
+        );
+        asm_fft_sum != u32::MAX
+            && asm_fft2_sum != u32::MAX
+            && asm_fft3_sum != u32::MAX
+            && asm_fft4_sum != u32::MAX
     };
     #[cfg(not(feature = "asm-fft"))]
     let asm_ok: bool = {
@@ -868,7 +882,10 @@ fn run(gba: &mut agb::Gba) -> bool {
         overlay::pre(kx, work);
         overlay::fft_asm_v3_call(work); // v3
         let v3_ok = *work == *want;
-        v1_ok && v2_ok && v3_ok
+        overlay::pre(kx, work);
+        overlay::fft_asm_v4_call(work); // v4
+        let v4_ok = *work == *want;
+        v1_ok && v2_ok && v3_ok && v4_ok
     };
     #[cfg(not(feature = "asm-fft"))]
     let twin_fft_asm = true;

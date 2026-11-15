@@ -371,7 +371,9 @@ mod fft_asm {
         "\n",
         include_str!("../asm/fft_arm_v2.s"),
         "\n",
-        include_str!("../asm/fft_arm_v3.s")
+        include_str!("../asm/fft_arm_v3.s"),
+        "\n",
+        include_str!("../asm/fft_arm_v4.s")
     );
 
     // `(x, tw)` — the buffer (512 words) and the twiddle table, passed by
@@ -381,6 +383,7 @@ mod fft_asm {
         fn uli_fft_arm(x: *mut i32, tw: *const i32);
         fn uli_fft_arm_v2(x: *mut i32, tw: *const i32);
         fn uli_fft_arm_v3(x: *mut i32, tw: *const i32);
+        fn uli_fft_arm_v4(x: *mut i32, tw: *const i32);
     }
 
     /// Call the asm FFT (v1) on `x` (`[i32; 2*H]`). SAFETY: `x` points at 512
@@ -406,6 +409,14 @@ mod fft_asm {
         // SAFETY: as for `fft`.
         unsafe { uli_fft_arm_v3(x.as_mut_ptr(), crate::TW.as_ptr()) };
     }
+
+    /// Call the block-transfer + trivial-butterfly FFT (v4) on `x`. Same
+    /// contract as [`fft`].
+    #[inline]
+    pub fn fft_v4(x: &mut [i32; 2 * uli_lite::format::H]) {
+        // SAFETY: as for `fft`.
+        unsafe { uli_fft_arm_v4(x.as_mut_ptr(), crate::TW.as_ptr()) };
+    }
 }
 
 #[cfg(all(target_arch = "arm", feature = "asm-fft"))]
@@ -414,6 +425,8 @@ pub use fft_asm::fft as fft_asm_call;
 pub use fft_asm::fft_v2 as fft_asm_v2_call;
 #[cfg(all(target_arch = "arm", feature = "asm-fft"))]
 pub use fft_asm::fft_v3 as fft_asm_v3_call;
+#[cfg(all(target_arch = "arm", feature = "asm-fft"))]
+pub use fft_asm::fft_v4 as fft_asm_v4_call;
 
 /// The FFT the product decoder (and [`ArmKernels`]) should call: the best
 /// hand-written kernel (v3) when the `asm-fft` feature is on, otherwise the
@@ -424,7 +437,7 @@ pub use fft_asm::fft_v3 as fft_asm_v3_call;
 pub fn fft_kernel(z: &mut [i32; 2 * H]) {
     #[cfg(all(target_arch = "arm", feature = "asm-fft"))]
     {
-        crate::fft_asm_v3_call(z);
+        crate::fft_asm_v4_call(z);
     }
     #[cfg(not(all(target_arch = "arm", feature = "asm-fft")))]
     {

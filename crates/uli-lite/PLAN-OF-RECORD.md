@@ -34,15 +34,23 @@ measured steps, and then wired into the product decoder:
   −5.9% / −6.5%, a real product-path gain, pins unchanged. Before this wiring
   the asm gains only reached `ArmKernels`, not the product decoder.
 
+**PR C-1 follow-up landed (2026-11-15): the trivial butterfly (v4).** The last
+structural difference from C's `TRIV_BFLY_P` is now taken: at j==0 of each
+stage the twiddles are exactly (2^30,0)×3, so `cmul(y,1.0) == y>>2` and the
+three twiddled outputs are plain sums shifted right 2 — no multiplies and no
+twiddle loads. `fft_arm_v4.s` measures **69,034 cycles/call (−2,601, −3.6% vs
+v3)**, and the product frame **425,795 / 378,845 (162% / 145%)**, a further
+−5,202 worst. Ladder: 85,065 (Rust) → 88,205 (v1) → 73,363 (v2) → 71,635 (v3)
+→ **69,034 (v4)**, 2.20× the C record.
+
 **Still slower than C+asm, and where to look next** (see the ledger's "PR C-1"
-sections for the full analysis): v3 is 2.28× the C record's ~31,400, and the
-remaining known differences are (1) the **trivial-butterfly path** C runs for
-the identity twiddle (j==0, ~1.5% of butterflies — no multiplies, no twiddle
-loads), (2) **twiddle loads still 2×`ldr` not `ldmia`**, and (3) the C record
-is from a different corpus/image so 2.28× is not like-for-like — the honest
-sub-goal is to pull the FFT under 31,400 *in this instrument*. There is no
-reason this Rust+asm stack should lose to C+asm; the next research items are in
-that order in the ledger.
+sections for the full analysis): v4 is 2.20× the C record's ~31,400, and the
+remaining known differences are (1) ~~the trivial-butterfly path~~ **done**,
+(2) **twiddle loads still 2×`ldr` not `ldmia`**, then the multiply/memory floor,
+and (3) the C record is from a different corpus/image so the ratio is not
+like-for-like — the honest sub-goal is to pull the FFT under 31,400 *in this
+instrument*. There is no reason this Rust+asm stack should lose to C+asm; the
+next research items are in that order in the ledger.
 
 The target is **C-class performance** (the C/asm product decoder's 69.4% worst
 decode wall), not merely a decode frame under the 262,144-cycle period. A parity
@@ -501,7 +509,7 @@ may rest on the 129-frame number alone** — U4's witness is this analysis.
 | **U1 — reference** | `uli-lite` remains a bit-exact, host-testable reference (no longer a portable-product claim). | Met (Phase 0/1); redefined 2026-11-14. |
 | **U2 — bit-exact host** | The reference matches the C-pinned corpus, frame for frame, on **valid** streams. Malformed input only has to be rejected safely — no arithmetic-exactness promise (decided 2026-11-14). | Met. |
 | **U3 — bit-exact product** | The product kernel set produces the pinned int8/int16 frames, on target and in the host twin. | **Met for the full hot path (PR B).** `tests/product_twin.rs` (host, frame-for-frame) + `make uli-bench` on-target pins. |
-| **U4 — real-time decode** | Worst full frame within the product budget at WAITCNT 4/2 — read as **C-class (≤~70–75% decode wall)**, because the gate total adds convert + IRQ + DMA to whatever the decoder costs. **The ceiling itself is measured, not assigned** (2026-11-14): it is written down at the first near-real-time arm, from the measured gate total plus this tree's non-audio cost. Its worst-frame witness is PR E, not the 129-frame corpus. | **Not met.** PR B measured 204% worst / 177% mean; PR C added the attribution and a split-`huff` win to **200% worst / 174% mean** (523,267 / 456,187) and scoped the remainder as two rewrites (C-1 asm kernels 63%, C-2 entropy 33%). C-1 + C-2 projected to ~91%. **C-3a/C-3c then measured 488,685 / 429,339 (186% / 164%)**, and **C-3b measured 457,863 / 410,912 (175% / 157%)**, and **PR C-1 landed a bit-exact hand-written FFT that, wired into the product decoder, took the full frame to 430,997 / 384,046 (164% / 147%)** — see the ledger's “PR C-1 landed” section.  What remains: C-1's kernel prize (~194,000, the largest single item), coefficient buffers to IWRAM (~10,000–15,000, unblocked by C-1), OLA fusion, and the symbol-path codegen gap the attribution localized (~260 cycles/symbol against the record's ~114). The current item list alone still lands near the period rather than parity. See the ledger sections “PR C-3b” and “PR C-2 / C-3a”.  |
+| **U4 — real-time decode** | Worst full frame within the product budget at WAITCNT 4/2 — read as **C-class (≤~70–75% decode wall)**, because the gate total adds convert + IRQ + DMA to whatever the decoder costs. **The ceiling itself is measured, not assigned** (2026-11-14): it is written down at the first near-real-time arm, from the measured gate total plus this tree's non-audio cost. Its worst-frame witness is PR E, not the 129-frame corpus. | **Not met.** PR B measured 204% worst / 177% mean; PR C added the attribution and a split-`huff` win to **200% worst / 174% mean** (523,267 / 456,187) and scoped the remainder as two rewrites (C-1 asm kernels 63%, C-2 entropy 33%). C-1 + C-2 projected to ~91%. **C-3a/C-3c then measured 488,685 / 429,339 (186% / 164%)**, and **C-3b measured 457,863 / 410,912 (175% / 157%)**, and **PR C-1 landed a bit-exact hand-written FFT that, wired into the product decoder, took the full frame to 430,997 / 384,046 (164% / 147%)**, then its trivial-butterfly follow-up (**v4**) to **425,795 / 378,845 (162% / 145%)** — see the ledger's “PR C-1 landed” section.  What remains: C-1's kernel prize (~194,000, the largest single item), coefficient buffers to IWRAM (~10,000–15,000, unblocked by C-1), OLA fusion, and the symbol-path codegen gap the attribution localized (~260 cycles/symbol against the record's ~114). The current item list alone still lands near the period rather than parity. See the ledger sections “PR C-3b” and “PR C-2 / C-3a”.  |
 | **U5 — product playback** | 32,768 Hz path, zero underruns, clean period audit. | Not started (gated by U4). |
 | **U6 — memory** | IWRAM/EWRAM/stack inside the product budget with UI and feeder. | **Open, and now the binding constraint.** The product path needs ≈15.0 KiB of stack. Budget at PR C: `.iwram` 11,072 B baseline, 32,512 B usable, so 21,440 B spare — but 8,672 B of synthesis tables in IWRAM leaves 12,768 B, under the stack need, and `iwram-tables` **crashes** (stack overruns `__iwram_end` into code; the CPU jumps to an invalid address). IWRAM tables are therefore blocked until the stack requirement or the code size falls — and C-3's re-specification of C-1 (asm that also cuts the spilled intermediates) is the intended way to fall under it. `HotState` and the tables are both EWRAM now. **Priority decided 2026-11-14: audio first** — IWRAM budget goes to code, hot state and stack; synthesis tables next if the stack allows; UI affordances are the slack and may be dropped to buy audio headroom. Full `huff` inlining was rejected on this row: +4,252 B for 2.7% (U6 is binding), vs +896 B for 1.6% with the split. |
 | **U7 — licensing/spec** | Permissive license + standalone format spec before publishing; otherwise `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** Revisit only if a publish decision is taken; the license and `FORMAT.md` remain prerequisites for it. |
@@ -850,29 +858,39 @@ the `iwram-tables` crash recorded).
 #### PR C-1 landed: wired into the product, and where to look next
 
 The kernels were then wired into the **product hot path**: `GbaDecoder`'s
-synthesis calls `crate::fft_kernel`, which dispatches to v3 when `asm-fft` is
-on (the `#[cfg]` lives in one helper). Before this, the asm only reached
-`ArmKernels`, so `prod` was unchanged; now it moves.
+synthesis calls `crate::fft_kernel`, which dispatches to the best asm variant
+(v4 since 2026-11-15) when `asm-fft` is on (the `#[cfg]` lives in one helper).
+Before this, the asm only reached `ArmKernels`, so `prod` was unchanged; now it
+moves.
 
 | arm | worst | mean | of period (worst) |
 |---|---:|---:|---:|
 | product frame, Rust FFT (`asm-fft` off) | 457,863 | 410,912 | 175% |
-| **product frame, asm FFT v3 (`asm-fft` on)** | **430,997** | **384,046** | **164%** |
+| product frame, asm FFT v3 (`asm-fft` on) | 430,997 | 384,046 | 164% |
+| **product frame, asm FFT v4 (+ trivial butterfly)** | **425,795** | **378,845** | **162%** |
 
-**−26,866 worst / −26,866 mean (−5.9% / −6.5%)**, both pins `e6e87652` /
-`b3530978` PASS, `xover=0 hfnz=0`, on-target twin PASS. Ladder now
-**2526% → … → 175% → 164%** worst (147% mean). U4 (≤100%) is still not met.
+**v3: −26,866 / −26,866 (−5.9% / −6.5%)**; **v4: a further −5,202 / −5,201**,
+i.e. **−32,068 / −32,067 vs the Rust-FFT product build (−7.0% / −7.8%)**. Both
+pins `e6e87652` / `b3530978` PASS, `xover=0 hfnz=0`, on-target twin PASS. The
+product-frame delta is exactly `2 ×` the per-FFT saving (two channels). Ladder
+now **2526% → … → 175% → 164% → 162%** worst (145% mean). U4 (≤100%) is still
+not met.
 
 **Why this Rust+asm stack still loses to C+asm, and the research order to close
-it** (2.28× the C record's ~31,400 per FFT — and, since C's number is from a
+it** (2.20× the C record's ~31,400 per FFT — and, since C's number is from a
 different album/image, the sub-goal is to get under 31,400 *in this tree's
 instrument*, not to match a foreign percentage):
 
-1. **Trivial-butterfly path.** C's `TRIV_BFLY_P` handles the identity twiddle
-   (j==0 of each stage, where `TW[0..6] = (2^30,0)*3`, i.e. 1.0 in Q30) with
-   pure adds + `asr #2`: **no multiplies, no twiddle loads**. We run the
-   general path. ~1.5% of the 192 radix-4 butterflies (~1,000 cycles) — small
-   but free and it closes the last *structural* difference to C.
+1. **~~Trivial-butterfly path~~ — DONE as v4 (`fft_arm_v4.s`), 2026-11-15.**
+   C's `TRIV_BFLY_P` handles the identity twiddle (j==0 of each stage, where
+   `TW[base..base+6] = (2^30,0)*3`, i.e. 1.0 in Q30, verified for l=256/64/16,
+   and `cmul(y,1.0) == y>>2`) with pure adds + `asr #2`: no multiplies, no
+   twiddle loads. v4 takes that path and measures **69,034 cycles/call**, i.e.
+   **−2,601 (−3.6%) vs v3** — larger than the ~1,000 projected, because the path
+   also skips the per-output twiddle-pointer load and the six twiddle loads.
+   It covers `1 + 4 + 16 = 21` of the 192 radix-4 butterflies (an earlier note
+   said 3/192 by counting j-iterations, not butterflies). **This closes the last
+   structural difference to C.**
 2. **Twiddle loads are still 2×`ldr`, not `ldmia`.** Each twiddle pair is two
    consecutive `ldr`; C uses `ldmia r2,{r7,r8}`. Converting the three pairs to
    one `ldmia` each is −3 instructions/butterfly and directly on the fetch-cost
@@ -995,6 +1013,21 @@ coefficient against the C bench's entropy+dequant (~41 c/coef) is ~6.6×.
   like-for-like corpus) is written in the “PR C-1 landed” ledger section. The
   remaining stack gap to C is not accepted as inherent: nothing about Rust+asm
   forces it, so it is scoped as continued work.
+
+- **2026-11-15 — PR C-1 follow-up landed: the trivial butterfly (v4).** C's
+  `TRIV_BFLY_P` was the last structural difference in the FFT, and it is now
+  taken. At j==0 of every stage the twiddle triple is exactly (2^30,0)×3
+  (verified for l=256/64/16), so `cmul(y,1.0) == y>>2`: the three twiddled
+  outputs are sums shifted right 2, with no multiplies and no twiddle loads.
+  `fft_arm_v4.s` measures **69,034 cycles/call — −2,601 (−3.6%) vs v3**,
+  larger than the ~1,000 the ledger projected, because the path also drops the
+  per-output twiddle-pointer load and all six twiddle loads. It covers 21 of
+  the 192 radix-4 butterflies (an earlier note's "3/192" counted j-iterations,
+  not butterflies). Wired into `fft_kernel`, the product frame goes
+  **430,997 → 425,795 worst (164% → 162%)**, the delta being exactly 2× the
+  per-FFT saving. Ladder: 85,065 → 88,205 → 73,363 → 71,635 → **69,034**,
+  2.20× the C record. U4 still open; next is twiddle `ldmia`, then the
+  multiply/memory floor, then a like-for-like corpus (PR E).
 
 - **2026-11-14 — C-3b landed; the prediction held.** The counters and format-rule
   diagnostics moved behind `uli-lite-gba`'s `verify` feature: the product build
