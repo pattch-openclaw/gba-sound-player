@@ -98,6 +98,18 @@ static mut OUT16R: [i16; M] = [0; M];
 
 /// Kernel inputs/outputs live in EWRAM here. The overlay's job is to move the
 /// hot ones to IWRAM; this arm deliberately keeps the as-shipped placement.
+///
+/// NOTE (they look like scalars, they are blocks): `M = 512`, `H = 256`, so
+/// `[i32; M]` is **2,048 B**, `[i32; 2*H]` is **2,048 B**, `[i16; M]` is
+/// 1,024 B, `[i8; M]` is 512 B. The six `K*` buffers below are **8,704 B** in
+/// total, the ten `T_*` twins below them **13,312 B**, plus `ZWANT`/`ZWORK`
+/// 4,096 B and the four `OUT*` pins 3,072 B — **29,184 B of EWRAM arrays**,
+/// none of it small. They cannot go in IWRAM: the product hot path needs
+/// ~15 KiB of stack there, `.iwram` is 32,512 B usable of which ~13.9 KiB is
+/// code, which leaves only ~3.6 KiB genuinely free — less headroom than any
+/// single block below needs. EWRAM is the correct home for all of them, and
+/// the real IWRAM win is the product's `HotState`/coefficient buffers
+/// (PLAN-OF-RECORD.md C-3), which is blocked on the same stack.
 #[unsafe(link_section = ".ewram")]
 static mut KX: [i32; M] = [0; M];
 #[unsafe(link_section = ".ewram")]
