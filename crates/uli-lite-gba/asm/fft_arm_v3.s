@@ -50,7 +50,10 @@
     .syntax unified
     .arm
 
-    .section .iwram,"ax",%progbits
+    @ BUDGET (C-3, 2026-11-15): v3 is superseded by v4 (v4 = v3 + the trivial
+    @ butterfly) and lives in .text so IWRAM goes to the hot state instead.
+    @ Its recorded numbers were taken in .iwram.
+    .section .text,"ax",%progbits
     .global uli_fft_arm_v3
     .type   uli_fft_arm_v3, %function
 

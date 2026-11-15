@@ -67,12 +67,14 @@ next research items are in that order in the ledger.
 The target is **real time inside the hardware's cycle budget** (U4/U5), not a
 percentage borrowed from C: the C/asm decoder's 69.4% is a proof that the work
 fits this machine, so Rust+asm is expected to as well. See "The target is the
-real-time budget" below. The measured ladder so far is **2526% → … → 175% →
-148% → 138%**: the fast path is the default, and **C-3d (2026-11-15) removed the
-int16 output the product never used** — the production int8-only frame is
-**361,238 / 314,288 (138% / 120%)**, 1.99× the C decode wall. C-3's remaining
-differential items are the route further; every entry is a projection until it
-lands as its own measured arm.
+real-time budget" below. The measured ladder is **2526% → … → 175% → 148% → 138%
+→ 105%**. The fast path is the default; **C-3d (2026-11-15)** removed the int16
+output the product never used; and **C-3 (2026-11-15)** moved `HotState` to IWRAM
+for **−87,040 cycles/frame**. The production frame is now **274,198 / 232,090
+(105% / 89%)** — **1.51×** the C decode wall, with the mean already under the
+period and only **12,054 cycles (4.6%)** left to reach real time. The remaining
+items are listed below; every one is a projection until it lands as its own
+measured arm.
 
 The Phase 1b measurement that forced this rewrite is recorded in
 [`../../ULI2.md`](../../ULI2.md) → “Phase 1b — what the on-target measurement
@@ -204,8 +206,16 @@ measured directly: `examples/uli_bench` fills the free IWRAM stack region below
 `sp` with a sentinel before the product pass and scans it afterwards
 (`stack prod high-water`).
 
-**Measured: 768 B.** Not 15,040 B. Repeatable, two runs, same address
-(`__iwram_end` = `0x030049cc`, `sp` = `0x03007b28`).
+**Measured: 768 B of descent below `run()`'s frame** — not 15,040 B. Repeatable.
+
+**Refined 2026-11-15 (C-3): 768 B is not the whole requirement.** The probe fills
+below the *current* `sp`, so it measures only the descent from `run()`. The real
+budget runs from the BIOS stack top (`0x03007F00`; agb never sets `sp`), and the
+instrument's total high-water is **≈2,960 B** = 2,192 B above `run()` (entry
+wrapper + `agb::Gba`) + 768 B of descent. Write the budget as
+`usable = 0x03007F00 - __iwram_end`, and require `usable >= ~2,960 B` for this
+instrument. (This is the same lesson one level down: the first figure measured a
+*relative* quantity and was read as an absolute one.)
 
 ### Consequence: the C layout fits, and two "blocked" items are unblocked
 
@@ -542,15 +552,11 @@ its control in the same image (PR A's rule).
    (the attribution predicted −30,482 / ~20,000). Gate unchanged: `verify` is off
    for the product arm, on for the twins and for the arm that witnesses the
    product decoder's own `xover/hfnz`.
-2. **Coefficient buffers to IWRAM** — the attribution's second item, and new:
-   M/S plus coefficient traffic pays EWRAM wait states (the reference's `X`/`P`
-   are in IWRAM and its M/S is ~4,400 against our 16,067). ~~Blocked on the
-   ≈15.0 KiB stack~~ — **unblocked 2026-11-15**: the measured stack is 768 B, so
-   the block does not exist. Budget: `HotState` is 8,192 B; with the tables
-   already in IWRAM (25,548 B, 6,964 B free, 768 B stack) adding it needs
-   8,192 B, which the superseded v1/v2 kernels (1,520 B) close to a ~1,540 B
-   margin. This is now the largest identified placement win (10,000–15,000
-   cycles/frame) and it follows the C layout directly.
+2. ~~**Coefficient buffers to IWRAM**~~ — **DONE 2026-11-15 (C-3): −87,040
+   cycles/frame, 138% → 105%.** The block never existed (it was the stale stack
+   figure) and the prize was ~6x the 10,000–15,000 projection, because it
+   captures all coefficient traffic through `x`/`buf`/`p`, not just M/S. See the
+   C-3 section below.
 3. **C-1** — asm kernels, specified as *bit-exact and stack-reducing*; that is
    what makes both `iwram-tables` and the coefficient buffers legal (today
    `iwram-tables` crashes: 13,664 B of stack against ~15,040 needed).
@@ -1065,6 +1071,40 @@ None)`, fused OLA, identical int8 pin `e6e87652`) measures
 **-26,640 worst / -26,640 mean (-6.9%)**, `1.99x` the C decode wall. Ladder:
 2526% -> ... -> 175% -> 148% -> **138%**. The int16 profile keeps its own arm.
 
+**C-3 LANDED 2026-11-15 — `HotState` in IWRAM: the largest single win so far.**
+The decoder's hot working set (`x` 4,096 + `buf` 2,048 + `p` 2,048 = **8,192 B**,
+the same three buffers C keeps as `uli_g_X`/`uli_g_buf`/`uli_g_P` in IWRAM) moved
+from EWRAM to IWRAM. EWRAM charges 16-bit wait states on a 32-bit bus, so every
+coefficient write, every M/S read/write, and every pre/post/OLA pass over the
+buffers was paying ~5 extra cycles per access.
+
+| product frame | worst | mean | of period | vs C |
+|---|---:|---:|---:|---:|
+| before C-3 (int8-only) | 361,238 | 314,288 | 138% | 1.99x |
+| **after C-3 (int8-only, production)** | **274,198** | **232,090** | **105%** | **1.51x** |
+| after C-3 (dual output arm) | 300,838 | — | 115% | 1.65x |
+
+**−87,040 cycles/frame (−24.1%)**, both pins `e6e87652` / `b3530978` PASS, all
+twins PASS. **The plan projected 10,000–15,000 for this item; it delivered
+87,040 — about 6x** — because the projection counted only the M/S pass (16,067)
+while the win captures *all* coefficient traffic through `x`/`buf`/`p`. Mean is
+now **under** the period (89%); worst is **12,054 cycles (4.6%) from real time**.
+
+**How it was paid for in IWRAM** (the binding constraint). `.iwram` went from
+22,436 B to 28,852 B of 32,512. Two principled savings made the 8,192 B fit:
+1. **The Rust `fft` moved to ROM** when `asm-fft` is on (1,056 B). It is not on
+   the product path — `fft_kernel` dispatches to v4 — so IWRAM should not pay for
+   it. With `--no-default-features` it *is* the product kernel and stays in
+   IWRAM; the placement is gated on the feature.
+2. **v3 moved to ROM** (708 B): superseded by v4 (v4 = v3 + trivial butterfly).
+   v1/v2 went the same way in the same change. All three remain callable
+   comparison arms; their recorded numbers were taken in `.iwram`.
+
+Stack: usable from `0x03007F00` is 3,660 B, high-water ≈2,960 B, leaving **~700 B**
+— usable for this image, below C's own ~1 KiB assert, and the real product ROM
+(UI + feeder) must re-check it before shipping. `HotState` size is pinned by a
+compile-time assert so the budget cannot drift silently.
+
 **PLANNED NEXT — `pre`/`post`/`ola` as asm (the rest of C-1), 2026-11-15.** The
 FFT is now near its multiply floor; the next synthesis target is the *other three
 kernels*, which are still the **Rust ARM-mode** kernels. Measured per channel
@@ -1092,9 +1132,11 @@ now. Historical note on the ordering:
 `pre` and `post` follow with one asm kernel each (a twiddle-table walk with a
 single `SMULL`/`SMLAL` pair per output — structurally simpler than the FFT, so
 they should come cheap). Together the three are now **~38,000 cycles/frame** of
-identified headroom (`pre` 7,954 + `post` 5,110 + `ola` 6,118 per channel), and
-`pre` is the largest single item — still worth asm, but no longer comparable to
-the whole FFT gap now that OLA has been re-measured.
+identified headroom per the pre-C-3 kernel table, and `pre` is the largest single
+item. **Note after C-3 (105%):** only **12,054 cycles** separate the production
+frame from the period, so the *next* synthesis arm is not chosen by kernel ratio
+any more — `pre` asm alone (~16,000/frame) would clear the period if it lands at
+C's number. That makes `pre` the single most valuable next kernel.
 
 #### PR C-1 follow-up 3: the twiddle table is the real "twiddle load" cost
 
@@ -1257,6 +1299,22 @@ coefficient against the C bench's entropy+dequant (~41 c/coef) is ~6.6×.
   like-for-like corpus) is written in the “PR C-1 landed” ledger section. The
   remaining stack gap to C is not accepted as inherent: nothing about Rust+asm
   forces it, so it is scoped as continued work.
+
+- **2026-11-15 — C-3 landed: `HotState` in IWRAM, the largest single win.**
+  Moving the decoder's 8,192 B hot working set (`x`/`buf`/`p`, exactly the three
+  buffers C keeps in IWRAM) out of EWRAM took the production frame **361,238 →
+  274,198 (138% → 105%)**, **−87,040 (−24.1%)**, mean 232,090 (89%, now under the
+  period), and **1.99× → 1.51×** the C decode wall. **The projection was
+  10,000–15,000; the measurement is 87,040 — ~6x** — because the projection
+  counted only the M/S pass while every coefficient access through those buffers
+  was paying EWRAM wait states. Paid for by moving the Rust `fft` to ROM when
+  `asm-fft` is on (it is not on the product path) and the superseded v1/v2/v3 FFT
+  kernels to ROM, which is the general rule this work keeps teaching: **spend
+  IWRAM on what the product actually executes.** `.iwram` 28,852 B of 32,512;
+  usable stack from the BIOS top is 3,660 B against a ~2,960 B high-water, so
+  ~700 B margin — usable here, below C's own ~1 KiB assert, and the full product
+  ROM must re-check it. Also corrected the stack record: the earlier "768 B" was
+  the descent below `run()`'s frame only, not the total from the stack top.
 
 - **2026-11-15 — C-3d landed: OLA was measured in a configuration C never ran.**
   The `ola` kernel selected its output format *per sample* and computed both
