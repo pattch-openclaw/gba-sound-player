@@ -22,6 +22,15 @@ There is no `album_player` crate here, no product code, no screens, no bake tool
 `examples/flac_spike`, the timer2/3 `Counter` from `examples/e5_fetch` — so no file under
 `crates/` or the other `examples/` changed to build this.
 
+Two of those three sources are **spike and instrument directories**, which is a debt this
+crate takes on purpose and the plan refuses to carry forward: `flac_spike` and `e5_fetch`
+exist to gather information while the FLAC implementation is developed, and an
+application that outlives that work cannot be founded on them. `ALBUM-PLAYER.md` §2.2
+rules the lift (into project source, proposal `crates/gba-playback`) and makes it Phase 1
+work — before any `album_player` module links any of it. Phase 0 borrows the shipped
+`RingFeed` precisely *so that* its skip numbers are statements about the ring the product
+runs on rather than a model of one; moving that ring is the follow-up, not this PR's job.
+
 ## Reproduce
 
 ```sh
@@ -336,7 +345,9 @@ The DMA cannot be emptied faster than the hardware reads it. `RingFeed` cannot t
 not played" that the *application* can write costs exactly one period per stale chunk, and
 at the ring's 36-chunk ceiling that is 36 × 34.18 = **1,230.5 ms**. Both host tests pin the arithmetic
 against the real ring type (`discarding_a_full_ring_costs_one_period_per_queued_chunk`,
-`a_skip_at_the_shipped_depth_costs_the_queue_plus_the_cover`).
+`a_skip_at_the_shipped_depth_costs_the_queue_plus_the_cover`). That test name says "shipped
+depth" and means the ceiling; the identifier is the one older than the correction in
+"The deep arm" above, and the README's prose is what should be believed.
 
 A **truncate** — advancing the consumer cursor past the queue in one step — would delete
 exactly that window, leaving only the cover in front of the new track:
@@ -352,10 +363,13 @@ Every truncate row is inside §4.4's observable; every measured row is outside i
 truncate would need a new method on `examples/flac_spike/src/playback.rs`, a file whose own
 docs say changing it changes both shipped product images and whose witness is
 `make flac-check` — **so this change was not made**, and the `SKIP_PRIME_CHUNKS` decision is
-**blocked** on the owner ruling below. **Ruled 2026-11-14: truncate is the mechanism** —
-what remains open is the codec track shipping it, so the value stays un-chosen here.
+**blocked** on the owner ruling below. **Ruled 2026-11-14: truncate is the mechanism.**
+Ruled again on 2026-11-15 about *whose* ruling it was: the blocker is now
+`ALBUM-PLAYER.md` §2.2's lift of this feeder out of a spike directory into project
+source, which this application owns. The value stays un-chosen here; nothing is
+waiting on another track.
 
-#### Ruled 2026-11-14 — the question that went into `ALBUM-PLAYER.md` §15 as Q13b (same boundary as Q13)
+#### AP-0's question, adopted into `ALBUM-PLAYER.md` §15 as Q13b — including the part AP-0 got wrong
 
 > **Q13b — may the shared feeder *truncate* the ring at a skip?** §4.4 step 2 says the
 > queued chunks are "dropped, not played", but `RingFeed` offers no way to drop them:
@@ -375,6 +389,21 @@ what remains open is the codec track shipping it, so the value stays un-chosen h
 > chosen: with drain-or-drop the only lever left is the queue's steady-state depth, and that
 > is a decode-margin decision (a shallow queue means less room for a slow FLAC frame), not a
 > skip-policy one.
+
+**Corrected 2026-11-15.** The paragraph above reads "the codec track's file, not the
+application's, which is exactly the boundary Q13 draws", and that was wrong in a way
+worth keeping visible: `examples/flac_spike/` is a **spike directory** — code that lives
+there exists to gather information while the Rust + ASM FLAC implementation is
+developed, and is meant to be thrown away. Nothing that answers to "the codec track"
+ever owned the ring; the ring is simply parked somewhere it should not be depended on.
+`ALBUM-PLAYER.md` §2.2 now rules that no Phase 1 module may `#[path]`-include a spike or
+instrument directory, and that `playback.rs` (with `checksum.rs`, and the `e5_fetch`
+cycle counter this probe also borrows) is lifted into project source first — proposal:
+`crates/gba-playback`. **`truncate()` lands on the lifted type, and the application owns
+both moves.** The lift is a measured change rather than a rename: `playback.rs` is
+compiled into both shipped product images, so moving it re-baselines their bytes, and its
+unit suite has to travel with it or `make flac-check` quietly stops witnessing it. That
+work is deliberately out of this PR — see "What this directory is not" above.
 
 #### Where `underflows = 0` is a measurement and where it is structural
 
@@ -435,9 +464,11 @@ period is 573,440 and a 2,048-sample frame is 3.657 periods, as geometry pins th
 
 ### §4.4 — `SKIP_PRIME_CHUNKS`: **blocked**, not chosen
 
-*Status 2026-11-14: the decision (truncate the ring at step 2) is ruled in this
-crate's favour and recorded in `ALBUM-PLAYER.md` §4.4 / Q13b; the value is still
-un-chosen because the `RingFeed` method it depends on is the codec track's to land.*
+*Status 2026-11-15: the decision (truncate the ring at step 2) is ruled, and so is the
+ownership — `ALBUM-PLAYER.md` §2.2 lifts the feeder out of `examples/flac_spike/` into
+project source that this application owns, and `truncate()` lands with it. The value is
+still un-chosen because that lift has not happened yet, not because another track has to
+agree.*
 
 **No value is chosen, because the number §4.4's observable turns on is the queue's depth, not
 the cover.** At the ceiling depth both available policies read 39–53 periods (1.33–1.81 s)
