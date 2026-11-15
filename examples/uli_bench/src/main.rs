@@ -436,6 +436,33 @@ fn timed_pass<K: uli_lite::Kernels>(
 /// unchecked hot path, 32-bit bit reader, product tables in EWRAM and hot
 /// buffers in IWRAM.
 #[inline(never)]
+/// The production (headphone) product pass: **int8 only**, no int16 buffer.
+/// `ola_kernel` therefore takes the fused int8 path and the decoder never pays
+/// for the pre-DAC int16 write. This is C-3d's "one output format per arm":
+/// the dual-output pass below exists to pin both hashes, not because the product
+/// writes both.
+fn product_pass_s8(
+    album: Album<'_>,
+    tables: &mut CodeTables,
+    hot: &mut HotState,
+    counter: &mut Counter<'_>,
+    overhead: u32,
+    l8: &mut [i8; M],
+    r8: &mut [i8; M],
+) -> Result<(FrameCost, u32), uli_lite::Error> {
+    let mut decoder = GbaDecoder::new(album, tables, hot)?;
+    let mut cost = FrameCost::new();
+    let mut all8 = 2_166_136_261u32;
+    for f in 0..album.n_frames() {
+        let (res, raw) = timed(counter, || decoder.decode_frame(l8, r8, None, None));
+        res?;
+        all8 = fnv_bytes(all8, &fnv_i8(2_166_136_261, l8, r8).to_le_bytes());
+        let net = raw.saturating_sub(overhead);
+        cost.observe(f, net, decoder.ops());
+    }
+    Ok((cost, all8))
+}
+
 fn product_pass(
     album: Album<'_>,
     tables: &mut CodeTables,
@@ -702,6 +729,44 @@ fn run(gba: &mut agb::Gba) -> bool {
         }
     };
     let prod_pin_ok = prod8 == EXPECTED_INT8 && prod16 == EXPECTED_INT16;
+
+    // C-3d: the production (int8-only) product pass. Same decoder, same frames,
+    // but no int16 buffer, so OLA takes the fused int8 path. Its int8 hash must
+    // equal the dual pass's int8 pin - same samples, less work.
+    let (cost_prod8, prod8_only) = {
+        let (lo, hi) = stack_probe_fill();
+        match product_pass_s8(
+            album,
+            product_tables,
+            product_hot,
+            &mut counter,
+            overhead,
+            l8,
+            r8,
+        ) {
+            Ok(v) => {
+                let used = stack_probe_used(lo, hi);
+                agb::println!("[uli-bench] stack prod8 high-water {} B", used);
+                v
+            }
+            Err(e) => {
+                agb::println!("[uli-bench] FAIL int8-only product pass: {:?}", e);
+                return false;
+            }
+        }
+    };
+    print_cost("prod8", &cost_prod8, cfg!(feature = "verify"));
+    agb::println!(
+        "[uli-bench] prod8 pin int8={:08x} (want {:08x}) [{}]",
+        prod8_only,
+        EXPECTED_INT8,
+        if prod8_only == EXPECTED_INT8 {
+            "PASS"
+        } else {
+            "FAIL"
+        }
+    );
+
     let prod_stack_used = stack_probe_used(probe_lo, probe_hi);
     agb::println!(
         "[uli-bench] stack prod high-water {} B below sp=0x{:08x} (iwram_end=0x{:08x})",
@@ -759,6 +824,38 @@ fn run(gba: &mut agb::Gba) -> bool {
             );
         }
     });
+    // C-3d: OLA per output format. The production (headphone) path writes int8
+    // only, so `olas8` is the arm the OLA gate should be read against; `olas16`
+    // is the pre-DAC profile. The dual `ola` arm above is the bench-pin
+    // configuration the C record never timed.
+    let (_, ola_dual_sum) = timed(&mut counter, || {
+        for _ in 0..KREP {
+            overlay::ola(
+                core::hint::black_box(&*ky),
+                core::hint::black_box(&mut *kp),
+                core::hint::black_box(&mut k8[..]),
+                Some(core::hint::black_box(&mut k16[..])),
+            );
+        }
+    });
+    let (_, ola_s8_sum) = timed(&mut counter, || {
+        for _ in 0..KREP {
+            overlay::ola_s8(
+                core::hint::black_box(&*ky),
+                core::hint::black_box(&mut *kp),
+                core::hint::black_box(&mut k8[..]),
+            );
+        }
+    });
+    let (_, ola_s16_sum) = timed(&mut counter, || {
+        for _ in 0..KREP {
+            overlay::ola_s16(
+                core::hint::black_box(&*ky),
+                core::hint::black_box(&mut *kp),
+                core::hint::black_box(&mut k16[..]),
+            );
+        }
+    });
     let (_, seq_sum) = timed(&mut counter, || {
         for _ in 0..KREP {
             imdct::pre(kx, kz);
@@ -772,6 +869,9 @@ fn run(gba: &mut agb::Gba) -> bool {
         && fft_sum != u32::MAX
         && post_sum != u32::MAX
         && ola_sum != u32::MAX
+        && ola_dual_sum != u32::MAX
+        && ola_s8_sum != u32::MAX
+        && ola_s16_sum != u32::MAX
         && seq_sum != u32::MAX;
     agb::println!(
         "[uli-bench] kern n={} pre_sum={} fft_sum={} post_sum={} ola_sum={} seq_sum={} wrapped={}",
@@ -782,6 +882,13 @@ fn run(gba: &mut agb::Gba) -> bool {
         ola_sum,
         seq_sum,
         !kern_ok
+    );
+    agb::println!(
+        "[uli-bench] ola-fmt n={} dual={} s8={} s16={} (overlay kernel, same family)",
+        KREP,
+        ola_dual_sum,
+        ola_s8_sum,
+        ola_s16_sum
     );
 
     // -----------------------------------------------------------------
@@ -945,9 +1052,22 @@ fn run(gba: &mut agb::Gba) -> bool {
     imdct::post(zc, yc);
     overlay::post(zo, yo);
     let twin_post = yc == yo;
+    // C-3d: the fused int8/int16 kernels must reproduce the dual kernel's halves
+    // exactly. OLA mutates the overlap state `p`, so replay each format from the
+    // same starting `p`.
+    let po_save = *po;
     imdct::ola(yc, pc, c8, Some(c16));
     overlay::ola(yo, po, co, Some(o16));
     let twin_ola = c8 == co && c16 == o16 && pc == po;
+
+    let kb8 = unsafe { &mut *core::ptr::addr_of_mut!(K8L) };
+    let kb16 = unsafe { &mut *core::ptr::addr_of_mut!(K16L) };
+    *po = po_save;
+    overlay::ola_s8(yo, po, kb8);
+    let twin_ola_s8 = c8 == &kb8[..] && &po[..] == &pc[..];
+    *po = po_save;
+    overlay::ola_s16(yo, po, kb16);
+    let twin_ola_s16 = c16 == &kb16[..] && &po[..] == &pc[..];
     #[cfg(feature = "asm-fft")]
     let twin_fft_asm = {
         // Rust ARM FFT -> want; then each asm variant on the same pre-FFT input.
@@ -971,13 +1091,21 @@ fn run(gba: &mut agb::Gba) -> bool {
     };
     #[cfg(not(feature = "asm-fft"))]
     let twin_fft_asm = true;
-    let twin_ok = twin_pre && twin_fft && twin_post && twin_ola && twin_fft_asm;
+    let twin_ok = twin_pre
+        && twin_fft
+        && twin_post
+        && twin_ola
+        && twin_ola_s8
+        && twin_ola_s16
+        && twin_fft_asm;
     agb::println!(
-        "[uli-bench] ovl twin pre={} fft={} post={} ola={} fftasm={} [{}]",
+        "[uli-bench] ovl twin pre={} fft={} post={} ola={} ola8={} ola16={} fftasm={} [{}]",
         twin_pre,
         twin_fft,
         twin_post,
         twin_ola,
+        twin_ola_s8,
+        twin_ola_s16,
         twin_fft_asm,
         if twin_ok { "PASS" } else { "FAIL" }
     );
@@ -986,6 +1114,7 @@ fn run(gba: &mut agb::Gba) -> bool {
         && core_pin_ok
         && ovl_pin_ok
         && prod_pin_ok
+        && prod8_only == EXPECTED_INT8
         && calib_ok
         && !cost_core.wrapped
         && !cost_ovl.wrapped

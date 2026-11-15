@@ -68,9 +68,11 @@ The target is **real time inside the hardware's cycle budget** (U4/U5), not a
 percentage borrowed from C: the C/asm decoder's 69.4% is a proof that the work
 fits this machine, so Rust+asm is expected to as well. See "The target is the
 real-time budget" below. The measured ladder so far is **2526% → … → 175% →
-148%** (default build now ships the fast path). C-3's differential items below
-remain the route to real time; every entry is a projection until it lands as its
-own measured arm.
+148% → 138%**: the fast path is the default, and **C-3d (2026-11-15) removed the
+int16 output the product never used** — the production int8-only frame is
+**361,238 / 314,288 (138% / 120%)**, 1.99× the C decode wall. C-3's remaining
+differential items are the route further; every entry is a projection until it
+lands as its own measured arm.
 
 The Phase 1b measurement that forced this rewrite is recorded in
 [`../../ULI2.md`](../../ULI2.md) → “Phase 1b — what the on-target measurement
@@ -1028,6 +1030,41 @@ instrument*, not to match a foreign percentage):
 4. **Corpus/image.** PR E's worst-frame program (deferred) is what makes the
    gap to C like-for-like. Until then every `×` is against a foreign number.
 
+**C-3d LANDED 2026-11-15 — the OLA outlier was mostly a measurement artifact.**
+`ola` fused the format selection per sample and computed **both** int8 and int16
+whenever the caller passed an int16 buffer, and the bench passed one (to pin both
+hashes) — so the arm the plan was reading (34,780/call, 2.27x C) was a
+configuration the C record never timed. C ships one kernel per format
+(`uli_ola_s8_asm` / `uli_ola_s8w_asm` / `uli_ola_s16_asm`) and selects the format
+outside the loop.
+
+Two fused kernels now do the same (`ola_s8`, `ola_s16`, format fixed at compile
+time, no per-sample branch, no arithmetic for the format not being written), and
+`ola_kernel` resolves the `Option` once so the product path gets the int8 kernel
+when it has no int16 buffer. Measured, same image, same kernel family:
+
+| OLA arm | cycles/call | vs C (15,300) |
+|---|---:|---:|
+| dual (what the plan was reading) | 34,780 | 2.27x |
+| **s8 — the production headphone path** | **21,418** | **1.40x** |
+| s16 — pre-DAC profile | 23,220 | 1.52x |
+
+**OLA's headroom against C shrank ~69%** (19,480 -> 6,118 per channel), so OLA
+asm is now a small item, not the second-biggest kernel prize the earlier table
+suggested. The earlier `2.28x` row is superseded.
+
+**And it is a real frame win, not just a fairer measurement.** The product was
+writing int16 it never uses: an int8-only product pass (`decode_frame(.., None,
+None)`, fused OLA, identical int8 pin `e6e87652`) measures
+
+| product frame | worst | mean | of period |
+|---|---:|---:|---:|
+| dual output (previous default) | 387,878 | 340,928 | 148% |
+| **int8-only (production)** | **361,238** | **314,288** | **138%** |
+
+**-26,640 worst / -26,640 mean (-6.9%)**, `1.99x` the C decode wall. Ladder:
+2526% -> ... -> 175% -> 148% -> **138%**. The int16 profile keeps its own arm.
+
 **PLANNED NEXT — `pre`/`post`/`ola` as asm (the rest of C-1), 2026-11-15.** The
 FFT is now near its multiply floor; the next synthesis target is the *other three
 kernels*, which are still the **Rust ARM-mode** kernels. Measured per channel
@@ -1038,24 +1075,26 @@ with tables in IWRAM, against the C record (`ovl` arm of `uli_bench`):
 | pre | 17,654 | 9,700 | 1.82× | 7,954 |
 | fft (v4, asm) | 61,852 | 31,400 | 1.97× | 30,452 |
 | post | 16,010 | 10,900 | **1.47×** | 5,110 |
-| **ola** | **34,882** | **15,300** | **2.28×** | **19,582** |
+| ola (dual, superseded) | 34,780 | 15,300 | 2.27× | 19,480 |
+| **ola (s8, production)** | **21,418** | **15,300** | **1.40×** | **6,118** |
 | pair | 260,797 | 134,600 | 1.94× | 126,197 |
 
-**OLA is the worst ratio and the largest single kernel prize (~39,000/frame
-across two channels), and it is still Rust.** Two things to do there, in order:
-1. **C-3d first (measurement fairness):** the bench times `ola` with
-   `Some(out16)` + `Some(out8)`, i.e. it writes **both** int8 and int16 for every
-   sample — a configuration the C record never timed (C has three separate OLA
-   kernels, one output format each). Re-time on the *production* output format
-   before writing OLA's gate, or the 2.28× is partly an artifact.
-2. **Then OLA asm**, fusing the store (and the `nb`-limited range) the way the C
-   kernel does.
+**OLA's contribution to this list is much smaller than it first looked** (C-3d,
+below: the production int8 kernel is 1.40x C, not 2.28x). What remains of the
+list is `pre` (1.82x) and `post` (1.47x), which together are the larger half
+now. Historical note on the ordering:
+1. ~~**C-3d first (measurement fairness)**~~ — **DONE 2026-11-15**, above: the
+   format is now selected outside the loop and the production arm is 1.40× C.
+2. **Then OLA asm** on the *s8* kernel — but note the prize is now ~6,100/channel
+   (~12,200/frame), not the ~39,000 the dual-output arm implied, so `pre`/`post`
+   are the larger half of what is left.
 
 `pre` and `post` follow with one asm kernel each (a twiddle-table walk with a
 single `SMULL`/`SMLAL` pair per output — structurally simpler than the FFT, so
-they should come cheap). Together these three kernels are **~65,000 cycles/frame
-of identified headroom, comparable to the entire FFT gap** — which is why they
-are the next planned step rather than more FFT tuning.
+they should come cheap). Together the three are now **~38,000 cycles/frame** of
+identified headroom (`pre` 7,954 + `post` 5,110 + `ola` 6,118 per channel), and
+`pre` is the largest single item — still worth asm, but no longer comparable to
+the whole FFT gap now that OLA has been re-measured.
 
 #### PR C-1 follow-up 3: the twiddle table is the real "twiddle load" cost
 
@@ -1218,6 +1257,20 @@ coefficient against the C bench's entropy+dequant (~41 c/coef) is ~6.6×.
   like-for-like corpus) is written in the “PR C-1 landed” ledger section. The
   remaining stack gap to C is not accepted as inherent: nothing about Rust+asm
   forces it, so it is scoped as continued work.
+
+- **2026-11-15 — C-3d landed: OLA was measured in a configuration C never ran.**
+  The `ola` kernel selected its output format *per sample* and computed both
+  formats whenever an int16 buffer was passed — and the bench passed one, to pin
+  both hashes. So the 2.28× OLA ratio the plan carried was partly a measurement
+  artifact. Fused per-format kernels (`ola_s8`, `ola_s16`, format fixed outside
+  the loop, C's own structure) plus an `ola_kernel` dispatcher measure the
+  production int8 kernel at **21,418/call = 1.40× C** (dual 34,780 = 2.27×;
+  s16 23,220 = 1.52×), shrinking OLA's headroom ~69%. It also found a real win:
+  the product was writing int16 it never uses, so the int8-only pass takes the
+  frame **387,878 → 361,238 (148% → 138%)**, mean 340,928 → 314,288, with the
+  same int8 pin (`e6e87652`). Ladder: 175% → 148% → 138%, **1.99× C**. Recorded
+  with the lesson that recurred three times in this work: *measure the
+  configuration that ships*, not the one that is convenient to pin.
 
 - **2026-11-15 — the fast path is the DEFAULT, and "C-class parity" is retired.**
   Two decisions. (1) `uli-lite-gba` now defaults to `["asm-fft",

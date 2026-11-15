@@ -815,12 +815,12 @@ impl<'a, 's> GbaDecoder<'a, 's> {
         crate::pre(&self.hot.x[0], &mut self.hot.buf);
         crate::fft_kernel(&mut self.hot.buf);
         crate::post(&self.hot.buf, &mut self.hot.x[0]);
-        crate::ola(&self.hot.x[0], &mut self.hot.p[0], out8l, out16l);
+        crate::ola_kernel(&self.hot.x[0], &mut self.hot.p[0], out8l, out16l);
 
         crate::pre(&self.hot.x[1], &mut self.hot.buf);
         crate::fft_kernel(&mut self.hot.buf);
         crate::post(&self.hot.buf, &mut self.hot.x[1]);
-        crate::ola(&self.hot.x[1], &mut self.hot.p[1], out8r, out16r);
+        crate::ola_kernel(&self.hot.x[1], &mut self.hot.p[1], out8r, out16r);
 
         self.bitpos = br.bitpos();
         // The whole diagnostic block is product-build dead code: `Diag` is empty
