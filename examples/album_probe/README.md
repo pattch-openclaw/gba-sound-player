@@ -618,3 +618,10 @@ Caveats that qualify the numbers:
 witness that stays is the committed generator output — `assets/probe_art1.bin` and
 `src/art_pin.rs`, tracked, byte-identical on regeneration (`make album-probe-test` refuses
 if they are not).
+
+That tracking is the **narrow exception**, not a precedent: ALBUM-PLAYER.md §2.3 permits a
+committed generated asset only where a host gate's whole job is reading those exact bytes and
+the generator is deterministic and in-tree — which is true of a 7,748-byte hand-written `ART1`
+and false of recorded music. **Phase 1's album audio follows the opposite rule:** the per-track
+`GAFP` blobs, `ALBM1` and `src/assets.rs` are generated at build time from a tracked track list
+and gitignored, exactly as `make master-pack` already treats `master.gfp` and `master_pin.rs`.

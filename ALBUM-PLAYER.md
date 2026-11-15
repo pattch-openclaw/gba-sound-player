@@ -6,14 +6,19 @@ three probe ROMs are built, run and measured, and their numbers live in
 Phase 1 on is still unbuilt and unclaimed. It is a plan to be argued with, a scope
 statement, and a budget the first probe ROM has to contradict usefully — and it did:
 AP-0 refuted one row of §4.4's observable table, and the fix is recorded there rather
-than quietly applied. Four things have already been settled
+than quietly applied. Six things have already been settled
 in review and are recorded inline rather than left open: **a skip is allowed a
 short, bounded delay (§4.4)**; **a skip drops the queue by *truncating* the ring, and
 the application grows that method on its own feeder once §2.2's lift lands (§4.4,
 Q13b — ruled 2026-11-14 on AP-0's measurement)**; **the session clock is one `u32` in `.iwram`
-(§10.4)**; and **U4 closed on 2026-11-14**, which moves what this application is
-waiting on from decoder speed to the lossy backend's **playback (U5) and output
-stage (PR D)** gates (§2, §10.2, §11). Every number below is either
+(§10.4)**; **what this application waits on is still the lossy backend's real-time decode
+(U4), and only then its playback (U5) and output stage (PR D) — §2, §10.2, §11, corrected
+2026-11-15 against the plan of record, which never recorded U4 as met**; **the album's
+audio is build output and never committed source — a tracked track list plus the already
+shipped `master-pack` flow generate the blobs, the manifest and the pin module at build
+time (§2.3, ruled 2026-11-15)**; and therefore **the bake tool is split across two phases:
+packing a declared track list is Phase 1 work, its verdict set stays in Phase 3 (§3 A3a/A3b,
+§9.0, §11)**. Every number below is either
 (a) transcribed from this repository with its source named, (b) arithmetic on such
 a number, with the arithmetic shown, or (c) written as a question. Nothing is an
 estimate dressed as a measurement, and nothing is inherited from another project's
@@ -62,11 +67,11 @@ can each be built, measured and refused.
 | Lossless decode → sound at 16,384 Hz | `crates/flac-lite`, `crates/flac-lite-gba`, `examples/flac_integration/src/product_play_main.rs` | **accepted, C1+C2 closed 2026-11-13**; real audio on two GBA units, `underflows = 0` | a working producer/consumer playback pipeline today, at ~19% of audio time |
 | The geometry (clock, chunk, ring, prefill, re-arm grace) | `examples/flac_integration/src/geometry.rs` | shipped, host-modelled (`make product-play-test`) | every timing number in §4 and §10, transcribed not re-derived |
 | The feeder (ring, chunk classification, 8-bit convert, DMA/timer/IRQ discipline) | `examples/flac_spike/src/playback.rs` (`RingFeed`), shared by ROM and host model by `#[path]` | shipped and depended on — **and it is in a spike directory, which §2.2 rules must not last** | pause, skip and track-end are *states of this feeder*, not new machinery |
-| A second decoder in the tree | `crates/uli-lite`, `crates/uli-lite-gba` | **U4 (real-time decode) met — ruling reported 2026-11-14, during this proposal's review.** The measured arm belongs to [`PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md)'s ledger, which this checkout does not carry yet, so the number is quoted there and not here. Still **decode-only**: **U5** (playback — zero underruns, clean period audit, mGBA then hardware) and **PR D** (the output stage) are the gates still open. For the history: PR C measured 200% / 174%, C-1 + C-2 projected to ~91% ("the period, not C-class"), and PR C-3 carried the differential items | the lossy backend is now a live candidate for the album-length build. What this app waits on is **playback and the output stage, not decoder speed** — and everything it needs arrives **through the seam**, so the ordering is invisible above it |
+| A second decoder in the tree | `crates/uli-lite`, `crates/uli-lite-gba` | **U4 (real-time decode) is NOT met.** This checkout does carry the ledger, and it says so: [`PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) → "Critical path to real time" (2026-11-15) records the production frame at **274,198 worst / 232,090 mean = 105% / 89%** of the 262,144-cycle period after C-3's HotState-to-IWRAM — the mean fits, the worst frame is **12,054 cycles (4.6%) over**, and the codec's own working target is **≤ ~85%** so that the gate total (convert + IRQ + DMA) and this tree's UI fit beside it. Still **decode-only** even at parity: **U5** (playback — zero underruns, clean period audit, mGBA then hardware) and **PR D** (the output stage) are open behind it. Ladder for context: PR C 200% / 174% → C-3a/c 186% → C-3b 175% → C-1 164% → v4 162% → `iwram-tw` 157% → fused OLA 148/138% → **C-3 HotState 105%** *(corrected 2026-11-15; an earlier revision of this row read "U4 met", which no codec document says)* | the lossy backend is close, and is a candidate for the album-length build **once U4 lands with margin**. What this app waits on is **real-time decode, then playback and the output stage** — and everything it needs arrives **through the seam**, so the ordering is invisible above it |
 | Two codec containers, and neither is the application's | `GAFP` (`crates/flac-lite`), `ULA2` (`crates/uli-lite`) | both owned by codec tracks, both pinned by those tracks' evidence | **the reason A1/A6/A10/A11 are answered by an application manifest and not by either container** (§4.3). The app must not make a product feature depend on a field one codec happens to carry and the other does not |
 | On-screen text with a measured fit check | `examples/flac_integration/src/text.rs` | shipped | A10/A11/A12's font, layout settings and the "does it fit 240×160" verdict |
 | Refuse-at-pack-time tooling pattern | `scripts/gafp_pack.py` (profile guard, `MEASURED_DECODE`, `flac -d` differential, self-audit re-read) | shipped and gated (`make gafp-pack-check`) | the shape of `scripts/album_bake.py` in §9: the bake tool is a *verdict*, not a converter |
-| One-implementation-two-consumers, gates, native/podman twins, `toolchain-check`, `make help` | `Makefile`, `README.md` → "Build Process" | convention | every app subsystem gets a host twin and a named gate, per §13 |
+| Generate an asset at build time, pin it, link it | `make master-pack INPUT=track.wav` → `scripts/gafp_pack.py --master --emit-pin` (ffmpeg normalises **only** when the WAV header differs from the target — "a pack never quietly resamples"), the `master-asset` feature switching `include_bytes!` between the fixture and the generated blob (`examples/flac_integration/src/product_play_main.rs:233-236`), and `.gitignore` ignoring **both** `examples/flac_integration/assets/master.gfp` and `src/master_pin.rs` | **shipped, and it is this repo's answer for real music** — the C2 asset is "the first 9.9 s of `bioluminescent.wav`" (`flac-docs/measurements.md`) | **the mechanism §2.3 generalises from one track to N.** Phase 1's album is neither committed nor hand-made; it is *packed* |
 
 ### 2.1 This plan is self-contained
 
@@ -144,19 +149,75 @@ This is deliberately **not** part of the Phase 0 PR: Phase 0's job was to measur
 probe that carried a refactor of the product path with it would have made its own
 numbers hard to read.
 
+### 2.3 Audio is build output, never committed source (ruled 2026-11-15)
+
+Raised in review of Phase 1, and it corrects a line of this plan. §4.1 used to describe the
+app's `assets/` as "committed, tracked, generated (the `flac_spike` assets/ rule)". That is
+the wrong precedent: `flac_spike`'s blobs are tracked because they are the output of a
+*deterministic synthetic* generator — `scripts/gen_spike_assets.sh`: "source PCM is
+integer-synthesized (no floats, no RNG), so the WAVs are byte-identical anywhere" — and
+because they are the perf gate's `ctrl` arm, where **the bytes are the measurement**. Real
+recorded music is neither of those things, and this repository's standing practice for it
+runs the other way:
+
+| evidence | what it establishes |
+|---|---|
+| `make master-pack INPUT=track.wav` → `gafp_pack.py --master --emit-pin` | the shipped path from a real master to a playable asset: normalise if (and only if) the header differs from 16,384 Hz / 16-bit / stereo / 2048-sample frames, encode, pack, and **emit the Rust pin module the ROM checks its own embedded blob against** |
+| `.gitignore`, "Master-audio build artifacts (7-3)" | `assets/master.gfp` **and** `src/master_pin.rs` are ignored: "generated by `make master-pack` from `assets/sound/*.wav`; the tracked product asset is never overwritten" |
+| `.gitignore`, the rate-asset rule | "its generated clips + modules are TEMPORARY like ROMs — regenerate with `make rate-assets INPUT=… RATE=…`, removed by `make clean`" |
+| the census of tracked `.wav`/`.flac`/`.bin`/`.gfp` in the tree | two source WAVs (`assets/sound/bioluminescent.wav`, `test.wav`), synthetic spike blobs, a handful of KB of crate fixtures, and one 7,748-byte `ART1` whose tracked-ness `.gitignore` justifies as "the evidence the script ran". **Nothing else that carries recorded audio is committed** |
+| `flac-docs/measurements.md` — "The master asset is the first 9.9 s of `bioluminescent.wav`" | the C2 hardware witness is *derived* from the one tracked reference master, not stored beside it |
+
+**So, for this application: the album's structure is tracked, its bytes are not.**
+
+| tracked (source) | generated at build time (ignored, regenerable, pinned) |
+|---|---|
+| `examples/album_player/album.toml` — the **track list**: which files, in what order, with what titles/artists (§9) | each track's `GAFP` blob; `ALBM1`; `ART1`; `ALVZ1`; the generated `src/assets.rs` (`include_bytes!` + sha256 pins — `master_pin.rs`'s shape, N entries wide) |
+| the reference master the repository already carries: `assets/sound/bioluminescent.wav` (Q15) | — |
+
+Four consequences, all of them this plan's to honour:
+
+1. **No phase hand-packs an asset and no phase commits one.** §11's Phase 1 row said
+   "hand-packed"; it now reads *packed by the build*, from the tracked track list, by the
+   Phase 1 subset of the §9 tool. `master-pack` already does exactly this for one track; the
+   album's work is to make it N tracks wide, which is a loop plus a manifest writer.
+2. **§12.1's one-implementation rule decides where that code goes.** `scripts/album_bake.py`
+   is written once, in Phase 1, at its minimum scope, and Phase 3 *grows its refusals*. There
+   is never a Phase 3 rewrite of a Phase 1 packer, and never a second path from `album.toml`
+   to a `.gba`.
+3. **Reproducibility moves from "a committed blob still matches" to "two builds match"** — the
+   same shift `gafp-pack-check` already makes for one packer. This is why pack-twice-and-compare
+   enters **AP-1** rather than waiting for AP-5: it is nearly free once the packer exists
+   (`gafp_pack.py` already reproduces its blob byte for byte), and it is much cheaper to
+   establish in Phase 1 than to retrofit onto a five-subsystem image in Phase 3.
+4. **The cost of not committing is staleness, and pins are the mitigation** (R11). A build
+   that silently links yesterday's blob is precisely the failure `--emit-pin` exists to make
+   loud at boot; the app inherits that mechanism instead of inventing one, `make album-rom`
+   depends on the pack step so a build cannot skip it, and `make clean` has to know the
+   generated paths from day one, in the `master-pack` idiom.
+
+The narrow exception, stated so it does not get generalised back in: a *generated* app asset
+may be committed **only** when a host gate's entire job is reading those exact bytes *and*
+the generator is deterministic and in-tree — which is what justified
+`examples/album_probe/assets/probe_art1.bin` for AP-0, and which is unavailable for music.
+
+---
+
 ## 3. Requirements — the fifteen asks, as buildable items
 
-`Phase` is §11's numbering; `Gate` is §13's. Two items are marked **[reach]**
+`Phase` is §11's numbering; `Gate` is §13's. Fifteen asks, sixteen rows — A3 is one ask that
+§2.3 forces into two phases (A3a packs, A3b judges; §9.0). Two items are marked **[reach]**
 (§12) and the album-length build is marked **[waiting]** — waiting means "this app
 cannot close it, a codec track owns the precondition", which is stated so nobody
-quietly drops it. As of 2026-11-14 that precondition is **U5 (playback) and PR D
-(the output stage)**, not decode speed: U4 has closed.
+quietly drops it. As of 2026-11-15 that precondition is still **U4 (real-time decode —
+105% worst / 89% mean today, `PLAN-OF-RECORD.md`)**, and behind it **U5 (playback) and PR D
+(the output stage)**.
 
 | # | Requirement | Phase | Gate | Notes / dependency |
 |---|---|---|---|---|
-| A1 | Multiple tracks on one cartridge | 1 | AP-1 | An application manifest indexes N tracks over whichever backend is linked (§4.3) — the same screen, the same code, both codecs. `make album-rom BACKEND=flac\|uli2` (§4.2b). |
+| A1 | Multiple tracks on one cartridge | 1 | AP-1 | An application manifest indexes N tracks over whichever backend is linked (§4.3) — the same screen, the same code, both codecs. The index is `ALBM1`'s **internal per-track map of ROM locations and sample boundaries**, generated at build time (§2.3, §4.3), and it is not the A11 screen. `make album-rom BACKEND=flac\|uli2` (§4.2b). |
 | A2 | Skip next / previous **on the cartridge itself** | 1 | AP-1 | `PcmSource::start_track` + a fade + a ring re-prime; a short, bounded delay is accepted product behaviour, not a defect (§4.4). Buttons, not the emulator. |
-| A3 | Tool: many WAVs → a baked ROM | 3 | AP-5 | `scripts/album_bake.py`; refuses at pack time (§9). |
+| A3a | Tool: a declared track list → a packed ROM (**the blobs are generated, never committed**) | **1** | AP-1 | `scripts/album_bake.py` at its Phase 1 scope: `album.toml`'s track list → one `GAFP` per track via `gafp_pack.py --master --emit-pin` → `ALBM1` + generated `src/assets.rs` → ROM (§2.3, §9.0). Refuses the two things Phase 1 can check: rate identity, and manifest-vs-container disagreement. |
 | A4 | Play / pause | 1 | AP-1 | fade-in/fade-out over the DMA boundary, silent-ring state, no click (§4.4). |
 | A5 | General UI layout support | 2 | AP-3 | screens, a layout table in one shared module, a host snapshot twin (§5). |
 | A6 | Elapsed time / time left | 1 | AP-2 | shifts, not divides, because both clocks are powers of two (§6). |
@@ -166,17 +227,26 @@ quietly drops it. As of 2026-11-14 that precondition is **U5 (playback) and PR D
 | A10 | Track titles | 1 | AP-1 | From the application manifest's string pool, never the codec container; ASCII-folded at bake time (§5.5). |
 | A11 | Track list screen | 2 | AP-3 | ≤ 32 rows, scroll + cursor + now-playing marker. |
 | A12 | Opening menu / title card with the album title | 2 | AP-3 | boot → title card → "press Start"; settings page inside it (§5.2). |
-| A13 | Tool that *configures* the album and bakes the ROM | 3 | AP-5 | `album.toml` is the single input; the ROM is a function of it (§9). |
+| A13 | Tool that *configures* the album and bakes the ROM | 3 (schema: **1**) | AP-5 | `album.toml` is the single input; the ROM is a function of it (§9). The file's `[album]`/`[[track]]`/`[out]` core is **Phase 1's**, because A3a needs it; `[art]`/`[viz]`/`[game]` and the budget verdict arrive in Phase 3. |
 | A14 | **[reach]** Web UI for the configuration | 6 | AP-8 | a skin over the bake entry point, never a second implementation (§12.1). |
 | A15 | **[reach]** Background toy game (T-Rex / pong / breakout / snake) | 6 | AP-8 | admitted by a ring-watermark rule under a hard cycle cap (§12.2). |
+
+**Three things in this plan share the name "track list", and two of them are not a
+screen.** *Track list* (A3a, §9) is the tracked config input — `[[track]]` entries naming
+files, order, titles, artists. `ALBM1`'s per-track table (§4.3) is the **generated internal
+map**: for each track, its `(offset, len)` of asset bytes in the ROM, its `start_sample` and
+`n_samples` on the album timeline, its string-pool offsets and its §6 reciprocal. The *track
+list screen* (A11, §5.2) is the user-visible browser, and it is Phase 2. When this file says
+"the track list indexes the album", it means the second thing, which the first thing
+generates.
 
 Deferred-but-named, so they are not forgotten: seek-to-position within a track
 (A2's natural next step, and the first feature where the two backends visibly
 differ in granularity — the app's answer is a `PcmSource` capability query, §4.2,
 not an `if`), resume-from-last-track via SRAM (agb ships
 `sram`/`flash`/`eeprom`), speaker output profile, **[waiting]** album-length
-builds on the lossy backend's U5 (playback) and PR D (output stage) — U4, the
-decode gate, has closed.
+builds on the lossy backend's **U4 (real-time decode — not met, §2)**, then U5 (playback)
+and PR D (output stage).
 
 ---
 
@@ -188,6 +258,11 @@ decode gate, has closed.
 shape as `examples/flac_integration/` and `examples/uli_bench/` (own `Cargo.toml`,
 own committed `Cargo.lock`, own `target/`, `[[bin]]` per ROM image, `tests/` for
 the host twins), built by `make album-rom`.
+
+**`make album-rom` packs before it links.** The assets and the generated pin module are
+build output (§2.3), so a fresh clone turns the tracked track list into a ROM with nothing
+fetched, nothing hand-made and nothing audio committed — the same shape as
+`make master-play-rom INPUT=track.wav` today, with N tracks instead of one.
 
 Why not the root crate: `src/main.rs` is today a deliberately dependency-free
 teal baseline, and the isolation rule that keeps a broken experiment from taking
@@ -214,7 +289,9 @@ examples/album_player/
   src/viz.rs             ALVZ1 reader (§8)
   src/game/{core,pong,snake}.rs                                   (§12.2, phase 6)
   src/meta.rs            ALBM1 album-metadata reader (§4.3)
-  assets/                committed, tracked, generated (the flac_spike assets/ rule)
+  album.toml             TRACKED — the track list: which files, in what order, what titles/artists (§9, §2.3)
+  assets/                GENERATED, gitignored — per-track GAFP + ALBM1 + ART1 + ALVZ1 (§2.3)
+  src/assets.rs          GENERATED, gitignored — include_bytes! + sha256 pins over the above (master_pin.rs's shape, N wide)
   tests/                 host twins + snapshot checks
 ```
 
@@ -336,7 +413,9 @@ validating parser that refuses before it indexes (the discipline
 `scripts/gafp_pack.py` and `crates/uli-lite/src/album.rs` both already model, at
 one layer of remove):
 
-- `ALBM1` — **the manifest, and the only album-structural thing the UI reads.**
+- `ALBM1` — **the manifest, and the only album-structural thing the UI reads:** the
+  internal per-track map the player decodes from (this file's other "track list" — §3's
+  terminology note; A11 is the screen).
   Album title/artist/year, `n_tracks`, and per track: string-pool offsets for
   title and artist, `start_sample`, `n_samples`, `rate_hz`, the §6 progress
   reciprocal, the §12.2 measured per-frame cost ceiling, the backend selector, and
@@ -748,11 +827,11 @@ The honest framing: the WMP-era animations worked because the PC analysed the
 audio cheaply and the machine had spare cycles. On the FLAC path this tree has
 **~81% of audio time left after the decoder** (worst frame 398,255 of a
 2,097,152-cycle period-account, `product_play_main.rs` → 18.99%), and on the
-album-length path **very little**: U4 has closed (2026-11-14), which is exactly why
-the picture's budget is now a live question rather than a hypothetical one — but
-the target the codec chased was **C-class parity (~69–75% decode wall)**, not 100%,
-because the gate total has to leave room for the feeder, the output stage *and* this
-application. So the CPU that a real-time decoder frees up is not automatically the
+album-length path **very little, still**: U4 is **not** met (2026-11-15: 105% worst /
+89% mean of the period, [`PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md)), and the
+codec has explicitly retired "match C" as its target — the working bar is **≤ ~85% of the
+period**, written down precisely so the gate total (convert + IRQ + DMA) and this tree's UI
+fit beside the decoder (§10.2). So the CPU that a real-time decoder frees up is not automatically the
 visualiser's; it is the gate total's, and §10.2 is where the claim gets written.
 
 **Ruling for this plan: analysis is offline; the GBA only reads and draws.** The
@@ -816,24 +895,47 @@ about (§4.4).
 
 ---
 
-## 9. The bake tools (A3, A13)
+## 9. The bake tools (A3a, A3b, A13)
 
 Two entry points, one code path, and the ROM is a pure function of the config.
 
 ```
-album.toml ──► scripts/album_bake.py ──► encode each track (backend's own encoder) + ALBM1 + ART1 + ALVZ1
-                                    └──► generated src/assets.rs (include_bytes! + pins)
-                                    └──► cargo build --release --target thumbv4t-none-eabi
-                                    └──► agb-gbafix  ──► album-player.gba
+album.toml (TRACKED) ──► scripts/album_bake.py ──► per-track GAFP via gafp_pack.py --master --emit-pin
+                                                  ├──► ALBM1 + ART1 + ALVZ1        (GENERATED, §2.3)
+                                                  └──► src/assets.rs (include_bytes! + pins)
+                                                  └──► cargo build --release --target thumbv4t-none-eabi
+                                                  └──► agb-gbafix  ──► album-player.gba  (never tracked)
 ```
+
+### 9.0 Two phases, one tool: the packer lands in Phase 1, the verdict set in Phase 3
+
+§11 used to put "the bake" wholly in Phase 3 and describe Phase 1's audio as
+"hand-packed". Both halves of that were wrong, and wrong in the interesting way: hand-packing
+N tracks is work nobody owns, and a Phase 3 tool that writes a manifest Phase 1 already needs
+is a second implementation of the thing (§12.1). So the tool is one file, landed early, and
+what moves between the phases is its **refusal set**, not its existence.
+
+| piece | **Phase 1** (AP-1) | **Phase 3** (AP-5) |
+|---|---|---|
+| `scripts/album_bake.py` | exists, and carries the whole audio path: read the config's `[album]`/`[[track]]`/`[out]` subset → per track, `gafp_pack.py --master --emit-pin` → write `ALBM1` (the §4.3 internal map: `(offset, len)`, `start_sample`, `n_samples`, string offsets, the §6 reciprocal) → write `src/assets.rs` → link | *the same file*, grown: budget arithmetic, minutes-per-cart, `[art]`/`[viz]`/`[game]`, every remaining §9 refusal |
+| `scripts/album_prep.py` | its rate half — 16,384 Hz stereo (much of which `gafp_pack.py` already does from the WAV header) and the tag read + ASCII fold (§5.5) | its album half — join the tracks into one continuous timeline, so `start_sample` is an album position rather than a file offset |
+| `scripts/album_art.py`, `scripts/album_viz.py` | not built | built (§7, §8) |
+| determinism | **pack twice, compare bytes** — nearly free once the packer exists, and it is what makes "generated" mean "regenerable" rather than "whatever is lying around" (§2.3) | two full `make album-rom` runs → byte-identical `.gba` |
+| refusals that fire | declared rate ≠ product clock (Q14); frames outside the encode profile (inherited from `gafp_pack.py`); **`ALBM1`'s `n_samples` disagreeing with the packed container's `total_samples`** (§4.3 rule 1); the writer's own output re-read through the shipping `meta.rs` parser (§4.3's `audit_blob` rule) | plus over budget, >32 tracks, palette count, title fit, unused viz streams, the §10.4 audit ceiling |
+
+Two duties the split makes explicit, both Phase 1's: **(i)** land the `.gitignore` entries for
+every generated album path, in the `master-pack` idiom (rule in the comment, not a bare
+filename — see the header comment on the `*.gba` rule), and teach `make clean` the same paths;
+**(ii)** keep `album.toml` — never the assets — as the tracked artifact a reviewer reads, so an
+album is reviewable and rebuildable by someone who does not have this machine's `~/Music`.
 
 | Tool | Job |
 |---|---|
-| `scripts/album_bake.py` | the driver: read config, resolve tracks, check budget, call the rest, write the generated Rust pin module, link the ROM. **Refuses before it writes** (see below). |
+| `scripts/album_bake.py` | the driver: read config, resolve tracks, check budget, call the rest, write the generated Rust pin module, link the ROM. **Refuses before it writes** (see below). **Its Phase 1 subset is A3a (§9.0): pack a declared track list, nothing else — same file, grown in Phase 3, never rewritten.** |
 | `scripts/album_prep.py` | ffmpeg → the product rate, stereo; joins the tracks into one continuous album timeline; reads tags → titles/artists and ASCII-folds them (§5.5). **This is where `ALBM1`'s `start_sample` / `n_samples` come from, and it is codec-blind: it produces PCM, not a bitstream** |
 | `scripts/album_art.py` | image → `ART1` (median-cut + dither + tiles/map/palettes + palette-count refusal) |
 | `scripts/album_viz.py` | album PCM → `ALVZ1` (§8). Also codec-blind: it analyses the same prepared PCM whichever backend is going to be linked |
-| `scripts/gafp_pack.py` *(shipped)* | per-track GAFP for the FLAC source |
+| `scripts/gafp_pack.py` *(shipped)* | per-track GAFP for the FLAC source — **the bake calls it once per track**, and it already performs the ffmpeg normalisation, the 16,384 Hz / 16-bit / 2048-frame rate-and-profile refusal (Q14), the `flac -d` differential and `--emit-pin` |
 | *lossy encode step* | **not this track's to solve, and settled for v1 by the codec track:** the encoder of record is used **off-tree** to produce assets, nothing in this repository builds or vendors it ([`ULI2.md`](ULI2.md) → risks 5–6). So the bake tool's contract is *"an already-encoded asset plus a tracklist"* for that backend: `album-bake` takes the asset bytes, decodes nothing, and does the same manifest/art/viz/cost work as the lossless path. Phases 0–4 are demoable on the lossless backend alone; **Q3** tracks an in-repo encoder, which is a codec-milestone question and not an app task. |
 
 **`album.toml` (the whole configuration, so A14 is a form over one file):**
@@ -874,7 +976,8 @@ enabled = false                # §12.2; "pong" | "snake" when on
 # artist = "sila"
 ```
 
-**The bake step is a verdict.** It refuses, with a cited number, for: over budget
+**The bake step is a verdict** — in Phase 3 the whole set, in Phase 1 the four refusals
+§9.0 names. It refuses, with a cited number, for: over budget
 (album + art + viz + code reserve); more than 32 tracks; a declared rate that is
 not the product clock (the `geometry.rs::RATE_BRIDGE` rule, which is FLAC
 plan-of-record **Q14** — reinterpretation
@@ -889,7 +992,10 @@ against. It
 re-reads everything it wrote through the shipping parsers, and a second run on the
 same inputs must produce a **byte-identical** `.gba` (a real gate, and a strict
 improvement on today's reproducibility, since ROM header/entry/nintendo-logo
-bytes are fixed by `agb-gbafix` at a pinned version).
+bytes are fixed by `agb-gbafix` at a pinned version). Because nothing here is committed
+(§2.3), that byte-identity claim — not a stored blob — *is* the evidence that the
+generated assets mean what the config says they mean; its audio-only half is checked from
+Phase 1.
 
 ### 9.1 The Make surface this implies
 
@@ -897,16 +1003,20 @@ Same naming discipline as the rest of the tree (`native-*` / `podman-*` twins, a
 listed by `make help`, all gated through `toolchain-check`, all running `format`
 as a pre-step and never gating on tests):
 
-| Target | Does |
-|---|---|
-| `make album-bake ALBUM=album.toml` | runs the bake: assets + generated pin module, prints the size/budget/duration table, refuses what it cannot fit |
-| `make album-rom ALBUM=album.toml` | `album-bake` → cargo → `agb-gbafix` → `album-player.gba` (this is §1's one command) |
-| `make album-probe-rom` | the Phase 0 throwaway probes |
-| `make album-test` | AP-1/AP-2: scripted-key playback ROM in headless mGBA + audio-capture diff |
-| `make album-layout-test` | AP-3 host snapshots + fit verdicts |
-| `make album-art-check` / `album-bake-check` / `album-viz-test` | AP-4 / AP-5 / AP-6 |
-| `make album-web` | AP-8's local config server (never a build dependency) |
-| **`make album-check`** | the app's aggregate, the way `flac-check` is the FLAC track's |
+| Target | Does | Lands |
+|---|---|---|
+| `make album-bake ALBUM=album.toml` | runs the bake: assets + generated pin module, prints the size/budget/duration table, refuses what it cannot fit | **1** (track list → blobs → manifest); 3 (budget/art/viz verdicts) |
+| `make album-rom ALBUM=album.toml` | `album-bake` → cargo → `agb-gbafix` → `album-player.gba` (this is §1's one command) | **1** |
+| `make album-probe-rom` | the Phase 0 throwaway probes | 0 (landed) |
+| `make album-test` | AP-1/AP-2: scripted-key playback ROM in headless mGBA + audio-capture diff | **1** |
+| `make album-layout-test` | AP-3 host snapshots + fit verdicts | 2 |
+| `make album-art-check` / `album-bake-check` / `album-viz-test` | AP-4 / AP-5 / AP-6 | 2 / 3 / 4 |
+| `make album-web` | AP-8's local config server (never a build dependency) | 6 |
+| **`make album-check`** | the app's aggregate, the way `flac-check` is the FLAC track's | grows with the phases |
+
+`make clean` removes every generated album path (blobs, `ALBM1`, `ART1`, `ALVZ1`,
+`src/assets.rs`, `album-player.gba`) and keeps `album.toml` — the same division the master
+and rate assets already obey (§2.3).
 
 ---
 
@@ -960,10 +1070,14 @@ track's own reading is that the C record's 69.4% decode wall sits inside a 73.63
 gate total, i.e. **~4 points for everything that is not the decoder** — and its U4
 says the ceiling itself is *"measured, not assigned"*, written down at the first
 near-real-time arm "from the measured gate total plus this tree's non-audio cost".
-**U4 closing on 2026-11-14 makes that ceiling writable now, and the missing
-addend is this application's own cost.** So the cross-track debt runs one way: the
-app owes the codec track a measured UI + viz + game cost (AP-0, AP-6), in the same
-units the ledger uses, before U5's gate total is struck. Until then every
+(That 69.4% is a *diagnostic* now, not a target: the codec retired "match C" as an
+acceptance criterion on 2026-11-15 and works to **≤ ~85% of the period**, which is the same
+arithmetic with the app's cost as one of its terms.)
+**U4 is not met (2026-11-15: 105% worst / 89% mean), but that ceiling is writable now and the
+missing addend in it is this application's own cost.** So the cross-track debt runs one way:
+the app owes the codec track a measured UI + viz + game cost (AP-0, AP-6), in the same
+units the ledger uses, before U4's ceiling and U5's gate total can be struck. **AP-0 has
+delivered the basic-UI line, and AP-6/AP-8 owe the viz and game lines.** Until then every
 percentage in the table above is a target with no witness, which is why the basis
 column says so.
 
@@ -971,7 +1085,7 @@ column says so.
 
 | | total | committed to audio | left for the app |
 |---|---|---|---|
-| IWRAM 32 KiB | 32 KiB | ULI2 port ~22.6 KiB [ULI2.md], and PR B recorded a **15.0 KiB stack** need that an 8 KiB `.iwram` placement could not serve | tight: UI code/tiles staging must be sized against the map, and `.iwram` growth is a gate failure (AP-7) |
+| IWRAM 32 KiB | 32 KiB | measured with all synthesis tables placed as the C reference places them: `.iwram` = **25,548 B, 6,964 B left**, and the stack budget is **≈2,960 B** (2,192 B above `run()` + 768 B of descent) ⇒ **6,196 B headroom** — [`PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) → "The stack figure in this file was stale". *(corrected 2026-11-15: this row and R6 carried PR B's superseded "~22.6 KiB port + 15.0 KiB stack" numbers)* | workable, still map-sized: UI code/tiles staging is checked against the linker map, and `.iwram` growth is a gate failure (AP-7) |
 | EWRAM 256 KiB | 256 KiB | FLAC ring 40,320 B; ULI2 state ~96 KiB | workable; VRAM mirrors + ledgers + tables here |
 | VRAM 64 KiB | | BG tile data + maps + OBJ tile data | §5.1, split to be recorded in AP-0 |
 | OAM 1 KiB | | 128 objects × 8 B (max) | cursor/sprites |
@@ -983,10 +1097,14 @@ these words: **"audio first"** — the IWRAM budget goes to code, hot state and 
 and **"UI affordances are the slack and may be dropped to buy audio headroom"**
 ([`PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) → U6, decided 2026-11-14).
 That is the frame this application accepts: no UI feature in this plan is worth an
-`.iwram` byte the decoder needs, and U6 is currently the *binding* constraint on the
-lossy backend (an 8 KiB `.iwram` table placement crashes because ~15 KiB of stack
-does not fit behind it). So the app adds the linker-map diff to its gate set, so a
-200-byte surprise in `.iwram` is a red test rather than a silent playback failure.
+`.iwram` byte the decoder needs. And the memory story has already been rewritten once: with
+the stack measured rather than inherited, the plan of record's own words are that **"the
+binding constraint was never the stack, it was a stale measurement"** — `iwram-tables`,
+previously recorded as crashing, runs with all twins and pins green. So what this application
+carries from U6 is the *method*, not a number: size against the linker map, and re-read the
+ledger before quoting any figure from it. The app therefore adds the linker-map diff to its
+gate set, so a 200-byte surprise in `.iwram` is a red test rather than a silent playback
+failure.
 
 ### 10.4 The 16-bit period counter: internal bookkeeping, and what widening it costs
 
@@ -1028,8 +1146,9 @@ the audit and the game's admission rule all read, rather than two clocks with
 different widths and different failure modes. The accepted price is stated plainly
 so it is not rediscovered later: **4 bytes of `.iwram` and roughly one
 load/add/store per 34 ms period**, in exchange for keeping timer3 free and adding no
-torn-read handling. Against U6's numbers — 21,440 B spare, with a table arm needing
-~12.8 KB it does not have — 4 bytes is not a claim on the budget anyone is fighting
+torn-read handling. Against the plan of record's measured numbers — **6,196 B of `.iwram`
+headroom** with every synthesis table in place (§10.3) — 4 bytes is not a claim on the budget
+anyone is fighting
 over, and it sits in the UI's own allocation, which is exactly where "UI affordances
 are the slack" (§10.3) says such bytes belong.
 
@@ -1043,11 +1162,11 @@ that rather than promote an internal constant into a headline.
 | Phase | Ships | Exit gate |
 |---|---|---|
 | **0 — Probes.** Three throwaway ROMs and no product code: (a) UI spike — 3 BGs + 1 OBJ + text + palette fade, VBlank-paced, *with the shipped lossless feeder playing underneath*; (b) art spike — a PNG on screen from a hand-written `ART1`; (c) skip spike — fade/drop/re-prime against the real ring, measuring the silence gap and proving the re-prime costs no underrun | `make album-probe-rom` + logs; **AP-0**: the frame cost breakdown closes with UI terms, the VRAM/OBJ split is recorded, `SKIP_PRIME_CHUNKS` gets its first number, and the *targets in §10 are replaced by measurements*. **Landed 2026-11-14** (`examples/album_probe/README.md`; `make album-probe-art/-test/-rom`, `make album-probe`): UI full arm **1.89%** of a period (≤2% target, and a lower bound), feeder 0.92%, video period **280,896 c** (§4.5's ~281,000 confirmed), one 4bpp tile write 726 c, art upload **0.60 period** live (+2.08% over audio-disarmed, n=1, emulator — the same upload has now read three ways and AP-4 re-prices it), `late_max` 4 samples in the skip sweep's total, inside the 16-sample grace — and `SKIP_PRIME_CHUNKS` came back **blocked on the truncate ruling (§4.4, Q13b)**, which is the finding Phase 0 existed to produce |
-| **1 — It plays an album.** A1–A4, A6, A10: 2–3 tracks (lossless backend, hand-packed), play/pause, next/prev with fade+drop+re-prime, title + elapsed/remaining on screen; the 32-bit session clock (§10.4, ruled); **the `stub` and both backend arms compile and run the same screen suite from here on**; and first on the list, **§2.2's lift of the feeder out of `examples/flac_spike/` into project source, with `truncate()` (§4.4) landing on the lifted type** — Phase 1 may not `#[path]` a spike | **AP-1**, **AP-2**, **AP-9** |
+| **1 — It builds an album, and it plays one.** A1–A4, A6, A10, **A3a**. In order: **§2.2's lift of the feeder out of `examples/flac_spike/` into project source, with `truncate()` (§4.4) landing on the lifted type** — Phase 1 may not `#[path]` a spike; then **the pack step (§2.3, §9.0): `examples/album_player/album.toml` (tracked) → `scripts/album_bake.py`'s Phase 1 subset → N `GAFP` blobs + `ALBM1` + `src/assets.rs`, all generated and gitignored**, default material 2–3 slices of the tracked reference master (Q15) so a fresh clone builds with no untracked input; then the app crate — `PcmSource` + `backend/{flac,stub}` (§4.2b), the app's derived `geometry.rs`, `meta.rs` (the validating `ALBM1` reader over the per-track ROM-location map), the fade→**truncate**→re-seek→silence-cover→re-prime→fade-in feeder (§4.4), the 32-bit session clock (§10.4, ruled), the no-divide arithmetic (§6), play/pause/next/prev/restart, and title + elapsed/remaining on screen. **The `stub` and both backend arms compile from here on, and the suite runs on `stub` + `flac`; `uli2` runs when U4/U5 land (Phase 5, AP-9).** | **AP-1**, **AP-2**, **AP-9** — and the phase that hands the codec track its UI-cost addend (§10.2, R1b). Landing it also updates `README.md` → "Build Process" and the `gba-build-and-test` skill with the new `album-*` targets |
 | **2 — The shell.** A5, A7, A8, A11, A12: layout module, title card, now-playing, track list, pause menu, progress bar, cover art | **AP-3**, **AP-4** |
-| **3 — Bake.** A3, A13: `album.toml` + `scripts/album_bake.py` end to end, WAVs → ROM, determinism and refusals | **AP-5** |
+| **3 — The bake becomes a verdict.** A3b, A13: the **same** `scripts/album_bake.py` grows §9's remaining refusal set (budget, 32-track cap, palette count, title fit, unused viz streams, the §10.4 audit ceiling), plus `album_art.py` / `album_viz.py`, the `[art]`/`[viz]`/`[game]` config sections, and two full runs → one byte-identical `.gba` (its audio-only half has been checked since Phase 1) | **AP-5** |
 | **4 — It moves.** A9: `ALVZ1` + `bar` + `skyline`, `beat`-driven sprite; art+breathe | **AP-6** |
-| **5 — Hardware + the second backend.** Both GBA units, two runs each, `none` vs each viz; then the album-length build on the lossy backend — **U4 has closed, so what this waits on is U5 (playback) and PR D (the output stage)**, and the app-side work is a `BACKEND=uli2` rebuild plus a fresh set of measurements, changing no screen and no tool (§4.2b is why that is the expectation rather than a hope) | **AP-7**, **AP-9** |
+| **5 — Hardware + the second backend.** Both GBA units, two runs each, `none` vs each viz; then the album-length build on the lossy backend — **U4 is not met (105% worst / 89% mean, 2026-11-15), so this waits on real-time decode with margin, then U5 (playback) and PR D (the output stage)**, and the app-side work is a `BACKEND=uli2` rebuild plus a fresh set of measurements, changing no screen and no tool (§4.2b is why that is the expectation rather than a hope) | **AP-7**, **AP-9** |
 | **6 — Reach.** A14 web config, A15 toy game | **AP-8** |
 
 Phase 0 exists because four things in this plan are genuinely new to this tree
@@ -1124,15 +1243,15 @@ the rule that a gate touching a non-default configuration runs as its own target
 | Gate | Claim | Witness |
 |---|---|---|
 | **AP-0** | The probe ROMs run: objects + 3 BGs + text present simultaneously, the frame cost breakdown closes with UI terms, VRAM/OBJ split and refresh cost recorded, the skip gap measured | **Closed 2026-11-14** (`examples/album_probe/README.md`): measured — UI **1.89%** of a period, feeder 0.92%, one 4bpp tile write 726 c, art upload 0.60 period, video period 280,896 c, and the skip sweep's drain/drop ceiling (§4.4, Q13b). Not measured, still targets: viz (AP-6), game (AP-8), the ≥ 20% reserve — plus every screen and sound claim in the record's NOT VERIFIED section |
-| **AP-1** | ≥2 tracks play to the end of the album, pause/resume and next/prev work **from scripted button presses**, `underflows = 0`, fades produce no click, and a skip's silence is bounded by `SKIP_PRIME_CHUNKS` | `make album-test`: `mgba-test-runner` with a scripted key log, plus a captured-audio comparison against a reference decode of the same asset |
-| **AP-2** | mm:ss elapsed + remaining match the bake tool's durations to ≤1 s; bar and time never disagree by more than one cell and never move backwards; no `__aeabi_*div*` in the playback/UI path | host twin on `position.rs`/`layout.rs` + objdump/symbol fact on the linked `.gba` |
+| **AP-1** | **the ROM under test was built by `make album-rom ALBUM=examples/album_player/album.toml` from a fresh clone, with no untracked input and nothing fetched (§2.3)**; ≥2 tracks play to the end of the album, pause/resume and next/prev work **from scripted button presses**, `underflows = 0`, fades produce no click, and a skip's silence is bounded by `SKIP_PRIME_CHUNKS` | `make album-test`: `mgba-test-runner` with a scripted key log, plus a captured-audio comparison against a reference decode of the same asset. **Also runs here, because the packer does: two consecutive packs → byte-identical blobs, and `ALBM1` re-read through the shipping `meta.rs` agrees with `album.toml` field by field** |
+| **AP-2** | mm:ss elapsed + remaining match the durations **the same build's pack step printed** to ≤1 s (§6; the tool is Phase 1's as of §9.0, so this differential exists from the first album build rather than waiting for Phase 3); bar and time never disagree by more than one cell and never move backwards; no `__aeabi_*div*` in the playback/UI path | host twin on `position.rs`/`layout.rs` + objdump/symbol fact on the linked `.gba` + the bake's printed track table |
 | **AP-3** | Every screen's map renders to the expected host snapshot from the same `layout.rs`, and every string on every screen *fits* 240×160 | host snapshot test + on-screen fit verdict (the `text::measure` precedent) |
 | **AP-4** | `ART1` is reproducible byte-for-byte from the source PNG, re-reads through the shipping parser, never exceeds its tile/palette allocation (linker map + VRAM audit), and refuses an off-palette source image | `make album-art-check` |
-| **AP-5** | `album.toml` + WAVs → ROM end to end; two runs → identical bytes; every refusal in §9 fires with its message | `make album-bake-check` |
+| **AP-5** | `album.toml` + WAVs → ROM end to end; two runs → identical bytes; every refusal in §9 fires with its message — **the Phase 3 set; the four §9.0 refusals that land in Phase 1 are witnessed by AP-1** | `make album-bake-check` |
 | **AP-6** | Each viz, alone and paired with art, holds `underflows = 0`, stays inside its §10.2 line, and leaves the audio cost breakdown unchanged vs the `none` control arm | `make album-viz-test` + on-target timing, `none` as control |
 | **AP-7** | Hardware: GBA 001 + GBA SP, two runs each, `none`/`bar`/`skyline`/`game`, with the map-file memory report attached and `.iwram` growth flagged | two units, a notebook, and a `flac-docs/history.md`-style record |
 | **AP-8** | Reach: the web config produces an `album.toml` the CLI bakes unchanged; the game under the watermark rule never admits an underrun | `make album-web-check` (headless, config diff) + AP-6's arms with `game = on` |
-| **AP-9** | **The seam holds:** the same screen/layout suite passes against `backend-flac`, `backend-uli2` and `stub`; no module outside `src/backend/` names a codec crate (a build-time fact, not a code-review hope) | three `cargo` arms + a dependency check on the app crate's module graph |
+| **AP-9** | **The seam holds:** the same screen/layout suite passes against `backend-flac`, `backend-uli2` and `stub`; no module outside `src/backend/` names a codec crate (a build-time fact, not a code-review hope). **Phase 1 reads this as: all three arms compile, and the suite *runs* on `stub` + `flac`; three-way runtime parity is witnessed in Phase 5, because the lossy backend has no real-time decode (U4) and no in-tree encoder (R7) yet — the arms that cannot have assets cannot be blamed for it** | three `cargo` arms + a dependency check on the app crate's module graph |
 
 Aggregate: **`make album-check`** = AP-0…AP-6 plus AP-9 on host+target, mirroring
 `make flac-check`; the codec tracks' gates (`flac-check`, `uli-*`) stay the
@@ -1144,17 +1263,18 @@ authorities on decode, and an app change never re-decides them.
 
 | # | Risk | Why it is real here | Mitigation |
 |---|---|---|---|
-| R1 | **The album-length build waits on the lossy backend's playback gate, not on its decoder** | U4 (real-time decode) closed 2026-11-14; **U5** (zero underruns, clean period audit, mGBA then hardware) and **PR D** (output stage, incl. the speaker fold-down this app exposes) are still open, and U6 memory is the binding constraint | the app is built and gated on the lossless backend meanwhile; the backend switch is Phase 5 and touches no screen. The seam is the mitigation — the risk is only realised if someone writes `if flac` in the UI |
-| R1b | **The app's UI cost is an input to the codec's own gate ceiling**, so an unmeasured UI blocks U5's gate total on the lossy backend | U4's ceiling is "measured, not assigned": the gate total **plus this tree's non-audio cost** — and U4 has now closed, so the addend missing from that sum is this application's | AP-0/AP-6 publish the UI + viz + game cost in the same units the codec ledger uses and hand it across; §10.2's targets are explicitly targets until then |
-| R2 | **The lossless backend cannot hold a whole album** — the shipped clip carries 354.8 kbit/s (439,396 B for 9.91 s, `spike_l0.gfp`) ⇒ arithmetic puts ~12.6 min of that material on 32 MiB | that clip is a perf fixture, not a measure of real music, and no amount of FLAC tuning makes lossless reach album length at this depth | Phase 3 measures a real master's bitrate and the bake tool reports minutes-per-cart honestly. This risk is also the *reason* the lossy backend is not a nice-to-have: an album player that can only hold an EP is why §4.2b exists. Quote a measured number from here on, not 354.8 kbit/s |
+| R1 | **The album-length build waits on the lossy backend's decode gate, and then on its playback gate** | U4 is **not met** — 2026-11-15: 105% worst / 89% mean of the period, and the codec's working bar is ≤ ~85% so the gate total and this tree's UI fit beside it ([`PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) → "Critical path to real time"). Behind it, **U5** (zero underruns, clean period audit, mGBA then hardware) and **PR D** (output stage, incl. the speaker fold-down this app exposes) are still open. *(corrected 2026-11-15: this row and four others in earlier revisions of this file read "U4 closed 2026-11-14", which no codec document says — see §2's row for the ladder)* | the app is built and gated on the lossless backend meanwhile; the backend switch is Phase 5 and touches no screen. The seam is the mitigation — the risk is only realised if someone writes `if flac` in the UI |
+| R1b | **The app's UI cost is an input to the codec's own gate ceiling**, so an unmeasured UI blocks U4's ceiling and U5's gate total on the lossy backend | U4's ceiling is "measured, not assigned": the gate total **plus this tree's non-audio cost**, and the critical path's ≤ ~85% target is derived from exactly that sum — so the addend missing from it is this application's | AP-0 has handed across the basic-UI line (**1.89%** of a period, plus feeder 0.92%) and AP-6/AP-8 owe the viz and game lines, in the same units the codec ledger uses; §10.2's targets are explicitly targets until then |
+| R2 | **The lossless backend cannot hold a whole album** — the shipped clip carries 354.8 kbit/s (439,396 B for 9.91 s, `spike_l0.gfp`) ⇒ arithmetic puts ~12.6 min of that material on 32 MiB | that clip is a perf fixture, not a measure of real music, and no amount of FLAC tuning makes lossless reach album length at this depth | **Phase 1's default album is real music** (Q15: slices of the tracked `bioluminescent.wav`), so the first bitrate this app quotes for a real master comes out of the Phase 1 pack report, and the bake tool reports minutes-per-cart honestly. This risk is also the *reason* the lossy backend is not a nice-to-have: an album player that can only hold an EP is why §4.2b exists. Quote a measured number from here on, not 354.8 kbit/s |
 | R3 | **Cartridge bus contention**: the app adds ROM *data* traffic (VIZ reads, tile uploads, art) around decoder *instruction* and audio-data fetches | mGBA does **not** model the ROM prefetch buffer, and this tree already had to arbitrate emulator-vs-hardware fetch once (`examples/e5_fetch/`); ULI2's method note says on-target numbers stay unclaimed until hardware | the ≥20% reserve; a hardware run per phase from Phase 5; the watermark rule keeps the risk off the audio deadline |
 | R4 | **A skip that sounds broken**: too long a silence, a pop at the splice, or a re-prime that starves the ring | §4.4: 1.23 s is queued and must be dropped, then replaced while the DMA keeps consuming. **AP-0 found the stronger version of this risk: without a ring truncate the drop cannot be faster than one period per queued chunk, so at the ring's ceiling the skip is 1.33–1.81 s no matter what `SKIP_PRIME_CHUNKS` is (§4.4, Q13b)** | the fade/drop/re-prime sequence with `SKIP_PRIME_CHUNKS` chosen by the host model, not guessed; AP-1 measures the gap and holds `underflows = 0` across it; and Q13b ruled in the app's favour, so step 2 becomes a truncate rather than a drain |
 | R5 | **Silent failure modes** (a bad blob, an album longer than the manifest's own arithmetic, an off-profile asset) | the bake tool is the only place with enough information to notice, and it is not currently the place that decides | refuse at bake time; show a named on-screen verdict ("DATA ERROR") at run time; a decode error skips to the next track and stops at the album end; the 32-bit session clock (§10.4) so a long run is still measurable |
-| R6 | **IWRAM is already nearly full** on the album-length path | ULI2 port ~22.6 KiB + a 15 KiB stack, per PR B | AP-7 flags `.iwram`/stack growth; new non-hot code stays out of IWRAM by rule; the "a few hundred bytes of RAM growth breaks playback silently" failure mode is one this project has already recorded, so the map diff is a gate and not a courtesy |
+| R6 | **IWRAM is the scarce RAM** on the album-length path, and it has already been mis-sized once in this repository's own documents | the plan of record now measures `.iwram` = 25,548 B with every synthesis table in place, **6,196 B of headroom after a ≈2,960 B stack** — which supersedes the PR B-era "~22.6 KiB port + 15.0 KiB stack" reading this file's earlier revision carried | AP-7 flags `.iwram`/stack growth from the linker map, not from a remembered number; new non-hot code stays out of IWRAM by rule; the "a few hundred bytes of RAM growth breaks playback silently" failure mode is one this project has already recorded, so the map diff is a gate and not a courtesy |
 | R7 | **The lossy backend has no encoder in this repository**, so `BACKEND=uli2` cannot be baked here today | `make gafp-pack-check` covers FLAC end to end; nothing in `scripts/` encodes the lossy format | the bake tool calls encode behind one indirection with a declared interface (§9); the app is built and gated on the lossless backend in the meantime, so this blocks a *backend*, never the application (Q3) |
 | R8 | **Scope**: fifteen features, two backends, a UI toolkit, an art pipeline, an analysis pipeline and a game | the natural failure is a demo that does all of them badly | phases are ordered so each one is *usable*, and A9/A14/A15 are labelled reach; §16 lists what we will not build |
 | R9 | Font/charset limits and licensing | 96-glyph ASCII subset; OFL fonts; ULI2 licensing (U7) unresolved | fold at bake time and print offenders (Q9); the app is not the vehicle that forces a publication decision |
 | R10 | **The app's foundation includes a spike directory** — its feeder (`examples/flac_spike/src/playback.rs`) and its cycle counter (`examples/e5_fetch/src/timer.rs`) live where the tree's own purpose statement says code goes to be thrown away | `flac_spike` is the perf-gate `ctrl` arm and `e5_fetch` has no Make target any more; a product feature implemented there has no owner, and Q13b's ownership looked genuinely ambiguous for exactly this reason | §2.2: lift the feeder + checksum + counter into project source before Phase 1 links them, keep `flac-check`/`product-play-test` as their witnesses, and re-baseline the shipped ROM bytes the move touches. Phase 0's probes lean on them on purpose and are throwaway |
+| R11 | **A generated asset can go stale** — the policy that keeps album audio out of the repository (§2.3) means a build can silently link *yesterday's* blob | this is the price of the policy, not an accident of it: `master.gfp`, the rate clips and every future `album_player` asset are build output, and build output outlives its config more often than source does | `gafp_pack.py --emit-pin` already writes the sha256 pins the **ROM** checks its own embedded blob against at boot, so a mismatch is a named verdict (R5's "DATA ERROR") rather than a plausible-sounding track; `make album-rom` depends on the pack step so a build cannot skip it; `make clean` removes the generated paths; and AP-1's pack-twice check plus AP-5's byte-identical-ROM check make "generated" mean **regenerable**, not "whatever is lying around" |
 
 ---
 
@@ -1164,7 +1284,7 @@ Numbered in this file's own space (the codec tracks keep theirs).
 
 | # | Question | Provisional ruling |
 |---|---|---|
-| Q1 | Which backend is v1's default *artifact*? | **The application supports both and favours neither** (§4.2b, AP-9). With U4 closed the lossy backend is a real candidate for the album-length image, and it becomes the default once **U5** gives it zero-underrun playback on hardware — the lossless backend stays the default until then because it is the one with hardware witnesses today, and it stays a build forever, as the A/B control. Either way this is a shipping decision about which artifact `make album-rom` builds by default, not a design assumption: nothing in the app may depend on it. |
+| Q1 | Which backend is v1's default *artifact*? | **The application supports both and favours neither** (§4.2b, AP-9). U4 is not met yet (105% worst / 89% mean, §2), so the lossy backend is a *near* candidate for the album-length image; it becomes a real one when U4 lands with margin and the default once **U5** gives it zero-underrun playback on hardware — the lossless backend stays the default until then because it is the one with hardware witnesses today, and it stays a build forever, as the A/B control. Either way this is a shipping decision about which artifact `make album-rom` builds by default, not a design assumption: nothing in the app may depend on it. |
 | Q2 | App-side manifest, or extend a codec's container with album fields? | **App-side `ALBM1`, for both backends equally** — the decoupling argument is §4.3: an album feature must be available to both codecs or it is not a feature, it is a branch. Revisit only if a future format revision is happening for codec reasons anyway. |
 | Q3 | An in-repo encoder for the lossy backend? | **Settled for v1 by the codec track** (2026-11-14): the encoder of record is used off-tree to produce assets, nothing is built from it and no C is vendored. This app therefore bakes from a *pre-encoded asset* on that backend. A Rust encoder remains a codec-track milestone; nothing in Phases 0–4 blocks on it. |
 | Q4 | Gapless playback? | ULI2 is gapless by construction (one stream, track boundaries are positions). The FLAC path is N blobs and will gap **audibly** unless the ring is bridged at a track boundary. **v1 rules: lossless path has inter-track gaps, and we say so**; bridging is a Phase 5 item. |
@@ -1179,12 +1299,16 @@ Numbered in this file's own space (the codec tracks keep theirs).
 | Q13 | Where does the codec track's PR D stop and this application start — the output stage, the feeder, **and whether the UI reads the codec's tables or the app's manifest**? | Overlapping ground, named rather than papered over. The feeder is already shared in this repo's idiom (`RingFeed` and `geometry.rs` are compiled by several consumers through `#[path]`), and the lossy track's PR D claims "reuse the ring/FIFO feeder … int8 direct … UI from the container's tables" — that last clause is the boundary §4.3 pushes back on. **Proposal:** the feeder / convert / fold-down lives in one shared module that both the product ROM and this app link (PR D's fold-down measurement lands there), the *player* (screens, manifest, keys, viz) lives here, and the adapter cross-checks the container's tables against the manifest so both statements hold at once. One piece of that boundary has since settled on its own terms: the ring/feeder becomes project source the *application* owns (§2.2), so `truncate()` (Q13b) is not a cross-track ask at all. What still needs an owner's ruling is where PR D's output stage stops and the player begins, because that decides where U5's gate gets written. |
 | Q13b | **May the shared feeder *truncate* the ring at a skip?** (raised by AP-0, 2026-11-14) | **Ruled: yes — this is the mechanism §4.4 step 2 means, and the application grows it.** `consumed` is private and only `take_chunk` moves it, so the only drop the application can write today costs one hardware period (34.18 ms) per queued chunk: at the 36-chunk ceiling that is 1,230.5 ms of either the old track or silence, measured at 39–53 periods to new-track audio against §4.4's ≤ ~0.6 s, where a truncate reads 3–17 periods (102.5–581.1 ms) and comes inside it at every prime setting. **The method:** `truncate()` (or `skip_to_producer()`) setting `consumed = pushed` under the same critical section `take_chunk` uses, keeping `consumed <= pushed` and "a starved period consumes nothing" intact, plus a host test that a truncated ring reads `ready() == 0` and delivers the next push whole. **Whose:** ours. It looked like a codec-track ask only because the ring sits in `examples/flac_spike/src/playback.rs`, a spike directory that both shipped product images happen to compile; §2.2 rules the application must not build on a spike, so the feeder is lifted into project source first and the method lands on the lifted type. Both are Phase 1 work (§11), and `flac-check` + `product-play-test` stay its witnesses because the lift re-baselines the shipped images. **Consequence until it lands:** `SKIP_PRIME_CHUNKS` is un-chosen, and a skip on the current feeder is 1.33–1.81 s whichever drop the app picks. |
 | Q14 | Does the app's reaction data need the lossy backend's int16 path, or is int8 enough? | Neither, as designed: the visualiser reads the **album timeline**, not the PCM (§8). This only reopens if the runtime-analysis experiment is taken, and then it is a measured cost against the gate total, not a free tap. |
+| Q15 | What does Phase 1's default album actually play, given nothing is committed (§2.3)? | **2–3 slices of the reference master this repository already tracks: `assets/sound/bioluminescent.wav`** (96 kHz / 24-bit / stereo, 258.6 s — and already the source of the C2 asset, whose first 9.9 s it contributes), declared in `examples/album_player/album.toml` and normalised to the product clock by `gafp_pack.py`. The reason is a gate requirement, not convenience: AP-1's witness has to be runnable by someone other than the person who built it, so `make album-rom` and `make album-test` must work from a fresh clone with **no untracked input and nothing fetched**. Arbitrary local folders are supported through the same config (`source = "my-album/"` or explicit `[[track]]` rows), but a personal album is never the gate's fixture. Two things fall out: this is the first place the project states a real-music bitrate instead of inheriting the perf fixture's 354.8 kbit/s (R2), and slicing one continuous recording makes the FLAC path's **audible** inter-track gaps (Q4) visible in the very first build rather than discovered on hardware. |
 
 ---
 
 ## 16. Non-goals
 
-No on-device file browsing or multi-album carts (Q11). No streaming, link-cable
+No on-device file browsing or multi-album carts (Q11). **No committed album audio, and no
+committed album assets** — the track list is source, everything derived from it is build
+output (§2.3); the only recorded audio this repository tracks is the reference master (or
+masters) under `assets/sound/`. No streaming, link-cable
 or MIDI input here (goal 3 is its own ROM). No new codec work, no format
 revisions, no encoder rewrites inside an app PR. No runtime FFT. No video, no
 per-frame art streams, no alpha blending beyond palette tricks. No general GUI
@@ -1217,9 +1341,22 @@ backend is ready, with every target number in §10 replaced by a measurement.
 
 - [`FLAC.md`](FLAC.md), [`flac-docs/`](flac-docs/) — the lossless source this app plays first.
 - [`ULI2.md`](ULI2.md), [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) —
-  the album-length codec, its container, and the gates this app waits on: **U4 is
-  closed (2026-11-14); U5 (playback), PR D (output stage) and U6 (memory) are the
-  open ones**, and the plan of record is where the measured numbers live.
+  the album-length codec, its container, and the gates this app waits on: **U4 (real-time
+  decode) is not met — 105% worst / 89% mean as of 2026-11-15, with U5 (playback), PR D
+  (output stage) and U6 (memory) behind it**, and the plan of record's "Critical path to real
+  time" section is the authority on all four. Read numbers there, not here: this file has
+  already carried two of its superseded figures forward ("U4 closed", "15.0 KiB stack"), and
+  both corrections are marked inline (§2, §10.3, §10.4, R1, R6).
+- [`README.md`](README.md) → "Build Process" — the `master-pack` / `master-play-rom` flow this
+  plan generalises to N tracks (§2.3), and the place the new `album-*` targets have to be
+  documented when they land (Phase 1 owes that edit, along with the `gba-build-and-test` skill).
+- [`.gitignore`](.gitignore) — where "audio is build output" is actually enforced, for ROMs,
+  the generated master asset + pin, and the rate clips, with the spike and probe blobs marked
+  as the narrow exception in their own comments (cross-referenced here 2026-11-15). Phase 1
+  adds the `album_player` generated paths here, in the same idiom: the rule and its reason,
+  not a bare filename.
+- [`assets/sound/bioluminescent.wav`](assets/sound/) — the one tracked piece of real music,
+  the reference master, and Phase 1's default album material (Q15).
 - [`README.md`](README.md) — "Project ideas (top-level ROMs)" lists this as an
   idea; this file is where that idea stops being one. The README should gain a
   pointer to this document when Phase 0 lands.
