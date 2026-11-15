@@ -14,7 +14,13 @@ entropy, 4% M/S + wrapper — and took it to 200% / 174% with a split-`huff` fas
 path. The remainder was scoped as C-1 (asm kernels) and C-2 (entropy). A parity
 audit (2026-11-14) found that C-1 + C-2 project to ~91% — the period, not the C
 record's 69.4% — so the plan now carries C-3, a differential port against the C
-product decoder, and re-reads U4 as C-class.** This file is the decision record (why
+product decoder, and re-reads U4 as C-class.**
+**Since then the production path reached 274,198 worst / 232,090 mean = 105% / 89%
+(C-3d + C-3), and Step 0 (2026-11-15) re-attributed that frame by difference in the
+product image: on the worst frame entropy/dequant/M-S is 40% of the frame and 69% of
+the distance to the C worst-frame shape, the three Rust kernels are 1.10-1.22x
+hand-written asm, and the already-asm FFT (1.33x) is the largest kernel item.
+This file is the decision record (why
 ULI2, what it is, the licensing and encoder risks); the live plan, gates and
 measurement ledger are [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md).
 
@@ -542,7 +548,7 @@ claims to be measured, not inherited from `gba-audio`.
 | **U1 — reference** | `uli-lite` remains a bit-exact, host-testable reference and oracle (no longer a portable-product claim). | `make uli-test`; committed corpus; thumbv4t `check` |
 | **U2 — bit-exact host** | The Rust core matches the C integer reference frame-for-frame on the committed corpus and rejects malformed frames without panic. | `make uli-test`; pinned hashes |
 | **U3 — bit-exact product** | The product kernel set (`ArmKernels`) decodes the corpus to the pinned int8/int16 frames, in the host full-frame twin and on the target. **Met (PR A).** | `make uli-bench` (both arms + on-target twin); `make uli-overlay-test` (host kernel + decoder twins) |
-| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Not met. PR B: 204% / 177%. PR C (2026-11-14): 200% / 174% (523,267 / 456,187), with the frame attributed 63% kernels / 33% entropy / 4% M/S + wrapper; remainder scoped as C-1 asm kernels and C-2 entropy, projected ~91% with the C kernel row pinned at 134,600 — which is the period, not parity (69.4%); see C-3 in the plan of record.** | `make uli-bench`; mGBA, then hardware |
+| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Not met.** Ladder: 204% (PR B) -> 200% (split `huff`) -> 186% -> 175% -> 164% (asm FFT) -> 162% -> 157% (`iwram-tw`) -> 148% (`iwram-tables`) -> 138% (C-3d) -> **274,198 / 232,090 = 105% / 89%** (C-3). **Step 0 (2026-11-15) attributed the worst frame (f98) by difference in the product image: synthesis 162,987 (59%), entropy/dequant/M-S 110,741 (40%), wrapper 486 - i.e. 69% of the 92,286-cycle distance to the C worst-frame shape is the entropy path and 31% synthesis. Per channel the kernels are 1.10-1.33x C (pre 1.22x, fft 1.33x, post 1.10x, ola 1.11x), so the previous 'asm kernels first, ~194,000 prize' order is retired; the live order is in `crates/uli-lite/PLAN-OF-RECORD.md` ('Critical path to real time').** | `make uli-bench`; mGBA, then hardware |
 | **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | `product-play` equivalent for ULI2; hardware runs |
 | **U6 — memory** | IWRAM/EWRAM/stack stay inside the product budget with the UI and feeder linked. | linker map + runtime stack check |
 | **U7 — licensing/spec** | A public crate, if published, has a permissive license and a standalone format specification; otherwise it remains `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** |
