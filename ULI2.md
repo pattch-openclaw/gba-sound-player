@@ -47,7 +47,14 @@ against LLVM's 33) for **34,375 -> 30,539 at the gate frame = 1.00x C**, the fir
 kernel at parity: the product frame is **221,332 worst / 195,154 mean = 84.4% /
 74.4%**, **1.22x** the C decode wall, and the <=85% headroom target is met with
 1,490 cycles of margin. All four kernels are now 1.00x-1.23x C, so the remaining
-deficit is 62% entropy / 37% synthesis. That is the decode
+deficit is 62% entropy / 37% synthesis. Step 1e then banked budget rather than
+cycles: the Rust control kernels moved out of `.iwram` (−496 B, byte-identical
+frame), a `bad`-into-`valid` register-relief attempt was **measured and
+rejected** (+1,450 cycles for −1,672 B, and worse still with derived per-band
+values, because indexing the tables resurrected them as live), and a cursor
+rewrite in `dec_chan` landed for **−856 B / −665 cycles mean**. Net `.iwram`
+**28,632 -> 27,280 B with 2,196 B of headroom**, and the frame **219,251 worst /
+194,489 mean = 83.6% / 74.2%** at **1.21x** the C decode wall. That is the decode
 wall, not the gate total: convert + IRQ + DMA and this tree's UI are not in it, so
 U4 and playback remain open.
 This file is the decision record (why

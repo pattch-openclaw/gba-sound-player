@@ -658,6 +658,14 @@ unsafe fn dec_chan(
         mut bad,
     } = br;
 
+    #[cfg(feature = "verify")]
+    // SAFETY: NCODED <= M, so this is inside the channel.
+    let xn = unsafe { x.add(NCODED) };
+
+    #[cfg(feature = "verify")]
+    // SAFETY: NCODED <= M, so this is inside the channel.
+    let xn = unsafe { x.add(NCODED) };
+
     /// Ensure at least 17 valid bits (or set `bad`): one halfword, and a second
     /// only when the window was empty. 17 and not 16 because a group reads
     /// `rbits` raw bits and then a sign bit.
@@ -766,7 +774,7 @@ unsafe fn dec_chan(
     /// nonzero — the reference's order (`mm != 0 && get(1)`).
     macro_rules! coef {
         ($raw:literal, $slot:expr, $digit:expr, $esc_d:expr, $r:expr, $rqp:expr, $dq15:expr,
-         $step:expr, $index:expr, $esck:expr) => {{
+         $step:expr, $esck:expr) => {{
             let mut m = $digit;
             if m == $esc_d {
                 m = m.wrapping_add(esc!($esck));
@@ -824,8 +832,12 @@ unsafe fn dec_chan(
                 count_zero(ops);
             } else {
                 count_nonzero(ops);
+                // The format rule is "nonzero at index >= NCODED"; with cursor
+                // addressing that is a pointer compare against `x + NCODED`
+                // rather than an index, which is what lets the loops below stop
+                // carrying a coefficient counter.
                 #[cfg(feature = "verify")]
-                if $index >= NCODED {
+                if $slot >= xn {
                     note_hfnz(diag);
                 }
             }
@@ -850,6 +862,11 @@ unsafe fn dec_chan(
     let step32 = step as i32;
     let mut ctx = k;
     let mut b = 0usize;
+    // A cursor over the band's 16 slots instead of `x.add(b * BANDW)` recomputed
+    // per band: `b` survives only as the band counter and as dead weight in a
+    // product build (the `verify` index went away with the pointer compare
+    // above).
+    let mut xc = x;
     while b < NBANDS {
         let band = tables.band_table(ctx);
         let blut = band.lut_ptr();
@@ -868,12 +885,16 @@ unsafe fn dec_chan(
             break;
         }
         ctx = c;
-        // SAFETY: b < NBANDS, so the band's 16 slots are inside the channel.
-        let xp = unsafe { x.add(b * BANDW) };
+        // SAFETY: b < NBANDS, so the cursor's 16 slots are inside the channel.
+        let xp = xc;
         // SAFETY: c < MAXK == ctype.len().
         let ct = unsafe { *tables.ctype.get_unchecked(c) };
         if ct == CT_ZERO {
-            unsafe { zero16(xp) };
+            // SAFETY: as above.
+            unsafe {
+                zero16(xp);
+                xc = xp.add(BANDW);
+            }
             b += 1;
             continue;
         }
@@ -887,88 +908,69 @@ unsafe fn dec_chan(
         // SAFETY: c < MAXK == esck.len().
         let esck = unsafe { *tables.esck.get_unchecked(c) } as u32;
         let rqp = rq.as_ptr();
-        let idx = b * BANDW;
+        // A cursor over this band's slots. `xf` is one past the end, so the
+        // loops below compare pointers instead of carrying a coefficient
+        // counter — the shape that paid ~20% in `pre` and `ola`.
+        let mut sc = xp;
+        // SAFETY: the band is 16 slots inside the channel.
+        let xf = unsafe { xp.add(BANDW) };
         if ct == CT_PAIR {
             // SAFETY: c < MAXK == rbits.len().
             let r = unsafe { *tables.rbits.get_unchecked(c) } as u32;
-            let mut i = 0usize;
             if r == 0 {
-                while i < BANDW {
+                while sc < xf {
                     refill!();
                     let e = huff_consume!(coef_huff_at(hw, clut, cls, ops));
                     count_pair(ops);
                     refill!();
                     let s = (e >> 5) as u32;
-                    // SAFETY: i + 1 < BANDW.
+                    // SAFETY: `sc` and `sc + 1` are both inside the band.
+                    coef!(false, sc, s >> 4, 15, 0, rqp, dq15, step32, esck);
                     coef!(
                         false,
-                        xp.add(i),
-                        s >> 4,
-                        15,
-                        0,
-                        rqp,
-                        dq15,
-                        step32,
-                        idx + i,
-                        esck
-                    );
-                    coef!(
-                        false,
-                        xp.add(i + 1),
+                        unsafe { sc.add(1) },
                         s & 15,
                         15,
                         0,
                         rqp,
                         dq15,
                         step32,
-                        idx + i + 1,
                         esck
                     );
-                    i += 2;
+                    // SAFETY: two slots consumed.
+                    sc = unsafe { sc.add(2) };
                 }
             } else {
-                while i < BANDW {
+                while sc < xf {
                     refill!();
                     let e = huff_consume!(coef_huff_at(hw, clut, cls, ops));
                     count_pair(ops);
                     refill!();
                     let s = (e >> 5) as u32;
-                    // SAFETY: i + 1 < BANDW.
-                    coef!(
-                        true,
-                        xp.add(i),
-                        s >> 4,
-                        15,
-                        r,
-                        rqp,
-                        dq15,
-                        step32,
-                        idx + i,
-                        esck
-                    );
+                    // SAFETY: `sc` is inside the band.
+                    coef!(true, sc, s >> 4, 15, r, rqp, dq15, step32, esck);
                     // A raw field plus a sign bit can consume the whole contract
                     // window (16 + 1), so re-establish it before the second
                     // coefficient of the group.
                     refill!();
-                    // SAFETY: as above.
+                    // SAFETY: `sc + 1` is inside the band.
                     coef!(
                         true,
-                        xp.add(i + 1),
+                        unsafe { sc.add(1) },
                         s & 15,
                         15,
                         r,
                         rqp,
                         dq15,
                         step32,
-                        idx + i + 1,
                         esck
                     );
-                    i += 2;
+                    // SAFETY: two slots consumed.
+                    sc = unsafe { sc.add(2) };
                 }
             }
         } else {
-            let mut i = 0usize;
-            while i < BANDW {
+            while sc < xf {
                 refill!();
                 let e = huff_consume!(coef_huff_at(hw, clut, cls, ops));
                 count_quad(ops);
@@ -978,30 +980,35 @@ unsafe fn dec_chan(
                 let mut kk = 0usize;
                 while kk < 4 {
                     let m = ((q3 >> (6 - 2 * kk)) & 3) as u32;
-                    // SAFETY: i + kk < BANDW.
+                    // SAFETY: `sc + kk` is inside the band.
                     coef!(
                         false,
-                        xp.add(i + kk),
+                        unsafe { sc.add(kk) },
                         m,
                         2,
                         0,
                         rqp,
                         dq15,
                         step32,
-                        idx + i + kk,
                         esck
                     );
                     kk += 1;
                 }
-                i += 4;
+                // SAFETY: four slots consumed.
+                sc = unsafe { sc.add(4) };
             }
         }
+        // SAFETY: one band decoded; step the band cursor.
+        xc = unsafe { xp.add(BANDW) };
         b += 1;
     }
     // Tail after EOB: whole bands of zeros, so no coefficient is ever stale.
     while b < NBANDS {
         // SAFETY: b < NBANDS.
-        unsafe { zero16(x.add(b * BANDW)) };
+        unsafe {
+            zero16(xc);
+            xc = xc.add(BANDW);
+        }
         b += 1;
     }
     (

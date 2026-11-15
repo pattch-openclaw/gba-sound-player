@@ -153,8 +153,19 @@ fn sat8(v: i32) -> i8 {
 }
 
 /// Pre-twiddle, ARM mode, unchecked addressing.
+///
+/// **IWRAM placement is gated on `asm-pre` being off**, exactly as [`fft`] is
+/// gated on `asm-fft`: with the hand-written cursor kernel available (the
+/// default) this one is the in-image *control*, so it belongs in the cartridge
+/// and not in the budget the audio path needs (U6). Placement does not change a
+/// value, so the twins still compare it — only the isolated `kern`/`ovl` timing
+/// becomes a fetch-polluted ROM reading, which is the same trade v1-v4 of the
+/// FFT already carry.
 #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
-#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
+#[cfg_attr(
+    all(target_arch = "arm", not(feature = "asm-pre")),
+    unsafe(link_section = ".iwram")
+)]
 #[inline(never)]
 pub fn pre(x: &[i32; M], z: &mut [i32; 2 * H]) {
     let xp = x.as_ptr();
@@ -382,8 +393,12 @@ pub fn ola(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8], mut out16: Option<&m
 ///
 /// Bit-exact with `ola(.., Some(..))`'s int8 half. `out8` must be `M` long (it
 /// writes `i` and `M - 1 - i`).
+/// IWRAM placement gated on `asm-ola` being off, as for [`pre`].
 #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
-#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
+#[cfg_attr(
+    all(target_arch = "arm", not(feature = "asm-ola")),
+    unsafe(link_section = ".iwram")
+)]
 #[inline(never)]
 pub fn ola_s8(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8]) {
     let yp = y.as_ptr();
@@ -414,8 +429,11 @@ pub fn ola_s8(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8]) {
 ///
 /// The pre-DAC int16 profile's fused kernel (C's `uli_ola_s16_asm` shape).
 /// Bit-exact with `ola(.., Some(..))`'s int16 half; `out16` must be `M` long.
+/// **Never on the product path** — [`ola_kernel`]'s int16 arm dispatches to the
+/// dual [`ola`], so this kernel exists as the format-isolated comparison arm and
+/// a twin target. It therefore lives in the cartridge unconditionally and does
+/// not consume the audio budget.
 #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
-#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
 #[inline(never)]
 pub fn ola_s16(y: &[i32; M], p: &mut [i32; H], out16: &mut [i16]) {
     let yp = y.as_ptr();
