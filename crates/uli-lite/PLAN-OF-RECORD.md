@@ -136,6 +136,94 @@ the control and the host-testable oracle.
 
 ---
 
+## Memory layout — mirrored from the C reference (2026-11-15)
+
+Placement is **not a guess and not trial-and-error**. It is read from the C
+reference's own linker script (`gba-audio/tools/gba/gba.ld`) and working-set
+declarations (`src/uli/gba/uli_gba_int.h`, `uli_gba_dec.iwram.c`). Analysis
+only — no C source is incorporated.
+
+### The two projects have opposite defaults
+
+This is the root of the earlier ambiguity:
+
+- **C**: plain `static`/global data goes to **IWRAM** — `.data` and `.bss` are
+  both placed in IWRAM. Only things explicitly marked `.ewram`/`.ewram_bss`, or
+  compiled into a `*.ewram.o`, go to EWRAM. The linker `ASSERT`s that `≥1 KiB`
+  of IWRAM is left for the user stack, so **C's decoder uses essentially no
+  stack**: every working buffer is a static in IWRAM.
+- **ours (agb)**: `.bss`/`.data` go to **EWRAM**; IWRAM receives only what is
+  explicitly `#[link_section = ".iwram"]`. A plain `static` here is the opposite
+  of the same declaration in C.
+
+So "which section does this buffer belong in" is answered by C's source, not by
+our defaults.
+
+### C's IWRAM working set (measured from the source)
+
+| C object | bytes | meaning |
+|---|---:|---|
+| `uli_g_X[2][512]` i32 | 4,096 | per-channel coefficient buffer |
+| `uli_g_buf[512]` i32 | 2,048 | FFT scratch |
+| `uli_g_P[2][256]` i32 | 2,048 | overlap (OLA) state |
+| `uli_g_preP[512]` i32 | 2,048 | pre-twiddle table (IWRAM copy) |
+| `uli_g_postP[512]` i32 | 2,048 | post-twiddle table |
+| `uli_g_twP[504]` i32 | 2,016 | FFT twiddles |
+| `uli_g_winP[512]` i32 | 2,048 | window table |
+| `uli_g_perm[256]` u16 | 512 | post permutation |
+| `uli_g_q3[81]` u8 | 81 | quad-class lookup |
+| `UliGState uli_g` | ~600 | bit reader + per-frame state |
+| **sum** | **~19,545** | |
+| + ARM code (their doc: ~5 KB) | ~5,000 | kernels + IRQ + conv |
+| + user stack (assert floor) | ≥1,024 | C uses almost none |
+| **total** | **~25.5 KB of 32 KB** | |
+
+The ~100 KB Huffman `UliCodeTables` is the only large object, and it is in
+**EWRAM** (`UliGState.T` is documented `/* EWRAM */`). The audio ring buffer is
+also EWRAM.
+
+### Ours today vs the C-mirrored target
+
+| buffer | C | ours now | target |
+|---|---|---|---|
+| X/buf/P (`HotState`) | IWRAM 8,192 | **EWRAM** 8,192 | IWRAM (C-3) |
+| tables (perm/pre/post/tw/win) | IWRAM 8,672 | **ROM** (feature copies) | IWRAM |
+| synthesis kernels | IWRAM | IWRAM | IWRAM |
+| Huffman code tables | EWRAM | EWRAM | EWRAM |
+| decoder state | IWRAM ~600 | EWRAM | IWRAM (small) |
+
+### The stack figure in this file was stale — corrected by measurement
+
+Every `~15.0 KiB stack` number in this file (PR B onwards) came from a period
+when the bench's twin scratch buffers were **stack locals**. They were moved to
+EWRAM statics during PR C-1, and the figure was never re-measured. It is now
+measured directly: `examples/uli_bench` fills the free IWRAM stack region below
+`sp` with a sentinel before the product pass and scans it afterwards
+(`stack prod high-water`).
+
+**Measured: 768 B.** Not 15,040 B. Repeatable, two runs, same address
+(`__iwram_end` = `0x030049cc`, `sp` = `0x03007b28`).
+
+### Consequence: the C layout fits, and two "blocked" items are unblocked
+
+With the real stack cost the arithmetic reverses. Measured in the bench
+(`--features asm-fft,iwram-tables`, i.e. C's table layout):
+
+| arm | worst | mean | of period |
+|---|---:|---:|---:|
+| product, TW only in IWRAM (`asm-fft,iwram-tw`) | 411,431 | 364,481 | 157% |
+| **product, all tables in IWRAM (`asm-fft,iwram-tables`)** | **387,879** | **340,929** | **148%** |
+
+`.iwram` = 25,548 B, leaving 6,964 B, minus the 768 B stack → **6,196 B
+headroom**. `iwram-tables` was recorded as *crashing* on the stale figure; it
+now runs with all twins and pins green. Mean and worst fall together, and the
+`ovl` full-frame arm falls to 1,570,540.
+
+This is the placement lesson again, one level up: **the binding constraint was
+never the stack, it was a stale measurement.** The next placement step (C-3,
+`HotState` → IWRAM, 8,192 B) needs the superseded v1/v2 kernels dropped (1,520 B
+frees it) — arithmetic in the C-3 row below.
+
 ## Measurement method
 
 Every number in this file follows the Phase 1b rules, so the arms stay
@@ -453,8 +541,13 @@ its control in the same image (PR A's rule).
    product decoder's own `xover/hfnz`.
 2. **Coefficient buffers to IWRAM** — the attribution's second item, and new:
    M/S plus coefficient traffic pays EWRAM wait states (the reference's `X`/`P`
-   are in IWRAM and its M/S is ~4,400 against our 16,067). Blocked on the
-   ≈15.0 KiB stack; unblock it *with* C-1 rather than before.
+   are in IWRAM and its M/S is ~4,400 against our 16,067). ~~Blocked on the
+   ≈15.0 KiB stack~~ — **unblocked 2026-11-15**: the measured stack is 768 B, so
+   the block does not exist. Budget: `HotState` is 8,192 B; with the tables
+   already in IWRAM (25,548 B, 6,964 B free, 768 B stack) adding it needs
+   8,192 B, which the superseded v1/v2 kernels (1,520 B) close to a ~1,540 B
+   margin. This is now the largest identified placement win (10,000–15,000
+   cycles/frame) and it follows the C layout directly.
 3. **C-1** — asm kernels, specified as *bit-exact and stack-reducing*; that is
    what makes both `iwram-tables` and the coefficient buffers legal (today
    `iwram-tables` crashes: 13,664 B of stack against ~15,040 needed).
@@ -523,7 +616,7 @@ may rest on the 129-frame number alone** — U4's witness is this analysis.
 | **U3 — bit-exact product** | The product kernel set produces the pinned int8/int16 frames, on target and in the host twin. | **Met for the full hot path (PR B).** `tests/product_twin.rs` (host, frame-for-frame) + `make uli-bench` on-target pins. |
 | **U4 — real-time decode** | Worst full frame within the product budget at WAITCNT 4/2 — read as **C-class (≤~70–75% decode wall)**, because the gate total adds convert + IRQ + DMA to whatever the decoder costs. **The ceiling itself is measured, not assigned** (2026-11-14): it is written down at the first near-real-time arm, from the measured gate total plus this tree's non-audio cost. Its worst-frame witness is PR E, not the 129-frame corpus. | **Not met.** PR B measured 204% worst / 177% mean; PR C added the attribution and a split-`huff` win to **200% worst / 174% mean** (523,267 / 456,187) and scoped the remainder as two rewrites (C-1 asm kernels 63%, C-2 entropy 33%). C-1 + C-2 projected to ~91%. **C-3a/C-3c then measured 488,685 / 429,339 (186% / 164%)**, and **C-3b measured 457,863 / 410,912 (175% / 157%)**, and **PR C-1 landed a bit-exact hand-written FFT that, wired into the product decoder, took the full frame to 430,997 / 384,046 (164% / 147%)**, then its trivial-butterfly follow-up (**v4**) to **425,795 / 378,845 (162% / 145%)** — see the ledger's “PR C-1 landed” section.  What remains: C-1's kernel prize (~194,000, the largest single item), coefficient buffers to IWRAM (~10,000–15,000, unblocked by C-1), OLA fusion, and the symbol-path codegen gap the attribution localized (~260 cycles/symbol against the record's ~114). The current item list alone still lands near the period rather than parity. See the ledger sections “PR C-3b” and “PR C-2 / C-3a”.  |
 | **U5 — product playback** | 32,768 Hz path, zero underruns, clean period audit. | Not started (gated by U4). |
-| **U6 — memory** | IWRAM/EWRAM/stack inside the product budget with UI and feeder. | **Open, and now the binding constraint.** The product path needs ≈15.0 KiB of stack. Budget at PR C: `.iwram` 11,072 B baseline, 32,512 B usable, so 21,440 B spare — but 8,672 B of synthesis tables in IWRAM leaves 12,768 B, under the stack need, and `iwram-tables` **crashes** (stack overruns `__iwram_end` into code; the CPU jumps to an invalid address). IWRAM tables are therefore blocked until the stack requirement or the code size falls — and C-3's re-specification of C-1 (asm that also cuts the spilled intermediates) is the intended way to fall under it. `HotState` and the tables are both EWRAM now. **Priority decided 2026-11-14: audio first** — IWRAM budget goes to code, hot state and stack; synthesis tables next if the stack allows; UI affordances are the slack and may be dropped to buy audio headroom. Full `huff` inlining was rejected on this row: +4,252 B for 2.7% (U6 is binding), vs +896 B for 1.6% with the split. |
+| **U6 — memory** | IWRAM/EWRAM/stack inside the product budget with UI and feeder. | **Open.** ~~The product path needs ≈15.0 KiB of stack.~~ **Corrected 2026-11-15: the measured stack high-water is 768 B** (sentinel probe in `examples/uli_bench`); the ≈15.0 KiB figure was an artifact of stack-local twin buffers and is withdrawn. That reverses this row's conclusion: `iwram-tables` (all synthesis tables in IWRAM, C's own layout) **now runs** — `.iwram` 25,548 B, 6,964 B free, 768 B stack used, **6,196 B headroom** — and measures the product frame at **148%** (387,879 / 340,929). See "Memory layout — mirrored from the C reference". Remaining placement item is C-3 (`HotState` → IWRAM, 8,192 B), which fits once the superseded v1/v2 kernels are dropped (1,520 B). Historical note (superseded): the row previously concluded IWRAM tables were blocked because a stale ≈15.0 KiB stack left no room and `iwram-tables` crashed. **Priority decided 2026-11-14 and still in force: audio first** — IWRAM budget goes to code, hot state and stack; UI affordances are the slack and may be dropped to buy audio headroom. Full `huff` inlining was rejected on this row: +4,252 B for 2.7%, vs +896 B for 1.6% with the split. |
 | **U7 — licensing/spec** | Permissive license + standalone format spec before publishing; otherwise `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** Revisit only if a publish decision is taken; the license and `FORMAT.md` remain prerequisites for it. |
 
 ---
@@ -1079,6 +1172,22 @@ coefficient against the C bench's entropy+dequant (~41 c/coef) is ~6.6×.
   like-for-like corpus) is written in the “PR C-1 landed” ledger section. The
   remaining stack gap to C is not accepted as inherent: nothing about Rust+asm
   forces it, so it is scoped as continued work.
+
+- **2026-11-15 — memory layout is read from C, and the stack figure was stale.**
+  Placement is now derived, not guessed: C's linker script puts plain statics in
+  **IWRAM** (`.data`/`.bss` both) and only explicit `.ewram` in EWRAM — the
+  opposite of our agb default — and C's decoder uses ~no stack because every
+  working buffer is a static. Profiling C's working set (`uli_g_X/buf/P` 8,192 B,
+  five tables 8,672 B, state ~600 B, ~5 KB ARM code, ~100 KB Huffman in EWRAM)
+  gave the target directly. Measuring our own stack with a sentinel probe found
+  **768 B, not the ≈15.0 KiB this file had carried since PR B** — that figure was
+  an artifact of stack-local twin buffers, already fixed in PR C-1 but never
+  re-measured, and it had been *blocking* the tables-in-IWRAM item. With the real
+  number, `iwram-tables` (C's own table layout) runs and measures the product
+  frame at **148%** (387,879 / 340,929) with 6,196 B of `.iwram` headroom, and
+  C-3 (`HotState` → IWRAM) is unblocked (fits once the superseded v1/v2 kernels
+  are dropped). Lesson recorded next to the placement findings: a stale number in
+  a decision record is a blocked work item.
 
 - **2026-11-15 — PR C-1 follow-up: the twiddle table's location dominates.**
   Investigating the planned "twiddle `ldmia`" step revealed the actual cost: with

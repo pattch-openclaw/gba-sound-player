@@ -334,6 +334,57 @@ impl FrameCost {
     }
 }
 
+/// Read the stack pointer.
+#[inline(always)]
+fn sp_now() -> usize {
+    let r: usize;
+    // SAFETY: reading sp has no side effects.
+    unsafe { core::arch::asm!("mov {}, sp", out(reg) r) };
+    r
+}
+
+/// IWRAM stack high-water probe. Fills the free stack region below the current
+/// `sp` with a sentinel; after the work under test runs, the lowest address
+/// still holding the sentinel marks the deepest stack touch. Replaces the stale
+/// "~15 KiB product stack" figure with a measurement.
+const STACK_SENTINEL: u32 = 0xA5A5_A5A5;
+
+unsafe extern "C" {
+    static __iwram_end: u8;
+}
+
+#[inline(never)]
+fn stack_probe_fill() -> (usize, usize) {
+    // SAFETY: writes only to the region strictly below the current sp, which the
+    // ARM ABI leaves free for callees; IRQs are off in the measured windows.
+    unsafe {
+        let lo = core::ptr::addr_of!(__iwram_end) as usize;
+        let hi = sp_now() & !3;
+        let mut p = lo;
+        while p + 4 <= hi {
+            core::ptr::write_volatile(p as *mut u32, STACK_SENTINEL);
+            p += 4;
+        }
+        (lo, hi)
+    }
+}
+
+/// Bytes of stack used below the fill ceiling, given the fill's (lo, hi).
+#[inline(never)]
+fn stack_probe_used(lo: usize, hi: usize) -> usize {
+    // SAFETY: reads the same region the fill wrote.
+    unsafe {
+        let mut p = lo;
+        while p + 4 <= hi {
+            if core::ptr::read_volatile(p as *const u32) != STACK_SENTINEL {
+                return hi - p;
+            }
+            p += 4;
+        }
+    }
+    0
+}
+
 /// Deterministic kernel input: a 28-bit signed pattern, inside the encoder's
 /// `|X| < 2^28` guarantee. The kernels' cost is data-independent except for
 /// the ARM7TDMI multiplier's early-termination, so a fixed pattern is a
@@ -632,6 +683,7 @@ fn run(gba: &mut agb::Gba) -> bool {
     // hot buffers in IWRAM.
     let product_tables = unsafe { &mut *core::ptr::addr_of_mut!(PRODUCT_TABLES) };
     let product_hot = unsafe { &mut *core::ptr::addr_of_mut!(PRODUCT_HOT) };
+    let (probe_lo, probe_hi) = stack_probe_fill();
     let (cost_prod, prod8, prod16) = match product_pass(
         album,
         product_tables,
@@ -650,6 +702,13 @@ fn run(gba: &mut agb::Gba) -> bool {
         }
     };
     let prod_pin_ok = prod8 == EXPECTED_INT8 && prod16 == EXPECTED_INT16;
+    let prod_stack_used = stack_probe_used(probe_lo, probe_hi);
+    agb::println!(
+        "[uli-bench] stack prod high-water {} B below sp=0x{:08x} (iwram_end=0x{:08x})",
+        prod_stack_used,
+        probe_hi,
+        probe_lo
+    );
     print_cost("prod", &cost_prod, cfg!(feature = "verify"));
     agb::println!(
         "[uli-bench] prod pins int8={:08x} int16={:08x} [{}]",
