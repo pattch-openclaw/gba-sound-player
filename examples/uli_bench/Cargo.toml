@@ -86,6 +86,10 @@ tw-iwram-arm = []
 # image that runs the `preasm` twin.
 asm-pre = ["uli-lite-gba/asm-pre"]
 
+# The hand-written window + overlap-add (uli-lite-gba/asm-ola). Enable it to
+# build the image that runs the `olaasm` twin.
+asm-ola = ["uli-lite-gba/asm-ola"]
+
 [dependencies]
 uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }
 # The overlay's ARM-mode, unchecked kernels (the measurement's second arm).

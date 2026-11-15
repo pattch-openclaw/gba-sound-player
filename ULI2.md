@@ -41,7 +41,13 @@ instructions per output pair against LLVM's 15, with the four multiplies
 irreducible on a non-overlapping ARM7TDMI multiply) for **26,458 -> 23,889 at the
 gate frame**, taking the product frame to **225,168 worst / 198,992 mean = 85.9%
 / 75.9%** of the period at **1.24x** the C decode wall, and the headroom target
-to ~2,350 cycles away. That is the decode
+to ~2,350 cycles away. Step 1d then took `ola` to the reference's six-cursor
+shape and its `sat16`-then-`asr #8` clamp idiom (26 instructions per iteration
+against LLVM's 33) for **34,375 -> 30,539 at the gate frame = 1.00x C**, the first
+kernel at parity: the product frame is **221,332 worst / 195,154 mean = 84.4% /
+74.4%**, **1.22x** the C decode wall, and the <=85% headroom target is met with
+1,490 cycles of margin. All four kernels are now 1.00x-1.23x C, so the remaining
+deficit is 62% entropy / 37% synthesis. That is the decode
 wall, not the gate total: convert + IRQ + DMA and this tree's UI are not in it, so
 U4 and playback remain open.
 This file is the decision record (why

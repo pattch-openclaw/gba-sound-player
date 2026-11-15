@@ -1229,6 +1229,23 @@ fn run(gba: &mut agb::Gba) -> bool {
     *po = po_save;
     overlay::ola_s8(yo, po, kb8);
     let twin_ola_s8 = c8 == &kb8[..] && &po[..] == &pc[..];
+    // The asm overlap-add kernels (asm-ola) must reproduce the Rust ones,
+    // including the mutated overlap state: replay each from the same `p`.
+    #[cfg(feature = "asm-ola")]
+    let twin_ola_asm = {
+        let oc8 = unsafe { &mut *core::ptr::addr_of_mut!(K8L) };
+        *po = po_save;
+        overlay::ola_s8_asm_call(yo, po, oc8);
+        let s8_ok = kb8 == oc8 && &po[..] == &pc[..];
+        let oc16 = unsafe { &mut *core::ptr::addr_of_mut!(K16L) };
+        *po = po_save;
+        overlay::ola_s16_asm_call(yo, po, oc16);
+        let s16_ok = kb16 == oc16 && &po[..] == &pc[..];
+        *po = po_save;
+        s8_ok && s16_ok
+    };
+    #[cfg(not(feature = "asm-ola"))]
+    let twin_ola_asm = true;
     *po = po_save;
     overlay::ola_s16(yo, po, kb16);
     let twin_ola_s16 = c16 == &kb16[..] && &po[..] == &pc[..];
@@ -1276,9 +1293,10 @@ fn run(gba: &mut agb::Gba) -> bool {
         && twin_ola_s8
         && twin_ola_s16
         && twin_fft_asm
-        && twin_pre_asm;
+        && twin_pre_asm
+        && twin_ola_asm;
     agb::println!(
-        "[uli-bench] ovl twin pre={} fft={} post={} ola={} ola8={} ola16={} fftasm={} preasm={} [{}]",
+        "[uli-bench] ovl twin pre={} fft={} post={} ola={} ola8={} ola16={} fftasm={} preasm={} olaasm={} [{}]",
         twin_pre,
         twin_fft,
         twin_post,
@@ -1287,6 +1305,7 @@ fn run(gba: &mut agb::Gba) -> bool {
         twin_ola_s16,
         twin_fft_asm,
         twin_pre_asm,
+        twin_ola_asm,
         if twin_ok { "PASS" } else { "FAIL" }
     );
 

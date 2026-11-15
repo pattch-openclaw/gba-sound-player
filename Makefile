@@ -691,12 +691,12 @@ uli-attrib: toolchain-check
 # 30,320 B region and had no room for the 828 B stack.
 ULI_FFT_TWIN_LOG := uli-kernel-twin.log
 uli-kernel-twin: toolchain-check
-	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features asm-fft,asm-pre
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features asm-fft,asm-pre,asm-ola
 	agb-gbafix $(ULI_BENCH_BIN) -o uli-kernel-twin.gba
 	timeout -k 5 300 $(GBA_TEST_RUNNER) uli-kernel-twin.gba > $(ULI_FFT_TWIN_LOG) 2>&1 || true
 	@grep -E '^\[uli-bench\] asmfft5 ' $(ULI_FFT_TWIN_LOG) || { echo "uli-fft-twin: no asmfft5 arm in the log"; exit 1; }
-	@grep -q 'ovl twin .* fftasm=true preasm=true \[PASS\]' $(ULI_FFT_TWIN_LOG) || { echo "uli-kernel-twin: an asm kernel twin failed — see $(ULI_FFT_TWIN_LOG)"; exit 1; }
-	@echo "uli-kernel-twin passed: the asm FFTs (v1..v5) and the asm pre-twiddle are bit-exact on the ARM7TDMI"
+	@grep -q 'ovl twin .* fftasm=true preasm=true olaasm=true \[PASS\]' $(ULI_FFT_TWIN_LOG) || { echo "uli-kernel-twin: an asm kernel twin failed — see $(ULI_FFT_TWIN_LOG)"; exit 1; }
+	@echo "uli-kernel-twin passed: the asm FFTs (v1..v5), the asm pre-twiddle and the asm overlap-add are bit-exact on the ARM7TDMI"
 
 # The overlay's host twin: the ARM-mode, unchecked kernels must be bit-exact with
 # uli-lite's portable reference. This is what licenses the bench's overlay arm to be

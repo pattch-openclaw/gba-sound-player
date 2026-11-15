@@ -439,6 +439,22 @@ pub fn ola_s16(y: &[i32; M], p: &mut [i32; H], out16: &mut [i16]) {
     }
 }
 
+/// The fused int8 overlap-add the product decoder should call: the hand-written
+/// cursor kernel when `asm-ola` is on, otherwise the Rust ARM-mode [`ola_s8`].
+/// Mirrors [`fft_kernel`] and [`pre_kernel`], and for the same reason — the
+/// `#[cfg]` lives here so the hot path does not repeat it.
+#[inline]
+pub fn ola_s8_kernel(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8]) {
+    #[cfg(all(target_arch = "arm", feature = "asm-ola"))]
+    {
+        crate::ola_asm::s8(y, p, out8);
+    }
+    #[cfg(not(all(target_arch = "arm", feature = "asm-ola")))]
+    {
+        crate::ola_s8(y, p, out8);
+    }
+}
+
 /// The OLA the product decoder should call. With no int16 buffer this is the
 /// **fused int8-only kernel** (no per-sample format branch, no int16 arithmetic);
 /// with one it is the dual-output [`ola`] the int16 profile and the bench pins
@@ -448,7 +464,7 @@ pub fn ola_s16(y: &[i32; M], p: &mut [i32; H], out16: &mut [i16]) {
 pub fn ola_kernel(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8], out16: Option<&mut [i16]>) {
     match out16 {
         Some(o16) => crate::ola(y, p, out8, Some(o16)),
-        None => crate::ola_s8(y, p, out8),
+        None => crate::ola_s8_kernel(y, p, out8),
     }
 }
 
@@ -571,6 +587,67 @@ mod fft_asm {
         unsafe { uli_fft_arm_v4(x.as_mut_ptr(), tw) };
     }
 }
+
+/// Hand-written ARM window + overlap-add (`asm/ola_arm.s`). Off unless
+/// `asm-ola` is on; the Rust ARM-mode [`ola_s8`]/[`ola_s16`] stay the default so
+/// every existing arm keeps its control in the same image.
+///
+/// The loop is the reference's shape — six post-indexed cursors, the int16
+/// `sat16`-then-`asr #8` clamp idiom, and the overlap word read with
+/// `ldr [b_cursor, Y_minus_P]` — which is **26 instructions per iteration
+/// against LLVM's 33**. The four multiplies are the algorithm's own.
+#[cfg(all(target_arch = "arm", feature = "asm-ola"))]
+mod ola_asm {
+    core::arch::global_asm!(include_str!("../asm/ola_arm.s"));
+
+    // `(y, p, out, win)` — pointers, so the asm never depends on a Rust
+    // symbol's mangled name and `iwram-tables` moves WIN for free.
+    unsafe extern "C" {
+        fn uli_ola_s8(y: *const i32, p: *mut i32, out: *mut i8, win: *const i32);
+        #[allow(dead_code)]
+        fn uli_ola_s16(y: *const i32, p: *mut i32, out: *mut i16, win: *const i32);
+    }
+
+    /// Fused int8 overlap-add via the cursor kernel. Same contract as
+    /// [`crate::ola_s8`] and bit-exact with it.
+    #[inline]
+    pub fn s8(y: &[i32; uli_lite::format::M], p: &mut [i32; uli_lite::format::H], out8: &mut [i8]) {
+        // SAFETY: `y` is M i32, `p` is H i32, `out8` is M i8, and WIN is the
+        // 512-word window table the asm reads forward from 0 and backward from
+        // M-1, exactly `H` times each.
+        unsafe {
+            uli_ola_s8(
+                y.as_ptr(),
+                p.as_mut_ptr(),
+                out8.as_mut_ptr(),
+                crate::tables::WIN.as_ptr(),
+            );
+        }
+    }
+
+    /// Fused int16 overlap-add (the pre-DAC profile's kernel). Same contract as
+    /// [`crate::ola_s16`] and bit-exact with it.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn s16(
+        y: &[i32; uli_lite::format::M],
+        p: &mut [i32; uli_lite::format::H],
+        out16: &mut [i16],
+    ) {
+        // SAFETY: as for [`s8`], with `out16` M i16.
+        unsafe {
+            uli_ola_s16(
+                y.as_ptr(),
+                p.as_mut_ptr(),
+                out16.as_mut_ptr(),
+                crate::tables::WIN.as_ptr(),
+            );
+        }
+    }
+}
+
+#[cfg(all(target_arch = "arm", feature = "asm-ola"))]
+pub use ola_asm::{s8 as ola_s8_asm_call, s16 as ola_s16_asm_call};
 
 /// Hand-written ARM pre-twiddle (`asm/pre_arm.s`). Off unless `asm-pre` is on;
 /// the Rust ARM-mode [`pre`] stays the default so every existing arm keeps its
