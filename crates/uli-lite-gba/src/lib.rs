@@ -58,6 +58,20 @@ pub mod decoder;
 
 pub use decoder::{GbaDecoder, HotState};
 
+/// `HotState` is the decoder's hot working set — the transform buffers (`x`),
+/// the FFT scratch (`buf`) and the overlap state (`p`). It is the same 8,192 B
+/// the C reference keeps in IWRAM (`uli_g_X` 4,096 + `uli_g_buf` 2,048 +
+/// `uli_g_P` 2,048), and **it belongs in IWRAM**: in EWRAM every coefficient
+/// write and the M/S pass pay 16-bit wait states (`PLAN-OF-RECORD.md` C-3).
+///
+/// It is caller-owned, so the *caller* declares the placement:
+/// `#[unsafe(link_section = ".iwram")] static mut HOT: HotState = HotState::new();`.
+/// This assertion pins the size so the IWRAM budget cannot drift silently.
+const _: () = assert!(
+    core::mem::size_of::<HotState>() == 8192,
+    "HotState size changed: redo the IWRAM budget (C-3)"
+);
+
 use uli_lite::format::{H, M};
 
 /// The synthesis tables: cartridge-resident by default (they are read-only
@@ -163,8 +177,18 @@ pub fn pre(x: &[i32; M], z: &mut [i32; 2 * H]) {
 }
 
 /// 256-point radix-4 DIF FFT, ARM mode, unchecked addressing.
+///
+/// IWRAM placement is gated on `asm-fft` being **off**: when the hand-written
+/// kernel is available (the default), this Rust kernel is not on the product
+/// path — `fft_kernel` dispatches to `fft_arm_v4` — so it stays in ROM and stops
+/// consuming the 1,056 B of IWRAM the product needs for its hot state (C-3).
+/// With `--no-default-features` it *is* the product kernel and is placed in
+/// IWRAM as before.
 #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
-#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
+#[cfg_attr(
+    all(target_arch = "arm", not(feature = "asm-fft")),
+    unsafe(link_section = ".iwram")
+)]
 #[inline(never)]
 pub fn fft(x: &mut [i32; 2 * H]) {
     let n = H;

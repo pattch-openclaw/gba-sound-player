@@ -68,7 +68,11 @@
     .syntax unified
     .arm
 
-    .section .iwram,"ax",%progbits
+    @ BUDGET (C-3, 2026-11-15): v1 is a superseded comparison arm and v1
+    @ lives in .text (cartridge ROM) so it does not consume IWRAM. Its
+    @ recorded cycle numbers were taken while it was in .iwram; the IWRAM
+    @ budget now goes to the shipping kernel (v4) and the hot state.
+    .section .text,"ax",%progbits
     .global uli_fft_arm
     .type   uli_fft_arm, %function
 
