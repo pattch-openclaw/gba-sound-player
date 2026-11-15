@@ -1,0 +1,47 @@
+[package]
+name = "gba-playback"
+version = "0.1.0"
+edition = "2024"
+# The playback data path, lifted out of the instrument that measured it:
+# decode-to-FIFO conversion, the chunk-granular ring a timer-IRQ feeder drains,
+# and the FNV-1a pins the same bytes are folded into. ALBUM-PLAYER.md §2.2 says
+# the ring/feeder becomes project source the application owns; this crate is
+# that lift. A library, deliberately not published — its correctness claims are
+# the host suite's (`make playback-test`) plus the witnesses the instrument and
+# the product ROM already run over the same code.
+publish = false
+description = "GBA playback data path: i32->FIFO8 conversion, a chunk-granular sample ring for a timer-IRQ feeder, and the FNV-1a pins the same bytes are folded into. Platform-free no_std, no critical section of its own — the caller owns the interrupt discipline."
+license = "MIT"
+
+# STATE (2026-11-15): `playback` and `checksum` moved here verbatim from
+# examples/flac_spike/src/ (a MOVE: that crate now depends on this one and
+# re-exports both module names, so `flac_spike::playback::*` and every other
+# existing use-site still resolves). `RingFeed::truncate()` landed with the
+# lift (ALBUM-PLAYER.md §4.4, Q13b). What has NOT moved: the spike's `driver`,
+# `stats`, `assets`, its ROM entry points, and `geometry.rs` (which stays in
+# examples/flac_integration).
+#
+# Standalone workspace, cargo config INHERITED from the repo root — do NOT add a
+# local .cargo/config.toml: cargo concatenates target.<triple>.rustflags across
+# config layers, and a local re-declaration links `-Tgba.ld` twice.
+#
+#   make playback-test       the host suite (conversion, ring accounting,
+#                            truncate, the FNV folds)
+
+[dependencies]
+# Intentionally EMPTY. The GBA target is core-only, and the whole module set is
+# caller-owned state plus borrowed slices. Do not add dependencies without
+# re-verifying the thumbv4t build.
+
+[workspace]
+
+# Same profile choices as the crates it sits beside: a standalone release build of
+# this crate is what a direct measurement here reads, so optimisation matches the
+# consumers' choices. This manifest is a **path dependency** of three other
+# crates, and a path dependency's profile is ignored — the consuming workspace's
+# `[profile.release]` decides what ships — so these lines apply only to a
+# standalone build of this crate (its host suite, or a direct `cargo build`).
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true

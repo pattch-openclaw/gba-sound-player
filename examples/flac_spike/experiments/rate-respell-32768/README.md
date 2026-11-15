@@ -69,7 +69,9 @@ spelling 0b1101 (exact Hz as a 16-bit field): payload 865654 B (+314 against the
 
 A third, quieter one: the repository's FNV-1a-64 uses its **house offset basis**
 `0xCBF43CE95DE684B7`, not the textbook `0xCBF29CE484222325`
-(`examples/flac_spike/src/checksum.rs::FNV_OFFSET`,
+(`crates/gba-playback/src/checksum.rs::FNV_OFFSET` — that file moved out of
+`examples/flac_spike/src/` on 2026-11-15, ALBUM-PLAYER.md §2.2; the bytes and the basis did
+not,
 `scripts/gen_gafp_blob.py::fnv1a64`). The textbook basis produces a mismatch that
 is only a different hash.
 

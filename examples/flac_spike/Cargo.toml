@@ -32,6 +32,13 @@ edition = "2024"
 # public contract. This crate is exactly the instrument that feature exists for.
 flac-lite = { path = "../../crates/flac-lite", features = ["iwram-pin", "instrument"] }
 
+# The playback data path (the chunk ring, the FIFO conversion, the FNV folds),
+# lifted into a crate of its own per ALBUM-PLAYER.md §2.2. `src/lib.rs`
+# re-exports its two module names, so this crate's bins, witnesses and ROM keep
+# naming `flac_spike::playback` / `flac_spike::checksum`. Platform-free, so it
+# is NOT under the arm-target block below.
+gba-playback = { path = "../../crates/gba-playback" }
+
 # The GBA OVERLAY crate, optional and off in every shipped build: this is the
 # first time anything in this repository links `flac-lite-gba` at all, which is
 # what 6a-3's link witness needs (an rlib has no link step, so no gate on the

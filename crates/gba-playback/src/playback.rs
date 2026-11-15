@@ -1,16 +1,18 @@
 //! The playback data path — decode-to-FIFO logic, hardware-free.
 //!
-//! The rate-play ROM's answer to "can we even play back FLAC at a reduced
-//! sampling rate": decoded i32 samples (the driver's output) are truncated
-//! to the GBA sound hardware's 8-bit FIFO form and pushed through a chunk
-//! ring that a timer-IRQ feeder drains at the hardware rate. Everything
-//! that can be witnessed on the host lives HERE, pure and `no_std`: the
-//! truncation rule, the two-channel FIFO byte folds, the ring's
-//! producer/consumer accounting, the underflow classification. The ROM
-//! binary (`src/rate_play_main.rs`) owns only registers, timers, and the
-//! interrupt wiring around this logic — the same split as `driver`/
-//! `checksum` vs `main.rs` (shared-consumer rule, spike harness notes: the
-//! host witness drives the exact function the ROM runs).
+//! Decoded i32 samples (the decoder's output) are truncated to the GBA sound
+//! hardware's 8-bit FIFO form and pushed through a chunk ring that a timer-IRQ
+//! feeder drains at the hardware rate. Everything that can be witnessed on the
+//! host lives HERE, pure and `no_std`: the truncation rule, the two-channel
+//! FIFO byte folds, the ring's producer/consumer accounting, the underflow
+//! classification. A ROM binary owns only registers, timers, and the interrupt
+//! wiring around this logic — the shared-consumer rule: the host suite drives
+//! the exact function the ROM runs.
+//!
+//! Lifted 2026-11 out of `examples/flac_spike/src/playback.rs` so the playback
+//! seam is project source the application owns (ALBUM-PLAYER.md §2.2). The
+//! instrument and the product ROM depend on this crate, so the bytes one image
+//! moves are the bytes the host suite witnesses.
 //!
 //! ## Conversion (measured against agb's own path, not invented)
 //!
@@ -97,9 +99,10 @@ pub fn fold_fifo8(
     Ok(())
 }
 
-/// Why a [`RingFeed::push_frame`] refused. Mirrors
-/// [`crate::driver::DriverError`]'s taxonomy: a caller-contract violation
-/// names need/have, a stream violation names the sample.
+/// Why a [`RingFeed::push_frame`] refused. Mirrors the spike driver's
+/// `DriverError` (`examples/flac_spike/src/driver.rs`) taxonomy: a
+/// caller-contract violation names need/have, a stream violation names the
+/// sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushError {
     /// The producer started a frame that does not fit the ring's free
@@ -506,12 +509,36 @@ impl<const RING: usize> RingFeed<RING> {
         self.consumed += real;
         verdict
     }
+
+    /// Drop everything queued but not yet consumed, returning the number of
+    /// samples discarded. The skip seam (ALBUM-PLAYER.md §4.4, Q13b): a track
+    /// change makes the queued span stale, and stepping over it costs no copy
+    /// and no wait.
+    ///
+    /// The ledger is the whole mechanism: `consumed = pushed`, so
+    /// `consumed <= pushed` keeps holding by construction and [`Self::ready`]
+    /// is 0 afterwards. The ring BYTES are deliberately not zeroed — the next
+    /// push writes at `pushed % RING` and the next take reads from the same
+    /// residue, so the queued span is stepped over and never delivered, while
+    /// the first frame pushed after the truncate lands whole instead of
+    /// headless. A starved period still consumes nothing (that rule lives in
+    /// [`Self::take_chunk`] and is untouched here).
+    ///
+    /// Like [`Self::push_bytes`], this must run in the same critical section
+    /// the feeder's [`Self::take_chunk`] runs in: the crate owns no critical
+    /// section, the discipline is the caller's.
+    pub fn truncate(&mut self) -> usize {
+        let dropped = self.pushed - self.consumed;
+        self.consumed = self.pushed;
+        dropped
+    }
 }
 
-// Unit tests ride the rate-assets gate: the module itself always
-// compiles (shared lib), but its suite belongs to `make rate-test`, retired 2026-11-14 —
-// `make spike-test`'s counts stay untouched (coexistence contract).
-#[cfg(all(test, feature = "rate-assets"))]
+// The suite is this crate's own: `make playback-test` runs it from a
+// gate-neutral cwd (the root `.cargo/config.toml` sets the GBA target, which a
+// host test binary cannot link against). It witnesses the conversion, the ring
+// accounting, the skip seam's `truncate()`, and the FNV folds.
+#[cfg(test)]
 mod tests {
     extern crate alloc;
     use super::*;
@@ -630,6 +657,128 @@ mod tests {
         );
         assert_eq!(&dl[..3], &[1u8, 2, 3]);
         assert!(dl[3..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn truncate_empties_the_ring_and_keeps_the_ledger() {
+        // The skip seam's contract, stated as arithmetic: the return value is
+        // exactly what `ready()` reported, the producer ledger does not move,
+        // and the consumer catches up to it — so `consumed <= pushed` and
+        // `ready() == 0` hold afterwards without the ring bytes being touched.
+        let mut ring = RingFeed::<16>::new();
+        let mut hl = Fnv1a64::new();
+        let mut hr = Fnv1a64::new();
+        ring.push_frame(&[256, 512, 768], &[256, 512, 768], &mut hl, &mut hr)
+            .unwrap();
+        let mut dl = [0u8; 2];
+        let mut dr = [0u8; 2];
+        assert_eq!(ring.take_chunk(&mut dl, &mut dr, 2, false), Chunk::Full);
+        assert_eq!(ring.ready(), 1);
+        let pushed = ring.pushed();
+        assert_eq!(ring.truncate(), 1);
+        assert_eq!(ring.ready(), 0, "truncate must empty the queue");
+        assert_eq!(ring.pushed(), pushed, "truncate is not a producer step");
+        assert_eq!(ring.consumed(), ring.pushed());
+        // Empty queue: nothing left to drop, still no ledger movement.
+        assert_eq!(ring.truncate(), 0);
+        assert_eq!(ring.pushed(), pushed);
+    }
+
+    #[test]
+    fn truncate_then_push_delivers_the_next_frame_whole() {
+        // The failure mode a skip can introduce: the arriving track's first
+        // frame tainted by stale ring residue. Truncate leaves the residue in
+        // place but moves both cursors past it, so the push lands whole and
+        // the take reads exactly those bytes — no stale lead-in, no Starved.
+        let mut ring = RingFeed::<16>::new();
+        let mut hl = Fnv1a64::new();
+        let mut hr = Fnv1a64::new();
+        let stale_l: Vec<i32> = (0..12).map(|i| (i as i32 - 6) * 1024).collect();
+        let stale_r: Vec<i32> = (0..12).map(|i| (6 - i as i32) * 512).collect();
+        ring.push_frame(&stale_l, &stale_r, &mut hl, &mut hr)
+            .unwrap();
+        let mut dl = [0u8; 4];
+        let mut dr = [0u8; 4];
+        assert_eq!(ring.take_chunk(&mut dl, &mut dr, 4, false), Chunk::Full);
+        // 8 queued of 16 (residue 12, the frame straddles the wrap).
+        assert_eq!(ring.truncate(), 8);
+        assert_eq!(ring.free_samples(), 16);
+
+        let next_l: Vec<i32> = (0..8).map(|i| (i as i32 * 7 - 20) * 333).collect();
+        let next_r: Vec<i32> = (0..8).map(|i| (20 - i as i32) * 977).collect();
+        let mut want_l = [0u8; 8];
+        let mut want_r = [0u8; 8];
+        convert_frame(&next_l, &next_r, &mut want_l, &mut want_r).unwrap();
+        ring.push_frame(&next_l, &next_r, &mut hl, &mut hr).unwrap();
+
+        let mut got_l = [0u8; 8];
+        let mut got_r = [0u8; 8];
+        assert_eq!(
+            ring.take_chunk(&mut got_l, &mut got_r, 8, false),
+            Chunk::Full
+        );
+        assert_eq!(got_l, want_l, "stale left bytes leaked into the new track");
+        assert_eq!(got_r, want_r, "stale right bytes leaked into the new track");
+    }
+
+    #[test]
+    fn truncate_on_an_empty_or_starved_ring_drops_nothing() {
+        // Two ways to have "nothing to skip", and they differ in what the
+        // ledger says: a fresh ring has no queue at all, while a starved
+        // period leaves real queued bytes behind (it consumes nothing).
+        let mut ring = RingFeed::<8>::new();
+        assert_eq!(ring.truncate(), 0);
+        assert_eq!(ring.ready(), 0);
+
+        let mut hl = Fnv1a64::new();
+        let mut hr = Fnv1a64::new();
+        ring.push_frame(&[256, 512], &[256, 512], &mut hl, &mut hr)
+            .unwrap();
+        let mut dl = [0u8; 4];
+        let mut dr = [0u8; 4];
+        assert_eq!(ring.take_chunk(&mut dl, &mut dr, 4, false), Chunk::Starved);
+        assert_eq!(ring.consumed(), 0);
+        // The two real samples are still queued, so a skip after a starved
+        // period drops them rather than reporting nothing to do.
+        assert_eq!(ring.truncate(), 2);
+        assert_eq!(ring.ready(), 0);
+    }
+
+    #[test]
+    fn truncate_across_a_wrap_restarts_the_residues() {
+        // `pushed % RING` and `consumed % RING` are what place the bytes, and
+        // truncate sets them equal again without moving either cursor to 0.
+        // Push across the wrap afterwards and the drained stream is exactly
+        // the pushed one.
+        let mut ring = RingFeed::<8>::new();
+        let mut hl = Fnv1a64::new();
+        let mut hr = Fnv1a64::new();
+        ring.push_frame(&[256, 512, 768], &[256, 512, 768], &mut hl, &mut hr)
+            .unwrap();
+        ring.push_frame(&[1024, 1280, 1536], &[1024, 1280, 1536], &mut hl, &mut hr)
+            .unwrap();
+        let mut dl = [0u8; 2];
+        let mut dr = [0u8; 2];
+        assert_eq!(ring.take_chunk(&mut dl, &mut dr, 2, false), Chunk::Full);
+        assert_eq!(ring.pushed() % 8, 6, "residue under test");
+        assert_eq!(ring.truncate(), 4);
+
+        let next_l: Vec<i32> = (0..5).map(|i| (i as i32 - 2) * 777).collect();
+        let next_r: Vec<i32> = (0..5).map(|i| (2 - i as i32) * 1234).collect();
+        let mut want_l = [0u8; 5];
+        let mut want_r = [0u8; 5];
+        convert_frame(&next_l, &next_r, &mut want_l, &mut want_r).unwrap();
+        ring.push_frame(&next_l, &next_r, &mut hl, &mut hr).unwrap();
+
+        let mut got_l = [0u8; 5];
+        let mut got_r = [0u8; 5];
+        assert_eq!(
+            ring.take_chunk(&mut got_l, &mut got_r, 5, false),
+            Chunk::Full
+        );
+        assert_eq!(got_l, want_l);
+        assert_eq!(got_r, want_r);
+        assert_eq!(ring.ready(), 0);
     }
 
     #[test]

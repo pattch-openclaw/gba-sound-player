@@ -7,7 +7,7 @@
 //! | module | what it is |
 //! |---|---|
 //! | [`geometry`] | `#[path]` include of `examples/flac_integration/src/geometry.rs` — the ring, chunk and prefill the probe measures against |
-//! | [`playback`], [`checksum`] | the same shared pair `examples/flac_integration/src/lib.rs` includes, so the skip probe runs the real `RingFeed` |
+//! | [`playback`], [`checksum`] | `crates/gba-playback` (path dependency) — the same shared pair `examples/flac_integration/src/lib.rs` re-exports, so the skip probe runs the real `RingFeed` |
 //! | [`art1`] | the ART1 blob reader: validate, refuse by name, blit 8 words/tile |
 //! | [`synth`] | the deterministic PCM source the probes play instead of a decoder |
 //! | [`position`] | the 32-bit session clock (ALBUM-PLAYER.md §4.4) |
@@ -33,37 +33,23 @@
 // sound-DMA registers), and a crate-wide `forbid` cannot be relaxed by an
 // `allow` on that module (E0453). Every other module — and the whole host build,
 // which never compiles `probe_hw` — keeps the absolute form. The lint also
-// governs the three host-visible `#[path]` includes below (`geometry`,
-// `playback`, `checksum`), because an include is compiled as this crate's code:
-// an `unsafe` added to any of those breaks the probe build, and that break is the
-// canary, not a bug to silence. `probe_hw`'s `timer.rs` include sits inside the
-// module that allows unsafe, so its existing `unsafe` is fine.
+// governs the host-visible `#[path]` include below (`geometry`), because an
+// include is compiled as this crate's code: an `unsafe` added there breaks the
+// probe build, and that break is the canary, not a bug to silence. `playback`
+// and `checksum` used to be includes too and are now a dependency whose own
+// `#![forbid(unsafe_code)]` covers them. `probe_hw`'s `timer.rs` include sits
+// inside the module that allows unsafe, so its existing `unsafe` is fine.
 #![cfg_attr(target_arch = "arm", deny(unsafe_code))]
 #![cfg_attr(not(target_arch = "arm"), forbid(unsafe_code))]
 
 #[path = "../../flac_integration/src/geometry.rs"]
 pub mod geometry;
 
-// The shared pair. `playback.rs` reaches its checksum as `crate::checksum`, so
-// the two are included together — that is the arrangement the spike crate has
-// them in, and re-declaring one without the other is a compile error rather than
-// a silent fork.
-#[path = "../../flac_spike/src/checksum.rs"]
-pub mod checksum;
-
-/// The decode-to-FIFO path: ring accounting and underflow classification. The
-/// skip probe drives this exact type, which is what makes its silence-gap number
-/// a statement about the shipped ring rather than about a model of one.
-//
-// `allow(unexpected_cfgs)`: `playback.rs`'s unit-test suite rides a feature
-// (`rate-assets`) that belongs to the crate the file *comes from*, not to this
-// one. The predicate is false here on purpose — that suite was `make rate-test`'s
-// (retired 2026-11-14) to run, and moving it would change the counts that gate
-// reports (the coexistence contract in the Makefile). The attribute is here so
-// cargo's unexpected-cfg lint doesn't call a deliberate boundary a mistake.
-#[allow(unexpected_cfgs)]
-#[path = "../../flac_spike/src/playback.rs"]
-pub mod playback;
+// The decode-to-FIFO path and its checksums, from the crate that owns them
+// (ALBUM-PLAYER.md §2.2). The skip probe drives this exact type, which is what
+// makes its silence-gap number a statement about the shipped ring rather than
+// about a model of one.
+pub use gba_playback::{checksum, playback};
 
 pub mod art1;
 pub mod art_pin;

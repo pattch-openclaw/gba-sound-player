@@ -24,7 +24,7 @@
 //! by the real `RingFeed` code and the real frame sizes from the real manifest.
 //! A model that disagreed with the ROM about `CHUNK_SAMPLES` would prove nothing,
 //! so both read this file — the same "one implementation, two consumers" rule
-//! `examples/flac_spike/src/playback.rs` states for the ring itself, and the
+//! `crates/gba-playback/src/playback.rs` states for the ring itself, and the
 //! `#[path]` sharing pattern `crates/flac-lite-gba/tests/arm_from_outside.rs`
 //! already uses across these directories.
 //!

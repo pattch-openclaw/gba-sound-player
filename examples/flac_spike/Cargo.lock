@@ -290,6 +290,7 @@ dependencies = [
  "agb",
  "flac-lite",
  "flac-lite-gba",
+ "gba-playback",
 ]
 
 [[package]]
@@ -318,6 +319,10 @@ dependencies = [
  "hashbrown",
  "ttf-parser",
 ]
+
+[[package]]
+name = "gba-playback"
+version = "0.1.0"
 
 [[package]]
 name = "gif"

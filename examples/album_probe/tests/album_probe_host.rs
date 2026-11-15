@@ -944,12 +944,14 @@ fn synth_seek_changes_the_track() {
 // 7. §4.4's skip on the real ring: what consume-and-discard costs
 // ---------------------------------------------------------------------------
 
-/// §4.4 step 2 says the queued chunks are "dropped, not played", and the shipped
-/// `RingFeed` cannot truncate: `consumed` is private and only `take_chunk` moves
-/// it, so the only drop the application has is *consume-and-discard*. That costs
-/// one hardware period per queued chunk, and this test pins the arithmetic to the
-/// real ring type — the same one `FEED` instantiates — so the skip probe's `drop`
-/// arm is measuring a ceiling the code proves, not one the record asserts.
+/// §4.4 step 2 says the queued chunks are "dropped, not played". Before
+/// `RingFeed::truncate` landed (with the §2.2 lift, 2026-11-15) the only drop the
+/// application had was *consume-and-discard*, which costs one hardware period per
+/// queued chunk. This test pins that arithmetic to the real ring type — the same
+/// one `FEED` instantiates — so the skip probe's `drop` arm is measuring a cost the
+/// code proves, not one the record asserts. (`truncate` itself is witnessed in
+/// `crates/gba-playback`'s own suite, `make playback-test`; the other half of this
+/// file's ceiling arithmetic is the test below.)
 ///
 /// The numbers the record reads from it: the ring holds all 36 chunks (`push_bytes`
 /// refuses only what needs more than `free`), so a skip at the ring's ceiling
@@ -1015,8 +1017,9 @@ fn a_skip_at_the_shipped_depth_costs_the_queue_plus_the_cover() {
             "prime {prime_chunks}: {to_new_periods} periods = {to_new_ms:.0} ms is already \
              outside §4.4's ~0.6 s — the ring depth is the budget"
         );
-        // Truncating the queue in one step would leave only the cover in front of
-        // the new audio: that is what the proposed RingFeed truncate would buy.
+        // Truncating the queue in one step leaves only the cover in front of the
+        // new audio — the row the skip probe's `truncate` arm now measures on mGBA
+        // rather than derives here (`RingFeed::truncate`, landed 2026-11-15).
         let truncated_ms = (prime_chunks + 1) as f64 * period_ms;
         assert!(
             truncated_ms <= 600.0,
