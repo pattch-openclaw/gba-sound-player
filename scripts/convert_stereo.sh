@@ -7,7 +7,7 @@
 if [ -z "$1" ]; then
   echo "Usage: $0 <input_audio_file> [sample_rate] [output_file]"
   echo "  sample_rate:   Target sample rate in Hz (default: 32768)"
-  echo "  output_file:   Target output .wav file (default: test.wav)"
+  echo "  output_file:   Target output .wav file (default: assets/sound/<input>-<rate>hz-8bit-stereo.wav)"
   echo ""
   echo "Example:"
   echo "  $0 my_song.mp3 32768 my_song.wav"
@@ -18,7 +18,15 @@ fi
 INPUT_FILE="$1"
 # Default to 32768 Hz if arg 2 is empty
 SAMPLE_RATE="${2:-32768}"
-OUTPUT_FILE="${3:-assets/sound/test.wav}"
+# Name the default output after what this script actually writes (pcm_u8, -ac 2, and the
+# rate above), so a fresh conversion cannot land on a name that says nothing about rate or
+# depth. The tracked render in assets/sound/ follows this same convention.
+if [ -z "$3" ]; then
+  IN_BASE="$(basename "$INPUT_FILE")"; IN_BASE="${IN_BASE%.*}"
+  OUTPUT_FILE="assets/sound/${IN_BASE}-${SAMPLE_RATE}hz-8bit-stereo.wav"
+else
+  OUTPUT_FILE="$3"
+fi
 
 echo "Converting '$INPUT_FILE' for GBA..."
 echo "Sample Rate: $SAMPLE_RATE Hz"

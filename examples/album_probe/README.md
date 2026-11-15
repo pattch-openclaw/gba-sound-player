@@ -619,9 +619,11 @@ witness that stays is the committed generator output — `assets/probe_art1.bin`
 `src/art_pin.rs`, tracked, byte-identical on regeneration (`make album-probe-test` refuses
 if they are not).
 
-That tracking is the **narrow exception**, not a precedent: ALBUM-PLAYER.md §2.3 permits a
-committed generated asset only where a host gate's whole job is reading those exact bytes and
-the generator is deterministic and in-tree — which is true of a 7,748-byte hand-written `ART1`
-and false of recorded music. **Phase 1's album audio follows the opposite rule:** the per-track
-`GAFP` blobs, `ALBM1` and `src/assets.rs` are generated at build time from a tracked track list
-and gitignored, exactly as `make master-pack` already treats `master.gfp` and `master_pin.rs`.
+That tracking is a **development instrument**, not a precedent. ALBUM-PLAYER.md §2.3 sorts by
+what an asset is for: the bytes a gate exists to read — a host gate whose whole job is these
+exact bytes, from a deterministic in-tree generator — are tracked, and the bytes that belong to
+a particular album or a particular generated ROM are not. **Phase 1's album audio is in that
+second class:** its per-track `GAFP` blobs, `ALBM1` and `src/assets.rs` are generated at build
+time from a tracked track list and gitignored, exactly as `make master-pack` already treats
+`master.gfp` and `master_pin.rs`. Nothing about this probe's blob should be read as permission
+to commit one.
