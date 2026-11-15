@@ -31,6 +31,15 @@ verify = []
 # different budget (IWRAM) than the code placement.
 iwram-tables = []
 
+# Hand-written ARM FFT kernels (`asm/`, PR C-1): v1 (fft_arm.s), v2, v3. Off by
+# default so every arm keeps the Rust ARM-mode `fft` as its control in the same
+# image. With the feature on, `fft_kernel` (and so `ArmKernels::fft` and the
+# product `GbaDecoder`) call the best variant, v3 (`fft_arm_v3.s`); v1/v2 stay
+# addressable via `fft_asm_call`/`fft_asm_v2_call` as measured comparison arms.
+# Only assembles for `target_arch = "arm"`; the host twin exercises the dispatch
+# and falls back to the Rust kernel.
+asm-fft = []
+
 [lib]
 name = "uli_lite_gba"
 path = "src/lib.rs"

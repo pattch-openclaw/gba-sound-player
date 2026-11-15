@@ -20,9 +20,19 @@
 //! The arithmetic is a line-for-line transcription of
 //! `uli_lite::imdct`; that is deliberate, because the overlay is only
 //! useful if it is bit-exact with the core. `tests/twin.rs` proves that on the
-//! host. This crate makes **no product claim**: it is not wired into
-//! `Decoder`, it does not place its tables in IWRAM, and it has not been
-//! measured against a hand-written kernel.
+//! host.
+//!
+//! **Hand-written FFT (PR C-1).** The `fft` stage additionally has three
+//! hand-written ARM kernels in `asm/` (`fft_arm.s` = v1, `fft_arm_v2.s`, and
+//! `fft_arm_v3.s`), assembled with `global_asm!` and placed in `.iwram`. They
+//! are enabled by the `asm-fft` feature (off by default), bit-exact with the
+//! Rust kernel, and measured on the ARM7TDMI in `examples/uli_bench`. The
+//! measured ladder is v1 (88,205 c/call, spill-heavy, *slower* than Rust) →
+//! v2 (73,363, spill/reload traffic removed) → **v3 (71,635, `ldmia`/`stmia`
+//! block transfers)** against the Rust ARM kernel's 85,065; see
+//! `../../crates/uli-lite/PLAN-OF-RECORD.md` → "PR C-1". `ArmKernels::fft`
+//! uses the best variant (v3) when the feature is on. v1 and v2 are kept as
+//! measured comparison arms, not shipping kernels.
 //!
 //! # Index bounds (the `unsafe` contract)
 //!
@@ -329,7 +339,10 @@ impl uli_lite::Kernels for ArmKernels {
 
     #[inline]
     fn fft(z: &mut [i32; 2 * H]) {
-        crate::fft(z);
+        // With `asm-fft`, use the best hand-written kernel (v3). The Rust
+        // ARM-mode `fft` stays the default so every arm keeps its control in
+        // the same image; v1 and v2 remain measurable comparison arms.
+        crate::fft_kernel(z);
     }
 
     #[inline]
@@ -340,5 +353,81 @@ impl uli_lite::Kernels for ArmKernels {
     #[inline]
     fn ola(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8], out16: Option<&mut [i16]>) {
         crate::ola(y, p, out8, out16);
+    }
+}
+
+/// Hand-written ARM asm for the FFT (PR C-1). Off unless the `asm-fft`
+/// feature is on; the Rust ARM-mode [`fft`] above stays the default so every
+/// existing arm keeps its control in the same image.
+///
+/// The kernel is bit-exact with [`fft`] (which is bit-exact with the core),
+/// so it is a drop-in replacement. `examples/uli_bench`'s on-target kernel twin
+/// compares the two on the ARM7TDMI, which is what licenses a cycle number
+/// measured through this path.
+#[cfg(all(target_arch = "arm", feature = "asm-fft"))]
+mod fft_asm {
+    core::arch::global_asm!(
+        include_str!("../asm/fft_arm.s"),
+        "\n",
+        include_str!("../asm/fft_arm_v2.s"),
+        "\n",
+        include_str!("../asm/fft_arm_v3.s")
+    );
+
+    // `(x, tw)` — the buffer (512 words) and the twiddle table, passed by
+    // pointer so the asm never depends on a Rust symbol's mangled name and so
+    // `iwram-tables` moves TW for free (the pointer follows the active table).
+    unsafe extern "C" {
+        fn uli_fft_arm(x: *mut i32, tw: *const i32);
+        fn uli_fft_arm_v2(x: *mut i32, tw: *const i32);
+        fn uli_fft_arm_v3(x: *mut i32, tw: *const i32);
+    }
+
+    /// Call the asm FFT (v1) on `x` (`[i32; 2*H]`). SAFETY: `x` points at 512
+    /// i32 and `tables::TW` at the 504-entry twiddle table.
+    #[inline]
+    pub fn fft(x: &mut [i32; 2 * uli_lite::format::H]) {
+        // SAFETY: `x` is a `[i32; 2*H]` buffer; the asm writes exactly 2*H
+        // words at `x` and reads TW[0..504] at `TW`.
+        unsafe { uli_fft_arm(x.as_mut_ptr(), crate::TW.as_ptr()) };
+    }
+
+    /// Call the memory-traffic-reduction FFT (v2) on `x`. Same contract as
+    /// [`fft`].
+    #[inline]
+    pub fn fft_v2(x: &mut [i32; 2 * uli_lite::format::H]) {
+        // SAFETY: as for `fft`.
+        unsafe { uli_fft_arm_v2(x.as_mut_ptr(), crate::TW.as_ptr()) };
+    }
+
+    /// Call the block-transfer FFT (v3) on `x`. Same contract as [`fft`].
+    #[inline]
+    pub fn fft_v3(x: &mut [i32; 2 * uli_lite::format::H]) {
+        // SAFETY: as for `fft`.
+        unsafe { uli_fft_arm_v3(x.as_mut_ptr(), crate::TW.as_ptr()) };
+    }
+}
+
+#[cfg(all(target_arch = "arm", feature = "asm-fft"))]
+pub use fft_asm::fft as fft_asm_call;
+#[cfg(all(target_arch = "arm", feature = "asm-fft"))]
+pub use fft_asm::fft_v2 as fft_asm_v2_call;
+#[cfg(all(target_arch = "arm", feature = "asm-fft"))]
+pub use fft_asm::fft_v3 as fft_asm_v3_call;
+
+/// The FFT the product decoder (and [`ArmKernels`]) should call: the best
+/// hand-written kernel (v3) when the `asm-fft` feature is on, otherwise the
+/// Rust ARM-mode [`fft`]. Centralising the `#[cfg]` here is what lets the
+/// product hot path (`decoder.rs`) pick up the asm kernel without repeating the
+/// gate at every call site.
+#[inline]
+pub fn fft_kernel(z: &mut [i32; 2 * H]) {
+    #[cfg(all(target_arch = "arm", feature = "asm-fft"))]
+    {
+        crate::fft_asm_v3_call(z);
+    }
+    #[cfg(not(all(target_arch = "arm", feature = "asm-fft")))]
+    {
+        crate::fft(z);
     }
 }

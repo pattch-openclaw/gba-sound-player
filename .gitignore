@@ -101,6 +101,13 @@ __pycache__/
 /examples/uli_bench/target/
 !/examples/uli_bench/Cargo.lock
 
+# The PR C-1 asm-FFT probe (examples/uli_asm_probe/ — own workspace, same
+# pattern). Builds only for the GBA target; its target/ is build output. Its
+# Cargo.lock is committed like uli_bench's: the instrument's graph is part of
+# the measurement.
+/examples/uli_asm_probe/target/
+!/examples/uli_asm_probe/Cargo.lock
+
 # Cycle-harness logs are per-run output; the numbers that matter live in
 # ULI2.md, and `make uli-bench` can regenerate the raw log.
 /uli-bench*.log
