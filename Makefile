@@ -207,8 +207,12 @@ OPUS_CRATE_BIN := $(OPUS_CRATE_DIR)/target/$(TARGET)/release/opus-spike
 # (its own workspace, same pattern). The shared modules are `#[path]` includes of
 # flac_integration's geometry and flac_spike's playback/checksum — one
 # implementation, two consumers — so nothing in crates/ or the other examples/
-# moves for them. The ART1 blob and its pin are TRACKED generator output (the
-# flac_spike assets/ rule): the witness the host test reads.
+# moves for them. The ART1 blob and its pin are TRACKED because this host gate's
+# whole job is reading those exact bytes and scripts/album_probe_art.py is
+# deterministic and in-tree — ALBUM-PLAYER.md §2.3's *narrow* exception, not a
+# general rule. It does not extend to album audio: Phase 1's per-track GAFP blobs,
+# ALBM1 and src/assets.rs are generated at build time and gitignored, the way
+# `master-pack` already treats its own artifacts (§2.3, §9.0).
 ALBUM_PROBE_DIR := examples/album_probe
 ALBUM_PROBE_MANIFEST := $(abspath examples/album_probe/Cargo.toml)
 ALBUM_PROBE_TARGET_DIR := $(ALBUM_PROBE_DIR)/target/$(TARGET)/release
@@ -828,7 +832,10 @@ podman-%:
 #
 # Nothing here touches tracked generator output — `examples/flac_spike/assets/*.bin`
 # and `src/assets.rs`, the committed `GAFP` blob, the test fixtures — which the
-# build reads as input and regenerates only through their own generators.
+# build reads as input and regenerates only through their own generators. The Album
+# Player's assets are the opposite case and will belong in the removal list above,
+# not this one: they are generated from a tracked track list and gitignored
+# (ALBUM-PLAYER.md §2.3), and Phase 1 adds those paths here as it adds the targets.
 clean: clean-outputs
 	@if [ -n "$(DEEP)" ]; then \
 	  echo "clean: DEEP is set — dropping every workspace's target/ as well"; \

@@ -753,6 +753,45 @@ implementation**, which is how this file now uses it.
 - Gate: U5 (zero underruns, clean period audit) in mGBA, then hardware, with
   both regimes reported.
 
+#### Cross-track facts PR D's owner needs (reported by the application track, 2026-11-15)
+
+Not codec rulings and not claims on U4 — three things decided above the seam that change
+what PR D reuses. Authority: [`../../ALBUM-PLAYER.md`](../../ALBUM-PLAYER.md) §2.2, §2.3,
+§4.3, §9.0.
+
+1. **The feeder PR D says it will reuse is moving.** `RingFeed` + its `checksum` pair live in
+   `examples/flac_spike/src/`, a spike directory that both shipped FLAC images happen to
+   `#[path]`-include. The application track has ruled it must not stay there (§2.2): Phase 1
+   lifts the pair into project source (proposal `crates/gba-playback`) and adds `truncate()`
+   to the lifted type (§4.4, Q13b — AP-0 measured that without it a skip cannot beat one
+   period per queued chunk: 39–53 periods at the ring's ceiling). `flac-check` +
+   `product-play-test` stay the witnesses, because the move re-baselines the shipped images'
+   bytes. **If PR D wants the feeder, ask for it on the lifted crate rather than `#[path]`-ing
+   the spike.**
+2. **"UI from the ULA2 tables" overlaps the application manifest (Q13).** The app rules its UI
+   reads `ALBM1` — its own per-track map of ROM locations, album-sample boundaries, titles and
+   the progress reciprocal (§4.3) — because the features A1/A6/A10/A11 must exist on both
+   backends and `ULA2`'s tables are one backend's. The resolution keeps both statements true:
+   the adapter reads `ULA2`'s tables to position the decoder and **cross-checks them against
+   the manifest at bake time, refusing on mismatch**, so "driven from `ULA2`" and "driven from
+   `ALBM1`" are the same sentence wherever they agree and a build failure where they do not.
+   What still needs a PR D ruling is where the output stage stops and the player begins — that
+   decides where U5's gate gets written.
+3. **The non-audio addend in the ≤ ~85% target is partly measured, and it is the app's to
+   hand across.** AP-0 (`examples/album_probe/README.md`) measured the basic UI at **5,306
+   cycles per video frame** = 10,832 of the FLAC 573,440-cycle period (**1.89%** of wall
+   time), feeder 0.92%. Because that cost is VBlank-paced rather than per audio period, the
+   share travels as a fraction of *time*: against ULI2's 262,144-cycle period the same
+   arithmetic reads ≈4,950 cycles/period (**≈1.9%**). That is a conversion, not a ULI2
+   measurement — the app re-measures it on the `BACKEND=uli2` arm (AP-6/AP-9, Phase 5) before
+   anyone spends it, and viz + game cost are still unmeasured targets.
+
+Also for PR D's assets: the album line's policy is that **no album audio is committed** — the
+track list is tracked and every blob is generated at build time and pinned (§2.3). For the
+lossy backend that composes with Q3 (encoder used off-tree): the bake hands the adapter
+*already-encoded asset bytes plus a tracklist*, decodes nothing, and performs the same
+manifest/viz/cost work as the lossless path.
+
 ---
 
 ### PR E — comprehensive worst-frame analysis (deferred; after the real-time regime)
