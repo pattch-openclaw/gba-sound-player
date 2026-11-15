@@ -511,6 +511,12 @@ feeder would underrun continuously; this phase starts only after PR B/C bring
 the full frame inside the budget with margin.
 
 1. Reuse the 32,768 Hz ring/FIFO feeder built for the FLAC product path.
+   **That feeder is `crates/gba-playback` since 2026-11-15** ([`ALBUM-PLAYER.md`](ALBUM-PLAYER.md)
+   §2.2 — the application line lifted it out of the `examples/flac_spike/` spike; it now also
+   carries `RingFeed::truncate()`, §4.4's skip seam). The ring is `RingFeed<const RING: usize>`
+   and takes its chunk size from the caller's `take_chunk` destination, so this phase's rate and
+   frame size are a different const parameter rather than a fork; link the crate as a path
+   dependency instead of `#[path]`-including a spike.
    ULI2 frames are 512 samples/channel; adjust the chunk/period arithmetic but
    keep the same timer/DMA/IRQ discipline.
 2. Feed int8 directly (headphone profile) and the optional pre-DAC int16 path.

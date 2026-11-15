@@ -736,6 +736,10 @@ implementation**, which is how this file now uses it.
 
 - Reuse the 32,768 Hz ring/FIFO feeder; int8 direct and the optional pre-DAC
   int16 path; UI from the ULA2 tables; `PcmSource` seam.
+  - **That feeder is `crates/gba-playback` since 2026-11-15** (the application line lifted it
+    out of `examples/flac_spike/`; item 1 of "Cross-track facts PR D's owner needs" below, and
+    [`../../ALBUM-PLAYER.md`](../../ALBUM-PLAYER.md) §2.2). Link it as a path dependency at
+    this phase's own `RING` const rather than `#[path]`-including the spike.
 - **Two output regimes, one decoder (decided 2026-11-14).** The speaker profile
   is **in scope**, not an afterthought: the decoder always produces full stereo
   (two channels synthesised, stereo sample pairs out) and the mono collapse
@@ -759,15 +763,26 @@ Not codec rulings and not claims on U4 — three things decided above the seam t
 what PR D reuses. Authority: [`../../ALBUM-PLAYER.md`](../../ALBUM-PLAYER.md) §2.2, §2.3,
 §4.3, §9.0.
 
-1. **The feeder PR D says it will reuse is moving.** `RingFeed` + its `checksum` pair live in
-   `examples/flac_spike/src/`, a spike directory that both shipped FLAC images happen to
-   `#[path]`-include. The application track has ruled it must not stay there (§2.2): Phase 1
-   lifts the pair into project source (proposal `crates/gba-playback`) and adds `truncate()`
-   to the lifted type (§4.4, Q13b — AP-0 measured that without it a skip cannot beat one
-   period per queued chunk: 39–53 periods at the ring's ceiling). `flac-check` +
-   `product-play-test` stay the witnesses, because the move re-baselines the shipped images'
-   bytes. **If PR D wants the feeder, ask for it on the lifted crate rather than `#[path]`-ing
-   the spike.**
+1. **The feeder PR D says it will reuse has moved — it landed 2026-11-15** (this note read
+   future tense when the application track wrote it; PR-1 of the album line is the event).
+   `RingFeed` + its `checksum` pair are now **`crates/gba-playback`**, a path dependency that
+   `examples/flac_spike`, `examples/flac_integration` and `examples/album_probe` all share and
+   re-export, and `truncate()` is on the lifted type (§4.4, Q13b) — **measured, not derived**:
+   the skip probe's truncate arm reads `SKIP_PRIME_CHUNKS + 1` periods (3/5/9/17 at prime
+   2/4/8/16, `min == max`, `underflows = 0`) against the 39–53 periods drain and
+   consume-and-discard still cost at the ring's 36-chunk ceiling. `flac-check` gained
+   `playback-test` (24 tests, fails closed below the floor) beside `product-play-test`, and the
+   shipped images' bytes are re-baselined in [`../../flac-docs/measurements.md`](../../flac-docs/measurements.md).
+   **What this changes for PR D, and what it does not:** the ask is now a path dependency on
+   the crate (`gba-playback = { path = "../../crates/gba-playback" }` from an `examples/`
+   workspace, `../gba-playback` from a `crates/` one) instead of a `#[path]` of
+   a spike directory, and it needs **no new mechanism** for the 32,768 Hz geometry — the ring
+   is `RingFeed<const RING: usize>` and takes its chunk size from the caller's `take_chunk`
+   destination, so a different rate and frame size are a different const parameter, not a fork
+   (the product host model already instantiates arbitrary `R`). Nothing in `crates/uli-lite*`
+   or `examples/uli_*` referenced the spike pair, so **no ULI work in flight needed
+   refactoring**; `make uli-test` is green across the move, and no ULI image compiles these
+   modules, so no ULI hash was re-baselined.
 2. **"UI from the ULA2 tables" overlaps the application manifest (Q13).** The app rules its UI
    reads `ALBM1` — its own per-track map of ROM locations, album-sample boundaries, titles and
    the progress reciprocal (§4.3) — because the features A1/A6/A10/A11 must exist on both
