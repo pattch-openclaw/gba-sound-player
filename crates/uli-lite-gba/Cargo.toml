@@ -61,6 +61,29 @@ iwram-tw = []
 # core`, `kern`, `ovl`).
 asm-fft = []
 
+# **Measurement-only: by-difference attribution arms.** Each flag removes exactly
+# one part of the product frame so `examples/uli_bench` can attribute the frame
+# by difference inside one source tree (PR C's method; see PLAN-OF-RECORD.md
+# "Critical path to real time", Step 0). They are **timing-only**: the removed
+# work changes the decoded samples, so the bench's pins fail by construction in
+# these builds and only the timed window is quoted. The flags are const-folded
+# out, so the default build (none on) is textually the product frame. Never
+# ship a build with any of them on.
+attrib-pre = []
+attrib-fft = []
+attrib-post = []
+attrib-ola = []
+# All eight synthesis calls (2 x pre+fft+post+ola) removed: what remains is
+# entropy + dequant + M/S + the frame wrapper.
+attrib-synth = ["attrib-pre", "attrib-fft", "attrib-post", "attrib-ola"]
+# `dec_chan` removed for both channels: entropy, dequant and the zero-band fills
+# vanish, and with `nb = 0` the M/S loop is skipped too. What remains is
+# synthesis + the frame wrapper.
+attrib-entropy = []
+# The M/S coefficient transform removed on its own (the frame header is kept, so
+# the decoded band count is still read).
+attrib-ms = []
+
 [lib]
 name = "uli_lite_gba"
 path = "src/lib.rs"

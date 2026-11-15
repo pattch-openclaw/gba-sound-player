@@ -5,7 +5,7 @@
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
-        uli-bench-rom uli-bench uli-overlay-test \
+        uli-bench-rom uli-bench uli-attrib uli-frame-ops uli-overlay-test \
         album-probe-art album-probe-test album-probe-rom album-probe \
         uli-spike-rom clean clean-cache check help toolchain-check
 
@@ -620,6 +620,33 @@ uli-bench: uli-bench-rom
 	@grep -q '^\[uli-bench\] PASS' $(ULI_BENCH_LOG) || { echo "uli-bench: harness/pin failure — see $(ULI_BENCH_LOG)"; exit 1; }
 	@echo "uli-bench done: $(ULI_BENCH_LOG)"
 
+# --- ULI2 by-difference attribution (PLAN-OF-RECORD.md, critical path Step 0) ---
+#
+# Each arm rebuilds the bench with exactly one part of the product frame removed
+# and dumps the per-frame window (`--features attrib-dump`), so the frame can be
+# attributed by difference at a *given* frame index rather than only in the mean.
+# These are TIMING-ONLY builds: the album pins fail by construction in every arm,
+# so this target does NOT gate on the log's PASS. Read the `frame prod8` line and
+# the `pfc` rows, never the pin verdict. `attrib-dump` costs a constant +16
+# cycles per window in this image (control 274,214 vs the product 274,198) —
+# deltas are unaffected; quote absolutes from the product arm.
+ULI_ATTRIB_ARMS := control synth pre fft post ola ms entropy synth-entropy
+uli-attrib: toolchain-check
+	@for arm in $(ULI_ATTRIB_ARMS); do \
+	  feats="attrib-dump"; \
+	  case $$arm in \
+	    control) : ;; \
+	    synth-entropy) feats="attrib-dump,attrib-synth,attrib-entropy" ;; \
+	    *) feats="attrib-dump,attrib-$$arm" ;; \
+	  esac; \
+	  echo "uli-attrib: $$arm ($$feats)"; \
+	  ( cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features "$$feats" ) || exit 1; \
+	  agb-gbafix $(ULI_BENCH_BIN) -o uli-attrib-$$arm.gba || exit 1; \
+	  timeout -k 5 300 $(GBA_TEST_RUNNER) uli-attrib-$$arm.gba > uli-attrib-$$arm.log 2>&1 || true; \
+	  grep -E '^\[uli-bench\] frame prod8' uli-attrib-$$arm.log || exit 1; \
+	done
+	@echo "uli-attrib done: uli-attrib-<arm>.log (timing-only arms; pins fail by design)"
+
 # The overlay's host twin: the ARM-mode, unchecked kernels must be bit-exact with
 # uli-lite's portable reference. This is what licenses the bench's overlay arm to be
 # called a realisation of the same arithmetic.
@@ -630,6 +657,17 @@ uli-overlay-test: toolchain-check
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(ULI_OVERLAY_MANIFEST) --target $(HOST_TRIPLE) --features verify
 	@echo "uli-overlay-test passed: overlay kernels and the full decoder are bit-exact with the portable reference, in both the product and the verify build"
+
+# Per-frame operation counts from the portable decoder (host). The entropy
+# attribution's instrument: symbol counts are a bitstream property, so they need
+# no emulator build and no `verify` image. Pair the rows with a timed arm from
+# `make uli-attrib`. Frames may be named: `make uli-frame-ops FRAMES="98 72"`.
+ULI_FRAME_OPS_ALBUM ?= $(abspath crates/uli-lite/tests/fixtures/uli2_tiny.uli)
+uli-frame-ops: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) run --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE) --example frame_ops -- \
+	    $(ULI_FRAME_OPS_ALBUM) $(FRAMES)
 
 # Regenerate the committed expected-vector file. This WRITES a fixture, so it is
 # a maintenance command and never part of `make test`.
@@ -809,7 +847,7 @@ clean-outputs:
 	@rm -f $(MASTER_ASSET) $(MASTER_PIN)
 	@rm -f $(SPIKE_CRATE_DIR)/src/rate_assets.rs $(SPIKE_CRATE_DIR)/src/rate_pcm.rs
 	@rm -f $(SPIKE_CRATE_DIR)/assets/rate_*.bin
-	@rm -f uli-bench*.log
+	@rm -f uli-bench*.log uli-attrib*.log
 	@rm -f album-probe*.log
 	@find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} + 2>/dev/null || true
 

@@ -23,6 +23,25 @@
 //! 4. **Overlay twin** — the image runs the reference and overlay kernels on
 //!    identical inputs and compares every sample, so the timing arm is
 //!    measuring the same arithmetic the host twin test proves.
+//! 5. **By-difference attribution** (`attrib-*` features, timing-only) — each arm
+//!    removes exactly one part of the product frame (a kernel, all synthesis,
+//!    `dec_chan`, the M/S loop) so the frame can be attributed by difference in
+//!    the product image. `attrib-dump` prints one `pfc f= cyc=` row per frame so
+//!    arms can be differenced at the same frame index, not only in the mean.
+//!    These builds fail their pins by construction and are never quoted as the
+//!    product number. Reproduce the whole set with `make uli-attrib`; the method
+//!    and results are in `crates/uli-lite/PLAN-OF-RECORD.md` ("Step 0").
+//!
+//! **Known defect: the `verify` arm does not run on target.** With
+//! `--features verify` (which `per-frame` implies) the `ovl` pin fails
+//! (`b3613428`/`b607b02e`; `1b4f486e`/`28d04b52` with `per-frame`) and the run
+//! stops before the product arms, so the per-frame dump and its operation
+//! counts are unavailable. The differing hashes across two builds point at
+//! corruption, not arithmetic; the leading hypothesis is `.iwram` headroom
+//! (29,688 B of 32,512 in the verify image). Host twins with `verify` pass
+//! (`make uli-overlay-test`). For operation counts use `make uli-frame-ops`,
+//! which reads them from the bitstream on the host — see PLAN-OF-RECORD.md
+//! "Step 0b".
 //!
 //! Measurement discipline (the same rules as the FLAC cycle harness, so the
 //! two records are comparable):
@@ -164,6 +183,17 @@ static mut TW_IWRAM: [i32; 504] = uli_lite::tables_data::TW;
 /// `512 * 2^24 / 32768 = 262144` cycles. Compile-time arithmetic, no divide on
 /// the measured path.
 const FRAME_BUDGET_CYCLES: u32 = 262_144;
+
+/// The by-difference attribution arm this image was built with (0 = the product
+/// frame). Every log prints it, so a timing-only arm cannot be mistaken for the
+/// product number later.
+const ATTRIB_MASK: u32 = cfg!(feature = "attrib-pre") as u32
+    | (cfg!(feature = "attrib-fft") as u32) << 1
+    | (cfg!(feature = "attrib-post") as u32) << 2
+    | (cfg!(feature = "attrib-ola") as u32) << 3
+    | (cfg!(feature = "attrib-entropy") as u32) << 4
+    | (cfg!(feature = "attrib-ms") as u32) << 5
+    | (cfg!(feature = "attrib-synth") as u32) << 6;
 
 /// FNV-1a 32 of the C reference's per-frame int8 hashes, in frame order.
 const EXPECTED_INT8: u32 = 0xe6e8_7652;
@@ -460,6 +490,12 @@ fn product_pass_s8(
         all8 = fnv_bytes(all8, &fnv_i8(2_166_136_261, l8, r8).to_le_bytes());
         let net = raw.saturating_sub(overhead);
         cost.observe(f, net, decoder.ops());
+        // Attribution dump (see the `attrib-dump` feature): printed outside the
+        // window, so the number is the same one the summary reports. This is
+        // what makes a by-difference arm comparable at a *given* frame index
+        // instead of only in the mean.
+        #[cfg(feature = "attrib-dump")]
+        agb::println!("[uli-bench] pfc f={} cyc={}", f, net);
     }
     Ok((cost, all8))
 }
@@ -565,6 +601,22 @@ fn run(gba: &mut agb::Gba) -> bool {
         boot_waitcnt,
         FRAME_BUDGET_CYCLES
     );
+    agb::println!(
+        "[uli-bench] attrib mask=0x{:x} pre={} fft={} post={} ola={} synth={} entropy={} ms={}",
+        ATTRIB_MASK,
+        cfg!(feature = "attrib-pre"),
+        cfg!(feature = "attrib-fft"),
+        cfg!(feature = "attrib-post"),
+        cfg!(feature = "attrib-ola"),
+        cfg!(feature = "attrib-synth"),
+        cfg!(feature = "attrib-entropy"),
+        cfg!(feature = "attrib-ms")
+    );
+    if ATTRIB_MASK != 0 {
+        agb::println!(
+            "[uli-bench] ATTRIBUTION ARM: pins fail by construction; quote only the timed window"
+        );
+    }
 
     let album = match Album::parse(ALBUM) {
         Ok(a) => a,

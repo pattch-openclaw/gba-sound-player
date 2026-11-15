@@ -765,6 +765,17 @@ impl<'a, 's> GbaDecoder<'a, 's> {
             return Err(Error::BadBitstream);
         }
 
+        // by-difference attribution arm (`attrib-entropy`): the whole band
+        // decoder is removed, so entropy, dequant, zero-band fills and (via
+        // `nb = 0`) the M/S loop all disappear. Timing only; the samples are
+        // no longer the album, which is why the bench's pins fail by design in
+        // that build.
+        #[cfg(feature = "attrib-entropy")]
+        let (nb0, nb1) = {
+            let _ = (&mut br, &mut ops, &mut diag, step);
+            (0usize, 0usize)
+        };
+        #[cfg(not(feature = "attrib-entropy"))]
         let (nb0, nb1) = {
             let tables = self.tables;
             let hot = &mut *self.hot;
@@ -793,6 +804,7 @@ impl<'a, 's> GbaDecoder<'a, 's> {
             return Err(Error::BadBitstream);
         }
 
+        #[cfg(not(feature = "attrib-ms"))]
         if ms != 0 {
             // The reference transforms only the coded coefficients
             // (`nb = max(nb0, nb1)`); everything past them is zero in both
@@ -812,15 +824,30 @@ impl<'a, 's> GbaDecoder<'a, 's> {
             }
         }
 
+        // The eight synthesis calls. Each is individually removable for the
+        // by-difference attribution arms (`attrib-pre`/`-fft`/`-post`/`-ola`,
+        // and `attrib-synth` which implies all four). In the default build the
+        // `cfg` folds away and this is exactly the product sequence.
+        #[cfg(not(feature = "attrib-pre"))]
         crate::pre(&self.hot.x[0], &mut self.hot.buf);
+        #[cfg(not(feature = "attrib-fft"))]
         crate::fft_kernel(&mut self.hot.buf);
+        #[cfg(not(feature = "attrib-post"))]
         crate::post(&self.hot.buf, &mut self.hot.x[0]);
+        #[cfg(not(feature = "attrib-ola"))]
         crate::ola_kernel(&self.hot.x[0], &mut self.hot.p[0], out8l, out16l);
 
+        #[cfg(not(feature = "attrib-pre"))]
         crate::pre(&self.hot.x[1], &mut self.hot.buf);
+        #[cfg(not(feature = "attrib-fft"))]
         crate::fft_kernel(&mut self.hot.buf);
+        #[cfg(not(feature = "attrib-post"))]
         crate::post(&self.hot.buf, &mut self.hot.x[1]);
+        #[cfg(not(feature = "attrib-ola"))]
         crate::ola_kernel(&self.hot.x[1], &mut self.hot.p[1], out8r, out16r);
+
+        #[cfg(feature = "attrib-ms")]
+        let _ = (nb0, nb1, ms);
 
         self.bitpos = br.bitpos();
         // The whole diagnostic block is product-build dead code: `Diag` is empty
