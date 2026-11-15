@@ -151,6 +151,14 @@ static mut T_C16: [i16; M] = [0; M];
 #[unsafe(link_section = ".ewram")]
 static mut T_O16: [i16; M] = [0; M];
 
+/// The FFT twiddle table copied into `.iwram`, for the same-image placement
+/// A/B: the kernel takes its table pointer as an argument, so one build can
+/// time v4 against the cartridge-resident `TW` and against this `.iwram` copy.
+/// `.iwram` data is initialised from ROM at boot by the agb startup copy, the
+/// same mechanism the `iwram-tables` feature relies on.
+#[unsafe(link_section = ".iwram")]
+static mut TW_IWRAM: [i32; 504] = uli_lite::tables_data::TW;
+
 /// The product frame period: 512 samples at 32,768 Hz on the 2^24 Hz clock.
 /// `512 * 2^24 / 32768 = 262144` cycles. Compile-time arithmetic, no divide on
 /// the measured path.
@@ -324,6 +332,57 @@ impl FrameCost {
             self.worst_model = ops.cycle_model();
         }
     }
+}
+
+/// Read the stack pointer.
+#[inline(always)]
+fn sp_now() -> usize {
+    let r: usize;
+    // SAFETY: reading sp has no side effects.
+    unsafe { core::arch::asm!("mov {}, sp", out(reg) r) };
+    r
+}
+
+/// IWRAM stack high-water probe. Fills the free stack region below the current
+/// `sp` with a sentinel; after the work under test runs, the lowest address
+/// still holding the sentinel marks the deepest stack touch. Replaces the stale
+/// "~15 KiB product stack" figure with a measurement.
+const STACK_SENTINEL: u32 = 0xA5A5_A5A5;
+
+unsafe extern "C" {
+    static __iwram_end: u8;
+}
+
+#[inline(never)]
+fn stack_probe_fill() -> (usize, usize) {
+    // SAFETY: writes only to the region strictly below the current sp, which the
+    // ARM ABI leaves free for callees; IRQs are off in the measured windows.
+    unsafe {
+        let lo = core::ptr::addr_of!(__iwram_end) as usize;
+        let hi = sp_now() & !3;
+        let mut p = lo;
+        while p + 4 <= hi {
+            core::ptr::write_volatile(p as *mut u32, STACK_SENTINEL);
+            p += 4;
+        }
+        (lo, hi)
+    }
+}
+
+/// Bytes of stack used below the fill ceiling, given the fill's (lo, hi).
+#[inline(never)]
+fn stack_probe_used(lo: usize, hi: usize) -> usize {
+    // SAFETY: reads the same region the fill wrote.
+    unsafe {
+        let mut p = lo;
+        while p + 4 <= hi {
+            if core::ptr::read_volatile(p as *const u32) != STACK_SENTINEL {
+                return hi - p;
+            }
+            p += 4;
+        }
+    }
+    0
 }
 
 /// Deterministic kernel input: a 28-bit signed pattern, inside the encoder's
@@ -624,6 +683,7 @@ fn run(gba: &mut agb::Gba) -> bool {
     // hot buffers in IWRAM.
     let product_tables = unsafe { &mut *core::ptr::addr_of_mut!(PRODUCT_TABLES) };
     let product_hot = unsafe { &mut *core::ptr::addr_of_mut!(PRODUCT_HOT) };
+    let (probe_lo, probe_hi) = stack_probe_fill();
     let (cost_prod, prod8, prod16) = match product_pass(
         album,
         product_tables,
@@ -642,6 +702,13 @@ fn run(gba: &mut agb::Gba) -> bool {
         }
     };
     let prod_pin_ok = prod8 == EXPECTED_INT8 && prod16 == EXPECTED_INT16;
+    let prod_stack_used = stack_probe_used(probe_lo, probe_hi);
+    agb::println!(
+        "[uli-bench] stack prod high-water {} B below sp=0x{:08x} (iwram_end=0x{:08x})",
+        prod_stack_used,
+        probe_hi,
+        probe_lo
+    );
     print_cost("prod", &cost_prod, cfg!(feature = "verify"));
     agb::println!(
         "[uli-bench] prod pins int8={:08x} int16={:08x} [{}]",
@@ -815,7 +882,36 @@ fn run(gba: &mut agb::Gba) -> bool {
             asm_fft3_sum,
             asm_fft3_sum == u32::MAX
         );
-        asm_fft_sum != u32::MAX && asm_fft2_sum != u32::MAX && asm_fft3_sum != u32::MAX
+        let (_, asm_fft4_sum) = timed(&mut counter, || {
+            for _ in 0..KREP {
+                overlay::fft_asm_v4_call(core::hint::black_box(&mut *kz));
+            }
+        });
+        agb::println!(
+            "[uli-bench] asmfft4 n={} fft_sum={} wrapped={}",
+            KREP,
+            asm_fft4_sum,
+            asm_fft4_sum == u32::MAX
+        );
+        // Same kernel, twiddle table in `.iwram` instead of ROM: the placement
+        // A/B (see TW_IWRAM). Isolates table location from code/instruction work.
+        let tw_iwram = core::ptr::addr_of!(TW_IWRAM) as *const i32;
+        let (_, asm_fft4iw_sum) = timed(&mut counter, || {
+            for _ in 0..KREP {
+                overlay::fft_asm_v4_tw_call(core::hint::black_box(&mut *kz), tw_iwram);
+            }
+        });
+        agb::println!(
+            "[uli-bench] asmfft4iw n={} fft_sum={} wrapped={}",
+            KREP,
+            asm_fft4iw_sum,
+            asm_fft4iw_sum == u32::MAX
+        );
+        asm_fft_sum != u32::MAX
+            && asm_fft2_sum != u32::MAX
+            && asm_fft3_sum != u32::MAX
+            && asm_fft4_sum != u32::MAX
+            && asm_fft4iw_sum != u32::MAX
     };
     #[cfg(not(feature = "asm-fft"))]
     let asm_ok: bool = {
@@ -868,7 +964,10 @@ fn run(gba: &mut agb::Gba) -> bool {
         overlay::pre(kx, work);
         overlay::fft_asm_v3_call(work); // v3
         let v3_ok = *work == *want;
-        v1_ok && v2_ok && v3_ok
+        overlay::pre(kx, work);
+        overlay::fft_asm_v4_call(work); // v4
+        let v4_ok = *work == *want;
+        v1_ok && v2_ok && v3_ok && v4_ok
     };
     #[cfg(not(feature = "asm-fft"))]
     let twin_fft_asm = true;

@@ -37,10 +37,12 @@ fn run() -> bool {
 
     let z_asm2 = z_asm;
     let z_asm3 = z_asm;
+    let z_asm4 = z_asm;
     let mut a = z_ref;
     let mut b = z_asm;
     let mut b2 = z_asm2;
     let mut b3 = z_asm3;
+    let mut b4 = z_asm4;
     agb::println!(
         "[asm-probe] z[0,1,128,129,256,257,384,385]={} {} {} {} {} {} {} {}",
         b[0],
@@ -71,6 +73,8 @@ fn run() -> bool {
     overlay::fft_asm_v2_call(&mut b2);
     agb::println!("[asm-probe] calling asm fft v3");
     overlay::fft_asm_v3_call(&mut b3);
+    agb::println!("[asm-probe] calling asm fft v4");
+    overlay::fft_asm_v4_call(&mut b4);
     agb::println!(
         "[asm-probe] asm b[0..8]={} {} {} {} {} {} {} {}",
         b[0],
@@ -137,7 +141,25 @@ fn run() -> bool {
     } else {
         agb::println!("[asm-probe] v3 matches");
     }
-    bad1 < 0 && bad2 < 0 && bad3 < 0
+    let mut bad4: i32 = -1;
+    for i in 0..2 * H {
+        if a[i] != b4[i] {
+            bad4 = i as i32;
+            break;
+        }
+    }
+    if bad4 >= 0 {
+        let i = bad4 as usize;
+        agb::println!(
+            "[asm-probe] v4 MISMATCH idx={} rust={} v4={}",
+            i,
+            a[i],
+            b4[i]
+        );
+    } else {
+        agb::println!("[asm-probe] v4 matches");
+    }
+    bad1 < 0 && bad2 < 0 && bad3 < 0 && bad4 < 0
 }
 
 #[agb::entry]

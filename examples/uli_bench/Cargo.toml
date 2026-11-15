@@ -36,6 +36,14 @@ verify = ["uli-lite-gba/verify"]
 # default so the product frame in the default build is the Rust-kernel control.
 asm-fft = ["uli-lite-gba/asm-fft"]
 
+# Place only the FFT twiddle table in IWRAM (uli-lite-gba/iwram-tw).
+iwram-tw = ["uli-lite-gba/iwram-tw"]
+
+# All synthesis tables (PERM/PRE/POST/TW/WIN) in IWRAM (uli-lite-gba/iwram-tables).
+# This is the C reference's own table layout; it fits now that the product stack
+# is measured at 768 B, not the stale ~15 KiB figure.
+iwram-tables = ["uli-lite-gba/iwram-tables"]
+
 [dependencies]
 uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }
 # The overlay's ARM-mode, unchecked kernels (the measurement's second arm).
