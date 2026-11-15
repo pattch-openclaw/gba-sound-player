@@ -64,9 +64,21 @@ use uli_lite::format::{H, M};
 /// constants), or copied to `.iwram` with the `iwram-tables` feature. The
 /// reference GBA port copies them; the feature exists so the cost of that
 /// choice is measured rather than assumed (ULI2.md, Phase 1b).
-#[cfg(not(feature = "iwram-tables"))]
+#[cfg(not(any(feature = "iwram-tables", feature = "iwram-tw")))]
 mod tables {
     pub use uli_lite::tables_data::{PERM, POST, PRE, TW, WIN};
+}
+
+// Narrower placement arm: only the FFT's twiddle table in `.iwram`, the rest
+// (PRE/POST/WIN/PERM) still in ROM. TW is 504 words = 2,016 B — the table the
+// hot butterfly touches on every output — so this isolates the twiddle-read
+// cost from the pre/post/OLA tables' cost, and fits `.iwram` where the full
+// `iwram-tables` set (8,672 B) does not.
+#[cfg(all(not(feature = "iwram-tables"), feature = "iwram-tw"))]
+mod tables {
+    pub use uli_lite::tables_data::{PERM, POST, PRE, WIN};
+    #[unsafe(link_section = ".iwram")]
+    pub static TW: [i32; 504] = uli_lite::tables_data::TW;
 }
 
 #[cfg(feature = "iwram-tables")]
@@ -417,6 +429,16 @@ mod fft_asm {
         // SAFETY: as for `fft`.
         unsafe { uli_fft_arm_v4(x.as_mut_ptr(), crate::TW.as_ptr()) };
     }
+
+    /// Measurement-only: call v4 with an explicit twiddle-table pointer so a
+    /// single image can time the same kernel against the cartridge-resident
+    /// `TW` and an `.iwram` copy of it. SAFETY: `tw` must point at the 504-word
+    /// twiddle table.
+    #[inline]
+    pub fn fft_v4_tw(x: &mut [i32; 2 * uli_lite::format::H], tw: *const i32) {
+        // SAFETY: caller promises `tw` is the 504-entry table.
+        unsafe { uli_fft_arm_v4(x.as_mut_ptr(), tw) };
+    }
 }
 
 #[cfg(all(target_arch = "arm", feature = "asm-fft"))]
@@ -427,6 +449,8 @@ pub use fft_asm::fft_v2 as fft_asm_v2_call;
 pub use fft_asm::fft_v3 as fft_asm_v3_call;
 #[cfg(all(target_arch = "arm", feature = "asm-fft"))]
 pub use fft_asm::fft_v4 as fft_asm_v4_call;
+#[cfg(all(target_arch = "arm", feature = "asm-fft"))]
+pub use fft_asm::fft_v4_tw as fft_asm_v4_tw_call;
 
 /// The FFT the product decoder (and [`ArmKernels`]) should call: the best
 /// hand-written kernel (v3) when the `asm-fft` feature is on, otherwise the

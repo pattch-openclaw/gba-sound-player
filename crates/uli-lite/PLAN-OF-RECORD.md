@@ -43,11 +43,23 @@ v3)**, and the product frame **425,795 / 378,845 (162% / 145%)**, a further
 −5,202 worst. Ladder: 85,065 (Rust) → 88,205 (v1) → 73,363 (v2) → 71,635 (v3)
 → **69,034 (v4)**, 2.20× the C record.
 
+**PR C-1 follow-up 3 (2026-11-15): the twiddle table's *location* was the real
+twiddle-load cost.** The planned `ldr`->`ldmia` was worth ~1-2%; the table was
+sitting in **cartridge ROM** (`.rodata` at `0x0800d640`) while C keeps its tables
+in IWRAM, so every hot butterfly paid ROM wait states. A same-image A/B (same
+kernel, only the table pointer differs) measures **69,034 → 61,852 cycles/call,
+−10.4%**, and the new `iwram-tw` feature takes the product frame **425,795 →
+411,431 worst (162% → 157%)**, mean 378,845 → 364,481 (145% → 139%). The FFT is
+now **1.97×** the C record — under 2× for the first time. `iwram-tw` costs
+2,016 B of `.iwram` (14,860 → 16,876) and is **opt-in** pending the U6 budget
+(see the ledger). Lesson recorded: a large part of "why are we slower than C"
+was table placement, not kernel codegen.
+
 **Still slower than C+asm, and where to look next** (see the ledger's "PR C-1"
-sections for the full analysis): v4 is 2.20× the C record's ~31,400, and the
+sections for the full analysis): v4 is ~1.97× the C record's ~31,400, and the
 remaining known differences are (1) ~~the trivial-butterfly path~~ **done**,
-(2) **twiddle loads still 2×`ldr` not `ldmia`**, then the multiply/memory floor,
-and (3) the C record is from a different corpus/image so the ratio is not
+(2) the remaining ~2× is the multiply core and the A..D/output traffic, and
+(3) the C record is from a different corpus/image so the ratio is not
 like-for-like — the honest sub-goal is to pull the FFT under 31,400 *in this
 instrument*. There is no reason this Rust+asm stack should lose to C+asm; the
 next research items are in that order in the ledger.
@@ -891,10 +903,13 @@ instrument*, not to match a foreign percentage):
    It covers `1 + 4 + 16 = 21` of the 192 radix-4 butterflies (an earlier note
    said 3/192 by counting j-iterations, not butterflies). **This closes the last
    structural difference to C.**
-2. **Twiddle loads are still 2×`ldr`, not `ldmia`.** Each twiddle pair is two
-   consecutive `ldr`; C uses `ldmia r2,{r7,r8}`. Converting the three pairs to
-   one `ldmia` each is −3 instructions/butterfly and directly on the fetch-cost
-   path that made v3's block transfers pay.
+2. **~~Twiddle loads~~ — RESOLVED 2026-11-15, and not by `ldmia`.** The
+   `ldr`->`ldmia` idea was worth ~1-2%. The real cost was that `TW` sat in
+   cartridge ROM (`.rodata` @ `0x0800d640`) while C keeps tables in IWRAM: a
+   same-image A/B measures **−10.4%** for relocating the table, delivered by the
+   opt-in `iwram-tw` feature (see "follow-up 3" below). With the table in IWRAM
+   the read is ~1 cycle, so `ldmia` would now save only instruction count (~1%)
+   — still worth one measured arm, but it is no longer where the money is.
 3. **The multiply core is the floor.** 12 SMULL/SMLAL per butterfly (6+6) ×
    192 radix-4 + tail is ~the C kernel's own arithmetic. If 1 and 2 land and
    the FFT is still over, the gap is the per-butterfly load/store of A..D (4
@@ -902,6 +917,57 @@ instrument*, not to match a foreign percentage):
    irreducible memory traffic — not codegen.
 4. **Corpus/image.** PR E's worst-frame program (deferred) is what makes the
    gap to C like-for-like. Until then every `×` is against a foreign number.
+
+#### PR C-1 follow-up 3: the twiddle table is the real "twiddle load" cost
+
+**The planned item was `ldr` -> `ldmia` for the three twiddle pairs (~1-2%). The
+measurement found the dominant cost is PLACEMENT, not instruction count.** With
+`iwram-tables` off, `TW` is a plain `const` and therefore lives in `.rodata` —
+which the linker map puts at `0x0800d640`, i.e. **cartridge ROM**. Every
+twiddle load in the hot butterfly was therefore a slow ROM read (~6 cycles at
+WAITCNT 4/2 with no prefetch), the same class of problem as ROM-resident code.
+The C reference keeps its tables in IWRAM (~9.4 KB); we did not.
+
+Measured as a **same-image A/B** (one build, one kernel, only the table pointer
+differs — `fft_v4_tw(x, tw)` timed against the ROM `TW` and against an `.iwram`
+copy):
+
+| arm (v4, 69,034 with ROM twiddles) | cycles/call | vs ROM |
+|---|---:|---:|
+| twiddle table in `.rodata` (ROM) | 69,034 | — |
+| **twiddle table in `.iwram`** | **61,852** | **−7,182 (−10.4%)** |
+
+That is **~6.2 cycles saved per twiddle load**, exactly the ROM wait-state cost
+over ~1,152 loads/call — the mechanism confirms itself. Product frame, with the
+new `iwram-tw` feature moving `crate::TW` into `.iwram` (the product path picks
+it up through the same `tw` argument, no asm change):
+
+| arm | worst | mean | of period (worst) |
+|---|---:|---:|---:|
+| product, v4, TW in ROM (`asm-fft`) | 425,795 | 378,845 | 162% |
+| **product, v4, TW in IWRAM (`asm-fft,iwram-tw`)** | **411,431** | **364,481** | **157%** |
+
+**−14,364 worst / −14,364 mean**, exactly `2 ×` the per-FFT saving (two
+channels). The FFT is now **61,852 vs the C record's ~31,400 = 1.97x** — under
+2x for the first time. Ladder: 85,065 (Rust) → 88,205 → 73,363 → 71,635 →
+69,034 → **61,852** (IWRAM twiddles).
+
+**Budget, stated because it is the binding constraint.** `iwram-tw` costs
+**2,016 B** (TW is 504 words). `.iwram` goes 14,860 → 16,876 B of 32,512,
+leaving **~600 B** against the recorded ~15 KiB product stack — viable in the
+bench image (it runs, all twins/pins PASS) but **not** comfortably safe for the
+full product ROM, which adds UI and a feeder. Two ways to pay for it, both
+deferred to the U6 budget decision: drop the superseded v1/v2 kernels from the
+unit (frees 1,520 B; their numbers are recorded here), or accept a smaller
+stack margin. The feature is therefore **opt-in**, exactly like `iwram-tables`.
+
+**Consequence for the research order.** Item 2 was "twiddle `ldmia`". With the
+table in IWRAM the read cost collapses, so `ldmia` would now save only the
+instruction-count difference (~1%), not a wait-state penalty — it is worth
+measuring once, but the 10.4% was in the table's location. This also revises
+the "why are we slower than C" answer: **a large part of it was table
+placement**, not kernel codegen. The remaining gap is now the multiply core,
+the A..D/output traffic, and a like-for-like corpus (PR E).
 
 ### PR C (2026-11-14, mGBA, WAITCNT 4/2)
 
@@ -1013,6 +1079,19 @@ coefficient against the C bench's entropy+dequant (~41 c/coef) is ~6.6×.
   like-for-like corpus) is written in the “PR C-1 landed” ledger section. The
   remaining stack gap to C is not accepted as inherent: nothing about Rust+asm
   forces it, so it is scoped as continued work.
+
+- **2026-11-15 — PR C-1 follow-up: the twiddle table's location dominates.**
+  Investigating the planned "twiddle `ldmia`" step revealed the actual cost: with
+  `iwram-tables` off, `TW` lives in `.rodata` = cartridge ROM, so every hot
+  twiddle load paid ~6 ROM wait-state cycles. A same-image A/B (same kernel,
+  only the table pointer changed) measures **69,034 → 61,852 cycles/call
+  (−10.4%)** for moving the table to IWRAM; the `iwram-tw` feature delivers it
+  and takes the product frame **425,795 → 411,431 (162% → 157%)**. FFT now
+  **1.97× the C record** — under 2× for the first time. Recorded because it
+  revises the "why slower than C" answer: table placement, not codegen, was a
+  large share. `iwram-tw` is opt-in: it costs 2,016 B of `.iwram` (margin ~600 B
+  vs the ~15 KiB product stack), and making it the default waits on the U6
+  budget (or dropping the superseded v1/v2 kernels to free 1,520 B).
 
 - **2026-11-15 — PR C-1 follow-up landed: the trivial butterfly (v4).** C's
   `TRIV_BFLY_P` was the last structural difference in the FFT, and it is now

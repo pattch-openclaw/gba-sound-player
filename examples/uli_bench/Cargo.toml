@@ -36,6 +36,9 @@ verify = ["uli-lite-gba/verify"]
 # default so the product frame in the default build is the Rust-kernel control.
 asm-fft = ["uli-lite-gba/asm-fft"]
 
+# Place only the FFT twiddle table in IWRAM (uli-lite-gba/iwram-tw).
+iwram-tw = ["uli-lite-gba/iwram-tw"]
+
 [dependencies]
 uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }
 # The overlay's ARM-mode, unchecked kernels (the measurement's second arm).

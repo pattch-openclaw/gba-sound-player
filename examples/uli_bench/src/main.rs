@@ -151,6 +151,14 @@ static mut T_C16: [i16; M] = [0; M];
 #[unsafe(link_section = ".ewram")]
 static mut T_O16: [i16; M] = [0; M];
 
+/// The FFT twiddle table copied into `.iwram`, for the same-image placement
+/// A/B: the kernel takes its table pointer as an argument, so one build can
+/// time v4 against the cartridge-resident `TW` and against this `.iwram` copy.
+/// `.iwram` data is initialised from ROM at boot by the agb startup copy, the
+/// same mechanism the `iwram-tables` feature relies on.
+#[unsafe(link_section = ".iwram")]
+static mut TW_IWRAM: [i32; 504] = uli_lite::tables_data::TW;
+
 /// The product frame period: 512 samples at 32,768 Hz on the 2^24 Hz clock.
 /// `512 * 2^24 / 32768 = 262144` cycles. Compile-time arithmetic, no divide on
 /// the measured path.
@@ -826,10 +834,25 @@ fn run(gba: &mut agb::Gba) -> bool {
             asm_fft4_sum,
             asm_fft4_sum == u32::MAX
         );
+        // Same kernel, twiddle table in `.iwram` instead of ROM: the placement
+        // A/B (see TW_IWRAM). Isolates table location from code/instruction work.
+        let tw_iwram = core::ptr::addr_of!(TW_IWRAM) as *const i32;
+        let (_, asm_fft4iw_sum) = timed(&mut counter, || {
+            for _ in 0..KREP {
+                overlay::fft_asm_v4_tw_call(core::hint::black_box(&mut *kz), tw_iwram);
+            }
+        });
+        agb::println!(
+            "[uli-bench] asmfft4iw n={} fft_sum={} wrapped={}",
+            KREP,
+            asm_fft4iw_sum,
+            asm_fft4iw_sum == u32::MAX
+        );
         asm_fft_sum != u32::MAX
             && asm_fft2_sum != u32::MAX
             && asm_fft3_sum != u32::MAX
             && asm_fft4_sum != u32::MAX
+            && asm_fft4iw_sum != u32::MAX
     };
     #[cfg(not(feature = "asm-fft"))]
     let asm_ok: bool = {

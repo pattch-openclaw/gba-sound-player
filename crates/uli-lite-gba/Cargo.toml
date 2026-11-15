@@ -31,6 +31,13 @@ verify = []
 # different budget (IWRAM) than the code placement.
 iwram-tables = []
 
+# Only the FFT twiddle table (TW, 504 words = 2,016 B) in `.iwram`. The full
+# `iwram-tables` set is 8,672 B and does not fit alongside the asm kernels and
+# the ~15 KiB product stack; TW alone is the table the hot butterfly reads on
+# every output, so this isolates its cost. Off by default; superseded by
+# `iwram-tables` if both are on.
+iwram-tw = []
+
 # Hand-written ARM FFT kernels (`asm/`, PR C-1): v1 (fft_arm.s), v2, v3. Off by
 # default so every arm keeps the Rust ARM-mode `fft` as its control in the same
 # image. With the feature on, `fft_kernel` (and so `ArmKernels::fft` and the
