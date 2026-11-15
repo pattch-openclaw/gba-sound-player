@@ -1,0 +1,28 @@
+[package]
+name = "uli-asm-probe"
+version = "0.1.0"
+edition = "2024"
+
+# Minimal on-target probe for the hand-written ARM FFT (PR C-1): run the Rust
+# ARM-mode FFT and the asm FFT on identical `pre` output and print the first
+# divergence. Standalone workspace, root config inherited (no local
+# .cargo/config.toml — double -Tgba.ld).
+
+[dependencies]
+uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }
+uli-lite-gba = { path = "../../crates/uli-lite-gba", features = ["asm-fft"] }
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+agb = "0.25.0"
+
+[[bin]]
+name = "uli-asm-probe"
+path = "src/main.rs"
+
+[workspace]
+
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3

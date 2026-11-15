@@ -30,6 +30,12 @@ per-frame = ["verify"]
 # hfnz=0` for the product decoder itself.
 verify = ["uli-lite-gba/verify"]
 
+# Hand-written ARM FFT (PR C-1): the product decoder and `ArmKernels` use v3
+# (`asm/fft_arm_v3.s`). The bench times v1/v2/v3 in isolation (`asmfft*` arms)
+# and twins all three against the Rust ARM-mode `fft` on the ARM7TDMI. Off by
+# default so the product frame in the default build is the Rust-kernel control.
+asm-fft = ["uli-lite-gba/asm-fft"]
+
 [dependencies]
 uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }
 # The overlay's ARM-mode, unchecked kernels (the measurement's second arm).

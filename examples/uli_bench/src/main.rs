@@ -98,6 +98,18 @@ static mut OUT16R: [i16; M] = [0; M];
 
 /// Kernel inputs/outputs live in EWRAM here. The overlay's job is to move the
 /// hot ones to IWRAM; this arm deliberately keeps the as-shipped placement.
+///
+/// NOTE (they look like scalars, they are blocks): `M = 512`, `H = 256`, so
+/// `[i32; M]` is **2,048 B**, `[i32; 2*H]` is **2,048 B**, `[i16; M]` is
+/// 1,024 B, `[i8; M]` is 512 B. The six `K*` buffers below are **8,704 B** in
+/// total, the ten `T_*` twins below them **13,312 B**, plus `ZWANT`/`ZWORK`
+/// 4,096 B and the four `OUT*` pins 3,072 B — **29,184 B of EWRAM arrays**,
+/// none of it small. They cannot go in IWRAM: the product hot path needs
+/// ~15 KiB of stack there, `.iwram` is 32,512 B usable of which ~13.9 KiB is
+/// code, which leaves only ~3.6 KiB genuinely free — less headroom than any
+/// single block below needs. EWRAM is the correct home for all of them, and
+/// the real IWRAM win is the product's `HotState`/coefficient buffers
+/// (PLAN-OF-RECORD.md C-3), which is blocked on the same stack.
 #[unsafe(link_section = ".ewram")]
 static mut KX: [i32; M] = [0; M];
 #[unsafe(link_section = ".ewram")]
@@ -110,6 +122,34 @@ static mut KP: [i32; H] = [0; H];
 static mut K8L: [i8; M] = [0; M];
 #[unsafe(link_section = ".ewram")]
 static mut K16L: [i16; M] = [0; M];
+// Twin work buffers (EWRAM, not stack): the product-path decode needs ~15 KiB of
+// stack in .iwram, and the twin's buffers used to be locals in `run()`; putting
+// them on the stack overflowed it once the asm kernels grew `.iwram` (the PR
+// B/C-1 stack class). Statics keep `run()`'s frame tiny.
+#[unsafe(link_section = ".ewram")]
+static mut ZWANT: [i32; 2 * H] = [0; 2 * H];
+#[unsafe(link_section = ".ewram")]
+static mut ZWORK: [i32; 2 * H] = [0; 2 * H];
+#[unsafe(link_section = ".ewram")]
+static mut T_ZC: [i32; 2 * H] = [0; 2 * H];
+#[unsafe(link_section = ".ewram")]
+static mut T_ZO: [i32; 2 * H] = [0; 2 * H];
+#[unsafe(link_section = ".ewram")]
+static mut T_YC: [i32; M] = [0; M];
+#[unsafe(link_section = ".ewram")]
+static mut T_YO: [i32; M] = [0; M];
+#[unsafe(link_section = ".ewram")]
+static mut T_PC: [i32; H] = [0; H];
+#[unsafe(link_section = ".ewram")]
+static mut T_PO: [i32; H] = [0; H];
+#[unsafe(link_section = ".ewram")]
+static mut T_C8: [i8; M] = [0; M];
+#[unsafe(link_section = ".ewram")]
+static mut T_CO: [i8; M] = [0; M];
+#[unsafe(link_section = ".ewram")]
+static mut T_C16: [i16; M] = [0; M];
+#[unsafe(link_section = ".ewram")]
+static mut T_O16: [i16; M] = [0; M];
 
 /// The product frame period: 512 samples at 32,768 Hz on the 2^24 Hz clock.
 /// `512 * 2^24 / 32768 = 262144` cycles. Compile-time arithmetic, no divide on
@@ -734,42 +774,112 @@ fn run(gba: &mut agb::Gba) -> bool {
         !ovl_ok
     );
 
+    // -----------------------------------------------------------------
+    // 6. asm FFT arm (PR C-1, `asm-fft` feature): the hand-written ARM FFT in
+    //    `.iwram`, timed in isolation against the same-shape Rust ARM FFT, and
+    //    twinned on the ARM7TDMI. The twin below is the witness that licenses
+    //    quoting this cycle number.
+    // -----------------------------------------------------------------
+    #[cfg(feature = "asm-fft")]
+    let asm_ok: bool = {
+        let (_, asm_fft_sum) = timed(&mut counter, || {
+            for _ in 0..KREP {
+                overlay::fft_asm_call(core::hint::black_box(&mut *kz));
+            }
+        });
+        agb::println!(
+            "[uli-bench] asmfft n={} fft_sum={} wrapped={}",
+            KREP,
+            asm_fft_sum,
+            asm_fft_sum == u32::MAX
+        );
+        let (_, asm_fft2_sum) = timed(&mut counter, || {
+            for _ in 0..KREP {
+                overlay::fft_asm_v2_call(core::hint::black_box(&mut *kz));
+            }
+        });
+        agb::println!(
+            "[uli-bench] asmfft2 n={} fft_sum={} wrapped={}",
+            KREP,
+            asm_fft2_sum,
+            asm_fft2_sum == u32::MAX
+        );
+        let (_, asm_fft3_sum) = timed(&mut counter, || {
+            for _ in 0..KREP {
+                overlay::fft_asm_v3_call(core::hint::black_box(&mut *kz));
+            }
+        });
+        agb::println!(
+            "[uli-bench] asmfft3 n={} fft_sum={} wrapped={}",
+            KREP,
+            asm_fft3_sum,
+            asm_fft3_sum == u32::MAX
+        );
+        asm_fft_sum != u32::MAX && asm_fft2_sum != u32::MAX && asm_fft3_sum != u32::MAX
+    };
+    #[cfg(not(feature = "asm-fft"))]
+    let asm_ok: bool = {
+        agb::println!("[uli-bench] asmfft: not in this build (rebuild with --features asm-fft)");
+        true
+    };
+
     // On-target twin: run the core (Thumb, checked) and overlay (ARM,
     // unchecked) kernels on identical inputs once, and compare every output.
     // The host test proves the transcription; this proves the *ARM-mode
     // unchecked* build that the timing above actually measured. A timing arm
     // on an image whose overlay arithmetic is not proven would be measuring a
     // possibly different function.
-    let mut zc = [0i32; 2 * H];
-    let mut zo = [0i32; 2 * H];
-    let mut yc = [0i32; M];
-    let mut yo = [0i32; M];
-    let mut pc = [0i32; H];
-    let mut po = [0i32; H];
-    let mut c8 = [0i8; M];
-    let mut co = [0i8; M];
-    let mut c16 = [0i16; M];
-    let mut o16 = [0i16; M];
+    let zc = unsafe { &mut *core::ptr::addr_of_mut!(T_ZC) };
+    let zo = unsafe { &mut *core::ptr::addr_of_mut!(T_ZO) };
+    let yc = unsafe { &mut *core::ptr::addr_of_mut!(T_YC) };
+    let yo = unsafe { &mut *core::ptr::addr_of_mut!(T_YO) };
+    let pc = unsafe { &mut *core::ptr::addr_of_mut!(T_PC) };
+    let po = unsafe { &mut *core::ptr::addr_of_mut!(T_PO) };
+    let c8 = unsafe { &mut *core::ptr::addr_of_mut!(T_C8) };
+    let co = unsafe { &mut *core::ptr::addr_of_mut!(T_CO) };
+    let c16 = unsafe { &mut *core::ptr::addr_of_mut!(T_C16) };
+    let o16 = unsafe { &mut *core::ptr::addr_of_mut!(T_O16) };
     fill_kx(kx);
-    imdct::pre(kx, &mut zc);
-    overlay::pre(kx, &mut zo);
+    imdct::pre(kx, zc);
+    overlay::pre(kx, zo);
     let twin_pre = zc == zo;
-    imdct::fft(&mut zc);
-    overlay::fft(&mut zo);
+    imdct::fft(zc);
+    overlay::fft(zo);
     let twin_fft = zc == zo;
-    imdct::post(&zc, &mut yc);
-    overlay::post(&zo, &mut yo);
+    imdct::post(zc, yc);
+    overlay::post(zo, yo);
     let twin_post = yc == yo;
-    imdct::ola(&yc, &mut pc, &mut c8, Some(&mut c16));
-    overlay::ola(&yo, &mut po, &mut co, Some(&mut o16));
+    imdct::ola(yc, pc, c8, Some(c16));
+    overlay::ola(yo, po, co, Some(o16));
     let twin_ola = c8 == co && c16 == o16 && pc == po;
-    let twin_ok = twin_pre && twin_fft && twin_post && twin_ola;
+    #[cfg(feature = "asm-fft")]
+    let twin_fft_asm = {
+        // Rust ARM FFT -> want; then each asm variant on the same pre-FFT input.
+        let want = unsafe { &mut *core::ptr::addr_of_mut!(ZWANT) };
+        let work = unsafe { &mut *core::ptr::addr_of_mut!(ZWORK) };
+        overlay::pre(kx, want);
+        overlay::fft(want); // Rust ARM-mode FFT
+        overlay::pre(kx, work);
+        overlay::fft_asm_call(work); // v1
+        let v1_ok = *work == *want;
+        overlay::pre(kx, work);
+        overlay::fft_asm_v2_call(work); // v2
+        let v2_ok = *work == *want;
+        overlay::pre(kx, work);
+        overlay::fft_asm_v3_call(work); // v3
+        let v3_ok = *work == *want;
+        v1_ok && v2_ok && v3_ok
+    };
+    #[cfg(not(feature = "asm-fft"))]
+    let twin_fft_asm = true;
+    let twin_ok = twin_pre && twin_fft && twin_post && twin_ola && twin_fft_asm;
     agb::println!(
-        "[uli-bench] ovl twin pre={} fft={} post={} ola={} [{}]",
+        "[uli-bench] ovl twin pre={} fft={} post={} ola={} fftasm={} [{}]",
         twin_pre,
         twin_fft,
         twin_post,
         twin_ola,
+        twin_fft_asm,
         if twin_ok { "PASS" } else { "FAIL" }
     );
 
@@ -783,6 +893,7 @@ fn run(gba: &mut agb::Gba) -> bool {
         && !cost_prod.wrapped
         && kern_ok
         && ovl_ok
+        && asm_ok
         && twin_ok;
     agb::println!(
         "[uli-bench] {}",
