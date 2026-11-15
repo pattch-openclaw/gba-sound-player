@@ -75,6 +75,13 @@ attrib-count = ["uli-lite-gba/attrib-count"]
 # only like-for-like when compared frame-for-frame.
 attrib-dump = []
 
+# The twiddle-table-in-`.iwram` placement A/B (`asmfft4iw`). Off by default:
+# `iwram-tables` already puts the shipped `TW` in `.iwram`, so the arm compares
+# the table against itself, and its 2,016 B copy is what pushed the
+# `--features asm-fft` image past the IWRAM region — which is where the on-target
+# asm twin lives. See `make uli-fft-twin`.
+tw-iwram-arm = []
+
 [dependencies]
 uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }
 # The overlay's ARM-mode, unchecked kernels (the measurement's second arm).

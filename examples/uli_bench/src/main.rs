@@ -176,6 +176,15 @@ static mut T_O16: [i16; M] = [0; M];
 /// time v4 against the cartridge-resident `TW` and against this `.iwram` copy.
 /// `.iwram` data is initialised from ROM at boot by the agb startup copy, the
 /// same mechanism the `iwram-tables` feature relies on.
+///
+/// **Off by default, and 2,016 B is why.** Since `iwram-tables` became the
+/// product default, `crate::TW` is *already* in `.iwram`, so this copy compares
+/// the table against itself and the arm has nothing left to show. It also cost
+/// the `--features asm-fft` image its whole budget: that build measured
+/// 30,284 B of a 30,320 B region, i.e. no room for the 828 B stack, so the
+/// on-target asm twin could not run at all. Gating it here is what makes
+/// `make uli-fft-twin` possible.
+#[cfg(feature = "tw-iwram-arm")]
 #[unsafe(link_section = ".iwram")]
 static mut TW_IWRAM: [i32; 504] = uli_lite::tables_data::TW;
 
@@ -1132,21 +1141,44 @@ fn run(gba: &mut agb::Gba) -> bool {
             asm_fft4_sum,
             asm_fft4_sum == u32::MAX
         );
-        // Same kernel, twiddle table in `.iwram` instead of ROM: the placement
-        // A/B (see TW_IWRAM). Isolates table location from code/instruction work.
-        let tw_iwram = core::ptr::addr_of!(TW_IWRAM) as *const i32;
-        let (_, asm_fft4iw_sum) = timed(&mut counter, || {
+        // v5 (item 1 of the critical path): absolute byte cursor, register-held
+        // twiddle pointer and the reference's destructive sum formation. This is
+        // the SHIPPED kernel, in `.iwram`; v1..v4 are in `.text` and their
+        // numbers here are fetch-polluted ROM readings.
+        let (_, asm_fft5_sum) = timed(&mut counter, || {
             for _ in 0..KREP {
-                overlay::fft_asm_v4_tw_call(core::hint::black_box(&mut *kz), tw_iwram);
+                overlay::fft_asm_v5_call(core::hint::black_box(&mut *kz));
             }
         });
         agb::println!(
-            "[uli-bench] asmfft4iw n={} fft_sum={} wrapped={}",
+            "[uli-bench] asmfft5 n={} fft_sum={} wrapped={}",
             KREP,
-            asm_fft4iw_sum,
-            asm_fft4iw_sum == u32::MAX
+            asm_fft5_sum,
+            asm_fft5_sum == u32::MAX
         );
+        // Same kernel, twiddle table copied into `.iwram`: the placement A/B
+        // (see TW_IWRAM). Gated, because with `iwram-tables` the shipped table
+        // is already there and the 2,016 B copy broke this image's budget.
+        #[cfg(feature = "tw-iwram-arm")]
+        let asm_fft4iw_sum = {
+            let tw_iwram = core::ptr::addr_of!(TW_IWRAM) as *const i32;
+            let (_, sum) = timed(&mut counter, || {
+                for _ in 0..KREP {
+                    overlay::fft_asm_v4_tw_call(core::hint::black_box(&mut *kz), tw_iwram);
+                }
+            });
+            agb::println!(
+                "[uli-bench] asmfft4iw n={} fft_sum={} wrapped={}",
+                KREP,
+                sum,
+                sum == u32::MAX
+            );
+            sum
+        };
+        #[cfg(not(feature = "tw-iwram-arm"))]
+        let asm_fft4iw_sum = { 0u32 };
         asm_fft_sum != u32::MAX
+            && asm_fft5_sum != u32::MAX
             && asm_fft2_sum != u32::MAX
             && asm_fft3_sum != u32::MAX
             && asm_fft4_sum != u32::MAX
@@ -1219,7 +1251,10 @@ fn run(gba: &mut agb::Gba) -> bool {
         overlay::pre(kx, work);
         overlay::fft_asm_v4_call(work); // v4
         let v4_ok = *work == *want;
-        v1_ok && v2_ok && v3_ok && v4_ok
+        overlay::pre(kx, work);
+        overlay::fft_asm_v5_call(work); // v5 (the shipped kernel)
+        let v5_ok = *work == *want;
+        v1_ok && v2_ok && v3_ok && v4_ok && v5_ok
     };
     #[cfg(not(feature = "asm-fft"))]
     let twin_fft_asm = true;

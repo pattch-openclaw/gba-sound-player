@@ -28,9 +28,15 @@ of the period** — the decode wall under the frame period for the first time, w
 both twin builds still bit-exact. Step 1a the same day put the bit window into
 `let mut` scalars with the reader as macros over them (the reference's
 `REFILL`/`SKIP` shape) for another **-12,583 / -9,686**, to **237,252 worst /
-211,071 mean = 90.5% / 80.5%** and **1.30x** the C decode wall, **-36,946** off
-the worst frame in two steps. With entropy down 37.6% the deficit to C is now
-42% entropy / 57% synthesis, so the FFT is the next item. That is the decode
+211,071 mean = 90.5% / 80.5%**. Step 1b then took the hand-written FFT to v5 —
+the reference's absolute byte cursor, register-held twiddle pointer and
+destructive sum formation — for **81,035 -> 71,519 at the gate frame** and a
+further **-9,516 / -9,517**: the product frame is **227,736 worst / 201,554 mean
+= 86.9% / 76.9%** of the period, **1.25x** the C decode wall, with the FFT at
+**1.14x** C and **-46,462** off the worst frame across the three steps. The two
+halves of the remaining gap are now within 10% of each other (52% entropy / 47%
+synthesis) and ~4,900 cycles separate the decode wall from the <=85% headroom
+target. That is the decode
 wall, not the gate total: convert + IRQ + DMA and this tree's UI are not in it, so
 U4 and playback remain open.
 This file is the decision record (why

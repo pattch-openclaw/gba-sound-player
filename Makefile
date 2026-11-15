@@ -6,7 +6,7 @@
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
-        uli-overlay-test \
+        uli-overlay-test uli-fft-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
         uli-spike-rom clean clean-cache check help toolchain-check
 
@@ -677,6 +677,26 @@ uli-attrib: toolchain-check
 	  grep -E '^\[uli-bench\] frame prod8' uli-attrib-$$arm.log || exit 1; \
 	done
 	@echo "uli-attrib done: uli-attrib-<arm>.log (timing-only arms; pins fail by design)"
+
+# --- The on-target asm FFT twin (a real gate, added with v5) ------------------
+#
+# The bench's `ovl twin ... fftasm=` line lives behind the bench's `asm-fft`
+# feature, so `make uli-bench` — which builds without it — reported
+# `fftasm=true` vacuously while the product decoder was in fact calling the asm
+# kernel. The album pins were the only witness. This target builds the image
+# that actually runs the twin, and gates on it.
+#
+# It fits because the twiddle-table placement arm (`tw-iwram-arm`, 2,016 B of
+# `.iwram`) is off by default: with it on, this build measured 30,284 B of a
+# 30,320 B region and had no room for the 828 B stack.
+ULI_FFT_TWIN_LOG := uli-fft-twin.log
+uli-fft-twin: toolchain-check
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features asm-fft
+	agb-gbafix $(ULI_BENCH_BIN) -o uli-fft-twin.gba
+	timeout -k 5 300 $(GBA_TEST_RUNNER) uli-fft-twin.gba > $(ULI_FFT_TWIN_LOG) 2>&1 || true
+	@grep -E '^\[uli-bench\] asmfft5 ' $(ULI_FFT_TWIN_LOG) || { echo "uli-fft-twin: no asmfft5 arm in the log"; exit 1; }
+	@grep -q 'ovl twin .* fftasm=true \[PASS\]' $(ULI_FFT_TWIN_LOG) || { echo "uli-fft-twin: the asm FFT twin failed — see $(ULI_FFT_TWIN_LOG)"; exit 1; }
+	@echo "uli-fft-twin passed: v1..v5 asm FFTs are bit-exact on the ARM7TDMI (v5 is the shipped kernel)"
 
 # The overlay's host twin: the ARM-mode, unchecked kernels must be bit-exact with
 # uli-lite's portable reference. This is what licenses the bench's overlay arm to be

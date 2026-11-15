@@ -84,6 +84,18 @@ in the order the plan required:
   **274,198 → 249,835 worst (105% → 95.3% of the period)** and **232,090 →
   220,757 mean (89% → 84.2%)**, pins unchanged in both twin builds.
 
+**Step 1b (2026-11-15): FFT v5, and the frame is at 86.9%.** The hand-written
+FFT took the reference's address shape — an absolute byte cursor with
+register-offset addressing, a register-held twiddle pointer, and the destructive
+sum formation that needs no moves — for **81,035 → 71,519 at the gate frame**
+(−9,516, exactly the frame delta) and **35,760/channel = 1.14x the C record**,
+the closest any kernel has come. The product frame is **237,252 → 227,736 worst
+(90.5% → 86.9% of the period)** and **211,071 → 201,554 mean (80.5% → 76.9%)**,
+**1.30x → 1.25x** the C decode wall, pins unchanged and the asm twin now a real
+gate (`make uli-fft-twin` — it had been compiled out of `make uli-bench` since
+PR C-1, so that line read `fftasm=true` vacuously). The <=85% headroom target
+now needs **~4,900** cycles.
+
 **Step 1a of the critical path landed the same day: the bit window is in
 registers.** `dec_chan` destructures the reader into five `let mut` scalars and
 `refill`/`take`/`top`/`esc`/`coef` are **macros over them** — the reference's
@@ -137,22 +149,22 @@ above are history; this section is the live order of work.
 
 ### Where we are
 
-Production frame **237,252 worst (frame 109) / 211,071 mean = 90.5% / 80.5%** of
+Production frame **227,736 worst (frame 109) / 201,554 mean = 86.9% / 76.9%** of
 the 262,144-cycle period. Both are under the period: the decode wall cleared
-100% in Step 1 and Step 1a took it a further 12,583, **36,946 off the worst frame
-in two steps**. Against the C record (181,928 = 69.4%) we are **1.30x**.
+100% in Step 1, and Steps 1a + 1b took it a further 22,099, **46,462 off the
+worst frame in three steps**. Against the C record (181,928 = 69.4%) we are
+**1.25x**.
 
 Two different targets, not one:
 
 - **to work** — the decode wall must fit with room for the gate total (DMA, IRQ,
-  convert) and this tree's UI: target **<= ~85%**, so cut **>= ~14,400** cycles.
-- **to match C** — cut ~55,300. Not a requirement; C has 31% slack by design.
+  convert) and this tree's UI: target **<= ~85%**, so cut **>= ~4,900** cycles.
+- **to match C** — cut ~45,800. Not a requirement; C has 31% slack by design.
 
-**90.5% is not "real time".** It is the entropy + M/S + synthesis work for one
+**86.9% is not "real time".** It is the entropy + M/S + synthesis work for one
 frame; the feeder's convert/IRQ/DMA and the UI are not in it, and U4's ceiling is
-a measured gate total. Playback still does not start. It is, though, the first
-time the whole decode of the worst iteration frame fits inside the period with
-more than 9% of it spare.
+a measured gate total. Playback still does not start. But the decode wall now has
+13.1% of the period spare, and the headroom target is one modest item away.
 
 ### Step 0 done (2026-11-15): the frame, attributed by difference
 
@@ -171,21 +183,25 @@ the pins fail by construction there and are never quoted. `attrib-dump` costs a
 constant **+16 cycles per window**, so the absolutes below are the product arm's
 and every delta is a frame-aligned control-minus-arm.
 
-**Re-attributed after Step 1a** (control 231,359 at f98 in the dump image; the
-product is 231,343 there and 237,252 at its own worst frame f109). The rows are
+**Re-attributed after Step 1b** (control 221,843 at f98 in the dump image; the
+product is 221,827 there and 227,736 at its own worst frame f109). The rows are
 the same instrument re-run in the shipping image each time, not a rescaling of an
-earlier table — entropy changed twice, so the shares did:
+earlier table — entropy changed twice and the FFT once, so the shares did:
 
 | part | at f98 | share | C/asm | ratio |
 |---|---:|---:|---:|---:|
-| `pre` (Rust) | 26,458 | 11.4% | 19,400 | 1.36x |
-| `fft` (asm v4) | **81,035** | **35.0%** | 62,800 | 1.29x |
-| `post` (Rust) | 22,372 | 9.7% | 21,800 | 1.03x |
-| `ola` (Rust, fused s8) | 34,386 | 14.9% | 30,600 | 1.12x |
-| synthesis, all 8 calls | 162,995 | 70.4% | 134,600 | 1.21x |
-| entropy + dequant | **58,071** | **25.1%** | ~42,600 | ~1.4x |
-| M/S | 9,861 | 4.3% | ~4,400 | ~1.0x |
+| `pre` (Rust) | 26,458 | 11.9% | 19,400 | 1.36x |
+| `fft` (asm v5) | **71,519** | **32.2%** | 62,800 | **1.14x** |
+| `post` (Rust) | 22,372 | 10.1% | 21,800 | 1.03x |
+| `ola` (Rust, fused s8) | 34,386 | 15.5% | 30,600 | 1.12x |
+| synthesis, all 8 calls | 153,479 | 69.2% | 134,600 | 1.14x |
+| entropy + dequant | **58,071** | **26.2%** | ~42,600 | ~1.4x |
+| M/S | 9,861 | 4.4% | ~4,400 | ~1.0x |
 | wrapper / glue | 432 | 0.2% | — | — |
+
+The sub-frame entropy partition is **unchanged and needs no re-run**: those arms
+all carry `attrib-synth`, so they are measured with synthesis removed and v5
+cannot move them.
 
 The C column is the record's own per-channel decomposition doubled (pre 9,700 +
 fft 31,400 + post 10,900 + ola 15,300) plus its entropy/dequant/M-S row. Those
@@ -194,17 +210,21 @@ they are best read as *C's worst-frame shape* — which is the comparison the ga
 actually needs. It is still a different corpus and image: a diagnostic, never an
 acceptance criterion.
 
-**The two-part split of the gap to C has moved twice, and that is the point of
-re-attributing.** Step 0 put 69% of the 92,286-cycle distance in the entropy path
-and 31% in synthesis; Step 1 moved it to 58/42; **after Step 1a it is 42% entropy
-(20,932: entropy+dequant+M/S 67,932 against C's ~47,000) / 57% synthesis
-(28,395: 162,995 against 134,600)**, out of a total distance of **49,431** at
-f98. So entropy has gone from two thirds of the deficit to a minority of it, and
-**synthesis is now the critical path to the gate** — it is 70% of the frame, the
-FFT alone is 35%, and it is the only block large enough to close the ~14,400
-cycles the <=85% target still needs. Part of the entropy row is frame density,
-not a slow loop: M/S is 9,861 here against C's ~4,400 because the gate frame
-transforms more coefficients.
+**The two-part split of the gap to C has moved three times, and that is the
+point of re-attributing.** Step 0 put 69% of the 92,286-cycle distance in the
+entropy path and 31% in synthesis; Step 1 moved it to 58/42; Step 1a to 42/57;
+**after Step 1b it is 52% entropy (20,932: entropy+dequant+M/S 67,932 against
+C's ~47,000) / 47% synthesis (18,879: 153,479 against 134,600)**, out of a total
+distance of **39,915** at f98. The two halves are now within 10% of each other,
+which is the real reading: **neither is "the" critical path any more**, and the
+order of work below is about size-per-risk rather than about a dominant block.
+Part of the entropy row is frame density, not a slow loop: M/S is 9,861 here
+against C's ~4,400 because the gate frame transforms more coefficients.
+
+The FFT is the story of the kernel ratio: **1.33x → 1.29x → 1.14x** C across
+Steps 0, 1 and 1b, on a `pre` that is 1.36x and an `ola` at 1.12x. The remaining
+synthesis gap is now mostly `pre` (7,058) and `ola` (3,786), i.e. two Rust
+kernels, not the asm one.
 
 **What it corrects, in order of consequence:**
 
@@ -231,30 +251,29 @@ transforms more coefficients.
 Every item is a projection until it lands as its own measured arm, with a
 same-image control, twinned bit-exactly (the discipline that has held).
 
-1. **The asm FFT, v5 — now the critical path.** In-frame baseline
-   **40,518/channel** (81,035 at f98, 1.29x C), prize **~18,200/frame**, which on
-   its own clears the ~14,400 the <=85% target needs. Remaining known
-   differences: the multiply core and the A..D/output traffic. This moved to
-   first because Step 1a took entropy from 69% of the deficit to 42%.
-2. **`pre` asm → `ola` asm → `post` asm.** `pre` is the worst kernel ratio
-   (1.36x, 26,458 at f98) and the largest of the three; the three together are
-   worth ~11,400 over C's shape.
-3. ~~**Entropy + dequant — attribution, then rewrite.**~~ **DONE in two steps
-   (2026-11-15): the path fell 111,227 → 86,826 → 69,364 at f98 (−37.6%), and the
-   worst frame 274,198 → 237,252 (−36,946).** It is no longer the deficit's
-   majority. What is left inside it is ordered by the sub-frame arms — dequant
-   arithmetic is now the largest single piece (13,129 = 19% of the path) and the
-   per-band hoists still spill alongside the window — but it is item 3, not
-   item 1.
+1. ~~**The asm FFT, v5.**~~ **DONE (2026-11-15): 81,035 → 71,519 at f98, 1.14x
+   C, −9,516 on the frame.** See "Step 1b".
+2. **`pre` asm.** The worst kernel ratio left (1.36x, 26,458 at f98 = 11.9% of
+   the frame) and, with `ola`, the bulk of the remaining synthesis gap (7,058 +
+   3,786 against C's shape). **~4,900 buys the <=85% target**, so `pre` reaching
+   even ~1.15x would do it — but the prize has to be measured, not assumed: the
+   FFT moved 9,516 by changing its *addressing*, so the same question is open
+   for `pre` (`ola` is already fused, 1.12x, and is the smaller item).
+3. **The rest of entropy.** Dequant arithmetic is the largest single piece
+   inside it (13,129 = 19% of the path) and the per-band hoists still spill
+   beside the window (`rqp`/`d15`/`step` reload per coefficient). Worth ~20,900
+   against C's shape, so it is the bigger half of the gap — but it is also the
+   half that has already taken three measured passes and yielded 42,000.
 4. **PR E — full-album worst frame**, and the gate total (decode + convert + IRQ
    + DMA). This is U4's real witness, and it is the only thing that can say
-   whether 90.5% on 129 frames is 90.5% on a real album.
+   whether 86.9% on 129 frames is 86.9% on a real album.
 
 The arithmetic on the two targets, from these numbers: **<=100% is met on this
-corpus (90.5%) with 9.5% spare**, so the honest target is the **<=85%** headroom,
-which needs **~14,400**. That is one item — the FFT at C-class (18,235) — which
-is why the order flipped. The <=85% number is still not assigned: it is written
-down when the gate total is measured (U4), and PR E is its witness.
+corpus (86.9%) with 13.1% spare**; the honest target is the **<=85%** headroom,
+which needs **~4,900** — small enough that `pre` alone may clear it, and small
+enough that it is now a question of *which* item is cheapest rather than which is
+biggest. The <=85% number is still not assigned: it is written down when the gate
+total is measured (U4), and PR E is its witness.
 
 ### Step 1 — the entropy/dequant rewrite (2026-11-15)
 
@@ -449,11 +468,97 @@ per-band hoists that still spill beside the window (`rqp`, `d15`, `step` reload
 per coefficient in the disassembly) — real, but together worth less than the FFT
 prize.
 
+### Step 1b — FFT v5 (2026-11-15)
+
+**Target.** In-frame the FFT was **81,035 at f98 = 40,518/channel = 1.29x C's
+31,400**, 35% of the frame and the largest single item. Two differences from the
+reference were named before the work started: the **A..D / output traffic** and
+the **sum formation**. Both turned out to be address-and-move problems, not
+multiply problems — the multiply core was already identical (`2x SMULL/SMLAL` +
+one `rsb` per complex product, both sides).
+
+**What changed in `asm/fft_arm_v5.s`:**
+
+1. **An absolute byte cursor** (`r2`) and the element stride in bytes (`r3`)
+   replace v4's word index rebuilt from `(p, t, x)`. The four complexes are one
+   `ldmia` at the cursor plus three `add r0, r0, r3` steps — **7 instructions for
+   the loads where v4 needed 12** — and each store address is one or two `add`s
+   from `(cursor, stride)` with no shift-per-word conversion.
+2. **The destructive sum formation** from the reference: form the sum into one
+   operand's register and derive the difference from the sum with a shifted
+   operand (`rsb t1, t0, a, lsl #1` ⇒ `2a - t0 = a - c`). **8 instructions with
+   no moves, where v4 needs 12 with four.** Both half-B Y values come from the
+   same trick (4 instructions where v4 needs 6).
+3. **The twiddle pointer lives in a register for the whole k-loop** (`r12`).
+   That is possible only because the cursor is *absolute*, so the buffer base is
+   not needed inside the loops and frees the register; v4 reloaded `F_TWJ` from
+   the stack once per output (3 loads per butterfly) and indexed from it.
+4. The trivial-butterfly path (j == 0, identity twiddles) and the block transfers
+   are kept from v4; the tail stage becomes one `ldmia`/8 `str` on a single base.
+
+**Measured.** Same corpus, same pins, both twin builds bit-exact:
+
+| | worst | mean | of period |
+|---|---:|---:|---|
+| Step 1a | 237,252 (f109) | 211,071 | 90.5% / 80.5% |
+| **Step 1b** | **227,736 (f109)** | **201,554** | **86.9% / 76.9%** |
+| delta | **−9,516 (−4.0%)** | **−9,517 (−4.5%)** | |
+
+FFT at f98: **81,035 → 71,519 (−9,516, exactly the frame delta — the change is
+confined to the kernel)**, i.e. **35,760/channel = 1.14x C**, the closest any
+kernel has come. Cumulative from the Step 0 baseline: **−46,462 (−16.9%)** on the
+worst frame, −30,536 mean. Ratio to C: **1.30x → 1.25x**. `asm/fft_arm_v5.s` is
+**764 B**, 192 B *smaller* than v4's 956 B despite doing more per instruction.
+
+**The bug worth recording: `smull` writes a register pair.** The first v5 stored
+each output's address in `r0`, then did the real half of the complex multiply as
+`smull r0, r1, ...` — destroying the address and writing the real part to a
+pointer built from a product's low word. It corrupted memory on target
+(`BadFrame`, 486 of 512 coefficients wrong) and the signature was diagnostic:
+**every imaginary part was right and every real part wrong**, because only the
+second `smull` of each product clobbered the address. v4 keeps its store address
+in `lr` for exactly this reason; v5 now does too, at the cost of one bound `ldr`
+per butterfly (every other register is spoken for). Found by transliterating the
+kernel into a host test and comparing against the reference — the transliteration
+reproduced the target's first divergent index exactly, which turned a guess into
+a one-line fix.
+
+**Memory — and the instrument gap it exposed.** `.iwram` is **28,276 B with
+2,044 B free above the 828 B stack (1,216 B of headroom)**, slightly better than
+before v5 because v5 is smaller than v4. v4 is **demoted to `.text`** as a
+comparison arm, exactly as v1/v2/v3 already were — which means its cycle number
+in that image is a fetch-polluted ROM reading: measured, the same kernel at
+`asmfft4` reads **179,694 cycles/call from ROM against 57,094 for v5 in
+`.iwram`**, a 3.1x placement penalty and *not* a v4-vs-v5 comparison. Do not
+quote it as one.
+
+Two things about the instrument were wrong and are now fixed:
+
+- **`ovl twin ... fftasm=true` was vacuous in `make uli-bench`.** The twin lives
+  behind the bench's `asm-fft` feature and `make uli-bench` does not enable it,
+  so from PR C-1 until now that line reported `true` without comparing anything
+  — while the product decoder was calling the asm kernel. The album pins were the
+  only real witness. **`make uli-fft-twin`** now builds the image that runs the
+  twin and gates on it.
+- **That image could not fit until `TW_IWRAM` was gated.** The twiddle-placement
+  arm allocated a 2,016 B `.iwram` copy of `TW`, which put the build at
+  **30,284 B of a 30,320 B region** — no room for the 828 B stack, so the twin
+  could not run at all. Since `iwram-tables` became the default, `crate::TW` is
+  *already* in `.iwram`, so that copy was comparing the table with itself; it is
+  now behind `tw-iwram-arm` (off by default). This is the second time a
+  measurement-only allocation has silently eaten the budget.
+
+**What it leaves.** The two halves of the gap to C are now within 10% of each
+other (52% entropy / 47% synthesis) and **~4,900 cycles buys the <=85%
+target**. `pre` (1.36x) is the largest remaining kernel and the cheapest thing
+to try; the rest of entropy (dequant 13,129, plus the spilled per-band hoists) is
+the bigger prize but has already had three passes.
+
 ### Caveats that must travel with these numbers
 
 - **Per-kernel rows are ±3%** (they disagree by up to ~10% between two
-  re-measurements a day apart). The single-kernel deltas sum to 164,187 at f98
-  against the measured sequence 162,979 (+0.7%). The interaction is the FFT's
+  re-measurements a day apart). The single-kernel deltas sum to 154,735 at f98
+  against the measured sequence 153,479 (+0.8%). The interaction is the FFT's
   data-dependent trivial-butterfly path: removing `pre` feeds it a stale `buf`.
   Quote the sequence row for synthesis.
 - **`attrib-entropy` alone is not quotable.** Removing `dec_chan` freezes the bit
@@ -466,7 +571,7 @@ prize.
   it consumes" with a ~7,200-cycle correction, not the lookup alone. `nodequant`
   and `count` are exact.
 - **The wrapper is 432 cycles.** The frame has no glue left to win.
-- **95.3% is the worst of a 129-frame iteration corpus, not a worst-case
+- **86.9% is the worst of a 129-frame iteration corpus, not a worst-case
   guarantee** — C's hardest frame was #27,806 of 167,222. Plan for margin; PR E
   is the real witness.
 - Hand-written asm is only worth it once placement is right. Placement is still
@@ -1077,7 +1182,7 @@ may rest on the 129-frame number alone** — U4's witness is this analysis.
 | **U1 — reference** | `uli-lite` remains a bit-exact, host-testable reference (no longer a portable-product claim). | Met (Phase 0/1); redefined 2026-11-14. |
 | **U2 — bit-exact host** | The reference matches the C-pinned corpus, frame for frame, on **valid** streams. Malformed input only has to be rejected safely — no arithmetic-exactness promise (decided 2026-11-14). | Met. |
 | **U3 — bit-exact product** | The product kernel set produces the pinned int8/int16 frames, on target and in the host twin. | **Met for the full hot path (PR B).** `tests/product_twin.rs` (host, frame-for-frame) + `make uli-bench` on-target pins. |
-| **U4 — real-time decode** | Worst full frame inside the **real-time budget** at WAITCNT 4/2: the decode wall must leave room for the gate total (convert + IRQ + DMA) and this tree's UI. **Not a "match C" target** (2026-11-15): C+asm proves the budget is reachable on this hardware, so Rust+asm is expected to reach it too; the C percentage is an existence proof and a diagnostic, not an acceptance criterion. **The ceiling itself is measured, not assigned** (2026-11-14): it is written down at the first near-real-time arm, from the measured gate total plus this tree's non-audio cost. Its worst-frame witness is PR E, not the 129-frame corpus. | **Not met.** PR B measured 204% worst / 177% mean; PR C added the attribution and a split-`huff` win to **200% worst / 174% mean** (523,267 / 456,187) and scoped the remainder as two rewrites (C-1 asm kernels 63%, C-2 entropy 33%). C-1 + C-2 projected to ~91%. **C-3a/C-3c then measured 488,685 / 429,339 (186% / 164%)**, and **C-3b measured 457,863 / 410,912 (175% / 157%)**, and **PR C-1 landed a bit-exact hand-written FFT that, wired into the product decoder, took the full frame to 430,997 / 384,046 (164% / 147%)**, then its trivial-butterfly follow-up (**v4**) to **425,795 / 378,845 (162% / 145%)** — see the ledger's “PR C-1 landed” section.  The rest of the ladder: `iwram-tw` (157%) and `iwram-tables` (148%) were placement arms, **C-3d** made the timed frame int8-only (**138%**), and **C-3** moved `HotState` to IWRAM (**−87,040**) to **274,198 / 232,090 (105% / 89%)**. **Step 0 (2026-11-15) then attributed that frame by difference in the product image:** at the worst frame (f98) synthesis is 162,987 (59%) and entropy/dequant/M/S 110,741 (40%, wrapper 486), so **69% of the 92,286-cycle distance to the C worst-frame shape is the entropy path** and 31% synthesis; per channel the kernels are 1.10–1.33x C, with the already-asm FFT (41,671) the largest kernel item and `pre`+`post`+`ola` worth 9,817/frame together. The previous "C-1 kernel prize ~194,000, the largest single item" is retired. **Step 1 (2026-11-15) then did the entropy/dequant item: the sub-frame instrument (5 arms) plus a rewrite of the reader contract, the long-code search and the per-band live set.** The entropy path fell **111,227 → 86,826 at f98 (−22%)** and the product frame **274,198 / 232,090 → 249,835 / 220,757 = 95.3% / 84.2%** (pins unchanged, both twins bit-exact), taking **the decode wall under the period for the first time**. **Step 1a (2026-11-15)** then put the bit window into `let mut` scalars with the `refill`/`take`/`esc`/`coef` bodies as macros over them — the reference's `REFILL`/`SKIP` shape — for another **−12,583 / −9,686**, to **237,252 / 211,071 = 90.5% / 80.5%**, **1.30x** the C record and **−36,946** off the worst frame in two steps. That is still not the gate: convert + IRQ + DMA and this tree's UI are not in it, so U4 stays open and playback does not start; the remaining headroom target is the <=~85% the critical path names, which needs **~14,400** more. **What remains is ordered in "Critical path to real time": FFT v5 (now the critical path — the deficit is 42% entropy / 57% synthesis and the FFT alone is 35% of the frame), then `pre`/`ola`/`post` asm, then the rest of entropy, then PR E.** See the ledger's "Step 0 attribution", "Step 1" and "Step 1a". |
+| **U4 — real-time decode** | Worst full frame inside the **real-time budget** at WAITCNT 4/2: the decode wall must leave room for the gate total (convert + IRQ + DMA) and this tree's UI. **Not a "match C" target** (2026-11-15): C+asm proves the budget is reachable on this hardware, so Rust+asm is expected to reach it too; the C percentage is an existence proof and a diagnostic, not an acceptance criterion. **The ceiling itself is measured, not assigned** (2026-11-14): it is written down at the first near-real-time arm, from the measured gate total plus this tree's non-audio cost. Its worst-frame witness is PR E, not the 129-frame corpus. | **Not met.** PR B measured 204% worst / 177% mean; PR C added the attribution and a split-`huff` win to **200% worst / 174% mean** (523,267 / 456,187) and scoped the remainder as two rewrites (C-1 asm kernels 63%, C-2 entropy 33%). C-1 + C-2 projected to ~91%. **C-3a/C-3c then measured 488,685 / 429,339 (186% / 164%)**, and **C-3b measured 457,863 / 410,912 (175% / 157%)**, and **PR C-1 landed a bit-exact hand-written FFT that, wired into the product decoder, took the full frame to 430,997 / 384,046 (164% / 147%)**, then its trivial-butterfly follow-up (**v4**) to **425,795 / 378,845 (162% / 145%)** — see the ledger's “PR C-1 landed” section.  The rest of the ladder: `iwram-tw` (157%) and `iwram-tables` (148%) were placement arms, **C-3d** made the timed frame int8-only (**138%**), and **C-3** moved `HotState` to IWRAM (**−87,040**) to **274,198 / 232,090 (105% / 89%)**. **Step 0 (2026-11-15) then attributed that frame by difference in the product image:** at the worst frame (f98) synthesis is 162,987 (59%) and entropy/dequant/M/S 110,741 (40%, wrapper 486), so **69% of the 92,286-cycle distance to the C worst-frame shape is the entropy path** and 31% synthesis; per channel the kernels are 1.10–1.33x C, with the already-asm FFT (41,671) the largest kernel item and `pre`+`post`+`ola` worth 9,817/frame together. The previous "C-1 kernel prize ~194,000, the largest single item" is retired. **Step 1 (2026-11-15) then did the entropy/dequant item: the sub-frame instrument (5 arms) plus a rewrite of the reader contract, the long-code search and the per-band live set.** The entropy path fell **111,227 → 86,826 at f98 (−22%)** and the product frame **274,198 / 232,090 → 249,835 / 220,757 = 95.3% / 84.2%** (pins unchanged, both twins bit-exact), taking **the decode wall under the period for the first time**. **Step 1a (2026-11-15)** then put the bit window into `let mut` scalars with the `refill`/`take`/`esc`/`coef` bodies as macros over them — the reference's `REFILL`/`SKIP` shape — for another **−12,583 / −9,686**, to **237,252 / 211,071 = 90.5% / 80.5%**, and **Step 1b (2026-11-15)** took the FFT to v5 (absolute byte cursor, register-held twiddle pointer, the reference's destructive sum formation) for **−9,516 / −9,517**: **227,736 / 201,554 = 86.9% / 76.9%**, **1.25x** the C record and **−46,462** off the worst frame across the three steps. That is still not the gate: convert + IRQ + DMA and this tree's UI are not in it, so U4 stays open and playback does not start; the remaining headroom target is the <=~85% the critical path names, which needs **~4,900** more. **What remains is ordered in "Critical path to real time": `pre` asm (1.36x, the largest kernel left) or the rest of entropy (the deficit is now 52% entropy / 47% synthesis, within 10% of each other), then PR E.** See the ledger's "Step 0 attribution", "Step 1", "Step 1a" and "Step 1b". |
 | **U5 — product playback** | 32,768 Hz path, zero underruns, clean period audit. | Not started (gated by U4). |
 | **U6 — memory** | IWRAM/EWRAM/stack inside the product budget with UI and feeder. | **Open.** ~~The product path needs ≈15.0 KiB of stack.~~ **Corrected 2026-11-15: the measured stack high-water is 768 B** (sentinel probe in `examples/uli_bench`); the ≈15.0 KiB figure was an artifact of stack-local twin buffers and is withdrawn. That reverses this row's conclusion: `iwram-tables` (all synthesis tables in IWRAM, C's own layout) **now runs** — `.iwram` 25,548 B, 6,964 B free, 768 B stack used, **6,196 B headroom** — and measures the product frame at **148%** (387,879 / 340,929). See "Memory layout — mirrored from the C reference". Remaining placement item is C-3 (`HotState` → IWRAM, 8,192 B), which fits once the superseded v1/v2 kernels are dropped (1,520 B). Historical note (superseded): the row previously concluded IWRAM tables were blocked because a stale ≈15.0 KiB stack left no room and `iwram-tables` crashed. **Priority decided 2026-11-14 and still in force: audio first** — IWRAM budget goes to code, hot state and stack; UI affordances are the slack and may be dropped to buy audio headroom. Full `huff` inlining was rejected on this row: +4,252 B for 2.7%, vs +896 B for 1.6% with the split. |
 | **U7 — licensing/spec** | Permissive license + standalone format spec before publishing; otherwise `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** Revisit only if a publish decision is taken; the license and `FORMAT.md` remain prerequisites for it. |
@@ -1960,6 +2065,31 @@ counts above come from the host.
 
 ## Decision log
 
+- **2026-11-15 — Step 1b landed: FFT v5, 1.14x C, and the frame at 86.9%.** The
+  kernel took the reference's address shape — an **absolute byte cursor** with
+  the stride in a register, a **register-held twiddle pointer** (possible only
+  because an absolute cursor does not need the buffer base in the loops), and the
+  **destructive sum formation** that derives the difference from the sum with a
+  shifted operand, so 8 instructions with no moves instead of 12 with four.
+  Measured **81,035 → 71,519 at f98** (−9,516, exactly the frame delta),
+  **35,760/channel = 1.14x C**, and the product frame **237,252 → 227,736 worst
+  (90.5% → 86.9%)** / **211,071 → 201,554 mean (80.5% → 76.9%)**, ratio to C
+  **1.30x → 1.25x**, pins unchanged. v5 is **764 B of `.iwram`**, 192 B smaller
+  than v4, and v4 is demoted to `.text` as a comparison arm — where it measures
+  179,694 cycles/call against v5's 57,094, a 3.1x placement penalty that must
+  **not** be quoted as a v4-vs-v5 comparison. Two instrument defects found and
+  fixed on the way: `ovl twin ... fftasm=true` had been **vacuous** in
+  `make uli-bench` since PR C-1 (the twin is behind the bench's `asm-fft`
+  feature, which that target does not enable), and the image that *does* run it
+  could not fit until `TW_IWRAM` (2,016 B, comparing the table with itself since
+  `iwram-tables` became the default) was gated. `make uli-fft-twin` is the new
+  gate. Recorded for the next asm: **`smull` writes a register pair**, so an
+  output address held in `r0` is destroyed by the real half of a complex
+  multiply — the first v5 draft did that and stored every real part to a pointer
+  built from a product's low word (486 of 512 coefficients wrong, and
+  diagnostically *only* the real parts). v4 holds its address in `lr`; so does
+  v5. Found by transliterating the kernel into a host test that reproduced the
+  target's first divergent index exactly.
 - **2026-11-15 — Step 1a landed: the bit window is in registers, and synthesis
   becomes the critical path.** `dec_chan` now destructures the reader into five
   `let mut` scalars and `refill`/`take`/`top`/`esc`/`coef` are **macros over

@@ -59,7 +59,13 @@
     .syntax unified
     .arm
 
-    .section .iwram,"ax",%progbits
+    @ DEMOTED (FFT v5, item 1 of the critical path): v5 takes the `.iwram` slot
+    @ because the shipped kernel must be there and the region only has room for
+    @ one (~1,000 B). v4 stays in the tree and stays callable as the comparison
+    @ arm, exactly as v1/v2/v3 are — in `.text`, so its cycle number is a
+    @ fetch-polluted ROM reading and is NOT comparable with an `.iwram` kernel.
+    @ The comparable record for v4 is its in-frame 81,035 at f98 (Step 1a).
+    .section .text,"ax",%progbits
     .global uli_fft_arm_v4
     .type   uli_fft_arm_v4, %function
 

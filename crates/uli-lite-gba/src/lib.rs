@@ -490,7 +490,9 @@ mod fft_asm {
         "\n",
         include_str!("../asm/fft_arm_v3.s"),
         "\n",
-        include_str!("../asm/fft_arm_v4.s")
+        include_str!("../asm/fft_arm_v4.s"),
+        "\n",
+        include_str!("../asm/fft_arm_v5.s")
     );
 
     // `(x, tw)` — the buffer (512 words) and the twiddle table, passed by
@@ -501,6 +503,7 @@ mod fft_asm {
         fn uli_fft_arm_v2(x: *mut i32, tw: *const i32);
         fn uli_fft_arm_v3(x: *mut i32, tw: *const i32);
         fn uli_fft_arm_v4(x: *mut i32, tw: *const i32);
+        fn uli_fft_arm_v5(x: *mut i32, tw: *const i32);
     }
 
     /// Call the asm FFT (v1) on `x` (`[i32; 2*H]`). SAFETY: `x` points at 512
@@ -535,6 +538,13 @@ mod fft_asm {
         unsafe { uli_fft_arm_v4(x.as_mut_ptr(), crate::TW.as_ptr()) };
     }
 
+    /// Call v5 on `x`. Same contract as [`fft`].
+    #[inline]
+    pub fn fft_v5(x: &mut [i32; 2 * uli_lite::format::H]) {
+        // SAFETY: as for `fft`.
+        unsafe { uli_fft_arm_v5(x.as_mut_ptr(), crate::TW.as_ptr()) };
+    }
+
     /// Measurement-only: call v4 with an explicit twiddle-table pointer so a
     /// single image can time the same kernel against the cartridge-resident
     /// `TW` and an `.iwram` copy of it. SAFETY: `tw` must point at the 504-word
@@ -556,9 +566,11 @@ pub use fft_asm::fft_v3 as fft_asm_v3_call;
 pub use fft_asm::fft_v4 as fft_asm_v4_call;
 #[cfg(all(target_arch = "arm", feature = "asm-fft"))]
 pub use fft_asm::fft_v4_tw as fft_asm_v4_tw_call;
+#[cfg(all(target_arch = "arm", feature = "asm-fft"))]
+pub use fft_asm::fft_v5 as fft_asm_v5_call;
 
 /// The FFT the product decoder (and [`ArmKernels`]) should call: the best
-/// hand-written kernel (v3) when the `asm-fft` feature is on, otherwise the
+/// hand-written kernel (**v5**) when the `asm-fft` feature is on, otherwise the
 /// Rust ARM-mode [`fft`]. Centralising the `#[cfg]` here is what lets the
 /// product hot path (`decoder.rs`) pick up the asm kernel without repeating the
 /// gate at every call site.
@@ -566,7 +578,7 @@ pub use fft_asm::fft_v4_tw as fft_asm_v4_tw_call;
 pub fn fft_kernel(z: &mut [i32; 2 * H]) {
     #[cfg(all(target_arch = "arm", feature = "asm-fft"))]
     {
-        crate::fft_asm_v4_call(z);
+        crate::fft_asm_v5_call(z);
     }
     #[cfg(not(all(target_arch = "arm", feature = "asm-fft")))]
     {
