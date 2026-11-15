@@ -111,3 +111,5 @@ __pycache__/
 # Cycle-harness logs are per-run output; the numbers that matter live in
 # ULI2.md, and `make uli-bench` can regenerate the raw log.
 /uli-bench*.log
+# Timing-only by-difference attribution arms (`make uli-attrib`).
+/uli-attrib*.log

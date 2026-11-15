@@ -44,6 +44,27 @@ iwram-tw = ["uli-lite-gba/iwram-tw"]
 # is measured at 768 B, not the stale ~15 KiB figure.
 iwram-tables = ["uli-lite-gba/iwram-tables"]
 
+# **Measurement-only: by-difference attribution arms** (see PLAN-OF-RECORD.md
+# "Critical path to real time", Step 0). Each flag removes exactly one part of
+# the product frame so its share can be measured by difference. These are
+# **timing-only**: the pins fail by construction, and a build with any of them on
+# must never be quoted as a product number. The banner line `attrib mask=...`
+# makes every log self-describing.
+attrib-pre = ["uli-lite-gba/attrib-pre"]
+attrib-fft = ["uli-lite-gba/attrib-fft"]
+attrib-post = ["uli-lite-gba/attrib-post"]
+attrib-ola = ["uli-lite-gba/attrib-ola"]
+attrib-synth = ["uli-lite-gba/attrib-synth"]
+attrib-entropy = ["uli-lite-gba/attrib-entropy"]
+attrib-ms = ["uli-lite-gba/attrib-ms"]
+
+# Per-frame timing dump for the attribution arms: one `pfc f=<frame> cyc=<net>`
+# line per frame, printed outside the timed window. Deliberately independent of
+# `per-frame` (which implies `verify` and so measures a different build): the
+# attribution must be read from the product image, and a by-difference delta is
+# only like-for-like when compared frame-for-frame.
+attrib-dump = []
+
 [dependencies]
 uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }
 # The overlay's ARM-mode, unchecked kernels (the measurement's second arm).
