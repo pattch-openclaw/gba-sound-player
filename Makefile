@@ -939,7 +939,7 @@ album-pack-check: toolchain-check
 	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_GATE_LOG)) \
 	    || { echo "album-pack-check: the host suite did not pass — see $(ALBUM_GATE_LOG)"; exit 1; }; \
 	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_GATE_LOG))); \
-	  [ -n "$$n" ] && [ "$$n" -ge 20 ] || { echo "album-pack-check: collected '$$n' tests, needs >= 20 — a green that names nothing is not a green"; exit 1; }
+	  [ -n "$$n" ] && [ "$$n" -ge 48 ] || { echo "album-pack-check: collected '$$n' tests, needs >= 48 — a green that names nothing is not a green"; exit 1; }
 	@echo "album-pack-check passed: the four §9.0 Phase-1 refusals fired — (a) declared rate != product clock,"
 	@echo "  (b) frames outside the encode profile (inherited from gafp_pack.py), (c) ALBM1 n_samples vs the"
 	@echo "  container's total_samples, (d) the writer's output re-read through meta.rs — plus two bakes"
@@ -965,7 +965,7 @@ album-seam-test: toolchain-check
 	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_SEAM_GATE_LOG)) \
 	    || { echo "album-seam-test: the host suite did not pass — see $(ALBUM_SEAM_GATE_LOG)"; exit 1; }; \
 	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_SEAM_GATE_LOG))); \
-	  [ -n "$$n" ] && [ "$$n" -ge 18 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 18 — a green that names nothing is not a green"; exit 1; }
+	  [ -n "$$n" ] && [ "$$n" -ge 22 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 22 — a green that names nothing is not a green"; exit 1; }
 	@cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) build --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) \
 	    --no-default-features --features backend-stub >> $(abspath $(ALBUM_SEAM_GATE_LOG)) 2>&1 \
@@ -984,10 +984,10 @@ album-seam-test: toolchain-check
 # Run it and read the log: `timeout -k 5 600 $(GBA_TEST_RUNNER) $(ALBUM_ROM) > $(ALBUM_ROM_RUN_LOG)`,
 # and remember that exit 124 IS the passing result (the ROM reached its `loop {}`). The old 240 s
 # was a guess with no recorded headroom — a 30 s clip plus a full cold re-decode and two folds — and
-# is now 600 s. The ROM carries no wall-clock instrument (R10), so the image cannot vouch for its own
-# duration: what the harness measured here is that the `verdict` line lands ~4 s into the run (two
-# timed mGBA runs), which says the old bound was generous rather than tight, but a slower host has
-# no bound of its own.
+# is now 600 s. The ROM times itself in **CPU cycles** (`gba_audio_hw::CycleCounter`, read before
+# the audio chain arms and printed as `boot: parse=…c open=…c gate=…c prefill=…c total=…c`), so the
+# image can say what a human waited for; ÷ 16,777,216 is seconds on any GBA. The 600 s leash is a
+# backstop for the post-verdict `loop {}`, not a budget line.
 album-rom: album-bake
 	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin album-play
 	agb-gbafix $(ALBUM_ROM_BIN) -o $(ALBUM_ROM)

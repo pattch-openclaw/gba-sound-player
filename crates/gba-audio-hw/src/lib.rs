@@ -41,6 +41,16 @@
 //! passes what [`rearm_dma`] needs as arguments — which is also what keeps this
 //! crate free of the feeder that decides *when* a re-arm is due.
 //!
+//! ## The cycle counter
+//!
+//! [`CycleCounter`] is the one item here that is not a register write: a
+//! free-running 32-bit CPU-cycle counter on timer0/timer1, lifted from
+//! `examples/e5_fetch/src/timer.rs` (that file's `Counter`) because
+//! ALBUM-PLAYER.md §2.2 / D4 forbid an application reaching into a spike
+//! directory and R10's *"the counter is still owed"* row names this consumer.
+//! It borrows the two timers it owns, so it holds no statics either — the caller
+//! drops it before [`arm_audio_chain`] reprograms the same pair.
+//!
 //! ## MIGRATION (a later PR, deliberately not this one)
 //!
 //! A follow-up PR moves `product_play_main.rs`, `rate_play_main.rs` and
@@ -55,7 +65,7 @@
 #![warn(missing_docs)]
 #![warn(unsafe_op_in_unsafe_fn)]
 
-use agb::timer::{AllTimers, Divider};
+use agb::timer::{AllTimers, Divider, Timer};
 
 /// The GBA sound-chain register map, transcribed from
 /// `product_play_main.rs:263-320`.
@@ -298,6 +308,88 @@ pub fn arm_audio_chain(timers: &mut AllTimers<'_>, chain: &AudioChain) {
     timers.timer2.set_enabled(true);
     timers.timer0.set_enabled(true);
     timers.timer1.set_enabled(true);
+}
+
+/// A free-running 32-bit CPU-cycle counter: timer0 at `/1` as the low half,
+/// cascading into timer1 as the high half — the `e5_fetch` instrument's idiom
+/// (`examples/e5_fetch/src/timer.rs`'s `Counter`), lifted here rather than
+/// `#[path]`-included.
+///
+/// # What it borrows, and why that is the whole contract
+/// The two `&mut Timer`s are the caller's `AllTimers` fields, so the type system
+/// makes the ordering non-optional: drop (or [`stop`](Self::stop)) the counter
+/// before [`arm_audio_chain`] reprograms timer0/1. Reading a cycle count *after*
+/// the chain starts would be reading audio time, not boot time.
+///
+/// # The read is a stabilising re-read, not a median of three
+/// `low, high, low` and one retry if the low half wrapped. Pre-audio nothing
+/// else writes either half (the counter is the only writer of the pair), so a
+/// tearing read needs only to be re-taken. That is deliberately weaker than
+/// `product_play_main.rs`'s `audio_cycles`, which needs a median of three: it
+/// reads a *running* three-timer chain whose halves can tear against separate
+/// audio periods, and a torn value there is a wrong cycle count inside a ledger.
+/// The read is bounded at four attempts and returns the last value rather than
+/// looping — with IRQs off against a 65,536-cycle high half that path cannot be
+/// reached, and a bounded answer beats a hang.
+pub struct CycleCounter<'a> {
+    low: &'a mut Timer,
+    high: &'a mut Timer,
+}
+
+impl<'a> CycleCounter<'a> {
+    /// Point timer0 at `/1` free-running, cascade timer1 from it, zero both.
+    ///
+    /// Zeroing is `set_overflow_amount(0)` on each half while disabled: that
+    /// writes the reload value *and* reloads the counter, so the composite
+    /// starts at 0 (agb's `set_overflow_amount`, not a raw register poke).
+    #[must_use]
+    pub fn start(timers: &'a mut AllTimers<'_>) -> Self {
+        timers.timer0.set_enabled(false);
+        timers.timer1.set_enabled(false);
+        timers
+            .timer0
+            .set_divider(Divider::Divider1)
+            .set_interrupt(false)
+            .set_overflow_amount(0);
+        timers
+            .timer1
+            .set_cascade(true)
+            .set_interrupt(false)
+            .set_overflow_amount(0);
+        let counter = Self {
+            low: &mut timers.timer0,
+            high: &mut timers.timer1,
+        };
+        counter.low.set_enabled(true);
+        counter.high.set_enabled(true);
+        counter
+    }
+
+    /// The 32-bit composite: `high << 16 | low`, re-read until the low half did
+    /// not wrap between the first and second low read.
+    #[must_use]
+    pub fn read(&self) -> u32 {
+        for _ in 0..4 {
+            let low1 = self.low.value();
+            let high = self.high.value();
+            let low = self.low.value();
+            if low >= low1 {
+                return (u32::from(high) << 16) | u32::from(low);
+            }
+        }
+        // See the type's docs: unreachable with IRQs off, bounded on purpose.
+        let high = self.high.value();
+        let low = self.low.value();
+        (u32::from(high) << 16) | u32::from(low)
+    }
+
+    /// Freeze both halves, so a read after this cannot advance. [`arm_audio_chain`]
+    /// disables the pair anyway; this makes the caller's "read before arming"
+    /// explicit rather than incidental.
+    pub fn stop(&mut self) {
+        self.low.set_enabled(false);
+        self.high.set_enabled(false);
+    }
 }
 
 /// Clear a stale Timer1 `IF` before the feeder's source is enabled.

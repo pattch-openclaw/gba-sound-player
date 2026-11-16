@@ -228,9 +228,9 @@ fn every_track_pin_agrees_with_the_manifest() {
 #[test]
 fn an_audited_mutation_of_the_manifest_is_refused() {
     type Mutation = fn(&mut Vec<u8>);
-    let mutations: [(&str, Mutation); 8] = [
+    let mutations: [(&str, Mutation); 9] = [
         ("magic", |blob| blob[0] = b'X'),
-        ("version", |blob| blob[4] = 2),
+        ("version", |blob| blob[4] = 3),
         ("n_tracks", |blob| blob[5] = 0),
         ("reserved byte 7", |blob| blob[7] = 1),
         ("rate", |blob| {
@@ -239,7 +239,8 @@ fn an_audited_mutation_of_the_manifest_is_refused() {
         ("bar_cells", |blob| {
             blob[12..16].copy_from_slice(&64u32.to_le_bytes())
         }),
-        ("checksum", |blob| blob[44] ^= 0xFF),
+        ("structure checksum", |blob| blob[44] ^= 0xFF),
+        ("assets checksum", |blob| blob[60] ^= 0xFF),
         // The pool's trailing pad byte, after the last NUL.
         ("pool padding", |blob| {
             let pool_end = word(blob, 36) as usize;
@@ -254,11 +255,99 @@ fn an_audited_mutation_of_the_manifest_is_refused() {
     for (name, edit) in mutations {
         let mut copy = BLOB.to_vec();
         edit(&mut copy);
+        // v2 has two reader rules: the structure fold is `parse`'s, the asset fold is
+        // `verify_assets`'s (the post-audio audit). Each mutation has an explicit
+        // test below saying which rule refuses it.
+        let refused = match Album::parse(&copy) {
+            Err(_) => true,
+            Ok(album) => album.verify_assets().is_err(),
+        };
         assert!(
-            Album::parse(&copy).is_err(),
+            refused,
             "the audited mutation {name:?} was accepted by meta.rs"
         );
     }
+}
+
+#[test]
+fn boot_checks_the_structure_fold_and_the_audit_checks_the_asset_fold() {
+    // The v2 split, one rule at a time: a structure-fold byte is a boot refusal,
+    // an asset-fold byte is accepted at boot and refused by the post-audio audit.
+    let mut structure = BLOB.to_vec();
+    structure[44] ^= 0xFF;
+    assert!(
+        matches!(
+            Album::parse(&structure),
+            Err(meta::Refusal::ChecksumMismatch { .. })
+        ),
+        "a structure-fold mutation was not a boot refusal"
+    );
+
+    let mut assets = BLOB.to_vec();
+    assets[60] ^= 0xFF;
+    let album = Album::parse(&assets).expect("the asset fold is the audit's rule, not boot's");
+    assert!(
+        matches!(
+            album.verify_assets(),
+            Err(meta::Refusal::AssetsMismatch { .. })
+        ),
+        "a mutated asset fold survived the post-audio audit"
+    );
+}
+
+#[test]
+fn boot_pin_check_does_not_sweep_the_asset_region() {
+    // The boot cross-check is the tripwire, not a fold: a byte in the middle of the
+    // album's asset region must pass `verify_pins` and fail only the post-audio
+    // audit. If someone makes `verify_pins` read the whole region, this test fails.
+    let asset_off = word(BLOB, 36) as usize;
+    let asset_len = word(BLOB, 40) as usize;
+    let mut copy = BLOB.to_vec();
+    copy[asset_off + asset_len / 2] ^= 0xFF;
+    let album = Album::parse(&copy).expect("the structure fold is unaffected");
+    assert_eq!(
+        album_player::backend::verify_pins(&album),
+        Ok(()),
+        "the boot pin check read a byte outside every content tripwire"
+    );
+    assert!(
+        album.verify_assets().is_err(),
+        "the post-audio audit did not catch the byte the boot path is allowed to skip"
+    );
+}
+
+#[test]
+fn the_content_tripwire_refuses_a_stale_prefix_or_suffix_byte() {
+    // `verify_pins` is the boot cross-check, and it holds the first 32 KiB and last
+    // 4 KiB of every blob to the bake's pins. A byte inside either span is a named
+    // `PinMismatch`; the full-fold audit is what covers the bytes in between.
+    let asset_off = word(BLOB, 36) as usize;
+
+    let mut prefix = BLOB.to_vec();
+    prefix[asset_off] ^= 0xFF;
+    let album = Album::parse(&prefix).expect("the structure fold is unaffected");
+    assert_eq!(
+        album_player::backend::verify_pins(&album),
+        Err(SourceError::PinMismatch {
+            track: 0,
+            field: "prefix_fnv",
+        })
+    );
+
+    let mut suffix = BLOB.to_vec();
+    // The last byte of **track 1's** blob (track 0's suffix is a different span), so
+    // the refusal names track 1 and not whichever track happens to be last.
+    let pin = &assets::TRACKS[1];
+    let track_end = asset_off + pin.asset_off as usize + pin.asset_len as usize;
+    suffix[track_end - 1] ^= 0xFF;
+    let album = Album::parse(&suffix).expect("the structure fold is unaffected");
+    assert_eq!(
+        album_player::backend::verify_pins(&album),
+        Err(SourceError::PinMismatch {
+            track: 1,
+            field: "suffix_fnv",
+        })
+    );
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -381,7 +470,7 @@ fn start_sample_is_unsupported_on_every_arm() {
     #[cfg(feature = "backend-flac")]
     {
         let mut flac =
-            album_player::backend::flac::FlacSource::new(parsed()).expect("track 0 boots");
+            album_player::backend::flac::FlacSource::new(parsed()).expect("the album opens");
         assert_eq!(
             flac.start_sample(1_234),
             Err(SourceError::Unsupported(Capability::Seek))
@@ -420,6 +509,26 @@ fn the_stub_arm_drives_the_seam_with_no_codec_or_platform_in_its_module() {
 /// same FNV-1a/64 the bake pinned — the decode the ROM will run, on the host, checked against
 /// `fnv_pcm` rather than against its own output.
 ///
+#[cfg(feature = "backend-flac")]
+#[test]
+fn opening_the_flac_arm_starts_no_track() {
+    // `FlacSource::new` no longer gates track 0 (the fixture's 12,293,131-byte master
+    // the ROM never plays). A pull before `start_track` is an empty stream, not a decode.
+    use album_player::backend::flac::FlacSource;
+
+    let mut source = FlacSource::new(parsed()).expect("the album opens");
+    let mut out = vec![0i16; 2 * geometry::FRAME_SAMPLES as usize];
+    assert_eq!(
+        source.pull_frame(&mut out),
+        Ok(0),
+        "an unselected album must not decode"
+    );
+    source
+        .start_track(0)
+        .expect("track 0 still gates on demand");
+    assert!(matches!(source.pull_frame(&mut out), Ok(n) if n > 0));
+}
+
 /// The fixture blobs are generated by `make album-bake` and present in this build (`include_bytes!`
 /// makes a missing one a compile error). `flac-lite` is platform-free, so this arm decodes on the
 /// host through the core's `TableCountKernel`; `arm-kernel` adds the ARM kernel only under
@@ -433,7 +542,7 @@ fn the_flac_arm_decodes_the_shipped_track_to_its_pcm_pin() {
     const TRACK: usize = 1;
     let pin = &assets::TRACKS[TRACK];
 
-    let mut source = FlacSource::new(parsed()).expect("track 0 boots");
+    let mut source = FlacSource::new(parsed()).expect("the album opens");
     assert_eq!(source.rate_hz(), geometry::RATE_HZ);
     assert_eq!(source.producer_frame(), FrameCostModel::FLAC);
     assert_eq!(source.n_tracks(), assets::TRACKS.len());
@@ -506,7 +615,7 @@ fn the_flac_arm_folds_track_1s_fifo_bytes_to_the_bake_pins() {
     const TRACK: usize = 1;
     let pin = &assets::TRACKS[TRACK];
 
-    let mut source = FlacSource::new(parsed()).expect("track 0 boots");
+    let mut source = FlacSource::new(parsed()).expect("the album opens");
     source
         .start_track(TRACK)
         .expect("track 1's container gates");

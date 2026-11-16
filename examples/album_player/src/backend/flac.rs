@@ -41,13 +41,18 @@ pub struct FlacSource {
 }
 
 impl FlacSource {
-    /// Open an album and position at its first track.
+    /// Open an album, positioned on **no** track.
     ///
-    /// The first track's boot gate runs here, so a container that this image cannot play is a named
-    /// boot refusal rather than a first-frame surprise. Every later track is gated the same way by
-    /// [`start_track`](PcmSource::start_track).
+    /// Nothing is decoded and no container is parsed until the caller names a track with
+    /// [`start_track`](PcmSource::start_track), which is where the boot gate runs — so opening an
+    /// album no longer pays to gate track 0 (the PR-3a fixture's track 0 is the 12,293,131-byte full
+    /// master, which the ROM never plays).
+    ///
+    /// The `Result` is kept so the seam's constructor stays fallible for the next backend arm; there
+    /// is no failing path here now. `pull_frame` before the first `start_track` is `Ok(0)`: an album
+    /// with no current track has no stream, and that is not an error.
     pub fn new(album: Album<'static>) -> Result<Self, SourceError> {
-        let mut source = Self {
+        Ok(Self {
             album,
             manifest: None,
             decoder: None,
@@ -55,9 +60,7 @@ impl FlacSource {
             right: Vec::new(),
             frame_len: 0,
             eos: true,
-        };
-        source.start_track(0)?;
-        Ok(source)
+        })
     }
 }
 

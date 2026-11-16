@@ -16,7 +16,7 @@
 //! app's owner, and the ROM's `main` must never need to change between them.
 
 use crate::assets;
-use crate::meta::{Album, Track};
+use crate::meta::{self, Album, Track};
 use crate::pcm::SourceError;
 
 #[cfg(feature = "backend-flac")]
@@ -37,7 +37,8 @@ pub type Source = flac::FlacSource;
 pub type Source = stub::StubSource;
 
 /// Open the album this image carries: parse `ALBM1`, cross-check every generated pin against the
-/// manifest, and start the first track.
+/// manifest, and return the arm's source. The caller names the track it wants — neither arm starts
+/// one here, so a boot no longer pays for a track it will not play.
 ///
 /// **The pin cross-check is §4.3 rule 1 and spec D-C rule 2**: the manifest is authoritative, the
 /// bake cross-checked it against each packed container, and the ROM re-checks the pair rather than
@@ -59,7 +60,7 @@ pub fn open() -> Result<Source, SourceError> {
 /// file cannot be believed by a build that never re-ran the bake. Public because a stub image reads
 /// the same manifest and owes the same refusal — the check is arm-independent, and a stub ROM that
 /// skipped it could play a timeline the packed container does not have.
-pub fn verify_pins(album: &Album<'static>) -> Result<(), SourceError> {
+pub fn verify_pins(album: &Album<'_>) -> Result<(), SourceError> {
     let pins = &assets::TRACKS;
     if pins.len() != album.n_tracks() as usize {
         return Err(SourceError::PinMismatch {
@@ -68,7 +69,7 @@ pub fn verify_pins(album: &Album<'static>) -> Result<(), SourceError> {
         });
     }
     for (index, pin) in pins.iter().enumerate() {
-        let track: Track<'static> = album.track(index as u32);
+        let track: Track<'_> = album.track(index as u32);
         if track.frames != pin.frames {
             return Err(pin_mismatch(index, "frames"));
         }
@@ -89,6 +90,15 @@ pub fn verify_pins(album: &Album<'static>) -> Result<(), SourceError> {
         // decode failure at play time.
         if track.asset.len() != pin.asset_len as usize {
             return Err(pin_mismatch(index, "asset_len"));
+        }
+        // The bounded content tripwire: the first 32 KiB and last 4 KiB of the blob, against the
+        // bake's pins. A cold boot reads ~148 KiB here for the whole album — milliseconds — and it
+        // is what catches a stale blob (R11) without hashing the cart before the audio.
+        if meta::prefix_fnv(track.asset) != pin.prefix_fnv {
+            return Err(pin_mismatch(index, "prefix_fnv"));
+        }
+        if meta::suffix_fnv(track.asset) != pin.suffix_fnv {
+            return Err(pin_mismatch(index, "suffix_fnv"));
         }
     }
     Ok(())

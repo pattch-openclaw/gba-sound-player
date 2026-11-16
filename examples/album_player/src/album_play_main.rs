@@ -5,8 +5,11 @@
 //! is the record of the run. Then it loops forever, so `timeout`'s exit 124 **is** the pass — the
 //! same contract `product-play.gba` has.
 //!
-//! What this ROM is not: no screen, no keys, no pause, no skip, no session clock, no progress bar.
-//! Those are PR-3b/3c (§4.5). Nothing here touches `gba.graphics`, `DISPCNT` or a palette.
+//! What this ROM is not: no keys, no pause, no skip, no session clock, no progress bar, no text,
+//! no tiles, no sprites. Those are PR-3b/3c (§4.5). What it *does* show is one colour: the
+//! backdrop palette entry, painted violet while it is working, blue on PASS and red on FAIL. That
+//! is a verdict lamp, not a screen — a silent cart run has to be readable (§4.5's palette trap is
+//! the reason a frame with nothing shown repaints the backdrop alone).
 //!
 //! ## Where every ordering choice comes from
 //!
@@ -20,6 +23,7 @@
 //! ## The run, in the order hardware settled it
 //!
 //! ```text
+//! lamp           backdrop = violet, committed from a frame that shows nothing
 //! verify (§D-C)  Album::parse → open()/verify_pins → the track's pins vs meta::Track → the FLAC
 //!                boot gate (start_track), each refusal a named FAIL and a stop
 //! prefill        16 chunks / 8,960 samples: pull_frame → widen → convert_frame → push_bytes,
@@ -35,6 +39,8 @@
 //! proof          the PCM and FIFO pins over a cold re-decode of the gate track — a decode witness;
 //!                the ring ledger above (`pushed == consumed == expected`) is what witnesses the
 //!                bytes the DMA actually carried
+//! audit (assets) the full asset-region fold, after the audio (ALBM1 v2)
+//! lamp           backdrop = blue (PASS) or red (FAIL), then the verdict line
 //! ```
 //!
 //! ## The two folds, and why they are a second pass
@@ -78,6 +84,7 @@ extern crate alloc;
 
 #[cfg(target_arch = "arm")]
 mod rom {
+    use agb::display::{Graphics, Rgb, Rgb15};
     use agb::external::critical_section::{self, Mutex};
     use agb::interrupt::{Interrupt, add_interrupt_handler};
     use alloc::format;
@@ -91,8 +98,8 @@ mod rom {
     use album_player::meta::{Album, Track};
     use album_player::pcm::{PcmSource, SourceError};
     use gba_audio_hw::{
-        AudioChain, arm_audio_chain, clear_timer1_if, enable_sound, io_read_u16, rearm_dma, regs,
-        teardown_audio,
+        AudioChain, CycleCounter, arm_audio_chain, clear_timer1_if, enable_sound, io_read_u16,
+        rearm_dma, regs, teardown_audio,
     };
     use gba_playback::checksum::{Fnv1a64, fold_i16le_stereo};
     use gba_playback::playback::{Chunk, RingFeed, convert_frame, fold_bytes};
@@ -135,6 +142,16 @@ mod rom {
     /// samples). Playing that would make the headless gate a 4.3-minute run for no extra proof —
     /// same code, same feeder, four times the clock. PR-3b's traversal walks past both.
     const PLAY_TRACK: usize = 1;
+
+    // ------------------------------------------------------------------ colors
+
+    /// "Still working": violet, so a human watching a cart can tell booting from hung. This is the
+    /// shipped `product-play.gba` pending colour, used the same way.
+    const COLOR_PENDING: Rgb15 = Rgb::new(128, 0, 255).to_rgb15();
+    /// PASS blue — the same verdict colour the shipped product ROM paints.
+    const COLOR_PASS: Rgb15 = Rgb::new(0, 0, 255).to_rgb15();
+    /// FAIL red.
+    const COLOR_FAIL: Rgb15 = Rgb::new(255, 0, 0).to_rgb15();
 
     // ------------------------------------------------------------------ statics
 
@@ -534,8 +551,10 @@ mod rom {
         ///
         /// A cold restart of the gate track (the FLAC arm rebuilds its decoder from the container,
         /// so the pull starts at frame 0 again), then the same seam → widen → `convert_frame` path
-        /// the producer ran, folding both pins on the way. Not timed, for the reason the reference
-        /// records: a window containing the fold prices the fold.
+        /// the producer ran, folding both pins on the way. Not timed *against the audio deadline*,
+        /// for the reason the reference records: a window containing the fold prices the fold. The
+        /// cycle figures printed here are the proof's own cost, read from the counter the caller
+        /// starts after the teardown — they are not on the audio path and are not a budget line.
         ///
         /// **What it witnesses.** The decoder: a cold re-decode of the same track folded to the
         /// bake's pins. It is *not* a witness of the ring — a ROM that had played a different track
@@ -552,7 +571,12 @@ mod rom {
         ///
         /// Returns `(pcm_ok, fifo_ok)`; both are compared against the bake's pins, never against
         /// this run's own output.
-        fn proof(&mut self) -> (bool, bool) {
+        ///
+        /// `clock` is the caller's post-teardown counter. Each frame is bracketed twice — one
+        /// window around the pull/widen/convert (`redecode`) and one around the two folds (`fold`) —
+        /// and the four reads per frame are priced into the phase they bracket. That overhead only
+        /// exists in this pass; the producer path carries no clock read at all.
+        fn proof(&mut self, clock: &mut CycleCounter<'_>) -> (bool, bool) {
             let pin = &assets::TRACKS[PLAY_TRACK];
             if let Err(error) = self.source.start_track(PLAY_TRACK) {
                 agb::println!("[album-rom] FAIL proof: the gate track would not restart: {error}");
@@ -564,12 +588,19 @@ mod rom {
 
             let mut frames = 0usize;
             let mut samples = 0usize;
+            let mut redecode = 0u32;
+            let mut fold = 0u32;
+            let total_start = clock.read();
             loop {
+                let pull_start = clock.read();
                 let n = match self.next_frame() {
                     Ok(0) => break,
                     Ok(n) => n,
                     Err(_) => return (false, false),
                 };
+                let pull_end = clock.read();
+                redecode = redecode.wrapping_add(pull_end.wrapping_sub(pull_start));
+                let fold_start = clock.read();
                 if fold_i16le_stereo(&mut self.pcm, &self.left[..n], &self.right[..n]).is_err() {
                     agb::println!(
                         "[album-rom] FAIL proof: a sample is outside the int16 profile at frame {frames}"
@@ -582,9 +613,12 @@ mod rom {
                     &self.bytes_l[..n],
                     &self.bytes_r[..n],
                 );
+                fold = fold.wrapping_add(clock.read().wrapping_sub(fold_start));
                 frames += 1;
                 samples += n;
             }
+            let total = clock.read().wrapping_sub(total_start);
+            agb::println!("[album-rom] proof: redecode={redecode}c fold={fold}c total={total}c");
 
             let pcm = self.pcm.finish();
             let pcm_ok = frames == pin.frames as usize
@@ -617,9 +651,10 @@ mod rom {
 
     /// The selected backend's source over `album`.
     ///
-    /// The shipped arm is `backend::open()` — parse, `verify_pins`, `Source::new`, whose
-    /// `start_track(0)` runs the FLAC boot gate. `Source::new` is the FLAC arm's constructor, so a
-    /// stub-only image builds the same [`backend::Source`] from the manifest it still carries: the
+    /// The shipped arm is `backend::open()` — parse, `verify_pins` (which includes every track's
+    /// bounded content tripwire), then the arm's constructor. `Source::new` starts no track: the
+    /// caller names the one it plays, so a boot no longer gates track 0. A stub-only image builds
+    /// the same [`backend::Source`] from the manifest it still carries: the
     /// stub's track table is the caller's by design (`backend/stub.rs`'s `StubSource::new`), so it
     /// is leaked once into `'static`. That keeps this ROM's `main` free of any codec name (§4.2
     /// rule 2) — the arm changes here and nowhere else.
@@ -648,14 +683,27 @@ mod rom {
         Ok(StubSource::new(Vec::leak(tracks)))
     }
 
+    /// Paint the verdict lamp: backdrop palette entry 0, committed from a frame that
+    /// shows **nothing**.
+    ///
+    /// §4.5's trap is what makes this work: `TiledGraphicsFrame::commit` derives
+    /// DISPCNT's background-enable mask from the backgrounds shown that frame, so a
+    /// commit from a fresh frame with nothing shown repaints the backdrop alone. No
+    /// font, no tiles, no sprites — this stays inside PR-3a's "no screen" boundary.
+    fn lamp(gfx: &mut Graphics<'_>, colour: Rgb15) {
+        gfx.set_background_palette_colour(0, 0, colour);
+        gfx.frame().commit();
+    }
+
     /// Say what was refused, by name, and stop. R5: a partial run that still printed PASS would be
     /// worse than no run at all, so every boot refusal ends here rather than continuing.
-    fn refuse(what: &str) -> ! {
+    fn refuse(gfx: &mut Graphics<'_>, what: &str) -> ! {
+        lamp(gfx, COLOR_FAIL);
         agb::println!("[album-rom] FAIL {what}");
         // Every exit path emits a verdict: `make album-rom`'s echo tells a human to judge by the
         // `verdict` line, so a refusal that printed only `FAIL` would leave the log with no verdict
         // to read at all.
-        agb::println!("[album-rom] verdict FAILED (boot refusal)");
+        agb::println!("[album-rom] verdict FAILED (boot refusal) — screen RED");
         loop {}
     }
 
@@ -665,12 +713,28 @@ mod rom {
     fn main(mut gba: agb::Gba) -> ! {
         agb::println!("[album-rom] entry — the album player's playback path (PR-3a step iii)");
 
+        // The lamp first, before any work that can be slow: violet says "booting", and a
+        // cart left violet is a boot that never reached a verdict. `gfx` and `timers` are
+        // disjoint fields of `gba`, so both handles live for the whole run.
+        let mut gfx = gba.graphics.get();
+        lamp(&mut gfx, COLOR_PENDING);
+
+        // ---- the boot clock (R10's counter lift): timer0 at /1 cascading into timer1, started
+        // BEFORE the manifest is read and stopped before `arm_audio_chain` reprograms the same pair.
+        // `CycleCounter` borrows the two timers, so "read the boot total first" is enforced by the
+        // borrow checker rather than by this comment. The unit is the CPU cycle; ÷ 16,777,216 is
+        // seconds on any GBA, which wall time on an emulator is not.
+        let mut timers = unsafe { gba.timers.all_timers() }; // SAFETY: no agb::sound::mixer::Mixer is instantiated in this ROM.
+        let mut clock = CycleCounter::start(&mut timers);
+        let boot_start = clock.read();
+
         // §D-C rule 1: the manifest is authoritative and is read before anything it describes is
         // believed. A refusal names the rule and its payload (`meta::Refusal`'s `Display`).
         let album = match Album::parse(assets::ALBUM1) {
             Ok(album) => album,
-            Err(refusal) => refuse(&format!("manifest refused: {refusal}")),
+            Err(refusal) => refuse(&mut gfx, &format!("manifest refused: {refusal}")),
         };
+        let after_parse = clock.read();
         agb::println!(
             "[album-rom] album: {} tracks, {} samples, rate {} Hz, \"{}\"",
             album.n_tracks(),
@@ -679,24 +743,31 @@ mod rom {
             album.album_title()
         );
 
-        // §D-C rule 2: the generated pins against the manifest, then the arm's own constructor. The
-        // FLAC arm's `start_track(0)` runs the boot gate (profile, stereo, rate identity, pins) as
-        // part of `open()`, so a container this image cannot play is a boot refusal, not a
-        // first-frame surprise.
+        // §D-C rule 2: the generated pins against the manifest, then the arm's own constructor.
+        // `open()` cross-checks every pin (including each track's bounded content tripwire); the
+        // gate track's own container gate runs at `start_track` below, so a container this image
+        // cannot play is a boot refusal, not a first-frame surprise.
         let mut source = match open_source(&album) {
             Ok(source) => source,
-            Err(error) => refuse(&format!("the backend refused the album: {error}")),
+            Err(error) => refuse(&mut gfx, &format!("the backend refused the album: {error}")),
         };
+        let after_open = clock.read();
 
         // The gate track's own entry against its bake pin, field by field. `verify_pins` has
         // already swept every track; this is the pair the rest of `main` reads numbers from.
         let track: Track<'static> = album.track(PLAY_TRACK as u32);
         let pin = &assets::TRACKS[PLAY_TRACK];
         if track.frames != pin.frames {
-            refuse("the gate track's frame count disagrees with the bake's pin");
+            refuse(
+                &mut gfx,
+                "the gate track's frame count disagrees with the bake's pin",
+            );
         }
         if track.n_samples != pin.n_samples {
-            refuse("the gate track's sample count disagrees with the bake's pin");
+            refuse(
+                &mut gfx,
+                "the gate track's sample count disagrees with the bake's pin",
+            );
         }
         agb::println!(
             "[album-rom] track {}: \"{}\" {} frames, {} samples, {} asset bytes",
@@ -710,8 +781,12 @@ mod rom {
         // The FLAC boot gate for the gate track (§D-C rule 3): profile, stereo, rate identity and
         // the container's pins, all inside `start_track`.
         if let Err(error) = source.start_track(PLAY_TRACK) {
-            refuse(&format!("track {PLAY_TRACK} failed its boot gate: {error}"));
+            refuse(
+                &mut gfx,
+                &format!("track {PLAY_TRACK} failed its boot gate: {error}"),
+            );
         }
+        let after_gate = clock.read();
 
         agb::println!(
             "[album-rom] geometry: chunk={} ring={}x{}={} prefill={}x{}={} dma_words={} frame={}",
@@ -733,7 +808,7 @@ mod rom {
         // ---- prefill (ring only; the consumer does not exist yet)
         let prefilled = match producer.prefill(PREFILL_SAMPLES) {
             Ok(n) => n,
-            Err(_) => refuse("the prefill did not complete"),
+            Err(_) => refuse(&mut gfx, "the prefill did not complete"),
         };
         agb::println!(
             "[album-rom] prefilled {} samples in {} frames (target {})",
@@ -741,6 +816,7 @@ mod rom {
             producer.frames,
             PREFILL_SAMPLES
         );
+        let after_prefill = clock.read();
 
         // ---- prime: the first chunk is handed to the DMA before the first period boundary can ask
         // for one, so audio begins at arming rather than one period late
@@ -761,7 +837,10 @@ mod rom {
             }
         });
         if !primed {
-            refuse("the prime could not fill a whole chunk (the prefill is shorter than one)");
+            refuse(
+                &mut gfx,
+                "the prime could not fill a whole chunk (the prefill is shorter than one)",
+            );
         }
 
         enable_sound();
@@ -774,10 +853,29 @@ mod rom {
         // agb's interrupt-handler contract.
         let _handler = unsafe { add_interrupt_handler(Interrupt::Timer1, feeder) };
 
-        // The timers are handed out once for the whole audio phase: taking all four is `unsafe`
-        // only because a `Mixer` would own timer0/1, and this crate never constructs one — which is
-        // what makes the raw DMA path legal here (`product_play_main.rs:1836-1839`).
-        let mut timers = unsafe { gba.timers.all_timers() }; // SAFETY: no agb::sound::mixer::Mixer is instantiated in this ROM.
+        // The boot total is read with the pair still owned by `clock`, i.e. before the line that
+        // reprograms them. Everything from `boot_start` to here is what a human waits through
+        // before audio; `enable_sound` and the IF clear are part of it.
+        let boot_total = clock.read().wrapping_sub(boot_start);
+        clock.stop();
+        drop(clock);
+        agb::println!(
+            "[album-rom] boot: parse={}c open={}c gate={}c prefill={}c total={}c",
+            after_parse.wrapping_sub(boot_start),
+            after_open.wrapping_sub(after_parse),
+            after_gate.wrapping_sub(after_open),
+            after_prefill.wrapping_sub(after_gate),
+            boot_total
+        );
+        agb::println!(
+            "[album-rom] boot takes {} ms of CPU at 16.78 MHz — audio begins after prefill",
+            u64::from(boot_total) * 1_000 / 16_777_216
+        );
+
+        // The timers were handed out before the manifest was read (the boot clock), because taking
+        // all four is `unsafe` only where a `Mixer` would own timer0/1 and this crate never
+        // constructs one — which is what makes the raw DMA path legal here
+        // (`product_play_main.rs:1836-1839`).
         arm_audio_chain(&mut timers, &CHAIN);
         agb::println!(
             "[album-rom] armed: {} ticks/sample x {} samples = {} cycles/period, {} DMA words",
@@ -936,21 +1034,43 @@ mod rom {
         }
 
         // ---- the two proofs, after the audio and over a cold restart of the gate track (see
-        // `Producer::proof`); the pins are the bake's, not this run's own output.
-        let (pcm_ok, fifo_ok) = producer.proof();
+        // `Producer::proof`); the pins are the bake's, not this run's own output. The counter is
+        // restarted here so the proof's own cost is measured: it is off the audio deadline, which
+        // is why it is a second pass at all.
+        let mut proof_clock = CycleCounter::start(&mut timers);
+        let (pcm_ok, fifo_ok) = producer.proof(&mut proof_clock);
+        proof_clock.stop();
+        drop(proof_clock);
 
+        // ---- the asset audit: the O(asset-region) fold, moved off the pre-audio path in ALBM1 v2.
+        // Boot verifies the structure fold and each track's bounded tripwire; this is the fold that
+        // still covers every byte, and after the audio nothing is waiting on it. Measured, because
+        // its whole reason for moving is its cost.
+        let mut audit_clock = CycleCounter::start(&mut timers);
+        let assets = album.verify_assets();
+        let audit_cycles = audit_clock.read();
+        audit_clock.stop();
+        drop(audit_clock);
+        let assets_ok = assets.is_ok();
         agb::println!(
-            "[album-rom] ledger: no cycle terms — R10's counter lift is owed; AP-0 carries the frame-cost lines"
+            "[album-rom] audit: assets={audit_cycles}c [{}]",
+            if assets_ok { "MATCH" } else { "MISMATCH" }
         );
+        if let Err(refusal) = assets {
+            agb::println!("[album-rom] FAIL the asset fold refuses: {refusal}");
+        }
 
-        let pass = ledger_ok && audit_ok && pcm_ok && fifo_ok;
+        let pass = ledger_ok && audit_ok && pcm_ok && fifo_ok && assets_ok;
+        lamp(&mut gfx, if pass { COLOR_PASS } else { COLOR_FAIL });
         agb::println!(
-            "[album-rom] verdict {} (ledger={}, audit={}, pcm={}, fifo={})",
+            "[album-rom] verdict {} — screen {} (ledger={}, audit={}, pcm={}, fifo={}, assets={})",
             if pass { "PASSED" } else { "FAILED" },
+            if pass { "BLUE" } else { "RED" },
             ledger_ok,
             audit_ok,
             pcm_ok,
-            fifo_ok
+            fifo_ok,
+            assets_ok
         );
         loop {}
     }
