@@ -56,7 +56,7 @@
 
 pub mod decoder;
 
-pub use decoder::{GbaDecoder, HotState};
+pub use decoder::{GbaDecoder, HotState, slow_hit_count};
 
 /// `HotState` is the decoder's hot working set — the transform buffers (`x`),
 /// the FFT scratch (`buf`) and the overlap state (`p`). It is the same 8,192 B
@@ -153,8 +153,19 @@ fn sat8(v: i32) -> i8 {
 }
 
 /// Pre-twiddle, ARM mode, unchecked addressing.
+///
+/// **IWRAM placement is gated on `asm-pre` being off**, exactly as [`fft`] is
+/// gated on `asm-fft`: with the hand-written cursor kernel available (the
+/// default) this one is the in-image *control*, so it belongs in the cartridge
+/// and not in the budget the audio path needs (U6). Placement does not change a
+/// value, so the twins still compare it — only the isolated `kern`/`ovl` timing
+/// becomes a fetch-polluted ROM reading, which is the same trade v1-v4 of the
+/// FFT already carry.
 #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
-#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
+#[cfg_attr(
+    all(target_arch = "arm", not(feature = "asm-pre")),
+    unsafe(link_section = ".iwram")
+)]
 #[inline(never)]
 pub fn pre(x: &[i32; M], z: &mut [i32; 2 * H]) {
     let xp = x.as_ptr();
@@ -173,6 +184,22 @@ pub fn pre(x: &[i32; M], z: &mut [i32; 2 * H]) {
             zp.add(2 * k + 1)
                 .write(hi32(mul32(xr, wi).wrapping_add(mul32(xi, wr))));
         }
+    }
+}
+
+/// The pre-twiddle the product decoder (and [`ArmKernels`]) should call: the
+/// hand-written cursor kernel when `asm-pre` is on, otherwise the Rust ARM-mode
+/// [`pre`]. Mirrors [`fft_kernel`], and for the same reason — the `#[cfg]` lives
+/// here so the hot path does not repeat it.
+#[inline]
+pub fn pre_kernel(x: &[i32; M], z: &mut [i32; 2 * H]) {
+    #[cfg(all(target_arch = "arm", feature = "asm-pre"))]
+    {
+        crate::pre_asm_call(x, z);
+    }
+    #[cfg(not(all(target_arch = "arm", feature = "asm-pre")))]
+    {
+        crate::pre(x, z);
     }
 }
 
@@ -366,8 +393,12 @@ pub fn ola(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8], mut out16: Option<&m
 ///
 /// Bit-exact with `ola(.., Some(..))`'s int8 half. `out8` must be `M` long (it
 /// writes `i` and `M - 1 - i`).
+/// IWRAM placement gated on `asm-ola` being off, as for [`pre`].
 #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
-#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
+#[cfg_attr(
+    all(target_arch = "arm", not(feature = "asm-ola")),
+    unsafe(link_section = ".iwram")
+)]
 #[inline(never)]
 pub fn ola_s8(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8]) {
     let yp = y.as_ptr();
@@ -398,8 +429,11 @@ pub fn ola_s8(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8]) {
 ///
 /// The pre-DAC int16 profile's fused kernel (C's `uli_ola_s16_asm` shape).
 /// Bit-exact with `ola(.., Some(..))`'s int16 half; `out16` must be `M` long.
+/// **Never on the product path** — [`ola_kernel`]'s int16 arm dispatches to the
+/// dual [`ola`], so this kernel exists as the format-isolated comparison arm and
+/// a twin target. It therefore lives in the cartridge unconditionally and does
+/// not consume the audio budget.
 #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
-#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
 #[inline(never)]
 pub fn ola_s16(y: &[i32; M], p: &mut [i32; H], out16: &mut [i16]) {
     let yp = y.as_ptr();
@@ -423,6 +457,22 @@ pub fn ola_s16(y: &[i32; M], p: &mut [i32; H], out16: &mut [i16]) {
     }
 }
 
+/// The fused int8 overlap-add the product decoder should call: the hand-written
+/// cursor kernel when `asm-ola` is on, otherwise the Rust ARM-mode [`ola_s8`].
+/// Mirrors [`fft_kernel`] and [`pre_kernel`], and for the same reason — the
+/// `#[cfg]` lives here so the hot path does not repeat it.
+#[inline]
+pub fn ola_s8_kernel(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8]) {
+    #[cfg(all(target_arch = "arm", feature = "asm-ola"))]
+    {
+        crate::ola_asm::s8(y, p, out8);
+    }
+    #[cfg(not(all(target_arch = "arm", feature = "asm-ola")))]
+    {
+        crate::ola_s8(y, p, out8);
+    }
+}
+
 /// The OLA the product decoder should call. With no int16 buffer this is the
 /// **fused int8-only kernel** (no per-sample format branch, no int16 arithmetic);
 /// with one it is the dual-output [`ola`] the int16 profile and the bench pins
@@ -432,7 +482,7 @@ pub fn ola_s16(y: &[i32; M], p: &mut [i32; H], out16: &mut [i16]) {
 pub fn ola_kernel(y: &[i32; M], p: &mut [i32; H], out8: &mut [i8], out16: Option<&mut [i16]>) {
     match out16 {
         Some(o16) => crate::ola(y, p, out8, Some(o16)),
-        None => crate::ola_s8(y, p, out8),
+        None => crate::ola_s8_kernel(y, p, out8),
     }
 }
 
@@ -451,7 +501,7 @@ pub struct ArmKernels;
 impl uli_lite::Kernels for ArmKernels {
     #[inline]
     fn pre(x: &[i32; M], z: &mut [i32; 2 * H]) {
-        crate::pre(x, z);
+        crate::pre_kernel(x, z);
     }
 
     #[inline]
@@ -490,7 +540,9 @@ mod fft_asm {
         "\n",
         include_str!("../asm/fft_arm_v3.s"),
         "\n",
-        include_str!("../asm/fft_arm_v4.s")
+        include_str!("../asm/fft_arm_v4.s"),
+        "\n",
+        include_str!("../asm/fft_arm_v5.s")
     );
 
     // `(x, tw)` — the buffer (512 words) and the twiddle table, passed by
@@ -501,6 +553,7 @@ mod fft_asm {
         fn uli_fft_arm_v2(x: *mut i32, tw: *const i32);
         fn uli_fft_arm_v3(x: *mut i32, tw: *const i32);
         fn uli_fft_arm_v4(x: *mut i32, tw: *const i32);
+        fn uli_fft_arm_v5(x: *mut i32, tw: *const i32);
     }
 
     /// Call the asm FFT (v1) on `x` (`[i32; 2*H]`). SAFETY: `x` points at 512
@@ -535,6 +588,13 @@ mod fft_asm {
         unsafe { uli_fft_arm_v4(x.as_mut_ptr(), crate::TW.as_ptr()) };
     }
 
+    /// Call v5 on `x`. Same contract as [`fft`].
+    #[inline]
+    pub fn fft_v5(x: &mut [i32; 2 * uli_lite::format::H]) {
+        // SAFETY: as for `fft`.
+        unsafe { uli_fft_arm_v5(x.as_mut_ptr(), crate::TW.as_ptr()) };
+    }
+
     /// Measurement-only: call v4 with an explicit twiddle-table pointer so a
     /// single image can time the same kernel against the cartridge-resident
     /// `TW` and an `.iwram` copy of it. SAFETY: `tw` must point at the 504-word
@@ -543,6 +603,96 @@ mod fft_asm {
     pub fn fft_v4_tw(x: &mut [i32; 2 * uli_lite::format::H], tw: *const i32) {
         // SAFETY: caller promises `tw` is the 504-entry table.
         unsafe { uli_fft_arm_v4(x.as_mut_ptr(), tw) };
+    }
+}
+
+/// Hand-written ARM window + overlap-add (`asm/ola_arm.s`). Off unless
+/// `asm-ola` is on; the Rust ARM-mode [`ola_s8`]/[`ola_s16`] stay the default so
+/// every existing arm keeps its control in the same image.
+///
+/// The loop is the reference's shape — six post-indexed cursors, the int16
+/// `sat16`-then-`asr #8` clamp idiom, and the overlap word read with
+/// `ldr [b_cursor, Y_minus_P]` — which is **26 instructions per iteration
+/// against LLVM's 33**. The four multiplies are the algorithm's own.
+#[cfg(all(target_arch = "arm", feature = "asm-ola"))]
+mod ola_asm {
+    core::arch::global_asm!(include_str!("../asm/ola_arm.s"));
+
+    // `(y, p, out, win)` — pointers, so the asm never depends on a Rust
+    // symbol's mangled name and `iwram-tables` moves WIN for free.
+    unsafe extern "C" {
+        fn uli_ola_s8(y: *const i32, p: *mut i32, out: *mut i8, win: *const i32);
+        #[allow(dead_code)]
+        fn uli_ola_s16(y: *const i32, p: *mut i32, out: *mut i16, win: *const i32);
+    }
+
+    /// Fused int8 overlap-add via the cursor kernel. Same contract as
+    /// [`crate::ola_s8`] and bit-exact with it.
+    #[inline]
+    pub fn s8(y: &[i32; uli_lite::format::M], p: &mut [i32; uli_lite::format::H], out8: &mut [i8]) {
+        // SAFETY: `y` is M i32, `p` is H i32, `out8` is M i8, and WIN is the
+        // 512-word window table the asm reads forward from 0 and backward from
+        // M-1, exactly `H` times each.
+        unsafe {
+            uli_ola_s8(
+                y.as_ptr(),
+                p.as_mut_ptr(),
+                out8.as_mut_ptr(),
+                crate::tables::WIN.as_ptr(),
+            );
+        }
+    }
+
+    /// Fused int16 overlap-add (the pre-DAC profile's kernel). Same contract as
+    /// [`crate::ola_s16`] and bit-exact with it.
+    #[inline]
+    #[allow(dead_code)]
+    pub fn s16(
+        y: &[i32; uli_lite::format::M],
+        p: &mut [i32; uli_lite::format::H],
+        out16: &mut [i16],
+    ) {
+        // SAFETY: as for [`s8`], with `out16` M i16.
+        unsafe {
+            uli_ola_s16(
+                y.as_ptr(),
+                p.as_mut_ptr(),
+                out16.as_mut_ptr(),
+                crate::tables::WIN.as_ptr(),
+            );
+        }
+    }
+}
+
+#[cfg(all(target_arch = "arm", feature = "asm-ola"))]
+pub use ola_asm::{s8 as ola_s8_asm_call, s16 as ola_s16_asm_call};
+
+/// Hand-written ARM pre-twiddle (`asm/pre_arm.s`). Off unless `asm-pre` is on;
+/// the Rust ARM-mode [`pre`] stays the default so every existing arm keeps its
+/// control in the same image.
+///
+/// The loop is the reference's shape — four post-indexed cursors, one `stmia`
+/// per output pair, a pointer bound — which is **11 instructions per output pair
+/// against LLVM's 15**. The four multiplies are the algorithm's own.
+#[cfg(all(target_arch = "arm", feature = "asm-pre"))]
+mod pre_asm {
+    core::arch::global_asm!(include_str!("../asm/pre_arm.s"));
+
+    // `(x, z, pre)` — pointers, so the asm never depends on a Rust symbol's
+    // mangled name and `iwram-tables` moves PRE for free.
+    unsafe extern "C" {
+        fn uli_pre_arm(x: *const i32, z: *mut i32, pre: *const i32);
+    }
+
+    /// Pre-twiddle via the cursor kernel. Same contract as [`crate::pre`], and
+    /// bit-exact with it — which is what licenses quoting a cycle number.
+    #[inline]
+    pub fn pre(x: &[i32; uli_lite::format::M], z: &mut [i32; 2 * uli_lite::format::H]) {
+        // SAFETY: `x` is M i32, `z` is 2H i32, and PRE is the 512-word twiddle
+        // table the asm reads exactly once, forward, in step with X.
+        unsafe {
+            uli_pre_arm(x.as_ptr(), z.as_mut_ptr(), crate::tables::PRE.as_ptr());
+        }
     }
 }
 
@@ -556,9 +706,13 @@ pub use fft_asm::fft_v3 as fft_asm_v3_call;
 pub use fft_asm::fft_v4 as fft_asm_v4_call;
 #[cfg(all(target_arch = "arm", feature = "asm-fft"))]
 pub use fft_asm::fft_v4_tw as fft_asm_v4_tw_call;
+#[cfg(all(target_arch = "arm", feature = "asm-fft"))]
+pub use fft_asm::fft_v5 as fft_asm_v5_call;
+#[cfg(all(target_arch = "arm", feature = "asm-pre"))]
+pub use pre_asm::pre as pre_asm_call;
 
 /// The FFT the product decoder (and [`ArmKernels`]) should call: the best
-/// hand-written kernel (v3) when the `asm-fft` feature is on, otherwise the
+/// hand-written kernel (**v5**) when the `asm-fft` feature is on, otherwise the
 /// Rust ARM-mode [`fft`]. Centralising the `#[cfg]` here is what lets the
 /// product hot path (`decoder.rs`) pick up the asm kernel without repeating the
 /// gate at every call site.
@@ -566,7 +720,7 @@ pub use fft_asm::fft_v4_tw as fft_asm_v4_tw_call;
 pub fn fft_kernel(z: &mut [i32; 2 * H]) {
     #[cfg(all(target_arch = "arm", feature = "asm-fft"))]
     {
-        crate::fft_asm_v4_call(z);
+        crate::fft_asm_v5_call(z);
     }
     #[cfg(not(all(target_arch = "arm", feature = "asm-fft")))]
     {

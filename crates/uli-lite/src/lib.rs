@@ -52,7 +52,7 @@ pub use album::{Album, AlbumHeader, SeekEntry, TrackEntry};
 pub use frame::{Decoder, DecoderState, FrameInfo, Kernels, Ops, PortableKernels};
 pub use tables::CodeTables;
 #[cfg(feature = "product")]
-pub use tables::HuffmanParts;
+pub use tables::{Huffman, HuffmanParts};
 
 /// Errors returned by the decoder and container parser.
 ///

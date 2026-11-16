@@ -152,6 +152,17 @@ impl Huffman {
             sym: &self.sym,
         }
     }
+
+    /// The LUT base pointer, for the product's hot decoder.
+    ///
+    /// The GBA hot path keeps **one** pointer per active table rather than a
+    /// [`HuffmanParts`] value: five slices are ten live words, and that pressure
+    /// spilled the decoder's window to the stack (Step 1 measured 218 stack
+    /// accesses in `dec_chan`). `lut_ptr` plus a `&Huffman` for the cold slow
+    /// path is two.
+    pub fn lut_ptr(&self) -> *const u16 {
+        self.lut.as_ptr()
+    }
 }
 
 /// Parsed per-album code tables.

@@ -176,6 +176,15 @@ static mut T_O16: [i16; M] = [0; M];
 /// time v4 against the cartridge-resident `TW` and against this `.iwram` copy.
 /// `.iwram` data is initialised from ROM at boot by the agb startup copy, the
 /// same mechanism the `iwram-tables` feature relies on.
+///
+/// **Off by default, and 2,016 B is why.** Since `iwram-tables` became the
+/// product default, `crate::TW` is *already* in `.iwram`, so this copy compares
+/// the table against itself and the arm has nothing left to show. It also cost
+/// the `--features asm-fft` image its whole budget: that build measured
+/// 30,284 B of a 30,320 B region, i.e. no room for the 828 B stack, so the
+/// on-target asm twin could not run at all. Gating it here is what makes
+/// `make uli-fft-twin` possible.
+#[cfg(feature = "tw-iwram-arm")]
 #[unsafe(link_section = ".iwram")]
 static mut TW_IWRAM: [i32; 504] = uli_lite::tables_data::TW;
 
@@ -193,7 +202,67 @@ const ATTRIB_MASK: u32 = cfg!(feature = "attrib-pre") as u32
     | (cfg!(feature = "attrib-ola") as u32) << 3
     | (cfg!(feature = "attrib-entropy") as u32) << 4
     | (cfg!(feature = "attrib-ms") as u32) << 5
-    | (cfg!(feature = "attrib-synth") as u32) << 6;
+    | (cfg!(feature = "attrib-synth") as u32) << 6
+    | (cfg!(feature = "attrib-entropy-nolut") as u32) << 7
+    | (cfg!(feature = "attrib-entropy-nodequant") as u32) << 8
+    | (cfg!(feature = "attrib-entropy-nowrite") as u32) << 9
+    | (cfg!(feature = "attrib-entropy-reader") as u32) << 10;
+
+/// The sub-frame arm this image carries, named so a log is self-describing.
+const SUBFRAME_ARM_NAME: &str = if cfg!(feature = "attrib-entropy-reader") {
+    "sub=reader"
+} else if cfg!(feature = "attrib-entropy-nolut") {
+    "sub=nolut"
+} else if cfg!(feature = "attrib-entropy-nodequant") {
+    "sub=nodequant"
+} else if cfg!(feature = "attrib-entropy-nowrite") {
+    "sub=nowrite"
+} else {
+    "sub=none"
+};
+
+/// Per-frame bit counts from the control pass, replayed by the
+/// `attrib-entropy-reader` arm so the reader's window mechanics can be timed at
+/// the true bit volume (`uli_lite_gba::GbaDecoder::replay_bits`). Filled from
+/// the portable decoder's `FrameInfo::bits`, which is a property of the album,
+/// not of the arm.
+#[cfg(feature = "attrib-entropy-reader")]
+const MAX_FRAMES: usize = 512;
+#[cfg(feature = "attrib-entropy-reader")]
+static mut FRAME_BITS: [u32; MAX_FRAMES] = [0; MAX_FRAMES];
+
+/// Read one frame's recorded bit count (only the reader arm uses this).
+#[cfg(feature = "attrib-entropy-reader")]
+fn frame_bits(f: u32) -> u32 {
+    if (f as usize) >= MAX_FRAMES {
+        return 0;
+    }
+    // SAFETY: single-threaded, index bounded above, no reference escapes.
+    unsafe {
+        core::ptr::read_volatile(
+            core::ptr::addr_of!(FRAME_BITS)
+                .cast::<u32>()
+                .add(f as usize),
+        )
+    }
+}
+
+/// Record one frame's bit count from the control pass.
+#[cfg(feature = "attrib-entropy-reader")]
+fn set_frame_bits(f: u32, bits: u32) {
+    if (f as usize) >= MAX_FRAMES {
+        return;
+    }
+    // SAFETY: as above.
+    unsafe {
+        core::ptr::write_volatile(
+            core::ptr::addr_of_mut!(FRAME_BITS)
+                .cast::<u32>()
+                .add(f as usize),
+            bits,
+        )
+    }
+}
 
 /// FNV-1a 32 of the C reference's per-frame int8 hashes, in frame order.
 const EXPECTED_INT8: u32 = 0xe6e8_7652;
@@ -452,7 +521,13 @@ fn timed_pass<K: uli_lite::Kernels>(
         let (res, raw) = timed(counter, || {
             decoder.decode_frame(l8, r8, Some(l16), Some(r16))
         });
-        res?;
+        let info = res?;
+        // The reader-only arm replays the *true* per-frame bit count. This pass
+        // is the portable decoder, so the count is the album's, not the arm's.
+        #[cfg(feature = "attrib-entropy-reader")]
+        set_frame_bits(f, info.bits);
+        #[cfg(not(feature = "attrib-entropy-reader"))]
+        let _ = &info;
         // Hash outside the window: proves the timed decode is the pinned
         // decode, not just a decode that consumed the same number of cycles.
         all8 = fnv_bytes(all8, &fnv_i8(2_166_136_261, l8, r8).to_le_bytes());
@@ -485,6 +560,8 @@ fn product_pass_s8(
     let mut cost = FrameCost::new();
     let mut all8 = 2_166_136_261u32;
     for f in 0..album.n_frames() {
+        #[cfg(feature = "attrib-entropy-reader")]
+        decoder.replay_bits(frame_bits(f));
         let (res, raw) = timed(counter, || decoder.decode_frame(l8, r8, None, None));
         res?;
         all8 = fnv_bytes(all8, &fnv_i8(2_166_136_261, l8, r8).to_le_bytes());
@@ -602,7 +679,7 @@ fn run(gba: &mut agb::Gba) -> bool {
         FRAME_BUDGET_CYCLES
     );
     agb::println!(
-        "[uli-bench] attrib mask=0x{:x} pre={} fft={} post={} ola={} synth={} entropy={} ms={}",
+        "[uli-bench] attrib mask=0x{:x} pre={} fft={} post={} ola={} synth={} entropy={} ms={} {}",
         ATTRIB_MASK,
         cfg!(feature = "attrib-pre"),
         cfg!(feature = "attrib-fft"),
@@ -610,7 +687,8 @@ fn run(gba: &mut agb::Gba) -> bool {
         cfg!(feature = "attrib-ola"),
         cfg!(feature = "attrib-synth"),
         cfg!(feature = "attrib-entropy"),
-        cfg!(feature = "attrib-ms")
+        cfg!(feature = "attrib-ms"),
+        SUBFRAME_ARM_NAME
     );
     if ATTRIB_MASK != 0 {
         agb::println!(
@@ -813,6 +891,12 @@ fn run(gba: &mut agb::Gba) -> bool {
         }
     };
     print_cost("prod8", &cost_prod8, cfg!(feature = "verify"));
+    // `attrib-count` only: how many symbols took the canonical search off the
+    // LUT, summed over every pass in this image. 0 in a build without it.
+    agb::println!(
+        "[uli-bench] prod8 slow_hits={}",
+        uli_lite_gba::slow_hit_count()
+    );
     agb::println!(
         "[uli-bench] prod8 pin int8={:08x} (want {:08x}) [{}]",
         prod8_only,
@@ -1057,21 +1141,44 @@ fn run(gba: &mut agb::Gba) -> bool {
             asm_fft4_sum,
             asm_fft4_sum == u32::MAX
         );
-        // Same kernel, twiddle table in `.iwram` instead of ROM: the placement
-        // A/B (see TW_IWRAM). Isolates table location from code/instruction work.
-        let tw_iwram = core::ptr::addr_of!(TW_IWRAM) as *const i32;
-        let (_, asm_fft4iw_sum) = timed(&mut counter, || {
+        // v5 (item 1 of the critical path): absolute byte cursor, register-held
+        // twiddle pointer and the reference's destructive sum formation. This is
+        // the SHIPPED kernel, in `.iwram`; v1..v4 are in `.text` and their
+        // numbers here are fetch-polluted ROM readings.
+        let (_, asm_fft5_sum) = timed(&mut counter, || {
             for _ in 0..KREP {
-                overlay::fft_asm_v4_tw_call(core::hint::black_box(&mut *kz), tw_iwram);
+                overlay::fft_asm_v5_call(core::hint::black_box(&mut *kz));
             }
         });
         agb::println!(
-            "[uli-bench] asmfft4iw n={} fft_sum={} wrapped={}",
+            "[uli-bench] asmfft5 n={} fft_sum={} wrapped={}",
             KREP,
-            asm_fft4iw_sum,
-            asm_fft4iw_sum == u32::MAX
+            asm_fft5_sum,
+            asm_fft5_sum == u32::MAX
         );
+        // Same kernel, twiddle table copied into `.iwram`: the placement A/B
+        // (see TW_IWRAM). Gated, because with `iwram-tables` the shipped table
+        // is already there and the 2,016 B copy broke this image's budget.
+        #[cfg(feature = "tw-iwram-arm")]
+        let asm_fft4iw_sum = {
+            let tw_iwram = core::ptr::addr_of!(TW_IWRAM) as *const i32;
+            let (_, sum) = timed(&mut counter, || {
+                for _ in 0..KREP {
+                    overlay::fft_asm_v4_tw_call(core::hint::black_box(&mut *kz), tw_iwram);
+                }
+            });
+            agb::println!(
+                "[uli-bench] asmfft4iw n={} fft_sum={} wrapped={}",
+                KREP,
+                sum,
+                sum == u32::MAX
+            );
+            sum
+        };
+        #[cfg(not(feature = "tw-iwram-arm"))]
+        let asm_fft4iw_sum = { 0u32 };
         asm_fft_sum != u32::MAX
+            && asm_fft5_sum != u32::MAX
             && asm_fft2_sum != u32::MAX
             && asm_fft3_sum != u32::MAX
             && asm_fft4_sum != u32::MAX
@@ -1122,6 +1229,23 @@ fn run(gba: &mut agb::Gba) -> bool {
     *po = po_save;
     overlay::ola_s8(yo, po, kb8);
     let twin_ola_s8 = c8 == &kb8[..] && &po[..] == &pc[..];
+    // The asm overlap-add kernels (asm-ola) must reproduce the Rust ones,
+    // including the mutated overlap state: replay each from the same `p`.
+    #[cfg(feature = "asm-ola")]
+    let twin_ola_asm = {
+        let oc8 = unsafe { &mut *core::ptr::addr_of_mut!(K8L) };
+        *po = po_save;
+        overlay::ola_s8_asm_call(yo, po, oc8);
+        let s8_ok = kb8 == oc8 && &po[..] == &pc[..];
+        let oc16 = unsafe { &mut *core::ptr::addr_of_mut!(K16L) };
+        *po = po_save;
+        overlay::ola_s16_asm_call(yo, po, oc16);
+        let s16_ok = kb16 == oc16 && &po[..] == &pc[..];
+        *po = po_save;
+        s8_ok && s16_ok
+    };
+    #[cfg(not(feature = "asm-ola"))]
+    let twin_ola_asm = true;
     *po = po_save;
     overlay::ola_s16(yo, po, kb16);
     let twin_ola_s16 = c16 == &kb16[..] && &po[..] == &pc[..];
@@ -1144,19 +1268,35 @@ fn run(gba: &mut agb::Gba) -> bool {
         overlay::pre(kx, work);
         overlay::fft_asm_v4_call(work); // v4
         let v4_ok = *work == *want;
-        v1_ok && v2_ok && v3_ok && v4_ok
+        overlay::pre(kx, work);
+        overlay::fft_asm_v5_call(work); // v5 (the shipped kernel)
+        let v5_ok = *work == *want;
+        v1_ok && v2_ok && v3_ok && v4_ok && v5_ok
     };
     #[cfg(not(feature = "asm-fft"))]
     let twin_fft_asm = true;
+    #[cfg(feature = "asm-pre")]
+    let twin_pre_asm = {
+        use core::ptr::addr_of_mut;
+        let want = unsafe { &mut *addr_of_mut!(ZWANT) };
+        let work = unsafe { &mut *addr_of_mut!(ZWORK) };
+        overlay::pre(kx, want);
+        overlay::pre_asm_call(kx, work);
+        *work == *want
+    };
+    #[cfg(not(feature = "asm-pre"))]
+    let twin_pre_asm = true;
     let twin_ok = twin_pre
         && twin_fft
         && twin_post
         && twin_ola
         && twin_ola_s8
         && twin_ola_s16
-        && twin_fft_asm;
+        && twin_fft_asm
+        && twin_pre_asm
+        && twin_ola_asm;
     agb::println!(
-        "[uli-bench] ovl twin pre={} fft={} post={} ola={} ola8={} ola16={} fftasm={} [{}]",
+        "[uli-bench] ovl twin pre={} fft={} post={} ola={} ola8={} ola16={} fftasm={} preasm={} olaasm={} [{}]",
         twin_pre,
         twin_fft,
         twin_post,
@@ -1164,6 +1304,8 @@ fn run(gba: &mut agb::Gba) -> bool {
         twin_ola_s8,
         twin_ola_s16,
         twin_fft_asm,
+        twin_pre_asm,
+        twin_ola_asm,
         if twin_ok { "PASS" } else { "FAIL" }
     );
 

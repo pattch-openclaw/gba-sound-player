@@ -24,7 +24,7 @@ uli-lite = { path = "../uli-lite", features = ["kernels", "product"] }
 # (`frame core`, and the isolated `kern`/`ovl` arms), so turning the fast path on
 # does not remove the comparison — it just stops the product being slow by
 # default. Use `--no-default-features` to get the pure-Rust-kernel build.
-default = ["asm-fft", "iwram-tables"]
+default = ["asm-fft", "asm-pre", "asm-ola", "iwram-tables"]
 
 # Operation counts (`Ops`) and format-rule diagnostics (`xover`/`hfnz`) on the
 # hot path. Off by default: they cost ~30,000 cycles on the measured worst frame
@@ -61,6 +61,20 @@ iwram-tw = []
 # core`, `kern`, `ovl`).
 asm-fft = []
 
+# Hand-written ARM pre-twiddle (`asm/pre_arm.s`): four post-indexed cursors and
+# one `stmia` per output pair, matching the reference's loop shape — 11
+# instructions per pair where LLVM's is 15. The four multiplies are the
+# algorithm's own. On by default, with the Rust ARM-mode `pre` left in place as
+# the in-image control.
+asm-pre = []
+
+# Hand-written ARM window + overlap-add (`asm/ola_arm.s`): six post-indexed
+# cursors, the reference's `sat16`-then-`asr #8` clamp idiom and a single
+# `ldr`/`str` pair for the overlap word — 26 instructions per iteration where
+# LLVM's is 33. On by default, with the Rust ARM-mode kernels left in place as
+# the in-image control.
+asm-ola = []
+
 # **Measurement-only: by-difference attribution arms.** Each flag removes exactly
 # one part of the product frame so `examples/uli_bench` can attribute the frame
 # by difference inside one source tree (PR C's method; see PLAN-OF-RECORD.md
@@ -69,20 +83,53 @@ asm-fft = []
 # these builds and only the timed window is quoted. The flags are const-folded
 # out, so the default build (none on) is textually the product frame. Never
 # ship a build with any of them on.
-attrib-pre = []
-attrib-fft = []
-attrib-post = []
-attrib-ola = []
+#
+# Every arm implies `attrib-timing`, which only relaxes frame rejection: a
+# removed layer desynchronises the bit stream, and a rejected frame would abort
+# the run instead of measuring it. It is inert in the product build.
+attrib-timing = []
+attrib-pre = ["attrib-timing"]
+attrib-fft = ["attrib-timing"]
+attrib-post = ["attrib-timing"]
+attrib-ola = ["attrib-timing"]
 # All eight synthesis calls (2 x pre+fft+post+ola) removed: what remains is
 # entropy + dequant + M/S + the frame wrapper.
 attrib-synth = ["attrib-pre", "attrib-fft", "attrib-post", "attrib-ola"]
 # `dec_chan` removed for both channels: entropy, dequant and the zero-band fills
 # vanish, and with `nb = 0` the M/S loop is skipped too. What remains is
 # synthesis + the frame wrapper.
-attrib-entropy = []
+attrib-entropy = ["attrib-timing"]
 # The M/S coefficient transform removed on its own (the frame header is kept, so
 # the decoded band count is still read).
-attrib-ms = []
+attrib-ms = ["attrib-timing"]
+
+# **Measurement-only: sub-frame entropy attribution (Step 0b).** `attrib-entropy`
+# above removes the whole band decoder; these four remove one layer *inside* it
+# so the ~101,000 cycles it owns at the worst frame can be partitioned before the
+# rewrite lands. Same rules: timing-only, pins fail by construction, never ship.
+#
+# Two of them are strict removals that leave the bit stream untouched (so the
+# frame still decodes the same symbols and the delta is one layer):
+#   nodequant — the `rq` load and the `step` multiply (the magnitude is stored).
+#   nowrite   — the store into `x` (the arithmetic still runs).
+# Two substitute a fixed-width read for symbol resolution, so their bit volume
+# differs from the real stream and their deltas price *resolution plus the bits
+# it consumes*, not the lookup alone:
+#   nolut     — every Huffman symbol is a fixed `LUTB`-bit skip.
+#   reader    — the band loop is replaced by a replay of the frame's *true* bit
+#               count (`GbaDecoder::replay_bits`), i.e. refill/skip mechanics at
+#               the real volume with no symbols, dequant or stores at all.
+attrib-entropy-nolut = ["attrib-timing"]
+attrib-entropy-nodequant = ["attrib-timing"]
+attrib-entropy-nowrite = ["attrib-timing"]
+attrib-entropy-reader = ["attrib-timing"]
+
+# Counts `huff_slow` hits (the canonical search off the LUT) for the sub-frame
+# attribution. Off by default: it is a counter increment per long code (~32 per
+# worst frame), which is a rounding error on the frame but is still not the
+# product build. `Ops::long_codes` carries the same number in a `verify` build;
+# this exists because the target `verify` image fails the `ovl` pin at HEAD.
+attrib-count = []
 
 [lib]
 name = "uli_lite_gba"

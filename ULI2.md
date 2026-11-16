@@ -20,6 +20,47 @@ product decoder, and re-reads U4 as C-class.**
 product image: on the worst frame entropy/dequant/M-S is 40% of the frame and 69% of
 the distance to the C worst-frame shape, the three Rust kernels are 1.10-1.22x
 hand-written asm, and the already-asm FFT (1.33x) is the largest kernel item.
+Step 1 (2026-11-15) then landed the entropy/dequant item: a five-arm sub-frame
+instrument plus a rewrite of the bit-reader contract, the long-code search and the
+per-band live set took the entropy path **111,227 -> 86,826 at the worst frame
+(-22%)** and the product frame to **249,835 worst / 220,757 mean = 95.3% / 84.2%
+of the period** — the decode wall under the frame period for the first time, with
+both twin builds still bit-exact. Step 1a the same day put the bit window into
+`let mut` scalars with the reader as macros over them (the reference's
+`REFILL`/`SKIP` shape) for another **-12,583 / -9,686**, to **237,252 worst /
+211,071 mean = 90.5% / 80.5%**. Step 1b then took the hand-written FFT to v5 —
+the reference's absolute byte cursor, register-held twiddle pointer and
+destructive sum formation — for **81,035 -> 71,519 at the gate frame** and a
+further **-9,516 / -9,517**: the product frame is **227,736 worst / 201,554 mean
+= 86.9% / 76.9%** of the period, **1.25x** the C decode wall, with the FFT at
+**1.14x** C and **-46,462** off the worst frame across the three steps. The two
+halves of the remaining gap are now within 10% of each other (52% entropy / 47%
+synthesis) and ~4,900 cycles separate the decode wall from the <=85% headroom
+target. Step 1c then took `pre` to the reference's four-cursor shape (10
+instructions per output pair against LLVM's 15, with the four multiplies
+irreducible on a non-overlapping ARM7TDMI multiply) for **26,458 -> 23,889 at the
+gate frame**, taking the product frame to **225,168 worst / 198,992 mean = 85.9%
+/ 75.9%** of the period at **1.24x** the C decode wall, and the headroom target
+to ~2,350 cycles away. Step 1d then took `ola` to the reference's six-cursor
+shape and its `sat16`-then-`asr #8` clamp idiom (26 instructions per iteration
+against LLVM's 33) for **34,375 -> 30,539 at the gate frame = 1.00x C**, the first
+kernel at parity: the product frame is **221,332 worst / 195,154 mean = 84.4% /
+74.4%**, **1.22x** the C decode wall, and the <=85% headroom target is met with
+1,490 cycles of margin. All four kernels are now 1.00x-1.23x C, so the remaining
+deficit is 62% entropy / 37% synthesis. Step 1e then banked budget rather than
+cycles: the Rust control kernels moved out of `.iwram` (−496 B, byte-identical
+frame), a `bad`-into-`valid` register-relief attempt was **measured and
+rejected** (+1,450 cycles for −1,672 B, and worse still with derived per-band
+values, because indexing the tables resurrected them as live), and a cursor
+rewrite in `dec_chan` landed for **−856 B / −665 cycles mean**. Net `.iwram`
+**28,632 -> 27,280 B with 2,196 B of headroom**, and the frame **219,251 worst /
+194,489 mean = 83.6% / 74.2%** at **1.21x** the C decode wall, with **2,196 B of `.iwram` headroom** (was 700 B).
+The marginal return is now ~1% of the frame per round, and the plan's "Handing
+off" section records the ceilings left, the two negative results (`huff_slow` is
+already optimal; register relief in `dec_chan` does not pay) and the checklist
+worth applying to the feeder and UI. That is the decode
+wall, not the gate total: convert + IRQ + DMA and this tree's UI are not in it, so
+U4 and playback remain open.
 This file is the decision record (why
 ULI2, what it is, the licensing and encoder risks); the live plan, gates and
 measurement ledger are [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md).

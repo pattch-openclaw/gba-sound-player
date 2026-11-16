@@ -5,7 +5,8 @@
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
-        uli-bench-rom uli-bench uli-attrib uli-frame-ops uli-overlay-test \
+        uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
+        uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
         uli-spike-rom clean clean-cache check help toolchain-check
 
@@ -661,6 +662,32 @@ uli-bench: uli-bench-rom
 # cycles per window in this image (control 274,214 vs the product 274,198) —
 # deltas are unaffected; quote absolutes from the product arm.
 ULI_ATTRIB_ARMS := control synth pre fft post ola ms entropy synth-entropy
+
+# --- Sub-frame entropy attribution (Step 0b) --------------------------------
+#
+# The entropy/dequant path owns 69% of the worst frame's distance to the C shape,
+# so it is attributed one level down before its rewrite: `attrib-entropy-{reader,
+# nolut,nodequant,nowrite}` remove one layer each (`attrib-count` adds the
+# `huff_slow` hit counter). Same method and same caveats as `uli-attrib`: these
+# are TIMING-ONLY images whose pins fail by construction, and `attrib-dump` costs
+# a constant +16 cycles per window. Quote `frame prod8` / `pfc`, never the pins.
+ULI_SUBFRAME_ARMS := s-base s-reader s-nolut s-nodequant s-nowrite s-count
+uli-attrib-subframe: toolchain-check
+	@for arm in $(ULI_SUBFRAME_ARMS); do \
+	  case $$arm in \
+	    s-base) feats="attrib-dump,attrib-synth,attrib-entropy" ;; \
+	    s-reader) feats="attrib-dump,attrib-synth,attrib-entropy-reader" ;; \
+	    s-count) feats="attrib-dump,attrib-synth,attrib-count" ;; \
+	    *) feats="attrib-dump,attrib-synth,attrib-entropy-$${arm#s-}" ;; \
+	  esac; \
+	  echo "uli-attrib-subframe: $$arm ($$feats)"; \
+	  ( cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features "$$feats" ) || exit 1; \
+	  agb-gbafix $(ULI_BENCH_BIN) -o uli-subframe-$$arm.gba || exit 1; \
+	  timeout -k 5 300 $(GBA_TEST_RUNNER) uli-subframe-$$arm.gba > uli-subframe-$$arm.log 2>&1 || true; \
+	  grep -E '^\[uli-bench\] frame prod8' uli-subframe-$$arm.log || exit 1; \
+	  grep -E '^\[uli-bench\] (attrib|prod8 slow_hits)' uli-subframe-$$arm.log || true; \
+	done
+	@echo "uli-attrib-subframe done: uli-subframe-<arm>.log (timing-only arms; pins fail by design)"
 uli-attrib: toolchain-check
 	@for arm in $(ULI_ATTRIB_ARMS); do \
 	  feats="attrib-dump"; \
@@ -676,6 +703,26 @@ uli-attrib: toolchain-check
 	  grep -E '^\[uli-bench\] frame prod8' uli-attrib-$$arm.log || exit 1; \
 	done
 	@echo "uli-attrib done: uli-attrib-<arm>.log (timing-only arms; pins fail by design)"
+
+# --- The on-target asm KERNEL twin (a real gate, added with FFT v5) ----------
+#
+# The bench's `ovl twin ... fftasm=` line lives behind the bench's `asm-fft`
+# feature, so `make uli-bench` — which builds without it — reported
+# `fftasm=true` vacuously while the product decoder was in fact calling the asm
+# kernel. The album pins were the only witness. This target builds the image
+# that actually runs the twin, and gates on it.
+#
+# It fits because the twiddle-table placement arm (`tw-iwram-arm`, 2,016 B of
+# `.iwram`) is off by default: with it on, this build measured 30,284 B of a
+# 30,320 B region and had no room for the 828 B stack.
+ULI_FFT_TWIN_LOG := uli-kernel-twin.log
+uli-kernel-twin: toolchain-check
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features asm-fft,asm-pre,asm-ola
+	agb-gbafix $(ULI_BENCH_BIN) -o uli-kernel-twin.gba
+	timeout -k 5 300 $(GBA_TEST_RUNNER) uli-kernel-twin.gba > $(ULI_FFT_TWIN_LOG) 2>&1 || true
+	@grep -E '^\[uli-bench\] asmfft5 ' $(ULI_FFT_TWIN_LOG) || { echo "uli-fft-twin: no asmfft5 arm in the log"; exit 1; }
+	@grep -q 'ovl twin .* fftasm=true preasm=true olaasm=true \[PASS\]' $(ULI_FFT_TWIN_LOG) || { echo "uli-kernel-twin: an asm kernel twin failed — see $(ULI_FFT_TWIN_LOG)"; exit 1; }
+	@echo "uli-kernel-twin passed: the asm FFTs (v1..v5), the asm pre-twiddle and the asm overlap-add are bit-exact on the ARM7TDMI"
 
 # The overlay's host twin: the ARM-mode, unchecked kernels must be bit-exact with
 # uli-lite's portable reference. This is what licenses the bench's overlay arm to be
@@ -971,7 +1018,9 @@ help:
 	@echo "  Other tracks:"
 	@echo "    ULI2 (ULI2.md — the repository's product codec): uli-test, uli-overlay-test,"
 	@echo "      uli-check, uli-fixture, native-uli-spike-rom, native-uli-bench-rom,"
-	@echo "      uli-bench (headless run + PASS/FAIL read from the log)"
+	@echo "      uli-bench (headless run + PASS/FAIL read from the log), uli-kernel-twin"
+	@echo "    ULI2 attribution (timing-only; pins fail by design): uli-attrib,"
+	@echo "      uli-attrib-subframe, uli-frame-ops"
 	@echo "    Opus (OPUS.md): native-opus-rom, opus-test"
 	@echo "    Album Player, Phase 0 (AP-0 — the probe aggregate; nothing here is"
 	@echo "      wired into flac-check or test): album-probe-rom (three probe ROMs),"
