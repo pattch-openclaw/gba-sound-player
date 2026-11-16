@@ -7,11 +7,10 @@
 //! | module | what it is |
 //! |---|---|
 //! | [`geometry`] | `#[path]` include of `examples/flac_integration/src/geometry.rs` — the ring, chunk and prefill the probe measures against |
-//! | [`playback`], [`checksum`] | `crates/gba-playback` (path dependency) — the same shared pair `examples/flac_integration/src/lib.rs` re-exports, so the skip probe runs the real `RingFeed` |
+//! | [`playback`], [`checksum`], [`nodiv`] | `crates/gba-playback` (path dependency) — the same shared pair `examples/flac_integration/src/lib.rs` re-exports, so the skip probe runs the real `RingFeed`, and §6's no-divide arithmetic, lifted out of this crate in Phase 1 PR-2 |
 //! | [`art1`] | the ART1 blob reader: validate, refuse by name, blit 8 words/tile |
 //! | [`synth`] | the deterministic PCM source the probes play instead of a decoder |
 //! | [`position`] | the 32-bit session clock (ALBUM-PLAYER.md §4.4) |
-//! | [`nodiv`] | §6's arithmetic: no `/` or `%` on a variable anywhere on the measured path |
 //! | [`art_pin`] | generated: what `assets/probe_art1.bin` must say, so the ROM and the host suite check the same blob |
 //!
 //! ## A probe is a witness, never a gate input
@@ -48,12 +47,20 @@ pub mod geometry;
 // The decode-to-FIFO path and its checksums, from the crate that owns them
 // (ALBUM-PLAYER.md §2.2). The skip probe drives this exact type, which is what
 // makes its silence-gap number a statement about the shipped ring rather than
-// about a model of one.
-pub use gba_playback::{checksum, playback};
+// about a model of one. `nodiv` travels with them: §6's arithmetic moved to the
+// same crate in Phase 1 PR-2, so `album_probe::nodiv` is a re-export and the
+// probe no longer `#[path]`-includes it.
+pub use gba_playback::{checksum, nodiv, playback};
+
+// The clock tie, asserted here because this is the link site that *has* a
+// geometry: `nodiv` keeps §6's `RATE_LOG2` as arithmetic and imports no clock, so
+// the probe is the place that proves the arithmetic lands on the ring geometry it
+// measures against. (The application asserts the same tie against its own product
+// rate; inverted on purpose, so a shared module names neither.)
+const _: () = assert!(geometry::PLAYBACK_RATE_HZ == 1 << nodiv::RATE_LOG2);
 
 pub mod art1;
 pub mod art_pin;
-pub mod nodiv;
 pub mod position;
 pub mod synth;
 

@@ -1,5 +1,12 @@
 //! §6's arithmetic: the numbers the UI paints, computed without dividing.
 //!
+//! `ALBUM-PLAYER.md` §6 owns this. It lives in project source because three
+//! things paint from it — the Phase 0 probe, the application, and the host gates
+//! that hold both to it — and §2.2's rule is that what an app needs from a probe
+//! is lifted into project source first, not `#[path]`-included from it. One
+//! implementation, so a number a probe prints and a cell the app paints cannot
+//! come from two arithmetics.
+//!
 //! The ARM7TDMI has no divide instruction, so `/` on a variable is a call into
 //! `__aeabi_*div*` — ~50–150 cycles on a path with a 34 ms budget, and AP-2's
 //! gate wording is a symbol fact on the linked image. Every quantity here is a
@@ -8,20 +15,29 @@
 //!
 //! There is exactly **one** divide in this file, [`bar_recip`], and it is the
 //! bake tool's: `floor(2^32 × BAR_CELLS / n_samples)` is computed once per track
-//! on the host and carried in the manifest, so the ROM only ever multiplies. The
-//! host suite reads this file and refuses a second one — that is the code-level
-//! half of the §6 rule; the linked-image half (`__aeabi_u*div*`) is AP-2's.
+//! on the host and carried in the manifest, so the ROM only ever multiplies. This
+//! crate's host suite reads this file and refuses a second one — that is the
+//! code-level half of the §6 rule; the linked-image half (`__aeabi_u*div*`) is
+//! AP-2's.
+//!
+//! ## The clock is the link site's fact, not this module's
+//!
+//! [`RATE_LOG2`] is §6's arithmetic — both clocks are powers of two and the shift
+//! is the whole trick — so it is stated here, once. What this module must not do
+//! is *import* a geometry to check it with: the probe checks against the shipped
+//! `examples/flac_integration/src/geometry.rs`, and the application will check
+//! against the per-backend geometry §4.2b says it derives, so a shared module
+//! naming either one would couple them through it. The tie is inverted: each
+//! link site asserts it with its own `const _: () = assert!(… == 1 <<
+//! nodiv::RATE_LOG2);`, which is one line per consumer and cannot be skipped by
+//! the arithmetic itself.
 
-use crate::geometry;
-
-/// log2 of the product rate: `geometry::PLAYBACK_RATE_HZ == 1 << 14`. §6's table
-/// has both rows (`>> 14` at 16,384 Hz, `>> 15` at 32,768); the product path runs
-/// at 16,384 (the shipped `geometry`), so 14 is the one the ROM uses, and the
-/// assertion below is what keeps that a fact about the included geometry rather
-/// than about this comment.
+/// log2 of the product rate: `1 << 14 == 16_384` Hz. §6's table has both rows
+/// (`>> 14` at 16,384 Hz, `>> 15` at 32,768); the product path runs at 16,384, so
+/// 14 is the one the ROM uses. Each consumer asserts that its own clock is this
+/// power of two — see the module docs — so this stays an arithmetic fact rather
+/// than a claim about someone else's geometry file.
 pub const RATE_LOG2: u32 = 14;
-
-const _: () = assert!(geometry::PLAYBACK_RATE_HZ == 1 << RATE_LOG2);
 
 /// Cells in the progress bar: §6's fixed grid of 32 equal cells (32 cells × 7 px
 /// on a 256-px-wide bar; a 64-cell bar is the other priced option).

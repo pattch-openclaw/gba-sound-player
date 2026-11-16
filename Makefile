@@ -8,6 +8,7 @@
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
+        album-bake album-pack-check \
         uli-spike-rom clean clean-cache check help toolchain-check
 
 # ===========================================================================
@@ -161,6 +162,19 @@ MASTER_ASSET := $(FLAC_CRATE_DIR)/assets/master.gfp
 MASTER_PIN := $(FLAC_CRATE_DIR)/src/master_pin.rs
 MASTER_PLAY_ROM := master-play.gba
 
+# --- the Album Player's pack step (ALBUM-PLAYER.md §9.0, A3a) ----------------
+# The master-audio path generalised to N tracks: `album.toml` is the tracked
+# input, and the per-track GAFP blobs, `ALBM1` (the app's manifest) and the
+# generated `src/assets.rs` are build output, gitignored the way the master asset
+# already is (§2.3). Phase 1 packs; nothing plays audio yet (§11).
+ALBUM_CRATE_DIR := examples/album_player
+ALBUM_MANIFEST := $(abspath examples/album_player/Cargo.toml)
+ALBUM ?= examples/album_player/album.toml
+ALBUM_ASSETS_DIR := $(ALBUM_CRATE_DIR)/assets
+ALBUM_BLOB := $(ALBUM_ASSETS_DIR)/albm1.bin
+ALBUM_ASSETS_RS := $(ALBUM_CRATE_DIR)/src/assets.rs
+ALBUM_GATE_LOG := album-pack-check.log
+
 # --- the core and its overlay -------------------------------------------------
 FLAC_CRATE_DIR_MANIFEST := $(abspath crates/flac-lite/Cargo.toml)
 OVERLAY_CRATE_DIR := crates/flac-lite-gba
@@ -243,6 +257,15 @@ WORKSPACES := . crates/flac-lite crates/flac-lite-gba crates/gba-playback \
               crates/uli-lite crates/uli-lite-gba examples/uli_spike examples/uli_bench \
               examples/album_probe
 
+# examples/album_player is deliberately NOT in WORKSPACES: its `src/lib.rs`
+# declares `pub mod assets;` from a GENERATED, gitignored `src/assets.rs` that
+# only `make album-bake` writes, so it cannot be a plain `cargo fmt` / `cargo
+# clean` target on a fresh clone — rustfmt resolves `mod` statically and aborts.
+# Its fmt coverage comes from the `fmt_with_generated_stub.sh` call below (which
+# writes a comment-only stub with GENERATED=<file>, formats, and removes it), and
+# its caches are still covered by `clean-caches`, whose WORKSPACE_DIRS is derived
+# from the manifests on disk rather than from this list.
+
 # Every cargo workspace root in the tree, derived from the manifests on disk (see
 # `clean`). Pruned so a warm `target/`'s vendored manifests are never mistaken for
 # workspace roots of their own.
@@ -264,6 +287,7 @@ ifeq ($(HAS_RUSTFMT),1)
 format:
 	@for d in $(WORKSPACES); do (cd $$d && $(CARGO) fmt) || exit 1; done
 	CARGO='$(CARGO)' sh scripts/fmt_with_generated_stub.sh $(FLAC_CRATE_DIR)
+	CARGO='$(CARGO)' GENERATED='$(abspath $(ALBUM_ASSETS_RS))' sh scripts/fmt_with_generated_stub.sh $(ALBUM_CRATE_DIR)
 else
 format:
 	@echo "format: skipping — no rustfmt for '$(TOOLCHAIN)' (build continues)."
@@ -592,8 +616,8 @@ playback-test: toolchain-check
 	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath playback-test.log) \
 	    || { echo "playback-test: the library suite did not pass — see playback-test.log"; exit 1; }; \
 	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath playback-test.log)); \
-	  [ -n "$$n" ] && [ "$$n" -ge 24 ] || { echo "playback-test: collected '$$n' tests, needs >= 24 — a green that names nothing is not a green"; exit 1; }
-	@echo "playback-test passed: FIFO conversion, ring accounting, truncate()'s ledger, and both FNV folds"
+	  [ -n "$$n" ] && [ "$$n" -ge 25 ] || { echo "playback-test: collected '$$n' tests, needs >= 25 — a green that names nothing is not a green"; exit 1; }
+	@echo "playback-test passed: FIFO conversion, ring accounting, truncate()'s ledger, both FNV folds, and §6's one-divide census"
 
 spike-rom: format
 	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
@@ -836,6 +860,84 @@ album-probe: album-probe-rom
 	@echo "album-probe done: album-probe-{ui,art,skip}.log hold the tables and the verdicts"
 
 # ===========================================================================
+# Album Player — Phase 1 (A3a): the pack step, and the four refusals
+# ===========================================================================
+#
+# Nothing here plays audio. This is §9.0's "the bake step is a verdict" at its
+# Phase-1 scope: `album.toml` (tracked) → one `GAFP` blob per distinct source →
+# `ALBM1` (the app's manifest) → the generated `src/assets.rs`. The gate is
+# named `album-pack-check` on purpose — `album-bake-check` is AP-5/Phase 3's
+# budget-and-art gate (§9.1), not this one.
+
+# Bake the tracked fixture (or ALBUM=your.toml). A maintenance command: it
+# writes generated, gitignored files, so it is never part of `make test`.
+album-bake: toolchain-check format
+	@test -f "$(ALBUM)" || { echo "album-bake: $(ALBUM) does not exist — pass ALBUM=<config> or check the tracked fixture is present"; exit 1; }
+	python3 scripts/album_bake.py "$(ALBUM)"
+
+# The Phase-1 pack gate. Five legs, all fail-closed:
+#   1. the inputs a clone must have (the tracked config, the host suite) and the
+#      tools the bake shells to (flac, metaflac, ffmpeg, python3) are checked by
+#      name, so a missing dependency is one line instead of a traceback;
+#   2. bake once, then bake again and compare the asset directory's whole
+#      listing and every generated byte — §9.0's determinism leg, "pack twice,
+#      compare bytes", the thing that makes "generated" mean "regenerable";
+#      the listing half is what catches a stale or leftover blob. The comparison
+#      is also witnessed *negatively*: one flipped byte in a copy must be
+#      reported, so a leg that has only ever passed is not mistaken for proof;
+#   3. the bake's own `--self-test` drives all four refusals with no repo state;
+#   4. the host suite runs from $(GATE_NEUTRAL_CWD) with --manifest-path and an
+#      explicit --target, the flac-test shape, so the root's GBA `target` and
+#      `build-std` are never inherited;
+#   5. a green that collected (nearly) nothing is refused: the count is read from
+#      the log only after the suite passed.
+album-pack-check: toolchain-check
+	@test -f "$(ALBUM)" || { echo "album-pack-check: $(ALBUM) is missing — the tracked fixture config is this gate's input"; exit 1; }
+	@test $$(find $(ALBUM_CRATE_DIR)/tests -name 'album_pack_host.rs' | wc -l) -eq 1 \
+	  || { echo "album-pack-check: $(ALBUM_CRATE_DIR)/tests/album_pack_host.rs is missing — the ALBM1 host half has to exist before a blob can be believed"; exit 1; }
+	@for tool in flac metaflac ffmpeg python3; do \
+	  command -v $$tool >/dev/null 2>&1 \
+	    || { echo "album-pack-check: '$$tool' is not on PATH — the bake (or its host gate) shells to it"; exit 1; }; \
+	done
+	python3 scripts/album_bake.py "$(ALBUM)"
+	@first=$$(mktemp -d); \
+	  cp -r $(ALBUM_ASSETS_DIR) $$first/assets || exit 1; \
+	  cp $(ALBUM_ASSETS_RS) $$first/assets.rs || exit 1; \
+	  ls $(ALBUM_ASSETS_DIR) > $$first/assets.list || exit 1; \
+	  python3 scripts/album_bake.py "$(ALBUM)" >/dev/null || { rm -rf $$first; exit 1; }; \
+	  ls $(ALBUM_ASSETS_DIR) > $$first/assets.after.list || exit 1; \
+	  cmp -s $$first/assets.list $$first/assets.after.list \
+	    || { echo "album-pack-check: the bake is not deterministic — the asset directories differ:"; \
+	         echo "  first:  $$(tr '\n' ' ' < $$first/assets.list)"; \
+	         echo "  second: $$(tr '\n' ' ' < $$first/assets.after.list)"; rm -rf $$first; exit 1; }; \
+	  for f in $$first/assets/*; do \
+	    cmp -s "$$f" "$(ALBUM_ASSETS_DIR)/$$(basename $$f)" \
+	      || { echo "album-pack-check: the bake is not deterministic — $$(basename $$f) differs between two runs"; rm -rf $$first; exit 1; }; \
+	  done; \
+	  cmp -s $$first/assets.rs $(ALBUM_ASSETS_RS) \
+	    || { echo "album-pack-check: the bake is not deterministic — src/assets.rs differs between two runs"; rm -rf $$first; exit 1; }; \
+	  cp $$first/assets.rs $$first/assets.mutant.rs; \
+	  python3 -c 'import sys; p = sys.argv[1]; d = bytearray(open(p, "rb").read()); d[0] ^= 0xFF; open(p, "wb").write(d)' $$first/assets.mutant.rs; \
+	  cmp -s $$first/assets.mutant.rs $(ALBUM_ASSETS_RS) \
+	    && { echo "album-pack-check: the determinism comparison passed two files that differ by one byte — the byte leg is not witnessing anything"; rm -rf $$first; exit 1; } \
+	    || echo "  determinism leg: one flipped byte is reported as a difference (negative control)"; \
+	  rm -rf $$first
+	python3 scripts/album_bake.py --self-test
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	@cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) --test album_pack_host > $(abspath $(ALBUM_GATE_LOG)) 2>&1; \
+	  status=$$?; \
+	  cat $(abspath $(ALBUM_GATE_LOG)); \
+	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_GATE_LOG)) \
+	    || { echo "album-pack-check: the host suite did not pass — see $(ALBUM_GATE_LOG)"; exit 1; }; \
+	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_GATE_LOG))); \
+	  [ -n "$$n" ] && [ "$$n" -ge 20 ] || { echo "album-pack-check: collected '$$n' tests, needs >= 20 — a green that names nothing is not a green"; exit 1; }
+	@echo "album-pack-check passed: the four §9.0 Phase-1 refusals fired — (a) declared rate != product clock,"
+	@echo "  (b) frames outside the encode profile (inherited from gafp_pack.py), (c) ALBM1 n_samples vs the"
+	@echo "  container's total_samples, (d) the writer's output re-read through meta.rs — plus two bakes"
+	@echo "  byte-identical and the ALBM1 host suite green."
+
+# ===========================================================================
 # Aggregates
 # ===========================================================================
 
@@ -913,7 +1015,8 @@ podman-%:
 # build reads as input and regenerates only through their own generators. The Album
 # Player's assets are the other class, not this one: they belong to whichever album
 # was built, so they are generated from a tracked fixture config and gitignored
-# (ALBUM-PLAYER.md §2.3), and Phase 1 adds those paths here as it adds the targets.
+# (ALBUM-PLAYER.md §2.3) — `albm1.bin`, `assets/*.gfp` and `src/assets.rs` are
+# removed below, and `album.toml` stays because it is tracked source.
 clean: clean-outputs
 	@if [ -n "$(DEEP)" ]; then \
 	  echo "clean: DEEP is set — dropping every workspace's target/ as well"; \
@@ -934,6 +1037,7 @@ clean-outputs:
 	@rm -f $(SPIKE_CRATE_DIR)/assets/rate_*.bin
 	@rm -f uli-bench*.log uli-attrib*.log
 	@rm -f album-probe*.log
+	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_GATE_LOG)
 	@find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} + 2>/dev/null || true
 
 # The caches: the fifteen workspaces' `target/` dirs, discovered from the tree.
@@ -954,6 +1058,7 @@ clean-cache:
 check:
 	@for d in $(WORKSPACES); do (cd $$d && $(CARGO) fmt --check) || exit 1; done
 	CARGO='$(CARGO)' sh scripts/fmt_with_generated_stub.sh $(FLAC_CRATE_DIR) --check
+	CARGO='$(CARGO)' GENERATED='$(abspath $(ALBUM_ASSETS_RS))' sh scripts/fmt_with_generated_stub.sh $(ALBUM_CRATE_DIR) --check
 	@echo "check: all workspaces rustfmt-clean"
 
 # Fail early and legibly when the pinned toolchain is not reachable, instead of
@@ -1027,6 +1132,9 @@ help:
 	@echo "      album-probe (run all three headless; PASS read from each log),"
 	@echo "      album-probe-art (regenerate the tracked ART1 blob + pin),"
 	@echo "      album-probe-test (the AP-0 host gate)."
+	@echo "    Album Player, Phase 1 (pack step only; ALBUM-PLAYER.md §9.0 A3a):"
+	@echo "      album-bake (album.toml -> assets/*.gfp + ALBM1 + src/assets.rs),"
+	@echo "      album-pack-check (two byte-identical bakes, the four refusals, the ALBM1 host gate)."
 	@echo "  Tests/format:  test (test-rom + flac-test + uli-test), test-rom, check, format"
 	@echo "  Housekeeping:  clean (outputs only; caches kept), clean-deep (+ every"
 	@echo "                 workspace's target/), clean-cache (container volumes),"

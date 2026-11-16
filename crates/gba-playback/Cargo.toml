@@ -21,6 +21,12 @@ license = "MIT"
 # `stats`, `assets`, its ROM entry points, and `geometry.rs` (which stays in
 # examples/flac_integration).
 #
+# `nodiv` (ALBUM-PLAYER.md §6) moved here the same way in Phase 1 PR-2, out of
+# examples/album_probe/src/nodiv.rs: the probe, the application and their host
+# gates all paint from it, and §2.2 says what an app needs from a probe is
+# lifted, not `#[path]`-included. The clock tie is NOT in the moved file — each
+# link site asserts it (see nodiv's module docs).
+#
 # Standalone workspace, cargo config INHERITED from the repo root — do NOT add a
 # local .cargo/config.toml: cargo concatenates target.<triple>.rustflags across
 # config layers, and a local re-declaration links `-Tgba.ld` twice.

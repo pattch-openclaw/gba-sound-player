@@ -160,6 +160,26 @@ standing; the totals' delta is the four added settings plus that clock noise, an
 quoted as a cost. `overlay-kernel-check.gba` sits at 221,020 B throughout: it does not
 compile these modules.
 
+**Re-baseline 2026-11-15 (Phase 1 PR-2) — a no-op on every image, verified rather than
+assumed.** `examples/album_probe/src/nodiv.rs` MOVED into `crates/gba-playback`
+(ALBUM-PLAYER.md §2.2, §6): one no-divide arithmetic for the probe, the application and the
+host gates. Same host, same toolchain instance, same command (`make spike-rom flac-rom
+product-play-rom album-probe-rom`), and **every `sha256` and every section is unchanged**:
+`flac-spike` 1,042,156 B, `flac-integration` 644,340 B, `product-play` 662,480 B, and the
+probe images 195,828 / 180,332 / 170,880 B with the skip probe at `.text` 45,008 ·
+`.rodata` 124,536 · `.iwram` 556 · `.bss` 42,696 — byte for byte what PR-1 recorded. This is
+the opposite of PR-1's +504 B and worth recording: there the move carried a new method
+(`truncate()`), here it carries the same functions, so codegen is unchanged and only comments
+and which crate the object comes from moved. "It moved, so the bytes must move" is the
+assumption this document replaces with a measurement, and this time the measurement says no.
+
+Gate counts at PR-2, with the reason each moved: `playback-test` **24 → 25** and its Makefile
+floor **24 → 25** — §6's one-divide census moved with the file into that crate's `--lib`
+suite; `album-probe-test` **52 → 51** — the same census left the probe's suite (floor `> 40`,
+unmoved); `album-pack-check` **45 → 46** — the app's new `meta::PRODUCT_RATE_HZ == 1 <<
+nodiv::RATE_LOG2` tie test (floor 20, unmoved). `spike-test` stays 17 and `product-play-test`
+is untouched: no image that compiles the moved module changed a byte.
+
 ## Rules every run follows
 
 - **Correctness before speed.** No number is reported from an image whose decode has not
@@ -298,7 +318,7 @@ and four runs, which is what makes it safe to read.
 | `overlay-kernel-test` | The only place the assembled kernel runs: mGBA's ARM7TDMI sweeps the committed corpus and the synthesized boundaries through the incumbent, the kernel and the model. Debug profile on purpose (overflow checks and the model's domain guard are part of what is witnessed). |
 | `product-play-test` | The product geometry's host model: the shipped manifest's real frame lengths replayed through the **same** `RingFeed` and the **same** `geometry` constants the ROM compiles, against a credit-per-period clock. Where flow control, the two tolerances and the ring sizing are justified rather than asserted. Its cost envelope is transcribed from one named run's printed `stages:`/`attribution:` lines — `the_envelope_is_the_runs_own_sums` locks those to each other, but **no host test reads a ROM log**, so re-reading them after a build is record-keeping, not a gate. |
 | `spike-test` | The instrument's host witness: the exact embedded clips decode bit-exactly against `flac -d`, the pins reproduce, the shared fold reaches them. Collected count **17** since the §2.2 lift (2026-11-15): 7 `stats` unit tests + 10 `spike_witness` tests. It was 25 before, because the 8 `checksum` unit tests lived in this workspace; they now run in `playback-test`. |
-| `playback-test` | The lifted playback data path's own suite (`crates/gba-playback`, ALBUM-PLAYER.md §2.2): the FIFO truncation rule, the two-channel fold, the ring's producer/consumer accounting and underflow classification, and **`RingFeed::truncate()`** — §4.4's skip seam (Q13b): it drops exactly the queued span, leaves `ready() == 0` with `consumed() == pushed()` and the producer ledger untouched, and the next push comes back whole, across a ring wrap too. 24 tests (12 playback + 8 checksum + 4 truncate). Gate-neutral cwd with `--lib`, and it fails closed: a failed run, a log without `test result: ok.`, or fewer than 24 collected tests is a red (the floor is the whole suite, so losing `truncate()`'s four tests cannot stay green). |
+| `playback-test` | The lifted playback data path's own suite (`crates/gba-playback`, ALBUM-PLAYER.md §2.2): the FIFO truncation rule, the two-channel fold, the ring's producer/consumer accounting and underflow classification, **`RingFeed::truncate()`** — §4.4's skip seam (Q13b): it drops exactly the queued span, leaves `ready() == 0` with `consumed() == pushed()` and the producer ledger untouched, and the next push comes back whole, across a ring wrap too — and §6's arithmetic's **one-divide census** (`nodiv` moved here in PR-2). 25 tests (12 playback + 8 checksum + 4 truncate + 1 census). Gate-neutral cwd with `--lib`, and it fails closed: a failed run, a log without `test result: ok.`, or fewer than 25 collected tests is a red (the floor is the whole suite, so losing `truncate()`'s four tests cannot stay green). |
 | `test-rom` / `test` | The root ROM's `#[test_case]` suite (currently **collects 0 cases** — a build/link/boot check, not evidence) and `test`'s aggregate with `flac-test` + `uli-test`. |
 | `check` | `cargo fmt --check` across the workspaces. The only style gate; builds auto-format, tests never write. |
 
