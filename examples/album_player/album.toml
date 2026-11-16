@@ -23,7 +23,10 @@
 
 [album]
 title  = "Bioluminescent"
-artist = "Reference Master"
+# The tracked master carries **no RIFF tags** (verified: `ffprobe -show_entries
+# format_tags` prints nothing for it), so there is no real credit to copy here. Said as
+# `unknown` rather than invented — an album artist is metadata a listener would read as fact.
+artist = "unknown"
 year   = 2026
 
 # One backend per ROM, chosen at build time (§4.2b). `stub` is the silent
@@ -35,10 +38,18 @@ backend    = "flac"
 rate_hz    = 16384            # the packer's rate contract: identity or refusal (Q14)
 cart_bytes = 33554432         # 32 MiB, §10.1
 
-# Play order. `title` is ASCII-folded at bake time (§5.5: NFKD, drop non-ASCII,
-# collapse whitespace, strip a whole title wrapped in parentheses) and a title
-# that will not fit its box is PRINTED, never refused — fixing it is an album
-# decision, not a build failure.
+# Play order. Titles are exactly what §15's Q15 ruling names — "Bioluminescent 1",
+# "Bioluminescent Clip 1", … — and **nothing more**: this file is the one tracked artifact of
+# an album build, so a title invented here to exercise a rule would read forever after as
+# album metadata that never existed (PR-2 first shipped `Clip 1` as an “Öffnung (Alternate
+# Mix, Take 12)” that is not a thing; withdrawn as D5). Q15's "free extra" — one title over
+# 28 characters, one carrying non-ASCII — is witnessed where it belongs, in
+# `scripts/album_prep.py`'s `FOLD_CASES` and its box report, on strings labelled synthetic and
+# covering the whole of §5.5 rather than one accidental word.
+#
+# `title` is ASCII-folded at bake time (§5.5: NFKD, drop non-ASCII, collapse whitespace, strip
+# a whole title wrapped in parentheses) and a title that will not fit its box is **PRINTED,
+# never refused** — fixing it is an album decision, not a build failure.
 #
 # `start_sample`/`end_sample` are optional and, when present, are samples AT THE
 # SOURCE'S OWN RATE (probed from its header, not assumed): a clip is extracted
@@ -55,7 +66,7 @@ title = "Bioluminescent 1"
 
 [[track]]
 file         = "assets/sound/bioluminescent.wav"
-title        = "Bioluminescent Clip 1 — Öffnung (Alternate Mix, Take 12)"
+title        = "Bioluminescent Clip 1"
 start_sample = 96000          # t = 1.0 s at the master's 96,000 Hz
 end_sample   = 2976000        # + 30 s
 
@@ -65,6 +76,6 @@ title = "Bioluminescent 2"
 
 [[track]]
 file         = "assets/sound/bioluminescent.wav"
-title        = "(Bioluminescent Clip 2)"
+title        = "Bioluminescent Clip 2"
 start_sample = 5472000        # t = 57.0 s at the master's 96,000 Hz
 end_sample   = 8352000        # + 30 s

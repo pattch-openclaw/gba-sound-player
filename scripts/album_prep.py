@@ -24,7 +24,7 @@ so `start_sample` is an album position — in the same file, never a rewrite.
 
     python3 scripts/album_prep.py --self-test
     python3 scripts/album_prep.py --probe assets/sound/bioluminescent.wav
-    python3 scripts/album_prep.py --fold "Bioluminescent — Öffnung (Mix)"
+    python3 scripts/album_prep.py --fold "Synthetic — Öffnung (Mix)"
 """
 
 from __future__ import annotations
@@ -64,11 +64,15 @@ def fold(text: str) -> str:
     """§5.5's ASCII fold, in the order the spec states it.
 
     NFKD first, so an accented letter becomes base + combining mark and the mark
-    is what gets dropped (`Öffnung` → `Offnung`, not `?ffnung`); then everything
+    is what gets dropped (`Ö` → `O`, not `?`); then everything
     outside ASCII; then whitespace collapsed to one space and trimmed; then a
     whole title wrapped in parentheses loses the wrapping (a parenthesised
     *phrase* inside a longer title is left alone — only a title that is entirely
     parenthesised is a wrapped title).
+
+    Every string this function is tested against lives in `FOLD_CASES` below and is
+    **synthetic on purpose**: the tracked album fixture's titles are §15 Q15's own
+    names, not decorations invented to exercise a rule (`album.toml`, deviation D5).
     """
     decomposed = unicodedata.normalize("NFKD", text)
     ascii_only = "".join(ch for ch in decomposed if ord(ch) < 128)
@@ -290,13 +294,21 @@ def _run(cmd: list[str], why: str) -> str:
 
 
 FOLD_CASES = (
-    # (in, out, why)
+    # (in, out, why) — all synthetic inputs, each chosen for the one shape of §5.5 it
+    # exercises. This is where Q15's "free extra" (a title over 28 characters, a title
+    # carrying non-ASCII) is witnessed: NOT by decorating the tracked fixture's titles,
+    # which are Q15's own names (deviation D5, `examples/album_player/album.toml`).
     ("Bioluminescent 1", "Bioluminescent 1", "ASCII already: nothing moves"),
-    ("Bioluminescent — Öffnung", "Bioluminescent Offnung", "NFKD then drop: the em-dash is dropped, not transliterated"),
+    ("Synthetic — Öffnung", "Synthetic Offnung", "NFKD then drop: the em-dash is dropped, not transliterated"),
     ("  spaced   out  ", "spaced out", "whitespace collapsed and trimmed"),
-    ("(Bioluminescent Clip 2)", "Bioluminescent Clip 2", "a whole wrapped title loses its wrapping"),
-    ("A (Bioluminescent) Clip", "A (Bioluminescent) Clip", "a parenthesised phrase is not a wrapped title"),
+    ("(Synthetic Clip)", "Synthetic Clip", "a whole wrapped title loses its wrapping"),
+    ("A (Synthetic) Clip", "A (Synthetic) Clip", "a parenthesised phrase is not a wrapped title"),
     ("夜のエラー", "", "a title with no ASCII at all folds to nothing, loudly"),
+    (
+        "Synthetic Fixture Title Long Enough To Overflow Twenty-Eight Cells Öffnung",
+        "Synthetic Fixture Title Long Enough To Overflow Twenty-Eight Cells Offnung",
+        "Q15's > 28-char case: folded, never truncated — the box report below prints it",
+    ),
 )
 
 
@@ -308,8 +320,12 @@ def self_test() -> int:
         ok = got == want
         failures += 0 if ok else 1
         print(f"{'PASS' if ok else 'FAIL'} fold({text!r}) = {got!r}  [{why}]")
-    # The box test is a report, not a refusal: both answers are correct.
-    for text in ("Bioluminescent 1", "Bioluminescent Clip 1 - Offnung (Alternate Mix, Take 12)"):
+    # The box test is a report, not a refusal: both answers are correct. The second
+    # string is Q15's over-the-box case, kept synthetic for the same reason.
+    for text in (
+        "Bioluminescent 1",
+        "Synthetic Fixture Title Long Enough To Overflow Twenty-Eight Cells",
+    ):
         folded = fold(text)
         print(f"INFO fits({folded!r}) = {title_fits(folded)} (box {TITLE_BOX_MAX})")
     if failures:

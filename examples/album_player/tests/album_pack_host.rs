@@ -140,7 +140,7 @@ fn backend_is_the_config_selector() {
 fn album_metadata_is_the_folded_config() {
     let album = parsed();
     assert_eq!(album.album_title(), "Bioluminescent");
-    assert_eq!(album.album_artist(), "Reference Master");
+    assert_eq!(album.album_artist(), "unknown");
     assert_eq!(album.year(), 2026);
     assert_eq!(assets::ALBUM_TITLE, album.album_title());
     assert_eq!(assets::ALBUM_ARTIST, album.album_artist());
@@ -196,7 +196,7 @@ fn titles_are_ascii_folded_from_the_config() {
         titles,
         [
             "Bioluminescent 1",
-            "Bioluminescent Clip 1 Offnung (Alternate Mix, Take 12)",
+            "Bioluminescent Clip 1",
             "Bioluminescent 2",
             "Bioluminescent Clip 2",
         ]
@@ -207,24 +207,45 @@ fn titles_are_ascii_folded_from_the_config() {
 }
 
 #[test]
-fn the_long_title_is_kept_whole() {
-    // §5.5: a title wider than the box is printed at bake time and never
-    // truncated or refused — fixing it is an album decision.
-    let long = parsed().track_title(1);
-    assert!(
-        long.chars().count() > 28,
-        "{long:?} should overflow the box"
+fn the_fixture_titles_are_q15s_names_verbatim() {
+    // §15's Q15 names these tracks; the titles are the config's own strings, folded to
+    // themselves. An earlier revision of the fixture decorated them (`… — Öffnung
+    // (Alternate Mix, Take 12)`, a wholly parenthesised `Clip 2`, artist "Reference
+    // Master") to drive §5.5's fold and §5.2's box report — which put invented album
+    // metadata in the one tracked artifact of an album build, where it reads as fact.
+    // Withdrawn as D5. §5.5's rules — non-ASCII, a >28-char title, a whole title wrapped
+    // in parentheses — are witnessed where they belong: `scripts/album_prep.py
+    // --self-test`, on inputs labelled synthetic. What is left here is the invariant that
+    // the bake does not rewrite the config, so a long or accented title can only reach
+    // ALBM1 through the fold that is tested over there.
+    let album = parsed();
+    for (index, want) in [
+        "Bioluminescent 1",
+        "Bioluminescent Clip 1",
+        "Bioluminescent 2",
+        "Bioluminescent Clip 2",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let index = index as u32;
+        let title = album.track_title(index);
+        assert_eq!(title, want, "track {index} is not Q15's name");
+        assert!(
+            title.chars().count() <= 28,
+            "track {index}: {title:?} overflows §5.2's box, and the fixture has no business doing that"
+        );
+        assert_eq!(
+            album.track_artist(index),
+            "",
+            "the tracked master carries no RIFF tags, so a track artist here would be invented"
+        );
+    }
+    assert_eq!(
+        album.album_artist(),
+        "unknown",
+        "see `[album]` in album.toml"
     );
-    assert!(
-        long.ends_with("(Alternate Mix, Take 12)"),
-        "{long:?} was cut"
-    );
-}
-
-#[test]
-fn a_whole_wrapped_title_loses_its_wrapping() {
-    // `album.toml` writes track 3 as "(Bioluminescent Clip 2)".
-    assert_eq!(parsed().track_title(3), "Bioluminescent Clip 2");
 }
 
 #[test]
