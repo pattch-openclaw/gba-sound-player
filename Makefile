@@ -6,7 +6,7 @@
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
-        uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom \
+        uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
         album-bake album-pack-check \
@@ -754,6 +754,24 @@ uli-gate-rom: format
 	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features gate,album-corpus
 	agb-gbafix $(ULI_BENCH_BIN) -o $(ULI_GATE_ROM)
 	@echo "ULI2 gate-total ROM built: $(ULI_GATE_ROM)"
+
+# The same gate arm on the **129-frame fixture**: a ~30 s hardware run whose
+# audio is the synthetic fixture (two-tone stereo, a silent gap, a noisy band,
+# high-frequency clicks) rather than music. It is the cheapest witness that the
+# whole chain — timer0/1, DMA1/2 on the FIFOs, the feeder IRQ, the ring — works on
+# silicon, and the fixture is C-pinned on both outputs, so a blue screen is a real
+# pass. Use it before flashing the 3.7 MB album build.
+ULI_GATE_FIXTURE_ROM := uli-gate-fixture.gba
+uli-gate-fixture-rom: format
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features gate
+	agb-gbafix $(ULI_BENCH_BIN) -o $(ULI_GATE_FIXTURE_ROM)
+	@echo "ULI2 gate-total ROM (fixture corpus) built: $(ULI_GATE_FIXTURE_ROM)"
+
+uli-gate-fixture: uli-gate-fixture-rom
+	timeout -k 5 180 $(GBA_TEST_RUNNER) $(ULI_GATE_FIXTURE_ROM) 2>&1 | tee uli-gate-fixture.log || true
+	@grep -q '^\[uli-bench\] PASS' uli-gate-fixture.log \
+	  || { echo "uli-gate-fixture: harness/pin failure — see uli-gate-fixture.log"; exit 1; }
+	@grep -E '^\[uli-bench\] (corpus|decode frames|frame prod8 |frame gate |gate feeder|gate pin)' uli-gate-fixture.log || true
 
 uli-gate: uli-gate-rom
 	timeout -k 5 900 $(GBA_TEST_RUNNER) $(ULI_GATE_ROM) 2>&1 | tee $(ULI_GATE_LOG) || true
