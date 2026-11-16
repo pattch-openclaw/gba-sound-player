@@ -205,6 +205,85 @@ The important reading:
 
 ---
 
+## Capacity: how much audio fits a cartridge
+
+The product configuration carries **12,735 B/s ≈ 101.9 kbit/s**, and that is a
+measured constant rather than a target: the reference album is 33,280,736 B over
+2,612.815 s (12,737 B/s) and `assets/sound/bioluminescent.wav` encoded at the same
+settings is 3,293,048 B over 258.613 s (12,733 B/s). Capacity is therefore
+arithmetic on one number plus the ROM's own code — **~304 KB measured**, from
+`uli-play.gba`'s 3,597,068 B against its 3,293,048 B blob.
+
+| cartridge | audio payload (after ROM code) | **play time** |
+|---|---:|---:|
+| 1 MiB | 744,556 B | 0:58 |
+| 2 MiB | 1,793,132 B | 2:21 |
+| 4 MiB | 3,890,284 B | 5:05 |
+| 8 MiB | 8,084,588 B | 10:35 |
+| 16 MiB | 16,473,196 B | 21:34 |
+| **32 MiB** | 33,250,412 B | **43:31** |
+| — per MiB | 1,048,576 B | 1:22 |
+
+The reference project's album is 43:32 for the same reason this table's largest
+row is: it was encoded with `--budget 33,292,288` (32 MiB less 256 KiB), so the
+encoder *fills the cart* and "an album" is
+whatever 43½ minutes at ~102 kbit/s is. **The C and Rust sides are the same
+number**: there is one bitstream format and one encoder (the C encoder of record,
+run off-tree to produce assets), and the Rust decoder is bit-exact, so a Rust
+build cannot store more or fewer minutes than the C one. There is no Rust encoder
+yet; when one lands it must honour the same rate contract, with the byte budget as
+its knob.
+
+### There is no sample-rate table, and in v1 there cannot be one
+
+ULI2's rate is **fixed at 32,768 Hz** (decision log, "Rate flexibility — v1
+fixed"): the container carries `sample_rate`, and this decoder rejects anything
+but 32,768 (`format::RATE`). So capacity is a function of **bitrate**, and
+bitrate is the encoder's album-wide allocation (`--budget`, `--cap`), not a rate
+choice. An album longer than ~43 minutes therefore has two levers, and they are
+not equivalent.
+
+**Lever 1 — a lower bitrate budget: no format change, costs fidelity.** Fill the
+same 33,250,412 B payload at a lower rate:
+
+| target bitrate | bytes/s | **play time on 32 MiB** | what else moves |
+|---|---:|---:|---|
+| 101.9 kbit/s (product) | 12,735 | 43:31 | the measured row: 32.29 / 25.78 dB, worst frame 96.02% |
+| 80 kbit/s | 10,000 | 55:25 | fidelity cost **unmeasured**; decode CPU falls |
+| 64 kbit/s | 8,000 | 69:16 | as above, further |
+| 51 kbit/s | 6,375 | 86:56 | as above, further |
+
+This lever *helps* the CPU: a coarser quantiser leaves fewer nonzero
+coefficients, so the frame gets cheaper at the same time as the album gets
+longer. Its cost is fidelity, and nothing in this repository measures the
+trade below 102 kbit/s — the reference's own record only prices `--cap 74`
+against uncapped (~0.3 dB), not a budget change. A fidelity figure for 80 or
+64 kbit/s would have to be measured on the committed corpus first.
+
+**Lever 2 — a 16,384 Hz mode: a format and encoder change, costs the top
+octave.** At the same bits per stereo sample, halving the rate halves the bytes
+per second (~50.9 kbit/s, 6,367 B/s), so the same 32 MiB cart holds **≈ 87:03**
+— and because a frame is still 512 samples, the decoder's work per frame is
+unchanged while frames arrive half as often. The frame period doubles to 524,288
+cycles, so the album's measured costs become **decode 42.2% / gate total 48.0%**
+of the period: half the CPU per second of audio, and roughly double the headroom
+for a UI. What it costs is everything above 8 kHz
+(Nyquist), all of this file's measurements would have to be re-taken (none of
+them transfer), the parser's rate check and `format::RATE` change, and the
+encoder needs the new rate plus a budget at the same bits/sample.
+
+It is worth noting what that lever would *align*: the album player's packer
+already declares 16,384 Hz as its rate contract (`ALBUM-PLAYER.md` Q14), which
+ULI2 v1 currently violates — a 16,384 Hz ULI2 mode would agree with the
+application's existing clock instead of forcing the application to change.
+
+The two levers compose, and the composition is where "long album" stops being
+interesting: 16,384 Hz at ~25.5 kbit/s (half the product's bits per sample again)
+fills the same cart with **≈ 174 minutes**, at a fidelity nobody has measured. The
+empirical check for any of this is one corpus run — encode the same master at the
+new target, `make uli-album-bench` and `make uli-gate` for the cycles, and a
+fidelity run for the dB. Until that exists, none of these rows is a claim.
+
 ## What we are building
 
 ### Crates
