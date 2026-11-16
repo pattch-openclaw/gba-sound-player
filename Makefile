@@ -252,6 +252,7 @@ ALBUM_PROBE_ART_TOOL := scripts/album_probe_art.py
 # to fail on.
 
 WORKSPACES := . crates/flac-lite crates/flac-lite-gba crates/gba-playback \
+              crates/gba-audio-hw \
               examples/flac_spike \
               examples/overlay-kernel-check examples/opus_spike \
               crates/uli-lite crates/uli-lite-gba examples/uli_spike examples/uli_bench \
