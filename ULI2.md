@@ -61,7 +61,27 @@ off" section records the ceilings left, the two negative results (`huff_slow` is
 already optimal; register relief in `dec_chan` does not pay) and the checklist
 worth applying to the feeder and UI. That is the decode
 wall, not the gate total: convert + IRQ + DMA and this tree's UI are not in it, so
-U4 and playback remain open.
+U4 and playback remain open. **PR E (2026-11-15) then measured both over a real
+album**: `assets/sound/bioluminescent.wav` at the product configuration
+(3,293,048 B / 101.686 kbit/s / 16,553 frames, C-pinned `55e710af`) puts the
+decode wall at **220,062 worst (f16,204) / 189,780 mean = 83.94% / 72.40%** — the
+129-frame tail was not an underestimate — and the **gate total** (decode +
+convert + push + IRQ + DMA, shipping `RingFeed`, real 32,768 Hz timebase, player
+model — no in-loop verification, runtime exactly the album) at **251,712 worst /
+221,245 mean = 96.02% / 84.40%**, a paired **+12.06 / +11.99 points** for the
+output stage. U4's ceiling is therefore written down as **the
+period itself**, met with **3.98 points of margin at the worst frame** and 15.6 at
+the mean — thin enough that the UI, art and DMA/code-fetch arbitration (which
+mGBA does not model) remain the reason no playback claim is made. The 43-minute
+`gba-audio` album was measured out of court as PR E's corpus: it does not fit a
+32 MiB cart beside this instrument by **174,716 B**, and duration does not
+strengthen a tail. Its cross-check (their 104/64/12 pins) and a synthetic
+quad-heavy set stay as PR E's gated E3. **The chain has also been heard on
+silicon:** `make uli-play-rom` (`--features play-only`) runs one paced pass and
+nothing else, and a manual hardware listen on 2026-11-16 played the album through
+its entirety with no glitches and no silent gaps — a sanity check of the 32,768 Hz
+timer/DMA/FIFO chain, not U5 (one unit, one run, no counted underruns, no period
+audit, judgement by ear).
 This file is the decision record (why
 ULI2, what it is, the licensing and encoder risks); the live plan, gates and
 measurement ledger are [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md).
@@ -184,6 +204,97 @@ The important reading:
   use case.
 
 ---
+
+## Capacity: how much audio fits a cartridge
+
+The product configuration carries **12,735 B/s ≈ 101.9 kbit/s**, and that is a
+measured constant rather than a target: the reference album is 33,280,736 B over
+2,612.815 s (12,737 B/s) and `assets/sound/bioluminescent.wav` encoded at the same
+settings is 3,293,048 B over 258.613 s (12,733 B/s). Capacity is therefore
+arithmetic on one number plus the ROM's own code — **~304 KB measured**, from
+`uli-play.gba`'s 3,597,068 B against its 3,293,048 B blob. That image is the
+minimal one (codec, feeder, no UI); a product ROM with a screen, art and a
+manifest carries more code and correspondingly less audio, so read the table as
+an upper bound.
+
+| cartridge | audio payload (after ROM code) | **play time** |
+|---|---:|---:|
+| 1 MiB | 744,556 B | 0:58 |
+| 2 MiB | 1,793,132 B | 2:21 |
+| 4 MiB | 3,890,284 B | 5:05 |
+| 8 MiB | 8,084,588 B | 10:35 |
+| 16 MiB | 16,473,196 B | 21:34 |
+| **32 MiB** | 33,250,412 B | **43:31** |
+| — per MiB | 1,048,576 B | 1:22 |
+
+The reference project's album is 43:32 for the same reason this table's largest
+row is: it was encoded with `--budget 33,292,288` (32 MiB less 256 KiB), so the
+encoder *fills the cart* and "an album" is
+whatever 43½ minutes at ~102 kbit/s is. **The C and Rust sides are the same
+number**: there is one bitstream format and one encoder (the C encoder of record,
+run off-tree to produce assets), and the Rust decoder is bit-exact, so a Rust
+build cannot store more or fewer minutes than the C one. There is no Rust encoder
+yet; when one lands it must honour the same rate contract, with the byte budget as
+its knob.
+
+### There is no sample-rate table, and in v1 there cannot be one
+
+ULI2's rate is **fixed at 32,768 Hz** (decision log, "Rate flexibility — v1
+fixed"): the container carries `sample_rate`, and this decoder rejects anything
+but 32,768 (`format::RATE`). So capacity is a function of **bitrate**, and
+bitrate is the encoder's album-wide allocation (`--budget`, `--cap`), not a rate
+choice. An album longer than ~43 minutes therefore has two levers, and they are
+not equivalent.
+
+**Lever 1 — a lower bitrate budget: no format change, costs fidelity.** Fill the
+same 33,250,412 B payload at a lower rate:
+
+| target bitrate | bytes/s | **play time on 32 MiB** | what else moves |
+|---|---:|---:|---|
+| 101.9 kbit/s (product) | 12,735 | 43:31 | the reference album's 32.29 / 25.78 dB; this tree's worst frame 96.02% |
+| 80 kbit/s | 10,000 | 55:25 | fidelity cost **unmeasured**; entropy/dequant CPU falls |
+| 64 kbit/s | 8,000 | 69:16 | as above, further |
+| 51 kbit/s | 6,375 | 86:56 | as above, further |
+
+This lever *helps* part of the CPU: a coarser quantiser leaves fewer nonzero
+coefficients, so the entropy, dequant and M/S work falls. The synthesis half does
+not move — it was ~68% of the frame at the last attribution — so read the saving
+as confined to the other third. Its cost is fidelity, and nothing in this
+repository measures the trade below 102 kbit/s — the reference's own record only prices `--cap 74`
+against uncapped (~0.3 dB), not a budget change. A fidelity figure for 80 or
+64 kbit/s would have to be measured on the committed corpus first.
+
+**Lever 2 — a 16,384 Hz mode: a format and encoder change, costs the top
+octave.** At the same bits per stereo sample, halving the rate halves the bytes
+per second (~50.9 kbit/s, 6,367 B/s), so the same 32 MiB cart holds **≈ 87:03**
+— and because a frame is still 512 samples, the decoder's work per frame is
+unchanged while frames arrive half as often. The frame period doubles to 524,288
+cycles, so the album's measured costs become **decode 42.2% / gate total 48.0%**
+of the period: half the CPU per second of audio, and roughly double the headroom
+for a UI. What it costs is everything above 8 kHz
+(Nyquist), all of this file's measurements would have to be re-taken (none of
+them transfer), the parser's rate check and `format::RATE` change, and the
+encoder needs the new rate plus a budget at the same bits/sample.
+
+One note on the application seam, so none of this is read as a conflict. The
+album player is being built out against **one** backend today — FLAC — and its
+16,384 Hz product clock is *that backend's* rate: the `rate_hz` declaration and
+the GAFP packer's profile refusal (`ALBUM-PLAYER.md` Q14), and the single
+`RATE_LOG2` the application currently ties its geometry to. §4.2b's
+one-backend-per-ROM choice already has the clock derived from whichever backend
+is linked as PR-3 work (PR-2's D4), so a ULI2 backend at 32,768 Hz does not
+contradict the application: it exercises the seam as designed. A 16,384 Hz ULI2
+*mode* would instead coincide with the app's present constant (no geometry change
+at all), while keeping 32,768 Hz keeps the band every ULI2 measurement in this
+file was taken in. Decide that on capacity, CPU and the top octave — not on the
+application's present constant, which is the FLAC path's.
+
+The two levers compose, and the composition is where "long album" stops being
+interesting: 16,384 Hz at ~25.5 kbit/s (half the product's bits per sample again)
+fills the same cart with **≈ 174 minutes**, at a fidelity nobody has measured. The
+empirical check for any of this is one corpus run — encode the same master at the
+new target, `make uli-album-bench` and `make uli-gate` for the cycles, and a
+fidelity run for the dB. Until that exists, none of these rows is a claim.
 
 ## What we are building
 
@@ -596,8 +707,8 @@ claims to be measured, not inherited from `gba-audio`.
 | **U1 — reference** | `uli-lite` remains a bit-exact, host-testable reference and oracle (no longer a portable-product claim). | `make uli-test`; committed corpus; thumbv4t `check` |
 | **U2 — bit-exact host** | The Rust core matches the C integer reference frame-for-frame on the committed corpus and rejects malformed frames without panic. | `make uli-test`; pinned hashes |
 | **U3 — bit-exact product** | The product kernel set (`ArmKernels`) decodes the corpus to the pinned int8/int16 frames, in the host full-frame twin and on the target. **Met (PR A).** | `make uli-bench` (both arms + on-target twin); `make uli-overlay-test` (host kernel + decoder twins) |
-| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Not met.** Ladder: 204% (PR B) -> 200% (split `huff`) -> 186% -> 175% -> 164% (asm FFT) -> 162% -> 157% (`iwram-tw`) -> 148% (`iwram-tables`) -> 138% (C-3d) -> **274,198 / 232,090 = 105% / 89%** (C-3). **Step 0 (2026-11-15) attributed the worst frame (f98) by difference in the product image: synthesis 162,987 (59%), entropy/dequant/M-S 110,741 (40%), wrapper 486 - i.e. 69% of the 92,286-cycle distance to the C worst-frame shape is the entropy path and 31% synthesis. Per channel the kernels are 1.10-1.33x C (pre 1.22x, fft 1.33x, post 1.10x, ola 1.11x), so the previous 'asm kernels first, ~194,000 prize' order is retired; the live order is in `crates/uli-lite/PLAN-OF-RECORD.md` ('Critical path to real time').** | `make uli-bench`; mGBA, then hardware |
-| **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | `product-play` equivalent for ULI2; hardware runs |
+| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Met on the album corpus (PR E, 2026-11-15): decode 220,062 = 83.94% worst; gate total 251,712 = 96.02% worst / 84.40% mean in the player model (the same arm verifying in-loop reads 98.33% and starves 12.06 s, which is the harness); ceiling written down as the 262,144-cycle period, 10,432 cycles of margin at the worst frame; no UI, mGBA only.** Ladder: 204% (PR B) -> 200% (split `huff`) -> 186% -> 175% -> 164% (asm FFT) -> 162% -> 157% (`iwram-tw`) -> 148% (`iwram-tables`) -> 138% (C-3d) -> **274,198 / 232,090 = 105% / 89%** (C-3). **Step 0 (2026-11-15) attributed the worst frame (f98) by difference in the product image: synthesis 162,987 (59%), entropy/dequant/M-S 110,741 (40%), wrapper 486 - i.e. 69% of the 92,286-cycle distance to the C worst-frame shape is the entropy path and 31% synthesis. Per channel the kernels are 1.10-1.33x C (pre 1.22x, fft 1.33x, post 1.10x, ola 1.11x), so the previous 'asm kernels first, ~194,000 prize' order is retired; the live order is in `crates/uli-lite/PLAN-OF-RECORD.md` ('Critical path to real time').** | `make uli-bench`; mGBA, then hardware |
+| **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | `product-play` equivalent for ULI2; hardware runs. **Not met, but the chain has been heard:** one manual hardware pass of `make uli-play-rom` (audio-only, `--features play-only`) played the album to its end with no glitches and no silent gaps (2026-11-16). That is a sanity check, not the gate — no counted underrun ledger, no period audit, one unit, one run. |
 | **U6 — memory** | IWRAM/EWRAM/stack stay inside the product budget with the UI and feeder linked. | linker map + runtime stack check |
 | **U7 — licensing/spec** | A public crate, if published, has a permissive license and a standalone format specification; otherwise it remains `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** |
 
