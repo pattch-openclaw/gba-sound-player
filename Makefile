@@ -8,7 +8,7 @@
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
-        album-bake album-pack-check album-seam-test \
+        album-bake album-pack-check album-seam-test album-rom \
         uli-spike-rom clean clean-cache check help toolchain-check
 
 # ===========================================================================
@@ -175,6 +175,12 @@ ALBUM_BLOB := $(ALBUM_ASSETS_DIR)/albm1.bin
 ALBUM_ASSETS_RS := $(ALBUM_CRATE_DIR)/src/assets.rs
 ALBUM_GATE_LOG := album-pack-check.log
 ALBUM_SEAM_GATE_LOG := album-seam-test.log
+# The playback ROM (PR-3a step iii): the binary cargo writes, and the fixed image
+# `agb-gbafix` makes of it. Both are build output — `*.gba` at the root is already
+# cleaned by `clean`'s output pass.
+ALBUM_ROM_BIN := $(ALBUM_CRATE_DIR)/target/$(TARGET)/release/album-play
+ALBUM_ROM := album-player.gba
+ALBUM_ROM_RUN_LOG := album-rom-run.log
 
 # --- the core and its overlay -------------------------------------------------
 FLAC_CRATE_DIR_MANIFEST := $(abspath crates/flac-lite/Cargo.toml)
@@ -969,6 +975,28 @@ album-seam-test: toolchain-check
 	@echo "  track decodes to its fnv_pcm pin on the host, its FIFO bytes fold to the bake's fnv_fifo_l/fnv_fifo_r"
 	@echo "  as the ROM will push them, and a stub-only build links no decoder."
 
+# The playback ROM (PR-3a step iii): `ALBM1` + the packed blobs → the app's own chain at 16,384 Hz.
+# It boots, verifies its own album (§D-C), plays track 1 end to end through the shipped feeder, and
+# prints its `[album-rom]` ledger; like every playback ROM here it ends in `loop {}`.
+#
+# `album-bake` is a **prerequisite on purpose** (R11, §2.3(4)): a build must not be able to skip the
+# pack step and link yesterday's blob, so a stale `albm1.bin`/`assets.rs` cannot reach an image.
+# Run it and read the log: `timeout -k 5 600 $(GBA_TEST_RUNNER) $(ALBUM_ROM) > $(ALBUM_ROM_RUN_LOG)`,
+# and remember that exit 124 IS the passing result (the ROM reached its `loop {}`). The old 240 s
+# was a guess with no recorded headroom — a 30 s clip plus a full cold re-decode and two folds — and
+# is now 600 s. The ROM carries no wall-clock instrument (R10), so the image cannot vouch for its own
+# duration: what the harness measured here is that the `verdict` line lands ~4 s into the run (two
+# timed mGBA runs), which says the old bound was generous rather than tight, but a slower host has
+# no bound of its own.
+album-rom: album-bake
+	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin album-play
+	agb-gbafix $(ALBUM_ROM_BIN) -o $(ALBUM_ROM)
+	@ls -l $(ALBUM_ROM)
+	@size -A $(ALBUM_ROM_BIN) | grep -E '^(File|\.text|\.iwram|\.bss)'
+	@echo "  run: timeout -k 5 600 $(GBA_TEST_RUNNER) $(ALBUM_ROM) > $(ALBUM_ROM_RUN_LOG) 2>&1"
+	@echo "  judge by the log's '[album-rom] verdict' line, never by the exit status: a PASS loops"
+	@echo "  forever, so the timeout's exit 124 IS the passing result."
+
 # ===========================================================================
 # Aggregates
 # ===========================================================================
@@ -1069,7 +1097,7 @@ clean-outputs:
 	@rm -f $(SPIKE_CRATE_DIR)/assets/rate_*.bin
 	@rm -f uli-bench*.log uli-attrib*.log
 	@rm -f album-probe*.log
-	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG)
+	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_ROM_RUN_LOG)
 	@find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} + 2>/dev/null || true
 
 # The caches: the fifteen workspaces' `target/` dirs, discovered from the tree.
@@ -1169,7 +1197,9 @@ help:
 	@echo "      album-pack-check (two byte-identical bakes, the four refusals, the ALBM1 host gate),"
 	@echo "      album-seam-test (the seam's host gate: derived geometry vs the shipped figures, both"
 	@echo "      backend arms, the FLAC arm's fnv_pcm and fnv_fifo_l/fnv_fifo_r pins, and a stub-only"
-	@echo "      build with no decoder linked)."
+	@echo "      build with no decoder linked),"
+	@echo "      album-rom -> $(ALBUM_ROM) (bake + the ROM; run it with mgba-test-runner and read the"
+	@echo "      [album-rom] ledger — exit 124 IS the pass)."
 	@echo "  Tests/format:  test (test-rom + flac-test + uli-test), test-rom, check, format"
 	@echo "  Housekeeping:  clean (outputs only; caches kept), clean-deep (+ every"
 	@echo "                 workspace's target/), clean-cache (container volumes),"

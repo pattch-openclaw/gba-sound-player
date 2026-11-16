@@ -20,9 +20,10 @@
 //! [`meta::PRODUCT_RATE_HZ`] and [`geometry::RATE_HZ`] are one fact asserted
 //! against each other in `geometry.rs`.
 //!
-//! PR-2 landed the manifest half; PR-3 step (ii) lands this seam and its geometry.
-//! The ROM main and the `agb` bootstrap are step (iii): no binary is declared
-//! here and `backend/` links no display or timer registers.
+//! PR-2 landed the manifest half; PR-3 step (ii) landed this seam and its geometry, and step (iii)
+//! adds the ROM main (`src/album_play_main.rs`, `[[bin]] album-play`, `make album-rom`). The library
+//! is still platform-free: it declares no binary of its own, and `backend/` links no display or timer
+//! registers — the `agb` bootstrap lives in the bin.
 //!
 //! ## Generated, never tracked
 //!

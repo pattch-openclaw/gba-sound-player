@@ -18,9 +18,9 @@
 //! ## What it was transcribed from
 //!
 //! `examples/flac_integration/src/product_play_main.rs`, cited by line in each
-//! item's docs: the register map (`:262-330`), the I/O helpers (`:526-542`),
-//! [`enable_sound`] (`:646-661`), [`teardown_audio`] (`:663-670`),
-//! [`rearm_dma`] (`:681-702`), [`arm_audio_chain`] (`:704-732`) and
+//! item's docs: the register map (`:263-320`), the I/O helpers (`:526-540`),
+//! [`enable_sound`] (`:646-659`), [`teardown_audio`] (`:663-670`),
+//! [`rearm_dma`] (`:681-696`), [`arm_audio_chain`] (`:704-734`) and
 //! [`clear_timer1_if`] (`:1557`). That file is the shipped playback path: its
 //! ordering has been on hardware, and the failure the order avoids (a stale
 //! Timer1 `IF` entering the feeder before the chain has a period to serve) is
@@ -58,7 +58,7 @@
 use agb::timer::{AllTimers, Divider};
 
 /// The GBA sound-chain register map, transcribed from
-/// `product_play_main.rs:262-330`.
+/// `product_play_main.rs:263-320`.
 ///
 /// These are private registers, named because agb 0.25.0 gives an application no
 /// other way to drive the sound FIFO itself. Channel *n*'s DMA block starts at
@@ -188,7 +188,7 @@ pub unsafe fn io_write_u32(addr: usize, value: u32) {
 /// Sound hardware on: FIFO A → left at 100 %, FIFO B → right at 100 %, both
 /// FIFOs reset, master enable, bias at 8-bit/65,536 Hz.
 ///
-/// `product_play_main.rs:646-661`: agb `hw.rs`'s enable sequence, transcribed
+/// `product_play_main.rs:646-659`: agb `hw.rs`'s enable sequence, transcribed
 /// because those functions are `pub(super)`.
 pub fn enable_sound() {
     let sound_control: u16 = (1 << 2) // sound A volume 100%
@@ -223,7 +223,7 @@ pub fn teardown_audio() {
 /// Re-arm both sound DMAs from the slot just filled: stop, source, destination,
 /// count, go.
 ///
-/// `product_play_main.rs:681-702`. agb's `enable_dma_for_sound` (`hw.rs:56-68`)
+/// `product_play_main.rs:681-696`. agb's `enable_dma_for_sound` (`hw.rs:56-68`)
 /// writes source, destination and control and no count at all — in sound-FIFO
 /// mode the FIFO pulls 4 words per request — so [`AudioChain::dma_words`] is
 /// ours, deliberately, and it is the shape the rate ROM ran with on hardware.
@@ -254,7 +254,7 @@ pub unsafe fn rearm_dma(lsrc: *const u8, rsrc: *const u8, chain: &AudioChain) {
 
 /// Program the audio timebase from `chain` and start it.
 ///
-/// `product_play_main.rs:704-732`. Timer0 counts CPU cycles at /1 to
+/// `product_play_main.rs:704-734`. Timer0 counts CPU cycles at /1 to
 /// `ticks_per_sample` and cascades into timer1, which overflows every
 /// `chunk_samples` and raises its interrupt — one period per sound-DMA refill.
 /// Timer2 is a cascaded period witness (this crate never reads it; the audit
