@@ -212,7 +212,10 @@ measured constant rather than a target: the reference album is 33,280,736 B over
 2,612.815 s (12,737 B/s) and `assets/sound/bioluminescent.wav` encoded at the same
 settings is 3,293,048 B over 258.613 s (12,733 B/s). Capacity is therefore
 arithmetic on one number plus the ROM's own code — **~304 KB measured**, from
-`uli-play.gba`'s 3,597,068 B against its 3,293,048 B blob.
+`uli-play.gba`'s 3,597,068 B against its 3,293,048 B blob. That image is the
+minimal one (codec, feeder, no UI); a product ROM with a screen, art and a
+manifest carries more code and correspondingly less audio, so read the table as
+an upper bound.
 
 | cartridge | audio payload (after ROM code) | **play time** |
 |---|---:|---:|
@@ -248,15 +251,16 @@ same 33,250,412 B payload at a lower rate:
 
 | target bitrate | bytes/s | **play time on 32 MiB** | what else moves |
 |---|---:|---:|---|
-| 101.9 kbit/s (product) | 12,735 | 43:31 | the measured row: 32.29 / 25.78 dB, worst frame 96.02% |
-| 80 kbit/s | 10,000 | 55:25 | fidelity cost **unmeasured**; decode CPU falls |
+| 101.9 kbit/s (product) | 12,735 | 43:31 | the reference album's 32.29 / 25.78 dB; this tree's worst frame 96.02% |
+| 80 kbit/s | 10,000 | 55:25 | fidelity cost **unmeasured**; entropy/dequant CPU falls |
 | 64 kbit/s | 8,000 | 69:16 | as above, further |
 | 51 kbit/s | 6,375 | 86:56 | as above, further |
 
-This lever *helps* the CPU: a coarser quantiser leaves fewer nonzero
-coefficients, so the frame gets cheaper at the same time as the album gets
-longer. Its cost is fidelity, and nothing in this repository measures the
-trade below 102 kbit/s — the reference's own record only prices `--cap 74`
+This lever *helps* part of the CPU: a coarser quantiser leaves fewer nonzero
+coefficients, so the entropy, dequant and M/S work falls. The synthesis half does
+not move — it was ~68% of the frame at the last attribution — so read the saving
+as confined to the other third. Its cost is fidelity, and nothing in this
+repository measures the trade below 102 kbit/s — the reference's own record only prices `--cap 74`
 against uncapped (~0.3 dB), not a budget change. A fidelity figure for 80 or
 64 kbit/s would have to be measured on the committed corpus first.
 
@@ -272,10 +276,18 @@ for a UI. What it costs is everything above 8 kHz
 them transfer), the parser's rate check and `format::RATE` change, and the
 encoder needs the new rate plus a budget at the same bits/sample.
 
-It is worth noting what that lever would *align*: the album player's packer
-already declares 16,384 Hz as its rate contract (`ALBUM-PLAYER.md` Q14), which
-ULI2 v1 currently violates — a 16,384 Hz ULI2 mode would agree with the
-application's existing clock instead of forcing the application to change.
+One note on the application seam, so none of this is read as a conflict. The
+album player is being built out against **one** backend today — FLAC — and its
+16,384 Hz product clock is *that backend's* rate: the `rate_hz` declaration and
+the GAFP packer's profile refusal (`ALBUM-PLAYER.md` Q14), and the single
+`RATE_LOG2` the application currently ties its geometry to. §4.2b's
+one-backend-per-ROM choice already has the clock derived from whichever backend
+is linked as PR-3 work (PR-2's D4), so a ULI2 backend at 32,768 Hz does not
+contradict the application: it exercises the seam as designed. A 16,384 Hz ULI2
+*mode* would instead coincide with the app's present constant (no geometry change
+at all), while keeping 32,768 Hz keeps the band every ULI2 measurement in this
+file was taken in. Decide that on capacity, CPU and the top octave — not on the
+application's present constant, which is the FLAC path's.
 
 The two levers compose, and the composition is where "long album" stops being
 interesting: 16,384 Hz at ~25.5 kbit/s (half the product's bits per sample again)
