@@ -746,6 +746,12 @@ uli-album-bench: uli-album-bench-rom
 # arm is `src/gate.rs`; `uli-album-bench` is the decode wall on the same corpus,
 # so the pair separates "decode" from "decode + output stage" in one image.
 #
+# The default arm is the **player model**: it hashes nothing in the paced loop
+# (a player does not), drains the ring before stopping, and therefore runs for
+# exactly the album's length. `--features gate-hash` is the attribution arm that
+# verifies in-loop instead: +~5,000 cycles/frame on the windows *and* 12 s of
+# starvation, because in a paced pass untimed producer work is not free.
+#
 # The verdict gates on the pins and on the counter's integrity, **not** on
 # underruns: a starved period is the finding this arm exists to produce.
 ULI_GATE_ROM := uli-gate.gba

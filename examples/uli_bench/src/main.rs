@@ -1117,13 +1117,27 @@ fn run(gba: &mut agb::Gba) -> bool {
                     rep.over_period_worst
                 );
                 agb::println!("[uli-bench] gate first_starve_frame={}", rep.first_starve);
-                let pin = rep.all8 == EXPECTED_INT8;
-                agb::println!(
-                    "[uli-bench] gate pin int8={:08x} (want {:08x}) [{}]",
-                    rep.all8,
-                    EXPECTED_INT8,
-                    if pin { "PASS" } else { "FAIL" }
-                );
+                // The default arm does not hash in the paced loop (a player does
+                // not), so it has no pin of its own to check: its correctness
+                // witness is the untimed passes in this same image. `gate-hash`
+                // hashes every frame and can check the album pin directly.
+                let pin = if cfg!(feature = "gate-hash") {
+                    rep.all8 == EXPECTED_INT8
+                } else {
+                    true
+                };
+                if cfg!(feature = "gate-hash") {
+                    agb::println!(
+                        "[uli-bench] gate pin int8={:08x} (want {:08x}) [{}]",
+                        rep.all8,
+                        EXPECTED_INT8,
+                        if pin { "PASS" } else { "FAIL" }
+                    );
+                } else {
+                    agb::println!(
+                        "[uli-bench] gate verify=off (player model: no in-loop hashing; pins witnessed by the untimed passes)"
+                    );
+                }
                 pin && rep.cost.suspect == 0
             }
             Err(e) => {

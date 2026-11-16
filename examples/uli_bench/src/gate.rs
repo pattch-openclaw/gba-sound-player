@@ -57,7 +57,9 @@ use uli_lite::format::M;
 use uli_lite::{Album, CodeTables};
 use uli_lite_gba::{GbaDecoder, HotState};
 
-use super::{Counter, FrameCost, fnv_bytes, fnv_i8, timed_irq};
+use super::{Counter, FrameCost, timed_irq};
+#[cfg(feature = "gate-hash")]
+use super::{fnv_bytes, fnv_i8};
 
 /// 16,777,216 Hz / 32,768 Hz: one DAC sample per 512 CPU cycles.
 const TICKS_PER_SAMPLE: u32 = 512;
@@ -325,7 +327,10 @@ pub fn gate_pass(
     // Prefill: decode the first frames untimed and push them.
     for _ in 0..PREFILL_FRAMES {
         decoder.decode_frame(l8, r8, None, None)?;
-        all8 = fnv_bytes(all8, &fnv_i8(2_166_136_261, l8, r8).to_le_bytes());
+        #[cfg(feature = "gate-hash")]
+        {
+            all8 = fnv_bytes(all8, &fnv_i8(2_166_136_261, l8, r8).to_le_bytes());
+        }
         for i in 0..M {
             bl[i] = l8[i] as u8;
             br[i] = r8[i] as u8;
@@ -379,8 +384,17 @@ pub fn gate_pass(
             r
         });
         res?;
-        // Hash outside the window, as every other arm does.
-        all8 = fnv_bytes(all8, &fnv_i8(2_166_136_261, l8, r8).to_le_bytes());
+        // Hash outside the window, `gate-hash` only. **This is not free**: the
+        // gate pass is paced by the audio clock, so producer work the window does
+        // not count still costs the feeder ground. Measured: the hash is
+        // ~12,200 cycles/frame, which made the producer 4.7% slower than real
+        // time and starved 772 periods (12.06 s) over the album. A player hashes
+        // nothing, so the default arm does not either — the pin is witnessed by
+        // the untimed passes in the same image.
+        #[cfg(feature = "gate-hash")]
+        {
+            all8 = fnv_bytes(all8, &fnv_i8(2_166_136_261, l8, r8).to_le_bytes());
+        }
         let net = raw.saturating_sub(overhead);
         if net > 262_144 {
             over_period += 1;
@@ -389,6 +403,13 @@ pub fn gate_pass(
         cost.observe(f, net, decoder.ops());
     }
 
+    // Drain: the producer runs ~14% ahead of the clock, so it finishes with the
+    // ring full. A player keeps the chain running until the queue is empty; so
+    // does this arm, which is what makes its runtime exactly the album's length
+    // instead of 250 ms short of it.
+    while critical_section::with(|cs| FEED.borrow_ref(cs).ready()) > 0 {
+        core::hint::spin_loop();
+    }
     stop_chain(timer0, timer1);
     drop(handler);
     teardown_audio();

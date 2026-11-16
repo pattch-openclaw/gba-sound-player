@@ -30,6 +30,16 @@ album-corpus = []
 # record; `make uli-gate` builds and runs it.
 gate = ["dep:gba-playback"]
 
+# Attribution arm for the gate pass: hashes every decoded frame **in the paced
+# loop**, which is what lets the arm check the album pin itself. Off by default
+# because the gate pass is paced by the audio clock, so untimed producer work is
+# not free: the hash costs ~12,200 cycles/frame, which made the producer 4.7%
+# slower than real time and starved the feeder for 772 periods (12.06 s) across
+# the album. The default arm is the **player model** — no verification in the
+# loop, the pin witnessed by the untimed passes in the same image — and its
+# runtime is exactly the audio's.
+gate-hash = ["gate"]
+
 # Per-frame dump for attribution work: one CSV-ish line per frame with the
 # measured window and the decoder's operation counts, fitted host-side. Off by
 # default so the gate's log stays the record. Implies `verify`, because the dump
