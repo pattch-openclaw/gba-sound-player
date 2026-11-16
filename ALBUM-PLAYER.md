@@ -1248,6 +1248,65 @@ that rather than promote an internal constant into a headline.
 | **5 — Hardware + the second backend.** Both GBA units, two runs each, `none` vs each viz; then the album-length build on the lossy backend — **U4 is not met (105% worst / 89% mean, 2026-11-15), so this waits on real-time decode with margin, then U5 (playback) and PR D (the output stage)**, and the app-side work is a `BACKEND=uli2` rebuild plus a fresh set of measurements, changing no screen and no tool (§4.2b is why that is the expectation rather than a hope) | **AP-7**, **AP-9** |
 | **6 — Reach.** A14 web config, A15 toy game | **AP-8** |
 
+**Phase 1's pack step landed 2026-11-15 as PR-2 (A3a, §9.0).** The tracked
+`examples/album_player/album.toml` → `scripts/album_prep.py` (product-rate clip
+extraction, tag read, §5.5 fold) → `scripts/album_bake.py` (the driver; per distinct
+source it shells to `gafp_pack.py --master --emit-pin` and forwards the child's
+refusal) → three `GAFP` blobs, `ALBM1`, and the generated `src/assets.rs`, all
+gitignored. The gate is `make album-pack-check` (not `album-bake-check` — that name
+is AP-5/Phase 3's budget-and-art gate, §9.1). It bakes twice and `cmp`s every byte,
+runs the four Phase-1 refusals from `scripts/album_bake.py --self-test`, and runs
+`examples/album_player/tests/album_pack_host.rs`, which parses the finished `ALBM1`
+through the shipping `meta.rs` — refusals **(a)** declared rate ≠ product clock,
+**(b)** frames outside the encode profile (inherited, never reimplemented), **(c)**
+`ALBM1`'s `n_samples` vs the packed container's `total_samples`, **(d)** the writer's
+output re-read through the reader that ships.
+
+Real census from the fixture pack (asset-level mean, §10.2b's label — not a
+worst-frame row): the 258.61 s master becomes **12,293,131 B / 380.3 kbit/s**, the
+two 30 s clips **1,337,159 B / 356.6** and **1,474,602 B / 393.2 kbit/s**, and the
+two full tracks alias one blob, so the asset region is **15,104,892 B of a
+33,554,432 B cart (45.0%)** over **9.62 album minutes**; the duration-weighted mean
+is **~380 kbit/s ⇒ ~11.8 min/cart**, against R2's measured ~12.3 min. The host
+suite's count is a floor, not a target.
+
+The app crate takes §6's no-divide arithmetic as a **project-source dependency**
+(`gba_playback::nodiv`, path dependency on `crates/gba-playback`) and owns **no**
+`#[path]` include — §2.2's rule applied to the second file the app wanted from
+another directory. Recorded as **D4** below.
+
+**Deviations D1–D4, recorded here and not yet applied to §9.1.** §9.1's table says
+`album-rom` and `album-test` land in Phase 1. PR-2 lands the *pack* half only: there
+is no ROM main, no `PcmSource`/backend pair and nothing that plays, so both targets
+are PR-3's (**D3**) and §9.1's "Lands 1" reading is deferred rather than wrong — the
+table is left untouched until that half lands, at which point the two rows and this
+note are the same edit.
+
+The other two are Phase-1 readings the config and the reader needed and the spec
+leaves implicit. **D1: a clip window is in the *source's* sample indices, not album
+samples.** `[[track]]`'s `start_sample`/`end_sample` are applied to the master
+before the resample to 16,384 Hz (Q15's quietest 50 ms windows are quoted at the
+master's 96 kHz), because `album_prep.extract` is codec-blind by design and cuts
+before it resamples; album positions come from `ALBM1` alone, which is the §4.3
+rule-1 division D1 keeps intact. **D2: an unknown top-level config section is a
+named refusal** (`config-section`, naming §9.0/Phase 3). Phase 1 reads
+`[album]`/`[[track]]`/`[out]`; silently ignoring `[art]`/`[viz]`/`[ui]`/`[game]`
+would make the tracked config a file that lies about what it controls, and refusing
+is the cheapest honest answer until those sections mean something.
+
+**D4: the app depends on §6's arithmetic as project source, and owns no `#[path]`
+include.** PR-2 first re-committed the error §2.2 names —
+`examples/album_player/src/lib.rs` `#[path]`-included `examples/album_probe/src/nodiv.rs`
+(and, through it, the FLAC track's `geometry.rs`). The fix is the lift §2.2 already
+prescribes rather than a local patch: `nodiv.rs` **moved** into `crates/gba-playback`
+(`gba_playback::nodiv`, re-exported by the probe and depended on by the app), and the
+clock tie became the link site's instead of the module's — `nodiv` keeps §6's
+`RATE_LOG2` and imports no geometry, while the probe asserts
+`geometry::PLAYBACK_RATE_HZ == 1 << RATE_LOG2` and the app asserts its own
+`meta::PRODUCT_RATE_HZ == 1 << RATE_LOG2`. PR-3 replaces that constant with the
+§4.2b derived `geometry.rs`; inverting the dependency is what lets one file serve
+three consumers across two directories meanwhile.
+
 Phase 0 exists because four things in this plan are genuinely new to this tree
 and each has a way to be cheaply wrong: objects/sprites (nothing shipped draws
 one), multiple simultaneously-shown backgrounds (`text.rs` shows one, one-shot),

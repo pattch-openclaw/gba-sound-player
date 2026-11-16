@@ -7,8 +7,10 @@
 //!    `ART1.md` and with `src/art_pin.rs` (the tool that generated it);
 //! 2. every refusal in `ART1.md`'s list fires, from a byte this suite mutated;
 //! 3. §6's `mm:ss` is exact over the range it is claimed for, and the bar cell
-//!    has the four bake-time properties — and `src/nodiv.rs` has exactly one
-//!    divide in it, the tagged bake-time one;
+//!    has the four bake-time properties — and `gba_playback::nodiv`'s
+//!    `RATE_LOG2` is this probe's geometry's clock (the tie the shared
+//!    arithmetic deliberately does not carry; its divide census is
+//!    `make playback-test`'s, next to the file);
 //! 4. the session clock is 0 at a start, n at an end, and never backwards within
 //!    a track (including across a pause and across a skip's re-prime);
 //! 5. the geometry's §4.2b rules hold at **both** clocks (16,384 and 32,768 Hz),
@@ -548,29 +550,6 @@ fn bar_recip_is_the_bake_time_value() {
     // floor(2^32 * 32 / 2^17) = 32 * 2^15.
     assert_eq!(nodiv::bar_recip(1 << 17), nodiv::BAR_CELLS << 15);
     assert_eq!(nodiv::bar_cell(0, nodiv::bar_recip(90_000)), 0);
-}
-
-#[test]
-fn nodiv_source_has_one_tagged_bake_time_divide() {
-    let src = include_str!("../src/nodiv.rs");
-    let mut dividing = Vec::new();
-    for (index, raw) in src.lines().enumerate() {
-        let code = raw.split("//").next().unwrap_or("");
-        if code.contains('/') || code.contains('%') {
-            dividing.push((index + 1, raw));
-        }
-    }
-    assert_eq!(
-        dividing.len(),
-        1,
-        "src/nodiv.rs must carry exactly one dividing code line, the bake-time \
-         reciprocal; found {dividing:?}"
-    );
-    let (line, raw) = dividing[0];
-    assert!(
-        raw.contains("bake-time divide"),
-        "line {line} of src/nodiv.rs divides at run time: {raw}"
-    );
 }
 
 // ---------------------------------------------------------------------------
