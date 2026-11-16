@@ -336,19 +336,24 @@ same-image control, twinned bit-exactly (the discipline that has held).
    three measured passes and yielded 42,000, so treat the next pass as
    *measure-first*: the sub-frame arms in "Step 1" already say the dequant is
    13% of the path, which bounds the arithmetic lever at ~2,000/frame.
-5. **PR E — full-album worst frame**, and the gate total (decode + convert + IRQ
-   + DMA). This is U4's real witness, and it is the only thing that can say
-   whether 83.6% on 129 frames is 83.6% on a real album. **It should come before
-   items 3-4**: the budget now has 16.4% of the frame and 2,196 B of IWRAM spare,
-   and neither has been checked against what it reserves margin *for*.
+5. ~~**PR E — the album-corpus tail and the gate total.**~~ **DONE
+   (2026-11-15): 16,553 frames at the product configuration, worst frame f16,204
+   at 220,062 = 83.94% (mean 189,780 = 72.40%) — the 129-frame tail was not an
+   underestimate (+0.3 points over 128× the frames, mean *lower*) — and the gate
+   total (decode + convert + push + IRQ + DMA) at 257,789 = **98.34% worst /
+   226,320 = 86.33% mean**. U4's ceiling is the period itself, with 4,355 cycles
+   (1.66 points) of margin at the worst frame.** See "PR E" below. E3 — the
+   quad-heavy synthetic set and the `gba-audio` album cross-check — stays gated
+   on nothing except the pre-hardware requirement.
 
-The arithmetic on the two targets, from these numbers: **<=100% is met (83.6%)
-with 16.4% spare, and the <=85% headroom target is met with 2,940 cycles of
-margin.** What remains is the honest one: the chip is still spending 83.6% of
-the frame period on the decode wall alone, the gate total (convert + IRQ + DMA)
-and this tree's UI are not in it, and **U4's ceiling is still measured, not
-assigned** — it is written down at the first arm that includes the gate total,
-and **PR E is its witness**. The next item is inside entropy because that is
+The arithmetic on the two targets, from these numbers: **<=100% is met (83.6%
+decode, 98.3% gate total) and the <=85% headroom target is met on the decode
+wall with 2,783 cycles of margin at the album's worst frame.** What remains is
+the honest one: the *gate total* now has only **1.66 points of margin at the
+worst frame**, this tree's UI and art are not in it, and mGBA does not model the
+cart prefetch buffer or DMA/code-fetch arbitration — so U4's ceiling is written
+down as the period, not claimed as a playback result, and the burst behaviour is
+PR D's. The next item is inside entropy because that is
 where the 62% of the gap is.
 
 ### Step 1 — the entropy/dequant rewrite (2026-11-15)
@@ -1525,18 +1530,160 @@ manifest/viz/cost work as the lossless path.
 
 ---
 
-### PR E — comprehensive worst-frame analysis (deferred; after the real-time regime)
+### PR E — the album-corpus tail and the gate total (landed 2026-11-15)
 
-The 129-frame corpus is an iteration instrument, not a worst-case witness. Once
-the decoder is inside a realistic regime, run the worst-frame program on a
-full-album corpus: worst/mean with frame index, sum and arm; a paired control
-in the same image; the FLAC methodology in
-[`../../flac-docs/measurements.md`](../../flac-docs/measurements.md) (the tail
-is first-class, absolute arms are image-specific, pair rather than compare
-across images). Deferred deliberately: it is not required to pick the next
-differential, and full-album runs (~70 s each, 167,222 frames) would slow the
-loop while the frame is still multiples over budget. **No real-time or U4 claim
-may rest on the 129-frame number alone** — U4's witness is this analysis.
+**Two deliverables, one corpus, two images: the tail of the product frame over a
+16,553-frame album, and the gate total (decode + convert + IRQ + DMA) measured
+in one window.** Method is [`../../flac-docs/measurements.md`](../../flac-docs/measurements.md)'s:
+the tail is first-class (worst **with its frame index**, min, sum, mean), and
+every absolute is image-specific.
+
+#### The corpus decision: the tracked master, not the 43-minute album
+
+The plan of record previously said "full-album corpus (~70 s, 167,222 frames)".
+That was written before two facts existed, and both now decide against it:
+
+1. **It does not fit.** `gba-audio`'s album is 33,280,736 B; this bench image is
+   487,720 B with a 39,308 B corpus inside (448,412 B of non-album bytes). The
+   sum is 33,729,148 B against a 32 MiB cart's 33,554,432 B — **174,716 B over**.
+   A full-album arm would need the album trimmed, at which point it is no longer
+   the reference corpus and its pins no longer apply.
+2. **Density, not duration, is what a tail measures.** The reference album's
+   measured worst frames were concentrated in two of twelve tracks, and its own
+   encoder-model-ranked "heavy" frames were *not* the measured heaviest. Repeating
+   one master (Q15's album-length build) cannot strengthen a tail at all.
+
+So PR E's corpus is **`assets/sound/bioluminescent.wav`** — the tracked reference
+master, 258.61 s, 96 kHz/24-bit — encoded at the **product configuration**:
+`prep.py`'s fft resample to 32,768 Hz stereo, then the C encoder of record with
+`--cap 74` and `--budget 3,294,000` (the reference album's 12,742 B/s scaled to
+this master's 258.61 s). The result is **3,293,048 B = 101.686 kbit/s,
+16,553 frames** — the product rate, one track, and it fits a 32 MiB cart with
+the instrument at **3,741,460 B (11%)**.
+
+The corpus is a **witness, never a gate input**: the blob, the f32 intermediate,
+the C decode directory and the pin module are all gitignored
+(`ALBUM-PLAYER.md` §2.3's division), generated by `make uli-album-asset` from the
+tracked WAV. The pin is C-sourced: `scripts/uli_album_pin.py` takes the C
+reference decoder's own `hash_of_frame_hashes` and re-verifies its published
+per-frame checkpoints against the C decoder's 8-bit track output before it will
+emit a pin (67 checkpoints matched, the preroll frame excluded by construction).
+
+**The density screen ran before any ROM was built** (`make uli-frame-ops`, the
+host symbol census). Against the 129-frame corpus's gate frame — 64 band symbols,
+248 quads, 140 escapes, 616 nz — the album reaches **max 710 nz, 182 escapes, 257
+Huffman symbols, 16 long codes, 64 band symbols**, with **M/S in 87.1% of frames**
+(the fixture's gate frame has M/S off). It does not reach the quad-heavy mix
+(max 228 quads against 248; pairs are this master's dominant group, max 392).
+So the trigger set in advance is **met** in every dimension that drives the
+entropy path and in the M/S class, and **partly unmet** in the quad class — which
+is why a small synthetic adversarial set and the `gba-audio` album cross-check
+stay on the books as PR E's E3, gated rather than dropped.
+
+#### E1 — the tail (product build, decode only)
+
+`make uli-album-bench` (`--features album-corpus`), one image, product decoder,
+**int8-only** — the shipping path (C-3d). Pins: `int8=55e710af` PASS,
+`xover=0 hfnz=0`.
+
+| arm | frames | min (frame) | **worst (frame)** | mean | sum |
+|---|---:|---:|---:|---:|---:|
+| product `prod8`, album corpus | 16,553 | 144,725 (f15) | **220,062 (f16,204) = 83.94%** | **189,780 = 72.40%** | 3,141,376,572 |
+| product `prod8`, 129-frame fixture, same instrument | 129 | 153,436 (f35) | 219,261 (f125) = 83.65% | 194,499 = 74.19% | 25,090,379 |
+
+Three readings, in order of consequence:
+
+1. **The 129-frame tail was not an underestimate.** 128× more frames move the
+   worst frame by **+801 cycles (+0.3 points)** and the mean *down* by 4,709. The
+   deferred worry — that 129 frames understate the tail — does not hold on this
+   material: the fixture's synthetic clicks/noise are a harsher per-frame load
+   than real music at product settings.
+2. **The fixture's absolute moved +10 cycles/frame** (219,251 → 219,261,
+   194,489 → 194,499) and that is the recompile offset the FLAC ledger warns
+   about, not a regression: the arithmetic that changed is the counter's
+   zeroing cadence, the paired deltas are unaffected, and every number above is
+   from its own image.
+3. **The cycle-worst frame is not the densest frame.** f16,204 carries 63 band
+   symbols / 212 quads / 97 escapes / 570 nz / 4 long codes **and M/S**; the
+   bit- and symbol-maxima (f10,908: 3,744 bits, 249 symbols, 710 nz; f13,930: 257
+   symbols) are *not* the cycle worst. The plan's standing warning about proxies
+   holds inside a single real album, not only across the corpus.
+
+**An instrument bug the long corpus exposed, now fixed and recorded.** The cycle
+counter (timer2/timer3) is 32 bits at 16.78 MHz, so it wraps every **256 s of
+emulated time** — and one album pass is ~217 s (product) to ~1,280 s (portable
+core). Before this, only the *between-pass* case was guarded: the first album run
+reported windows of 4,294,967,260 cycles in 4,546 frames, and `wrapped` stayed
+false because a stale 16-bit high word reads as a *valid* difference. Fixes: the
+counter is zeroed every **1,024 windows** (no window can span a wrap — a window
+never crosses a zeroing), and any window above `SUSPECT_CYCLES` (2²⁴, a
+counter-integrity bound, not a speed one, because the control arms are
+legitimately several periods per frame) is counted, printed and **fails the
+verdict**. The 129-frame corpus never reached either limit, which is why it took
+a 16,553-frame corpus to find.
+
+#### E2 — the gate total (decode + convert + IRQ + DMA)
+
+`make uli-gate` (`--features gate,album-corpus`). Same decoder, same frames,
+int8-only, with the *shipping* `gba_playback::RingFeed` and the real timebase:
+timer0 = one sample (512 ticks), timer1 cascaded = one feeder period **= one ULI2
+frame** (64 periods/s) with its overflow as the feeder interrupt, DMA1→FIFO A and
+DMA2→FIFO B in repeat mode from a two-slot ping-pong, `SOUNDCNT_H` 100/100,
+`SOUNDBIAS` 8-bit. The measured window is **decode → convert → push with
+interrupts live**, so the feeder IRQ and the FIFO DMA are inside it; the
+producer's *wait for ring space* is outside (a real player is clock-paced, and
+charging the wait would measure the hardware clock).
+
+| arm (one image) | worst (frame) | mean | percent (worst / mean) |
+|---|---:|---:|---:|
+| `prod8` — decode only | 220,102 (f16,204) | 189,817 | 83.97% / 72.41% |
+| **`gate` — decode + convert + push + IRQ + DMA** | **257,789 (f16,204)** | **226,320** | **98.34% / 86.33%** |
+| gate overhead (paired, same frame) | **+37,687** | **+36,503** | +14.38 / +13.92 points |
+
+- **ULI2's "convert" is a byte copy, not the FLAC path's PCM16 `>> 8`** — the
+  fused int8 path (C-3d) is what makes the output stage this cheap. The
+  reference project's own output stage is 3.02% *plus* a driver conversion; this
+  is the same job after ULI2 stopped paying for int16.
+- **Feeder ledger: `pushed = 8,475,136`, `consumed = 8,466,944`, ring = 8,192
+  samples (16 frames) — `consumed + RING == pushed` exactly**, and
+  `full_takes = 16,536` accounts for every sample. The ring therefore ended
+  *full*: no sample was lost, and no sustained starvation occurred.
+- **772 handler entries found less than one period ready** while every sample was
+  delivered. That is an *entry* count, not a missed-period count, and it is
+  recorded as an open instrument question for PR D (double dispatch of the Timer1
+  handler is the leading hypothesis) rather than turned into an underrun claim.
+- **0 frames' measured window exceeded one period** (worst 98.34%). The window
+  that would have is the mean + a burst, which is the player's problem.
+
+#### The U4 ceiling, written down
+
+U4's ceiling is **the period itself (100%)**: the chip is spending this to decode
+and produce a frame; the UI is the only remaining consumer, and IWRAM priority
+stays audio-first. On the album corpus, in mGBA, at WAITCNT 4/2, no UI:
+
+- **decode wall: 83.94% worst / 72.40% mean** — the ≤85% headroom target is met
+  with 2,783 cycles of margin at the worst frame;
+- **gate total: 98.34% worst / 86.33% mean** — inside the period with **4,355
+  cycles (1.66 points) of margin at the worst frame** and 13.7 points at the mean.
+
+Read the margin honestly: **1.7 points at the worst frame is thin**, and this arm
+pays no UI, no art, no manifest walk, mGBA does not model the cart prefetch
+buffer or DMA/code-fetch arbitration (the FLAC ledger's R3), and the producer's
+pacing wait hides at most one IRQ per frame from the window. Those are the reasons
+the number is a **ceiling written down**, not a playback claim: U5 stays open, and
+PR D is where the burst behaviour and the real underrun ledger live.
+
+#### What PR E leaves open (E3, gated)
+
+1. **The quad-heavy class** the album does not produce (max 228 quads vs the
+   fixture's 248, 0 pairs there): a small synthetic adversarial set at product
+   settings, plus the `gba-audio` 12-track album as the album-scale cross-check
+   that re-validates its 104/64/12 pins. Both are required *before hardware*, and
+   neither is needed to write the ceiling down above.
+2. **The handler's double-dispatch question** (772 starved entries with a full
+   ring at the end) — PR D's, because the player owns that chain.
+3. **A real album-length run** (zero underruns, period audit, UI linked) — U5 and
+   PR D, not U4.
 
 ---
 
@@ -2118,6 +2265,48 @@ Frame-101 attribution of the 523,267 (by difference, one image): kernels
 328,502 (63%), `dec_chan` × 2 ≈175,000 (33%), M/S + wrapper ≈20,000 (4%).
 Kernels against the C record's 134,600 are 2.44×; entropy per
 coefficient against the C bench's entropy+dequant (~41 c/coef) is ~6.6×.
+
+### PR E (2026-11-15, mGBA, WAITCNT 4/2) — album corpus, tail and gate total
+
+Corpus: `assets/sound/bioluminescent.wav` (258.61 s, tracked) → 32,768 Hz stereo
+via `prep.py` → C encoder of record, `--cap 74`, `--budget 3,294,000` (the
+reference album's 12,742 B/s, scaled) ⇒ **3,293,048 B, 101.686 kbit/s, 16,553
+frames**, K=14, M/S in 87.1% of frames, 315.2 nonzero coefficients/frame, 30.7
+coded bands/frame, 42,760 long Huffman codes, encoder verify `|X|` overflows 0.
+C-sourced pin: `hash_of_frame_hashes 55e710af`; 67 published checkpoints
+re-verified by `scripts/uli_album_pin.py` from the C decoder's own `s8/` output.
+
+| arm | image | frames | min (frame) | worst (frame) | mean | sum |
+|---|---|---:|---:|---:|---:|---:|
+| `prod8` decode wall | `make uli-album-bench` | 16,553 | 144,725 (f15) | **220,062 (f16,204) = 83.94%** | **189,780 = 72.40%** | 3,141,376,572 |
+| `prod8` decode wall | `make uli-gate` | 16,553 | 144,765 (f15) | 220,102 (f16,204) = 83.97% | 189,817 = 72.41% | 3,142,038,692 |
+| **`gate`** decode+convert+push+IRQ+DMA | `make uli-gate` | 16,545 | 175,821 (f16,426) | **257,789 (f16,204) = 98.34%** | **226,320 = 86.33%** | 3,744,462,049 |
+| `prod8`, 129-frame fixture (control) | `make uli-bench` | 129 | 153,436 (f35) | 219,261 (f125) = 83.65% | 194,499 = 74.19% | 25,090,379 |
+| `gate`, 129-frame fixture (control, `--features gate`) | same crate | 121 | 184,603 (f35) | 256,957 (f125) = 98.03% | 231,435 = 88.29% | 28,003,635 |
+
+The fixture's `gate` arm is the **corpus-independence check** the overhead needs:
++36,896 cycles/frame mean against the album's +36,503, i.e. the same number
+within 1.1%. The output stage is a fixed per-frame producer cost (a 1,024-byte
+copy, one IRQ, one DMA re-arm), so it must not move with the corpus — and it
+does not. Its ring also drains (`pushed = consumed = 66,048`, ring 0) because the
+image stops the chain when the producer finishes, and it reports **1** starved
+entry for the same reason; that is the shape of the entry-count artifact the
+album's 772 belong to.
+
+- **Gate overhead, paired in the same image at the same frame: +37,687 cycles at
+  f16,204; +36,503 mean (14.38 / 13.92 points).**
+- Feeder ledger: `pushed 8,475,136`, `consumed 8,466,944`, ring `8,192` ⇒
+  `consumed + RING == pushed` exactly, `full_takes 16,536` (every sample),
+  `serviced 17,308`, `starved_entries 772`, `frames_over_period 0`.
+- The fixture's +10 cycles/frame (219,251 → 219,261; 194,489 → 194,499) is a
+  recompile offset from the counter's zeroing cadence, not a regression; every
+  row above is from its own image and pairing is within an image.
+- Instrument finding: the 32-bit cycle counter wraps every 256 s of emulated
+  time and one album pass is 217–1,280 s. The first album run read windows of
+  4,294,967,260 cycles in 4,546 frames with `wrapped=false` (a stale high word is
+  a *valid* difference). Fixed by zeroing the counter every 1,024 windows and by
+  a `SUSPECT_CYCLES` (2²⁴) bound that counts, prints and fails. The 129-frame
+  corpus never reached either limit.
 
 ### Step 0 attribution — the product frame by difference (2026-11-15, mGBA, WAITCNT 4/2)
 

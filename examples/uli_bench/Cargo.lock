@@ -300,6 +300,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gba-playback"
+version = "0.1.0"
+
+[[package]]
 name = "gif"
 version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -653,6 +657,7 @@ name = "uli-bench"
 version = "0.1.0"
 dependencies = [
  "agb",
+ "gba-playback",
  "uli-lite",
  "uli-lite-gba",
 ]

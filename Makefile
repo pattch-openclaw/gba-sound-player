@@ -6,6 +6,7 @@
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
+        uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
         album-bake album-pack-check \
@@ -675,6 +676,87 @@ uli-bench: uli-bench-rom
 	@grep -q '^\[uli-bench\] PASS' $(ULI_BENCH_LOG) || { echo "uli-bench: harness/pin failure — see $(ULI_BENCH_LOG)"; exit 1; }
 	@echo "uli-bench done: $(ULI_BENCH_LOG)"
 
+# --- PR E: the album-length corpus (a witness, never a gate input) -----------
+#
+# PLAN-OF-RECORD.md "PR E" needs a corpus large enough to be a worst-case
+# witness. It is the *tracked* reference master at the **product
+# configuration** — 32,768 Hz, hop 512, `--cap 74`, budget scaled to the
+# product's ~102 kbit/s — because density, not duration, is what the tail
+# measures, and because the reference album's own 43-minute blob does not fit a
+# 32 MiB cart beside this instrument (33,729,148 B against 33,554,432 B).
+#
+# Everything this target generates is build output (ALBUM-PLAYER.md §2.3's
+# division): `examples/uli_bench/assets/` and `src/album_pin.rs` are gitignored,
+# the tracked input is the WAV, and the pin is C-sourced — `scripts/
+# uli_album_pin.py` takes the C reference decoder's own `hash_of_frame_hashes`
+# and re-verifies its published checkpoints against the decoder's 8-bit track
+# output before it will emit a pin. Needs the sibling `gba-audio` checkout and
+# ffmpeg; it therefore never runs in `make test`.
+GBA_AUDIO ?= $(abspath ../gba-audio)
+ULI_ALBUM_WAV ?= $(abspath assets/sound/bioluminescent.wav)
+ULI_ALBUM_DIR := $(ULI_BENCH_DIR)/assets
+ULI_ALBUM_BLOB := $(ULI_ALBUM_DIR)/biomaster.uli
+ULI_ALBUM_REF := $(ULI_ALBUM_DIR)/ref
+ULI_ALBUM_PIN := $(ULI_BENCH_DIR)/src/album_pin.rs
+ULI_ALBUM_BENCH_ROM := uli-album-bench.gba
+ULI_ALBUM_BENCH_LOG ?= uli-album-bench.log
+# The reference album's budget (33,292,288 B) over its 2,612.815 s is 12,742 B/s;
+# scaled to this master's 258.61 s, so the stream lands at the product's rate.
+ULI_ALBUM_BUDGET ?= 3294000
+ULI_ALBUM_THREADS ?= 8
+ULI_ALBUM_PY ?= python3
+
+uli-album-asset:
+	@test -f $(ULI_ALBUM_WAV) || { echo "uli-album-asset: missing $(ULI_ALBUM_WAV)"; exit 1; }
+	@test -x $(GBA_AUDIO)/build/uli_enc -o -f $(GBA_AUDIO)/encoder/Makefile || \
+	  { echo "uli-album-asset: no gba-audio encoder at $(GBA_AUDIO) (set GBA_AUDIO=)"; exit 1; }
+	mkdir -p $(ULI_ALBUM_DIR) $(ULI_ALBUM_REF)
+	$(ULI_ALBUM_PY) $(GBA_AUDIO)/encoder/prep.py $(ULI_ALBUM_WAV) --out $(ULI_ALBUM_DIR)
+	$(MAKE) -C $(GBA_AUDIO)/encoder
+	$(GBA_AUDIO)/build/uli_enc --album $(ULI_ALBUM_DIR)/album.f32 \
+	  --tracks $(ULI_ALBUM_DIR)/tracks.tsv --out $(ULI_ALBUM_BLOB) \
+	  --budget $(ULI_ALBUM_BUDGET) --cap 74 --threads $(ULI_ALBUM_THREADS)
+	$(GBA_AUDIO)/build/uli_dec $(ULI_ALBUM_BLOB) $(ULI_ALBUM_REF) --seektest
+	$(ULI_ALBUM_PY) scripts/uli_album_pin.py --blob $(ULI_ALBUM_BLOB) \
+	  --ref $(ULI_ALBUM_REF) --rs $(ULI_ALBUM_PIN)
+	@echo "uli-album-asset: $(ULI_ALBUM_BLOB) and $(ULI_ALBUM_PIN) (both gitignored)"
+
+uli-album-bench-rom: format
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features album-corpus
+	agb-gbafix $(ULI_BENCH_BIN) -o $(ULI_ALBUM_BENCH_ROM)
+	@echo "ULI2 album-corpus bench ROM built: $(ULI_ALBUM_BENCH_ROM)"
+
+# The tail witness: worst frame **with its index**, mean, min, sum, on the album
+# corpus, decoded by the product build. Gate on PASS; the numbers are in the log.
+uli-album-bench: uli-album-bench-rom
+	timeout -k 5 600 $(GBA_TEST_RUNNER) $(ULI_ALBUM_BENCH_ROM) 2>&1 | tee $(ULI_ALBUM_BENCH_LOG) || true
+	@grep -q '^\[uli-bench\] PASS' $(ULI_ALBUM_BENCH_LOG) \
+	  || { echo "uli-album-bench: harness/pin failure — see $(ULI_ALBUM_BENCH_LOG)"; exit 1; }
+	@grep -E '^\[uli-bench\] (corpus|decode frames|frame prod8 |prod8 pin )' $(ULI_ALBUM_BENCH_LOG) || true
+	@echo "uli-album-bench done: $(ULI_ALBUM_BENCH_LOG)"
+
+# PR E's second deliverable: the **gate total** — decode + convert + IRQ + DMA in
+# one window, with the shipping `RingFeed` and the real sound timebase (timer0 =
+# one sample, timer1 = one 512-sample feeder period, DMA1/2 on the FIFOs). The
+# arm is `src/gate.rs`; `uli-album-bench` is the decode wall on the same corpus,
+# so the pair separates "decode" from "decode + output stage" in one image.
+#
+# The verdict gates on the pins and on the counter's integrity, **not** on
+# underruns: a starved period is the finding this arm exists to produce.
+ULI_GATE_ROM := uli-gate.gba
+ULI_GATE_LOG ?= uli-gate.log
+uli-gate-rom: format
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features gate,album-corpus
+	agb-gbafix $(ULI_BENCH_BIN) -o $(ULI_GATE_ROM)
+	@echo "ULI2 gate-total ROM built: $(ULI_GATE_ROM)"
+
+uli-gate: uli-gate-rom
+	timeout -k 5 900 $(GBA_TEST_RUNNER) $(ULI_GATE_ROM) 2>&1 | tee $(ULI_GATE_LOG) || true
+	@grep -q '^\[uli-bench\] PASS' $(ULI_GATE_LOG) \
+	  || { echo "uli-gate: harness/pin failure — see $(ULI_GATE_LOG)"; exit 1; }
+	@grep -E '^\[uli-bench\] (corpus|decode frames|frame prod8 |frame gate |gate feeder|gate pin|calib)' $(ULI_GATE_LOG) || true
+	@echo "uli-gate done: $(ULI_GATE_LOG)"
+
 # --- ULI2 by-difference attribution (PLAN-OF-RECORD.md, critical path Step 0) ---
 #
 # Each arm rebuilds the bench with exactly one part of the product frame removed
@@ -1126,6 +1208,9 @@ help:
 	@echo "      uli-bench (headless run + PASS/FAIL read from the log), uli-kernel-twin"
 	@echo "    ULI2 attribution (timing-only; pins fail by design): uli-attrib,"
 	@echo "      uli-attrib-subframe, uli-frame-ops"
+	@echo "    ULI2 PR E (album corpus, witness only — needs ffmpeg + the sibling gba-audio checkout):"
+	@echo "      uli-album-asset (blob + C-sourced pin, both gitignored), uli-album-bench (the tail),"
+	@echo "      uli-gate (the gate total: decode + convert + IRQ + DMA)"
 	@echo "    Opus (OPUS.md): native-opus-rom, opus-test"
 	@echo "    Album Player, Phase 0 (AP-0 — the probe aggregate; nothing here is"
 	@echo "      wired into flac-check or test): album-probe-rom (three probe ROMs),"

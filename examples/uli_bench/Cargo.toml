@@ -17,6 +17,19 @@ edition = "2024"
 # measured only after its own decode reproduces the C-reference album pins.
 
 [features]
+# PR E's corpus: `assets/biomaster.uli` — the tracked reference master
+# (`assets/sound/bioluminescent.wav`, 258.61 s) encoded at the product
+# configuration (32,768 Hz, hop 512, `--cap 74`, budget scaled to ~102 kbit/s)
+# — instead of the 129-frame Phase 0 fixture. Both the blob and its C-sourced
+# pin module (`src/album_pin.rs`) are build output: `make uli-album-asset`.
+# The fixture stays the regression pin; this feature is the tail witness.
+album-corpus = []
+# PR E's gate-total arm: decode + convert + IRQ + DMA in one window, with the
+# real sound timebase (timer0/1, DMA1/2 on the FIFOs) and the shipping
+# `gba_playback::playback::RingFeed`. A witness, not part of the decode-wall
+# record; `make uli-gate` builds and runs it.
+gate = ["dep:gba-playback"]
+
 # Per-frame dump for attribution work: one CSV-ish line per frame with the
 # measured window and the decoder's operation counts, fitted host-side. Off by
 # default so the gate's log stays the record. Implies `verify`, because the dump
@@ -94,6 +107,9 @@ asm-ola = ["uli-lite-gba/asm-ola"]
 uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }
 # The overlay's ARM-mode, unchecked kernels (the measurement's second arm).
 uli-lite-gba = { path = "../../crates/uli-lite-gba" }
+# PR E's gate arm: the shipping feeder ring, the same type the FLAC product path
+# and the album player use. Platform-free, so it is not under the arm block.
+gba-playback = { path = "../../crates/gba-playback", optional = true }
 
 [target.'cfg(target_arch = "arm")'.dependencies]
 agb = "0.25.0"
