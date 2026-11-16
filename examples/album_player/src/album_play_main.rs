@@ -5,12 +5,10 @@
 //! is the record of the run. Then it loops forever, so `timeout`'s exit 124 **is** the pass — the
 //! same contract `product-play.gba` has.
 //!
-//! What this ROM is not: no keys, no pause, no skip, no session clock, no progress bar, no text,
-//! no tiles, no sprites. Those are PR-3b/3c (§4.5). What it *does* show is the backdrop palette
-//! entry: violet and solid while it is working, and then a verdict annunciated by **blink rate and
-//! tone** — see "The verdict a colourblind human can perceive" below. That is a verdict lamp, not a
-//! screen — a silent cart run has to be readable (§4.5's palette trap is the reason a frame with
-//! nothing shown repaints the backdrop alone).
+//! What this ROM is not: no keys, no pause, no skip, no session clock, no progress bar, no tiles, no
+//! sprites. Those are PR-3b/3c (§4.5). What it *does* show is a screen: white while it is working,
+//! and then the verdict — `PASSED` on blue or `FAILED` on red, in words, through the same renderer
+//! the shipped product ROM uses (this crate's [`text`]). See "The verdict is a word" below.
 //!
 //! ## Where every ordering choice comes from
 //!
@@ -24,7 +22,7 @@
 //! ## The run, in the order hardware settled it
 //!
 //! ```text
-//! lamp           backdrop = violet, committed from a frame that shows nothing
+//! running        backdrop = white, presented with no glyphs (`text::show(gfx, "", white)`)
 //! verify (§D-C)  Album::parse → open()/verify_pins → the track's pins vs meta::Track → the FLAC
 //!                boot gate (start_track), each refusal a named FAIL and a stop
 //! prefill        16 chunks / 8,960 samples: pull_frame → widen → convert_frame → push_bytes,
@@ -41,48 +39,41 @@
 //!                track — a decode witness; the ring ledger above (`pushed == consumed == expected`)
 //!                is what witnesses the bytes the DMA actually carried
 //! audit (assets) (feature `deep-audit`) the full asset-region fold, after the audio (ALBM1 v2)
-//! verdict        backdrop = blue (PASS) or red (FAIL), then the verdict line
-//! annunciator    blink black ↔ that colour (fast on FAIL), and a tone: 3 × 120 ms beeps on PASS,
-//!                one 1 s low buzz on FAIL — the blink is white-on-black and the rate carries the
-//!                verdict, so hue is never load-bearing and a colourblind human can read it
+//! verdict        the word on the backdrop — blue "PASSED" or red "FAILED" — one commit, then the
+//!                verdict line, then `loop {}`
 //! ```
 //!
-//! ## The verdict a colourblind human can perceive
+//! ## The verdict is a word
 //!
 //! Fix 2 shipped a verdict lamp whose only signal was the backdrop's hue, and the person who runs
-//! this cart is colourblind: they cannot see violet→blue, so the lamp let them verify nothing. A
-//! signal the intended verifier cannot perceive is not a signal. The scheme is therefore **blink
-//! rate + tone**, with a violet solid held while work is still happening (steady vs moving is itself a
-//! no-colour cue):
+//! this cart is colourblind: violet→blue is the pair they cannot separate, so the lamp let them
+//! verify nothing. Fix 3 answered that with a blink *and* a tone, which was two inventions to work
+//! around a hue the builder had ruled out by rule. The rule over-generalised: full red against full
+//! blue is easy to tell, and what is hard is violet against blue. So the verdict is a **word**, from
+//! the renderer the shipped product ROM already uses ([`text`]), and the colour is the belt to that
+//! word's braces:
 //!
-//! | state | backdrop | sound |
+//! | state | backdrop | text |
 //! |---|---|---|
-//! | working (boot → verdict) | solid violet, as before | silent |
-//! | PASS | slow blink, ~1 Hz, **black ↔ white** | three short beeps, ~1 kHz, 120 ms on / 120 ms off |
-//! | FAIL | fast blink, ~5 Hz, **black ↔ white** | one long low buzz, ~200 Hz, ~1 s (verdict only; a boot
-//! refusal has no tone — see below) |
+//! | running (boot → verdict) | white | *(none yet)* |
+//! | PASSED | blue | `PASSED` |
+//! | FAILED | red | `FAILED` |
 //!
-//! The signal is the **luminance** swing, and the lit phase is deliberately white, not the verdict's
-//! colour: a first cut blinked blue against black and called that hue-free, but pure blue's relative
-//! luminance is 0.072 against black's 0.000, so the swing was 7% of the range — nearly the nothing it
-//! replaced. White is 1.000, so the blink is legible with no colour perception at all, and nothing in
-//! the scheme leans on hue. Because the lit phase is white for both verdicts, **rate and tone** are
-//! the only carriers of pass/fail, which is the point: two channels, neither of them colour. The
-//! pacing is the display's own frame clock — `GraphicsFrame::commit`
-//! waits for vblank — so the blink needs no timer and no interrupt, and after the album audio is torn
-//! down there is no deadline left to protect. The palette is never written from a handler.
+//! Red-vs-blue rides the blue/yellow axis, which deuteranopia and protanopia (the common cases)
+//! preserve — and the word is there regardless, so the colour is decoration and the text is the
+//! signal. A boot refusal prints `FAILED` on red like every other failure; that also retires fix 3's
+//! §5.6 open item, where a refusal had no tone because the refusal path cannot own timer0. There is
+//! no tone any more, so there is nothing for timer0 to carry.
 //!
-//! The tone is a square wave generated locally into the ring (no codec, no `#[path]` include of a
-//! probe's `synth.rs`: §2.2 / D4), played by *re-arming the chain after the audio*
-//! (`enable_sound` → a primed chunk → `arm_audio_chain`). That is the same sequence PR-3b's §4.4
-//! skip path needs after a track change, so the beep is a rehearsal of it, not a detour. The beep is
-//! a post-run annunciator: the album's ledger and its counters were printed before it starts and are
-//! never re-stated.
+//! Nothing is animated: the screen is presented **once** per state, from a background shown into
+//! that frame, and every path ends in `loop {}`. The commit's background-enable mask is why that
+//! works (§4.5, and [`text`]'s docs): a commit from a frame that shows nothing repaints the backdrop
+//! alone, which is exactly the "running" screen and is not something to do twice.
 //!
-//! A **boot refusal** is the one case with no tone, and only because none can be played there: direct
-//! sound A's sample rate *is* timer0's overflow rate, and every refusal happens while the boot clock
-//! still owns timer0 at its own 256 Hz. That path paints red and blinks fast instead (see
-//! `refuse`); a refusal is still perceivable without colour, which is the whole requirement.
+//! **What this drops.** `arm_tone` was the first code in this application to re-arm the audio chain
+//! after a teardown (`enable_sound` → a primed chunk → `arm_audio_chain`) — the shape PR-3b's §4.4
+//! skip path needs. It was never exercised beyond "the beep drained", so PR-3b derives it properly,
+//! with tests, rather than inheriting an annunciator's rehearsal.
 //!
 //! ## The two folds, and why they are a second pass
 //!
@@ -128,7 +119,6 @@ mod rom {
     use agb::display::{Graphics, Rgb, Rgb15};
     use agb::external::critical_section::{self, Mutex};
     use agb::interrupt::{Interrupt, add_interrupt_handler};
-    use agb::timer::{AllTimers, Divider};
     use alloc::format;
     use alloc::vec;
     use alloc::vec::Vec;
@@ -139,6 +129,7 @@ mod rom {
     use album_player::geometry;
     use album_player::meta::{Album, Track};
     use album_player::pcm::{PcmSource, SourceError};
+    use album_player::text;
     use gba_audio_hw::{
         AudioChain, CycleCounter, arm_audio_chain, clear_timer1_if, enable_sound, io_read_u16,
         rearm_dma, regs, teardown_audio,
@@ -192,67 +183,18 @@ mod rom {
 
     // ------------------------------------------------------------------ colors
 
-    /// "Still working": violet, so a human watching a cart can tell booting from hung. This is the
-    /// shipped `product-play.gba` pending colour, used the same way.
-    const COLOR_PENDING: Rgb15 = Rgb::new(128, 0, 255).to_rgb15();
-    /// The lit phase of **every** blink, and the solid flash before one: **full white**.
+    /// "Still working", and the boot screen: **full white**, with no text yet.
     ///
-    /// A first cut blinked the verdict colour (pure blue `Rgb::new(0,0,255)`) against black, on the
-    /// reasoning that a luminance swing needs no colour vision. It does not hold: relative luminance
-    /// of pure blue is **0.072** against black's **0.000**, so the "high contrast" blink modulated 7%
-    /// of the range and was very nearly the nothing the caller could not see. Red is 0.213 — better,
-    /// still dim. White is **1.000**, so the swing is the whole screen and the blink is legible with
-    /// no colour perception whatsoever. Hue therefore carries nothing in this scheme, not even
-    /// decoratively on the blink: **rate** (slow = pass, fast = fail) and **tone** (three beeps) are
-    /// the verdict, and both are unambiguous on a non-backlit screen in a sunlit room.
-    const COLOR_LIT: Rgb15 = Rgb::new(255, 255, 255).to_rgb15();
-    /// The "off" half of every blink: **full black**. Paired with [`COLOR_LIT`] that is a 0.000 →
-    /// 1.000 luminance swing, which needs no colour perception at all — the caller is colourblind, and
-    /// a violet→blue transition is exactly what they cannot see.
-    const COLOR_OFF: Rgb15 = Rgb::new(0, 0, 0).to_rgb15();
-
-    // ------------------------------------------------------- the annunciator's clock
-
-    /// One display frame: 228 scanlines × 1,232 cycles = 280,896 CPU cycles, i.e. 59.7275 frames per
-    /// second at 16,777,216 Hz. `GraphicsFrame::commit` waits for the frame boundary, so this is the
-    /// quantum the blink is paced on.
-    const FRAME_CYCLES: u32 = 228 * 1_232;
-
-    /// PASS: 30 frames per phase. 30 × 280,896 = 8,426,880 c = 502 ms, so a full black↔blue cycle is
-    /// 995 mHz — 0.4 % under the 1 Hz target, and nothing like the 0.2 Hz that would not read as a
-    /// blink at all.
-    const PASS_HALF_FRAMES: u32 = 30;
-
-    /// FAIL: 6 frames per phase. 6 × 280,896 = 1,685,376 c = 100 ms, so a full cycle is 4,977 mHz —
-    /// clearly faster than PASS without being a flicker.
-    const FAIL_HALF_FRAMES: u32 = 6;
-
-    // ------------------------------------------------------------- the annunciator's tone
-
-    /// A square wave is a level alternation, so the generator is four lines and its pitch is exact —
-    /// no codec is linked for an annunciator, and no probe's `synth.rs` is `#[path]`-included
-    /// (§2.2 / D4). ±96 in the 8-bit FIFO form is audible and far from clipping.
-    const TONE_LEVEL: u8 = 96;
-    const PASS_BEEP_HZ: u32 = 1_000;
-    const FAIL_BUZZ_HZ: u32 = 200;
-
-    /// 120 ms on / 120 ms off, three times, at 16,384 Hz: 1,966 samples per 120.0 ms segment, so the
-    /// whole PASS announcement is 9,830 samples. The FAIL buzz is one second, 16,384 samples. Both
-    /// fit the 20,160-sample ring, which is what lets the entire tone be pushed before the chain
-    /// arms — see the `const` assert below.
-    const BEEP_ON_SAMPLES: usize = 1_966;
-    const BEEP_OFF_SAMPLES: usize = 1_966;
-    const BEEP_COUNT: usize = 3;
-    const BUZZ_SAMPLES: usize = geometry::RATE_HZ as usize;
-
-    const _: () =
-        assert!(BEEP_ON_SAMPLES * BEEP_COUNT + BEEP_OFF_SAMPLES * (BEEP_COUNT - 1) <= RING_SAMPLES);
-    const _: () = assert!(BUZZ_SAMPLES <= RING_SAMPLES);
-
-    /// The beep is bounded in frames (the longest tone is 1 s): twice that is enough headroom for a
-    /// post-audio chain to drain 20,160 samples, and a wedge fails visibly instead of blinking
-    /// forever with the ring still armed.
-    const BEEP_MAX_FRAMES: u32 = 120;
+    /// The caller reads full red against full blue without trouble; what they cannot separate is
+    /// violet from blue. So the running screen is not a verdict hue, and it is bright enough that a
+    /// cart sitting on it is unmistakably booted rather than hung.
+    const COLOR_RUNNING: Rgb15 = Rgb::new(255, 255, 255).to_rgb15();
+    /// PASSED: **full blue**. Against [`COLOR_FAIL`]'s full red, the pair rides the blue/yellow axis
+    /// that deuteranopia and protanopia preserve — and the screen says `PASSED` either way, so the
+    /// colour is decoration and the word is the signal.
+    const COLOR_PASS: Rgb15 = Rgb::new(0, 0, 255).to_rgb15();
+    /// FAILED: **full red**. See [`COLOR_PASS`].
+    const COLOR_FAIL: Rgb15 = Rgb::new(255, 0, 0).to_rgb15();
 
     // ------------------------------------------------------------------ statics
 
@@ -797,19 +739,7 @@ mod rom {
         Ok(StubSource::new(Vec::leak(tracks)))
     }
 
-    /// Paint the verdict lamp: backdrop palette entry 0, committed from a frame that
-    /// shows **nothing**.
-    ///
-    /// §4.5's trap is what makes this work: `TiledGraphicsFrame::commit` derives
-    /// DISPCNT's background-enable mask from the backgrounds shown that frame, so a
-    /// commit from a fresh frame with nothing shown repaints the backdrop alone. No
-    /// font, no tiles, no sprites — this stays inside PR-3a's "no screen" boundary.
-    fn lamp(gfx: &mut Graphics<'_>, colour: Rgb15) {
-        gfx.set_background_palette_colour(0, 0, colour);
-        gfx.frame().commit();
-    }
-
-    // -------------------------------------------------------------- the annunciator
+    // ---------------------------------------------------------- the verdict terms
 
     /// A verdict term a build may not have checked at all.
     ///
@@ -830,169 +760,23 @@ mod rom {
         }
     }
 
-    /// Fill `dst` with `count` × (`on` samples of a `hz` square wave, `off` samples of silence) and
-    /// return the number of samples written. The last `off` is omitted, so a PASS pattern ends on its
-    /// final beep.
-    ///
-    /// `2^32 / rate` is exact — the rate is a power of two (262,144 per Hz at 16,384 Hz) — so both
-    /// 1 kHz and 200 Hz are whole multiples of the phase step and the pitch carries no rounding.
-    fn fill_tone(dst: &mut [u8], hz: u32, on: usize, off: usize, count: usize) -> usize {
-        let step = ((1u64 << 32) / u64::from(geometry::RATE_HZ)) as u32 * hz;
-        let low = 0u8.wrapping_sub(TONE_LEVEL);
-        let mut phase = 0u32;
-        let mut at = 0usize;
-        for beep in 0..count {
-            for _ in 0..on {
-                dst[at] = if phase >> 31 == 0 { TONE_LEVEL } else { low };
-                phase = phase.wrapping_add(step);
-                at += 1;
-            }
-            if beep + 1 < count {
-                dst[at..at + off].fill(0);
-                at += off;
-            }
-        }
-        at
-    }
-
-    /// Arm the chain a second time and play the verdict tone.
-    ///
-    /// This repeats the whole arm-the-chain sequence over the same ring and `push_bytes` path the
-    /// album played through — `enable_sound` → a primed chunk → `arm_audio_chain` — because that is
-    /// exactly what PR-3b's §4.4 skip path needs after a track change. The beep is a rehearsal of it,
-    /// not a detour from it.
-    ///
-    /// The album's ledger is untouched: `finished` stays true (the feeder classifies the tone's tail
-    /// and the silence after it as a tail/starved period, never as an underflow), its counters were
-    /// copied into `Observed` and printed before this ran, and the only thing reset is the period
-    /// witness's baseline — a fresh chain restarts timer2 at 0, and a stale baseline would book the
-    /// album's whole period count as one coalesced overflow.
-    ///
-    /// Returns the number of samples pushed; zero means the tone did not fit (excluded by the `const`
-    /// assert above) and the caller must not arm anything.
-    fn arm_tone(timers: &mut AllTimers<'_>, pass: bool) -> usize {
-        let mut tone = vec![0u8; RING_SAMPLES];
-        let pushed = if pass {
-            fill_tone(
-                &mut tone,
-                PASS_BEEP_HZ,
-                BEEP_ON_SAMPLES,
-                BEEP_OFF_SAMPLES,
-                BEEP_COUNT,
-            )
-        } else {
-            fill_tone(&mut tone, FAIL_BUZZ_HZ, BUZZ_SAMPLES, 0, 1)
-        };
-        let tone = &tone[..pushed];
-
-        let pushed_ok = critical_section::with(|cs| {
-            STATS.borrow_ref_mut(cs).last_period = 0;
-            // Both channels carry the same bytes; two immutable borrows of one buffer are fine.
-            FEED.borrow_ref_mut(cs).push_bytes(tone, tone).is_ok()
-        });
-        if !pushed_ok {
-            return 0;
-        }
-
-        let primed = critical_section::with(|cs| {
-            let mut bufs = BUFS.borrow_ref_mut(cs);
-            let mut feed = FEED.borrow_ref_mut(cs);
-            let (verdict, lp, rp) = take_into_slot(&mut *bufs, &mut *feed, true);
-            match verdict {
-                Chunk::Full => {
-                    // SAFETY: aligned pointers into the static ping-pong, filled for a whole
-                    // transfer by `take_chunk` just above.
-                    unsafe { rearm_dma(lp, rp, &CHAIN) };
-                    true
-                }
-                _ => false,
-            }
-        });
-        if !primed {
-            return 0;
-        }
-
-        enable_sound();
-        clear_timer1_if();
-        arm_audio_chain(timers, &CHAIN);
-        pushed
-    }
-
-    /// Whether the annunciator's ring has been fully handed to the DMA.
-    fn tone_drained() -> bool {
-        critical_section::with(|cs| {
-            let feed = FEED.borrow_ref(cs);
-            feed.consumed() >= feed.pushed()
-        })
-    }
-
-    /// Stop the annunciator's chain in the album run's order: the timer chain through the handle
-    /// first, then the sound hardware (`teardown_audio` does not touch the timers).
-    fn stop_tone(timers: &mut AllTimers<'_>) {
-        timers.timer1.set_interrupt(false).set_enabled(false);
-        timers.timer0.set_enabled(false);
-        timers.timer2.set_enabled(false);
-        teardown_audio();
-    }
-
-    /// Blink the verdict lamp between full black and `colour`, `half_frames` display frames per
-    /// phase, until `until` returns true (polled once per frame).
-    ///
-    /// The pacing is the display's own frame clock: `GraphicsFrame::commit` waits for vblank, so each
-    /// iteration halts the CPU until the frame boundary rather than spinning, and no timer or
-    /// interrupt is involved — after the album audio is torn down there is no deadline left to
-    /// protect. The palette is written here, in the main loop, and never from a handler.
-    ///
-    /// A commit from a frame that shows nothing repaints the backdrop alone (§4.5's trap), so the
-    /// empty frames between flips leave the lamp colour on screen. A flip's `lamp()` commits too, so
-    /// every iteration costs one frame either way and the cadence cannot drift.
-    fn blink_until(
-        gfx: &mut Graphics<'_>,
-        colour: Rgb15,
-        half_frames: u32,
-        mut until: impl FnMut() -> bool,
-    ) {
-        let mut frames = 0u32;
-        let mut on = true; // the verdict lamp already painted `colour`
-        loop {
-            if until() {
-                return;
-            }
-            frames += 1;
-            if frames >= half_frames {
-                frames = 0;
-                on = !on;
-                lamp(gfx, if on { colour } else { COLOR_OFF });
-            } else {
-                gfx.frame().commit();
-            }
-        }
-    }
-
-    /// Say what was refused, by name, and paint it — and make the refusal **perceivable**, which is
-    /// the point of the annunciator.
+    /// Say what was refused, by name, and put `FAILED` on screen in red.
     ///
     /// R5: a partial run that still printed PASS would be worse than no run at all, so every boot
-    /// refusal ends here rather than continuing. It ends in the FAIL lamp blinking at its fast rate
-    /// forever, not just a printed line: a refusal the caller cannot perceive is the exact defect
-    /// this fixes, and this path used to fall straight into a bare `loop {}` after printing.
-    ///
-    /// A refusal has **no tone**, deliberately. Direct sound A's sample rate is timer0's overflow
-    /// rate (`SOUNDCNT_H` bit 10 selects it), and every refusal happens while the boot clock still
-    /// owns and runs timer0 at its own 256 Hz — so at this point no 200 Hz tone exists to play, and
-    /// a static one-period buffer would be a slow 0.8 Hz thump rather than a buzz. The lamp is the
-    /// signal a human reads on this path; the verdict tone belongs to a build that reached
-    /// `arm_tone`, where the chain programs timer0 to 16,384 Hz itself.
+    /// refusal ends here rather than continuing. It ends on the same verdict screen a failed run
+    /// shows, not just a printed line: a refusal the caller cannot perceive is the exact defect this
+    /// fixes, and this path used to fall straight into a bare `loop {}` after printing. The reason
+    /// itself stays in the log — the screen carries the two-word verdict only.
     fn refuse(gfx: &mut Graphics<'_>, what: &str) -> ! {
-        // Paint before printing: `blink_until` starts on the assumption that the lamp already
-        // shows the verdict colour, so the first phase is the colour and the second is black.
-        lamp(gfx, COLOR_LIT);
         agb::println!("[album-rom] FAIL {what}");
         // Every exit path emits a verdict: `make album-rom`'s echo tells a human to judge by the
         // `verdict` line, so a refusal that printed only `FAIL` would leave the log with no verdict
         // to read at all.
-        agb::println!("[album-rom] verdict FAILED (boot refusal) — screen red, blinking fast");
-        blink_until(gfx, COLOR_LIT, FAIL_HALF_FRAMES, || false);
+        agb::println!(
+            "[album-rom] verdict FAILED (boot refusal) — screen RED \"{}\"",
+            text::FAILED
+        );
+        text::show(gfx, text::FAILED, COLOR_FAIL);
         loop {}
     }
 
@@ -1002,11 +786,11 @@ mod rom {
     fn main(mut gba: agb::Gba) -> ! {
         agb::println!("[album-rom] entry — the album player's playback path (PR-3a step iii)");
 
-        // The lamp first, before any work that can be slow: violet says "booting", and a
-        // cart left violet is a boot that never reached a verdict. `gfx` and `timers` are
-        // disjoint fields of `gba`, so both handles live for the whole run.
+        // The screen first, before any work that can be slow: white says "booting", and a cart left
+        // white is a boot that never reached a verdict. `gfx` and `timers` are disjoint fields of
+        // `gba`, so both handles live for the whole run.
         let mut gfx = gba.graphics.get();
-        lamp(&mut gfx, COLOR_PENDING);
+        text::show(&mut gfx, "", COLOR_RUNNING);
 
         // `make album-player-rom` builds without `deep-audit`: it plays the same album but proves no
         // decoded content. Say so at boot as well as in the verdict, so an unverified image cannot be
@@ -1371,26 +1155,23 @@ mod rom {
 
         let pass =
             ledger_ok && audit_ok && term_ok(pcm_ok) && term_ok(fifo_ok) && term_ok(assets_ok);
-        let colour = COLOR_LIT;
-        let half_frames = if pass {
-            PASS_HALF_FRAMES
+        let (word, backdrop, screen) = if pass {
+            (text::PASSED, COLOR_PASS, "BLUE")
         } else {
-            FAIL_HALF_FRAMES
+            (text::FAILED, COLOR_FAIL, "RED")
         };
-        lamp(&mut gfx, colour);
-        // The audited image's line is fix 2's shape with the verdict channel renamed: it used to
-        // promise "screen BLUE", a hue, and the caller cannot read hues. The unaudited one may not
-        // borrow any promise that content was checked: it names the five terms and the feature that
-        // is missing, which is the whole difference between the two artifacts.
+        text::show(&mut gfx, word, backdrop);
+        // The audited image's line names what is on screen, not only a hue: "screen BLUE" alone was a
+        // promise the caller could not check, since violet against blue is exactly the pair they
+        // cannot separate. The unaudited one may not borrow any promise that content was checked: it
+        // names the five terms and the feature that is missing, which is the whole difference between
+        // the two artifacts.
         #[cfg(feature = "deep-audit")]
         agb::println!(
-            "[album-rom] verdict {} — screen {} (ledger={}, audit={}, pcm={}, fifo={}, assets={})",
-            if pass { "PASSED" } else { "FAILED" },
-            if pass {
-                "BLINKS SLOW ~1 Hz + 3 beeps"
-            } else {
-                "BLINKS FAST ~5 Hz, silent"
-            },
+            "[album-rom] verdict {} — screen {} \"{}\" (ledger={}, audit={}, pcm={}, fifo={}, assets={})",
+            word,
+            screen,
+            word,
             ledger_ok,
             audit_ok,
             term_name(pcm_ok),
@@ -1399,8 +1180,10 @@ mod rom {
         );
         #[cfg(not(feature = "deep-audit"))]
         agb::println!(
-            "[album-rom] verdict {} (ledger={}, audit={}, pcm={}, fifo={}, assets={} — built without deep-audit)",
-            if pass { "PASSED" } else { "FAILED" },
+            "[album-rom] verdict {} — screen {} \"{}\" (ledger={}, audit={}, pcm={}, fifo={}, assets={} — built without deep-audit)",
+            word,
+            screen,
+            word,
             ledger_ok,
             audit_ok,
             term_name(pcm_ok),
@@ -1408,84 +1191,10 @@ mod rom {
             term_name(assets_ok)
         );
 
-        // ---- the annunciator: the blink rate carries the verdict and the tone names it too. The
-        // album's chain is already torn down above and its ledger is already printed, so nothing
-        // here is on a deadline and nothing here re-states the run's numbers.
-        let beep_samples = arm_tone(&mut timers, pass);
-        if beep_samples != 0 {
-            let mut frames = 0u32;
-            blink_until(&mut gfx, colour, half_frames, || {
-                frames += 1;
-                frames >= BEEP_MAX_FRAMES || tone_drained()
-            });
-        }
-        let (beep_played, beep_periods) = critical_section::with(|cs| {
-            let feed = FEED.borrow_ref(cs);
-            let stats = STATS.borrow_ref(cs);
-            (
-                feed.consumed() - consumed,
-                stats.handler_entries - handler_entries,
-            )
-        });
-        stop_tone(&mut timers);
-        agb::println!(
-            "[album-rom] beep: {} Hz {} — {} samples, played {}/{} in {} periods [{}] — chain stopped",
-            if pass { PASS_BEEP_HZ } else { FAIL_BUZZ_HZ },
-            if pass {
-                "three 120 ms beeps"
-            } else {
-                "one 1 s buzz"
-            },
-            beep_samples,
-            beep_played,
-            beep_samples,
-            beep_periods,
-            if beep_played == beep_samples {
-                "DRAINED"
-            } else {
-                "SHORT"
-            }
-        );
-
-        // ---- the annunciator's budget, in the units a headless log can carry. The blink is paced by
-        // one commit per display frame, and a commit waits for vblank on SWI 0x05: the wait is a CPU
-        // halt, not a spin, so a flip costs one frame. Timer3 (/1024) measures it rather than this
-        // comment asserting it; two commits are ~2 frames, far inside timer3's 4 s wrap. The first
-        // `lamp` phase-aligns the sample to a vblank boundary — otherwise the interval starts
-        // part-way into a frame and under-reads by up to a whole scanline's worth of phase.
-        lamp(&mut gfx, COLOR_OFF);
-        timers
-            .timer3
-            .set_divider(Divider::Divider1024)
-            .set_cascade(false)
-            .set_interrupt(false)
-            .set_overflow_amount(0)
-            .set_enabled(true);
-        let before = u32::from(timers.timer3.value());
-        lamp(&mut gfx, colour);
-        lamp(&mut gfx, COLOR_OFF);
-        let flip_cycles = u32::from(timers.timer3.value()).wrapping_sub(before) / 2 * 1_024;
-        timers.timer3.set_enabled(false);
-        // Leave the lamp on the verdict colour: `blink_until` starts from "the colour is showing".
-        lamp(&mut gfx, colour);
-        let half_cycles = half_frames * FRAME_CYCLES;
-        agb::println!(
-            "[album-rom] lamp: {} — black ↔ {} every {} frames ({} c = {} ms); full cycle {} mHz",
-            if pass { "PASS" } else { "FAIL" },
-            if pass { "blue" } else { "red" },
-            half_frames,
-            half_cycles,
-            u64::from(half_cycles) * 1_000 / 16_777_216,
-            u64::from(16_777_216u32) * 1_000 / (2 * u64::from(half_cycles))
-        );
-        agb::println!(
-            "[album-rom] lamp: one commit per frame ({} c, 59.73/s) is a vblank halt, so 0 c/s is spun; measured commit={flip_cycles} c (2 phase-aligned commits); album chain torn down, beep chain stopped",
-            FRAME_CYCLES
-        );
-
-        // The verdict, held for as long as the cart is on. Nothing else is armed: the album's chain
-        // is down and the beep's is stopped, so the annunciator cannot starve audio that is playing.
-        blink_until(&mut gfx, colour, half_frames, || false);
+        // Held for as long as the cart is on: one present of the word on its backdrop, then `loop {}`
+        // with nothing shown into any later frame — a second commit would repaint the backdrop alone
+        // (`text`'s one-shot contract). Everything is already down at this point, so there is no
+        // deadline left to protect and nothing armed that could starve audio.
         loop {}
     }
 }

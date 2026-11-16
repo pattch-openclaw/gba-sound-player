@@ -1,7 +1,7 @@
 //! PR-3a steps (ii) and (iii-A)'s host gate: the seam, its derived geometry, and the backend arms —
 //! on the host.
 //!
-//! Four claims, each with its own tests so a failure names one:
+//! Five claims, each with its own tests so a failure names one:
 //!
 //! 1. **The derived geometry reproduces the shipped FLAC figures exactly.** Every equality cites
 //!    `examples/flac_integration/src/geometry.rs:LINE`, so a transcription rot in this app's
@@ -17,6 +17,9 @@
 //! 4. **The seam's sample scale survives the int16 boundary** — the ROM's whole path for track 1
 //!    (`pull_frame` → i32 → `convert_frame` → `fold_bytes`) reproduces the bake's `fnv_fifo_l` /
 //!    `fnv_fifo_r`, so the bytes the ROM would push are the bytes the pins describe.
+//! 5. **The verdict words are renderable** — inside the tracked font subset's glyph range and inside
+//!    one 30-column row, so a rename to a word the shipped 96-glyph font cannot draw fails here
+//!    rather than presenting an empty verdict screen on a cart.
 //!
 //! Nothing here is a hardware claim: the ROM's `agb` bootstrap and its feeder IRQ are step (iii)'s
 //! ROM half, which this file does not execute.
@@ -661,4 +664,33 @@ fn the_flac_arm_folds_track_1s_fifo_bytes_to_the_bake_pins() {
         pin.fnv_fifo_r,
         "the right FIFO bytes do not hash to the bake's fnv_fifo_r pin"
     );
+}
+
+// -------------------------------------------------------------------------------------------------
+// 5. The verdict screen's words against the tracked font subset
+// -------------------------------------------------------------------------------------------------
+
+/// `text::show` rasterizes exactly the glyphs `include_font!` found in the tracked subset and draws
+/// them from a (4,4) origin, so a word outside the subset renders as nothing at all and one wider
+/// than a row runs off the screen. Both are checked here against the words the ROM actually presents:
+/// a rename to something we cannot draw fails in `make album-seam-test`, not on a cart.
+#[test]
+fn the_verdict_words_are_inside_the_tracked_subset_and_one_row() {
+    for word in [album_player::text::PASSED, album_player::text::FAILED] {
+        assert!(
+            album_player::text::renderable(word),
+            "{word:?} is not renderable: the tracked subset is U+{:04X}-U+{:04X} and a row is {} \
+             columns ({} px at the font's 8 px cell)",
+            album_player::text::FIRST_GLYPH as u32,
+            album_player::text::LAST_GLYPH as u32,
+            album_player::text::COLUMNS,
+            album_player::text::COLUMNS * 8
+        );
+    }
+    // Negative control, so a check that has only ever passed is not mistaken for proof: a glyph the
+    // subset does not carry, and a word one column past the row, are both refused.
+    assert!(!album_player::text::renderable("PASSÃ‰"));
+    assert!(!album_player::text::renderable(
+        &"A".repeat(album_player::text::COLUMNS + 1)
+    ));
 }

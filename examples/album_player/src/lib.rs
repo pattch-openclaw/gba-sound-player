@@ -11,6 +11,7 @@
 //! | [`geometry`] | the app's audio-chain geometry (§4.2b), derived per backend from declared facts rather than transcribed |
 //! | [`backend`] | the only module that knows an implementor exists — `flac` (shipped) or `stub` (synthetic, codec-free) |
 //! | [`nodiv`] | `crates/gba-playback` (path dependency) — §6's no-divide arithmetic, the same implementation the probe and its host gate paint from |
+//! | [`text`] | the verdict screen — two words, the tracked OFL font, one commit (§4.1) |
 //!
 //! `nodiv` is a dependency, not a `#[path]` include: §2.2 rules that no Phase 1
 //! module may include or depend on anything under a spike or probe directory, and
@@ -23,7 +24,9 @@
 //! PR-2 landed the manifest half; PR-3 step (ii) landed this seam and its geometry, and step (iii)
 //! adds the ROM main (`src/album_play_main.rs`, `[[bin]] album-play`, `make album-rom`). The library
 //! is still platform-free: it declares no binary of its own, and `backend/` links no display or timer
-//! registers — the `agb` bootstrap lives in the bin.
+//! registers — the `agb` bootstrap lives in the bin. [`text`] is the one exception in the other
+//! direction, because its verdict words are checked on the host: the words and the subset check are
+//! platform-free, and only the drawing half is `#[cfg(target_arch = "arm")]`.
 //!
 //! ## Generated, never tracked
 //!
@@ -56,3 +59,4 @@ pub mod backend;
 pub mod geometry;
 pub mod meta;
 pub mod pcm;
+pub mod text;
