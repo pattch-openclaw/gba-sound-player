@@ -939,9 +939,11 @@ album-pack-check: toolchain-check
 	@echo "  container's total_samples, (d) the writer's output re-read through meta.rs — plus two bakes"
 	@echo "  byte-identical and the ALBM1 host suite green."
 
-# The app seam's host gate (PR-3a step ii): the derived geometry pinned to the shipped FLAC
-# figures, the manifest/pin cross-check for every track, both backend arms through `PcmSource`,
-# and the FLAC arm decoding the fixture's track to its committed `fnv_pcm` pin. Same shape as
+# The app seam's host gate (PR-3a steps ii and iii-A): the derived geometry pinned to the shipped
+# FLAC figures, the manifest/pin cross-check for every track, both backend arms through `PcmSource`,
+# the FLAC arm decoding the fixture's track to its committed `fnv_pcm` pin, and the ROM's whole path
+# for that track (`pull_frame` -> i32 -> `convert_frame` -> `fold_bytes`) reproducing the bake's
+# `fnv_fifo_l` / `fnv_fifo_r` — the sample-scale proof the ROM step rests on. Same shape as
 # `album-pack-check`: neutral cwd, explicit host target, a log, and a collected-test floor — a
 # green that names nothing is not a green. The second leg is the stub-only build, which is what
 # makes "a stub image links no codec at all" an observed fact rather than a claim about one test
@@ -957,14 +959,15 @@ album-seam-test: toolchain-check
 	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_SEAM_GATE_LOG)) \
 	    || { echo "album-seam-test: the host suite did not pass — see $(ALBUM_SEAM_GATE_LOG)"; exit 1; }; \
 	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_SEAM_GATE_LOG))); \
-	  [ -n "$$n" ] && [ "$$n" -ge 17 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 17 — a green that names nothing is not a green"; exit 1; }
+	  [ -n "$$n" ] && [ "$$n" -ge 18 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 18 — a green that names nothing is not a green"; exit 1; }
 	@cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) build --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) \
 	    --no-default-features --features backend-stub >> $(abspath $(ALBUM_SEAM_GATE_LOG)) 2>&1 \
 	    || { cat $(abspath $(ALBUM_SEAM_GATE_LOG)); echo "album-seam-test: the stub-only build failed — a stub image must link no codec at all (--no-default-features --features backend-stub)"; exit 1; }
 	@echo "album-seam-test passed: the derived geometry matches the shipped FLAC figures, the manifest"
 	@echo "  and its generated pins agree for every track, both backend arms satisfy PcmSource, the shipped"
-	@echo "  track decodes to its fnv_pcm pin on the host, and a stub-only build links no decoder."
+	@echo "  track decodes to its fnv_pcm pin on the host, its FIFO bytes fold to the bake's fnv_fifo_l/fnv_fifo_r"
+	@echo "  as the ROM will push them, and a stub-only build links no decoder."
 
 # ===========================================================================
 # Aggregates
@@ -1165,7 +1168,8 @@ help:
 	@echo "      album-bake (album.toml -> assets/*.gfp + ALBM1 + src/assets.rs),"
 	@echo "      album-pack-check (two byte-identical bakes, the four refusals, the ALBM1 host gate),"
 	@echo "      album-seam-test (the seam's host gate: derived geometry vs the shipped figures, both"
-	@echo "      backend arms, the FLAC arm's fnv_pcm pin, and a stub-only build with no decoder linked)."
+	@echo "      backend arms, the FLAC arm's fnv_pcm and fnv_fifo_l/fnv_fifo_r pins, and a stub-only"
+	@echo "      build with no decoder linked)."
 	@echo "  Tests/format:  test (test-rom + flac-test + uli-test), test-rom, check, format"
 	@echo "  Housekeeping:  clean (outputs only; caches kept), clean-deep (+ every"
 	@echo "                 workspace's target/), clean-cache (container volumes),"

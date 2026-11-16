@@ -1,6 +1,7 @@
-//! PR-3a step (ii)'s host gate: the seam, its derived geometry, and the backend arms — on the host.
+//! PR-3a steps (ii) and (iii-A)'s host gate: the seam, its derived geometry, and the backend arms —
+//! on the host.
 //!
-//! Three claims, each with its own tests so a failure names one:
+//! Four claims, each with its own tests so a failure names one:
 //!
 //! 1. **The derived geometry reproduces the shipped FLAC figures exactly.** Every equality cites
 //!    `examples/flac_integration/src/geometry.rs:LINE`, so a transcription rot in this app's
@@ -13,8 +14,12 @@
 //!    by one frame, `start_track` repositioning, `Ok(0)` at end of stream — and the FLAC arm decodes
 //!    the shipped fixture's track to its committed `fnv_pcm` pin, so "the decoder still produces
 //!    these samples" is a checked fact and not a shape assertion.
+//! 4. **The seam's sample scale survives the int16 boundary** — the ROM's whole path for track 1
+//!    (`pull_frame` → i32 → `convert_frame` → `fold_bytes`) reproduces the bake's `fnv_fifo_l` /
+//!    `fnv_fifo_r`, so the bytes the ROM would push are the bytes the pins describe.
 //!
-//! Nothing here is a hardware claim: the ROM, the `agb` bootstrap and the feeder are step (iii).
+//! Nothing here is a hardware claim: the ROM's `agb` bootstrap and its feeder IRQ are step (iii)'s
+//! ROM half, which this file does not execute.
 
 use album_player::assets::{self, TrackPin};
 use album_player::backend::stub::{StubSource, StubTrack};
@@ -475,4 +480,76 @@ fn the_flac_arm_decodes_the_shipped_track_to_its_pcm_pin() {
 
     // End of stream is sticky: a second pull is still 0, not a wrap to the track's start.
     assert_eq!(source.pull_frame(&mut out), Ok(0));
+}
+
+/// Step (iii)'s cheap proof that the seam's **sample scale** is right, before a ROM exists to get
+/// it wrong: the exact path the ROM drives for the whole of track 1 —
+/// `FlacSource::pull_frame` (interleaved i16) → sign-extend to the decoder's i32 →
+/// `playback::convert_frame` → `playback::fold_bytes` in push order — must reproduce the bake's
+/// `fnv_fifo_l` / `fnv_fifo_r`.
+///
+/// Both sides fold the same bytes, and this is where that is checked rather than assumed
+/// (`scripts/gafp_pack.py:1260`'s `fifo_pins`): the pin is `(sample >> 8) & 0xFF` per channel over
+/// the reference PCM in stream order, and `playback::fifo_byte` is `(sample >> 8) as u8` — only bits
+/// 15..8 of the i16-range sample survive, so widening the seam's i16 back to i32 is lossless for the
+/// FIFO byte, and FNV over one channel's bytes is streaming, so per-frame folding order equals the
+/// whole-stream order the pin was folded in. A failure here is a seam-scale finding, not a test to
+/// relax: it would mean the int16 boundary moved a sample's scale relative to the i32 the pins were
+/// computed from.
+#[cfg(feature = "backend-flac")]
+#[test]
+fn the_flac_arm_folds_track_1s_fifo_bytes_to_the_bake_pins() {
+    use album_player::backend::flac::FlacSource;
+    use gba_playback::checksum::Fnv1a64;
+    use gba_playback::playback::{convert_frame, fold_bytes};
+
+    const TRACK: usize = 1;
+    let pin = &assets::TRACKS[TRACK];
+
+    let mut source = FlacSource::new(parsed()).expect("track 0 boots");
+    source
+        .start_track(TRACK)
+        .expect("track 1's container gates");
+
+    let capacity = 2 * geometry::FRAME_SAMPLES as usize;
+    let mut interleaved = vec![0i16; capacity];
+    let mut left = vec![0i32; geometry::FRAME_SAMPLES as usize];
+    let mut right = vec![0i32; geometry::FRAME_SAMPLES as usize];
+    let mut bytes_l = vec![0u8; geometry::FRAME_SAMPLES as usize];
+    let mut bytes_r = vec![0u8; geometry::FRAME_SAMPLES as usize];
+
+    let mut hl = Fnv1a64::new();
+    let mut hr = Fnv1a64::new();
+    let mut samples = 0u64;
+    loop {
+        let n = source
+            .pull_frame(&mut interleaved)
+            .expect("a frame decodes");
+        if n == 0 {
+            break;
+        }
+        // The seam's form is interleaved i16; the FIFO conversion is defined over the decoder's
+        // i32, so widen back exactly the way the ROM will (a checked cast, not a reinterpretation).
+        for index in 0..n {
+            left[index] = i32::from(interleaved[2 * index]);
+            right[index] = i32::from(interleaved[2 * index + 1]);
+        }
+        let (l, r) = (&left[..n], &right[..n]);
+        convert_frame(l, r, &mut bytes_l[..n], &mut bytes_r[..n])
+            .expect("the decoded frame is inside the int16 profile");
+        fold_bytes(&mut hl, &mut hr, &bytes_l[..n], &bytes_r[..n]);
+        samples += n as u64;
+    }
+
+    assert_eq!(samples, pin.samples, "sample count against the bake's pin");
+    assert_eq!(
+        hl.finish(),
+        pin.fnv_fifo_l,
+        "the left FIFO bytes do not hash to the bake's fnv_fifo_l pin"
+    );
+    assert_eq!(
+        hr.finish(),
+        pin.fnv_fifo_r,
+        "the right FIFO bytes do not hash to the bake's fnv_fifo_r pin"
+    );
 }
