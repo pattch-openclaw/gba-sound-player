@@ -1782,6 +1782,64 @@ underrun ledger, no period audit, no UI, and the judgement is by ear. It removes
 the specific doubt PR E could not answer — whether the measured chain actually
 produces clean audio on silicon at 32,768 Hz — and leaves U5 where it was.
 
+#### E3 — the two pre-hardware corpora (landed 2026-11-16)
+
+Both are generated, gitignored assets with C-sourced pins, and both are now
+measured on the same arms as PR E.
+
+**E3-a, the adversarial density set** (`make uli-adversarial-asset`,
+`scripts/gen_adversarial_corpus.py`). Ten seconds of synthetic content chosen to
+invite the **quad-heavy** class the real master does not produce — 4-sample-block
+noise, impulse trains at four rates, hard-clipped harmonic-rich tones — at product
+settings (127,432 B, 641 frames). Its census covers the fixture's gate-frame class
+outright: **max 252 quads** (fixture 248; album 228), 197 escapes, 721 nonzero
+coefficients, 264 Huffman symbols, 64 band symbols. Measured:
+
+| arm | worst (frame) | mean | % of 262,144 |
+|---|---|---:|---:|
+| decode wall (`prod8`) | 213,783 (f64) | 184,896 | 81.55 / 70.54 |
+| gate total | 251,431 (f64) | 216,753 | 95.91 / 82.68 |
+
+**The class is not the worst class.** Quad codes carry four coefficients per
+Huffman symbol, so a quad-dense frame is *cheaper* per frame than the album's
+mixed pair+quad+M/S frames: the adversarial arm's worst is **281 cycles below**
+the album's gate total (251,431 against 251,712) and its mean is 2% lower. That
+is the bound E3-a owed: the corpus that produces the missing class does not beat
+the master's tail, so PR E's worst frame stands.
+
+**E3-b, the sibling project's 12-track album** (`make uli-cross-asset`,
+`scripts/uli_cross_album.py`). The repertoire the reference project measured on:
+twelve CC-licensed tracks fetched from the Internet Archive, trimmed and faded by
+the sibling's own documented recipe, resampled to the codec rate, and encoded at
+**101.277 kbit/s** — **167,222 frames**, the same count as their album, in
+33,088,280 B (the budget is 33,100,000, *not* their 33,292,288, which is 174,716 B
+over a 32 MiB cart beside this instrument). C-sourced pin `51fcf846`, 103
+checkpoints verified. Measured:
+
+| arm | worst (frame) | mean | % of 262,144 |
+|---|---|---:|---:|
+| decode wall (`prod8`) | 220,864 (f11,552) | 185,749 | 84.25 / 70.86 |
+| gate total | **252,490 (f11,552)** | 217,119 | **96.32 / 82.83** |
+
+- **The album-scale corpus has a marginally worse tail than the single master**:
+  96.32% against 96.02% (+782 cycles, +0.30 points), with 3.68 points of margin.
+  That is the first time a corpus has produced a worse frame than PR E's, and it
+  is the reason E3 existed.
+- Frame 11,552 of this bitstream, not the sibling's 27,806: different encode
+  (different budget, different processing), so the indices are not comparable and
+  are not compared.
+- Against the sibling's own C/asm record on the same repertoire (decode 69.43%
+  worst, gate total 73.63%), our decode wall is **1.21x** — the ratio this file has
+  carried since Step 0 — and the distance is the Rust/C gap plus the output stage.
+- The feeder closed the ledger exactly: 167,221 periods, 167,221 full takes, **0
+  starved**, ring drained.
+
+**What E3 does not settle.** The pins are our encoder's, not the sibling's
+bitstream: reproducing *their* blob would need their exact budget and processing,
+and it is 174,716 B too large for this cart anyway. So E3-b is repertoire-and-scale
+equivalence, not bitstream equivalence — which is what the hardware claim needs
+(the tail over a real 43-minute album), and it is recorded as that.
+
 #### What PR E leaves open (E3, gated)
 
 1. **The quad-heavy class** the album does not produce (max 228 quads vs the
@@ -2374,6 +2432,27 @@ Frame-101 attribution of the 523,267 (by difference, one image): kernels
 328,502 (63%), `dec_chan` × 2 ≈175,000 (33%), M/S + wrapper ≈20,000 (4%).
 Kernels against the C record's 134,600 are 2.44×; entropy per
 coefficient against the C bench's entropy+dequant (~41 c/coef) is ~6.6×.
+
+### E3 (2026-11-16, mGBA, WAITCNT 4/2) — the two pre-hardware corpora
+
+| corpus | frames | bytes | decode worst / mean | gate worst / mean | feeder |
+|---|---:|---:|---|---|---|
+| E3-a adversarial density | 641 | 127,432 | 213,783 (81.55%) / 184,896 (70.54%) | 251,431 (95.91%) / 216,753 (82.68%) | 640/640, 0 starved |
+| E3-b sibling 12-track album | **167,222** | 33,088,280 | 220,864 (84.25%) / 185,749 (70.86%) | **252,490 (96.32%)** / 217,119 (82.83%) | 167,221/167,221, 0 starved |
+| (PR E master, for comparison) | 16,553 | 3,293,048 | 220,062 (83.94%) / 189,780 (72.40%) | 251,712 (96.02%) / 221,245 (84.40%) | 16,552/16,552, 0 starved |
+
+- **The album-scale repertoire's tail is 0.30 points worse** than the single
+  master's (252,490 against 251,712): the first corpus to beat PR E's worst frame.
+- **The quad-heavy class is cheaper, not dearer** (251,431): quads carry four
+  coefficients per symbol, so the class the master lacks is not the class that
+  would have hurt.
+- Pins: E3-a `88738a70` (63 checkpoints), E3-b `51fcf846` (103 checkpoints), both
+  C-sourced from the C decoder's own `hash_of_frame_hashes`; both albums decode
+  with `xover=0 hfnz=0` and are bit-exact against the C reference.
+- E3-b's encode took 14.4 min at `--threads 8`; its fetch+prep 1.3 min (649 MB of
+  CC-licensed FLAC, cached outside the tree), and the measurement arm 19 min.
+- ROM sizes: the E3-b gate image is 33,544,188 B of a 33,554,432 B cart — **10,244
+  B of headroom**, which is what forces the smaller budget.
 
 ### PR D (2026-11-16, mGBA, WAITCNT 4/2) — the player, both output profiles
 

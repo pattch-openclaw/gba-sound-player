@@ -44,7 +44,14 @@ use uli_playback::source::{Frame, PcmSource, SourceError, UliSource};
 
 /// The generated album asset (`make uli-album-asset`); gitignored build output,
 /// the same blob the PR E instrument embeds.
+#[cfg(feature = "two-track")]
+static ALBUM: &[u8] = include_bytes!("../../uli_bench/assets/biotwo.uli");
+#[cfg(not(feature = "two-track"))]
 static ALBUM: &[u8] = include_bytes!("../../uli_bench/assets/biomaster.uli");
+
+/// The `autoskip` witness: skip to track 2 after this many frames of track 1.
+#[cfg(feature = "autoskip")]
+const AUTOSKIP_AT: u32 = 4000;
 
 /// The output stage this build ships. `--features speaker` is the folded build.
 #[cfg(feature = "speaker")]
@@ -148,12 +155,17 @@ static PLAYER: Mutex<RefCell<Player<RING_SAMPLES>>> =
 struct Ui {
     finished: bool,
     paused: bool,
+    /// True while a requested skip is being serviced (queue dropped, source
+    /// re-seeked, prefilled). A starved period there is the skip's bounded gap,
+    /// not an underrun: the plan allows a skip a short delay.
+    skipping: bool,
     skip_to: Option<usize>,
 }
 
 static UI: Mutex<RefCell<Ui>> = Mutex::new(RefCell::new(Ui {
     finished: false,
     paused: false,
+    skipping: false,
     skip_to: None,
 }));
 
@@ -184,7 +196,7 @@ fn feeder(cs: critical_section::CriticalSection<'_>) {
     let mut bufs = BUFS.borrow_ref_mut(cs);
     let mut player = PLAYER.borrow_ref_mut(cs);
     let ui = UI.borrow_ref(cs);
-    let quiescent = ui.finished || ui.paused;
+    let quiescent = ui.finished || ui.paused || ui.skipping;
     let SndBufs { l, r, next } = &mut *bufs;
     let i = *next;
     // The ledger classifies the result: starved while the producer had work is an
@@ -419,17 +431,17 @@ fn run(gba: &mut agb::Gba) -> Report {
         RING_SAMPLES
     );
 
+    let mut skipped_samples = 0u32;
+
     // Prefill and prime before the clock starts.
     for _ in 0..PREFILL_FRAMES {
-        if source
-            .pull(&mut Frame {
-                l: l8,
-                r: r8,
-                l16: None,
-            })
-            .is_err()
-        {
-            break;
+        match source.pull(&mut Frame {
+            l: l8,
+            r: r8,
+            l16: None,
+        }) {
+            Ok(stamp) => skipped_samples += u32::from(stamp.skipped),
+            Err(_) => break,
         }
         critical_section::with(|cs| {
             let _ = PLAYER
@@ -465,6 +477,9 @@ fn run(gba: &mut agb::Gba) -> Report {
     let mut sum = 0u64;
     let mut skips = 0u32;
     let mut suspects = 0u32;
+    let mut ui_sum = 0u64;
+    let mut ui_count = 0u32;
+    let mut ui_worst = 0u32;
     let mut finish = Finish::Played;
     let mut redraw = 0u32;
 
@@ -497,6 +512,7 @@ fn run(gba: &mut agb::Gba) -> Report {
                 let mut ui = UI.borrow_ref_mut(cs);
                 ui.finished = false;
                 ui.paused = false;
+                ui.skipping = true;
             });
             if source.seek_track(t).is_ok() {
                 skips += 1;
@@ -507,7 +523,12 @@ fn run(gba: &mut agb::Gba) -> Report {
                         r: r8,
                         l16: None,
                     }) {
-                        Ok(_) => {
+                        Ok(stamp) => {
+                            // The first post-seek frame carries the track's
+                            // `skip`; counting it here is the only place the
+                            // player ever sees it, because the refill is what
+                            // consumes that frame.
+                            skipped_samples += u32::from(stamp.skipped);
                             critical_section::with(|cs| {
                                 let _ = PLAYER
                                     .borrow_ref_mut(cs)
@@ -516,6 +537,16 @@ fn run(gba: &mut agb::Gba) -> Report {
                         }
                         Err(_) => break,
                     }
+                }
+            }
+            critical_section::with(|cs| UI.borrow_ref_mut(cs).skipping = false);
+        }
+
+        #[cfg(feature = "autoskip")]
+        if frames == AUTOSKIP_AT {
+            if let Some(t) = core::num::NonZeroUsize::new(source.track_count().saturating_sub(1)) {
+                if source.track_index() != t.get() {
+                    critical_section::with(|cs| UI.borrow_ref_mut(cs).skip_to = Some(t.get()));
                 }
             }
         }
@@ -551,7 +582,8 @@ fn run(gba: &mut agb::Gba) -> Report {
                 pull
             });
             match res {
-                Ok(_stamp) => {
+                Ok(stamp) => {
+                    skipped_samples += u32::from(stamp.skipped);
                     // A window above 64 frame periods is a counter-integrity
                     // fault, not a frame: count it, never fold it into the mean.
                     let net = raw;
@@ -608,7 +640,12 @@ fn run(gba: &mut agb::Gba) -> Report {
                 "u={} t={} p={} f={}\n",
                 ledger.underruns, ledger.tail_after_end, ledger.periods, frames
             );
-            text::show(&mut gfx, line.as_str(), verdict_colour);
+            let ((), ui_raw) = timed_irq(&mut counter, || {
+                text::show(&mut gfx, line.as_str(), verdict_colour);
+            });
+            ui_sum += u64::from(ui_raw);
+            ui_count += 1;
+            ui_worst = ui_worst.max(ui_raw);
         }
         redraw = if redraw + 1 >= 64 { 0 } else { redraw + 1 };
     }
@@ -624,14 +661,26 @@ fn run(gba: &mut agb::Gba) -> Report {
         0
     };
     agb::println!(
-        "[uli-player] played frames={} worst={} (f{}) mean={} of {} skips={} suspects={}",
+        "[uli-player] played frames={} worst={} (f{}) mean={} of {} skips={} skipped_samples={} suspects={}",
         frames,
         worst,
         worst_frame,
         mean,
         FRAME_CYCLES,
         skips,
+        skipped_samples,
         suspects
+    );
+    let ui_mean = if ui_count > 0 {
+        (ui_sum / u64::from(ui_count)) as u32
+    } else {
+        0
+    };
+    agb::println!(
+        "[uli-player] ui redraws={} mean={} worst={} (outside the frame window)",
+        ui_count,
+        ui_mean,
+        ui_worst
     );
     agb::println!(
         "[uli-player] feeder periods={} served={} underruns={} tails={} frames_fed={} max_ready={}",

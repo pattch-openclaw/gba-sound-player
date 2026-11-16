@@ -8,6 +8,7 @@
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-playback-test uli-player uli-player-rom uli-player-speaker uli-player-speaker-rom \
+        uli-adversarial-asset uli-cross-asset uli-two-track-asset uli-playback-track-pin uli-player-two-track \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
         album-bake album-pack-check \
@@ -710,6 +711,10 @@ ULI_ALBUM_BENCH_LOG ?= uli-album-bench.log
 # The reference album's budget (33,292,288 B) over its 2,612.815 s is 12,742 B/s;
 # scaled to this master's 258.61 s, so the stream lands at the product's rate.
 ULI_ALBUM_BUDGET ?= 3294000
+# Which corpus the bench/gate arms measure. `album-corpus` is PR E's master,
+# `adversarial-corpus` is E3-a's synthetic density set, `cross-corpus` is E3-b's
+# 12-track album. All three are generated, gitignored assets.
+ULI_CORPUS_FEATURE ?= album-corpus
 ULI_ALBUM_THREADS ?= 8
 ULI_ALBUM_PY ?= python3
 
@@ -729,7 +734,7 @@ uli-album-asset:
 	@echo "uli-album-asset: $(ULI_ALBUM_BLOB) and $(ULI_ALBUM_PIN) (both gitignored)"
 
 uli-album-bench-rom: format
-	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features album-corpus
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features $(ULI_CORPUS_FEATURE)
 	agb-gbafix $(ULI_BENCH_BIN) -o $(ULI_ALBUM_BENCH_ROM)
 	@echo "ULI2 album-corpus bench ROM built: $(ULI_ALBUM_BENCH_ROM)"
 
@@ -759,7 +764,7 @@ uli-album-bench: uli-album-bench-rom
 ULI_GATE_ROM := uli-gate.gba
 ULI_GATE_LOG ?= uli-gate.log
 uli-gate-rom: format
-	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features gate,album-corpus
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features gate,$(ULI_CORPUS_FEATURE)
 	agb-gbafix $(ULI_BENCH_BIN) -o $(ULI_GATE_ROM)
 	@echo "ULI2 gate-total ROM built: $(ULI_GATE_ROM)"
 
@@ -851,6 +856,88 @@ uli-playback-test: toolchain-check
 	  status=$$?; cat $(abspath uli-playback-test.log); [ $$status -eq 0 ] \
 	    || { echo "uli-playback-test: the seam suite did not pass — see uli-playback-test.log"; exit 1; }
 	@echo "uli-playback-test passed: seam transparency, fold-down, ring ledger"
+
+# --- PR E's E3: the two pre-hardware corpora, and PR D's witnesses -------------
+#
+# E3-a: the **adversarial density set** — synthetic content chosen to carry the
+# quad-heavy class the real master does not produce. Offline, no network, ten
+# seconds, and the pin is C-sourced like every other corpus's.
+ULI_ADV_DIR := $(ULI_BENCH_DIR)/assets
+ULI_ADV_BLOB := $(ULI_ADV_DIR)/adv.uli
+ULI_ADV_REF := $(ULI_ADV_DIR)/adv
+ULI_ADV_PIN := $(ULI_BENCH_DIR)/src/album_pin_adv.rs
+# 10 s at the product's 12,742 B/s.
+ULI_ADV_BUDGET ?= 127500
+
+uli-adversarial-asset:
+	mkdir -p $(ULI_ADV_DIR) $(ULI_ADV_REF)
+	$(ULI_ALBUM_PY) scripts/gen_adversarial_corpus.py $(ULI_ADV_DIR)/adv 10
+	$(GBA_AUDIO)/build/uli_enc --album $(ULI_ADV_DIR)/adv/album.f32 \
+	  --tracks $(ULI_ADV_DIR)/adv/tracks.tsv --out $(ULI_ADV_BLOB) \
+	  --budget $(ULI_ADV_BUDGET) --cap 74 --threads 4
+	$(GBA_AUDIO)/build/uli_dec $(ULI_ADV_BLOB) $(ULI_ADV_REF) --seektest
+	$(ULI_ALBUM_PY) scripts/uli_album_pin.py --blob $(ULI_ADV_BLOB) \
+	  --ref $(ULI_ADV_REF) --rs $(ULI_ADV_PIN)
+	@echo "uli-adversarial-asset: $(ULI_ADV_BLOB) and $(ULI_ADV_PIN) (both gitignored)"
+
+# E3-b: the **sibling project's 12-track album** — 43.5 minutes, 167,222 frames,
+# CC-licensed material fetched from the Internet Archive with the sibling's own
+# trim recipe (`scripts/uli_cross_album.py`). No blob is committed; the download
+# cache lives outside the tree by default.
+ULI_CROSS_DIR := $(ULI_BENCH_DIR)/assets/cross
+ULI_CROSS_BLOB := $(ULI_CROSS_DIR)/cross.uli
+ULI_CROSS_REF := $(ULI_CROSS_DIR)/ref
+ULI_CROSS_PIN := $(ULI_BENCH_DIR)/src/album_pin_cross.rs
+# 32 MiB less the ~448 KB this instrument's image needs; the sibling's own record
+# used 33,292,288, which does not fit beside the instrument (174,716 B over).
+ULI_CROSS_BUDGET ?= 33100000
+ULI_CROSS_CACHE ?= /tmp/uli-cross-src
+
+uli-cross-asset:
+	@test -f $(GBA_AUDIO)/music/tracklist.json || \
+	  { echo "uli-cross-asset: no $(GBA_AUDIO)/music/tracklist.json"; exit 1; }
+	mkdir -p $(ULI_CROSS_DIR) $(ULI_CROSS_REF)
+	$(ULI_ALBUM_PY) scripts/uli_cross_album.py $(GBA_AUDIO)/music/tracklist.json \
+	  $(ULI_CROSS_DIR) --cache $(ULI_CROSS_CACHE)
+	$(GBA_AUDIO)/build/uli_enc --album $(ULI_CROSS_DIR)/album.f32 \
+	  --tracks $(ULI_CROSS_DIR)/tracks.tsv --out $(ULI_CROSS_BLOB) \
+	  --budget $(ULI_CROSS_BUDGET) --cap 74 --threads $(ULI_ALBUM_THREADS)
+	$(GBA_AUDIO)/build/uli_dec $(ULI_CROSS_BLOB) $(ULI_CROSS_REF) --seektest
+	$(ULI_ALBUM_PY) scripts/uli_album_pin.py --blob $(ULI_CROSS_BLOB) \
+	  --ref $(ULI_CROSS_REF) --rs $(ULI_CROSS_PIN)
+	@echo "uli-cross-asset: $(ULI_CROSS_BLOB) and $(ULI_CROSS_PIN) (both gitignored)"
+
+# PR D's seek witness: every track's `seek_track` reproduces the continuous
+# stream, including the `skip` of a track that does not start on a frame boundary.
+ULI_TWO_BLOB := $(ULI_BENCH_DIR)/assets/biotwo.uli
+uli-two-track-asset:
+	mkdir -p $(ULI_BENCH_DIR)/assets/two $(ULI_BENCH_DIR)/assets/two/ref
+	$(ULI_ALBUM_PY) $(GBA_AUDIO)/encoder/prep.py $(ULI_ALBUM_WAV) $(ULI_ALBUM_WAV) \
+	  --out $(ULI_BENCH_DIR)/assets/two
+	$(GBA_AUDIO)/build/uli_enc --album $(ULI_BENCH_DIR)/assets/two/album.f32 \
+	  --tracks $(ULI_BENCH_DIR)/assets/two/tracks.tsv --out $(ULI_TWO_BLOB) \
+	  --budget 6588000 --cap 74 --threads $(ULI_ALBUM_THREADS)
+	$(GBA_AUDIO)/build/uli_dec $(ULI_TWO_BLOB) $(ULI_BENCH_DIR)/assets/two/ref --seektest
+	$(ULI_ALBUM_PY) scripts/uli_album_pin.py --blob $(ULI_TWO_BLOB) \
+	  --ref $(ULI_BENCH_DIR)/assets/two/ref --rs $(ULI_BENCH_DIR)/src/album_pin_two.rs
+	@echo "uli-two-track-asset: $(ULI_TWO_BLOB) (gitignored)"
+
+uli-playback-track-pin:
+	@test -f $(ULI_TWO_BLOB) || { echo "uli-playback-track-pin: run make uli-two-track-asset first"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) run --manifest-path $(ULI_PLAYBACK_MANIFEST) --target $(HOST_TRIPLE) \
+	    --example track_seek_pin -- $(abspath $(ULI_TWO_BLOB))
+
+# The player exercising a real track change: two tracks, and a deterministic skip
+# partway through track 1 (the runner has no input script).
+uli-player-two-track:
+	cd $(ULI_PLAYER_DIR) && $(CARGO) build --release --target $(TARGET) --features two-track,autoskip
+	agb-gbafix $(ULI_PLAYER_BIN) -o uli-player-two-track.gba
+	timeout -k 5 900 $(GBA_TEST_RUNNER) uli-player-two-track.gba > uli-player-two-track.log 2>&1 || true
+	@grep -q '^\[uli-player\] PASS' uli-player-two-track.log \
+	  || { echo "uli-player-two-track: not a pass — see uli-player-two-track.log"; exit 1; }
+	@grep -E '^\[uli-player\] (played frames|ui redraws|feeder)' uli-player-two-track.log || true
 
 # --- ULI2 by-difference attribution (PLAN-OF-RECORD.md, critical path Step 0) ---
 #
@@ -1304,7 +1391,10 @@ help:
 	@echo "    ULI2 attribution (timing-only; pins fail by design): uli-attrib,"
 	@echo "      uli-attrib-subframe, uli-frame-ops"
 	@echo "    ULI2 PR D (the player): uli-player (headphone), uli-player-speaker (folded), uli-playback-test"
-	@echo "    ULI2 PR E (album corpus, witness only — needs ffmpeg + the sibling gba-audio checkout):"
+	@echo "    ULI2 PR E/E3 (witness only; need ffmpeg + the sibling gba-audio checkout):"
+	@echo "      uli-adversarial-asset (E3-a density set), uli-cross-asset (E3-b 12-track album),"
+	@echo "      uli-two-track-asset + uli-playback-track-pin + uli-player-two-track (PR D witnesses);"
+	@echo "      ULI_CORPUS_FEATURE= selects the corpus for uli-album-bench / uli-gate"
 	@echo "      uli-album-asset (blob + C-sourced pin, both gitignored), uli-album-bench (the tail),"
 	@echo "      uli-gate (the gate total: decode + convert + IRQ + DMA)"
 	@echo "    Opus (OPUS.md): native-opus-rom, opus-test"

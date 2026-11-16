@@ -90,7 +90,14 @@ underruns and a clean period audit in all three**, the ring running full at
 8,192 samples of lead. The seam's host suite pins every emitted frame one-for-one
 against the C reference decoder. The fold choice ships as `(L+R)>>1`: `L`-only is
 the cheaper non-fold-down the plan required measuring, and it stays only as the
-comparison.
+comparison. **E3 (2026-11-16) then closed the two pre-hardware witnesses**: the
+adversarial density set carries the quad-heavy class the master lacks and measures
+*cheaper* (gate 95.91% / 82.68% against the master's 96.02% / 84.40%), while the
+sibling project's twelve-track, 43.5-minute, **167,222-frame** album — CC-licensed
+material with the sibling's own trim recipe, 101.277 kbit/s — measures **96.32% /
+82.83%** on the gate arm: the first corpus to produce a worse tail than the master
+(+0.30 points, 3.68 points of margin), with zero starved periods. Both are
+C-pinned. What remains before the hardware campaign is only the campaign.
 This file is the decision record (why
 ULI2, what it is, the licensing and encoder risks); the live plan, gates and
 measurement ledger are [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md).

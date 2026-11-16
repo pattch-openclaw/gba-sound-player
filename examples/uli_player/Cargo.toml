@@ -37,6 +37,12 @@ speaker = []
 # vanishes), so it exists to be measured against, not to ship unexamined.
 fold-left = []
 
+# Witness features: a two-track blob (`make uli-two-track-asset`) and a
+# deterministic skip partway through track 1, so the seek/truncate/refill path
+# runs on target without an input script. Not part of the shipping shape.
+two-track = []
+autoskip = []
+
 [[bin]]
 name = "uli-player"
 path = "src/main.rs"
