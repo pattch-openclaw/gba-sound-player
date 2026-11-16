@@ -774,6 +774,41 @@ cheap, explicit decision (**Q9**), not something a title with an em-dash should
 force silently. Long titles wrap or elide by rule; the bake tool prints any title
 that will not fit its box, so an album can be *fixed at bake time*.
 
+### 5.6 No signal in this application may be carried by hue alone (ruled 2026-11-16)
+
+**The person who verifies this product is colourblind.** That is a hardware constraint on the UI in
+the same class as 240×160 or 15 colours per bank, and it applies twice — to the player's screens and
+to the test ROMs' verdicts, because a verdict nobody can read is a gate that never runs.
+
+The rule: **hue may decorate a state, never encode it.** Every state an application or a probe can
+leave on screen must be distinguishable by (a) luminance, (b) motion, or (c) sound — and one of those
+three must be sufficient on its own.
+
+This was learned by shipping a violation of it. The first verdict lamp painted the *backdrop*
+blue-on-pass, red-on-fail, the shipped `text.rs` "verdict-colour trick" (§5.1) and
+`product-play_main.rs`'s `report()` idiom. The fix blinked the verdict colour against black and
+called itself hue-free — but **pure blue's relative luminance is 0.072** against black's 0.000, so the
+blink modulated 7% of the range. Full white is 1.000, so the swing is the whole screen. The scheme
+`album-play` now runs is: **steady violet** = still working (steady vs *moving* is the cue), **slow
+white blink ≈ 1 Hz + three 1 kHz beeps** = pass, **fast white blink ≈ 5 Hz** = fail. Rate and tone
+carry the verdict; colour carries nothing.
+
+Two consequences for later phases, stated now so they are not rediscovered as bugs:
+
+- §5.1's backdrop "verdict-colour trick" and §5.2's `ERROR` screen are **not** compliant as described,
+  and neither is any "lit/dim/peak" bar where peak is distinguished only by hue (§5.4's bank 1–2).
+  Peak needs a shape or a rate difference too — a one-frame white flash, not a different colour.
+- Every rate/luminance claim is stated in **cycles** like every other timing figure (§10.5): one frame
+  is 280,896 c, so "slow" is 30 frames per half-cycle = 995 mHz, "fast" is 6 = 4,978 mHz, computed and
+  printed by the ROM rather than eyeballed by whoever made the palette.
+
+- [ ] **Open:** a *boot refusal* currently signals by fast blink + printed log only, with no tone, because
+  every `refuse()` runs while the boot cycle clock owns timer0 — and sound FIFO A's rate **is**
+  timer0's overflow, so a pre-arm tone plays at the clock's rate, not at 16,384 Hz. PR-3b owes this:
+  either the refusal path stops the clock and arms the chain (the same re-arm the §4.4 skip path needs),
+  or the blink rate is documented as the only refusal channel and a hearing-impaired run is accepted as
+  unreadable. Neither is acceptable to leave unnamed.
+
 ---
 
 ## 6. Time, and a progress bar, with no divide (A6, A7)
@@ -1057,6 +1092,7 @@ as a pre-step and never gating on tests):
 |---|---|---|
 | `make album-bake ALBUM=album.toml` | runs the bake: assets + generated pin module, prints the size/budget/duration table, refuses what it cannot fit | **1** (track list → blobs → manifest); 3 (budget/art/viz verdicts) |
 | `make album-rom ALBUM=album.toml` | `album-bake` → cargo → `agb-gbafix` → `album-player.gba` (this is §1's one command) | **1 — landed 2026-11-15 (PR-3a)**; `album-bake` is a prerequisite so a build cannot skip the pack step (R11) |
+| `make album-player-rom` | the same bin **without** `deep-audit` — a *player* artifact: it plays the album and answers within ~1 s of the last sample, but does not verify decoded content, and says `pcm=SKIPPED, fifo=SKIPPED, assets=SKIPPED — built without deep-audit` plus a boot NOTE line so it can never be mistaken for the gate artifact | **1 (landed, PR-3a fix 3)** |
 | `make album-seam-test` | AP-2/AP-9's host leg: the derived geometry against the shipped FLAC figures, every track's `ALBM1`-vs-pin agreement, the eight `AUDITED_MUTATIONS` refusals, `PcmSource` on both arms, and the shipped track folded to its **FIFO pins on the host** — plus a stub-only build that must link no decoder | **1 (landed, PR-3a)** — a name §9.1 did not plan; it is the seam's gate, and `album-test` is the ROM's |
 | `make album-probe-rom` | the Phase 0 throwaway probes | 0 (landed) |
 | `make album-test` | AP-1/AP-2: scripted-key playback ROM in headless mGBA + audio-capture diff | **1 — not landed by PR-3a** (no keys yet; deferred to PR-3b). Its audio-capture leg also has no tool today: the installed `mgba-test-runner` (agb v0.25.0) takes a ROM and nothing else, so AP-1's content witness is on-ROM — the ring ledger plus the pins PR-3a folds — and the sample-for-sample capture diff is owed where it is genuinely needed (AP-6/AP-8, §12.2) |
@@ -1100,7 +1136,7 @@ FLAC geometry: `PERIOD_CYCLES = 573,440` (34.18 ms); a 2,048-sample frame is
 | feeder (convert+push+IRQ) | shipped figure in the product log; carried in | measured, shipped |
 | **content fold on the push path** — FNV-1a-64 over the bytes as they are committed, 12,288 B/frame | **cannot live here: 553 underflows in 1,430 periods** | **measured 2026-11-15 (PR-3a, `album-play`, mGBA, one run — the outcome is the observation, not a per-byte cycle count).** Measured two days later by the same ROM's own cycle clock (§10.5): the two post-audio folds cost **561,887,676 c for 240 frames = ~2,341,000 c per 2,048-sample frame, against a 2,097,152 c frame budget — 112% of a frame in folding alone**, which is precisely the starvation observed. (For scale, FNV-1a-**32** over ROM bytes measured ~29 c/byte in the same build — the 64-bit fold over audio is an order of magnitude worse per byte, and that gap is worth knowing before anyone budgets a fold by intuition.) So the fold belongs off the audio deadline: `album-play` proves its pins in a post-audio re-decode, the same shape the product ROM already uses (`product_play_main.rs:1690-1712`). This is the application's **first non-audio cost line handed across to §10.2's ledger** (R1b) — and it is a *refusal*, not a budget |
 | **boot audit** — `ALBM1` v2 structure fold + per-track 32 KiB/4 KiB content tripwire | **589 ms of CPU** (`parse` 25,477 + `open` 4,328,610 + `gate` 62,009 + `prefill` 5,461,122 c) | **measured 2026-11-16 (PR-3a fix 2, `CycleCounter`, mGBA — cycles, so it transfers to hardware, §10.5)**. Bounded by construction and guarded by a host test (`boot_audit_bytes < 1 MiB`), because the first cut of this row was **52.56 s** (R12) |
-| **post-audio proof + asset audit** — cold re-decode, the two content folds, the full asset fold | **75 s of CPU** (proof 817,429,485 c + assets 439,233,721 c) | **measured, same run.** Off the audio deadline, so it buys with a waiting listener and a lamp rather than with a drop — but it is a real per-run cost for `make album-test` and for Phase 5's hardware sessions, where it should be gated down (§10.5) |
+| **post-audio proof + asset audit** — cold re-decode, the two content folds, the full asset fold | **75 s of CPU** (proof 817,429,485 c + assets 439,233,721 c) | **measured, same run.** Off the audio deadline, so it buys with a waiting listener and a lamp rather than with a drop — but it is a real per-run cost for `make album-test` and for Phase 5's hardware sessions, where it is now gated by the `deep-audit` feature — `make album-player-rom` drops it and prints `SKIPPED` terms plus a boot NOTE line so a player artifact is never mistaken for the gate one (§11, fix 3) |
 | UI: key read, position, bar + 2 text lines, palette fade | **≤ 2% of audio time** target | **AP-0 measures it. This is a target, not a fact.** |
 | viz tick (1–2 ROM reads + table + tiles/sprites) | **≤ 1% target, unmeasured** | AP-6 |
 | art upload (rare, on screen change) | ≤ 1 period, off the audio path | AP-4 |
@@ -1424,6 +1460,18 @@ thing that keeps this from being rediscovered the expensive way. **Known and not
 post-audio proof + asset audit is ~75 s of CPU, which is fine for a test ROM and not fine for a
 player — a `--features deep-audit` decision for `make album-test` and Phase 5.
 
+**PR-3a fix 3 landed 2026-11-16, also from the caller's hardware session.** Two changes, both traceable
+to a person using the product rather than a gate running it. The ~75 s post-audio verification is now
+behind **`deep-audit`**, in `default` so `make album-rom` stays the artifact AP-1 will run, with
+`make album-player-rom` building the fast one — which must *say* it skipped (`NOTE` at boot,
+`SKIPPED` terms in the verdict), because an unaudited green is worse than an honest unknown. And the
+verdict became perceivable: §5.6 is the new rule, born from the fact that fix 2's lamp blinked pure
+blue (relative luminance 0.072) against black (0.000) and called that hue-free while the verifier is
+colourblind; the lit phase is white (1.000), rate carries pass/fail (995 mHz / 4,978 mHz, computed from
+the 280,896 c frame), and three 1 kHz beeps confirm it audibly. The same session produced this
+application's **first hardware witness** — one unit, one 30 s track, clean audio with no stutter —
+recorded against AP-7 and explicitly not a closure of it.
+
 Phase 0 exists because four things in this plan are genuinely new to this tree
 and each has a way to be cheaply wrong: objects/sprites (nothing shipped draws
 one), multiple simultaneously-shown backgrounds (`text.rs` shows one, one-shot),
@@ -1505,7 +1553,7 @@ the rule that a gate touching a non-default configuration runs as its own target
 | **AP-4** | `ART1` is reproducible byte-for-byte from the source PNG, re-reads through the shipping parser, never exceeds its tile/palette allocation (linker map + VRAM audit), and refuses an off-palette source image | `make album-art-check` |
 | **AP-5** | `album.toml` + WAVs → ROM end to end; two runs → identical bytes; every refusal in §9 fires with its message — **the Phase 3 set; the four §9.0 refusals that land in Phase 1 are witnessed by AP-1** | `make album-bake-check` |
 | **AP-6** | Each viz, alone and paired with art, holds `underflows = 0`, stays inside its §10.2 line, and leaves the audio cost breakdown unchanged vs the `none` control arm | `make album-viz-test` + on-target timing, `none` as control |
-| **AP-7** | Hardware: GBA 001 + GBA SP, two runs each, `none`/`bar`/`skyline`/`game`, with the map-file memory report attached and `.iwram` growth flagged | two units, a notebook, and a `flac-docs/history.md`-style record |
+| **AP-7** | Hardware: GBA 001 + GBA SP, two runs each, `none`/`bar`/`skyline`/`game`, with the map-file memory report attached and `.iwram` growth flagged; **and the run's verdict must be legible without colour vision (§5.6)** — a pass a verifier cannot perceive is not a witnessed pass | two units, a notebook, and a `flac-docs/history.md`-style record. **Partial witness already held (2026-11-16, PR-3a):** one unit, `album-player.gba`, track 1 end to end — audio played clean, no stutter and no non-encoder artifacts, reported by the caller from hardware. That is the first time this application's path has been heard; it is not AP-7, which needs both units, the viz/game arms and the memory report |
 | **AP-8** | Reach: the web config produces an `album.toml` the CLI bakes unchanged; the game under the watermark rule never admits an underrun | `make album-web-check` (headless, config diff) + AP-6's arms with `game = on` |
 | **AP-9** | **The seam holds:** the same screen/layout suite passes against `backend-flac`, `backend-uli2` and `stub`; no module outside `src/backend/` names a codec crate (a build-time fact, not a code-review hope). **Phase 1 reads this as: all three arms compile, and the suite *runs* on `stub` + `flac`; three-way runtime parity is witnessed in Phase 5, because the lossy backend has no real-time decode (U4) and no in-tree encoder (R7) yet — the arms that cannot have assets cannot be blamed for it** | three `cargo` arms + a dependency check on the app crate's module graph |
 
