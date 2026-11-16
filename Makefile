@@ -9,7 +9,7 @@
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
-        album-bake album-pack-check album-seam-test album-rom \
+        album-bake album-pack-check album-seam-test album-rom album-player-rom \
         uli-spike-rom clean clean-cache check help toolchain-check
 
 # ===========================================================================
@@ -181,6 +181,10 @@ ALBUM_SEAM_GATE_LOG := album-seam-test.log
 # cleaned by `clean`'s output pass.
 ALBUM_ROM_BIN := $(ALBUM_CRATE_DIR)/target/$(TARGET)/release/album-play
 ALBUM_ROM := album-player.gba
+# The unaudited artifact: the same bin built without the `deep-audit` feature. It plays the album but
+# does not verify decoded content, which is what takes the ~75 s of CPU out of a run a human sits in
+# front of. `*.gba` in `clean-outputs` covers this name — checked, not assumed.
+ALBUM_FAST_ROM := album-player-fast.gba
 ALBUM_ROM_RUN_LOG := album-rom-run.log
 
 # --- the core and its overlay -------------------------------------------------
@@ -1110,6 +1114,11 @@ album-seam-test: toolchain-check
 # the audio chain arms and printed as `boot: parse=…c open=…c gate=…c prefill=…c total=…c`), so the
 # image can say what a human waited for; ÷ 16,777,216 is seconds on any GBA. The 600 s leash is a
 # backstop for the post-verdict `loop {}`, not a budget line.
+#
+# This is the **audited** artifact and the one AP-1 runs: the default features include `deep-audit`,
+# which is the post-audio content proof (~817,429,485 c) plus the full asset fold (~439,233,721 c) =
+# ~75 s of CPU. That is the price of a gate artifact. `make album-player-rom` drops the flag when
+# what you want is something to sit in front of, and its verdict line says the terms were SKIPPED.
 album-rom: album-bake
 	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin album-play
 	agb-gbafix $(ALBUM_ROM_BIN) -o $(ALBUM_ROM)
@@ -1118,6 +1127,22 @@ album-rom: album-bake
 	@echo "  run: timeout -k 5 600 $(GBA_TEST_RUNNER) $(ALBUM_ROM) > $(ALBUM_ROM_RUN_LOG) 2>&1"
 	@echo "  judge by the log's '[album-rom] verdict' line, never by the exit status: a PASS loops"
 	@echo "  forever, so the timeout's exit 124 IS the passing result."
+
+# The same ROM, built without `deep-audit`: a **player** artifact, not a gate artifact. It plays the
+# album and runs every always-on witness (the ALBM1 structure fold, the per-track tripwires, the pin
+# cross-check, the FLAC boot gate, the live period audit) but skips the cold re-decode's pcm/fifo
+# folds and the asset-region fold — ~75 s of CPU that is right for `album-rom` and wrong for a cart
+# a human is watching. It says so twice rather than looking like a pass: a `[album-rom] NOTE` line at
+# boot, and `pcm=SKIPPED, fifo=SKIPPED, assets=SKIPPED — built without deep-audit` in the verdict.
+# `album-bake` stays a prerequisite for the same R11 reason as `album-rom`.
+album-player-rom: album-bake
+	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin album-play \
+	  --no-default-features --features "backend-flac arm-kernel"
+	agb-gbafix $(ALBUM_ROM_BIN) -o $(ALBUM_FAST_ROM)
+	@ls -l $(ALBUM_FAST_ROM)
+	@size -A $(ALBUM_ROM_BIN) | grep -E '^(File|\.text|\.iwram|\.bss)'
+	@echo "  run: timeout -k 5 600 $(GBA_TEST_RUNNER) $(ALBUM_FAST_ROM) 2>&1 | grep '^\[album-rom\]'"
+	@echo "  this build does not verify decoded content: pcm/fifo/assets are SKIPPED, by design."
 
 # ===========================================================================
 # Aggregates
@@ -1323,8 +1348,10 @@ help:
 	@echo "      album-seam-test (the seam's host gate: derived geometry vs the shipped figures, both"
 	@echo "      backend arms, the FLAC arm's fnv_pcm and fnv_fifo_l/fnv_fifo_r pins, and a stub-only"
 	@echo "      build with no decoder linked),"
-	@echo "      album-rom -> $(ALBUM_ROM) (bake + the ROM; run it with mgba-test-runner and read the"
-	@echo "      [album-rom] ledger — exit 124 IS the pass)."
+	@echo "      album-rom -> $(ALBUM_ROM) (bake + the audited ROM: all five verdict terms true; run it"
+	@echo "      with mgba-test-runner and read the [album-rom] ledger — exit 124 IS the pass),"
+	@echo "      album-player-rom -> $(ALBUM_FAST_ROM) (the same ROM built without deep-audit: no cold"
+	@echo "      re-decode, no asset fold, and the verdict says pcm/fifo/assets=SKIPPED)."
 	@echo "  Tests/format:  test (test-rom + flac-test + uli-test), test-rom, check, format"
 	@echo "  Housekeeping:  clean (outputs only; caches kept), clean-deep (+ every"
 	@echo "                 workspace's target/), clean-cache (container volumes),"

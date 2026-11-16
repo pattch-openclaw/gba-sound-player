@@ -66,7 +66,7 @@ name = "album-play"
 path = "src/album_play_main.rs"
 
 [features]
-default = ["backend-flac", "backend-stub", "arm-kernel"]
+default = ["backend-flac", "backend-stub", "arm-kernel", "deep-audit"]
 # The shipped backend: packed `GAFP` blobs through flac-lite.
 backend-flac = ["dep:flac-lite"]
 # The synthetic backend: deterministic int16 stereo, no codec, no platform.
@@ -75,6 +75,13 @@ backend-stub = []
 # `TableCountKernel` — the same kernel A/B `examples/flac_integration` carries
 # (its Cargo.toml's `arm-kernel` block, mirrored).
 arm-kernel = ["dep:flac-lite-gba", "flac-lite-gba/rice-arm", "flac-lite-gba/iwram-pin"]
+# The post-audio content proofs: the cold re-decode with its `pcm`/`fifo` folds and
+# the full `fnv_assets` region fold. ~75 s of CPU (measured: proof 817,429,485 c +
+# asset fold 439,233,721 c) — right for a gate artifact, wrong for something a human
+# sits in front of. IN `default` on purpose: `make album-rom` must keep producing the
+# audited artifact AP-1 runs, and an off-by-default witness is one a gate can skip.
+# `make album-player-rom` builds without it and says so in its verdict line.
+deep-audit = []
 
 [[test]]
 name = "album_pack_host"
