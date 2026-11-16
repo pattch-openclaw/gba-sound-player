@@ -692,6 +692,11 @@ uli-bench: uli-bench-rom
 # and re-verifies its published checkpoints against the decoder's 8-bit track
 # output before it will emit a pin. Needs the sibling `gba-audio` checkout and
 # ffmpeg; it therefore never runs in `make test`.
+#
+# `gba-audio/encoder/prep.py` needs numpy, scipy and soundfile, which a bare
+# system python often lacks (PEP 668). Point `ULI_ALBUM_PY` at a venv:
+#   python3 -m venv /tmp/uli-venv && /tmp/uli-venv/bin/pip install numpy scipy soundfile
+#   make uli-album-asset ULI_ALBUM_PY=/tmp/uli-venv/bin/python3
 GBA_AUDIO ?= $(abspath ../gba-audio)
 ULI_ALBUM_WAV ?= $(abspath assets/sound/bioluminescent.wav)
 ULI_ALBUM_DIR := $(ULI_BENCH_DIR)/assets
