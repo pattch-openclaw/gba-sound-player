@@ -774,40 +774,42 @@ cheap, explicit decision (**Q9**), not something a title with an em-dash should
 force silently. Long titles wrap or elide by rule; the bake tool prints any title
 that will not fit its box, so an album can be *fixed at bake time*.
 
-### 5.6 No signal in this application may be carried by hue alone (ruled 2026-11-16)
+### 5.6 Every on-screen state must be readable by the person who reads it (ruled 2026-11-16, corrected the same day)
 
-**The person who verifies this product is colourblind.** That is a hardware constraint on the UI in
-the same class as 240×160 or 15 colours per bank, and it applies twice — to the player's screens and
-to the test ROMs' verdicts, because a verdict nobody can read is a gate that never runs.
+**The person who verifies this product is colourblind** — and, specifically, they can separate **full
+red from full blue easily** and cannot separate **violet from blue**. That is a hardware constraint on
+the UI in the same class as 240×160 or 15 colours per bank, and it applies to the test ROMs' verdicts
+as much as to the player's screens: a verdict nobody can read is a gate that never runs.
 
-The rule: **hue may decorate a state, never encode it.** Every state an application or a probe can
-leave on screen must be distinguishable by (a) luminance, (b) motion, or (c) sound — and one of those
-three must be sufficient on its own.
+**The rule: a state must be carried by something other than colour, and the tree already ships that
+something — `text.rs`.** A word is unambiguous to any verifier and to any future one whose vision
+differs. Colour may accompany it as a second channel. Within colour, the usable axis is the
+long/short-wavelength one (red vs blue survives deuteranopia and protanopia, the common cases); the
+unusable one here is **two short-wavelength neighbours** like violet and blue. Also worth keeping from
+the correction below: **pure blue against black is a 0.072-vs-0.000 relative-luminance step**, so a
+"clearly visible" blue-on-black signal may be announcing nothing at all.
 
-This was learned by shipping a violation of it. The first verdict lamp painted the *backdrop*
-blue-on-pass, red-on-fail, the shipped `text.rs` "verdict-colour trick" (§5.1) and
-`product-play_main.rs`'s `report()` idiom. The fix blinked the verdict colour against black and
-called itself hue-free — but **pure blue's relative luminance is 0.072** against black's 0.000, so the
-blink modulated 7% of the range. Full white is 1.000, so the swing is the whole screen. The scheme
-`album-play` now runs is: **steady violet** = still working (steady vs *moving* is the cue), **slow
-white blink ≈ 1 Hz + three 1 kHz beeps** = pass, **fast white blink ≈ 5 Hz** = fail. Rate and tone
-carry the verdict; colour carries nothing.
+`album-play`'s scheme is therefore the boring one the rest of the repository already used: **white
+backdrop while running, then BLUE + the word `PASSED`, or RED + the word `FAILED`** — and a boot
+refusal gets red + `FAILED` with its named reason in the log.
 
-Two consequences for later phases, stated now so they are not rediscovered as bugs:
+**How this went wrong twice in one day, recorded because the failure mode is repeatable.** A PR brief
+of mine said "no `text.rs`, no screens" to keep scope on the seam, so the verdict had to be a lamp;
+the lamp was violet→blue and unreadable, so it became a blink; the blink's contrast was checked against
+nobody, so it blinked pure blue (luminance 0.072) at black; blue-vs-black being invisible, the answer
+became a *tone* as well — three inventions, ~500 lines of annunciator, and the whole time the
+correct answer was sitting in `examples/flac_integration/src/text.rs`, used by `product_play_main.rs`
+for exactly this. Two lessons, both cheaper than the code they would have saved:
 
-- §5.1's backdrop "verdict-colour trick" and §5.2's `ERROR` screen are **not** compliant as described,
-  and neither is any "lit/dim/peak" bar where peak is distinguished only by hue (§5.4's bank 1–2).
-  Peak needs a shape or a rate difference too — a one-frame white flash, not a different colour.
-- Every rate/luminance claim is stated in **cycles** like every other timing figure (§10.5): one frame
-  is 280,896 c, so "slow" is 30 frames per half-cycle = 995 mHz, "fast" is 6 = 4,978 mHz, computed and
-  printed by the ROM rather than eyeballed by whoever made the palette.
+- **Ask the verifier what they can perceive before designing the signal**, not after shipping one.
+- **When a restriction of your own making causes a feature, remove the restriction, not the feature.**
+  And: over-correcting a real constraint into an absolute one ("hue may never carry anything") is its
+  own bug — it made §5.2's `ERROR` screen, which spells out "DATA ERROR" in words, suddenly
+  "non-compliant" on paper. That claim is withdrawn; it is compliant, and it was always compliant.
 
-- [ ] **Open:** a *boot refusal* currently signals by fast blink + printed log only, with no tone, because
-  every `refuse()` runs while the boot cycle clock owns timer0 — and sound FIFO A's rate **is**
-  timer0's overflow, so a pre-arm tone plays at the clock's rate, not at 16,384 Hz. PR-3b owes this:
-  either the refusal path stops the clock and arms the chain (the same re-arm the §4.4 skip path needs),
-  or the blink rate is documented as the only refusal channel and a hearing-impaired run is accepted as
-  unreadable. Neither is acceptable to leave unnamed.
+Carried forward for Phase 2, in one line each: §5.1's verdict-colour trick stays, **paired with a
+word**; §5.4's bar peak must not be hue-only (shape or luminance, plus the mm:ss beside it); §5.2's
+`ERROR` screen is the model, not the exception.
 
 ---
 
@@ -1118,7 +1120,7 @@ write the number down before the first real-time claim."* Here it is.
 
 | item | budget | basis |
 |---|---|---|
-| code + tables + headers + metadata | **256 KiB** | a reserve, chosen as ~0.8% of the cart; the real number is read out of the linker map at AP-5 and will be far smaller. What matters is that it is *reserved before* the encoder sizes the audio, so a code growth never silently eats samples |
+| code + tables + headers + metadata | **256 KiB** | a reserve, chosen as ~0.8% of the cart; the real number is read out of the linker map at AP-5 and will be far smaller. What matters is that it is *reserved before* the encoder sizes the audio, so a code growth never silently eats samples. **First real read-out, 2026-11-16 (PR-3a):** `album-play`'s audited image is `.text` 77,696 B — ~30% of the reserve, with no screen yet. (Its `.rodata` is dominated by the album asset itself, so the clean code-plus-data figure stays AP-5's linker-map job rather than being guessed by subtraction.) **§5.6's text renderer costs +11,516 B `.text` and +7,620 B `.rodata`** (96 rasterised glyphs) = +18,940 B per ROM, measured against a baseline build of the same tree; paid once and shared with Phase 2 |
 | `ALBM1` | ~64 B + 32 B/track + strings | §4.3 |
 | `ART1` | 7–20 KiB | §7 |
 | `ALVZ1` | 33.75 B/s for `loud`+`beat` (~91 KB per 45 min) + 90 B/s for `bands` (~243 KB) | §8's arithmetic: 1 B per 30 Hz tick (4+4 bits), 1 bit per tick, 6 B per 15 Hz band-tick |
@@ -1471,6 +1473,18 @@ colourblind; the lit phase is white (1.000), rate carries pass/fail (995 mHz / 4
 the 280,896 c frame), and three 1 kHz beeps confirm it audibly. The same session produced this
 application's **first hardware witness** — one unit, one 30 s track, clean audio with no stutter —
 recorded against AP-7 and explicitly not a closure of it.
+
+**PR-3a fix 4 landed 2026-11-16: the verdict is a word, and the annunciator is gone.** The caller
+asked why this ROM didn't do what every past PR did — render PASS/FAIL as text — and there was no good
+answer but my own scoping. `examples/album_player/src/text.rs` (§4.1's planned file, pulled forward at
+minimum scope: the font include and one present, no measure/wrap/layout — that stays Phase 2's A5) now
+gives white-while-running → BLUE `PASSED` / RED `FAILED`; fix 3's blink, tone, `arm_tone` and
+`COLOR_LIT/OFF/PENDING` are deleted (−372/+117 in the ROM), which also voids the §5.6 open item about
+refusals having no tone, because a refusal now needs no timer at all — it says `FAILED`. §5.6 is
+rewritten to the accurate constraint, and §10.1 gets its first real linker-map read-out.
+**What this gave up:** `arm_tone` was the application's only code to re-arm the audio chain after
+teardown, which is the shape §4.4's skip path wants in PR-3b. It witnessed nothing but its own drain
+count, so PR-3b derives that sequence properly, with tests, rather than inheriting a rehearsal.
 
 Phase 0 exists because four things in this plan are genuinely new to this tree
 and each has a way to be cheaply wrong: objects/sprites (nothing shipped draws
