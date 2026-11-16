@@ -323,7 +323,9 @@ same-image control, twinned bit-exactly (the discipline that has held).
    projection: `pre` was *not* address-rebuilt (LLVM's loop was already 15
    instructions with no spills), and the win came from the reference's cursor
    shape — 10 instructions — not from the arithmetic, which is irreducible.
-3. **The rest of entropy — now the whole deficit.** After Step 1d the gap to C
+3. **M/S (9,861 at f98) — the last hot loop nobody has disassembled.** Then the
+   rest of entropy. See "Handing off" below for the ceilings on both.
+4. **The rest of entropy — now the whole deficit.** After Step 1d the gap to C
    is 62% entropy / 37% synthesis, and three of the four kernels are within 1.00x
    to 1.23x, so the synthesis block is no longer where the headroom is. Inside
    entropy the two known items are the dequant arithmetic (13,129 = 19% of the
@@ -333,9 +335,11 @@ same-image control, twinned bit-exactly (the discipline that has held).
    three measured passes and yielded 42,000, so treat the next pass as
    *measure-first*: the sub-frame arms in "Step 1" already say the dequant is
    13% of the path, which bounds the arithmetic lever at ~2,000/frame.
-4. **PR E — full-album worst frame**, and the gate total (decode + convert + IRQ
+5. **PR E — full-album worst frame**, and the gate total (decode + convert + IRQ
    + DMA). This is U4's real witness, and it is the only thing that can say
-   whether 86.9% on 129 frames is 86.9% on a real album.
+   whether 83.6% on 129 frames is 83.6% on a real album. **It should come before
+   items 3-4**: the budget now has 16.4% of the frame and 2,196 B of IWRAM spare,
+   and neither has been checked against what it reserves margin *for*.
 
 The arithmetic on the two targets, from these numbers: **<=100% is met (84.4%)
 with 15.6% spare, and the <=85% headroom target is met with 1,490 cycles of
@@ -821,6 +825,81 @@ for the product decoder — is still blocked, and by less than before:
 short.** It needs one more decision rather than more work: the dual `ola`
 (344 B) would clear it, at the cost of making the int16/pre-DAC profile pay a
 cartridge fetch. That trade is deliberately **not** taken here.
+
+#### Handing off — what is left, and what to do first (2026-11-15)
+
+**The marginal return, per step, on the mean — which is the honest comparator,
+because the worst-frame index moved five times (f98 → f109 → f93 → f125) and a
+worst-vs-worst delta across different frames is not like-for-like:**
+
+| step | what | mean cycles saved |
+|---|---|---:|
+| 1 | entropy/dequant rewrite | 11,333 |
+| 1a | the bit window into registers | 9,686 |
+| 1b | FFT v5 (cursor + sum formation) | 9,517 |
+| 1c | `pre` in the reference's cursor shape | 2,562 |
+| 1d | `ola` in the reference's cursor shape | 3,838 |
+| 1e | budget work (controls to ROM, cursor rewrite) | 665 |
+
+`post` and M/S are unchanged from the initial 4-ish prior steps; the other three
+synthesis kernels and the entropy path are the whole of the change. **The curve
+is now flat**: ~1% of the frame per round, at the cost of a build-measure-record
+cycle each.
+
+**What is left, ranked, with the ceiling each one is bounded by:**
+
+1. **M/S — 9,861 at f98 (4.6% of the frame).** The **only hot loop in the
+   decoder nobody has disassembled**. It is 2 loads + `add` + `sub` + 2 stores
+   per coefficient over 862 coefficients, and the record already has it at
+   ~1.0x C per coefficient — so unlike `ola` there is no reference gap to close,
+   only whatever LLVM left. Ceiling **~1,500-2,500**, and it costs one
+   disassembly to size it.
+2. **Entropy's dequant path — 13,129 (19% of the entropy path).** Bounded by the
+   sub-frame arms: the reference does the same four multiplies, so the arithmetic
+   is not the gap. What is left is the two-compare `mm < 16 / >= 16` split and
+   the per-band `rqp` reload — which is exactly what 1e-ii tried and failed on.
+   Ceiling **~2,000**, and it needs a different idea than "free a register".
+3. **`pre`'s residual — 4,512.** Best read as *measurement*, not headroom: four
+   multiplies are ~20 of its ~47 cycles, so a 37.9 cycle/pair C row is not
+   reachable by this instruction mix. Expect **~0**.
+
+Realistic total left: **~3,000-4,500 cycles, i.e. 83.6% → ~82.5%.**
+
+**Two negative results worth not repeating:**
+- **`huff_slow` is already clean.** It was flagged in this file as likely building
+  five fat pointers on the stack per long code (13.4% of the worst frame's
+  symbols). Disassembled: LLVM folds `parts()` entirely into **constant offsets
+  from the struct base** (`ldrh r2, [r1, #0xb16]`), so the prologue is
+  `push {fp, lr}` and the function is 212 B. There is no slice construction to
+  remove, and the LUT-geometry lever remains the only one there.
+- **Register relief in `dec_chan` does not pay** (1e-ii): −1,672 B of code for
+  +1,450 cycles, and worse with derived per-band values, because indexing
+  `tables` makes it live again.
+
+**The transferable checklist**, earned across these six steps and worth applying
+to the feeder and UI when they are written:
+
+1. Every hot loop gets its own arm and a **same-image control**, or its number is
+   a guess. Two of six steps changed their plan *because* the instrument was run
+   first, and one was rejected outright by its own measurement.
+2. **Cursors, not indices.** If LLVM already folded the index (`dec_chan`), expect
+   a third of the prize the kernels got.
+3. **One pointer, not ten words.** A `HuffmanParts`-shaped value live across a
+   loop was the largest single pressure source found.
+4. **`smull` writes a register pair**, so a store address in `r0` dies mid
+   multiply. Keep it in `lr`.
+5. **Cold-but-per-frame code stays in `.iwram`**: `eg_slow` from the cartridge
+   measured **+22,657**.
+6. **Measurement-only code never gets a default feature** — the `TW_IWRAM` copy
+   and the vacuous `fftasm=true` both cost real understanding, and the second was
+   a *witness* that had never compared anything.
+
+**And the one thing that should gate further decoder work:** the feeder's
+convert + IRQ + DMA cost is still unmeasured (U4's ceiling is "measured, not
+assigned", and it has not been assigned). The budget now has **16.4% of the frame
+and 2,196 B of IWRAM** spare, both unverified against what they reserve margin
+*for*. Measuring that is cheaper than another kernel, and it is the only thing
+that turns any of these numbers into a real-time claim.
 
 ### Caveats that must travel with these numbers
 

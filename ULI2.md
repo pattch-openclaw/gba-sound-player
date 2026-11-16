@@ -54,7 +54,11 @@ rejected** (+1,450 cycles for −1,672 B, and worse still with derived per-band
 values, because indexing the tables resurrected them as live), and a cursor
 rewrite in `dec_chan` landed for **−856 B / −665 cycles mean**. Net `.iwram`
 **28,632 -> 27,280 B with 2,196 B of headroom**, and the frame **219,251 worst /
-194,489 mean = 83.6% / 74.2%** at **1.21x** the C decode wall. That is the decode
+194,489 mean = 83.6% / 74.2%** at **1.21x** the C decode wall, with **2,196 B of `.iwram` headroom** (was 700 B).
+The marginal return is now ~1% of the frame per round, and the plan's "Handing
+off" section records the ceilings left, the two negative results (`huff_slow` is
+already optimal; register relief in `dec_chan` does not pay) and the checklist
+worth applying to the feeder and UI. That is the decode
 wall, not the gate total: convert + IRQ + DMA and this tree's UI are not in it, so
 U4 and playback remain open.
 This file is the decision record (why
