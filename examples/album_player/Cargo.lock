@@ -6,7 +6,20 @@ version = 4
 name = "album-player"
 version = "0.1.0"
 dependencies = [
+ "flac-lite",
+ "flac-lite-gba",
  "gba-playback",
+]
+
+[[package]]
+name = "flac-lite"
+version = "0.1.0"
+
+[[package]]
+name = "flac-lite-gba"
+version = "0.1.0"
+dependencies = [
+ "flac-lite",
 ]
 
 [[package]]

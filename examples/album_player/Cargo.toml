@@ -35,10 +35,40 @@ license = "MIT"
 # probe, this crate and their host gates all paint from one implementation, and
 # the app may not `#[path]`-include anything under a probe directory.
 gba-playback = { path = "../../crates/gba-playback" }
+# The shipped backend's decoder (§4.2b). Optional so a stub-only image
+# (`--no-default-features --features backend-stub`) links no codec at all —
+# that arm is AP-9's "the UI cannot know which codec it drives" witness, and the
+# seam's host gate builds it explicitly. `iwram-pin` opts in to the core's .iwram
+# placement; `scan` makes the manifest facade a shell over the frame walk, which
+# is what lets the boot gate cross-check a container's frame count.
+flac-lite = { path = "../../crates/flac-lite", features = ["iwram-pin", "scan"], optional = true }
+
+# The overlay's ARM-mode Rice kernel (feature `arm-kernel`), ARM-only by
+# construction: `flac-lite-gba`'s kernel is written over the core's
+# `residual::RiceKernel` seam for thumbv4t. Under the arm target block so a host
+# build of this library never names it — the host gate decodes the same fixture
+# blobs through the core's default kernel.
+[target.'cfg(target_arch = "arm")'.dependencies]
+flac-lite-gba = { path = "../../crates/flac-lite-gba", optional = true }
+
+[features]
+default = ["backend-flac", "backend-stub", "arm-kernel"]
+# The shipped backend: packed `GAFP` blobs through flac-lite.
+backend-flac = ["dep:flac-lite"]
+# The synthetic backend: deterministic int16 stereo, no codec, no platform.
+backend-stub = []
+# Decode through the overlay's `ArmRiceKernel` instead of the core's
+# `TableCountKernel` — the same kernel A/B `examples/flac_integration` carries
+# (its Cargo.toml's `arm-kernel` block, mirrored).
+arm-kernel = ["dep:flac-lite-gba", "flac-lite-gba/rice-arm", "flac-lite-gba/iwram-pin"]
 
 [[test]]
 name = "album_pack_host"
 path = "tests/album_pack_host.rs"
+
+[[test]]
+name = "album_seam_host"
+path = "tests/album_seam_host.rs"
 
 [workspace]
 
