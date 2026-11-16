@@ -68,23 +68,12 @@ DEFAULT_ALBUM = REPO / "examples" / "album_player" / "album.toml"
 # the writer, and its job is to refuse rather than to be accommodating.
 MAGIC = b"ALBM"
 GAFP_MAGIC = b"GAFP"
-VERSION = 2
+VERSION = 1
 HEADER_BYTES = 64
 TRACK_BYTES = 40
 MAX_TRACKS = 32
 POOL_LIMIT = 0x1_0000
 BAR_CELLS = 32
-#: v2's two fold offsets: 44 is FNV over `table ‖ pool` (verified at boot), 60 is
-#: FNV over the asset region (verified by the post-audio audit). 54..60 stay
-#: reserved, so the header stays the documented 64 B.
-STRUCTURE_FNV_AT = 44
-ASSETS_FNV_AT = 60
-#: The bounded content tripwire's spans, in bytes: the first 32 KiB and the last
-#: 4 KiB of each track's blob. `src/meta.rs`'s `BOOT_PREFIX_BYTES` /
-#: `BOOT_SUFFIX_BYTES` are the same pair, restated here because the writer and the
-#: reader are written against §4.3 independently.
-CONTENT_PREFIX_BYTES = 32 * 1024
-CONTENT_SUFFIX_BYTES = 4 * 1024
 BACKENDS = {"stub": 0, "flac": 1}
 FNV_OFFSET = 0x811C9DC5
 FNV_PRIME = 0x01000193
@@ -451,11 +440,10 @@ def build_albm1(
     struct.pack_into("<I", blob, 32, pool_len)
     struct.pack_into("<I", blob, 36, asset_off)
     struct.pack_into("<I", blob, 40, asset_len)
-    struct.pack_into("<I", blob, STRUCTURE_FNV_AT, fnv1a32_parts(table, pool))
+    struct.pack_into("<I", blob, 44, fnv1a32_parts(table, pool, asset_bytes))
     struct.pack_into("<H", blob, 48, album_title_off)
     struct.pack_into("<H", blob, 50, album_artist_off)
     struct.pack_into("<H", blob, 52, year)
-    struct.pack_into("<I", blob, ASSETS_FNV_AT, fnv1a32_parts(asset_bytes))
     blob[track_off:pool_off] = table
     blob[pool_off:asset_off] = pool
     blob[asset_off:] = asset_bytes
@@ -463,27 +451,13 @@ def build_albm1(
 
 
 def fnv1a32_parts(*parts: bytes) -> int:
-    """FNV-1a/32 over concatenated spans — the fold `meta.rs` re-verifies."""
+    """FNV-1a/32 over concatenated spans — the checksum meta.rs re-verifies last."""
     value = FNV_OFFSET
     for part in parts:
         for byte in part:
             value ^= byte
             value = (value * FNV_PRIME) & MASK32
     return value
-
-
-def content_pins(blob: bytes) -> tuple[int, int]:
-    """The bounded content tripwire's two pins: the first 32 KiB and last 4 KiB.
-
-    `meta::prefix_fnv` / `meta::suffix_fnv` fold the same spans, and the ROM
-    compares them with these pins at boot (`backend::verify_pins`). A byte in the
-    middle of the blob is deliberately outside both spans: that is the whole point
-    of the bound, and the full fold that still covers it is `ASSETS_FNV_AT`'s,
-    verified after the audio.
-    """
-    prefix = fnv1a32_parts(blob[:CONTENT_PREFIX_BYTES])
-    suffix = fnv1a32_parts(blob[max(0, len(blob) - CONTENT_SUFFIX_BYTES):])
-    return prefix, suffix
 
 
 def _overwrite(offset: int, value: bytes):
@@ -514,13 +488,12 @@ def _pad_pool(bad: bytearray) -> None:
 #: silent divergence.
 AUDIT_MUTATIONS = {
     "magic": _overwrite(0, b"X"),
-    "version": _overwrite(4, b"\x03"),
+    "version": _overwrite(4, b"\x02"),
     "n_tracks": _overwrite(5, b"\x00"),
     "reserved byte 7": _overwrite(7, b"\x01"),
     "rate": _overwrite(8, b"\x00\x80\x00\x00"),
     "bar_cells": _overwrite(12, b"\x40\x00\x00\x00"),
-    "structure checksum": _xor(STRUCTURE_FNV_AT, 0xFF),
-    "assets checksum": _xor(ASSETS_FNV_AT, 0xFF),
+    "checksum": _xor(44, 0xFF),
     "pool padding": _pad_pool,
 }
 
@@ -542,7 +515,7 @@ def audit_blob(blob: bytes) -> list[str]:
     version, n_tracks, backend = blob[4], blob[5], blob[6]
     if blob[7] != 0:
         bad.append(f"reserved byte 7 is {blob[7]}")
-    for offset in range(54, ASSETS_FNV_AT):
+    for offset in range(54, HEADER_BYTES):
         if blob[offset] != 0:
             bad.append(f"reserved byte {offset} is {blob[offset]}")
             break
@@ -564,8 +537,7 @@ def audit_blob(blob: bytes) -> list[str]:
     pool_len = _word(blob, 32)
     asset_off = _word(blob, 36)
     asset_len = _word(blob, 40)
-    stored_fnv = _word(blob, STRUCTURE_FNV_AT)
-    stored_assets_fnv = _word(blob, ASSETS_FNV_AT)
+    stored_fnv = _word(blob, 44)
     if track_off != HEADER_BYTES or pool_off != track_off + track_len or asset_off != pool_off + pool_len:
         bad.append("sections are not header ‖ table ‖ pool ‖ assets")
     if any(value % 4 for value in (track_off, track_len, pool_off, pool_len, asset_off)):
@@ -629,14 +601,9 @@ def audit_blob(blob: bytes) -> list[str]:
             bad.append(f"pool byte {start} is non-zero padding ({pool[start]:#04x})")
         at += 1
 
-    computed = fnv1a32_parts(tracks, pool)
+    computed = fnv1a32_parts(tracks, pool, assets)
     if stored_fnv != computed:
-        bad.append(f"structure checksum {stored_fnv:#010x}, table+pool hash to {computed:#010x}")
-    computed_assets = fnv1a32_parts(assets)
-    if stored_assets_fnv != computed_assets:
-        bad.append(
-            f"asset checksum {stored_assets_fnv:#010x}, the asset region hashes to {computed_assets:#010x}"
-        )
+        bad.append(f"checksum {stored_fnv:#010x}, sections hash to {computed:#010x}")
     return bad
 
 
@@ -706,8 +673,6 @@ def assets_rs(config: Config, tracks: list[dict], album_samples: int) -> str:
                     f"        fnv_pcm: {hex64(track['pin']['FNV_PCM'])},",
                     f"        fnv_fifo_l: {hex64(track['pin']['FNV_FIFO_L'])},",
                     f"        fnv_fifo_r: {hex64(track['pin']['FNV_FIFO_R'])},",
-                    f"        prefix_fnv: {hex32(track['prefix_fnv'])},",
-                    f"        suffix_fnv: {hex32(track['suffix_fnv'])},",
                     f"        max_fixed_order: {track['pin']['MAX_FIXED_ORDER']},",
                     "    },",
                 ]
@@ -727,7 +692,7 @@ def assets_rs(config: Config, tracks: list[dict], album_samples: int) -> str:
 //! override, and `include_bytes!` makes a missing blob a compile error naming
 //! the path rather than a runtime default.
 
-/// The manifest, `assets/albm1.bin` (ALBM1 v{VERSION}).
+/// The manifest, `assets/albm1.bin` (ALBM1 v1).
 pub const ALBUM1: &[u8] = include_bytes!("../assets/albm1.bin");
 
 /// Tracks in the album (`ALBM1`'s header `n_tracks`).
@@ -776,12 +741,6 @@ pub struct TrackPin {{
     pub fnv_fifo_l: u64,
     /// Right channel's 8-bit FIFO bytes, in stream order (played-form witness).
     pub fnv_fifo_r: u64,
-    /// FNV-1a/32 over the blob's first 32 KiB — the boot content tripwire's prefix
-    /// half (`meta::prefix_fnv`). A boot may read only this much per track.
-    pub prefix_fnv: u32,
-    /// FNV-1a/32 over the blob's last 4 KiB — the tripwire's suffix half
-    /// (`meta::suffix_fnv`).
-    pub suffix_fnv: u32,
     /// Highest FIXED predictor order the packer recorded.
     pub max_fixed_order: u8,
 }}
@@ -890,7 +849,6 @@ def bake(config_path: Path) -> int:
                 recip = bar_recip(container["total_samples"])
                 assert_bar_reciprocal(track.index, container["total_samples"], recip)
                 blob = gfp.read_bytes()
-                prefix_fnv, suffix_fnv = content_pins(blob)
                 entry = {
                     "index": track.index,
                     "container_samples": container["total_samples"],
@@ -900,8 +858,6 @@ def bake(config_path: Path) -> int:
                     "pin": read_pin_module(pin),
                     "blob_sha256": hashlib.sha256(blob).hexdigest(),
                     "fnv": fnv1a32_parts(blob),
-                    "prefix_fnv": prefix_fnv,
-                    "suffix_fnv": suffix_fnv,
                     "asset_off": len(asset_region),
                     "asset_len": len(blob),
                     "blob": blob,
@@ -958,8 +914,6 @@ def bake(config_path: Path) -> int:
                     "title": title,
                     "artist": artist,
                     "fnv": entry["fnv"],
-                    "prefix_fnv": entry["prefix_fnv"],
-                    "suffix_fnv": entry["suffix_fnv"],
                     "blob_sha256": entry["blob_sha256"],
                     "pin": entry["pin"],
                 }
@@ -1271,24 +1225,6 @@ def self_test() -> int:
                 assert problems, f"an audited mutation ({name}) was accepted"
             print(f"  audit: round trip ok, {len(AUDIT_MUTATIONS)} mutations refused")
 
-        def content_tripwire_is_bounded() -> None:
-            # `blob` is longer than prefix + suffix, so the middle byte is in
-            # neither span: that is the property the boot path relies on.
-            blob = bytes(range(256)) * 512
-            prefix, suffix = content_pins(blob)
-            assert prefix == fnv1a32_parts(blob[:CONTENT_PREFIX_BYTES])
-            assert suffix == fnv1a32_parts(blob[-CONTENT_SUFFIX_BYTES:])
-            middle = bytearray(blob)
-            middle[len(blob) // 2] ^= 0xFF
-            assert content_pins(bytes(middle)) == (prefix, suffix), (
-                "a byte outside both spans moved a content pin — the tripwire is not bounded"
-            )
-            for at in (0, len(blob) - 1):
-                edge = bytearray(blob)
-                edge[at] ^= 0xFF
-                assert content_pins(bytes(edge)) != (prefix, suffix), at
-            print("  bounded — the content pins cover only the first 32 KiB and last 4 KiB")
-
         def riff_walk_is_bounded_by_the_declared_size() -> None:
             # A RIFF header that lies about the container's length. The `LIST`
             # below is one the reader does find when the header is honest (the
@@ -1336,7 +1272,6 @@ def self_test() -> int:
         check("a track at the 32-cell bar refused (u32 recip)", tiny_track_refused)
         check("a non-integer config value refused by name", non_integer_config_refused)
         check("RIFF tag walk clamped to min(declared, remaining)", riff_walk_is_bounded_by_the_declared_size)
-        check("content tripwire pins cover only the bounded spans", content_tripwire_is_bounded)
 
     if failures:
         print(f"album_bake self-test: {failures} failure(s)")

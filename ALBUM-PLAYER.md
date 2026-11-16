@@ -1056,10 +1056,9 @@ as a pre-step and never gating on tests):
 | Target | Does | Lands |
 |---|---|---|
 | `make album-bake ALBUM=album.toml` | runs the bake: assets + generated pin module, prints the size/budget/duration table, refuses what it cannot fit | **1** (track list → blobs → manifest); 3 (budget/art/viz verdicts) |
-| `make album-rom ALBUM=album.toml` | `album-bake` → cargo → `agb-gbafix` → `album-player.gba` (this is §1's one command) | **1 — landed 2026-11-15 (PR-3a)**; `album-bake` is a prerequisite so a build cannot skip the pack step (R11) |
-| `make album-seam-test` | AP-2/AP-9's host leg: the derived geometry against the shipped FLAC figures, every track's `ALBM1`-vs-pin agreement, the eight `AUDITED_MUTATIONS` refusals, `PcmSource` on both arms, and the shipped track folded to its **FIFO pins on the host** — plus a stub-only build that must link no decoder | **1 (landed, PR-3a)** — a name §9.1 did not plan; it is the seam's gate, and `album-test` is the ROM's |
+| `make album-rom ALBUM=album.toml` | `album-bake` → cargo → `agb-gbafix` → `album-player.gba` (this is §1's one command) | **1** |
 | `make album-probe-rom` | the Phase 0 throwaway probes | 0 (landed) |
-| `make album-test` | AP-1/AP-2: scripted-key playback ROM in headless mGBA + audio-capture diff | **1 — not landed by PR-3a** (no keys yet; deferred to PR-3b). Its audio-capture leg also has no tool today: the installed `mgba-test-runner` (agb v0.25.0) takes a ROM and nothing else, so AP-1's content witness is on-ROM — the ring ledger plus the pins PR-3a folds — and the sample-for-sample capture diff is owed where it is genuinely needed (AP-6/AP-8, §12.2) |
+| `make album-test` | AP-1/AP-2: scripted-key playback ROM in headless mGBA + audio-capture diff | **1** |
 | `make album-layout-test` | AP-3 host snapshots + fit verdicts | 2 |
 | `make album-art-check` / `album-bake-check` / `album-viz-test` | AP-4 / AP-5 / AP-6 | 2 / 3 / 4 |
 | `make album-web` | AP-8's local config server (never a build dependency) | 6 |
@@ -1098,9 +1097,6 @@ FLAC geometry: `PERIOD_CYCLES = 573,440` (34.18 ms); a 2,048-sample frame is
 | FLAC decode, **the synthetic FIXED-0 perf fixture** | worst frame 398,255 (18.99%) in the product log; 445,558 c mean / 21.25% and 21.36% worst on hardware | measured, shipped — **and it is the wrong row for an album** (§10.2b) |
 | FLAC decode, **real music** (C2's master run, hardware) | decode **527,339 c = 23.656%**; work/frame **32.208%**; worst frame **35.831%** | measured, shipped — **this is the album's line** (`flac-docs/measurements.md`) |
 | feeder (convert+push+IRQ) | shipped figure in the product log; carried in | measured, shipped |
-| **content fold on the push path** — FNV-1a-64 over the bytes as they are committed, 12,288 B/frame | **cannot live here: 553 underflows in 1,430 periods** | **measured 2026-11-15 (PR-3a, `album-play`, mGBA, one run — the outcome is the observation, not a per-byte cycle count).** Measured two days later by the same ROM's own cycle clock (§10.5): the two post-audio folds cost **561,887,676 c for 240 frames = ~2,341,000 c per 2,048-sample frame, against a 2,097,152 c frame budget — 112% of a frame in folding alone**, which is precisely the starvation observed. (For scale, FNV-1a-**32** over ROM bytes measured ~29 c/byte in the same build — the 64-bit fold over audio is an order of magnitude worse per byte, and that gap is worth knowing before anyone budgets a fold by intuition.) So the fold belongs off the audio deadline: `album-play` proves its pins in a post-audio re-decode, the same shape the product ROM already uses (`product_play_main.rs:1690-1712`). This is the application's **first non-audio cost line handed across to §10.2's ledger** (R1b) — and it is a *refusal*, not a budget |
-| **boot audit** — `ALBM1` v2 structure fold + per-track 32 KiB/4 KiB content tripwire | **589 ms of CPU** (`parse` 25,477 + `open` 4,328,610 + `gate` 62,009 + `prefill` 5,461,122 c) | **measured 2026-11-16 (PR-3a fix 2, `CycleCounter`, mGBA — cycles, so it transfers to hardware, §10.5)**. Bounded by construction and guarded by a host test (`boot_audit_bytes < 1 MiB`), because the first cut of this row was **52.56 s** (R12) |
-| **post-audio proof + asset audit** — cold re-decode, the two content folds, the full asset fold | **75 s of CPU** (proof 817,429,485 c + assets 439,233,721 c) | **measured, same run.** Off the audio deadline, so it buys with a waiting listener and a lamp rather than with a drop — but it is a real per-run cost for `make album-test` and for Phase 5's hardware sessions, where it should be gated down (§10.5) |
 | UI: key read, position, bar + 2 text lines, palette fade | **≤ 2% of audio time** target | **AP-0 measures it. This is a target, not a fact.** |
 | viz tick (1–2 ROM reads + table + tiles/sprites) | **≤ 1% target, unmeasured** | AP-6 |
 | art upload (rare, on screen change) | ≤ 1 period, off the audio path | AP-4 |
@@ -1109,37 +1105,6 @@ FLAC geometry: `PERIOD_CYCLES = 573,440` (34.18 ms); a 2,048-sample frame is
 
 The claim that must survive is `underflows = 0` **with the UI and a viz enabled**,
 on hardware, not `underflows = 0` with the screen off.
-
-### 10.5 The pre-audio path is a budget line like any other (measured 2026-11-16, PR-3a fix 2)
-
-**Rule, stated because the first album ROM broke it and no gate could see it: verification cost may
-never sit in front of the speaker.** A check whose cost is proportional to the *cart* belongs in the
-bake tool, in a host gate, or after the audio — never between boot and the first DMA. The bound is
-structural: boot may read O(album structure + a fixed per-track window), and nothing O(album bytes).
-
-What happened: a person played `album-player.gba` and reported **55 s of silence, then 30 s of audio,
-then silence and no verdict**. They were right, and the harness was blind to it — headless mGBA models
-no ROM wait states (R3) and ran the entire image in ~4 s, so every gate in this PR was green while the
-product was unusable. The ROM's own cycle clock, added in the same fix, says the pre-audio path cost
-**881,869,357 c = 52.56 s**, and it reproduces the human's number to within their stopwatch. Two
-causes, one symptom: `Album::parse` folded the whole 15,104,892-byte asset region (§4.3's
-audit-the-blob discipline, applied at the wrong moment), and `backend::open` parsed the manifest a
-second time, so the sweep ran **twice**. The shipped product ROM has never done this — its boot gate
-is counts plus folds of the *decoded output* (`gafp_pin.rs`), and its asset is 38× smaller. This plan
-priced none of it.
-
-After (`ALBM1` v2 — `fnv_structure` at boot, `fnv_assets` as an explicit post-audio audit gate, plus a
-bounded per-track 32 KiB/4 KiB tripwire so R11's stale blob stays loud for milliseconds):
-**9,882,264 c = 589 ms**, with `boot_audit_bytes` asserted ` < 1 MiB` on the host so an O(cart) boot
-cannot silently return. The scaling is honest and tracked: ~36 KiB per track, so a 32-track album is
-~2.4 s and would need the windows shrunk — a Phase 3 budget decision, not a surprise.
-
-Two things this bought that the plan should keep. **Cycles, not wall time:** mGBA headless ran this ROM
-7.5× faster than real time, so every timing claim in the album line is made in cycles and divided by
-16,777,216 in the log — the only unit that transfers to hardware. And **a ROM a human cannot read is a
-ROM a human cannot verify**: PR-3a shipped with no display code by design, which turned a pass into
-"silent forever" indistinguishable from a hang. It now paints the backdrop violet while working and
-blue/red at the verdict, the shipped `report()` idiom, at a cost of one palette write.
 
 **What AP-0's UI figure does and does not buy (accepted 2026-11-15).** The measured
 1.89% is taken as the budget line for a **basic** UI: text drawn from a composed
@@ -1319,10 +1284,9 @@ another directory. Recorded as **D4** below.
 **Deviations D1–D5, recorded here and not yet applied to §9.1.** §9.1's table says
 `album-rom` and `album-test` land in Phase 1. PR-2 lands the *pack* half only: there
 is no ROM main, no `PcmSource`/backend pair and nothing that plays, so both targets
-are PR-3's (**D3**). **Half of that is now discharged:** PR-3a landed `album-rom` and
-§9.1 carries its row; `album-test` stays deferred to PR-3b, because there is still no
-key handling, no pause and no skip — the ROM that exists plays one track and proves it.
-The rest of this note stays as written for D1/D2/D4/D5.
+are PR-3's (**D3**) and §9.1's "Lands 1" reading is deferred rather than wrong — the
+table is left untouched until that half lands, at which point the two rows and this
+note are the same edit.
 
 The other two are Phase-1 readings the config and the reader needed and the spec
 leaves implicit. **D1: a clip window is in the *source's* sample indices, not album
@@ -1371,58 +1335,6 @@ against *every* branch instead of against whichever word happened to be in a tit
 Phase 2, and it will need such a string in a layout fixture rather than in an album's
 metadata. `album-pack-check` 46 → **45** (two decoration-shaped tests replaced by the
 guard); floors unmoved.
-
-**Phase 1's PR-3a landed 2026-11-15: the seam, the derived geometry, and the first ROM
-that plays a track off the manifest.** Four commits on `feat/album-player-phase1-rom`:
-`crates/gba-audio-hw` (the arm-only sound bootstrap), `pcm.rs` + `geometry.rs` +
-`backend/{mod,flac,stub}.rs` + `make album-seam-test`, the host leg proving the seam's
-i16 round-trip, and `src/album_play_main.rs` + `make album-rom`. `album-player.gba` is
-15,291,532 B (`.text` 56,384 / `.iwram` 2,036 / `.bss` 42,620 — **no `.iwram` growth
-from app code**, §10.3), and headless it ends
-`underflows=0`, `coalesced=0`, `late=0`, PCM and both FIFO proofs `MATCH`,
-`verdict PASSED (ledger, audit, pcm, fifo)`. That is **mGBA**, one 30 s clip, no screen
-and no keys: AP-1 is not closed, and no hardware claim is made (AP-7, R3).
-Three things it settled that this file had left open, recorded as deviations:
-
-**D6: `gba-audio-hw` is a fourth copy of the DMA/timer plumbing, deliberately.** §2.2 and
-D4 forbid the app from `#[path]`-including the spike (`rate_play_main.rs`) or the probe
-(`probe_hw.rs`), and the shipped copy lives in a 2,457-line bin. The lift's destination
-crate now exists, parameterised by `{ticks_per_sample, chunk_samples}` rather than by
-FLAC's geometry (§4.2b), and the migration of the three existing consumers onto it is its
-own follow-up PR — witnessed by `flac-check`, `product-play-test` and `album-probe-test`
-— because it re-baselines two accepted ROM images, which is exactly the reasoning §2.2
-used to keep PR-1's lift separate. A copy with a named migration is better than a
-`#[path]` the app is forbidden to own.
-
-**D7: the int16 seam is FIFO-lossless, measured rather than assumed.** §4.2 hands the app
-interleaved **int16** while `convert_frame` and every pin are defined over the decoder's
-**i32**. `fifo_byte` reads only bits 15..8, so widening back with a sign-extend reproduces
-the shipped bytes exactly: all of track 1 through the seam → `convert_frame` → `fold_bytes`
-lands on `fnv_fifo_l 0xc26672ecd4d96261` / `fnv_fifo_r 0x00ea76cc78ca2608`, the bake's own
-values, and that test is a leg of `album-seam-test` (20 tests, floor 18). Nothing in this
-file said that was true before it was checked, and a scale mismatch would have been silent
-in every UI test.
-
-**D8: what the ROM's hashes witness.** The proofs are a **cold re-decode** after teardown,
-not a fold of the bytes that reached the DMA (that fold is §10.2's refused row), so the
-hashes are a *decode* witness and the ring ledger (`pushed == consumed == 491,520 ==
-TRACKS[1].samples`) is the witness of the bytes carried. For Q15's fixture, where two
-tracks alias one blob, the index→content claim therefore rests on `ALBM1`'s
-`(offset, len)` + the per-track pins cross-checked at boot (§4.3 rule 1, R11) — which is
-what PR-3a's boot gate does, and why a stale or swapped blob is a named `FAIL` and not a
-plausible-sounding track.
-
-**PR-3a fix 2 landed 2026-11-16, from a human playing the ROM (§10.5, R12).** It is recorded here
-because it is the first finding in this application's line that no gate in §13 could have produced:
-boot cost 52.56 s → **589 ms**, `ALBM1` **version 2** (64 B header unchanged: `fnv_structure` over
-table‖pool at byte 44, `fnv_assets` at byte 60, 54..60 reserved — so §10.1's ~64 B + 32 B/track line
-still holds), per-track `prefix_fnv`/`suffix_fnv` tripwires in the generated pin module, the full asset
-fold moved to an explicit post-audio audit gate, `FlacSource::new` no longer touches track 0's 12.29 MB
-container, a `CycleCounter` in `crates/gba-audio-hw`, and a backdrop verdict lamp. Gates moved with it:
-`album-seam-test` 20 → 24, `album-pack-check` 45 → 50, and the new `boot_audit_bytes` guard is the
-thing that keeps this from being rediscovered the expensive way. **Known and not yet paid:** the
-post-audio proof + asset audit is ~75 s of CPU, which is fine for a test ROM and not fine for a
-player — a `--features deep-audit` decision for `make album-test` and Phase 5.
 
 Phase 0 exists because four things in this plan are genuinely new to this tree
 and each has a way to be cheaply wrong: objects/sprites (nothing shipped draws
@@ -1499,7 +1411,7 @@ the rule that a gate touching a non-default configuration runs as its own target
 | Gate | Claim | Witness |
 |---|---|---|
 | **AP-0** | The probe ROMs run: objects + 3 BGs + text present simultaneously, the frame cost breakdown closes with UI terms, VRAM/OBJ split and refresh cost recorded, the skip gap measured | **Closed 2026-11-14** (`examples/album_probe/README.md`): measured — UI **1.89%** of a period, feeder 0.92%, one 4bpp tile write 726 c, art upload 0.60 period, video period 280,896 c, and the skip sweep's drain/drop ceiling (§4.4, Q13b). Not measured, still targets: viz (AP-6), game (AP-8), the ≥ 20% reserve — plus every screen and sound claim in the record's NOT VERIFIED section |
-| **AP-1** | **the ROM under test was built by `make album-rom ALBUM=examples/album_player/album.toml` from a fresh clone, with no untracked input and nothing fetched (§2.3)**; ≥2 tracks play to the end of the album, pause/resume and next/prev work **from scripted button presses**, `underflows = 0`, fades produce no click, and a skip's silence is bounded by `SKIP_PRIME_CHUNKS`; **audio begins within 1.5 s of boot**, read from the ROM's own `boot: total=…c` line (§10.5 — 589 ms measured on the 4-track fixture, ~36 KiB per track of that, so a 32-track album needs the tripwire windows shrunk) | `make album-test`: `mgba-test-runner` with a scripted key log, plus a captured-audio comparison against a reference decode of the same asset. **Also runs here, because the packer does: two consecutive packs → byte-identical blobs, and `ALBM1` re-read through the shipping `meta.rs` agrees with `album.toml` field by field** |
+| **AP-1** | **the ROM under test was built by `make album-rom ALBUM=examples/album_player/album.toml` from a fresh clone, with no untracked input and nothing fetched (§2.3)**; ≥2 tracks play to the end of the album, pause/resume and next/prev work **from scripted button presses**, `underflows = 0`, fades produce no click, and a skip's silence is bounded by `SKIP_PRIME_CHUNKS` | `make album-test`: `mgba-test-runner` with a scripted key log, plus a captured-audio comparison against a reference decode of the same asset. **Also runs here, because the packer does: two consecutive packs → byte-identical blobs, and `ALBM1` re-read through the shipping `meta.rs` agrees with `album.toml` field by field** |
 | **AP-2** | mm:ss elapsed + remaining match the durations **the same build's pack step printed** to ≤1 s (§6; the tool is Phase 1's as of §9.0, so this differential exists from the first album build rather than waiting for Phase 3); bar and time never disagree by more than one cell and never move backwards; no `__aeabi_*div*` in the playback/UI path | host twin on `position.rs`/`layout.rs` + objdump/symbol fact on the linked `.gba` + the bake's printed track table |
 | **AP-3** | Every screen's map renders to the expected host snapshot from the same `layout.rs`, and every string on every screen *fits* 240×160 | host snapshot test + on-screen fit verdict (the `text::measure` precedent) |
 | **AP-4** | `ART1` is reproducible byte-for-byte from the source PNG, re-reads through the shipping parser, never exceeds its tile/palette allocation (linker map + VRAM audit), and refuses an off-palette source image | `make album-art-check` |
@@ -1529,9 +1441,8 @@ authorities on decode, and an app change never re-decides them.
 | R7 | **The lossy backend has no encoder in this repository**, so `BACKEND=uli2` cannot be baked here today | `make gafp-pack-check` covers FLAC end to end; nothing in `scripts/` encodes the lossy format | the bake tool calls encode behind one indirection with a declared interface (§9); the app is built and gated on the lossless backend in the meantime, so this blocks a *backend*, never the application (Q3) |
 | R8 | **Scope**: fifteen features, two backends, a UI toolkit, an art pipeline, an analysis pipeline and a game | the natural failure is a demo that does all of them badly | phases are ordered so each one is *usable*, and A9/A14/A15 are labelled reach; §16 lists what we will not build |
 | R9 | Font/charset limits and licensing | 96-glyph ASCII subset; OFL fonts; ULI2 licensing (U7) unresolved | fold at bake time and print offenders (Q9); the app is not the vehicle that forces a publication decision |
-| R10 | **The app's foundation includes a spike directory** — its feeder (`crates/gba-playback/src/playback.rs` since 2026-11-15; `examples/flac_spike/src/playback.rs` before that) and its cycle counter (`examples/e5_fetch/src/timer.rs`) live where the tree's own purpose statement says code goes to be thrown away | `flac_spike` is the perf-gate `ctrl` arm and `e5_fetch` has no Make target any more; a product feature implemented there has no owner, and Q13b's ownership looked genuinely ambiguous for exactly this reason. **The feeder half is closed** (Phase 1 PR-1) | §2.2: lift the feeder + checksum + counter into project source before Phase 1 links them, keep `flac-check`/`product-play-test` as their witnesses, and re-baseline the shipped ROM bytes the move touches. Feeder + checksum **landed** in `crates/gba-playback` (2026-11-15, `make playback-test`); the `e5_fetch` counter's *method* is landed as `gba_audio_hw::CycleCounter` (2026-11-16, PR-3a fix 2 — it is what measured R12, and it is borrowed-handle state-free rather than the spike's statics), so nothing new `#[path]`-includes the spike; `e5_fetch` and `uli_bench` keep their own copies until their owners retire them. Phase 0's probes lean on them on purpose and are throwaway |
+| R10 | **The app's foundation includes a spike directory** — its feeder (`crates/gba-playback/src/playback.rs` since 2026-11-15; `examples/flac_spike/src/playback.rs` before that) and its cycle counter (`examples/e5_fetch/src/timer.rs`) live where the tree's own purpose statement says code goes to be thrown away | `flac_spike` is the perf-gate `ctrl` arm and `e5_fetch` has no Make target any more; a product feature implemented there has no owner, and Q13b's ownership looked genuinely ambiguous for exactly this reason. **The feeder half is closed** (Phase 1 PR-1) | §2.2: lift the feeder + checksum + counter into project source before Phase 1 links them, keep `flac-check`/`product-play-test` as their witnesses, and re-baseline the shipped ROM bytes the move touches. Feeder + checksum **landed** in `crates/gba-playback` (2026-11-15, `make playback-test`); the `e5_fetch` counter is still owed. Phase 0's probes lean on them on purpose and are throwaway |
 | R11 | **A generated asset can go stale** — the policy that keeps album audio out of the repository (§2.3) means a build can silently link *yesterday's* blob | this is the price of the policy, not an accident of it: `master.gfp`, the rate clips and every future `album_player` asset are build output, and build output outlives its config more often than source does | `gafp_pack.py --emit-pin` already writes the sha256 pins the **ROM** checks its own embedded blob against at boot, so a mismatch is a named verdict (R5's "DATA ERROR") rather than a plausible-sounding track; `make album-rom` depends on the pack step so a build cannot skip it; `make clean` removes the generated paths; and AP-1's pack-twice check plus AP-5's byte-identical-ROM check make "generated" mean **regenerable**, not "whatever is lying around" |
-| R12 | **A verification cost proportional to the cart, paid before the first sample** — the album's blobs are 38× the instrument's, and an audit written for a 394 KB clip does not scale to a 15 MB one | It happened, on the first album ROM: 52.56 s of CPU of boot-time asset folding, reported by a human's ears as "no audio for ~55 s" (§10.5). **No gate could have caught it** — headless mGBA models no ROM wait states (R3) and ran the whole image in ~4 s, so every green in the tree was compatible with the product being unusable | §10.5's rule; `meta::boot_audit_bytes` asserted `< 1 MiB` and linear in tracks, not in asset bytes, so the sweep cannot come back silently; the ROM prints its boot phases in cycles, which is the only timing unit that survives the emulator; and Phase 5's hardware runs are the witness R3 already names — an emulator green is not a usability green |
 
 ---
 

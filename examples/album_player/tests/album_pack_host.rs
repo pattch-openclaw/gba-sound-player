@@ -33,12 +33,6 @@ use album_player::nodiv;
 /// no skip.
 const BLOB: &[u8] = assets::ALBUM1;
 
-/// The header offsets of `ALBM1` v2's two folds: 44 is FNV-1a/32 over
-/// `table ‖ pool` (boot's rule), 60 is FNV-1a/32 over the asset region (the
-/// post-audio audit's rule). `54..60` stays reserved.
-const STRUCTURE_FNV_AT: usize = 44;
-const ASSETS_FNV_AT: usize = 60;
-
 /// `album.toml`, restated: four tracks over the tracked reference master.
 const N_TRACKS: u32 = 4;
 /// `[out] rate_hz` and the product clock (Q14), restated from the config and
@@ -463,9 +457,9 @@ fn refuses_bad_magic() {
 }
 
 #[test]
-fn refuses_a_version_that_is_not_2() {
-    let refusal = refuse_after(|blob| blob[4] = 3);
-    assert_eq!(refusal, Refusal::UnsupportedVersion { version: 3 });
+fn refuses_a_version_that_is_not_1() {
+    let refusal = refuse_after(|blob| blob[4] = 2);
+    assert_eq!(refusal, Refusal::UnsupportedVersion { version: 2 });
 }
 
 #[test]
@@ -568,11 +562,11 @@ fn refuses_a_non_zero_reserved_byte_in_the_header() {
             value: 1
         }
     );
-    let refusal = refuse_after(|blob| blob[55] = 0x10);
+    let refusal = refuse_after(|blob| blob[62] = 0x10);
     assert_eq!(
         refusal,
         Refusal::NonZeroReserved {
-            offset: 55,
+            offset: 62,
             value: 0x10
         }
     );
@@ -684,9 +678,9 @@ fn refuses_a_reciprocal_that_is_not_the_floor() {
 }
 
 #[test]
-fn refuses_a_structure_fold_mismatch() {
-    let stored = word(BLOB, STRUCTURE_FNV_AT);
-    let refusal = refuse_after(|blob| blob[STRUCTURE_FNV_AT] ^= 0xFF);
+fn refuses_a_checksum_mismatch() {
+    let stored = word(BLOB, 44);
+    let refusal = refuse_after(|blob| blob[44] ^= 0xFF);
     assert!(
         matches!(refusal, Refusal::ChecksumMismatch { .. }),
         "{refusal}"
@@ -708,7 +702,7 @@ fn refuses_every_mutation_the_bake_self_test_feeds_to_audit_blob() {
     const MUTATIONS: usize = assets::AUDITED_MUTATIONS.len();
     let mutations: [(&str, fn(&mut Vec<u8>)); MUTATIONS] = [
         ("magic", |blob| blob[0] = b'X'),
-        ("version", |blob| blob[4] = 3),
+        ("version", |blob| blob[4] = 2),
         ("n_tracks", |blob| blob[5] = 0),
         ("reserved byte 7", |blob| blob[7] = 1),
         ("rate", |blob| {
@@ -717,8 +711,7 @@ fn refuses_every_mutation_the_bake_self_test_feeds_to_audit_blob() {
         ("bar_cells", |blob| {
             blob[12..16].copy_from_slice(&64u32.to_le_bytes())
         }),
-        ("structure checksum", |blob| blob[STRUCTURE_FNV_AT] ^= 0xFF),
-        ("assets checksum", |blob| blob[ASSETS_FNV_AT] ^= 0xFF),
+        ("checksum", |blob| blob[44] ^= 0xFF),
         // The pool's trailing pad byte, after the last NUL.
         ("pool padding", |blob| {
             let pool_end = word(blob, 36) as usize;
@@ -733,112 +726,9 @@ fn refuses_every_mutation_the_bake_self_test_feeds_to_audit_blob() {
     for (name, edit) in mutations {
         let mut copy = BLOB.to_vec();
         edit(&mut copy);
-        // v2 splits the reader's checksums: the structure fold is `parse`'s rule and
-        // the asset fold is `verify_assets`'s (the post-audio audit). A named
-        // mutation must be refused by one of the two — the per-variant tests above
-        // say which one, and `the_asset_fold_is_not_checked_at_boot` says the asset
-        // fold is deliberately not the boot rule.
-        let refused = match Album::parse(&copy) {
-            Err(_) => true,
-            Ok(album) => album.verify_assets().is_err(),
-        };
         assert!(
-            refused,
+            Album::parse(&copy).is_err(),
             "the audited mutation {name:?} was accepted by meta.rs"
-        );
-    }
-}
-
-#[test]
-fn the_structure_fold_is_the_boot_rule_and_the_asset_fold_is_the_audit_rule() {
-    // Two folds, two passes: 44 hashes the kilobytes boot may read, 60 hashes the
-    // asset region the post-audio audit walks. Both are recomputed here from the
-    // blob's own sections, so a writer that folded the wrong span fails.
-    let (pool_off, pool_end) = pool_range(BLOB);
-    let tracks = &BLOB[HEADER_BYTES..pool_off];
-    let pool = &BLOB[pool_off..pool_end];
-    let assets = &BLOB[word(BLOB, 36) as usize..];
-    assert_eq!(
-        word(BLOB, STRUCTURE_FNV_AT),
-        meta::fnv1a32_parts(&[tracks, pool]),
-        "the structure fold is not over table ‖ pool"
-    );
-    assert_eq!(
-        word(BLOB, ASSETS_FNV_AT),
-        meta::fnv1a32_parts(&[assets]),
-        "the asset fold is not over the asset region"
-    );
-    assert_ne!(word(BLOB, STRUCTURE_FNV_AT), word(BLOB, ASSETS_FNV_AT));
-    assert_eq!(parsed().verify_assets(), Ok(()));
-}
-
-#[test]
-fn the_asset_fold_is_not_checked_at_boot() {
-    // The whole point of v2: a wrong asset fold is accepted by `parse` and refused
-    // by the audit, so boot never walks the region to find out.
-    let mut copy = BLOB.to_vec();
-    copy[ASSETS_FNV_AT] ^= 0xFF;
-    let album = Album::parse(&copy).expect("the asset fold is the audit's rule, not boot's");
-    assert!(
-        matches!(album.verify_assets(), Err(Refusal::AssetsMismatch { .. })),
-        "a mutated asset fold survived the post-audio audit"
-    );
-}
-
-#[test]
-fn a_byte_in_the_middle_of_the_asset_region_is_accepted_at_boot() {
-    // The real regression guard: an O(asset-region) sweep on the pre-audio path
-    // would read this byte at boot. It must not — the byte is outside every
-    // content tripwire, so only the post-audio full fold sees it.
-    let asset_off = word(BLOB, 36) as usize;
-    let asset_len = word(BLOB, 40) as usize;
-    let mut copy = BLOB.to_vec();
-    copy[asset_off + asset_len / 2] ^= 0xFF;
-    let album = Album::parse(&copy).expect("a cold boot must not read the whole asset region");
-    assert!(
-        album.verify_assets().is_err(),
-        "the post-audio audit did not catch a mid-asset byte"
-    );
-}
-
-#[test]
-fn a_cold_boot_reads_under_a_mebibyte_and_never_scales_with_the_asset_region() {
-    let album = parsed();
-    let boot = meta::boot_audit_bytes(album.n_tracks());
-    assert!(
-        boot < 1 << 20,
-        "a cold boot reads {boot} B of the cart — the bound is 1 MiB"
-    );
-    // The span is a per-track tripwire: one more track adds one entry and one
-    // tripwire, never a share of the asset region. This is the assertion that
-    // fails if an O(cart) sweep comes back to the pre-audio path.
-    assert_eq!(
-        meta::boot_audit_bytes(album.n_tracks() + 1) - meta::boot_audit_bytes(album.n_tracks()),
-        meta::TRACK_BYTES + meta::BOOT_PREFIX_BYTES + meta::BOOT_SUFFIX_BYTES
-    );
-    assert!(
-        album.asset_region().len() > 8 * boot,
-        "the asset region ({} B) is no longer large enough for this test to mean anything",
-        album.asset_region().len()
-    );
-}
-
-#[test]
-fn the_content_tripwire_pins_cover_the_bounded_spans() {
-    // The bake's prefix/suffix pins against the blob bytes it wrote them from: a
-    // stale pin (or a stale blob) is a mismatch here, before a ROM boots.
-    let album = parsed();
-    for (index, pin) in assets::TRACKS.iter().enumerate() {
-        let asset = album.track(index as u32).asset;
-        assert_eq!(
-            pin.prefix_fnv,
-            meta::prefix_fnv(asset),
-            "track {index} prefix_fnv"
-        );
-        assert_eq!(
-            pin.suffix_fnv,
-            meta::suffix_fnv(asset),
-            "track {index} suffix_fnv"
         );
     }
 }
@@ -847,7 +737,7 @@ fn the_content_tripwire_pins_cover_the_bounded_spans() {
 fn every_refusal_names_its_rule() {
     let refusals = [
         Refusal::BadMagic,
-        Refusal::UnsupportedVersion { version: 3 },
+        Refusal::UnsupportedVersion { version: 2 },
         Refusal::TrackCount { n_tracks: 0 },
         Refusal::RateNotProductClock { rate_hz: 32_768 },
         Refusal::BarCellsMismatch { bar_cells: 64 },
@@ -904,10 +794,6 @@ fn every_refusal_names_its_rule() {
             recip: 0,
         },
         Refusal::ChecksumMismatch {
-            stored: 0,
-            computed: 1,
-        },
-        Refusal::AssetsMismatch {
             stored: 0,
             computed: 1,
         },
