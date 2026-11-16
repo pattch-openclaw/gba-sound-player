@@ -81,7 +81,16 @@ silicon:** `make uli-play-rom` (`--features play-only`) runs one paced pass and
 nothing else, and a manual hardware listen on 2026-11-16 played the album through
 its entirety with no glitches and no silent gaps — a sanity check of the 32,768 Hz
 timer/DMA/FIFO chain, not U5 (one unit, one run, no counted underruns, no period
-audit, judgement by ear).
+audit, judgement by ear). **PR D (2026-11-16) then landed the player itself**:
+`crates/uli-playback` (the codec-agnostic `PcmSource`, the ULI2 adapter, the
+output stage and the ring) and `examples/uli_player`, measured in mGBA on both
+output profiles — headphone 93.42% worst / 80.08% mean, speaker folded
+`(L+R)>>1` 95.55% / 82.49%, speaker `L`-only 92.60% / 79.28% — with **zero
+underruns and a clean period audit in all three**, the ring running full at
+8,192 samples of lead. The seam's host suite pins every emitted frame one-for-one
+against the C reference decoder. The fold choice ships as `(L+R)>>1`: `L`-only is
+the cheaper non-fold-down the plan required measuring, and it stays only as the
+comparison.
 This file is the decision record (why
 ULI2, what it is, the licensing and encoder risks); the live plan, gates and
 measurement ledger are [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md).
@@ -708,7 +717,7 @@ claims to be measured, not inherited from `gba-audio`.
 | **U2 — bit-exact host** | The Rust core matches the C integer reference frame-for-frame on the committed corpus and rejects malformed frames without panic. | `make uli-test`; pinned hashes |
 | **U3 — bit-exact product** | The product kernel set (`ArmKernels`) decodes the corpus to the pinned int8/int16 frames, in the host full-frame twin and on the target. **Met (PR A).** | `make uli-bench` (both arms + on-target twin); `make uli-overlay-test` (host kernel + decoder twins) |
 | **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Met on the album corpus (PR E, 2026-11-15): decode 220,062 = 83.94% worst; gate total 251,712 = 96.02% worst / 84.40% mean in the player model (the same arm verifying in-loop reads 98.33% and starves 12.06 s, which is the harness); ceiling written down as the 262,144-cycle period, 10,432 cycles of margin at the worst frame; no UI, mGBA only.** Ladder: 204% (PR B) -> 200% (split `huff`) -> 186% -> 175% -> 164% (asm FFT) -> 162% -> 157% (`iwram-tw`) -> 148% (`iwram-tables`) -> 138% (C-3d) -> **274,198 / 232,090 = 105% / 89%** (C-3). **Step 0 (2026-11-15) attributed the worst frame (f98) by difference in the product image: synthesis 162,987 (59%), entropy/dequant/M-S 110,741 (40%), wrapper 486 - i.e. 69% of the 92,286-cycle distance to the C worst-frame shape is the entropy path and 31% synthesis. Per channel the kernels are 1.10-1.33x C (pre 1.22x, fft 1.33x, post 1.10x, ola 1.11x), so the previous 'asm kernels first, ~194,000 prize' order is retired; the live order is in `crates/uli-lite/PLAN-OF-RECORD.md` ('Critical path to real time').** | `make uli-bench`; mGBA, then hardware |
-| **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | `product-play` equivalent for ULI2; hardware runs. **Not met, but the chain has been heard:** one manual hardware pass of `make uli-play-rom` (audio-only, `--features play-only`) played the album to its end with no glitches and no silent gaps (2026-11-16). That is a sanity check, not the gate — no counted underrun ledger, no period audit, one unit, one run. |
+| **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | **Met in mGBA, open on hardware.** `make uli-player` (headphone) and `make uli-player-speaker`: zero underruns, period audit closed (periods = served + 1 tail), ring full, three builds measured (2026-11-16). The hardware half is still owed — two units × two runs of *this* player; the manual listen that has happened is the PR E audio-only ROM, which carried no counted ledger. |
 | **U6 — memory** | IWRAM/EWRAM/stack stay inside the product budget with the UI and feeder linked. | linker map + runtime stack check |
 | **U7 — licensing/spec** | A public crate, if published, has a permissive license and a standalone format specification; otherwise it remains `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** |
 

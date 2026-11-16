@@ -130,6 +130,14 @@ __pycache__/
 /uli-album-bench*.log
 /uli-gate*.log
 /uli-gate-fixture*.log
+/uli-player*.log
+/uli-playback-test.log
+
+# The PR D player crate and its host suite (own workspace, builds for both the
+# GBA target and the host triple). Its lockfile is part of the instrument, like
+# uli_bench's.
+/examples/uli_player/target/
+!/examples/uli_player/Cargo.lock
 
 # Timing-only by-difference attribution arms (`make uli-attrib`), and the
 # sub-frame entropy arms below the frame level (`make uli-attrib-subframe`).

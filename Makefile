@@ -7,6 +7,7 @@
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
+        uli-playback-test uli-player uli-player-rom uli-player-speaker uli-player-speaker-rom \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
         album-bake album-pack-check \
@@ -256,6 +257,7 @@ WORKSPACES := . crates/flac-lite crates/flac-lite-gba crates/gba-playback \
               examples/flac_spike \
               examples/overlay-kernel-check examples/opus_spike \
               crates/uli-lite crates/uli-lite-gba examples/uli_spike examples/uli_bench \
+              crates/uli-playback examples/uli_player \
               examples/album_probe
 
 # examples/album_player is deliberately NOT in WORKSPACES: its `src/lib.rs`
@@ -797,6 +799,59 @@ uli-gate: uli-gate-rom
 	@grep -E '^\[uli-bench\] (corpus|decode frames|frame prod8 |frame gate |gate feeder|gate pin|calib)' $(ULI_GATE_LOG) || true
 	@echo "uli-gate done: $(ULI_GATE_LOG)"
 
+# --- PR D: the product player (ULI2.md Phase 2, PLAN-OF-RECORD.md "PR D") -----
+#
+# `examples/uli_player` is one paced decode-and-play loop over the
+# `uli-playback` seam: the 32,768 Hz timer/DMA/FIFO chain, a live text UI read
+# from the ULA2 track table, and the underrun/period ledger U5 is gated on.
+# The headphone build ships stereo untouched; `--features speaker` decodes full
+# stereo and folds to mono in the output stage (both are measured).
+ULI_PLAYER_DIR := examples/uli_player
+ULI_PLAYER_BIN := $(ULI_PLAYER_DIR)/target/$(TARGET)/release/uli-player
+ULI_PLAYER_ROM := uli-player.gba
+ULI_PLAYER_SPK_ROM := uli-player-speaker.gba
+ULI_PLAYER_LOG ?= uli-player.log
+ULI_PLAYER_SPK_LOG ?= uli-player-speaker.log
+
+uli-player-rom: format
+	cd $(ULI_PLAYER_DIR) && $(CARGO) build --release --target $(TARGET)
+	agb-gbafix $(ULI_PLAYER_BIN) -o $(ULI_PLAYER_ROM)
+	@echo "ULI2 player ROM (headphone profile) built: $(ULI_PLAYER_ROM)"
+
+uli-player-speaker-rom: format
+	cd $(ULI_PLAYER_DIR) && $(CARGO) build --release --target $(TARGET) --features speaker
+	agb-gbafix $(ULI_PLAYER_BIN) -o $(ULI_PLAYER_SPK_ROM)
+	@echo "ULI2 player ROM (speaker profile, folded) built: $(ULI_PLAYER_SPK_ROM)"
+
+# A playback ROM loops forever once it passes, so the runner is leashed and the
+# verdict is read from the log: PASS requires zero underruns, a clean period
+# audit and a worst frame inside the period.
+uli-player: uli-player-rom
+	timeout -k 5 900 $(GBA_TEST_RUNNER) $(ULI_PLAYER_ROM) 2>&1 | tee $(ULI_PLAYER_LOG) || true
+	@grep -q '^\[uli-player\] PASS' $(ULI_PLAYER_LOG) \
+	  || { echo "uli-player: not a pass — see $(ULI_PLAYER_LOG)"; exit 1; }
+	@grep -E '^\[uli-player\] (profile|played frames|feeder)' $(ULI_PLAYER_LOG) || true
+	@echo "uli-player done: $(ULI_PLAYER_LOG)"
+
+uli-player-speaker: uli-player-speaker-rom
+	timeout -k 5 900 $(GBA_TEST_RUNNER) $(ULI_PLAYER_SPK_ROM) 2>&1 | tee $(ULI_PLAYER_SPK_LOG) || true
+	@grep -q '^\[uli-player\] PASS' $(ULI_PLAYER_SPK_LOG) \
+	  || { echo "uli-player-speaker: not a pass — see $(ULI_PLAYER_SPK_LOG)"; exit 1; }
+	@grep -E '^\[uli-player\] (profile|played frames|feeder)' $(ULI_PLAYER_SPK_LOG) || true
+	@echo "uli-player-speaker done: $(ULI_PLAYER_SPK_LOG)"
+
+# The seam's own host suite (crates/uli-playback): frame-for-frame pins against
+# the C reference, the two speaker folds, and the ring ledger's classification.
+ULI_PLAYBACK_MANIFEST := $(abspath crates/uli-playback/Cargo.toml)
+uli-playback-test: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	@cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(ULI_PLAYBACK_MANIFEST) --target $(HOST_TRIPLE) \
+	    > $(abspath uli-playback-test.log) 2>&1; \
+	  status=$$?; cat $(abspath uli-playback-test.log); [ $$status -eq 0 ] \
+	    || { echo "uli-playback-test: the seam suite did not pass — see uli-playback-test.log"; exit 1; }
+	@echo "uli-playback-test passed: seam transparency, fold-down, ring ledger"
+
 # --- ULI2 by-difference attribution (PLAN-OF-RECORD.md, critical path Step 0) ---
 #
 # Each arm rebuilds the bench with exactly one part of the product frame removed
@@ -1248,6 +1303,7 @@ help:
 	@echo "      uli-bench (headless run + PASS/FAIL read from the log), uli-kernel-twin"
 	@echo "    ULI2 attribution (timing-only; pins fail by design): uli-attrib,"
 	@echo "      uli-attrib-subframe, uli-frame-ops"
+	@echo "    ULI2 PR D (the player): uli-player (headphone), uli-player-speaker (folded), uli-playback-test"
 	@echo "    ULI2 PR E (album corpus, witness only — needs ffmpeg + the sibling gba-audio checkout):"
 	@echo "      uli-album-asset (blob + C-sourced pin, both gitignored), uli-album-bench (the tail),"
 	@echo "      uli-gate (the gate total: decode + convert + IRQ + DMA)"

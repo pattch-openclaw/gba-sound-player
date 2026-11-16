@@ -1,0 +1,52 @@
+[package]
+name = "uli-player"
+version = "0.1.0"
+edition = "2024"
+
+# ULI2's product player (PLAN-OF-RECORD.md, PR D): one paced decode-and-play loop
+# over the `uli-playback` seam, the 32,768 Hz timer/DMA/FIFO chain, a live text UI
+# read from the ULA2 track table, and the underrun/period ledger U5 is gated on.
+#
+#   make uli-player-rom        build + fix the ROM
+#   make uli-player            build, run in headless mGBA, gate on the verdict
+#
+# The corpus is the generated album asset (`make uli-album-asset`), the same blob
+# the PR E instrument embeds; it is gitignored build output, so this crate's
+# `include_bytes!` resolves only after that target has run.
+#
+# Standalone workspace, cargo config INHERITED from the repo root — do NOT add a
+# local .cargo/config.toml: cargo concatenates target.<triple>.rustflags across
+# config layers, and a local re-declaration links `-Tgba.ld` twice.
+
+[dependencies]
+uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }
+uli-lite-gba = { path = "../../crates/uli-lite-gba" }
+uli-playback = { path = "../../crates/uli-playback" }
+gba-playback = { path = "../../crates/gba-playback" }
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+agb = "0.25.0"
+
+[features]
+# The speaker output stage: decode full stereo, fold to mono after the decoder
+# (`FoldHow::Average`). Off by default — the headphone build ships stereo.
+speaker = []
+
+# Which fold the speaker build uses. `(L+R)/2` is the default because it is a
+# real fold-down; `left-only` is cheaper and is NOT one (hard-panned content
+# vanishes), so it exists to be measured against, not to ship unexamined.
+fold-left = []
+
+[[bin]]
+name = "uli-player"
+path = "src/main.rs"
+
+[workspace]
+
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true

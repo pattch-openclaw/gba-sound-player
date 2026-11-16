@@ -348,6 +348,11 @@ same-image control, twinned bit-exactly (the discipline that has held).
    quad-heavy synthetic set and the `gba-audio` album cross-check — stays gated
    on nothing except the pre-hardware requirement.
 
+6. ~~**PR D — playback.**~~ **DONE (2026-11-16, mGBA): the seam, the player and
+   both output profiles; zero underruns and a clean period audit in each of the
+   three builds.** See "Landed 2026-11-16" below. What it leaves: U5 on hardware,
+   a multi-track fixture, and the UI redraw's own cost.
+
 The arithmetic on the two targets, from these numbers: **<=100% is met (83.9%
 decode, 96.0% gate total) and the <=85% headroom target is met on the decode
 wall with 2,783 cycles of margin at the album's worst frame.** What remains is
@@ -1480,6 +1485,56 @@ implementation**, which is how this file now uses it.
 - Gate: U5 (zero underruns, clean period audit) in mGBA, then hardware, with
   both regimes reported.
 
+#### Landed 2026-11-16: the seam, the player, and both output profiles
+
+Three pieces, each with an owner that does not know about the others:
+
+* **`crates/uli-playback`** — the codec-agnostic `PcmSource` the player owns, the
+  ULI2 adapter (`UliSource`) over `GbaDecoder` + the `ULA2` track table, the
+  **output stage** (`fold_into`: headphone stereo, or speaker mono by
+  `(L+R)>>1` / `L`-only), and `Player<const RING>` over the shipping
+  `gba_playback::playback::RingFeed`. Host suite: **10 tests**, including every
+  emitted frame pinned **one-for-one against the C reference decoder's hashes**
+  (a stronger statement than an album total), the two folds' non-equivalence, the
+  int8-vs-int16 rounding rule, and the ledger's served/underrun/tail split.
+* **`examples/uli_player`** — the product player: one paced
+  decode→fold→push loop, timer0 = one sample, timer1 = one 512-sample feeder
+  period with its IRQ, DMA1/DMA2 on the FIFOs from a two-slot ping-pong, 16-frame
+  (250 ms) ring, 8-frame prefill, drain before the final screen. Keys: **A**
+  pause/resume, **L/R** previous/next track. The UI is text drawn from the
+  container's strings and the seam's position — title, `n/N`, elapsed/remaining —
+  redrawn about once a second, with the background re-`show`n before every
+  commit (the FLAC ROM's one-shot-present finding).
+* **Measurements below**, both profiles, zero underruns.
+
+**The fold choice: `(L+R)>>1` ships.** `L`-only is implemented because the plan
+required the comparison, and measured because a claim about it should not be
+assumed: it is *cheaper* than the fold-down (−2,114 cycles/frame mean here) and
+that cheapness is exactly its disqualification — it is not a fold-down (hard-panned
+content vanishes; on an M/S frame `L = M + S` is mid+side, not mid). Recorded
+costs are cross-image and therefore indicative, not paired:
+`(L+R)>>1` ≈ **+6.3 k cycles/frame** over the stereo build (≈ 12 cycles/sample for
+512 samples × load-pair/add/shift/store-both), `L`-only ≈ −2.1 k.
+
+**U5 in mGBA: met for both profiles.** Zero underruns, the period audit closes
+(`periods = served + tails`, one tail at the end of the album), and the ring ran
+full (8,192 samples of lead) throughout. Explicitly **not** the hardware half of
+U5, which still wants two units × two runs.
+
+Three things this first increment does **not** do, stated so they are not read as
+done:
+
+1. **The UI redraw is outside the measured window.** The per-frame cost below is
+   decode+fold+push; the ~1 Hz redraw sits between windows. It did not cause an
+   underrun in either run (the ledger is clean), but its own cost is unmeasured.
+2. **Multi-track seek is implemented and unexercised.** `UliSource` advances and
+   seeks through the `ULA2` table and `UliPlayer` binds L/R to it, but the corpus
+   is a single track, so a track change has never run. A two-track blob (the same
+   master twice, Q15-style) is the missing fixture.
+3. **Pause drains rather than stopping instantly.** Pause stops feeding and lets
+   the 250 ms ring run out; the ledger classifies those periods as tails, not
+   underruns, which is the correct accounting but not an instant silence.
+
 #### Cross-track facts PR D's owner needs (reported by the application track, 2026-11-15)
 
 Not codec rulings and not claims on U4 — three things decided above the seam that change
@@ -2319,6 +2374,31 @@ Frame-101 attribution of the 523,267 (by difference, one image): kernels
 328,502 (63%), `dec_chan` × 2 ≈175,000 (33%), M/S + wrapper ≈20,000 (4%).
 Kernels against the C record's 134,600 are 2.44×; entropy per
 coefficient against the C bench's entropy+dequant (~41 c/coef) is ~6.6×.
+
+### PR D (2026-11-16, mGBA, WAITCNT 4/2) — the player, both output profiles
+
+Corpus: the same generated album (`3,293,048 B`, 16,553 frames, 32,768 Hz), the
+same blob PR E measured. Ring 8,192 samples (16 frames), prefill 8 frames, one
+feeder period = one frame (64/s).
+
+| build | worst (frame) | mean | % of 262,144 | underruns | periods (served / tails) | max ring |
+|---|---|---:|---:|---:|---|---:|
+| headphone (stereo as decoded) | 244,879 (f16,196) | 209,937 | 93.42 / 80.08 | **0** | 16,553 (16,552 / 1) | 8,192 |
+| speaker, `(L+R)>>1` | 250,473 (f3,206) | 216,254 | 95.55 / 82.49 | **0** | 16,553 (16,552 / 1) | 8,192 |
+| speaker, `L`-only | 242,755 (f16,196) | 207,823 | 92.60 / 79.28 | **0** | 16,553 (16,552 / 1) | 8,192 |
+
+- Frames played 16,544 = 16,553 − 8 prefill − 1 preroll; `frames_fed` = 16,552.
+- The window is decode → fold → push with IRQs live; the ~1 Hz UI redraw is
+  outside it. The three builds are **different images**, so the fold deltas are
+  indicative: `(L+R)>>1` ≈ +6.3 k, `L`-only ≈ −2.1 k cycles/frame against the
+  stereo build. Both are consistent with a per-sample cost of a few cycles
+  (512 samples per frame).
+- The speaker profiles are **not** a stereo-shortcut: both decode two channels
+  (the decoder is untouched) and fold after it, which is why their worst frames
+  sit where a stereo frame does.
+- Instrument note: the 32-bit counter wraps every 256 s and this album is 258 s,
+  so the player zeroes it every 1,024 frames; a window above 2²⁴ is counted as a
+  suspect and fails the verdict rather than entering the mean.
 
 ### PR E (2026-11-15, mGBA, WAITCNT 4/2) — album corpus, tail and gate total
 
