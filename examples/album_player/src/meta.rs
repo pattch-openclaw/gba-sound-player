@@ -15,6 +15,10 @@
 //! - **The checksum is verified last**, after every semantic rule, so a blob
 //!   that is both wrong and stale reports the field that is wrong rather than
 //!   masking it as an integrity failure (the `art1` order, for the same reason).
+//!   Since `ALBM1` v2 that is the **structure** fold over `table ‖ pool`; the
+//!   fold over the asset region is [`Album::verify_assets`], deliberately *not*
+//!   run by [`Album::parse`] — a boot may not sweep the cart (§4.3 v2, and
+//!   [`boot_audit_bytes`] is the bound it is held to).
 //!
 //! The §6 reciprocal is *checked*, not taken on trust, and the check itself
 //! contains no divide: `recip == floor(2^32 × 32 / n)` is exactly
@@ -47,7 +51,7 @@ const _: () = assert!(PRODUCT_RATE_HZ == 1 << nodiv::RATE_LOG2);
 pub enum Refusal {
     /// The first four bytes are not `ALBM`.
     BadMagic,
-    /// The version field is not 1 (the only version this reader knows).
+    /// The version field is not [`VERSION`] (the only version this reader knows).
     UnsupportedVersion {
         /// The version the blob declared.
         version: u8,
@@ -175,11 +179,21 @@ pub enum Refusal {
         /// The reciprocal the entry declared.
         recip: u32,
     },
-    /// The stored checksum is not FNV-1a/32 over `table ‖ pool ‖ assets`.
+    /// The stored structure fold is not FNV-1a/32 over `table ‖ pool`. Checked by
+    /// [`Album::parse`] **last**, after every semantic rule.
     ChecksumMismatch {
         /// The value in the header.
         stored: u32,
         /// The value the sections produce.
+        computed: u32,
+    },
+    /// The stored asset fold is not FNV-1a/32 over the asset region. Checked by
+    /// [`Album::verify_assets`], which runs **after** the audio: the boot path is
+    /// bounded and does not sweep the cart.
+    AssetsMismatch {
+        /// The value in the header.
+        stored: u32,
+        /// The value the asset region produces.
         computed: u32,
     },
 }
@@ -282,7 +296,11 @@ impl core::fmt::Display for Refusal {
             ),
             Refusal::ChecksumMismatch { stored, computed } => write!(
                 f,
-                "checksum {stored:#010x}, sections hash to {computed:#010x}"
+                "structure checksum {stored:#010x}, table+pool hash to {computed:#010x}"
+            ),
+            Refusal::AssetsMismatch { stored, computed } => write!(
+                f,
+                "asset checksum {stored:#010x}, the asset region hashes to {computed:#010x}"
             ),
         }
     }
@@ -290,11 +308,45 @@ impl core::fmt::Display for Refusal {
 
 /// Header length in bytes. The track table, string pool and asset region follow
 /// it immediately.
+///
+/// v2 keeps the header at 64 B: bytes 0..44 are v1's field list, 44 is the
+/// structure fold (v1's checksum, over `table ‖ pool` instead of the whole blob),
+/// 48..54 are the album title/artist offsets and year, **54..60 stay reserved**,
+/// and 60..64 carry the asset fold. The v1 reserved block was 54..64, so the new
+/// field consumes four of its bytes and the documented "64 B header" still holds.
 pub const HEADER_BYTES: usize = 64;
+/// The structure fold's offset (FNV-1a/32 over `table ‖ pool`).
+const STRUCTURE_FNV_AT: usize = 44;
+/// The asset fold's offset (FNV-1a/32 over the asset region).
+const ASSETS_FNV_AT: usize = 60;
 /// One track entry. `n_tracks × 40` is the track table.
 pub const TRACK_BYTES: usize = 40;
-/// `ALBM1`'s version field for this layout.
-pub const VERSION: u8 = 1;
+/// `ALBM1`'s version field for this layout: v2 splits the checksum into the
+/// structure fold the boot path verifies and the asset fold the post-audio audit
+/// verifies.
+pub const VERSION: u8 = 2;
+/// How many bytes of a track's asset the boot-time content tripwire folds: its
+/// first 32 KiB. With [`BOOT_SUFFIX_BYTES`] this is the whole bounded read the
+/// pre-audio path does per track.
+pub const BOOT_PREFIX_BYTES: usize = 32 * 1024;
+/// The last 4 KiB of a track's asset — the tripwire's suffix half.
+pub const BOOT_SUFFIX_BYTES: usize = 4 * 1024;
+
+/// The bytes a cold boot reads out of the cart: the header, the track table, the
+/// string pool (at [`POOL_LIMIT`] as a ceiling) and each track's bounded content
+/// tripwire.
+///
+/// **The point is the argument:** this is a function of `n_tracks` alone. It
+/// cannot grow with the asset region, which is what keeps an O(cart) sweep off
+/// the pre-audio path — the host gate asserts this span stays under 1 MiB and that
+/// a byte in the middle of the asset region is accepted at boot (and refused by
+/// [`Album::verify_assets`] afterwards).
+pub const fn boot_audit_bytes(n_tracks: u32) -> usize {
+    HEADER_BYTES
+        + n_tracks as usize * TRACK_BYTES
+        + POOL_LIMIT
+        + n_tracks as usize * (BOOT_PREFIX_BYTES + BOOT_SUFFIX_BYTES)
+}
 /// The most tracks an album may declare (§9's Phase-3 cap, read here already:
 /// a blob that declares more is not one this reader accepts).
 pub const MAX_TRACKS: u8 = 32;
@@ -334,6 +386,9 @@ pub struct Album<'a> {
     tracks: &'a [u8],
     pool: &'a [u8],
     assets: &'a [u8],
+    /// The header's asset fold, kept so [`verify_assets`](Self::verify_assets) can
+    /// run after the audio without re-reading the header.
+    assets_fnv: u32,
 }
 
 /// One validated track entry, decoded on access.
@@ -440,6 +495,29 @@ impl<'a> Album<'a> {
         nodiv::bar_cell(pos_in_track, self.track(track).recip)
     }
 
+    /// The asset region's bytes.
+    pub const fn asset_region(&self) -> &'a [u8] {
+        self.assets
+    }
+
+    /// Verify the fold over the whole asset region — the **post-audio** pass.
+    ///
+    /// [`parse`](Self::parse) deliberately does not do this: a cold boot may not
+    /// sweep the cart (see [`boot_audit_bytes`]), so v2 moved the O(asset-region)
+    /// fold here, after the audio deadline no longer applies. A caller runs it and
+    /// reports the result; nothing in `parse` depends on it.
+    pub fn verify_assets(&self) -> Result<(), Refusal> {
+        let computed = fnv1a32_parts(&[self.assets]);
+        if computed == self.assets_fnv {
+            Ok(())
+        } else {
+            Err(Refusal::AssetsMismatch {
+                stored: self.assets_fnv,
+                computed,
+            })
+        }
+    }
+
     /// Parse and validate a blob. The one door into [`Album`]: a value of that type
     /// exists only if every rule in this module's list held.
     pub fn parse(blob: &'a [u8]) -> Result<Album<'a>, Refusal> {
@@ -465,20 +543,22 @@ impl<'a> Album<'a> {
         let pool_len = word(blob, 32);
         let asset_off = word(blob, 36);
         let asset_len = word(blob, 40);
-        let stored_fnv = word(blob, 44);
+        let stored_structure_fnv = word(blob, STRUCTURE_FNV_AT);
+        let stored_assets_fnv = word(blob, ASSETS_FNV_AT);
         let album_title_off = half(blob, 48);
         let album_artist_off = half(blob, 50);
         let year = half(blob, 52);
 
         // The header's reserved bytes first: they are header-only, so reporting one
-        // cannot mask a field the file's length or sections also depend on.
+        // cannot mask a field the file's length or sections also depend on. v2's
+        // asset fold occupies 60..64, so the reserved run is 54..60.
         if blob[7] != 0 {
             return Err(Refusal::NonZeroReserved {
                 offset: 7,
                 value: blob[7] as u32,
             });
         }
-        for (offset, &value) in blob[54..HEADER_BYTES].iter().enumerate() {
+        for (offset, &value) in blob[54..ASSETS_FNV_AT].iter().enumerate() {
             if value != 0 {
                 return Err(Refusal::NonZeroReserved {
                     offset: 54 + offset,
@@ -674,10 +754,13 @@ impl<'a> Album<'a> {
             at += 1;
         }
 
-        let computed = fnv1a32_parts(&[tracks, pool, assets]);
-        if stored_fnv != computed {
+        // The structure fold, over the kilobytes boot is allowed to read. The asset
+        // region's own fold is the post-audio audit's (`verify_assets`); leaving it
+        // out of `parse` is what makes a cold boot bounded.
+        let computed = fnv1a32_parts(&[tracks, pool]);
+        if stored_structure_fnv != computed {
             return Err(Refusal::ChecksumMismatch {
-                stored: stored_fnv,
+                stored: stored_structure_fnv,
                 computed,
             });
         }
@@ -693,6 +776,7 @@ impl<'a> Album<'a> {
             tracks,
             pool,
             assets,
+            assets_fnv: stored_assets_fnv,
         })
     }
 
@@ -707,6 +791,21 @@ impl<'a> Album<'a> {
         core::str::from_utf8(&rest[..len])
             .expect("parse validated every referenced string as ASCII")
     }
+}
+
+/// FNV-1a/32 over the first [`BOOT_PREFIX_BYTES`] of a track's asset — the prefix
+/// half of the bounded content tripwire `backend::verify_pins` holds to the bake's
+/// pin. A shorter asset folds whole; a boot must not read past the bound.
+pub fn prefix_fnv(asset: &[u8]) -> u32 {
+    fnv1a32_parts(&[&asset[..asset.len().min(BOOT_PREFIX_BYTES)]])
+}
+
+/// FNV-1a/32 over the last [`BOOT_SUFFIX_BYTES`] of a track's asset — the suffix
+/// half of the same tripwire. An asset shorter than the suffix folds whole, so the
+/// two spans simply overlap; the pin is computed the same way by the bake.
+pub fn suffix_fnv(asset: &[u8]) -> u32 {
+    let at = asset.len().saturating_sub(BOOT_SUFFIX_BYTES);
+    fnv1a32_parts(&[&asset[at..]])
 }
 
 /// Should `recip` be `floor(2^32 × BAR_CELLS / n_samples)`? Two 64-bit

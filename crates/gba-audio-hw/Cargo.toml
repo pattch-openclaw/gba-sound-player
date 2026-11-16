@@ -1,0 +1,58 @@
+[package]
+name = "gba-audio-hw"
+version = "0.1.0"
+edition = "2024"
+# The arm-only sound-hardware bootstrap the Album Player's ROM links: the GBA
+# register map, the raw I/O helpers, sound enable/teardown, the sound-DMA re-arm
+# and the timer-chain arming. ALBUM-PLAYER.md §2.2 / D4 say an application owns
+# no `#[path]` include, so the app may not reach into the spike
+# (`examples/flac_spike/src/rate_play_main.rs`) or the probe
+# (`examples/album_probe/src/probe_hw.rs`) that hold the same plumbing — this
+# crate is that lift. A library, deliberately not published.
+publish = false
+description = "Arm-only GBA sound hardware bootstrap (register map, sound DMA re-arm, timer-chain arming) transcribed from the shipped playback ROM. No state: the caller owns the statics and the critical sections."
+license = "MIT"
+
+# STATE (2026-11-15): every item here is TRANSCRIBED from
+# examples/flac_integration/src/product_play_main.rs with its line citations kept
+# in the doc comments; that file is untouched by this PR. The transcription is
+# parameterised (ticks-per-sample / chunk / DMA words arrive in an `AudioChain`),
+# which the source was not.
+#
+# MIGRATION (a later PR, deliberately NOT this one): product_play_main.rs,
+# flac_spike's rate_play_main.rs and album_probe's probe_hw.rs move onto this
+# crate, witnessed by `make flac-check`, `product-play-test` and
+# `album-probe-test`. Doing it here would re-baseline two accepted product ROM
+# images, and a re-baseline belongs in a PR whose own witnesses say so.
+#
+# Standalone workspace, cargo config INHERITED from the repo root — do NOT add a
+# local .cargo/config.toml: cargo concatenates target.<triple>.rustflags across
+# config layers, and a local re-declaration links `-Tgba.ld` twice.
+#
+#   cd crates/gba-audio-hw && rustup run nightly-2026-09-04 \
+#     cargo build --release --target thumbv4t-none-eabi
+
+[dependencies]
+# Intentionally EMPTY. This crate is registers and `agb`'s timer types, nothing
+# else. Do not add dependencies without re-verifying the thumbv4t build.
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+# `agb` for `AllTimers`/`Divider` only — the sound FIFO and DMA are driven
+# through the registers below, because agb 0.25.0 keeps its own enable/arm
+# helpers `pub(super)`. Gated to arm on purpose: this crate cannot build for a
+# host target (it names `agb::timer::AllTimers` unconditionally), and agb's
+# portable-atomic hard-errors there anyway.
+agb = "0.25.0"
+
+[workspace]
+
+# Same profile choices as the crates it sits beside: a standalone release build of
+# this crate is what a direct measurement here reads, so optimisation matches the
+# consumers' choices. This manifest is a **path dependency** of the Album Player
+# crate, and a path dependency's profile is ignored — the consuming workspace's
+# `[profile.release]` decides what ships — so these lines apply only to a
+# standalone build of this crate.
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true
