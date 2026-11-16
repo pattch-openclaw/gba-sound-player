@@ -795,6 +795,7 @@ fn print_cost(label: &str, cost: &FrameCost, counted: bool) {
     );
 }
 
+#[cfg(not(feature = "play-only"))]
 fn run(gba: &mut agb::Gba) -> bool {
     // Whole-instrument stack high-water probe: fill the free IWRAM below this
     // frame and report the deepest touch at the end of the run, so the budget is
@@ -1589,6 +1590,121 @@ fn run(gba: &mut agb::Gba) -> bool {
     // the verdict above is the real output.
     agb::println!("Tests finished successfully");
     pass
+}
+
+/// The **audio-only** ROM (`--features play-only`): one paced pass over the
+/// corpus — decode → convert → ring → dual FIFO DMA, with the real 32,768 Hz
+/// timebase — and nothing else. No pins pass, no control arms, no attribution,
+/// no per-frame hashing. Its runtime is the corpus's own length, and the only
+/// outputs are what you hear and a solid screen colour (blue = the feeder
+/// finished with no starved period and no counter-integrity fault, red =
+/// otherwise).
+///
+/// It exists because the instrument is a *witness*, and a witness that spends 90
+/// minutes decoding the same album five extra ways is not something to flash to
+/// answer "does it play". Numbers, if you need them, come from `make uli-gate`.
+#[cfg(feature = "play-only")]
+fn run(gba: &mut agb::Gba) -> bool {
+    // The U4 arm's cartridge timing, so what you hear is what was measured.
+    set_waitcnt(0x0000);
+    agb::println!(
+        "[uli-play] audio-only ROM: blob={} bytes waitcnt=0x{:04X}",
+        ALBUM.len(),
+        waitcnt()
+    );
+    let album = match Album::parse(ALBUM) {
+        Ok(a) => a,
+        Err(e) => {
+            agb::println!("[uli-play] FAIL album parse: {:?}", e);
+            return false;
+        }
+    };
+    #[cfg(feature = "album-corpus")]
+    agb::println!("[uli-play] corpus=album (tracked master at 32,768 Hz, product config)");
+    #[cfg(not(feature = "album-corpus"))]
+    agb::println!("[uli-play] corpus=fixture (synthetic, C-pinned)");
+    agb::println!(
+        "[uli-play] frames={} tracks={} rate={} hop={} ({:.2} s)",
+        album.n_frames(),
+        album.n_tracks(),
+        album.header().sample_rate,
+        album.header().hop,
+        (album.n_frames() as f32 * 512.0) / album.header().sample_rate as f32
+    );
+
+    let tables = unsafe { &mut *core::ptr::addr_of_mut!(PRODUCT_TABLES) };
+    let hot = unsafe { &mut *core::ptr::addr_of_mut!(PRODUCT_HOT) };
+    let l8 = unsafe { &mut *core::ptr::addr_of_mut!(OUT8L) };
+    let r8 = unsafe { &mut *core::ptr::addr_of_mut!(OUT8R) };
+
+    // SAFETY: no other agb component in this image uses timer0/timer1 — the
+    // sound FIFOs are driven directly here, as in the product-play ROM.
+    let mut all_timers = unsafe { gba.timers.all_timers() };
+    let mut counter = Counter::start_split(&mut all_timers.timer2, &mut all_timers.timer3);
+    // The same empty-window calibration the instrument uses, so both images
+    // subtract the same overhead.
+    let mut calib = [0u32; 5];
+    for slot in calib.iter_mut() {
+        let (_, raw) = timed(&mut counter, || {});
+        *slot = raw;
+    }
+    let overhead = calib.iter().copied().min().unwrap_or(0);
+    let calib_ok = calib.iter().max().copied().unwrap_or(0) - overhead <= 64;
+    agb::println!("[uli-play] calib min={} spread_ok={}", overhead, calib_ok);
+
+    let ok = match gate::gate_pass(
+        album,
+        tables,
+        hot,
+        &mut counter,
+        &mut all_timers.timer0,
+        &mut all_timers.timer1,
+        overhead,
+        l8,
+        r8,
+    ) {
+        Ok(rep) => {
+            let frames = rep.cost.count;
+            let mean = if frames > 0 {
+                rep.cost.sum / u64::from(frames)
+            } else {
+                0
+            };
+            agb::println!(
+                "[uli-play] played frames={} worst={} (f{}) mean={} of {} per frame",
+                frames,
+                rep.cost.max,
+                rep.cost.max_frame,
+                mean,
+                FRAME_BUDGET_CYCLES
+            );
+            agb::println!(
+                "[uli-play] feeder serviced={} full_takes={} starved={} pushed={} consumed={} ring={} over_period={}",
+                rep.serviced,
+                rep.full_takes,
+                rep.starved_entries,
+                rep.pushed,
+                rep.consumed,
+                rep.pushed - rep.consumed,
+                rep.over_period
+            );
+            calib_ok && rep.starved_entries == 0 && rep.cost.suspect == 0
+        }
+        Err(e) => {
+            agb::println!("[uli-play] FAIL gate pass: {:?}", e);
+            false
+        }
+    };
+    agb::println!(
+        "[uli-play] {}",
+        if ok {
+            "PASS: the corpus played to its end with no starved period"
+        } else {
+            "FAIL: see the feeder line above"
+        }
+    );
+    agb::println!("Tests finished successfully");
+    ok
 }
 
 #[agb::entry]

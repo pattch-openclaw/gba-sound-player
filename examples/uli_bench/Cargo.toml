@@ -40,6 +40,12 @@ gate = ["dep:gba-playback"]
 # runtime is exactly the audio's.
 gate-hash = ["gate"]
 
+# The **audio-only** ROM: one paced playback pass over the corpus and nothing
+# else — no pins pass, no control arms, no attribution, no hashing. Its runtime
+# is the corpus's own length, so it is the thing to flash for a manual listen
+# (`make uli-play` builds it on the album corpus). Numbers come from `uli-gate`.
+play-only = ["gate", "album-corpus"]
+
 # Per-frame dump for attribution work: one CSV-ish line per frame with the
 # measured window and the decoder's operation counts, fitted host-side. Off by
 # default so the gate's log stays the record. Implies `verify`, because the dump

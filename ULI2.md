@@ -76,7 +76,12 @@ mGBA does not model) remain the reason no playback claim is made. The 43-minute
 `gba-audio` album was measured out of court as PR E's corpus: it does not fit a
 32 MiB cart beside this instrument by **174,716 B**, and duration does not
 strengthen a tail. Its cross-check (their 104/64/12 pins) and a synthetic
-quad-heavy set stay as PR E's gated E3.
+quad-heavy set stay as PR E's gated E3. **The chain has also been heard on
+silicon:** `make uli-play-rom` (`--features play-only`) runs one paced pass and
+nothing else, and a manual hardware listen on 2026-11-16 played the album through
+its entirety with no glitches and no silent gaps — a sanity check of the 32,768 Hz
+timer/DMA/FIFO chain, not U5 (one unit, one run, no counted underruns, no period
+audit, judgement by ear).
 This file is the decision record (why
 ULI2, what it is, the licensing and encoder risks); the live plan, gates and
 measurement ledger are [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md).
@@ -612,7 +617,7 @@ claims to be measured, not inherited from `gba-audio`.
 | **U2 — bit-exact host** | The Rust core matches the C integer reference frame-for-frame on the committed corpus and rejects malformed frames without panic. | `make uli-test`; pinned hashes |
 | **U3 — bit-exact product** | The product kernel set (`ArmKernels`) decodes the corpus to the pinned int8/int16 frames, in the host full-frame twin and on the target. **Met (PR A).** | `make uli-bench` (both arms + on-target twin); `make uli-overlay-test` (host kernel + decoder twins) |
 | **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Met on the album corpus (PR E, 2026-11-15): decode 220,062 = 83.94% worst; gate total 251,712 = 96.02% worst / 84.40% mean in the player model (the same arm verifying in-loop reads 98.33% and starves 12.06 s, which is the harness); ceiling written down as the 262,144-cycle period, 10,432 cycles of margin at the worst frame; no UI, mGBA only.** Ladder: 204% (PR B) -> 200% (split `huff`) -> 186% -> 175% -> 164% (asm FFT) -> 162% -> 157% (`iwram-tw`) -> 148% (`iwram-tables`) -> 138% (C-3d) -> **274,198 / 232,090 = 105% / 89%** (C-3). **Step 0 (2026-11-15) attributed the worst frame (f98) by difference in the product image: synthesis 162,987 (59%), entropy/dequant/M-S 110,741 (40%), wrapper 486 - i.e. 69% of the 92,286-cycle distance to the C worst-frame shape is the entropy path and 31% synthesis. Per channel the kernels are 1.10-1.33x C (pre 1.22x, fft 1.33x, post 1.10x, ola 1.11x), so the previous 'asm kernels first, ~194,000 prize' order is retired; the live order is in `crates/uli-lite/PLAN-OF-RECORD.md` ('Critical path to real time').** | `make uli-bench`; mGBA, then hardware |
-| **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | `product-play` equivalent for ULI2; hardware runs |
+| **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | `product-play` equivalent for ULI2; hardware runs. **Not met, but the chain has been heard:** one manual hardware pass of `make uli-play-rom` (audio-only, `--features play-only`) played the album to its end with no glitches and no silent gaps (2026-11-16). That is a sanity check, not the gate — no counted underrun ledger, no period audit, one unit, one run. |
 | **U6 — memory** | IWRAM/EWRAM/stack stay inside the product budget with the UI and feeder linked. | linker map + runtime stack check |
 | **U7 — licensing/spec** | A public crate, if published, has a permissive license and a standalone format specification; otherwise it remains `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** |
 

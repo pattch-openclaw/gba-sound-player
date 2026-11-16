@@ -6,7 +6,7 @@
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
-        uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom \
+        uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
         album-bake album-pack-check \
@@ -767,6 +767,17 @@ uli-gate-rom: format
 # whole chain — timer0/1, DMA1/2 on the FIFOs, the feeder IRQ, the ring — works on
 # silicon, and the fixture is C-pinned on both outputs, so a blue screen is a real
 # pass. Use it before flashing the 3.7 MB album build.
+# The **audio-only** ROM: one paced playback pass over the album corpus and
+# nothing else, so its runtime is the album's own length (~4.3 min) and the only
+# outputs are sound and a screen colour. This is the image to flash for a manual
+# listen; every number still comes from `uli-gate`.
+ULI_PLAY_ROM := uli-play.gba
+uli-play-rom: format
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features play-only
+	agb-gbafix $(ULI_BENCH_BIN) -o $(ULI_PLAY_ROM)
+	@echo "ULI2 audio-only ROM built: $(ULI_PLAY_ROM)"
+	@stat -c '  %s bytes' $(ULI_PLAY_ROM)
+
 ULI_GATE_FIXTURE_ROM := uli-gate-fixture.gba
 uli-gate-fixture-rom: format
 	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features gate

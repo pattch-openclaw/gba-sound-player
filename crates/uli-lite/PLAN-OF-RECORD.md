@@ -1690,6 +1690,39 @@ pacing wait hides at most one IRQ per frame from the window. Those are the reaso
 the number is a **ceiling written down**, not a playback claim: U5 stays open, and
 PR D is where the burst behaviour and the real underrun ledger live.
 
+#### The audio-only ROM, and a manual hardware pass (2026-11-16)
+
+The instrument is a witness, and a witness that spends 90 minutes decoding the
+same album five extra ways is not something to flash to answer "does it play".
+`make uli-play-rom` builds the **audio-only** image from the same arm:
+`--features play-only` runs **one paced pass** — decode → int8 → ring → DMA1/DMA2
+on the FIFOs at 32,768 Hz — with no pins pass, no control arms, no attribution and
+no per-frame hashing, so its runtime is the album's own length.
+
+**Result, on real hardware, manual listen, one pass:** the album played through its
+entirety with **no glitches and no silent gaps**, and the image ended in PASS
+(`starved=0`, `pushed = consumed`, ring drained). Recorded as the first
+silicon witness of the shipping chain at 32,768 Hz: timer0 sample clock, timer1
+feeder period and IRQ, both FIFOs, the ring, and ULI2's fused int8 output.
+
+Its own numbers, with the image-specific caveat stated up front:
+
+| image | worst (f16,204) | mean | runtime |
+|---|---:|---:|---:|
+| `uli-play` (audio-only, no instrument code) | 226,542 = 86.43% | 196,073 = 74.80% | 258.63 s |
+| `uli-gate` (the same arm inside the instrument) | 251,712 = 96.02% | 221,245 = 84.40% | 258.63 s |
+
+The 9.6-point spread is the instrument's own presence — code layout, the passes
+before it, the counters — not a difference in the decoder. By this file's own rule
+absolutes are image-specific and pairing is within an image, so **96.02% stays the
+gate total of record** (deliberately the pessimistic of the two) and 86.4% is
+recorded as what a shipping-shaped image compiles to.
+
+**What this does not establish.** It is not U5: one unit, one run, no counted
+underrun ledger, no period audit, no UI, and the judgement is by ear. It removes
+the specific doubt PR E could not answer — whether the measured chain actually
+produces clean audio on silicon at 32,768 Hz — and leaves U5 where it was.
+
 #### What PR E leaves open (E3, gated)
 
 1. **The quad-heavy class** the album does not produce (max 228 quads vs the
