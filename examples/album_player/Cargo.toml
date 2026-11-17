@@ -89,6 +89,14 @@ deep-audit = []
 # socket path), so the gate's witness is the same state machine fed a scripted log (§5.3, §13 AP-1).
 # The ROM prints which source it used, always.
 input-replay = []
+# R13's diagnostic scenarios: each selects a different compiled-in script for the REPLAY arm,
+# matching a press pattern from the 2026-11-17 hardware session (`src/album_play_main.rs`,
+# `REPLAY_SCRIPT_A/B/C`). With none of them set the arm replays the gate's script, so
+# `make album-test` builds and asserts exactly what it did before. `make album-seam-test` and
+# `make album-pack-check` do not build the REPLAY arm and are untouched.
+replay-script-a = ["input-replay"]
+replay-script-b = ["input-replay"]
+replay-script-c = ["input-replay"]
 
 [[test]]
 name = "album_pack_host"
