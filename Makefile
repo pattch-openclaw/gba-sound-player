@@ -9,7 +9,7 @@
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
-        album-bake album-pack-check \
+        album-bake album-pack-check album-seam-test album-rom \
         uli-spike-rom clean clean-cache check help toolchain-check
 
 # ===========================================================================
@@ -175,6 +175,13 @@ ALBUM_ASSETS_DIR := $(ALBUM_CRATE_DIR)/assets
 ALBUM_BLOB := $(ALBUM_ASSETS_DIR)/albm1.bin
 ALBUM_ASSETS_RS := $(ALBUM_CRATE_DIR)/src/assets.rs
 ALBUM_GATE_LOG := album-pack-check.log
+ALBUM_SEAM_GATE_LOG := album-seam-test.log
+# The playback ROM (PR-3a step iii): the binary cargo writes, and the fixed image
+# `agb-gbafix` makes of it. Both are build output — `*.gba` at the root is already
+# cleaned by `clean`'s output pass.
+ALBUM_ROM_BIN := $(ALBUM_CRATE_DIR)/target/$(TARGET)/release/album-play
+ALBUM_ROM := album-player.gba
+ALBUM_ROM_RUN_LOG := album-rom-run.log
 
 # --- the core and its overlay -------------------------------------------------
 FLAC_CRATE_DIR_MANIFEST := $(abspath crates/flac-lite/Cargo.toml)
@@ -253,6 +260,7 @@ ALBUM_PROBE_ART_TOOL := scripts/album_probe_art.py
 # to fail on.
 
 WORKSPACES := . crates/flac-lite crates/flac-lite-gba crates/gba-playback \
+              crates/gba-audio-hw \
               examples/flac_spike \
               examples/overlay-kernel-check examples/opus_spike \
               crates/uli-lite crates/uli-lite-gba examples/uli_spike examples/uli_bench \
@@ -1053,11 +1061,63 @@ album-pack-check: toolchain-check
 	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_GATE_LOG)) \
 	    || { echo "album-pack-check: the host suite did not pass — see $(ALBUM_GATE_LOG)"; exit 1; }; \
 	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_GATE_LOG))); \
-	  [ -n "$$n" ] && [ "$$n" -ge 20 ] || { echo "album-pack-check: collected '$$n' tests, needs >= 20 — a green that names nothing is not a green"; exit 1; }
+	  [ -n "$$n" ] && [ "$$n" -ge 48 ] || { echo "album-pack-check: collected '$$n' tests, needs >= 48 — a green that names nothing is not a green"; exit 1; }
 	@echo "album-pack-check passed: the four §9.0 Phase-1 refusals fired — (a) declared rate != product clock,"
 	@echo "  (b) frames outside the encode profile (inherited from gafp_pack.py), (c) ALBM1 n_samples vs the"
 	@echo "  container's total_samples, (d) the writer's output re-read through meta.rs — plus two bakes"
 	@echo "  byte-identical and the ALBM1 host suite green."
+
+# The app seam's host gate (PR-3a steps ii and iii-A): the derived geometry pinned to the shipped
+# FLAC figures, the manifest/pin cross-check for every track, both backend arms through `PcmSource`,
+# the FLAC arm decoding the fixture's track to its committed `fnv_pcm` pin, and the ROM's whole path
+# for that track (`pull_frame` -> i32 -> `convert_frame` -> `fold_bytes`) reproducing the bake's
+# `fnv_fifo_l` / `fnv_fifo_r` — the sample-scale proof the ROM step rests on. Same shape as
+# `album-pack-check`: neutral cwd, explicit host target, a log, and a collected-test floor — a
+# green that names nothing is not a green. The second leg is the stub-only build, which is what
+# makes "a stub image links no codec at all" an observed fact rather than a claim about one test
+# binary compiled with the default features.
+album-seam-test: toolchain-check
+	@test $$(find $(ALBUM_CRATE_DIR)/tests -name 'album_seam_host.rs' | wc -l) -eq 1 \
+	  || { echo "album-seam-test: $(ALBUM_CRATE_DIR)/tests/album_seam_host.rs is missing — the seam's host half has to exist before a backend arm can be believed"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	@cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) --test album_seam_host > $(abspath $(ALBUM_SEAM_GATE_LOG)) 2>&1; \
+	  status=$$?; \
+	  cat $(abspath $(ALBUM_SEAM_GATE_LOG)); \
+	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_SEAM_GATE_LOG)) \
+	    || { echo "album-seam-test: the host suite did not pass — see $(ALBUM_SEAM_GATE_LOG)"; exit 1; }; \
+	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_SEAM_GATE_LOG))); \
+	  [ -n "$$n" ] && [ "$$n" -ge 22 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 22 — a green that names nothing is not a green"; exit 1; }
+	@cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) build --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) \
+	    --no-default-features --features backend-stub >> $(abspath $(ALBUM_SEAM_GATE_LOG)) 2>&1 \
+	    || { cat $(abspath $(ALBUM_SEAM_GATE_LOG)); echo "album-seam-test: the stub-only build failed — a stub image must link no codec at all (--no-default-features --features backend-stub)"; exit 1; }
+	@echo "album-seam-test passed: the derived geometry matches the shipped FLAC figures, the manifest"
+	@echo "  and its generated pins agree for every track, both backend arms satisfy PcmSource, the shipped"
+	@echo "  track decodes to its fnv_pcm pin on the host, its FIFO bytes fold to the bake's fnv_fifo_l/fnv_fifo_r"
+	@echo "  as the ROM will push them, and a stub-only build links no decoder."
+
+# The playback ROM (PR-3a step iii): `ALBM1` + the packed blobs → the app's own chain at 16,384 Hz.
+# It boots, verifies its own album (§D-C), plays track 1 end to end through the shipped feeder, and
+# prints its `[album-rom]` ledger; like every playback ROM here it ends in `loop {}`.
+#
+# `album-bake` is a **prerequisite on purpose** (R11, §2.3(4)): a build must not be able to skip the
+# pack step and link yesterday's blob, so a stale `albm1.bin`/`assets.rs` cannot reach an image.
+# Run it and read the log: `timeout -k 5 600 $(GBA_TEST_RUNNER) $(ALBUM_ROM) > $(ALBUM_ROM_RUN_LOG)`,
+# and remember that exit 124 IS the passing result (the ROM reached its `loop {}`). The old 240 s
+# was a guess with no recorded headroom — a 30 s clip plus a full cold re-decode and two folds — and
+# is now 600 s. The ROM times itself in **CPU cycles** (`gba_audio_hw::CycleCounter`, read before
+# the audio chain arms and printed as `boot: parse=…c open=…c gate=…c prefill=…c total=…c`), so the
+# image can say what a human waited for; ÷ 16,777,216 is seconds on any GBA. The 600 s leash is a
+# backstop for the post-verdict `loop {}`, not a budget line.
+album-rom: album-bake
+	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin album-play
+	agb-gbafix $(ALBUM_ROM_BIN) -o $(ALBUM_ROM)
+	@ls -l $(ALBUM_ROM)
+	@size -A $(ALBUM_ROM_BIN) | grep -E '^(File|\.text|\.iwram|\.bss)'
+	@echo "  run: timeout -k 5 600 $(GBA_TEST_RUNNER) $(ALBUM_ROM) > $(ALBUM_ROM_RUN_LOG) 2>&1"
+	@echo "  judge by the log's '[album-rom] verdict' line, never by the exit status: a PASS loops"
+	@echo "  forever, so the timeout's exit 124 IS the passing result."
 
 # ===========================================================================
 # Aggregates
@@ -1159,7 +1219,7 @@ clean-outputs:
 	@rm -f $(SPIKE_CRATE_DIR)/assets/rate_*.bin
 	@rm -f uli-bench*.log uli-attrib*.log
 	@rm -f album-probe*.log
-	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_GATE_LOG)
+	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_ROM_RUN_LOG)
 	@find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} + 2>/dev/null || true
 
 # The caches: the fifteen workspaces' `target/` dirs, discovered from the tree.
@@ -1257,9 +1317,14 @@ help:
 	@echo "      album-probe (run all three headless; PASS read from each log),"
 	@echo "      album-probe-art (regenerate the tracked ART1 blob + pin),"
 	@echo "      album-probe-test (the AP-0 host gate)."
-	@echo "    Album Player, Phase 1 (pack step only; ALBUM-PLAYER.md §9.0 A3a):"
+	@echo "    Album Player, Phase 1 (pack step + the app seam; ALBUM-PLAYER.md §9.0 A3a, §4.2b):"
 	@echo "      album-bake (album.toml -> assets/*.gfp + ALBM1 + src/assets.rs),"
-	@echo "      album-pack-check (two byte-identical bakes, the four refusals, the ALBM1 host gate)."
+	@echo "      album-pack-check (two byte-identical bakes, the four refusals, the ALBM1 host gate),"
+	@echo "      album-seam-test (the seam's host gate: derived geometry vs the shipped figures, both"
+	@echo "      backend arms, the FLAC arm's fnv_pcm and fnv_fifo_l/fnv_fifo_r pins, and a stub-only"
+	@echo "      build with no decoder linked),"
+	@echo "      album-rom -> $(ALBUM_ROM) (bake + the ROM; run it with mgba-test-runner and read the"
+	@echo "      [album-rom] ledger — exit 124 IS the pass)."
 	@echo "  Tests/format:  test (test-rom + flac-test + uli-test), test-rom, check, format"
 	@echo "  Housekeeping:  clean (outputs only; caches kept), clean-deep (+ every"
 	@echo "                 workspace's target/), clean-cache (container volumes),"

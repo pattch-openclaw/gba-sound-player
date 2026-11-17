@@ -184,3 +184,8 @@ __pycache__/
 # `make album-pack-check`'s log: per-run output, rewritten every run, with the
 # counts recorded per landing elsewhere (the playback-test.log/album-probe*.log rule).
 /album-pack-check.log
+# `make album-seam-test`'s log: the same per-run rule as the pack gate's above.
+/album-seam-test.log
+# `make album-rom`'s headless run log: the same per-run rule again. The run is the
+# record (`[album-rom] verdict`), never a committed artifact.
+/album-rom-run.log
