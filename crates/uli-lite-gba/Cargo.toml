@@ -24,7 +24,7 @@ uli-lite = { path = "../uli-lite", features = ["kernels", "product"] }
 # (`frame core`, and the isolated `kern`/`ovl` arms), so turning the fast path on
 # does not remove the comparison — it just stops the product being slow by
 # default. Use `--no-default-features` to get the pure-Rust-kernel build.
-default = ["asm-fft", "asm-pre", "asm-ola", "iwram-tables"]
+default = ["asm-fft", "asm-pre", "asm-ola", "asm-ms", "iwram-tables"]
 
 # Operation counts (`Ops`) and format-rule diagnostics (`xover`/`hfnz`) on the
 # hot path. Off by default: they cost ~30,000 cycles on the measured worst frame
@@ -74,6 +74,18 @@ asm-pre = []
 # LLVM's is 33. On by default, with the Rust ARM-mode kernels left in place as
 # the in-image control.
 asm-ola = []
+
+# Hand-written ARM mid/side transform (`asm/ms_arm.s`): two `ldmia`, eight ALU
+# ops and two `stmia` per **four** coefficients — 14 instructions per 4 against
+# the Rust scalar loop's 9 per 1. M/S was the last hot loop with no kernel at
+# all and the worst ratio in the decoder (9,861 cycles at the gate frame,
+# 2.24x the C record's ~4,400); see PLAN-OF-RECORD.md "Root-cause audit
+# (2026-11-16)". On by default, with the Rust loop left in place as the
+# in-image control.
+#
+# M/S is pure ALU, so unlike `pre`/`fft`/`post`/`ola` there is no multiplier
+# `Rs` early-termination question here: the only lever is the load/store shape.
+asm-ms = []
 
 # **Measurement-only: by-difference attribution arms.** Each flag removes exactly
 # one part of the product frame so `examples/uli_bench` can attribute the frame

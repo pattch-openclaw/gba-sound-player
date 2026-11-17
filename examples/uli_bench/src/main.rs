@@ -210,6 +210,17 @@ static mut T_CO: [i8; M] = [0; M];
 static mut T_C16: [i16; M] = [0; M];
 #[unsafe(link_section = ".ewram")]
 static mut T_O16: [i16; M] = [0; M];
+// M/S twin pair (root-cause audit, 2026-11-16): the Rust loop and the
+// block-transfer asm kernel are run on identical inputs and compared. Each is
+// `[i32; M]` = 2,048 B, so both live in EWRAM with the other twins.
+#[unsafe(link_section = ".ewram")]
+static mut T_ML: [i32; M] = [0; M];
+#[unsafe(link_section = ".ewram")]
+static mut T_MR: [i32; M] = [0; M];
+#[unsafe(link_section = ".ewram")]
+static mut T_MLO: [i32; M] = [0; M];
+#[unsafe(link_section = ".ewram")]
+static mut T_MRO: [i32; M] = [0; M];
 
 /// The FFT twiddle table copied into `.iwram`, for the same-image placement
 /// A/B: the kernel takes its table pointer as an argument, so one build can
@@ -1573,6 +1584,54 @@ fn run(gba: &mut agb::Gba) -> bool {
     };
     #[cfg(not(feature = "asm-pre"))]
     let twin_pre_asm = true;
+    #[cfg(feature = "asm-ms")]
+    let twin_ms_asm = {
+        use core::ptr::addr_of_mut;
+        let cl = unsafe { &mut *addr_of_mut!(T_ML) };
+        let cr = unsafe { &mut *addr_of_mut!(T_MR) };
+        let ol = unsafe { &mut *addr_of_mut!(T_MLO) };
+        let or = unsafe { &mut *addr_of_mut!(T_MRO) };
+        // A pattern that hits the shapes the transform can get wrong: zero,
+        // small positives/negatives, the int32 rails (where `>>1`-style code
+        // would differ), and values whose sum wraps.
+        let mut i = 0usize;
+        while i < M {
+            let k = i as i32;
+            cl[i] = match i % 8 {
+                0 => 0,
+                1 => k,
+                2 => -k,
+                3 => i32::MIN,
+                4 => i32::MAX,
+                5 => i32::MAX - 1,
+                6 => i32::MIN + 1,
+                _ => (k.wrapping_mul(37)) ^ 0x5a5a5a5a,
+            };
+            cr[i] = match i % 8 {
+                0 => 0,
+                1 => -k,
+                2 => k.wrapping_mul(3),
+                3 => i32::MAX,
+                4 => i32::MIN,
+                5 => 1,
+                6 => -1,
+                _ => (k.wrapping_mul(91)) ^ 0x12345678,
+            };
+            i += 1;
+        }
+        // SAFETY: both pairs are M-length rows; M is a multiple of 4.
+        unsafe {
+            let (l0, r0) = (cl.as_mut_ptr(), cr.as_mut_ptr());
+            let (l1, r1) = (ol.as_mut_ptr(), or.as_mut_ptr());
+            core::ptr::copy_nonoverlapping(l0, l1, M);
+            core::ptr::copy_nonoverlapping(r0, r1, M);
+            overlay::ms(l0, r0, M);
+            overlay::ms_asm_call(l1, r1, M);
+        }
+        *ol == *cl && *or == *cr
+    };
+    #[cfg(not(feature = "asm-ms"))]
+    let twin_ms_asm = true;
     let twin_ok = twin_pre
         && twin_fft
         && twin_post
@@ -1581,9 +1640,10 @@ fn run(gba: &mut agb::Gba) -> bool {
         && twin_ola_s16
         && twin_fft_asm
         && twin_pre_asm
-        && twin_ola_asm;
+        && twin_ola_asm
+        && twin_ms_asm;
     agb::println!(
-        "[uli-bench] ovl twin pre={} fft={} post={} ola={} ola8={} ola16={} fftasm={} preasm={} olaasm={} [{}]",
+        "[uli-bench] ovl twin pre={} fft={} post={} ola={} ola8={} ola16={} fftasm={} preasm={} olaasm={} msasm={} [{}]",
         twin_pre,
         twin_fft,
         twin_post,
@@ -1593,6 +1653,7 @@ fn run(gba: &mut agb::Gba) -> bool {
         twin_fft_asm,
         twin_pre_asm,
         twin_ola_asm,
+        twin_ms_asm,
         if twin_ok { "PASS" } else { "FAIL" }
     );
 
