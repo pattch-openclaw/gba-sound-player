@@ -1,6 +1,8 @@
 use uli_lite::{Album, Decoder, DecoderState, Error, Ops};
 
-const BLOB: &[u8] = include_bytes!("fixtures/uli2_tiny.uli");
+static BLOB_STORAGE: uli_lite::Aligned<{ include_bytes!("fixtures/uli2_tiny.uli").len() }> =
+    uli_lite::Aligned(*include_bytes!("fixtures/uli2_tiny.uli"));
+const BLOB: &[u8] = &BLOB_STORAGE.0;
 const EXPECTED: &str = include_str!("fixtures/uli2_tiny_expected.txt");
 
 const M: usize = 512;

@@ -19,7 +19,9 @@ use agb::display::Rgb;
 use uli_lite::{Album, Decoder, DecoderState};
 
 /// The committed Phase 0 corpus, byte-for-byte.
-static ALBUM: &[u8] = include_bytes!("../assets/uli2_tiny.uli");
+static ALBUM_BLOB: uli_lite::Aligned<{ include_bytes!("../assets/uli2_tiny.uli").len() }> =
+    uli_lite::Aligned(*include_bytes!("../assets/uli2_tiny.uli"));
+static ALBUM: &[u8] = &ALBUM_BLOB.0;
 
 /// Caller-owned decoder state. On the GBA this belongs in EWRAM;
 /// `DecoderState::new()` is `const`, so the linker places and initialises it

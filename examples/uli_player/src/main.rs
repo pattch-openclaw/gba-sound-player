@@ -45,11 +45,23 @@ use uli_playback::source::{Frame, PcmSource, SourceError, UliSource};
 /// The generated album asset (`make uli-album-asset`); gitignored build output,
 /// the same blob the PR E instrument embeds.
 #[cfg(feature = "cross-corpus")]
-static ALBUM: &[u8] = include_bytes!("../../uli_bench/assets/cross/cross.uli");
+static ALBUM_CROSS_BLOB: uli_lite::Aligned<
+    { include_bytes!("../../uli_bench/assets/cross/cross.uli").len() },
+> = uli_lite::Aligned(*include_bytes!("../../uli_bench/assets/cross/cross.uli"));
+#[cfg(feature = "cross-corpus")]
+static ALBUM: &[u8] = &ALBUM_CROSS_BLOB.0;
 #[cfg(all(feature = "two-track", not(feature = "cross-corpus")))]
-static ALBUM: &[u8] = include_bytes!("../../uli_bench/assets/biotwo.uli");
+static ALBUM_TWO_BLOB: uli_lite::Aligned<
+    { include_bytes!("../../uli_bench/assets/biotwo.uli").len() },
+> = uli_lite::Aligned(*include_bytes!("../../uli_bench/assets/biotwo.uli"));
+#[cfg(all(feature = "two-track", not(feature = "cross-corpus")))]
+static ALBUM: &[u8] = &ALBUM_TWO_BLOB.0;
 #[cfg(all(not(feature = "two-track"), not(feature = "cross-corpus")))]
-static ALBUM: &[u8] = include_bytes!("../../uli_bench/assets/biomaster.uli");
+static ALBUM_MASTER_BLOB: uli_lite::Aligned<
+    { include_bytes!("../../uli_bench/assets/biomaster.uli").len() },
+> = uli_lite::Aligned(*include_bytes!("../../uli_bench/assets/biomaster.uli"));
+#[cfg(all(not(feature = "two-track"), not(feature = "cross-corpus")))]
+static ALBUM: &[u8] = &ALBUM_MASTER_BLOB.0;
 
 /// The `autoskip` witness: skip to track 2 after this many frames of track 1.
 #[cfg(feature = "autoskip")]

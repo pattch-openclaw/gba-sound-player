@@ -11,7 +11,12 @@
 
 use uli_lite::{Album, Decoder, DecoderState, PortableKernels};
 
-const BLOB: &[u8] = include_bytes!("../../uli-lite/tests/fixtures/uli2_tiny.uli");
+static BLOB_STORAGE: uli_lite::Aligned<
+    { include_bytes!("../../uli-lite/tests/fixtures/uli2_tiny.uli").len() },
+> = uli_lite::Aligned(*include_bytes!(
+    "../../uli-lite/tests/fixtures/uli2_tiny.uli"
+));
+const BLOB: &[u8] = &BLOB_STORAGE.0;
 const M: usize = uli_lite::format::M;
 
 #[test]

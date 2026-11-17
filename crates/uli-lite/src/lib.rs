@@ -54,6 +54,30 @@ pub use tables::CodeTables;
 #[cfg(feature = "product")]
 pub use tables::{Huffman, HuffmanParts};
 
+/// A blob wrapper that guarantees the **halfword alignment** the ULA2 container
+/// requires.
+///
+/// The format's bitstream is a *halfword sequence*: `Album::parse` already
+/// rejects an odd `stream_off`, and the C reference reads it through a
+/// `const uint16_t *`. The product decoder additionally reads it with aligned
+/// `u16` loads (one `ldrh` per refill — see `uli_lite_gba`'s bit reader), which
+/// is only sound if the blob itself starts on a halfword boundary.
+///
+/// Rust gives `include_bytes!` no alignment guarantee, so an embedded album can
+/// land on an odd address (measured: `0x8010093` in one build). Wrap the blob:
+///
+/// ```ignore
+/// static ALBUM_BLOB: uli_lite::Aligned<{ include_bytes!("album.uli").len() }> =
+///     uli_lite::Aligned(*include_bytes!("album.uli"));
+/// static ALBUM: &[u8] = &ALBUM_BLOB.0;
+/// ```
+///
+/// `align(8)` rather than `align(2)`: it costs nothing (the blob is megabytes)
+/// and it keeps the common `ldrd`-style wide copy in the loader free of a
+/// second constraint if one is ever added.
+#[repr(align(8))]
+pub struct Aligned<const N: usize>(pub [u8; N]);
+
 /// Errors returned by the decoder and container parser.
 ///
 /// The variants are coarse on purpose: the decoder is a real-time component
@@ -76,4 +100,8 @@ pub enum Error {
     EndOfStream,
     /// A track or seek index is outside the album.
     BadSeek,
+    /// The album blob is not halfword-aligned, so the product decoder's aligned
+    /// `u16` stream loads would be unsound. Embed it with [`Aligned`]. The
+    /// portable core does not need this; only `uli_lite_gba` does.
+    UnalignedStream,
 }
