@@ -1261,14 +1261,11 @@ impl<'a, 's> GbaDecoder<'a, 's> {
             let n = if nb0 > nb1 { nb0 } else { nb1 } * BANDW;
             let l = self.hot.x[0].as_mut_ptr();
             let r = self.hot.x[1].as_mut_ptr();
-            // SAFETY: l and r are the two M-length rows and n <= M.
+            // SAFETY: l and r are the two M-length rows, n <= M, and `n` is a
+            // multiple of BANDW = 16, which is the kernel's alignment/grouping
+            // contract. Zero bands are handled by the kernel doing nothing.
             unsafe {
-                for i in 0..n {
-                    let a = (*l.add(i)) as u32;
-                    let b = (*r.add(i)) as u32;
-                    (*l.add(i)) = a.wrapping_add(b) as i32;
-                    (*r.add(i)) = a.wrapping_sub(b) as i32;
-                }
+                crate::ms_kernel(l, r, n);
             }
         }
 

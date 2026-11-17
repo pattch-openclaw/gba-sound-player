@@ -203,6 +203,36 @@ pub fn pre_kernel(x: &[i32; M], z: &mut [i32; 2 * H]) {
     }
 }
 
+/// The mid/side coefficient transform: `l[i], r[i] = l[i] + r[i], l[i] - r[i]`
+/// (wrapping), over `n` coefficients. The scalar reference for
+/// [`ms_kernel`]`s asm realisation, and the kernel itself when `asm-ms` is off.
+///
+/// This was **the last hot loop in the decoder with no hand-written kernel**, and
+/// the worst ratio in it (PLAN-OF-RECORD.md "Root-cause audit (2026-11-16)").
+/// Kept always-compiled, and out of `.iwram` when the asm kernel is present, so
+/// the on-target twin can compare the two in one image — the same arrangement
+/// `pre` and `ola` use.
+///
+/// # Safety
+/// `l` and `r` must each point at `n` writable, word-aligned `i32`.
+#[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
+#[cfg_attr(
+    all(target_arch = "arm", not(feature = "asm-ms")),
+    unsafe(link_section = ".iwram")
+)]
+#[inline(never)]
+pub unsafe fn ms(l: *mut i32, r: *mut i32, n: usize) {
+    // SAFETY: the caller guarantees `n` writable coefficients in both rows.
+    unsafe {
+        for i in 0..n {
+            let a = (*l.add(i)) as u32;
+            let b = (*r.add(i)) as u32;
+            (*l.add(i)) = a.wrapping_add(b) as i32;
+            (*r.add(i)) = a.wrapping_sub(b) as i32;
+        }
+    }
+}
+
 /// 256-point radix-4 DIF FFT, ARM mode, unchecked addressing.
 ///
 /// IWRAM placement is gated on `asm-fft` being **off**: when the hand-written
@@ -506,9 +536,9 @@ impl uli_lite::Kernels for ArmKernels {
 
     #[inline]
     fn fft(z: &mut [i32; 2 * H]) {
-        // With `asm-fft`, use the best hand-written kernel (v3). The Rust
+        // With `asm-fft`, use the best hand-written kernel (v5). The Rust
         // ARM-mode `fft` stays the default so every arm keeps its control in
-        // the same image; v1 and v2 remain measurable comparison arms.
+        // the same image; v1-v4 remain measurable comparison arms.
         crate::fft_kernel(z);
     }
 
@@ -710,6 +740,68 @@ pub use fft_asm::fft_v4_tw as fft_asm_v4_tw_call;
 pub use fft_asm::fft_v5 as fft_asm_v5_call;
 #[cfg(all(target_arch = "arm", feature = "asm-pre"))]
 pub use pre_asm::pre as pre_asm_call;
+
+/// Hand-written ARM mid/side transform (`asm/ms_arm.s`). Off unless `asm-ms` is
+/// on; the Rust ARM-mode [`ms`] stays the in-image control, exactly as `pre`,
+/// `fft` and `ola` do.
+///
+/// M/S was the last hot loop with **no hand-written kernel at all**, and it was
+/// the worst ratio in the decoder: 9,861 cycles at the gate frame against the C
+/// record's ~4,400 (2.24x). The Rust `for i in 0..n` loop is 9 instructions per
+/// coefficient; the reference's block-transfer kernel is 14 instructions per
+/// **four** (3.5 per coefficient). See `ms_arm.s` for both.
+///
+/// There is no `Rs` early-termination question here — M/S is pure ALU — so the
+/// kernel's only lever is the load/store shape.
+#[cfg(all(target_arch = "arm", feature = "asm-ms"))]
+mod ms_asm {
+    core::arch::global_asm!(include_str!("../asm/ms_arm.s"));
+
+    // `(l, r, n)` — raw pointers and a count, like the reference's
+    // `uli_ms_asm`, because the two rows live in IWRAM `HotState` and the
+    // kernel walks them as cursors.
+    unsafe extern "C" {
+        fn uli_ms_arm(l: *mut i32, r: *mut i32, n: u32);
+    }
+
+    /// Mid/side transform in place via the block-transfer kernel. Same contract
+    /// as [`crate::ms`] and bit-exact with it.
+    ///
+    /// # Safety
+    /// `l` and `r` must each point at `n` writable, word-aligned `i32`, and `n`
+    /// must be a multiple of 4 (every caller's bound is `bands * BANDW` = a
+    /// multiple of 16).
+    #[inline]
+    pub unsafe fn ms(l: *mut i32, r: *mut i32, n: usize) {
+        // SAFETY: the caller's contract is this kernel's contract. `n == 0`
+        // writes nothing, and the `subs`/`bgt` loop cannot leave a partial
+        // group because `n` is a multiple of 4.
+        unsafe { uli_ms_arm(l, r, n as u32) };
+    }
+}
+
+#[cfg(all(target_arch = "arm", feature = "asm-ms"))]
+pub use ms_asm::ms as ms_asm_call;
+
+/// The M/S transform the product decoder should call: the block-transfer kernel
+/// when `asm-ms` is on, otherwise the scalar Rust loop in [`ms`].
+///
+/// # Safety
+/// As [`ms`]: `l` and `r` each point at `n` writable word-aligned `i32`, and `n`
+/// is a multiple of 4.
+#[inline]
+pub unsafe fn ms_kernel(l: *mut i32, r: *mut i32, n: usize) {
+    #[cfg(all(target_arch = "arm", feature = "asm-ms"))]
+    {
+        // SAFETY: the caller's contract is passed through unchanged.
+        unsafe { crate::ms_asm_call(l, r, n) };
+    }
+    #[cfg(not(all(target_arch = "arm", feature = "asm-ms")))]
+    {
+        // SAFETY: as above.
+        unsafe { crate::ms(l, r, n) };
+    }
+}
 
 /// The FFT the product decoder (and [`ArmKernels`]) should call: the best
 /// hand-written kernel (**v5**) when the `asm-fft` feature is on, otherwise the

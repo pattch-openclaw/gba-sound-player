@@ -130,6 +130,12 @@ asm-pre = ["uli-lite-gba/asm-pre"]
 # build the image that runs the `olaasm` twin.
 asm-ola = ["uli-lite-gba/asm-ola"]
 
+# The hand-written mid/side transform (uli-lite-gba/asm-ms). On by default in
+# the crate, so the product arm already carries it; this passthrough exists so
+# the on-target twin (`ovl twin ... msasm=true`) can be named explicitly in
+# `make uli-kernel-twin`, the way asm-fft/asm-pre/asm-ola are.
+asm-ms = ["uli-lite-gba/asm-ms"]
+
 [dependencies]
 uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }
 # The overlay's ARM-mode, unchecked kernels (the measurement's second arm).

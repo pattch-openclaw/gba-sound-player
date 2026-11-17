@@ -170,13 +170,13 @@ uli_fft_arm_v5:
     sub     r9, r9, r11                @ Y2i
     ldr     r10, [r12, #8]             @ w2r
     ldr     r11, [r12, #12]            @ w2i
-    smull   r0, r1, r8, r11            @ Y2r*w2i
-    smlal   r0, r1, r9, r10            @ + Y2i*w2r -> imag
+    smull   r0, r1, r11, r8            @ w2i*Y2r (data in Rs = early term)
+    smlal   r0, r1, r10, r9            @ + w2r*Y2i -> imag
     add     lr, r2, r3, lsl #1         @ &x[P+2T] — lr, not r0: smull writes r0
     str     r1, [lr, #4]
     rsb     r11, r11, #0               @ -w2i
-    smull   r0, r1, r8, r10
-    smlal   r0, r1, r9, r11            @ real
+    smull   r0, r1, r10, r8
+    smlal   r0, r1, r11, r9            @ real
     str     r1, [lr]
 
     @ ---------------- half B: Y1 and Y3 from t1,t3 ----------------
@@ -190,26 +190,26 @@ uli_fft_arm_v5:
     @ ---------------- out1 = cmul(Y1, w1) -> x[P+T] ----------------
     ldr     r6, [r12]                  @ w1r
     ldr     r7, [r12, #4]              @ w1i
-    smull   r0, r1, r4, r7             @ Y1r*w1i
-    smlal   r0, r1, r5, r6             @ + Y1i*w1r -> imag
+    smull   r0, r1, r7, r4             @ w1i*Y1r (data in Rs = early term)
+    smlal   r0, r1, r6, r5             @ + w1r*Y1i -> imag
     add     lr, r2, r3                 @ &x[P+T]
     str     r1, [lr, #4]
     rsb     r7, r7, #0                 @ -w1i
-    smull   r0, r1, r4, r6
-    smlal   r0, r1, r5, r7             @ real
+    smull   r0, r1, r6, r4
+    smlal   r0, r1, r7, r5             @ real
     str     r1, [lr]
 
     @ ---------------- out3 = cmul(Y3, w3) -> x[P+3T] ----------------
     ldr     r10, [r12, #16]            @ w3r
     ldr     r11, [r12, #20]            @ w3i
-    smull   r0, r1, r8, r11            @ Y3r*w3i
-    smlal   r0, r1, r9, r10            @ + Y3i*w3r -> imag
+    smull   r0, r1, r11, r8            @ w3i*Y3r (data in Rs = early term)
+    smlal   r0, r1, r10, r9            @ + w3r*Y3i -> imag
     add     lr, r2, r3                 @ p+t
     add     lr, lr, r3, lsl #1         @ p+3t
     str     r1, [lr, #4]
     rsb     r11, r11, #0               @ -w3i
-    smull   r0, r1, r8, r10
-    smlal   r0, r1, r9, r11            @ real
+    smull   r0, r1, r10, r8
+    smlal   r0, r1, r11, r9            @ real
     str     r1, [lr]
 
     add     r2, r2, r3, lsl #2         @ P += 4T (next group of this j)
