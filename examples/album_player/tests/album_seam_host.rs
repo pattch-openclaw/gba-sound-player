@@ -719,8 +719,8 @@ fn the_verdict_words_are_inside_the_tracked_subset_and_one_row() {
 
 use album_player::keys::{
     self, Action, BTN_A, BTN_B, BTN_DOWN, BTN_L, BTN_LEFT, BTN_R, BTN_RIGHT, BTN_SELECT, BTN_START,
-    BTN_UP, Cursor, DEBOUNCE_FRAMES, KeySource, Keys, REPEAT_DELAY_FRAMES, REPEAT_INTERVAL_FRAMES,
-    Replay, SOFT_RESET_CHORD,
+    BTN_UP, Cursor, DEBOUNCE_FRAMES, Detected, KeySource, Keys, REPEAT_DELAY_FRAMES,
+    REPEAT_INTERVAL_FRAMES, Replay, SOFT_RESET_CHORD, Sampler,
 };
 
 /// A press edge is a *debounced* transition, so a raw press at frame `F` acts at `F + 1` — and a
@@ -998,34 +998,126 @@ const ROM_REPLAY_SCRIPT: [(u32, u16); 6] = [
 
 #[test]
 fn the_rom_replay_script_delivers_three_edges_and_seven_repeats() {
+    // The ISR-shaped seam: `Sampler::sample` is the vblank handler's half and `take` is the
+    // application's, exactly as the ROM splits it.
     let mut source = Replay::new(&ROM_REPLAY_SCRIPT);
-    let mut keys = Keys::new();
+    let mut sampler = Sampler::new();
     let mut press_frames = Vec::new();
     let mut repeat_frames = Vec::new();
-    for frame in 0..130u16 {
-        let sampled = keys.sample(source.sample());
-        if sampled.pressed != 0 {
-            press_frames.push(frame);
-        }
+    for frame in 0..130u32 {
+        let sampled = sampler.sample(source.sample());
         if sampled.repeated != 0 {
             repeat_frames.push(frame);
         }
+        if let Some(detected) = sampler.take() {
+            // One frame after each scripted entry (8, 24, 40), and stamped with the frame it was
+            // detected on — never with a frame before it.
+            assert_eq!(detected.frame, frame);
+            press_frames.push(frame);
+        }
     }
-    // One frame after each scripted entry (8, 24, 40), and nothing for the releases.
     assert_eq!(press_frames, vec![9, 25, 41]);
+    assert_eq!(sampler.presses(), 3);
+    assert_eq!(sampler.repeats(), 7);
+    assert_eq!(sampler.dropped(), 0);
     assert_eq!(source.edges(), 3);
     // Left is held from frame 41 to 120: first repeat REPEAT_DELAY_FRAMES later, then every
     // REPEAT_INTERVAL_FRAMES until the release at 120 clears the burst.
-    assert_eq!(repeat_frames[0], 41 + REPEAT_DELAY_FRAMES);
+    assert_eq!(repeat_frames[0], 41 + u32::from(REPEAT_DELAY_FRAMES));
     assert_eq!(repeat_frames, vec![65, 73, 81, 89, 97, 105, 113]);
     assert_eq!(source.frame(), 130);
 }
 
-/// §4.5's loop polls on the frame latch, so a scripted press stamped at frame `F` is *latched* at
-/// `F` and delivered to the application at `F + DEBOUNCE_FRAMES - 1` = `F + 1`: **one video frame
-/// from latch to delivery**, which is the bound §4.4's "within one video frame" observable needs
-/// from this layer. The ROM's loop can only be slower than this — it polls on the latch and spends
-/// up to one producer slice inside a decode — and it can never be faster, which is the direction
+/// The ISR-shaped seam's two halves, and the property that makes the frame stamp worth carrying:
+/// actions are posted one per frame, stamped with that frame, and a consumer can never be handed an
+/// older action after a newer one — however late it takes them and however many a single slot had to
+/// displace. This is what the ROM's `detect_latency` measurement rests on (the press is one frame
+/// after its scripted mask change) and what a frame boundary cannot reorder.
+#[test]
+fn the_isr_posts_edges_in_frame_order_and_never_reorders_across_a_boundary() {
+    // Frame 1: A confirms (`PauseToggle`). Frame 3: Right confirms while A is still held
+    // (`NextTrack`). Frame 5: Down confirms (`RestartTrack`). Nothing on the frames in between.
+    const RAW: [u16; 6] = [
+        BTN_A,
+        BTN_A,
+        BTN_A | BTN_RIGHT,
+        BTN_A | BTN_RIGHT,
+        BTN_A | BTN_RIGHT | BTN_DOWN,
+        BTN_A | BTN_RIGHT | BTN_DOWN,
+    ];
+
+    // A consumer that takes every frame sees each action once, on its own frame, in order.
+    let mut sampler = Sampler::new();
+    let mut seen = Vec::new();
+    for raw in RAW {
+        sampler.sample(raw);
+        if let Some(detected) = sampler.take() {
+            seen.push(detected);
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![
+            Detected {
+                frame: 1,
+                action: Action::PauseToggle,
+            },
+            Detected {
+                frame: 3,
+                action: Action::NextTrack,
+            },
+            Detected {
+                frame: 5,
+                action: Action::RestartTrack,
+            },
+        ],
+        "the frames with a press edge are 1, 3 and 5, and every other frame posts nothing"
+    );
+    assert_eq!(sampler.sampled(), RAW.len() as u32);
+    assert_eq!((sampler.presses(), sampler.dropped()), (3, 0));
+
+    // A consumer slower than the video clock: it takes on frames 3 and 5 only. The slot has already
+    // been displaced once by then, and what it hands over can only ever be newer than what it
+    // handed over last — an older action after a newer one is the reordering this cannot do.
+    let mut sampler = Sampler::new();
+    let mut delivered = Vec::new();
+    for (index, raw) in RAW.iter().enumerate() {
+        sampler.sample(*raw);
+        if index == 3 || index == 5 {
+            if let Some(detected) = sampler.take() {
+                delivered.push(detected);
+            }
+        }
+    }
+    assert_eq!(
+        delivered,
+        vec![
+            Detected {
+                frame: 3,
+                action: Action::NextTrack,
+            },
+            Detected {
+                frame: 5,
+                action: Action::RestartTrack,
+            },
+        ],
+        "the slot keeps the newest action; the displaced one is counted, not delivered late"
+    );
+    assert_eq!(sampler.dropped(), 1);
+    for pair in delivered.windows(2) {
+        assert!(
+            pair[0].frame < pair[1].frame,
+            "an action from frame {} arrived after one from frame {}",
+            pair[0].frame,
+            pair[1].frame
+        );
+    }
+}
+
+/// §4.5's vblank handler samples once per frame, so a scripted press stamped at frame `F` is
+/// *detected* at `F + DEBOUNCE_FRAMES - 1` = `F + 1`: **one video frame from the mask change to the
+/// detection**, which is the floor §4.4's observable has and the number the ROM measures against
+/// `keys::Replay::changed()`. It can never be detected before its own frame, which is the direction
 /// that would let a key act on a frame that had not happened yet.
 #[test]
 fn a_scripted_edge_is_delivered_within_one_frame_of_its_latch() {
@@ -1039,11 +1131,17 @@ fn a_scripted_edge_is_delivered_within_one_frame_of_its_latch() {
         .map(|(frame, _)| *frame)
         .collect();
     let mut source = Replay::new(&ROM_REPLAY_SCRIPT);
-    let mut machine = Keys::new();
+    let mut sampler = Sampler::new();
     let mut delivered = Vec::new();
-    for frame in 0..140u32 {
-        if machine.sample(source.sample()).action().is_some() {
-            delivered.push(frame);
+    for _ in 0..140u32 {
+        sampler.sample(source.sample());
+        if let Some(detected) = sampler.take() {
+            delivered.push((
+                detected.frame,
+                source
+                    .mask_changed()
+                    .expect("a script knows when its mask changed"),
+            ));
         }
     }
     assert_eq!(
@@ -1053,17 +1151,22 @@ fn a_scripted_edge_is_delivered_within_one_frame_of_its_latch() {
         stamps.len(),
         delivered.len()
     );
-    for (frame, stamp) in delivered.iter().zip(&stamps) {
+    for ((frame, changed), stamp) in delivered.iter().zip(&stamps) {
+        assert_eq!(
+            changed, stamp,
+            "the mask change the detection is measured from is the script's own entry"
+        );
         assert!(
             *frame > *stamp,
-            "an action was delivered at {frame}, before its scripted latch at {stamp}"
+            "an action was detected at {frame}, before its scripted latch at {stamp}"
         );
         assert!(
             *frame - *stamp <= LATCH_TO_DELIVERY,
-            "the press latched at {stamp} was delivered at {frame}: more than {LATCH_TO_DELIVERY} \
-             frame(s) from latch to delivery"
+            "the press latched at {stamp} was detected at {frame}: more than {LATCH_TO_DELIVERY} \
+             frame(s) from latch to detection"
         );
     }
+    assert_eq!(sampler.presses() as usize, stamps.len());
 }
 
 // -------------------------------------------------------------------------------------------------

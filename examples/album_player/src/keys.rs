@@ -45,11 +45,13 @@
 //!
 //! ## The two sources, and the one the gate can witness
 //!
-//! [`KeySource`] supplies one mask per video frame. [`HARDWARE`](Hardware) reads the keypad through
-//! `ButtonController::update()` → `ButtonState::current()` (`REG_KEYINPUT`, active-low, at
-//! `agb-0.25.0/src/input.rs:392`). [`Replay`](Replay) — feature `input-replay`, **off by default** —
-//! replays a compiled-in `(frame, mask)` script through `update_with_state`
-//! (`agb-0.25.0/src/input.rs:145`), the injection hook agb provides for exactly this.
+//! [`KeySource`] supplies one mask per video frame. [`HARDWARE`](Hardware) reads `REG_KEYINPUT`
+//! (active-low) with a single volatile load — `agb`'s own address for it is
+//! `agb-0.25.0/src/input.rs:82` — because the sample now happens in the vblank handler and the whole
+//! handler is measured against the audio clock (§4.5, PR-3b-ii-B1). [`Replay`](Replay) — feature
+//! `input-replay`, **off by default** — replays a compiled-in `(frame, mask)` script through
+//! `update_with_state` (`agb-0.25.0/src/input.rs:145`), the injection hook agb provides for exactly
+//! this.
 //!
 //! REPLAY exists because `mgba-test-runner` cannot press a key: the installed binary exposes only a
 //! positional ROM argument, and no key-log, stdin, env or socket path is reachable from it. So the
@@ -57,6 +59,15 @@
 //! — and the ROM always prints which source it used. A REPLAY run is **not** evidence that a
 //! physical press works; that is AP-7's, on a cartridge. The caller must never imply otherwise, and
 //! the log lines the ROM prints are worded to make it impossible to.
+//!
+//! ## Where the sample runs
+//!
+//! Not in the main loop, since PR-3b-ii-A measured why that cannot work: one producer frame is
+//! 1.04–1.09 M cycles of uninterruptible decode — 3.7–3.9 video frames — so a loop can observe the
+//! keypad at most once per producer frame. The sample therefore lives in the vblank handler, and
+//! [`Sampler`] is that half: one call per video frame, one pending action stamped with the frame it
+//! was detected on, and a [`take`](Sampler::take) for the application. It is platform-free like the
+//! rest of the machine, so the host twin drives the same sample-then-take path the ROM does.
 
 /// Button bits, in agb 0.25's `Button` discriminant order (`agb-0.25.0/src/input.rs:59-83`):
 /// `A = 1 << 0` … `L = 1 << 9`. Keeping the same layout is what makes the arm half of this module a
@@ -344,6 +355,134 @@ impl Default for Keys {
 }
 
 // -------------------------------------------------------------------------------------------------
+// The ISR half: one sample per video frame, one slot for what it detected
+// -------------------------------------------------------------------------------------------------
+
+/// One action, stamped with the video frame the ISR that detected it was sampling.
+///
+/// `frame` is the seam's own count of sampled frames — one per [`Sampler::sample`] call — and that is
+/// also the clock a [`Replay`] script's entries are stated in, because both count the same vblank
+/// passes. A scripted edge's latency is then a subtraction rather than an inference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Detected {
+    /// The video frame the action was detected on (0 is the first frame after installation).
+    pub frame: u32,
+    /// §5.3's now-playing meaning of that frame's press.
+    pub action: Action,
+}
+
+/// The ISR half of the seam: run [`Keys`] once per video frame, and leave the newest action in a
+/// single slot for the application to take.
+///
+/// The split is forced by a measurement, not by taste (§4.5, PR-3b-ii-A's finding): one producer
+/// frame is 1.04–1.09 M cycles of uninterruptible decode — 3.7–3.9 video frames — so a main loop can
+/// never sample the keypad once per frame. The vblank handler is the only code in this system that
+/// runs at video rate, so it owns `source.sample()` → [`Keys::sample`] → post, and the application
+/// owns [`take`](Self::take).
+///
+/// **Single slot, newest wins, and displacement is counted.** A consumer that is inside a producer
+/// frame cannot take every action; [`dropped`](Self::dropped) says how many actions an older one was
+/// displaced by, so "the application missed a press" is a number rather than a silence. A queue is
+/// what an interrupt must not grow.
+///
+/// Nothing here divides, formats, allocates or reads a register, and nothing here names `agb`: it is
+/// the same [`Keys`] machine the host twin drives, with a frame counter and a slot around it.
+pub struct Sampler {
+    keys: Keys,
+    /// Video frames sampled, i.e. the index `sample` is about to stamp.
+    sampled: u32,
+    /// The newest action the application has not taken.
+    pending: Option<Detected>,
+    /// Actions displaced from the slot before a consumer took them.
+    dropped: u32,
+    /// Frames carrying a press edge, and frames carrying an autorepeat.
+    presses: u32,
+    repeats: u32,
+}
+
+impl Sampler {
+    /// No frames sampled, nothing pending.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            keys: Keys::new(),
+            sampled: 0,
+            pending: None,
+            dropped: 0,
+            presses: 0,
+            repeats: 0,
+        }
+    }
+
+    /// Fold one video frame's raw mask in and post its action, if that frame had one.
+    ///
+    /// One call is one video frame and **the caller owns that cadence** — in the ROM it is the vblank
+    /// handler (§4.5). The index stamped on a posted action is this sampler's own count, incremented
+    /// once per call, so two actions on consecutive frames are stamped `n` and `n + 1` and can never
+    /// reach the consumer in the other order.
+    pub fn sample(&mut self, raw: u16) -> KeyFrame {
+        let frame = self.sampled;
+        let events = self.keys.sample(raw);
+        self.sampled = self.sampled.wrapping_add(1);
+        if events.pressed != 0 {
+            self.presses = self.presses.saturating_add(1);
+        }
+        if events.repeated != 0 {
+            self.repeats = self.repeats.saturating_add(1);
+        }
+        if let Some(action) = events.action() {
+            if self.pending.is_some() {
+                self.dropped = self.dropped.saturating_add(1);
+            }
+            self.pending = Some(Detected { frame, action });
+        }
+        events
+    }
+
+    /// The newest action, if the application has not taken it yet.
+    pub fn take(&mut self) -> Option<Detected> {
+        self.pending.take()
+    }
+
+    /// The newest action without consuming it — what the ISR asks when it wants the frame stamp it
+    /// has just posted.
+    #[must_use]
+    pub const fn pending(&self) -> Option<Detected> {
+        self.pending
+    }
+
+    /// Video frames sampled.
+    #[must_use]
+    pub const fn sampled(&self) -> u32 {
+        self.sampled
+    }
+
+    /// Frames carrying a press edge.
+    #[must_use]
+    pub const fn presses(&self) -> u32 {
+        self.presses
+    }
+
+    /// Frames carrying an autorepeat.
+    #[must_use]
+    pub const fn repeats(&self) -> u32 {
+        self.repeats
+    }
+
+    /// Actions displaced from the single slot before a consumer took them.
+    #[must_use]
+    pub const fn dropped(&self) -> u32 {
+        self.dropped
+    }
+}
+
+impl Default for Sampler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
 // The seam: one mask per video frame, from a keypad or from a script
 // -------------------------------------------------------------------------------------------------
 
@@ -355,6 +494,14 @@ impl Default for Keys {
 pub trait KeySource {
     /// The held-button mask for the next frame.
     fn sample(&mut self) -> u16;
+
+    /// The video frame at which the mask this source is delivering last changed, when the source
+    /// knows it. A scripted log does; a keypad cannot, so the default is `None` — "not measurable",
+    /// never "zero", which is what keeps the reaction latency a number only where it is a
+    /// measurement.
+    fn mask_changed(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// A compiled-in `(frame, mask)` script: the gate's input, since `mgba-test-runner` cannot press a
@@ -393,6 +540,9 @@ pub struct Replay {
     reported: u16,
     /// How many times a previously-unset button bit appeared (the delivered edge count).
     edges: u32,
+    /// The script frame of the last entry applied — the mask transition's own frame, which is what
+    /// a detection latency is measured from.
+    changed: u32,
     #[cfg(target_arch = "arm")]
     controller: agb::input::ButtonController,
 }
@@ -414,6 +564,7 @@ impl Replay {
             mask: 0,
             reported: 0,
             edges: 0,
+            changed: 0,
             #[cfg(target_arch = "arm")]
             controller: agb::input::ButtonController::new(),
         }
@@ -437,6 +588,14 @@ impl Replay {
         self.frame
     }
 
+    /// The script frame of the entry currently in force: the frame the delivered mask last changed
+    /// on. A press edge is detected one frame after this one (the debounce), which is the latency the
+    /// ROM prints, so this is the number it is measured from.
+    #[must_use]
+    pub const fn changed(&self) -> u32 {
+        self.changed
+    }
+
     /// Advance the script's clock by one frame and return that frame's raw scripted mask.
     fn advance(&mut self) -> u16 {
         let frame = self.frame;
@@ -445,6 +604,7 @@ impl Replay {
                 break;
             }
             self.mask = mask & BUTTON_MASK;
+            self.changed = at;
             self.next += 1;
         }
         self.frame = frame.wrapping_add(1);
@@ -472,24 +632,32 @@ impl KeySource for Replay {
         self.reported = delivered;
         delivered
     }
+
+    fn mask_changed(&self) -> Option<u32> {
+        Some(self.changed)
+    }
 }
 
 #[cfg(target_arch = "arm")]
 mod hw {
-    //! The only `agb` types in this module, and they are three functions over a mask.
+    //! The only `agb` types and the only register this module names: the keypad read, and the
+    //! `ButtonState` round trip the REPLAY arm drives.
 
+    use agb::input::Button;
+    #[cfg(feature = "input-replay")]
+    use agb::input::ButtonController;
     #[cfg(feature = "input-replay")]
     use agb::input::ButtonState;
-    use agb::input::{Button, ButtonController};
 
-    use super::{
-        BTN_A, BTN_B, BTN_DOWN, BTN_L, BTN_LEFT, BTN_R, BTN_RIGHT, BTN_SELECT, BTN_START, BTN_UP,
-        KeySource,
-    };
+    use super::{BTN_A, BTN_L, KeySource};
+    #[cfg(feature = "input-replay")]
+    use super::{BTN_B, BTN_DOWN, BTN_LEFT, BTN_R, BTN_RIGHT, BTN_SELECT, BTN_START, BTN_UP};
 
     /// The ten buttons against this module's bits. This table *is* the assertion that agb's
     /// discriminants and [`super`]'s constants agree; a drift in either is a wrong mask, so the
-    /// compile-time check below pins the ones a table cannot.
+    /// compile-time check below pins the ones a table cannot. Only the REPLAY arm walks it — the
+    /// keypad is one register read and needs no table.
+    #[cfg(feature = "input-replay")]
     const BUTTONS: [(Button, u16); 10] = [
         (Button::A, BTN_A),
         (Button::B, BTN_B),
@@ -506,7 +674,8 @@ mod hw {
     const _: () = assert!(Button::A as u16 == BTN_A);
     const _: () = assert!(Button::L as u16 == BTN_L);
 
-    /// The controller's held set as this module's mask.
+    /// The controller's held set as this module's mask — the REPLAY arm's delivery side.
+    #[cfg(feature = "input-replay")]
     pub(super) fn mask_of(controller: &ButtonController) -> u16 {
         let mut mask = 0u16;
         let mut index = 0;
@@ -521,7 +690,8 @@ mod hw {
     }
 
     /// A mask as a `ButtonState` for `update_with_state` — the injection hook the REPLAY arm uses,
-    /// and so only built for that arm.
+    /// and so only built for that arm. The `BUTTONS` table above is what makes the scripted mask and
+    /// the keypad's own bits one layout.
     #[cfg(feature = "input-replay")]
     pub(super) fn state_of(mask: u16) -> ButtonState {
         let mut state = ButtonState::empty();
@@ -533,22 +703,23 @@ mod hw {
         state
     }
 
+    /// `REG_KEYINPUT`, agb's private `BUTTON_INPUT` (`agb-0.25.0/src/input.rs:82`): the ten button
+    /// bits, **active-low** — a pressed button reads 0 — and the top six bits read as 1.
+    const REG_KEYINPUT: *const u16 = 0x0400_0130 as *const u16;
+
     /// The hardware source: the keypad, read once per frame.
     ///
-    /// `update()` copies the current `ButtonState` into the controller's `previous`, so
-    /// `is_just_pressed` would work too — this module does its own edge detection, from the
-    /// debounced set, because agb's edge is on the *raw* transition and a bounce would show as two.
-    pub struct Hardware {
-        controller: ButtonController,
-    }
+    /// One volatile load and a complement, because this now runs inside the vblank handler and the
+    /// handler's duration is measured against the audio clock (PR-3b-ii-B1): a
+    /// `ButtonController::update()` plus a ten-button mask walk would be the same information at
+    /// several times the cost. `agb`'s controller is still what the REPLAY arm drives, so the
+    /// scripted path goes through the same state transition the keypad's does.
+    pub struct Hardware;
 
     impl Hardware {
-        /// A controller seeded from the keypad as it stands (agb's `new()` does exactly that).
         #[must_use]
         pub fn new() -> Self {
-            Self {
-                controller: ButtonController::new(),
-            }
+            Self
         }
     }
 
@@ -560,8 +731,9 @@ mod hw {
 
     impl KeySource for Hardware {
         fn sample(&mut self) -> u16 {
-            self.controller.update();
-            mask_of(&self.controller)
+            // SAFETY: a fixed I/O address, read only. `BUTTON_MASK` drops the register's unused
+            // top bits, which the complement turns on.
+            (!unsafe { REG_KEYINPUT.read_volatile() }) & super::BUTTON_MASK
         }
     }
 }
