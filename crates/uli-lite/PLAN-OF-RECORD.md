@@ -1521,6 +1521,25 @@ costs are cross-image and therefore indicative, not paired:
 full (8,192 samples of lead) throughout. Explicitly **not** the hardware half of
 U5, which still wants two units × two runs.
 
+**The full-length album build (2026-11-16).** `make uli-player-cross` embeds E3-b's
+twelve tracks — 43.5 min, 167,222 frames, 33,088,280 B — in one ROM: **33,407,264 B
+of a 33,554,432 B cart, 147,168 B of headroom (0.44%)**. That is the image that
+tests the cartridge's *real* capacity rather than its stated one, and its mGBA
+run is the album-scale player number:
+
+| build | worst (non-boundary) | mean | underruns | periods | boundary frames |
+|---|---|---:|---:|---|---|
+| full-length album, headphone | 245,671 (f11,531) = 93.72% | 205,763 = 78.50% | **0** | 167,232 / 167,232 served | 12, worst 343,152 |
+
+**A gapless track advance costs two decodes in one window**, and the player now
+reports it as its own number instead of folding it into the worst frame: the pull
+that crosses a boundary also decodes the next track's preroll, so it costs ~1.3
+periods (343,152 cycles here, 12 times on this album). The 250 ms ring absorbs it
+— the ledger shows zero underruns and zero tails across 167,232 periods — and a
+gapless join is the design, so the verdict judges the non-boundary worst and
+prints the boundary figure separately. `skipped_samples = 2,769` is the sum of the
+twelve tracks' non-frame-aligned `skip` fields, all accounted.
+
 Three things this first increment does **not** do, stated so they are not read as
 done:
 
@@ -2432,6 +2451,28 @@ Frame-101 attribution of the 523,267 (by difference, one image): kernels
 328,502 (63%), `dec_chan` × 2 ≈175,000 (33%), M/S + wrapper ≈20,000 (4%).
 Kernels against the C record's 134,600 are 2.44×; entropy per
 coefficient against the C bench's entropy+dequant (~41 c/coef) is ~6.6×.
+
+### PR D, album-scale (2026-11-16, mGBA, WAITCNT 4/2) — the full-length player build
+
+`make uli-player-cross`: E3-b's twelve tracks in one player ROM, 33,407,264 B of a
+33,554,432 B cart (**147,168 B headroom**), headphone profile, ring 8,192 samples.
+
+| quantity | value |
+|---|---|
+| frames played | 167,224 (album frames + per-track padding frames) |
+| worst non-boundary frame | **245,671 (f11,531) = 93.72%** |
+| mean | **205,763 = 78.50%** |
+| track-change frames | **12, worst 343,152** (each also decodes the next track's preroll) |
+| feeder | 167,232 periods, 167,232 served, **0 underruns, 0 tails** |
+| ring high water | 8,192 samples (full) |
+| `skipped_samples` | 2,769 (the twelve tracks' `skip` fields, all accounted) |
+| UI redraws | 2,622, mean 377,163 cycles, worst 524,392 (outside the frame window) |
+
+- The boundary cost is *by design* and is what the ring is for: 343,152 cycles is
+  1.31 periods, and the queue never ran dry in 167,232 periods.
+- Image-specific: the instrument's gate arm on the same corpus reads 96.32%, this
+  player image reads 93.72% for its worst non-boundary frame. Different images,
+  so they are not compared; the player number is the product one.
 
 ### E3 (2026-11-16, mGBA, WAITCNT 4/2) — the two pre-hardware corpora
 

@@ -43,6 +43,12 @@ fold-left = []
 two-track = []
 autoskip = []
 
+# The full-length album corpus (E3-b's twelve tracks, 43.5 minutes, 167,222
+# frames) instead of the one master. Built so a 33 MB album can be run once on
+# real hardware: it is the only image that exercises the cartridge's actual
+# capacity rather than its stated one.
+cross-corpus = []
+
 [[bin]]
 name = "uli-player"
 path = "src/main.rs"

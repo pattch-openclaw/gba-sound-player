@@ -97,7 +97,13 @@ sibling project's twelve-track, 43.5-minute, **167,222-frame** album — CC-lice
 material with the sibling's own trim recipe, 101.277 kbit/s — measures **96.32% /
 82.83%** on the gate arm: the first corpus to produce a worse tail than the master
 (+0.30 points, 3.68 points of margin), with zero starved periods. Both are
-C-pinned. What remains before the hardware campaign is only the campaign.
+C-pinned. **A full-length player build exists for the memory question**:
+`make uli-player-cross` puts those twelve tracks in one ROM — **33,407,264 B of a
+33,554,432 B cart, 147,168 B of headroom** — and runs 167,232 periods with zero
+underruns, worst non-boundary frame 245,671 (93.72%), mean 205,763 (78.50%). A
+track change costs two decodes in one window (343,152 cycles, 12 times) and is
+reported separately: the 250 ms ring absorbs it. What remains before the hardware
+campaign is only the campaign.
 This file is the decision record (why
 ULI2, what it is, the licensing and encoder risks); the live plan, gates and
 measurement ledger are [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md).

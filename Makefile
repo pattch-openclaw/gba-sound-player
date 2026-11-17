@@ -9,6 +9,7 @@
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-playback-test uli-player uli-player-rom uli-player-speaker uli-player-speaker-rom \
         uli-adversarial-asset uli-cross-asset uli-two-track-asset uli-playback-track-pin uli-player-two-track \
+        uli-player-cross uli-player-cross-rom \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
         album-bake album-pack-check \
@@ -928,6 +929,23 @@ uli-playback-track-pin:
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) run --manifest-path $(ULI_PLAYBACK_MANIFEST) --target $(HOST_TRIPLE) \
 	    --example track_seek_pin -- $(abspath $(ULI_TWO_BLOB))
+
+# The **full-length album** build: E3-b's twelve tracks (43.5 min, 167,222 frames,
+# 33,088,280 B) inside one ROM. This is the only image that tests the cartridge's
+# real capacity rather than its stated one — 33.4 MB of a 32 MiB cart, ~160 KB of
+# headroom — and it is meant to be run once on hardware, read off the final
+# screen (frames, worst/mean, periods, underruns, tails).
+uli-player-cross-rom: format
+	cd $(ULI_PLAYER_DIR) && $(CARGO) build --release --target $(TARGET) --features cross-corpus
+	agb-gbafix $(ULI_PLAYER_BIN) -o uli-player-cross.gba
+	@echo "ULI2 player ROM (full-length album) built: uli-player-cross.gba"
+	@stat -c '  %s bytes of a 33554432-byte cart' uli-player-cross.gba
+
+uli-player-cross: uli-player-cross-rom
+	timeout -k 5 1200 $(GBA_TEST_RUNNER) uli-player-cross.gba > uli-player-cross.log 2>&1 || true
+	@grep -q '^\[uli-player\] PASS' uli-player-cross.log \
+	  || { echo "uli-player-cross: not a pass — see uli-player-cross.log"; exit 1; }
+	@grep -E '^\[uli-player\] (profile|played frames|ui redraws|feeder)' uli-player-cross.log || true
 
 # The player exercising a real track change: two tracks, and a deterministic skip
 # partway through track 1 (the runner has no input script).

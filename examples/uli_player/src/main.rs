@@ -44,9 +44,11 @@ use uli_playback::source::{Frame, PcmSource, SourceError, UliSource};
 
 /// The generated album asset (`make uli-album-asset`); gitignored build output,
 /// the same blob the PR E instrument embeds.
-#[cfg(feature = "two-track")]
+#[cfg(feature = "cross-corpus")]
+static ALBUM: &[u8] = include_bytes!("../../uli_bench/assets/cross/cross.uli");
+#[cfg(all(feature = "two-track", not(feature = "cross-corpus")))]
 static ALBUM: &[u8] = include_bytes!("../../uli_bench/assets/biotwo.uli");
-#[cfg(not(feature = "two-track"))]
+#[cfg(all(not(feature = "two-track"), not(feature = "cross-corpus")))]
 static ALBUM: &[u8] = include_bytes!("../../uli_bench/assets/biomaster.uli");
 
 /// The `autoskip` witness: skip to track 2 after this many frames of track 1.
@@ -314,6 +316,8 @@ struct Report {
     ledger: Ledger,
     skips: u32,
     finish: Finish,
+    boundary_worst: u32,
+    boundary_frames: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -375,7 +379,9 @@ fn run(gba: &mut agb::Gba) -> Report {
                   mean: u32,
                   ledger: Ledger,
                   skips: u32,
-                  finish: Finish| Report {
+                  finish: Finish,
+                  boundary_worst: u32,
+                  boundary_frames: u32| Report {
         ok,
         frames,
         worst,
@@ -384,13 +390,15 @@ fn run(gba: &mut agb::Gba) -> Report {
         ledger,
         skips,
         finish,
+        boundary_worst,
+        boundary_frames,
     };
 
     let album = match Album::parse(ALBUM) {
         Ok(a) => a,
         Err(e) => {
             agb::println!("[uli-player] FAIL album parse: {:?}", e);
-            return report(false, 0, 0, 0, 0, Ledger::default(), 0, Finish::Error);
+            return report(false, 0, 0, 0, 0, Ledger::default(), 0, Finish::Error, 0, 0);
         }
     };
     let tables = unsafe { &mut *core::ptr::addr_of_mut!(TABLES) };
@@ -404,14 +412,14 @@ fn run(gba: &mut agb::Gba) -> Report {
         Ok(d) => d,
         Err(e) => {
             agb::println!("[uli-player] FAIL tables: {:?}", e);
-            return report(false, 0, 0, 0, 0, Ledger::default(), 0, Finish::Error);
+            return report(false, 0, 0, 0, 0, Ledger::default(), 0, Finish::Error, 0, 0);
         }
     };
     let mut source = match UliSource::new(album, dec) {
         Ok(s) => s,
         Err(e) => {
             agb::println!("[uli-player] FAIL seek: {:?}", e);
-            return report(false, 0, 0, 0, 0, Ledger::default(), 0, Finish::Error);
+            return report(false, 0, 0, 0, 0, Ledger::default(), 0, Finish::Error, 0, 0);
         }
     };
 
@@ -461,7 +469,7 @@ fn run(gba: &mut agb::Gba) -> Report {
     });
     if !primed {
         agb::println!("[uli-player] FAIL prime: the ring had less than one period");
-        return report(false, 0, 0, 0, 0, Ledger::default(), 0, Finish::Error);
+        return report(false, 0, 0, 0, 0, Ledger::default(), 0, Finish::Error, 0, 0);
     }
     enable_sound();
     // SAFETY: fixed I/O address; a pending Timer1 bit would enter the feeder
@@ -474,6 +482,9 @@ fn run(gba: &mut agb::Gba) -> Report {
     let mut frames = 0u32;
     let mut worst = 0u32;
     let mut worst_frame = 0u32;
+    let mut boundary_worst = 0u32;
+    let mut boundary_frames = 0u32;
+    let mut last_track = usize::MAX;
     let mut sum = 0u64;
     let mut skips = 0u32;
     let mut suspects = 0u32;
@@ -584,11 +595,21 @@ fn run(gba: &mut agb::Gba) -> Report {
             match res {
                 Ok(stamp) => {
                     skipped_samples += u32::from(stamp.skipped);
+                    // The pull that crosses a track boundary also decodes the
+                    // next track's preroll inside the same window, so it costs
+                    // about two frames. It is reported separately: the ring's
+                    // 250 ms of lead is what absorbs it, and a player's gapless
+                    // join is by design, not a fault.
+                    let boundary = stamp.track != last_track;
+                    last_track = stamp.track;
                     // A window above 64 frame periods is a counter-integrity
                     // fault, not a frame: count it, never fold it into the mean.
                     let net = raw;
                     if net > (1 << 24) {
                         suspects += 1;
+                    } else if boundary {
+                        boundary_frames += 1;
+                        boundary_worst = boundary_worst.max(net);
                     } else {
                         sum += u64::from(net);
                         if net > worst {
@@ -671,6 +692,11 @@ fn run(gba: &mut agb::Gba) -> Report {
         skipped_samples,
         suspects
     );
+    agb::println!(
+        "[uli-player] track-change frames={} worst={} (reported separately: each also decodes the next track's preroll)",
+        boundary_frames,
+        boundary_worst
+    );
     let ui_mean = if ui_count > 0 {
         (ui_sum / u64::from(ui_count)) as u32
     } else {
@@ -699,7 +725,18 @@ fn run(gba: &mut agb::Gba) -> Report {
     agb::println!("[uli-player] {}", if ok { "PASS" } else { "FAIL" });
     // mgba-test-runner's exit sentinel; harmless on hardware.
     agb::println!("Tests finished successfully");
-    report(ok, frames, worst, worst_frame, mean, ledger, skips, finish)
+    report(
+        ok,
+        frames,
+        worst,
+        worst_frame,
+        mean,
+        ledger,
+        skips,
+        finish,
+        boundary_worst,
+        boundary_frames,
+    )
 }
 
 #[agb::entry]
