@@ -127,8 +127,10 @@ mod rom {
     use album_player::assets;
     use album_player::backend;
     use album_player::geometry;
+    use album_player::keys;
     use album_player::meta::{Album, Track};
     use album_player::pcm::{PcmSource, SourceError};
+    use album_player::position;
     use album_player::text;
     use gba_audio_hw::{
         AudioChain, CycleCounter, arm_audio_chain, clear_timer1_if, enable_sound, io_read_u16,
@@ -295,6 +297,207 @@ mod rom {
         max_delay_samples: u32,
     }
 
+    // ------------------------------------------------------------------ input
+
+    /// The video-frame latch (§4.5). The vblank handler stores; the main loop loads and compares
+    /// against the frame it last served. **The counter is the latch**: one increment is both the
+    /// "a frame started" event and the frame's number, so there is no second cell that could fall
+    /// out of step and no flag that could be cleared before the main loop looked at it.
+    ///
+    /// Deliberately in `.bss`, not `.iwram`: §4.5 records that the *audio* timer IRQ owns the
+    /// tightest deadline in the system and the 4-byte `.iwram` ruling (§10.4) is spent on the
+    /// session clock. One store per video frame, at AP-0's measured 280,896-cycle period, pays a
+    /// couple of EWRAM wait states — 0.001% of the frame it paces.
+    static mut FRAME_LATCH: u32 = 0;
+
+    /// The vblank handler: **increment the latch and nothing else.**
+    ///
+    /// It draws nothing, reads no key, touches no palette, no DISPCNT and no VRAM, so it cannot
+    /// change what is on screen (§4.5's "nothing else. Ever." applied to the video clock rather
+    /// than the audio one). What it *is* allowed to touch is DISPSTAT's vblank-IRQ enable, which
+    /// agb sets as part of registering the handler (`interrupt.rs`'s `Interrupt::enable`) — that is
+    /// what "register a VBlank handler" means, not a display write.
+    ///
+    /// **Why it cannot disturb the audio IRQ's deadline.** agb's dispatcher walks its 14-slot table
+    /// in interrupt-number order (`agb-0.25.0/src/interrupt.rs:271-279`), so a vblank that lands in
+    /// the same dispatch as a Timer1 overflow is serviced **before** the feeder. The cost it adds is
+    /// therefore on the feeder's entry latency: one load, one add and one store (three instructions,
+    /// single-digit cycles) — measured against the facts rather than asserted: the re-arm grace is
+    /// 16 samples = 16,384 cycles, so the latch is under 0.06% of it; the period is 573,440 cycles,
+    /// so it is under 0.002% of it; and AP-0 measured a *whole* UI frame at 1.89% of a period
+    /// (~10,838 c), so this handler is about one part in a thousand of the UI line it precedes. The
+    /// dispatcher's own table walk is paid once per interrupt whether this handler exists or not.
+    fn vblank(_cs: critical_section::CriticalSection<'_>) {
+        // SAFETY: one writer (this handler) and one aligned 32-bit read-modify-write, which is
+        // atomic on ARM7TDMI. The main loop's read is the same-aligned load on the other side.
+        unsafe { FRAME_LATCH = FRAME_LATCH.wrapping_add(1) };
+    }
+
+    /// The latch's current value, with no critical section needed (see [`vblank`]).
+    fn frame_latch() -> u32 {
+        // SAFETY: read only; an aligned 32-bit load is atomic on ARM7TDMI.
+        unsafe { FRAME_LATCH }
+    }
+
+    /// How many input events this ROM keeps for its end-of-run log.
+    ///
+    /// Bounded on purpose: an `agb::println!` is a semihosting trap, and this list is filled from
+    /// the producer loop — the one place the module docs forbid logging. So the edges are *recorded*
+    /// on the audio path and *printed* after the teardown, which is the same discipline the two
+    /// content folds follow for a cost reason and this follows for a latency reason.
+    const EDGE_LOG: usize = 16;
+
+    /// One recorded input event: the video frame it landed on, the mask, and whether it was a
+    /// repeat rather than an edge.
+    struct KeyEvent {
+        frame: u32,
+        mask: u16,
+        repeat: bool,
+    }
+
+    /// The input seam's ROM half: a source, the platform-free [`keys::Keys`] machine, the frame it
+    /// last served, and the running counts the log needs.
+    ///
+    /// **Inert by design.** PR-3b-i has no playback state machine, so an [`keys::Action`] here is
+    /// recorded and then dropped: pressing Start does not pause, Right does not skip. That is the
+    /// step's contract — a button is detected, debounced, repeated, counted and logged, and changes
+    /// nothing else — and it is what makes this the right place to land the seam before anything
+    /// depends on it.
+    struct Input<S: keys::KeySource> {
+        keys: keys::Keys,
+        source: S,
+        /// The latch value this input last served; a poll with the same value samples nothing.
+        served: u32,
+        /// Polls that observed a new latch, i.e. samples actually taken. Not video frames: this
+        /// loop polls once per pass, which is slower than the frame rate until PR-3b-ii gives the
+        /// producer a frame cadence, so one sample can span several frames.
+        sampled: u32,
+        /// Edge transactions (frames with at least one newly pressed button).
+        presses: u32,
+        /// Autorepeat events delivered.
+        repeats: u32,
+        log: [KeyEvent; EDGE_LOG],
+        logged: usize,
+    }
+
+    impl<S: keys::KeySource> Input<S> {
+        fn new(source: S) -> Self {
+            Self {
+                keys: keys::Keys::new(),
+                source,
+                served: 0,
+                sampled: 0,
+                presses: 0,
+                repeats: 0,
+                log: core::array::from_fn(|_| KeyEvent {
+                    frame: 0,
+                    mask: 0,
+                    repeat: false,
+                }),
+                logged: 0,
+            }
+        }
+
+        /// Sample the source for each newly latched video frame (§4.5: poll once per latched
+        /// frame).
+        ///
+        /// A poll that arrives after more than one frame has passed serves the newest latch and
+        /// samples **once** — the input machine is per-frame, not catch-up, and a REPLAY source
+        /// applies one scripted transition per poll for exactly that reason (see
+        /// [`keys::Replay`]). PR-3b-i's producer loop polls once per producer iteration, which at
+        /// this build's cadence is roughly one poll per eight video frames (measured: 306 samples
+        /// across the run's ~2,300 frames); PR-3b-ii's frame cadence makes it exactly one. Nothing
+        /// is lost either way: a REPLAY entry's index is a **poll index** until then, and the frame
+        /// number this records is the latch the poll actually saw — never the index the script
+        /// meant. The counts cannot slip at all.
+        fn poll(&mut self) -> Option<keys::KeyFrame> {
+            let latch = frame_latch();
+            if latch == self.served {
+                return None;
+            }
+            self.served = latch;
+            let raw = self.source.sample();
+            let frame = self.keys.sample(raw);
+            self.sampled = self.sampled.saturating_add(1);
+            if frame.pressed != 0 {
+                self.presses = self.presses.saturating_add(1);
+            }
+            if frame.repeated != 0 {
+                self.repeats = self.repeats.saturating_add(1);
+            }
+            let mask = if frame.repeated != 0 {
+                frame.repeated
+            } else {
+                frame.pressed
+            };
+            if mask != 0 && self.logged < EDGE_LOG {
+                self.log[self.logged] = KeyEvent {
+                    frame: latch,
+                    mask,
+                    repeat: frame.repeated != 0,
+                };
+                self.logged += 1;
+            }
+            Some(frame)
+        }
+
+        /// The end-of-run summary: what was delivered, and — one line each, only the first
+        /// [`EDGE_LOG`] — what the edges were.
+        fn report(&self, source: &str) {
+            agb::println!(
+                "[album-rom] input: {source} — sampled={} presses={} repeats={} logged={}",
+                self.sampled,
+                self.presses,
+                self.repeats,
+                self.logged
+            );
+            for event in &self.log[..self.logged] {
+                if event.repeat {
+                    agb::println!(
+                        "[album-rom] input edge: video={} repeated=0x{:04X} cursor={:?} (inert)",
+                        event.frame,
+                        event.mask,
+                        keys::cursor_action(event.mask)
+                    );
+                } else {
+                    agb::println!(
+                        "[album-rom] input edge: video={} pressed=0x{:04X} action={:?} (inert)",
+                        event.frame,
+                        event.mask,
+                        keys::now_playing_action(event.mask)
+                    );
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------- the replay script
+
+    /// The compiled-in key script for the REPLAY arm (feature `input-replay`, off by default).
+    ///
+    /// A whole history rather than a delta list: "from script frame `F` the mask is `M`", with a
+    /// frame and no entry repeating the previous mask. One entry is applied per poll
+    /// ([`keys::Replay`]), so the *sequence* of transitions is fixed even when the caller polls more
+    /// slowly than one frame — and this script's sequence is what the ROM's end line can be read
+    /// against: **3 edges and 7 autorepeats**, by the host twin's own arithmetic
+    /// (`tests/album_seam_host.rs` drives this same shape).
+    ///
+    /// Why these entries: one plain press (Start/A — the pause edge, inert here), one shoulder-free
+    /// direction press (Right = next), and one *held* direction long enough to cross
+    /// `REPEAT_DELAY_FRAMES` and fire several `REPEAT_INTERVAL_FRAMES` repeats (Left = previous).
+    /// Between them they exercise every rule `keys.rs` adds to agb, which is the whole of what a
+    /// gate can witness without a cartridge. What they do **not** witness is a physical press: no
+    /// emulator here can make one, and the ROM's log says so.
+    #[cfg(feature = "input-replay")]
+    const REPLAY_SCRIPT: [(u32, u16); 6] = [
+        (8, keys::BTN_A),
+        (14, 0),
+        (24, keys::BTN_RIGHT),
+        (30, 0),
+        (40, keys::BTN_LEFT),
+        (120, 0),
+    ];
+
     // ------------------------------------------------------------------ feeder
 
     /// Hand the next ring chunk to the free ping-pong slot and return the two pointers
@@ -389,9 +592,16 @@ mod rom {
 
         let finished = stats.finished;
         let (verdict, lp, rp) = take_into_slot(&mut *bufs, &mut *feed, finished);
-        match verdict {
-            Chunk::Full => {}
-            Chunk::Tail { .. } => stats.tail_periods += 1,
+        // The session clock (§10.4, ruled option A). It counts what this period actually
+        // committed — a whole chunk, a classified tail's real samples, or nothing — so it equals
+        // `RingFeed`'s `consumed` by construction rather than by a parallel computation. PR-3b-i
+        // reads it and prints it; PR-3b-ii drives the bar and the mm:ss readout from it.
+        let committed = match verdict {
+            Chunk::Full => CHUNK as u32,
+            Chunk::Tail { real } => {
+                stats.tail_periods += 1;
+                real as u32
+            }
             Chunk::Starved => {
                 // Only a starved period while the producer still has work is an underflow. The
                 // ledger did not advance for it (`take_chunk` consumes nothing it does not copy),
@@ -399,13 +609,17 @@ mod rom {
                 if !finished {
                     stats.underflows += 1;
                 }
+                0
             }
-        }
+        };
         drop(feed);
         // SAFETY: aligned pointers into the static ping-pong; the other slot was handed to the DMA
         // a whole period ago, and the FIFO's 4-word pulls (µs for a whole buffer) are long finished
         // by the next period (17.1 ms at this rate) — `product_play_main.rs:878-883`.
         unsafe { rearm_dma(lp, rp, &CHAIN) };
+        // After the re-arm, never before it: the DMA's next buffer is the deadline, and this is a
+        // load/add/store that buys nothing if the re-arm is late.
+        position::commit(committed);
         drop(bufs);
     }
 
@@ -800,6 +1014,32 @@ mod rom {
             "[album-rom] NOTE this build does not verify decoded content; it is a player artifact, not a gate artifact"
         );
 
+        // ---- the video clock and the input seam (PR-3b-i, §4.5). Registered here, before the
+        // boot clock starts, for two reasons: the frames a REPLAY script names are video frames from
+        // boot, and the boot ledger's `parse=`/`open=`/... spans stay comparable with every earlier
+        // run's. The handler allocates (agb boxes the closure), which is why it is not on any audio
+        // deadline — it is boot work, like the Timer1 registration further down.
+        //
+        // SAFETY: the handler increments one static and returns; it allocates nothing, logs nothing
+        // and touches no register — agb's interrupt-handler contract.
+        let _vblank = unsafe { add_interrupt_handler(Interrupt::VBlank, vblank) };
+        #[cfg(not(feature = "input-replay"))]
+        let mut input = Input::new(keys::Hardware::new());
+        #[cfg(feature = "input-replay")]
+        let mut input = Input::new(keys::Replay::new(&REPLAY_SCRIPT));
+        // Which source fed this run, always, and the honesty line §10.5 requires: the shipped
+        // artifact reads the keypad, and a headless run therefore cannot have observed a press. The
+        // REPLAY arm is the gate's only witness of the seam and says that it is a script.
+        #[cfg(not(feature = "input-replay"))]
+        agb::println!(
+            "[album-rom] input: HARDWARE (REG_KEYINPUT) — a headless run cannot press a key; the physical leg is AP-7a's"
+        );
+        #[cfg(feature = "input-replay")]
+        agb::println!(
+            "[album-rom] input: REPLAY ({} entries, scripted at the keys layer; the delivered count is printed at the end) — no physical press is implied",
+            REPLAY_SCRIPT.len()
+        );
+
         // ---- the boot clock (R10's counter lift): timer0 at /1 cascading into timer1, started
         // BEFORE the manifest is read and stopped before `arm_audio_chain` reprograms the same pair.
         // `CycleCounter` borrows the two timers, so "read the boot total first" is enforced by the
@@ -912,6 +1152,9 @@ mod rom {
                     // SAFETY: aligned pointers into the static ping-pong, filled for a whole
                     // transfer by `take_chunk` just above.
                     unsafe { rearm_dma(lp, rp, &CHAIN) };
+                    // The prime's chunk is committed to the DMA like any other, so the session clock
+                    // counts it here rather than starting one chunk short of the ledger.
+                    position::commit(CHUNK as u32);
                     true
                 }
                 _ => false,
@@ -970,6 +1213,11 @@ mod rom {
         // which on hardware is a syscall into a host that may not exist.
         let mut halt: Option<&'static str> = None;
         while producer.frames < total_frames {
+            // One input poll per pass of the loop, which samples only when a new video frame has
+            // been latched (`Input::poll` compares the latch). Nothing here acts on the result: the
+            // edges are counted and recorded, and PR-3b-ii is where an `Action` starts meaning
+            // something.
+            input.poll();
             if !producer.wait_for_room() {
                 agb::println!(
                     "[album-rom] FAIL the ring wedged at frame {}; the consumer stopped advancing",
@@ -1016,6 +1264,9 @@ mod rom {
         let max_polls = (RING_CHUNKS + 2) as u64 * 8192;
         let mut polls = 0u64;
         let (drained, observed) = loop {
+            // The drain spins for the ring's last 1.2 s, so it is a second place a latch is served
+            // (one load per poll, and the source is only sampled on a new frame).
+            input.poll();
             let (done, seen) = critical_section::with(|cs| {
                 let feed = FEED.borrow_ref(cs);
                 let stats = STATS.borrow_ref(cs);
@@ -1088,6 +1339,40 @@ mod rom {
             late_max,
             REARM_GRACE_SAMPLES
         );
+        // ---- the input seam's end-of-run line (PR-3b-i). The counts are what a gate reads: a
+        // REPLAY build's script has a known number of edges and repeats, and a HARDWARE build's
+        // `presses=0` is the honest reading of a headless run rather than a failure. Which source it
+        // was is in the line, always.
+        #[cfg(not(feature = "input-replay"))]
+        input.report("HARDWARE (REG_KEYINPUT) — no physical press was observed by this run");
+        #[cfg(feature = "input-replay")]
+        input.report(&format!(
+            "REPLAY ({} entries, {} edges delivered) — scripted, not a physical press",
+            input.source.entries(),
+            input.source.edges()
+        ));
+
+        // ---- the session clock (§10.4), printed where the ledger it mirrors was printed. The
+        // equality is structural — the clock is incremented by exactly what `take_chunk` returned —
+        // so a MISMATCH means the increment and the ledger have come apart, which is why it is part
+        // of the verdict rather than a remark.
+        let committed = position::committed_samples();
+        let paint = position::paint_position(committed, total_samples as u32);
+        let position_ok = committed == consumed as u32;
+        agb::println!(
+            "[album-rom] position: committed={} ledger={} lead={} paint={} [{}]",
+            committed,
+            consumed,
+            position::LEAD_SAMPLES,
+            paint,
+            if position_ok { "MATCH" } else { "MISMATCH" }
+        );
+        if !position_ok {
+            agb::println!(
+                "[album-rom] FAIL the session clock and the ring ledger disagree — one increment per committed period is the contract"
+            );
+        }
+
         // At most one tail period is expected (zero if the clip ends exactly on a period boundary).
         let ledger_ok = pushed == total_samples
             && consumed == pushed
@@ -1095,7 +1380,8 @@ mod rom {
             && underflows == 0
             && tails <= 1
             && halt.is_none()
-            && pushed != 0;
+            && pushed != 0
+            && position_ok;
         // The audit is part of the verdict, not supporting evidence (`product_play_main.rs:1865-1894`):
         // a coalesced overflow is a full-buffer replay, a late service is a mid-waveform splice, and
         // both are exactly what `product-play.gba` refuses — so this image's PASS cannot be weaker

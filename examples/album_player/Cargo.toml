@@ -82,6 +82,13 @@ arm-kernel = ["dep:flac-lite-gba", "flac-lite-gba/rice-arm", "flac-lite-gba/iwra
 # audited artifact AP-1 runs, and an off-by-default witness is one a gate can skip.
 # `make album-player-rom` builds without it and says so in its verdict line.
 deep-audit = []
+# Replay a compiled-in `(frame, mask)` key script at the keys layer instead of reading the keypad
+# (`keys::Replay`). OFF by default: every shipped artifact is a HARDWARE build, and a REPLAY run is
+# never evidence that a physical press works — that is AP-7's, on a cartridge. It exists because
+# `mgba-test-runner` cannot inject input (a positional ROM argument and no key-log, stdin, env or
+# socket path), so the gate's witness is the same state machine fed a scripted log (§5.3, §13 AP-1).
+# The ROM prints which source it used, always.
+input-replay = []
 
 [[test]]
 name = "album_pack_host"

@@ -12,6 +12,8 @@
 //! | [`backend`] | the only module that knows an implementor exists — `flac` (shipped) or `stub` (synthetic, codec-free) |
 //! | [`nodiv`] | `crates/gba-playback` (path dependency) — §6's no-divide arithmetic, the same implementation the probe and its host gate paint from |
 //! | [`text`] | the verdict screen — two words, the tracked OFL font, one commit (§4.1) |
+//! | [`keys`] | the input seam (§5.3): edges, autorepeat, debounce and the control map, platform-free, with a keypad source and a scripted-replay one |
+//! | [`position`] | the 32-bit session clock (§10.4, ruled) and §4.4's `paint_position` |
 //!
 //! `nodiv` is a dependency, not a `#[path]` include: §2.2 rules that no Phase 1
 //! module may include or depend on anything under a spike or probe directory, and
@@ -22,11 +24,14 @@
 //! against each other in `geometry.rs`.
 //!
 //! PR-2 landed the manifest half; PR-3 step (ii) landed this seam and its geometry, and step (iii)
-//! adds the ROM main (`src/album_play_main.rs`, `[[bin]] album-play`, `make album-rom`). The library
-//! is still platform-free: it declares no binary of its own, and `backend/` links no display or timer
-//! registers — the `agb` bootstrap lives in the bin. [`text`] is the one exception in the other
-//! direction, because its verdict words are checked on the host: the words and the subset check are
-//! platform-free, and only the drawing half is `#[cfg(target_arch = "arm")]`.
+//! adds the ROM main (`src/album_play_main.rs`, `[[bin]] album-play`, `make album-rom`). PR-3b-i
+//! adds [`keys`] and [`position`]: the input seam and the 32-bit session clock, both platform-free
+//! in the half that decides anything. The library is still platform-free: it declares no binary of
+//! its own, and `backend/` links no display or timer registers — the `agb` bootstrap lives in the
+//! bin. [`text`] and [`keys`] are the exceptions in the other direction, because the checks that
+//! matter are on the host: the words, the subset check, the debounce/edge/repeat machine and the
+//! control map are platform-free, and only the drawing half of `text` and the two `KeySource`
+//! implementations of `keys` are `#[cfg(target_arch = "arm")]`.
 //!
 //! ## Generated, never tracked
 //!
@@ -57,6 +62,8 @@ pub use gba_playback::nodiv;
 pub mod assets;
 pub mod backend;
 pub mod geometry;
+pub mod keys;
 pub mod meta;
 pub mod pcm;
+pub mod position;
 pub mod text;

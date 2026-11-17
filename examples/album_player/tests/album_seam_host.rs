@@ -1,7 +1,7 @@
 //! PR-3a steps (ii) and (iii-A)'s host gate: the seam, its derived geometry, and the backend arms —
-//! on the host.
+//! on the host — plus PR-3b-i's input seam and session clock.
 //!
-//! Five claims, each with its own tests so a failure names one:
+//! Seven claims, each with its own tests so a failure names one:
 //!
 //! 1. **The derived geometry reproduces the shipped FLAC figures exactly.** Every equality cites
 //!    `examples/flac_integration/src/geometry.rs:LINE`, so a transcription rot in this app's
@@ -20,9 +20,20 @@
 //! 5. **The verdict words are renderable** — inside the tracked font subset's glyph range and inside
 //!    one 30-column row, so a rename to a word the shipped 96-glyph font cannot draw fails here
 //!    rather than presenting an empty verdict screen on a cart.
+//! 6. **The input seam delivers the edges §5.3 means, at the frames it says** — debounce, edge
+//!    polarity, the autorepeat's exact first-repeat and interval frames, the control map, the BIOS
+//!    chord being absent by design, and the REPLAY script's entries landing on their own frame and
+//!    no adjacent one. This is the whole of what the gate can witness: `mgba-test-runner` cannot
+//!    press a key, so the script is replayed *at the keys layer* and the ROM prints which source it
+//!    used. Nothing here is evidence that a physical press reaches the ROM (§13 AP-1, AP-7).
+//! 7. **The painted position obeys §4.4's three invariants** — never backwards within a track
+//!    (including across a pause), 0 at a track start and `n_samples` at its end, with the
+//!    `committed − LEAD_SAMPLES` subtraction saturating rather than wrapping when `committed < LEAD`.
 //!
-//! Nothing here is a hardware claim: the ROM's `agb` bootstrap and its feeder IRQ are step (iii)'s
-//! ROM half, which this file does not execute.
+//! Nothing here is a hardware claim: the ROM's `agb` bootstrap, its feeder IRQ, the `.iwram` session
+//! clock's `commit`/`committed_samples` pair and the two `KeySource` arm implementations are the ROM
+//! half, which this file does not execute. The arm artifacts are checked as bytes (`size -A` for the
+//! 4-byte `.iwram` the clock costs) and as a run (`[album-rom] input:` naming its source).
 
 use album_player::assets::{self, TrackPin};
 use album_player::backend::stub::{StubSource, StubTrack};
@@ -30,6 +41,7 @@ use album_player::geometry::{self, ChainGeometry};
 use album_player::meta::{self, Album};
 use album_player::nodiv;
 use album_player::pcm::{Capability, FrameCostModel, PcmSource, SourceError};
+use album_player::position::{self, LEAD_SAMPLES, paint_position};
 
 /// The packed manifest, written by `make album-bake`. `include_bytes!` makes a missing blob a
 /// compile error naming the path; there is no runtime default and no skip.
@@ -693,4 +705,403 @@ fn the_verdict_words_are_inside_the_tracked_subset_and_one_row() {
     assert!(!album_player::text::renderable(
         &"A".repeat(album_player::text::COLUMNS + 1)
     ));
+}
+
+// -------------------------------------------------------------------------------------------------
+// 6. The input seam (§5.3, D1) — edges, debounce, autorepeat, the chord, and the REPLAY script
+// -------------------------------------------------------------------------------------------------
+//
+// The arm half (`keys::Hardware`, the `ButtonController` round trip in `keys::Replay`) is not
+// executed here; what is executed is every rule `keys.rs` adds to agb, over the same `Keys` machine
+// the ROM drives. The REPLAY type is compiled on the host unconditionally for exactly this reason
+// (`keys.rs`'s `Replay` cfg), so the script reader is tested as itself rather than as a copy.
+
+use album_player::keys::{
+    self, Action, BTN_A, BTN_B, BTN_DOWN, BTN_L, BTN_LEFT, BTN_R, BTN_RIGHT, BTN_SELECT, BTN_START,
+    BTN_UP, Cursor, DEBOUNCE_FRAMES, KeySource, Keys, REPEAT_DELAY_FRAMES, REPEAT_INTERVAL_FRAMES,
+    Replay, SOFT_RESET_CHORD,
+};
+
+/// A press edge is a *debounced* transition, so a raw press at frame `F` acts at `F + 1` — and a
+/// held button never acts twice.
+#[test]
+fn an_edge_is_a_debounced_transition_not_a_contact() {
+    let mut keys = Keys::new();
+    // Nothing leaves the machine on the frame the contact closes: `DEBOUNCE_FRAMES` frames must
+    // agree before the held set moves.
+    let first = keys.sample(BTN_A);
+    assert_eq!((first.pressed, first.released, first.held), (0, 0, 0));
+    let confirmed = keys.sample(BTN_A);
+    assert_eq!(
+        (confirmed.pressed, confirmed.released, confirmed.held),
+        (BTN_A, 0, BTN_A)
+    );
+    assert_eq!(confirmed.action(), Some(Action::PauseToggle));
+    // Holding delivers no second edge, however long it is held.
+    for frame in 0..60 {
+        assert_eq!(
+            keys.sample(BTN_A).pressed,
+            0,
+            "held frame {frame} re-pressed"
+        );
+    }
+    // Release is the same transition in the other direction, and it costs the same one frame.
+    let first_up = keys.sample(0);
+    assert_eq!(first_up.released, 0);
+    let up = keys.sample(0);
+    assert_eq!((up.pressed, up.released, up.held), (0, BTN_A, 0));
+}
+
+/// Two frames of agreement is the whole debounce rule: a contact that never agrees with itself for
+/// two frames is not a press, and a dropout shorter than the window is not a release.
+#[test]
+fn a_bounce_shorter_than_the_debounce_window_delivers_nothing() {
+    assert_eq!(DEBOUNCE_FRAMES, 2);
+    let mut keys = Keys::new();
+    // A contact alternating every frame: 100 raw transitions, zero edges. A raw `is_just_pressed`
+    // would report 50 presses here, which is the bug the debounce exists to prevent.
+    for frame in 0..100u16 {
+        let raw = if frame % 2 == 0 { BTN_START } else { 0 };
+        let sampled = keys.sample(raw);
+        assert_eq!(sampled.pressed, 0, "bounced frame {frame} produced a press");
+        assert_eq!(
+            sampled.released, 0,
+            "bounced frame {frame} produced a release"
+        );
+        assert_eq!(sampled.held, 0);
+    }
+    // And a one-frame dropout in the middle of a confirmed press is absorbed: it is shorter than the
+    // window, so the held set never moved and the application saw one press, not two.
+    let mut keys = Keys::new();
+    keys.sample(BTN_START);
+    keys.sample(BTN_START);
+    assert_eq!(keys.held(), BTN_START);
+    assert_eq!(keys.sample(0).released, 0);
+    keys.sample(BTN_START);
+    let after_dropout = keys.sample(BTN_START);
+    assert_eq!((after_dropout.pressed, after_dropout.released), (0, 0));
+    assert_eq!(keys.held(), BTN_START);
+}
+
+/// The autorepeat's exact frames, asserted against the two constants rather than described: first
+/// repeat `REPEAT_DELAY_FRAMES` after the press edge, then every `REPEAT_INTERVAL_FRAMES`.
+#[test]
+fn a_held_direction_repeats_at_the_documented_delay_and_interval() {
+    let mut keys = Keys::new();
+    let mut pressed_at = Vec::new();
+    let mut repeats = Vec::new();
+    for frame in 0..80u16 {
+        let sampled = keys.sample(BTN_LEFT);
+        if sampled.pressed != 0 {
+            pressed_at.push(frame);
+            // A press and its list step go through different accessors: `cursor` for the edge,
+            // `repeat_cursor` for the burst below.
+            assert_eq!(sampled.cursor(), Some(Cursor::Up));
+        }
+        if sampled.repeated != 0 {
+            assert_eq!(sampled.repeated, BTN_LEFT);
+            // Left is "up" in a list (§5.3's cursor column), and the repeat is delivered through
+            // `repeat_cursor` — never through `action`, which reads `pressed` only.
+            assert_eq!(sampled.repeat_cursor(), Some(Cursor::Up));
+            repeats.push(frame);
+        }
+    }
+    assert_eq!(pressed_at, vec![1]);
+    assert_eq!(repeats[0], 1 + REPEAT_DELAY_FRAMES);
+    assert_eq!(repeats, vec![25, 33, 41, 49, 57, 65, 73]);
+    for pair in repeats.windows(2) {
+        assert_eq!(pair[1] - pair[0], REPEAT_INTERVAL_FRAMES);
+    }
+
+    // A second held button does not stop the burst: repeat is per axis, not per frame.
+    let mut keys = Keys::new();
+    let mut held_burst = 0;
+    for _ in 0..40 {
+        if keys.sample(BTN_LEFT | BTN_START).repeated != 0 {
+            held_burst += 1;
+        }
+    }
+    assert_eq!(held_burst, 2);
+
+    // Both directions of one axis down cancels that axis (agb's `x_tri` convention), so a thumb
+    // straddling Left and Right does not scroll at all.
+    let mut keys = Keys::new();
+    for _ in 0..80 {
+        assert_eq!(keys.sample(BTN_LEFT | BTN_RIGHT).repeated, 0);
+    }
+}
+
+/// §5.3's "now playing" column, one row at a time, plus the two properties that are rules: the map
+/// is a pure function of one frame's edges (no time-dependent chord), and Down's restart is an edge
+/// and never a repeat.
+#[test]
+fn the_now_playing_map_is_the_tables_and_needs_no_clock() {
+    assert_eq!(
+        keys::now_playing_action(BTN_START),
+        Some(Action::PauseToggle)
+    );
+    assert_eq!(keys::now_playing_action(BTN_A), Some(Action::PauseToggle));
+    assert_eq!(keys::now_playing_action(BTN_RIGHT), Some(Action::NextTrack));
+    assert_eq!(keys::now_playing_action(BTN_R), Some(Action::NextTrack));
+    assert_eq!(keys::now_playing_action(BTN_LEFT), Some(Action::PrevTrack));
+    assert_eq!(keys::now_playing_action(BTN_L), Some(Action::PrevTrack));
+    assert_eq!(
+        keys::now_playing_action(BTN_DOWN),
+        Some(Action::RestartTrack)
+    );
+    // §5.3's `—`: Up, B and Select bind nothing while a track plays.
+    for unbound in [BTN_UP, BTN_B, BTN_SELECT, 0] {
+        assert_eq!(keys::now_playing_action(unbound), None);
+    }
+    // Two mapped edges in one frame resolve to the table's first row, deterministically — the rule
+    // only has to be stable, and it is a `const fn`, so it is also checked at compile time.
+    assert_eq!(
+        keys::now_playing_action(BTN_A | BTN_RIGHT | BTN_DOWN),
+        Some(Action::PauseToggle)
+    );
+    assert_eq!(
+        keys::now_playing_action(BTN_RIGHT | BTN_DOWN),
+        Some(Action::NextTrack)
+    );
+
+    // No time-dependent chord: a long Left hold (200 frames, i.e. > 3 s — the window §4.4 removed)
+    // followed by one Down press restarts the track. Nothing in the signature remembers the Left.
+    let mut keys = Keys::new();
+    let mut actions = Vec::new();
+    for frame in 0..206u16 {
+        let raw = match frame {
+            0..200 => BTN_LEFT,
+            200..202 => 0,
+            202..204 => 0,
+            _ => BTN_DOWN,
+        };
+        let sampled = keys.sample(raw);
+        if let Some(action) = sampled.action() {
+            actions.push(action);
+        }
+    }
+    assert_eq!(actions, vec![Action::PrevTrack, Action::RestartTrack]);
+
+    // Down repeats (it is a direction in a list), but the now-playing binding reads `pressed`, so a
+    // held Down restarts once. Applying `action()` to `repeated` would restart every 134 ms; that is
+    // why the repeat is delivered through `repeat_cursor` and never through `action`.
+    let mut keys = Keys::new();
+    let mut restarts = 0;
+    let mut down_repeats = 0;
+    for _ in 0..40 {
+        let sampled = keys.sample(BTN_DOWN);
+        if sampled.action() == Some(Action::RestartTrack) {
+            restarts += 1;
+        }
+        if sampled.repeated != 0 {
+            down_repeats += 1;
+        }
+    }
+    assert_eq!(restarts, 1);
+    assert_eq!(down_repeats, 2);
+}
+
+/// L + R + Start belongs to the BIOS (§5.3). The chord has no `Action`, and while it is held the
+/// machine delivers no events at all — the limit, that its component edges arrive while the chord is
+/// still being assembled, is asserted rather than glossed.
+#[test]
+fn the_soft_reset_chord_is_never_application_state() {
+    assert_eq!(SOFT_RESET_CHORD, BTN_L | BTN_R | BTN_START);
+    let mut keys = Keys::new();
+    // One frame to confirm the (already fully held) chord, so the loop below starts on a debounced
+    // chord rather than on the frame that is still waiting for its second agreement.
+    keys.sample(SOFT_RESET_CHORD);
+    for frame in 0..40u16 {
+        let sampled = keys.sample(SOFT_RESET_CHORD);
+        assert_eq!(sampled.held, SOFT_RESET_CHORD);
+        assert_eq!(
+            (sampled.pressed, sampled.released, sampled.repeated),
+            (0, 0, 0),
+            "the held chord emitted an edge on frame {frame}"
+        );
+        assert_eq!(sampled.action(), None);
+        assert_eq!(sampled.repeat_cursor(), None);
+    }
+    // The documented limit: pressed one at a time, the earlier buttons act before the chord exists.
+    // Suppressing that would need a time window, which §5.3's "nothing time-dependent" forbids.
+    let mut keys = Keys::new();
+    keys.sample(BTN_L);
+    assert_eq!(keys.sample(BTN_L).action(), Some(Action::PrevTrack));
+    keys.sample(BTN_L | BTN_R);
+    assert_eq!(keys.sample(BTN_L | BTN_R).action(), Some(Action::NextTrack));
+    keys.sample(SOFT_RESET_CHORD);
+    let chord = keys.sample(SOFT_RESET_CHORD);
+    assert_eq!((chord.pressed, chord.released), (0, 0));
+    assert_eq!(chord.action(), None);
+}
+
+/// The REPLAY script is the gate's input, so its frame numbers are a contract: an entry at frame `N`
+/// must not fire at `N - 1`, and the delivered edge must be on `N` itself (the machine's debounce
+/// then costs one more frame, which is stated rather than hidden).
+#[test]
+fn replay_delivers_each_entry_on_its_own_frame_and_no_adjacent_one() {
+    // `(frame, mask)` means "from frame `F` the mask is `M`" — a history, not a delta list.
+    const SCRIPT: [(u32, u16); 3] = [(4, BTN_A), (9, 0), (12, BTN_DOWN)];
+    let mut source = Replay::new(&SCRIPT);
+    let mut keys = Keys::new();
+    let mut masks = Vec::new();
+    let mut edges = Vec::new();
+    let mut pressed = Vec::new();
+    for _ in 0..16 {
+        let mask = source.sample();
+        masks.push(mask);
+        edges.push(source.edges());
+        pressed.push(keys.sample(mask).pressed);
+    }
+    assert_eq!(source.entries(), SCRIPT.len());
+    assert_eq!(source.frame(), 16);
+    // The mask in force, frame by frame: the entry at 4 is *not* in force at 3, and the entry at 9
+    // does not linger past 8.
+    assert_eq!(
+        masks,
+        vec![
+            0, 0, 0, 0, BTN_A, BTN_A, BTN_A, BTN_A, BTN_A, 0, 0, 0, BTN_DOWN, BTN_DOWN, BTN_DOWN,
+            BTN_DOWN
+        ]
+    );
+    // The delivered edge is counted once, on the entry's own frame — not on the frame before and not
+    // on the frame after.
+    assert_eq!(&edges[..6], &[0, 0, 0, 0, 1, 1]);
+    assert_eq!(edges[9], 1);
+    assert_eq!(edges[11], 1);
+    assert_eq!(edges[12], 2);
+    assert_eq!(source.edges(), 2);
+    // And through the machine, the application edge lands one frame after the script's transition
+    // (the debounce), exactly once per entry.
+    let pressed_frames: Vec<usize> = pressed
+        .iter()
+        .enumerate()
+        .filter(|(_, mask)| **mask != 0)
+        .map(|(frame, _)| frame)
+        .collect();
+    assert_eq!(pressed_frames, vec![5, 13]);
+}
+
+/// The ROM's `REPLAY_SCRIPT` (`src/album_play_main.rs`), repeated here because a `[[bin]]`'s private
+/// `const` is not importable. Its end-of-run line claims **3 edges and 7 autorepeats**; this test is
+/// what makes that claim arithmetic rather than hope. If the ROM's script changes, this one changes
+/// with it — the numbers in the log are checked against this shape.
+const ROM_REPLAY_SCRIPT: [(u32, u16); 6] = [
+    (8, keys::BTN_A),
+    (14, 0),
+    (24, keys::BTN_RIGHT),
+    (30, 0),
+    (40, keys::BTN_LEFT),
+    (120, 0),
+];
+
+#[test]
+fn the_rom_replay_script_delivers_three_edges_and_seven_repeats() {
+    let mut source = Replay::new(&ROM_REPLAY_SCRIPT);
+    let mut keys = Keys::new();
+    let mut press_frames = Vec::new();
+    let mut repeat_frames = Vec::new();
+    for frame in 0..130u16 {
+        let sampled = keys.sample(source.sample());
+        if sampled.pressed != 0 {
+            press_frames.push(frame);
+        }
+        if sampled.repeated != 0 {
+            repeat_frames.push(frame);
+        }
+    }
+    // One frame after each scripted entry (8, 24, 40), and nothing for the releases.
+    assert_eq!(press_frames, vec![9, 25, 41]);
+    assert_eq!(source.edges(), 3);
+    // Left is held from frame 41 to 120: first repeat REPEAT_DELAY_FRAMES later, then every
+    // REPEAT_INTERVAL_FRAMES until the release at 120 clears the burst.
+    assert_eq!(repeat_frames[0], 41 + REPEAT_DELAY_FRAMES);
+    assert_eq!(repeat_frames, vec![65, 73, 81, 89, 97, 105, 113]);
+    assert_eq!(source.frame(), 130);
+}
+
+// -------------------------------------------------------------------------------------------------
+// 7. The session clock (§10.4, ruled option A) and §4.4's painted position
+// -------------------------------------------------------------------------------------------------
+//
+// The counter itself is arm-only (`.iwram`, written from the period IRQ); what is testable on the
+// host is the map from it to what the display shows, which is where the invariants live.
+
+/// Within a track the painted position is monotone, a pause holds it still, and a skip's only step
+/// backwards is the new track's own 0.
+#[test]
+fn the_painted_position_never_runs_backwards_within_a_track() {
+    const TOTAL: u32 = 491_520;
+    let mut previous = 0;
+    for committed in (0..=TOTAL).step_by(137) {
+        let paint = paint_position(committed, TOTAL);
+        assert!(
+            paint >= previous,
+            "position went backwards at committed={committed}: {previous} -> {paint}"
+        );
+        // The display may lag the commit but may never lead it.
+        assert!(paint <= committed);
+        assert!(paint <= TOTAL);
+        previous = paint;
+    }
+    assert_eq!(paint_position(TOTAL, TOTAL), TOTAL);
+
+    // A pause freezes the chain, and the clock is incremented *in* the period IRQ, so a stopped
+    // timer stops the clock: the painted value is identical before, during and after the frozen
+    // span (three seconds' worth of frames).
+    let at_pause = 250_000;
+    let frozen = paint_position(at_pause, TOTAL);
+    for _ in 0..180 {
+        assert_eq!(paint_position(at_pause, TOTAL), frozen);
+    }
+
+    // A skip drops the queue and starts the next track at 0 — the only step backwards in the whole
+    // sequence, and it lands on 0 rather than on a wrapped or negative value.
+    let next_start = paint_position(0, TOTAL);
+    assert_eq!(next_start, 0);
+    assert!(next_start <= frozen);
+    // …and then grows again from it, which is the new track's own invariant 1.
+    assert!(paint_position(120_000, TOTAL) > next_start);
+}
+
+/// §4.4's two clamps: 0 at a track start and `n_samples` exactly at its end.
+#[test]
+fn the_painted_position_is_zero_at_a_start_and_the_total_at_its_end() {
+    const TOTAL: u32 = 491_520;
+    assert_eq!(paint_position(0, TOTAL), 0);
+    assert_eq!(paint_position(TOTAL, TOTAL), TOTAL);
+    // The end clamp is one-sided and deliberate: `committed` never exceeds the pin, but a stale
+    // clock must still not paint past the track's own length.
+    assert_eq!(paint_position(TOTAL + 1, TOTAL), TOTAL);
+    // A zero-length track is 0 at both ends rather than a subtraction of nothing.
+    assert_eq!(paint_position(0, 0), 0);
+}
+
+/// `committed − LEAD_SAMPLES` saturates: a position committed but not yet audible paints 0, never a
+/// wrapped ~4.29-billion.
+#[test]
+fn the_lead_subtraction_cannot_underflow() {
+    const TOTAL: u32 = 491_520;
+    // The lead's composition and its size: two DMA buffers plus the FIFO's half-full window.
+    assert_eq!(position::DMA_BUFFERS, 2);
+    assert_eq!(
+        LEAD_SAMPLES,
+        position::DMA_BUFFERS * geometry::CHUNK_SAMPLES + geometry::REARM_GRACE_SAMPLES
+    );
+    assert_eq!(LEAD_SAMPLES, 1_136);
+    // 1,136 samples at 16,384 Hz = 69 ms, the residual §4.4 ruled invisible in a bar or an mm:ss.
+    assert_eq!(LEAD_SAMPLES * 1_000 / 16_384, 69);
+    for committed in 0..=LEAD_SAMPLES {
+        assert_eq!(
+            paint_position(committed, TOTAL),
+            0,
+            "committed={committed} is inside the lead but painted past it"
+        );
+    }
+    assert_eq!(paint_position(LEAD_SAMPLES + 1, TOTAL), 1);
+    // Beyond the lead it is a plain subtraction, not a scaled or averaged one.
+    assert_eq!(
+        paint_position(20_160, TOTAL + 1_000_000),
+        20_160 - LEAD_SAMPLES
+    );
 }
