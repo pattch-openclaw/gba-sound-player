@@ -649,6 +649,21 @@ live and separates **work share** from **wait**, and keeps the closure identity
 The app keeps that identity verbatim and adds UI terms to it, because an
 unexplained gap in a ledger is a bug in the ledger.
 
+**Measured, PR-3b-ii-A (2026-11-17, the gate track, mGBA).** The sketch's inner
+`while` cannot poll the latch more often than once per producer frame, because one
+frame of this stream — `pull_frame` → widen → `convert_frame` → push — costs
+1.04–1.09 M cycles: **3.7–3.9 of AP-0's 280,896-cycle video frames, all of them
+uninterruptible.** So the row above is implemented as written (the vblank handler
+latches; the main loop polls it) and the ROM *prints* the cadence instead of
+asserting one: `cadence: video_frames=1790 input_polls=1116 ratio=1116/1790
+max_gap=4 frames limit=5` — one poll per frame while the ring is full, one per ≤4
+while the decoder is running, against PR-3a's one per 7.5 frames. §4.4's "screen
+changes within one video frame of the button press" is **not** met by that and
+cannot be from the main loop: it needs the key *sample* (not merely the latch) in
+the vblank handler, or a decode sliced below one frame — a decision for ii-B,
+recorded here rather than glossed. The audio side is untouched by the restructure
+(`underflows=0`, `coalesced=0`, `late=0`, `handler_entries=877` before and after).
+
 One shipped gotcha to carry into the UI design, because it bit 6a-7b's first
 hardware run: agb's `TiledGraphicsFrame::commit` derives DISPCNT's
 background-enable mask from the backgrounds *shown into that frame* — so a commit

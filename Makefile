@@ -1100,7 +1100,7 @@ album-seam-test: toolchain-check
 	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_SEAM_GATE_LOG)) \
 	    || { echo "album-seam-test: the host suite did not pass — see $(ALBUM_SEAM_GATE_LOG)"; exit 1; }; \
 	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_SEAM_GATE_LOG))); \
-	  [ -n "$$n" ] && [ "$$n" -ge 33 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 33 — a green that names nothing is not a green"; exit 1; }
+	  [ -n "$$n" ] && [ "$$n" -ge 35 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 35 — a green that names nothing is not a green"; exit 1; }
 	@cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) build --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) \
 	    --no-default-features --features backend-stub >> $(abspath $(ALBUM_SEAM_GATE_LOG)) 2>&1 \

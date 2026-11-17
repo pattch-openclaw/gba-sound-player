@@ -22,10 +22,11 @@
 //!    rather than presenting an empty verdict screen on a cart.
 //! 6. **The input seam delivers the edges §5.3 means, at the frames it says** — debounce, edge
 //!    polarity, the autorepeat's exact first-repeat and interval frames, the control map, the BIOS
-//!    chord being absent by design, and the REPLAY script's entries landing on their own frame and
-//!    no adjacent one. This is the whole of what the gate can witness: `mgba-test-runner` cannot
-//!    press a key, so the script is replayed *at the keys layer* and the ROM prints which source it
-//!    used. Nothing here is evidence that a physical press reaches the ROM (§13 AP-1, AP-7).
+//!    chord being absent by design, and the REPLAY script's entries landing on their own frame, no
+//!    adjacent one, and no later than one frame behind their latch. This is the whole of what the
+//!    gate can witness: `mgba-test-runner` cannot press a key, so the script is replayed *at the
+//!    keys layer* and the ROM prints which source it used. Nothing here is evidence that a physical
+//!    press reaches the ROM (§13 AP-1, AP-7).
 //! 7. **The painted position obeys §4.4's three invariants** — never backwards within a track
 //!    (including across a pause), 0 at a track start and `n_samples` at its end, with the
 //!    `committed − LEAD_SAMPLES` subtraction saturating rather than wrapping when `committed < LEAD`.
@@ -1018,6 +1019,51 @@ fn the_rom_replay_script_delivers_three_edges_and_seven_repeats() {
     assert_eq!(repeat_frames[0], 41 + REPEAT_DELAY_FRAMES);
     assert_eq!(repeat_frames, vec![65, 73, 81, 89, 97, 105, 113]);
     assert_eq!(source.frame(), 130);
+}
+
+/// §4.5's loop polls on the frame latch, so a scripted press stamped at frame `F` is *latched* at
+/// `F` and delivered to the application at `F + DEBOUNCE_FRAMES - 1` = `F + 1`: **one video frame
+/// from latch to delivery**, which is the bound §4.4's "within one video frame" observable needs
+/// from this layer. The ROM's loop can only be slower than this — it polls on the latch and spends
+/// up to one producer slice inside a decode — and it can never be faster, which is the direction
+/// that would let a key act on a frame that had not happened yet.
+#[test]
+fn a_scripted_edge_is_delivered_within_one_frame_of_its_latch() {
+    // The whole lag this layer is allowed: the debounce's single confirmation frame.
+    const LATCH_TO_DELIVERY: u32 = DEBOUNCE_FRAMES as u32 - 1;
+    // Every entry carrying a button is a press entry of this script: each press is released before
+    // the next, so `mask != 0` identifies the latch frame of each one.
+    let stamps: Vec<u32> = ROM_REPLAY_SCRIPT
+        .iter()
+        .filter(|(_, mask)| *mask != 0)
+        .map(|(frame, _)| *frame)
+        .collect();
+    let mut source = Replay::new(&ROM_REPLAY_SCRIPT);
+    let mut machine = Keys::new();
+    let mut delivered = Vec::new();
+    for frame in 0..140u32 {
+        if machine.sample(source.sample()).action().is_some() {
+            delivered.push(frame);
+        }
+    }
+    assert_eq!(
+        delivered.len(),
+        stamps.len(),
+        "the script presses {} times but {} actions were delivered",
+        stamps.len(),
+        delivered.len()
+    );
+    for (frame, stamp) in delivered.iter().zip(&stamps) {
+        assert!(
+            *frame > *stamp,
+            "an action was delivered at {frame}, before its scripted latch at {stamp}"
+        );
+        assert!(
+            *frame - *stamp <= LATCH_TO_DELIVERY,
+            "the press latched at {stamp} was delivered at {frame}: more than {LATCH_TO_DELIVERY} \
+             frame(s) from latch to delivery"
+        );
+    }
 }
 
 // -------------------------------------------------------------------------------------------------

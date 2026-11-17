@@ -366,13 +366,16 @@ pub trait KeySource {
 /// these edges at these frames" a host-tested fact rather than a claim about the arm binary.
 ///
 /// The script is a whole history, not a delta list: an entry says "from frame `F` the mask is `M`",
-/// and a frame with no entry repeats the previous mask. Frames are the source's own count (one per
-/// [`KeySource::sample`] call), so an entry's index is a **poll** index: it is a video-frame number
-/// only once the caller polls exactly once per latched vblank, which is PR-3b-ii's cadence and not
-/// PR-3b-i's (~one poll per eight frames). Until then the ROM logs the latch each sample observed,
-/// never the index the script meant. A poll that arrives after several frames have passed applies
-/// every entry that is due, in order, so no entry can be skipped — the count the ROM prints is the
-/// count the script contains.
+/// and a frame with no entry repeats the previous mask. Frames are the source's own count — one per
+/// [`KeySource::sample`] call, i.e. one per **poll** — so an entry's index is the poll index and not
+/// a video-frame number. The distinction is measurable rather than academic: §4.5's loop polls on
+/// the frame latch (PR-3b-ii-A), so a poll happens at the first frame boundary the main loop is awake
+/// for, but it is **not** awake inside a producer frame, whose pull+convert+push is ~3.7 video frames
+/// at this build's decode cost. The ROM therefore prints its own cadence
+/// (`cadence: video_frames=… input_polls=… ratio=… max_gap=…`) *and* the latch every edge landed on,
+/// so neither number has to be assumed: the script's index is exact in polls, and the video frame it
+/// arrives on is read off the log. A poll that arrives after several frames have passed applies every
+/// entry that is due, in order, so no entry can be skipped and none can fire before its own poll.
 ///
 /// On the arm build this goes through `ButtonController::update_with_state`, the same controller the
 /// hardware arm drives, so "the scripted log is exactly the input the test harness feeds the ROM"
