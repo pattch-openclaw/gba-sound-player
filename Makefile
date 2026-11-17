@@ -1085,6 +1085,12 @@ album-pack-check: toolchain-check
 # REPLAY script is replayed at the keys layer because `mgba-test-runner` cannot press a key, so a
 # green here is never evidence that a physical press reaches a cartridge (§13 AP-1, AP-7).
 #
+# PR-3b-ii-B2a adds the **hand-off gain and the pause contract**: a model that drives the real
+# `RingFeed`, the real `HandOffGain` and the real `Transport` through scripted pause/resume commands,
+# asserting in periods and samples that a fade is monotone to zero and back, that it never touches the
+# ring, that a pause freezes the session clock and the ring head, that a resume drops or repeats no
+# sample, that three scripted pauses book no underflow, and that a frozen ring refuses a push.
+#
 # Same shape as `album-pack-check`: neutral cwd, explicit host target, a log, and a collected-test
 # floor — a green that names nothing is not a green. The second leg is the stub-only build, which is
 # what makes "a stub image links no codec at all" an observed fact rather than a claim about one test
@@ -1100,7 +1106,7 @@ album-seam-test: toolchain-check
 	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_SEAM_GATE_LOG)) \
 	    || { echo "album-seam-test: the host suite did not pass — see $(ALBUM_SEAM_GATE_LOG)"; exit 1; }; \
 	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_SEAM_GATE_LOG))); \
-	  [ -n "$$n" ] && [ "$$n" -ge 35 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 35 — a green that names nothing is not a green"; exit 1; }
+	  [ -n "$$n" ] && [ "$$n" -ge 42 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 42 — a green that names nothing is not a green"; exit 1; }
 	@cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) build --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) \
 	    --no-default-features --features backend-stub >> $(abspath $(ALBUM_SEAM_GATE_LOG)) 2>&1 \
@@ -1109,8 +1115,10 @@ album-seam-test: toolchain-check
 	@echo "  and its generated pins agree for every track, both backend arms satisfy PcmSource, the shipped"
 	@echo "  track decodes to its fnv_pcm pin on the host, its FIFO bytes fold to the bake's fnv_fifo_l/fnv_fifo_r"
 	@echo "  as the ROM will push them, a stub-only build links no decoder, the input seam's edges/debounce/"
-	@echo "  autorepeat/control-map/chord rules hold and the REPLAY script lands on its own frames, and the"
-	@echo "  painted position obeys §4.4's three invariants with a saturating lead."
+	@echo "  autorepeat/control-map/chord rules hold and the REPLAY script lands on its own frames, the"
+	@echo "  painted position obeys §4.4's three invariants with a saturating lead, and the hand-off gain"
+	@echo "  and §4.4's pause contract hold: a fade is monotone to silence and back, applied to the DMA slot"
+	@echo "  and never the ring, and a pause/resume keeps the position exact with no underflow."
 
 # The playback ROM (PR-3a step iii): `ALBM1` + the packed blobs → the app's own chain at 16,384 Hz.
 # It boots, verifies its own album (§D-C), plays track 1 end to end through the shipped feeder, and

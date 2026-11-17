@@ -14,6 +14,7 @@
 //! | [`text`] | the verdict screen — two words, the tracked OFL font, one commit (§4.1) |
 //! | [`keys`] | the input seam (§5.3): edges, autorepeat, debounce and the control map, platform-free, with a keypad source and a scripted-replay one |
 //! | [`position`] | the 32-bit session clock (§10.4, ruled) and §4.4's `paint_position` |
+//! | [`transport`] | the playback transport: §4.4's pause / resume contract and the hand-off gain's schedule |
 //!
 //! `nodiv` is a dependency, not a `#[path]` include: §2.2 rules that no Phase 1
 //! module may include or depend on anything under a spike or probe directory, and
@@ -26,7 +27,10 @@
 //! PR-2 landed the manifest half; PR-3 step (ii) landed this seam and its geometry, and step (iii)
 //! adds the ROM main (`src/album_play_main.rs`, `[[bin]] album-play`, `make album-rom`). PR-3b-i
 //! adds [`keys`] and [`position`]: the input seam and the 32-bit session clock, both platform-free
-//! in the half that decides anything. The library is still platform-free: it declares no binary of
+//! in the half that decides anything. PR-3b-ii adds [`transport`]: §4.4's pause/resume contract and
+//! the hand-off gain's schedule and the gain itself, again platform-free. The gain is kept out of
+//! `crates/gba-playback` because the shipped image links that crate and an app PR does not
+//! re-baseline an accepted image. The library is still platform-free: it declares no binary of
 //! its own, and `backend/` links no display or timer registers — the `agb` bootstrap lives in the
 //! bin. [`text`] and [`keys`] are the exceptions in the other direction, because the checks that
 //! matter are on the host: the words, the subset check, the debounce/edge/repeat machine and the
@@ -67,3 +71,4 @@ pub mod meta;
 pub mod pcm;
 pub mod position;
 pub mod text;
+pub mod transport;

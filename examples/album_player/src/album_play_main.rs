@@ -5,13 +5,15 @@
 //! is the record of the run. Then it loops forever, so `timeout`'s exit 124 **is** the pass — the
 //! same contract `product-play.gba` has.
 //!
-//! What this ROM is not: no pause, no skip, no state machine, no progress bar, no tiles, no sprites.
-//! It samples the keypad in the vblank handler (PR-3b-ii-B1) and consumes what that handler posts,
-//! but no [`keys::Action`] means anything yet: an edge is detected, stamped with the frame it landed
-//! on, posted, taken and logged. Those are PR-3b-ii-B2/3c (§4.4, §4.5). What it *does* show is a
-//! screen: white while it is working, and then the verdict — `PASSED` on blue or `FAILED` on red, in
-//! words, through the same renderer the shipped product ROM uses (this crate's [`text`]). See "The
-//! verdict is a word" below.
+//! What this ROM is not: no skip, no track traversal, no progress bar, no tiles, no sprites.
+//! **Pause and resume** are here (PR-3b-ii-B2a): Start or A fades the hand-off gain to zero and
+//! freezes the chain; a second press primes both DMA buffers from the same ring head, re-arms, and
+//! ramps the gain back up. That contract is [`transport`]'s and is modelled on the host; §4.4 has
+//! its bounds. Right, Left and Down are still detected, stamped and logged but act on nothing —
+//! skip and traversal are PR-3b-ii-B2b's. What this ROM *does* show is a screen: white while it is
+//! working, and then the verdict — `PASSED` on blue or `FAILED` on red, in words, through the same
+//! renderer the shipped product ROM uses (this crate's [`text`]). See "The verdict is a word"
+//! below.
 //!
 //! ## Where every ordering choice comes from
 //!
@@ -39,6 +41,10 @@
 //!                whole frame and no video frame is latched; a latched frame is served (the
 //!                posted action + one position read) before any further decode; until frames ==
 //!                the pin's total_frames
+//! pause / resume a Start/A edge is taken at the next period boundary: the hand-off gain ramps to
+//!                zero inside one chunk, then timers 1/0/2 and both sound DMAs stop with the ring
+//!                and the decoder untouched; a second edge primes both DMA buffers from the same
+//!                ring head (which is the sample the freeze stopped on), re-arms, and ramps back up
 //! finish         `finished` is set in the same critical section as the final push
 //! drain          poll until consumed() == pushed()
 //! audit          every handler entry classifies the period: coalesced overflows, and lateness past
@@ -141,6 +147,7 @@ mod rom {
     use album_player::pcm::{PcmSource, SourceError};
     use album_player::position;
     use album_player::text;
+    use album_player::transport::{State, Step, Transport};
     use gba_audio_hw::{
         AudioChain, CycleCounter, arm_audio_chain, clear_timer1_if, enable_sound, io_read_u16,
         rearm_dma, regs, teardown_audio,
@@ -253,9 +260,18 @@ mod rom {
         underflows: u32,
         /// The handler's entry count (full, tail or starved period). Not a period count: the prime
         /// handed a chunk to the DMA *before* the chain was armed, so it is one fewer than the
-        /// periods the track spans (`product_play_main.rs:389-390`).
+        /// periods the track spans (`product_play_main.rs:389-390`). A resume's prime is the same
+        /// again, which is why the hand-off ledger below adds the two.
         handler_entries: u32,
         tail_periods: u32,
+        /// Chunk hand-offs the **main loop** made rather than the feeder: the boot prime, plus one
+        /// per resume. `handler_entries + primes` is the number of chunks the DMA was handed, which
+        /// is `ceil(n_samples / CHUNK)` whether or not the run was paused.
+        primes: u32,
+        /// Periods served in the epochs before the current one. `arm_audio_chain` reloads timer2
+        /// from zero, so a resume starts a new epoch; without banking the old count the first entry
+        /// after a resume would read a ~65,000-period gap and book it as coalesced overflows.
+        periods_before: u32,
         // --- Period audit, in the reference's meaning and reading order
         // (`product_play_main.rs:394-412`). Timer2 cascades from timer1 and so counts hardware
         // periods even while IME is off: IRQ delivery cannot stall it, which makes it ground truth
@@ -281,11 +297,18 @@ mod rom {
         underflows: 0,
         handler_entries: 0,
         tail_periods: 0,
+        primes: 0,
+        periods_before: 0,
         last_period: 0,
         coalesced: 0,
         late_servicings: 0,
         max_delay_samples: 0,
     }));
+
+    /// The playback transport (§4.4, PR-3b-ii-B2a): the state the main loop drives and the hand-off
+    /// gain the feeder applies, in one cell — so "is the hand-off faded?" has exactly one answer.
+    /// The feeder and the main loop are the only two borrowers, and each holds it for integer work.
+    static TRANSPORT: Mutex<RefCell<Transport>> = Mutex::new(RefCell::new(Transport::new()));
 
     /// The verdict's numbers, read in one critical section.
     ///
@@ -300,7 +323,10 @@ mod rom {
         underflows: u32,
         handler_entries: u32,
         tail_periods: u32,
-        hw_periods: u16,
+        primes: u32,
+        /// Periods in every epoch the run had (`periods_before + last_period`), so a paused run's
+        /// count is the sum of its epochs rather than only the last one.
+        hw_periods: u32,
         coalesced: u32,
         late_servicings: u32,
         max_delay_samples: u32,
@@ -732,11 +758,20 @@ mod rom {
                         keys::cursor_action(event.mask)
                     );
                 } else {
+                    // Which actions act is a property of this build, so it is stated per edge rather
+                    // than left to a reader's memory: Start/A acts (pause/resume), and the traversal
+                    // keys are PR-3b-ii-B2b's and act on nothing yet.
+                    let action = keys::now_playing_action(event.mask);
                     agb::println!(
-                        "[album-rom] input edge: video={} pressed=0x{:04X} action={:?} (inert)",
+                        "[album-rom] input edge: video={} pressed=0x{:04X} action={:?} ({})",
                         event.frame,
                         event.mask,
-                        keys::now_playing_action(event.mask)
+                        action,
+                        if action == Some(keys::Action::PauseToggle) {
+                            "acts: pause⇄resume"
+                        } else {
+                            "inert: ii-B2b"
+                        }
                     );
                 }
             }
@@ -822,23 +857,34 @@ mod rom {
     /// frame `n` is the `n`th one after it, exactly as the host twin counts it. The ROM prints the
     /// measured detection latency against these frames (`detect_latency max=…`), so the claim is
     /// checked rather than assumed. The *sequence* of transitions is fixed regardless, and it is what
-    /// the ROM's end line can be read against: **3 edges and 7 autorepeats**, by the host twin's own
+    /// the ROM's end line can be read against: **6 edges and 7 autorepeats**, by the host twin's own
     /// arithmetic (`tests/album_seam_host.rs` drives this same shape).
     ///
-    /// Why these entries: one plain press (Start/A — the pause edge, inert here), one shoulder-free
-    /// direction press (Right = next), and one *held* direction long enough to cross
+    /// Why these entries: **two pause/resume pairs** (A, then Start — Start and A are the same
+    /// action, so this also shows the control map), one shoulder-free direction press (Right = next,
+    /// still inert until ii-B2b), and one *held* direction long enough to cross
     /// `REPEAT_DELAY_FRAMES` and fire several `REPEAT_INTERVAL_FRAMES` repeats (Left = previous).
-    /// Between them they exercise every rule `keys.rs` adds to agb, which is the whole of what a
-    /// gate can witness without a cartridge. What they do **not** witness is a physical press: no
-    /// emulator here can make one, and the ROM's log says so.
+    /// Between them they exercise every rule `keys.rs` adds to agb and both transitions §4.4 defines,
+    /// which is the whole of what a gate can witness without a cartridge. What they do **not**
+    /// witness is a physical press: no emulator here can make one, and the ROM's log says so.
+    ///
+    /// The pauses are deliberately short (52 and 120 frames) and both resume: a run that ended
+    /// paused would never reach its verdict, and one with a minutes-long pause would only cost the
+    /// gate wall-clock, since the audio clock is stopped for the whole frozen span.
     #[cfg(feature = "input-replay")]
-    const REPLAY_SCRIPT: [(u32, u16); 6] = [
+    const REPLAY_SCRIPT: [(u32, u16); 12] = [
         (8, keys::BTN_A),
         (14, 0),
-        (24, keys::BTN_RIGHT),
-        (30, 0),
-        (40, keys::BTN_LEFT),
-        (120, 0),
+        (60, keys::BTN_A),
+        (66, 0),
+        (120, keys::BTN_RIGHT),
+        (126, 0),
+        (180, keys::BTN_START),
+        (186, 0),
+        (300, keys::BTN_START),
+        (306, 0),
+        (360, keys::BTN_LEFT),
+        (440, 0),
     ];
 
     // ------------------------------------------------------------------ feeder
@@ -851,10 +897,17 @@ mod rom {
     /// Destructuring to field borrows avoids double-borrowing the struct through two `IndexMut`s in
     /// one expression (which is what `bufs.l[bufs.next]` would be) —
     /// `product_play_main.rs:818-860`.
+    ///
+    /// `transport` is the hand-off gain's home (§4.4, PR-3b-ii-B2a): `take_chunk` has just copied the
+    /// ring's next chunk into the slot that starts playing on the next `rearm_dma`, so scaling it
+    /// *here* — after the copy and before the re-arm, in the same critical section — fades exactly
+    /// what is about to be heard and never touches the ring. That is what makes a pause resumable
+    /// without a seek; the producer-side shape the probe uses would dim 1.23 s of queued audio.
     fn take_into_slot(
         bufs: &mut SndBufs,
         feed: &mut RingFeed<RING_SAMPLES>,
         finished: bool,
+        transport: &mut Transport,
     ) -> (Chunk, *const u8, *const u8) {
         let (lp, rp) = {
             let SndBufs {
@@ -884,6 +937,9 @@ mod rom {
                 (&mut l1[..], &mut r1[..])
             };
             let taken = feed.take_chunk(dl, dr, CHUNK, finished);
+            // The hand-off, in place: no copy, no second buffer, and the ring's bytes are read
+            // once and never written.
+            transport.apply(dl, dr);
             *next = 1 - *next;
             taken
         };
@@ -899,6 +955,15 @@ mod rom {
     /// not even the audit's. All three static borrows use the `CriticalSection` token the handler is
     /// handed, which is also the race gate — the producer only touches the ring inside a critical
     /// section, so a copy cannot be interleaved by anything.
+    ///
+    /// **The hand-off gain is the one addition (PR-3b-ii-B2a), and it is not bracketed.** A bracket
+    /// here would be a second timer read pair on the deadline the bracket is protecting, so the
+    /// measure of this handler's cost is the audit the reads above already feed: a feeder slower than
+    /// the FIFO's 16-sample grace is `late`/`late_max`, and one that misses a period entirely is
+    /// `coalesced`. The steady-state cost is one `is_transparent` compare (a period with no fade in
+    /// flight returns immediately); a fade period pays a multiply, shift and clamp per channel-sample
+    /// over one chunk. Both runs' audits read `coalesced=0 late=0 late_max=0`, including the four
+    /// fade chunks the REPLAY run served, so the addition did not move the deadline.
     fn feeder(cs: critical_section::CriticalSection<'_>) {
         // The audit reads stay first, exactly as the harness orders them: their whole point is how
         // long the interrupt sat, and any work before them would be inside the answer
@@ -914,6 +979,7 @@ mod rom {
         let mut bufs = BUFS.borrow_ref_mut(cs);
         let mut feed = FEED.borrow_ref_mut(cs);
         let mut stats = STATS.borrow_ref_mut(cs);
+        let mut transport = TRANSPORT.borrow_ref_mut(cs);
 
         let gap = periods.wrapping_sub(stats.last_period);
         stats.last_period = periods;
@@ -934,7 +1000,7 @@ mod rom {
         stats.handler_entries += 1;
 
         let finished = stats.finished;
-        let (verdict, lp, rp) = take_into_slot(&mut *bufs, &mut *feed, finished);
+        let (verdict, lp, rp) = take_into_slot(&mut *bufs, &mut *feed, finished, &mut transport);
         // The session clock (§10.4, ruled option A). It counts what this period actually
         // committed — a whole chunk, a classified tail's real samples, or nothing — so it equals
         // `RingFeed`'s `consumed` by construction rather than by a parallel computation. PR-3b-i
@@ -964,6 +1030,249 @@ mod rom {
         // load/add/store that buys nothing if the re-arm is late.
         position::commit(committed);
         drop(bufs);
+    }
+
+    // ------------------------------------------------- §4.4's pause, from both sides
+
+    /// Hand the ring's head to the DMA through the hand-off gain: the boot prime, and a resume's.
+    ///
+    /// One chunk, then `rearm_dma`, exactly as the boot path does. `take_chunk` zero-pads a
+    /// classified tail, so a prime at the very end of a track still hands over a whole buffer. The
+    /// session clock is committed here for the same reason the boot prime commits: this chunk
+    /// reached the DMA, so it is no longer queued.
+    ///
+    /// `false` means the ring had nothing to give — at boot that is a refusal, and after a resume it
+    /// is a FAIL. Arming a chain with no primed buffer would start a starved run, which is the one
+    /// thing the shipped order exists to prevent.
+    fn prime_hand_off() -> bool {
+        critical_section::with(|cs| {
+            let mut bufs = BUFS.borrow_ref_mut(cs);
+            let mut feed = FEED.borrow_ref_mut(cs);
+            let mut transport = TRANSPORT.borrow_ref_mut(cs);
+            let mut stats = STATS.borrow_ref_mut(cs);
+            let finished = stats.finished;
+            let (verdict, lp, rp) =
+                take_into_slot(&mut *bufs, &mut *feed, finished, &mut transport);
+            let committed = match verdict {
+                Chunk::Full => CHUNK as u32,
+                Chunk::Tail { real } => real as u32,
+                Chunk::Starved => return false,
+            };
+            // SAFETY: aligned pointers into the static ping-pong, filled for a whole transfer by
+            // `take_chunk` just above.
+            unsafe { rearm_dma(lp, rp, &CHAIN) };
+            position::commit(committed);
+            stats.primes += 1;
+            true
+        })
+    }
+
+    /// §4.4's pause, applied by the main loop at a period boundary: the timer chain, then both sound
+    /// DMAs, and nothing else — the ring and the decoder are left exactly as they are.
+    ///
+    /// The order is the shipped teardown's (`product_play_main.rs:1844-1846`): timer1 first, so no
+    /// period is entered after its counter is frozen, then timer0/timer2, then `teardown_audio`.
+    ///
+    /// **The underflow counter cannot tick while frozen, and that is a property rather than a flag.**
+    /// It is incremented only in the feeder's `Chunk::Starved` arm, and a stopped timer1 means the
+    /// feeder is not entered at all — so a frozen chain cannot look like a starved one, and there is
+    /// no "paused" test in the hot path that could fall out of step with the hardware. A starved
+    /// period pending at the freeze was booked before it, and nothing is rewritten after.
+    ///
+    /// The period audit's epoch ends here: `arm_audio_chain` reloads timer2 from zero, so the periods
+    /// served so far are banked and `last_period` restarts at zero. Without that, the first entry
+    /// after a resume would read a ~65,000-period gap and book it as coalesced overflows.
+    ///
+    /// The whole transition is one critical section, and so is the resume below. That is not about
+    /// the ring: it is so no **vblank** bracket can straddle the counter reset. The handler brackets
+    /// itself on `TM1_DATA`/`TM2_DATA`, so one that entered before the stop and left after the re-arm
+    /// would read a 65,000-period jump and record a handler that sat for a whole minute — a FAIL with
+    /// no fault behind it. A few hundred masked cycles twice per pause cost nothing the audio can
+    /// notice, and the feeder is not running yet when this returns.
+    fn freeze_chain(timers: &mut agb::timer::AllTimers<'_>) {
+        critical_section::with(|cs| {
+            timers.timer1.set_interrupt(false).set_enabled(false);
+            timers.timer0.set_enabled(false);
+            timers.timer2.set_enabled(false);
+            teardown_audio();
+            let mut stats = STATS.borrow_ref_mut(cs);
+            stats.periods_before = stats
+                .periods_before
+                .saturating_add(u32::from(stats.last_period));
+            stats.last_period = 0;
+        });
+    }
+
+    /// The transport's state, read in one critical section.
+    fn transport_state() -> State {
+        critical_section::with(|cs| TRANSPORT.borrow_ref(cs).state())
+    }
+
+    /// The feeder's entry count — the fade's own budget, read at the two ends of a transition.
+    fn handler_entries() -> u32 {
+        critical_section::with(|cs| STATS.borrow_ref(cs).handler_entries)
+    }
+
+    /// The hand-off gain as it stands, for the pause log (it must read 0 at a freeze).
+    fn handoff_gain() -> i32 {
+        critical_section::with(|cs| TRANSPORT.borrow_ref(cs).gain().gain())
+    }
+
+    /// How many pause/resume pairs this ROM keeps for its end-of-run log.
+    ///
+    /// Bounded for the same reason [`EDGE_LOG`] is: the record is filled from the audio path, where
+    /// an `agb::println!` (a semihosting trap) is forbidden, and printed after the teardown.
+    const PAUSE_LOG: usize = 4;
+
+    /// One pause/resume pair as the main loop observed it.
+    ///
+    /// `resumed_committed − frozen_committed` is the whole claim — **0**, because the ring is never
+    /// touched — and `frozen_gain` is its other half (the fade reached silence before the chain
+    /// stopped). The frame span is the response, in the unit the contract's bounds are stated in.
+    struct PauseRecord {
+        action_frame: u32,
+        frozen_frame: u32,
+        frozen_gain: i32,
+        frozen_committed: u32,
+        /// Feeder periods between the toggle and the freeze: the fade's own cost, in periods.
+        fade_periods: u32,
+        resumed_frame: u32,
+        resumed_committed: u32,
+    }
+
+    /// The pause ledger: totals for the verdict, and the first [`PAUSE_LOG`] pairs in full.
+    struct Pauses {
+        /// Completed pairs (frozen and resumed).
+        pairs: u32,
+        /// Pause/resume toggles taken, and the ones ignored because a transition was in flight.
+        toggles: u32,
+        ignored: u32,
+        /// The pair currently open: the toggle's frame and the feeder's entry count.
+        opening_frame: u32,
+        opening_periods: u32,
+        records: [PauseRecord; PAUSE_LOG],
+        recorded: usize,
+    }
+
+    impl Pauses {
+        fn new() -> Self {
+            Self {
+                pairs: 0,
+                toggles: 0,
+                ignored: 0,
+                opening_frame: 0,
+                opening_periods: 0,
+                records: core::array::from_fn(|_| PauseRecord {
+                    action_frame: 0,
+                    frozen_frame: 0,
+                    frozen_gain: 0,
+                    frozen_committed: 0,
+                    fade_periods: 0,
+                    resumed_frame: 0,
+                    resumed_committed: 0,
+                }),
+                recorded: 0,
+            }
+        }
+
+        /// A pause was requested: the fade-out is issued and the chain is still running.
+        fn begin(&mut self, frame: u32, periods: u32) {
+            self.toggles += 1;
+            self.opening_frame = frame;
+            self.opening_periods = periods;
+        }
+
+        /// The chain stopped. The gain must be zero here or the pause ends on a step.
+        fn frozen(&mut self, frame: u32, committed: u32, gain: i32, periods: u32) {
+            let record = PauseRecord {
+                action_frame: self.opening_frame,
+                frozen_frame: frame,
+                frozen_gain: gain,
+                frozen_committed: committed,
+                fade_periods: periods.saturating_sub(self.opening_periods),
+                resumed_frame: 0,
+                resumed_committed: 0,
+            };
+            if self.recorded < PAUSE_LOG {
+                self.records[self.recorded] = record;
+                self.recorded += 1;
+            }
+        }
+
+        /// The chain was primed and re-armed: close the open pair and read off what it cost.
+        fn resumed(&mut self, frame: u32, committed: u32) {
+            self.toggles += 1;
+            if self.recorded > 0 {
+                let record = &mut self.records[self.recorded - 1];
+                if record.resumed_frame == 0 {
+                    record.resumed_frame = frame;
+                    record.resumed_committed = committed;
+                }
+            }
+            self.pairs += 1;
+        }
+
+        /// A toggle arrived while a transition was already running: no cancel, so it is counted.
+        fn ignored(&mut self) {
+            self.toggles += 1;
+            self.ignored += 1;
+        }
+
+        /// Samples lost across a pair: zero by contract.
+        fn dropped(record: &PauseRecord) -> u32 {
+            record
+                .resumed_committed
+                .saturating_sub(record.frozen_committed)
+        }
+
+        /// Every pair kept the position exactly, every fade reached silence before the chain stopped,
+        /// and every toggle is accounted for.
+        fn ok(&self) -> bool {
+            let mut clean = self.recorded > 0 || self.pairs == 0;
+            for record in &self.records[..self.recorded] {
+                clean &= record.frozen_gain == 0
+                    && Self::dropped(record) == 0
+                    && record.frozen_frame >= record.action_frame
+                    && record.resumed_frame >= record.frozen_frame;
+            }
+            clean && self.pairs * 2 + self.ignored == self.toggles
+        }
+
+        /// The end-of-run lines: one summary, then one line per pair (the first [`PAUSE_LOG`]).
+        fn report(&self) {
+            agb::println!(
+                "[album-rom] pause: pairs={} toggles={} ignored={} limit={} [{}]",
+                self.pairs,
+                self.toggles,
+                self.ignored,
+                PAUSE_LOG,
+                if self.ok() { "PASS" } else { "FAIL" }
+            );
+            for (index, record) in self.records[..self.recorded].iter().enumerate() {
+                agb::println!(
+                    "[album-rom] pause {}: action@frame={} frozen@frame={} fade_periods={} gain={} committed={} ; resume@frame={} committed={} dropped={} [{}]",
+                    index + 1,
+                    record.action_frame,
+                    record.frozen_frame,
+                    record.fade_periods,
+                    record.frozen_gain,
+                    record.frozen_committed,
+                    record.resumed_frame,
+                    record.resumed_committed,
+                    Self::dropped(record),
+                    if record.frozen_gain == 0 && Self::dropped(record) == 0 {
+                        "PASS"
+                    } else {
+                        "FAIL"
+                    }
+                );
+            }
+            if !self.ok() {
+                agb::println!(
+                    "[album-rom] FAIL a pause did not hold: every pair must freeze at gain 0, resume on the sample it stopped on (dropped=0), and account for its toggles"
+                );
+            }
+        }
     }
 
     // --------------------------------------------------------------- the audio
@@ -1477,25 +1786,10 @@ mod rom {
         // ---- prime: the first chunk is handed to the DMA before the first period boundary can ask
         // for one, so audio begins at arming rather than one period late
         // (`product_play_main.rs:1492-1530`). In repeat mode `rearm_dma` starts playing the moment it
-        // is written, and the first boundary is then a re-arm like any other.
-        let primed = critical_section::with(|cs| {
-            let mut bufs = BUFS.borrow_ref_mut(cs);
-            let mut feed = FEED.borrow_ref_mut(cs);
-            let (verdict, lp, rp) = take_into_slot(&mut *bufs, &mut *feed, false);
-            match verdict {
-                Chunk::Full => {
-                    // SAFETY: aligned pointers into the static ping-pong, filled for a whole
-                    // transfer by `take_chunk` just above.
-                    unsafe { rearm_dma(lp, rp, &CHAIN) };
-                    // The prime's chunk is committed to the DMA like any other, so the session clock
-                    // counts it here rather than starting one chunk short of the ledger.
-                    position::commit(CHUNK as u32);
-                    true
-                }
-                _ => false,
-            }
-        });
-        if !primed {
+        // is written, and the first boundary is then a re-arm like any other. A resume runs this
+        // same function: the ring's head is the sample the freeze stopped on, which is why no seek
+        // is needed.
+        if !prime_hand_off() {
             refuse(
                 &mut gfx,
                 "the prime could not fill a whole chunk (the prefill is shorter than one)",
@@ -1555,49 +1849,110 @@ mod rom {
         // which on hardware is a syscall into a host that may not exist.
         //
         // Two clocks meet here and this loop is the whole of their arbitration. The producer is the
-        // thief of leftover time: it runs only while the ring has room for another whole frame, and
-        // it stops the moment a video frame is due. A latched frame is then served before any more
-        // decode — the action the vblank handler posted, and one position read — which is everything
-        // §4.5 gives the video clock today. The key *sample* is the handler's (PR-3b-ii-B1), so it
-        // keeps happening while the decoder is inside a producer frame; this loop only reads what it
-        // left. The audio path is untouched by the restructure: the period IRQ still only takes a
-        // chunk, re-arms the DMA and counts, and the producer's flow control is the same predicate
-        // it always was, just asked once per pass instead of spun inside a wait.
+        // thief of leftover time: it runs only while the ring has room for another whole frame, it
+        // stops the moment a video frame is due, and it does not run at all while the transport is
+        // mid-transition — a pause that is being applied must not be fed another frame. A latched
+        // frame is then served before any more decode — the action the vblank handler posted, and
+        // one position read — which is everything §4.5 gives the video clock today. The key *sample*
+        // is the handler's (PR-3b-ii-B1), so it keeps happening while the decoder is inside a
+        // producer frame; this loop only reads what it left. The audio path is untouched by the
+        // restructure: the period IRQ takes a chunk, applies the hand-off gain, re-arms the DMA and
+        // counts, and the producer's flow control is the same predicate it always was, asked once
+        // per pass.
         let mut paint = Paint::new(total_samples as u32);
+        let mut pauses = Pauses::new();
         let mut halt: Option<&'static str> = None;
         // Passes in a row with a full ring and no frame due — the wedge bound ([`WEDGE_PASSES`]).
         let mut idle: u32 = 0;
         'frames: loop {
-            while !paint.due() && producer.frames < total_frames && producer.has_room() {
-                idle = 0;
-                match producer.push_one() {
-                    Ok(_) => {}
-                    Err(Halt::Ended) => {
-                        agb::println!(
-                            "[album-rom] FAIL the stream ended at frame {} of {}",
-                            producer.frames,
-                            total_frames
-                        );
-                        halt = Some("stream ended early");
-                        break 'frames;
-                    }
-                    Err(Halt::Failed) => {
-                        halt = Some("producer");
-                        break 'frames;
+            if transport_state() == State::Playing {
+                while !paint.due() && producer.frames < total_frames && producer.has_room() {
+                    idle = 0;
+                    match producer.push_one() {
+                        Ok(_) => {}
+                        Err(Halt::Ended) => {
+                            agb::println!(
+                                "[album-rom] FAIL the stream ended at frame {} of {}",
+                                producer.frames,
+                                total_frames
+                            );
+                            halt = Some("stream ended early");
+                            break 'frames;
+                        }
+                        Err(Halt::Failed) => {
+                            halt = Some("producer");
+                            break 'frames;
+                        }
                     }
                 }
             }
-            // The frame slice. Nothing acts on the key yet: the vblank handler detected it, stamped
-            // it with the frame it landed on and posted it; this takes it and counts it, and
-            // PR-3b-ii-B2 is where an `Action` means something.
-            if take_action().is_some() {
+            // The frame slice: the vblank handler detected the edge, stamped it with the frame it
+            // landed on and posted it. **Start/A is the one action that acts** (PR-3b-ii-B2a) and it
+            // acts here, on the next period boundary, because changing what the DMA is mid-buffer is
+            // the splice §4.4 forbids. Right/Left/Down stay inert until ii-B2b.
+            let detected = take_action();
+            if detected.is_some() {
                 idle = 0;
+            }
+            if let Some(detected) = detected
+                && detected.action == keys::Action::PauseToggle
+            {
+                match critical_section::with(|cs| TRANSPORT.borrow_ref_mut(cs).toggle(true)) {
+                    Step::FadeOut => pauses.begin(frame_latch(), handler_entries()),
+                    Step::Prime => {
+                        // §4.4's resume, in the boot path's order: the ring's head is the sample the
+                        // freeze stopped on, so this is a prime and not a seek. The transport has
+                        // already set the gain ramping in, and the primed chunk is the ramp's first.
+                        //
+                        // The position is read **before** the prime: the prime commits a chunk to
+                        // the DMA, and the pause's claim is about the sample the resume started
+                        // from, not the one after its first buffer.
+                        let at_resume = position::committed_samples();
+                        //
+                        // One critical section, for the reason `freeze_chain` gives: no vblank
+                        // bracket may straddle the timer reset. `prime_hand_off` takes its own
+                        // (nested) section inside this one, which agb's implementation allows.
+                        let armed = critical_section::with(|_cs| {
+                            if !prime_hand_off() {
+                                return false;
+                            }
+                            enable_sound();
+                            clear_timer1_if();
+                            arm_audio_chain(&mut timers, &CHAIN);
+                            true
+                        });
+                        if !armed {
+                            agb::println!(
+                                "[album-rom] FAIL the resume had nothing to prime — the ring was empty"
+                            );
+                            halt = Some("resume");
+                            break 'frames;
+                        }
+                        pauses.resumed(frame_latch(), at_resume);
+                    }
+                    Step::Ignored => pauses.ignored(),
+                    _ => {}
+                }
             }
             if paint.due() {
                 paint.sample();
                 idle = 0;
             }
-            if producer.frames >= total_frames {
+            // One main-loop pass's transport decision, independent of commands: has the fade
+            // finished (freeze the chain), or has the ramp back returned (Playing again)?
+            if critical_section::with(|cs| TRANSPORT.borrow_ref_mut(cs).tick()) == Step::Freeze {
+                freeze_chain(&mut timers);
+                pauses.frozen(
+                    frame_latch(),
+                    position::committed_samples(),
+                    handoff_gain(),
+                    handler_entries(),
+                );
+            }
+            if transport_state() != State::Playing {
+                idle = 0;
+            }
+            if producer.frames >= total_frames && transport_state() == State::Playing {
                 break;
             }
             // Only reachable with a full ring and no frame served, i.e. §4.5's leftover time spent
@@ -1653,7 +2008,10 @@ mod rom {
                         underflows: stats.underflows,
                         handler_entries: stats.handler_entries,
                         tail_periods: stats.tail_periods,
-                        hw_periods: stats.last_period,
+                        primes: stats.primes,
+                        hw_periods: stats
+                            .periods_before
+                            .saturating_add(u32::from(stats.last_period)),
                         coalesced: stats.coalesced,
                         late_servicings: stats.late_servicings,
                         max_delay_samples: stats.max_delay_samples,
@@ -1691,13 +2049,14 @@ mod rom {
             underflows,
             handler_entries,
             tail_periods: tails,
+            primes,
             hw_periods,
             coalesced,
             late_servicings: late,
             max_delay_samples: late_max,
         } = observed;
         agb::println!(
-            "[album-rom] feed: pushed={} expected={} consumed={} frames={}/{} underflows={} handler_entries={} tails={}",
+            "[album-rom] feed: pushed={} expected={} consumed={} frames={}/{} underflows={} handler_entries={} tails={} primes={}",
             pushed,
             total_samples,
             consumed,
@@ -1705,8 +2064,32 @@ mod rom {
             total_frames,
             underflows,
             handler_entries,
-            tails
+            tails,
+            primes
         );
+        // The hand-off ledger, which is the number to read once a run can be paused: a chunk reaches
+        // the DMA either through the feeder (a handler entry) or through the main loop's prime (the
+        // boot one, and one per resume), so the two together are `ceil(n_samples / chunk)` however
+        // many pauses the run had. `handler_entries` alone would look short by exactly one per
+        // resume — which is the shape of a dishonest comparison, so it is printed and gated here.
+        //
+        // The expected total is one divide, computed once at boot and never on the audio path.
+        let expected_hand_offs = (total_samples + CHUNK - 1) / CHUNK;
+        let hand_offs = handler_entries as usize + primes as usize;
+        let hand_offs_ok = hand_offs == expected_hand_offs;
+        agb::println!(
+            "[album-rom] handoffs: handler_entries+primes={} expected={} [{}]",
+            hand_offs,
+            expected_hand_offs,
+            if hand_offs_ok { "MATCH" } else { "MISMATCH" }
+        );
+        if !hand_offs_ok {
+            agb::println!(
+                "[album-rom] FAIL the hand-off ledger is short: {} chunks reached the DMA, {} were expected",
+                hand_offs,
+                expected_hand_offs
+            );
+        }
         // The audit, in the units it is measured in: `late_max` is in **samples** (timer1's counter
         // is a sample counter), the grace is 16 of them and one period is `CHUNK` of them. Printed
         // so a regression has numbers to diff instead of a claim. `late_max` is the worst *late*
@@ -1733,6 +2116,11 @@ mod rom {
             input.source.entries(),
             input.source.edges()
         ));
+
+        // ---- §4.4's pause ledger (PR-3b-ii-B2a): the pairs, and the one line each that says the
+        // position did not move. Printed here, after the teardown, for the reason the key edges are:
+        // `agb::println!` is a semihosting trap and the record is filled on the audio path.
+        pauses.report();
 
         // ---- the session clock (§10.4), printed where the ledger it mirrors was printed. The
         // equality is structural — the clock is incremented by exactly what `take_chunk` returned —
@@ -1843,8 +2231,16 @@ mod rom {
         #[cfg(not(feature = "deep-audit"))]
         let assets_ok: Option<bool> = None;
 
+        // A pause is part of the verdict on every arm, not a remark: every pair must have frozen at
+        // gain 0 and resumed on the sample it stopped on, and the hand-off ledger must add up
+        // (`handler_entries + primes`). On the HARDWARE arm `pairs=0` is the honest reading of a
+        // headless run — nothing pressed a key — and the term is trivially true, exactly as
+        // `presses=0` is.
+        let pauses_ok = pauses.ok();
         let pass = ledger_ok
             && audit_ok
+            && hand_offs_ok
+            && pauses_ok
             && cadence_ok
             && handler_ok
             && term_ok(reaction_ok)
@@ -1864,12 +2260,14 @@ mod rom {
         // the two artifacts.
         #[cfg(feature = "deep-audit")]
         agb::println!(
-            "[album-rom] verdict {} — screen {} \"{}\" (ledger={}, audit={}, cadence={}, isr={}, reaction={}, pcm={}, fifo={}, assets={})",
+            "[album-rom] verdict {} — screen {} \"{}\" (ledger={}, audit={}, handoffs={}, pause={}, cadence={}, isr={}, reaction={}, pcm={}, fifo={}, assets={})",
             word,
             screen,
             word,
             ledger_ok,
             audit_ok,
+            hand_offs_ok,
+            pauses_ok,
             cadence_ok,
             handler_ok,
             term_name(reaction_ok),
@@ -1879,12 +2277,14 @@ mod rom {
         );
         #[cfg(not(feature = "deep-audit"))]
         agb::println!(
-            "[album-rom] verdict {} — screen {} \"{}\" (ledger={}, audit={}, cadence={}, isr={}, reaction={}, pcm={}, fifo={}, assets={} — built without deep-audit)",
+            "[album-rom] verdict {} — screen {} \"{}\" (ledger={}, audit={}, handoffs={}, pause={}, cadence={}, isr={}, reaction={}, pcm={}, fifo={}, assets={} — built without deep-audit)",
             word,
             screen,
             word,
             ledger_ok,
             audit_ok,
+            hand_offs_ok,
+            pauses_ok,
             cadence_ok,
             handler_ok,
             term_name(reaction_ok),
