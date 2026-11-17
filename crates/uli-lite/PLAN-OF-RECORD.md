@@ -348,6 +348,11 @@ same-image control, twinned bit-exactly (the discipline that has held).
    quad-heavy synthetic set and the `gba-audio` album cross-check — stays gated
    on nothing except the pre-hardware requirement.
 
+6. ~~**PR D — playback.**~~ **DONE (2026-11-16, mGBA): the seam, the player and
+   both output profiles; zero underruns and a clean period audit in each of the
+   three builds.** See "Landed 2026-11-16" below. What it leaves: U5 on hardware,
+   a multi-track fixture, and the UI redraw's own cost.
+
 The arithmetic on the two targets, from these numbers: **<=100% is met (83.9%
 decode, 96.0% gate total) and the <=85% headroom target is met on the decode
 wall with 2,783 cycles of margin at the album's worst frame.** What remains is
@@ -1480,6 +1485,75 @@ implementation**, which is how this file now uses it.
 - Gate: U5 (zero underruns, clean period audit) in mGBA, then hardware, with
   both regimes reported.
 
+#### Landed 2026-11-16: the seam, the player, and both output profiles
+
+Three pieces, each with an owner that does not know about the others:
+
+* **`crates/uli-playback`** — the codec-agnostic `PcmSource` the player owns, the
+  ULI2 adapter (`UliSource`) over `GbaDecoder` + the `ULA2` track table, the
+  **output stage** (`fold_into`: headphone stereo, or speaker mono by
+  `(L+R)>>1` / `L`-only), and `Player<const RING>` over the shipping
+  `gba_playback::playback::RingFeed`. Host suite: **10 tests**, including every
+  emitted frame pinned **one-for-one against the C reference decoder's hashes**
+  (a stronger statement than an album total), the two folds' non-equivalence, the
+  int8-vs-int16 rounding rule, and the ledger's served/underrun/tail split.
+* **`examples/uli_player`** — the product player: one paced
+  decode→fold→push loop, timer0 = one sample, timer1 = one 512-sample feeder
+  period with its IRQ, DMA1/DMA2 on the FIFOs from a two-slot ping-pong, 16-frame
+  (250 ms) ring, 8-frame prefill, drain before the final screen. Keys: **A**
+  pause/resume, **L/R** previous/next track. The UI is text drawn from the
+  container's strings and the seam's position — title, `n/N`, elapsed/remaining —
+  redrawn about once a second, with the background re-`show`n before every
+  commit (the FLAC ROM's one-shot-present finding).
+* **Measurements below**, both profiles, zero underruns.
+
+**The fold choice: `(L+R)>>1` ships.** `L`-only is implemented because the plan
+required the comparison, and measured because a claim about it should not be
+assumed: it is *cheaper* than the fold-down (−2,114 cycles/frame mean here) and
+that cheapness is exactly its disqualification — it is not a fold-down (hard-panned
+content vanishes; on an M/S frame `L = M + S` is mid+side, not mid). Recorded
+costs are cross-image and therefore indicative, not paired:
+`(L+R)>>1` ≈ **+6.3 k cycles/frame** over the stereo build (≈ 12 cycles/sample for
+512 samples × load-pair/add/shift/store-both), `L`-only ≈ −2.1 k.
+
+**U5 in mGBA: met for both profiles.** Zero underruns, the period audit closes
+(`periods = served + tails`, one tail at the end of the album), and the ring ran
+full (8,192 samples of lead) throughout. Explicitly **not** the hardware half of
+U5, which still wants two units × two runs.
+
+**The full-length album build (2026-11-16).** `make uli-player-cross` embeds E3-b's
+twelve tracks — 43.5 min, 167,222 frames, 33,088,280 B — in one ROM: **33,407,264 B
+of a 33,554,432 B cart, 147,168 B of headroom (0.44%)**. That is the image that
+tests the cartridge's *real* capacity rather than its stated one, and its mGBA
+run is the album-scale player number:
+
+| build | worst (non-boundary) | mean | underruns | periods | boundary frames |
+|---|---|---:|---:|---|---|
+| full-length album, headphone | 245,671 (f11,531) = 93.72% | 205,763 = 78.50% | **0** | 167,232 / 167,232 served | 12, worst 343,152 |
+
+**A gapless track advance costs two decodes in one window**, and the player now
+reports it as its own number instead of folding it into the worst frame: the pull
+that crosses a boundary also decodes the next track's preroll, so it costs ~1.3
+periods (343,152 cycles here, 12 times on this album). The 250 ms ring absorbs it
+— the ledger shows zero underruns and zero tails across 167,232 periods — and a
+gapless join is the design, so the verdict judges the non-boundary worst and
+prints the boundary figure separately. `skipped_samples = 2,769` is the sum of the
+twelve tracks' non-frame-aligned `skip` fields, all accounted.
+
+Three things this first increment does **not** do, stated so they are not read as
+done:
+
+1. **The UI redraw is outside the measured window.** The per-frame cost below is
+   decode+fold+push; the ~1 Hz redraw sits between windows. It did not cause an
+   underrun in either run (the ledger is clean), but its own cost is unmeasured.
+2. **Multi-track seek is implemented and unexercised.** `UliSource` advances and
+   seeks through the `ULA2` table and `UliPlayer` binds L/R to it, but the corpus
+   is a single track, so a track change has never run. A two-track blob (the same
+   master twice, Q15-style) is the missing fixture.
+3. **Pause drains rather than stopping instantly.** Pause stops feeding and lets
+   the 250 ms ring run out; the ledger classifies those periods as tails, not
+   underruns, which is the correct accounting but not an instant silence.
+
 #### Cross-track facts PR D's owner needs (reported by the application track, 2026-11-15)
 
 Not codec rulings and not claims on U4 — three things decided above the seam that change
@@ -1726,6 +1800,64 @@ recorded as what a shipping-shaped image compiles to.
 underrun ledger, no period audit, no UI, and the judgement is by ear. It removes
 the specific doubt PR E could not answer — whether the measured chain actually
 produces clean audio on silicon at 32,768 Hz — and leaves U5 where it was.
+
+#### E3 — the two pre-hardware corpora (landed 2026-11-16)
+
+Both are generated, gitignored assets with C-sourced pins, and both are now
+measured on the same arms as PR E.
+
+**E3-a, the adversarial density set** (`make uli-adversarial-asset`,
+`scripts/gen_adversarial_corpus.py`). Ten seconds of synthetic content chosen to
+invite the **quad-heavy** class the real master does not produce — 4-sample-block
+noise, impulse trains at four rates, hard-clipped harmonic-rich tones — at product
+settings (127,432 B, 641 frames). Its census covers the fixture's gate-frame class
+outright: **max 252 quads** (fixture 248; album 228), 197 escapes, 721 nonzero
+coefficients, 264 Huffman symbols, 64 band symbols. Measured:
+
+| arm | worst (frame) | mean | % of 262,144 |
+|---|---|---:|---:|
+| decode wall (`prod8`) | 213,783 (f64) | 184,896 | 81.55 / 70.54 |
+| gate total | 251,431 (f64) | 216,753 | 95.91 / 82.68 |
+
+**The class is not the worst class.** Quad codes carry four coefficients per
+Huffman symbol, so a quad-dense frame is *cheaper* per frame than the album's
+mixed pair+quad+M/S frames: the adversarial arm's worst is **281 cycles below**
+the album's gate total (251,431 against 251,712) and its mean is 2% lower. That
+is the bound E3-a owed: the corpus that produces the missing class does not beat
+the master's tail, so PR E's worst frame stands.
+
+**E3-b, the sibling project's 12-track album** (`make uli-cross-asset`,
+`scripts/uli_cross_album.py`). The repertoire the reference project measured on:
+twelve CC-licensed tracks fetched from the Internet Archive, trimmed and faded by
+the sibling's own documented recipe, resampled to the codec rate, and encoded at
+**101.277 kbit/s** — **167,222 frames**, the same count as their album, in
+33,088,280 B (the budget is 33,100,000, *not* their 33,292,288, which is 174,716 B
+over a 32 MiB cart beside this instrument). C-sourced pin `51fcf846`, 103
+checkpoints verified. Measured:
+
+| arm | worst (frame) | mean | % of 262,144 |
+|---|---|---:|---:|
+| decode wall (`prod8`) | 220,864 (f11,552) | 185,749 | 84.25 / 70.86 |
+| gate total | **252,490 (f11,552)** | 217,119 | **96.32 / 82.83** |
+
+- **The album-scale corpus has a marginally worse tail than the single master**:
+  96.32% against 96.02% (+782 cycles, +0.30 points), with 3.68 points of margin.
+  That is the first time a corpus has produced a worse frame than PR E's, and it
+  is the reason E3 existed.
+- Frame 11,552 of this bitstream, not the sibling's 27,806: different encode
+  (different budget, different processing), so the indices are not comparable and
+  are not compared.
+- Against the sibling's own C/asm record on the same repertoire (decode 69.43%
+  worst, gate total 73.63%), our decode wall is **1.21x** — the ratio this file has
+  carried since Step 0 — and the distance is the Rust/C gap plus the output stage.
+- The feeder closed the ledger exactly: 167,221 periods, 167,221 full takes, **0
+  starved**, ring drained.
+
+**What E3 does not settle.** The pins are our encoder's, not the sibling's
+bitstream: reproducing *their* blob would need their exact budget and processing,
+and it is 174,716 B too large for this cart anyway. So E3-b is repertoire-and-scale
+equivalence, not bitstream equivalence — which is what the hardware claim needs
+(the tail over a real 43-minute album), and it is recorded as that.
 
 #### What PR E leaves open (E3, gated)
 
@@ -2319,6 +2451,118 @@ Frame-101 attribution of the 523,267 (by difference, one image): kernels
 328,502 (63%), `dec_chan` × 2 ≈175,000 (33%), M/S + wrapper ≈20,000 (4%).
 Kernels against the C record's 134,600 are 2.44×; entropy per
 coefficient against the C bench's entropy+dequant (~41 c/coef) is ~6.6×.
+
+### Hardware, GBA SP (2026-11-16) — the three player ROMs, and a late-re-arm finding
+
+**Every run below passed**, and the two runs of each ROM are **identical to the
+cycle** — the determinism the FLAC ledger demands as a witness, now on this
+target. The GBA 001 was unavailable (hardware fault), so this is one unit.
+
+| ROM | worst (frame) | mean | margin at worst | periods | underruns | tails | skips |
+|---|---|---:|---:|---|---:|---:|---:|
+| `uli-player` (headphone) | 247,789 (f13,905) = **94.52%** | 213,362 = 81.39% | 5.48 pts | 16,552 | 0 | 0 | 0 |
+| `uli-player-speaker` | 251,365 (f16,196) = **95.89%** | 216,547 = 82.61% | 4.11 pts | 16,552 | 0 | 0 | 0 |
+| `uli-player-two-track` | 247,876 (f17,158) = **94.56%** | 212,133 = 80.92% | 5.44 pts | 20,546 | 0 | 1 | 1 |
+
+- Against mGBA on the same images: **+1.11 / +1.31 points** on the headphone build
+  (247,789 vs 244,879; 213,362 vs 209,937) — the silicon penalty is ~1 point here,
+  far smaller than the LPC row the FLAC ledger recorded, and the worst frame still
+  leaves 4–5.5 points of the period.
+- The two-track run exercises a real track change on silicon: `tails 1 skips 1`,
+  zero underruns — the skip's bounded gap accounted as a tail, as designed.
+
+**The finding: audible drops the ledger cannot see.** The listening report is
+"brief drops, frequently" during the runs, while every ledger field says clean.
+That is a **late re-arm**, and it is now measured: at each feeder entry the ROM
+reads the period timer and counts entries that arrive more than the DMA's grace
+(the FIFO's 16 samples) past the overflow.
+
+| image | redraw | `late` entries | `max_late` | underruns |
+|---|---|---:|---:|---:|
+| `uli-player` (1 Hz live text) | 268 redraws | **104** | 34 samples | 0 |
+| `uli-player-noui` (`--features ui-off`) | none | **1** | 17 samples | 0 |
+
+**The 1 Hz text redraw causes 104 of the 105 late entries.** A late re-arm is
+audible (the DMA replays the previous slot and splices mid-waveform) but it is not
+a starved period, so the underrun ledger is blind to it by construction — the
+player's PASS was true and the listening report is also true. The measured cost of
+the redraw is ~410–470 k cycles (1.6–1.8 periods), inside agb's display path, and
+that is longer than the 488 µs grace.
+
+Consequence for the product, and it is the plan's own rule ("the UI is the slack;
+audio has priority"): **the audio-critical default is the end-only screen**
+(`ui-off`), and a live UI has to be built so it does not block the feeder — a
+digit-tile clock rather than a full background rebuild per second, or rendering
+sliced across periods. `late` is the gate for that work, and it is on the final
+screen next to the ledger.
+
+### PR D, album-scale (2026-11-16, mGBA, WAITCNT 4/2) — the full-length player build
+
+`make uli-player-cross`: E3-b's twelve tracks in one player ROM, 33,407,264 B of a
+33,554,432 B cart (**147,168 B headroom**), headphone profile, ring 8,192 samples.
+
+| quantity | value |
+|---|---|
+| frames played | 167,224 (album frames + per-track padding frames) |
+| worst non-boundary frame | **245,671 (f11,531) = 93.72%** |
+| mean | **205,763 = 78.50%** |
+| track-change frames | **12, worst 343,152** (each also decodes the next track's preroll) |
+| feeder | 167,232 periods, 167,232 served, **0 underruns, 0 tails** |
+| ring high water | 8,192 samples (full) |
+| `skipped_samples` | 2,769 (the twelve tracks' `skip` fields, all accounted) |
+| UI redraws | 2,622, mean 377,163 cycles, worst 524,392 (outside the frame window) |
+
+- The boundary cost is *by design* and is what the ring is for: 343,152 cycles is
+  1.31 periods, and the queue never ran dry in 167,232 periods.
+- Image-specific: the instrument's gate arm on the same corpus reads 96.32%, this
+  player image reads 93.72% for its worst non-boundary frame. Different images,
+  so they are not compared; the player number is the product one.
+
+### E3 (2026-11-16, mGBA, WAITCNT 4/2) — the two pre-hardware corpora
+
+| corpus | frames | bytes | decode worst / mean | gate worst / mean | feeder |
+|---|---:|---:|---|---|---|
+| E3-a adversarial density | 641 | 127,432 | 213,783 (81.55%) / 184,896 (70.54%) | 251,431 (95.91%) / 216,753 (82.68%) | 640/640, 0 starved |
+| E3-b sibling 12-track album | **167,222** | 33,088,280 | 220,864 (84.25%) / 185,749 (70.86%) | **252,490 (96.32%)** / 217,119 (82.83%) | 167,221/167,221, 0 starved |
+| (PR E master, for comparison) | 16,553 | 3,293,048 | 220,062 (83.94%) / 189,780 (72.40%) | 251,712 (96.02%) / 221,245 (84.40%) | 16,552/16,552, 0 starved |
+
+- **The album-scale repertoire's tail is 0.30 points worse** than the single
+  master's (252,490 against 251,712): the first corpus to beat PR E's worst frame.
+- **The quad-heavy class is cheaper, not dearer** (251,431): quads carry four
+  coefficients per symbol, so the class the master lacks is not the class that
+  would have hurt.
+- Pins: E3-a `88738a70` (63 checkpoints), E3-b `51fcf846` (103 checkpoints), both
+  C-sourced from the C decoder's own `hash_of_frame_hashes`; both albums decode
+  with `xover=0 hfnz=0` and are bit-exact against the C reference.
+- E3-b's encode took 14.4 min at `--threads 8`; its fetch+prep 1.3 min (649 MB of
+  CC-licensed FLAC, cached outside the tree), and the measurement arm 19 min.
+- ROM sizes: the E3-b gate image is 33,544,188 B of a 33,554,432 B cart — **10,244
+  B of headroom**, which is what forces the smaller budget.
+
+### PR D (2026-11-16, mGBA, WAITCNT 4/2) — the player, both output profiles
+
+Corpus: the same generated album (`3,293,048 B`, 16,553 frames, 32,768 Hz), the
+same blob PR E measured. Ring 8,192 samples (16 frames), prefill 8 frames, one
+feeder period = one frame (64/s).
+
+| build | worst (frame) | mean | % of 262,144 | underruns | periods (served / tails) | max ring |
+|---|---|---:|---:|---:|---|---:|
+| headphone (stereo as decoded) | 244,879 (f16,196) | 209,937 | 93.42 / 80.08 | **0** | 16,553 (16,552 / 1) | 8,192 |
+| speaker, `(L+R)>>1` | 250,473 (f3,206) | 216,254 | 95.55 / 82.49 | **0** | 16,553 (16,552 / 1) | 8,192 |
+| speaker, `L`-only | 242,755 (f16,196) | 207,823 | 92.60 / 79.28 | **0** | 16,553 (16,552 / 1) | 8,192 |
+
+- Frames played 16,544 = 16,553 − 8 prefill − 1 preroll; `frames_fed` = 16,552.
+- The window is decode → fold → push with IRQs live; the ~1 Hz UI redraw is
+  outside it. The three builds are **different images**, so the fold deltas are
+  indicative: `(L+R)>>1` ≈ +6.3 k, `L`-only ≈ −2.1 k cycles/frame against the
+  stereo build. Both are consistent with a per-sample cost of a few cycles
+  (512 samples per frame).
+- The speaker profiles are **not** a stereo-shortcut: both decode two channels
+  (the decoder is untouched) and fold after it, which is why their worst frames
+  sit where a stereo frame does.
+- Instrument note: the 32-bit counter wraps every 256 s and this album is 258 s,
+  so the player zeroes it every 1,024 frames; a window above 2²⁴ is counted as a
+  suspect and fails the verdict rather than entering the mean.
 
 ### PR E (2026-11-15, mGBA, WAITCNT 4/2) — album corpus, tail and gate total
 

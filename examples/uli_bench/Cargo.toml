@@ -46,6 +46,17 @@ gate-hash = ["gate"]
 # (`make uli-play` builds it on the album corpus). Numbers come from `uli-gate`.
 play-only = ["gate", "album-corpus"]
 
+# E3-a's corpus: the adversarial density set (`make uli-adversarial-asset`), which
+# carries the quad-heavy class the real master does not produce. Same shape as
+# `album-corpus`: blob and pin are generated, gitignored build output.
+adversarial-corpus = []
+
+# E3-b's corpus: the sibling project's 12-track, 43.5-minute repertoire
+# (`make uli-cross-asset`: CC-licensed downloads + the sibling's trim recipe).
+# 167,222 frames — the same length as their album — so it is the album-scale
+# witness this tree's single master cannot be.
+cross-corpus = []
+
 # Per-frame dump for attribution work: one CSV-ish line per frame with the
 # measured window and the decoder's operation counts, fitted host-side. Off by
 # default so the gate's log stays the record. Implies `verify`, because the dump

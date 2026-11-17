@@ -1,0 +1,68 @@
+[package]
+name = "uli-player"
+version = "0.1.0"
+edition = "2024"
+
+# ULI2's product player (PLAN-OF-RECORD.md, PR D): one paced decode-and-play loop
+# over the `uli-playback` seam, the 32,768 Hz timer/DMA/FIFO chain, a live text UI
+# read from the ULA2 track table, and the underrun/period ledger U5 is gated on.
+#
+#   make uli-player-rom        build + fix the ROM
+#   make uli-player            build, run in headless mGBA, gate on the verdict
+#
+# The corpus is the generated album asset (`make uli-album-asset`), the same blob
+# the PR E instrument embeds; it is gitignored build output, so this crate's
+# `include_bytes!` resolves only after that target has run.
+#
+# Standalone workspace, cargo config INHERITED from the repo root — do NOT add a
+# local .cargo/config.toml: cargo concatenates target.<triple>.rustflags across
+# config layers, and a local re-declaration links `-Tgba.ld` twice.
+
+[dependencies]
+uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }
+uli-lite-gba = { path = "../../crates/uli-lite-gba" }
+uli-playback = { path = "../../crates/uli-playback" }
+gba-playback = { path = "../../crates/gba-playback" }
+
+[target.'cfg(target_arch = "arm")'.dependencies]
+agb = "0.25.0"
+
+[features]
+# The speaker output stage: decode full stereo, fold to mono after the decoder
+# (`FoldHow::Average`). Off by default — the headphone build ships stereo.
+speaker = []
+
+# Which fold the speaker build uses. `(L+R)/2` is the default because it is a
+# real fold-down; `left-only` is cheaper and is NOT one (hard-panned content
+# vanishes), so it exists to be measured against, not to ship unexamined.
+fold-left = []
+
+# Witness features: a two-track blob (`make uli-two-track-asset`) and a
+# deterministic skip partway through track 1, so the seek/truncate/refill path
+# runs on target without an input script. Not part of the shipping shape.
+two-track = []
+autoskip = []
+
+# The full-length album corpus (E3-b's twelve tracks, 43.5 minutes, 167,222
+# frames) instead of the one master. Built so a 33 MB album can be run once on
+# real hardware: it is the only image that exercises the cartridge's actual
+# capacity rather than its stated one.
+cross-corpus = []
+
+# No periodic redraw: the end-only screen. Built so a hardware run can attribute
+# the perceived audio drops either to the UI's redraw window or to the chain.
+ui-off = []
+
+[[bin]]
+name = "uli-player"
+path = "src/main.rs"
+
+[workspace]
+
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true

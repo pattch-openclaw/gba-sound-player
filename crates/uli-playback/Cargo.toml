@@ -1,0 +1,44 @@
+[package]
+name = "uli-playback"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "ULI2's playback seam: a codec-agnostic PcmSource, the ULI2 source over the product decoder, the speaker fold-down output stage, and the ring/ledger a timer-IRQ feeder drains. Platform-free no_std."
+license = "MIT"
+
+# STATE (2026-11-16, PR D): the seam the ULI2 product path plays through.
+#
+# `PcmSource` is deliberately codec-agnostic: the player ROM owns a source and
+# knows nothing else about ULI2 — no bitstream, no tables, no container offsets.
+# `source::UliSource` is the ULI2 adapter and the only place that touches
+# `uli-lite`/`uli-lite-gba`.
+#
+# The output stage lives here too, because the plan puts the speaker fold-down
+# *after* the decoder and outside it: the decoder always synthesises full
+# stereo, and `fold::fold_into` is what a speaker-profile build changes.
+#
+# Standalone workspace, cargo config INHERITED from the repo root — do NOT add a
+# local .cargo/config.toml: cargo concatenates target.<triple>.rustflags across
+# config layers, and a local re-declaration links `-Tgba.ld` twice.
+#
+#   make uli-playback-test    the host suite (seam transparency, fold-down,
+#                             ring ledger)
+
+[dependencies]
+# The format, the container and the reference decoder (host tests, and the
+# generic `Decoder<K>` impl the seam is written against). `kernels` exposes the
+# `Kernels` trait that impl is bound on.
+uli-lite = { path = "../uli-lite", features = ["kernels"] }
+# The product decoder the GBA ROM links: ARM-mode hot path, IWRAM buffers.
+uli-lite-gba = { path = "../uli-lite-gba" }
+# The ring, its accounting and the FIFO conversion rule: the same type the FLAC
+# product path and the album player use, linked rather than re-invented.
+gba-playback = { path = "../gba-playback" }
+
+[workspace]
+
+# Standalone build only; a path dependency's profile is ignored by its consumers.
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true
