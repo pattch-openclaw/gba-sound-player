@@ -1160,7 +1160,7 @@ mod rom {
     /// minutes-long pause would only cost the gate wall-clock, since the audio clock is stopped for the
     /// whole frozen span.
     #[cfg(feature = "input-replay")]
-    const REPLAY_SCRIPT: [(u32, u16); 28] = [
+    const GATE_REPLAY_SCRIPT: [(u32, u16); 28] = [
         (8, keys::BTN_A),
         (14, 0),
         (60, keys::BTN_START),
@@ -1190,6 +1190,152 @@ mod rom {
         (2510, keys::BTN_LEFT),
         (2516, 0),
     ];
+
+    // ------------------------------------------------------- R13's diagnostic scenarios
+
+    /// R13's scenarios, in the same `(frame, mask)` units as [`GATE_REPLAY_SCRIPT`]: three press
+    /// histories from the 2026-11-17 hardware session, so the emulator can be asked which of them a
+    /// headless run refuses. Selected at build time by `replay-script-a|b|c`; with none of those
+    /// features set [`REPLAY_SCRIPT`] is the gate's script, so `make album-test` is unchanged.
+    ///
+    /// These are **diagnostic arms, not gates**: they exist to classify R13 (a transport defect, a
+    /// saturating counter, or a bound shaped by the gate's own script), and no bound was moved to
+    /// suit them.
+    ///
+    /// To run one (the log is the verdict, and exit 124 is the pass path — a verdict loops forever):
+    ///
+    /// ```text
+    /// cd examples/album_player
+    /// cargo build --release --target thumbv4t-none-eabi --bin album-play \
+    ///   --features "input-replay deep-audit replay-script-c"
+    /// agb-gbafix target/thumbv4t-none-eabi/release/album-play -o /tmp/r13-c.gba
+    /// timeout -k 5 240 mgba-test-runner /tmp/r13-c.gba | grep '^\[album-rom\]'
+    /// ```
+    ///
+    /// **A — no presses at all.** The human's first leg: an unpressed playthrough of tracks 1→2→3
+    /// ending `PASSED`. The fixture starts on track 1 (`START_TRACK`), plays it out, and the album
+    /// auto-advances to its end.
+    #[cfg(all(feature = "input-replay", feature = "replay-script-a"))]
+    const REPLAY_SCRIPT_A: &[(u32, u16)] = &[];
+
+    /// **B — Right, Right, then play the third track out.** The human's second leg. Two presses a
+    /// few hundred ms apart (0.6 s here), each strictly after the previous transition settled, then
+    /// nothing: track 3 plays to the album's end.
+    #[cfg(all(feature = "input-replay", feature = "replay-script-b"))]
+    const REPLAY_SCRIPT_B: &[(u32, u16)] = &[
+        (150, keys::BTN_RIGHT),
+        (156, 0),
+        (288, keys::BTN_RIGHT),
+        (294, 0),
+    ];
+
+    /// **C — interactive-heavy at human cadence.** The leg that ends in `FAILED` on the cartridge,
+    /// and the one that reproduces it here. Every press is 5 frames (84 ms) held; the gaps are in
+    /// video frames (~59.7/s):
+    ///
+    /// | frames | input | why it is here |
+    /// |---|---|---|
+    /// | 300–805 | **three** Start pause/resume pairs, 100 frames (1.67 s) apart | the report's "repeated Start pause/resume", inside track 1's 30 s visit so a resume always has a ring head to prime |
+    /// | 900–1045 | Right/Left alternating every 20 frames (335 ms) | the report's "repeated Left/Right": one press per period triplet, so some land inside the previous transition |
+    /// | 1100–1870 | **18** Rights every 45 frames (753 ms) | "more than three Right skips" — past the four the report names and past [`SKIP_LOG`]'s 16 |
+    /// | 1870– | *(no more input)* | the settling: track 3, which the 18 Rights wrap onto from track 1, plays out to the album's end |
+    ///
+    /// The cadence is the whole point of the scenario: the gate's script spaces every action a track
+    /// apart (~1000 frames), so it never has two transitions in flight and never approaches a fixed
+    /// cap. This one does both, at the rate a human reaches them.
+    #[cfg(all(feature = "input-replay", feature = "replay-script-c"))]
+    const REPLAY_SCRIPT_C: &[(u32, u16)] = &[
+        (300, keys::BTN_START),
+        (305, 0),
+        (400, keys::BTN_START),
+        (405, 0),
+        (500, keys::BTN_START),
+        (505, 0),
+        (600, keys::BTN_START),
+        (605, 0),
+        (700, keys::BTN_START),
+        (705, 0),
+        (800, keys::BTN_START),
+        (805, 0),
+        (900, keys::BTN_RIGHT),
+        (905, 0),
+        (920, keys::BTN_LEFT),
+        (925, 0),
+        (940, keys::BTN_RIGHT),
+        (945, 0),
+        (960, keys::BTN_LEFT),
+        (965, 0),
+        (980, keys::BTN_RIGHT),
+        (985, 0),
+        (1000, keys::BTN_LEFT),
+        (1005, 0),
+        (1020, keys::BTN_RIGHT),
+        (1025, 0),
+        (1040, keys::BTN_LEFT),
+        (1045, 0),
+        (1100, keys::BTN_RIGHT),
+        (1105, 0),
+        (1145, keys::BTN_RIGHT),
+        (1150, 0),
+        (1190, keys::BTN_RIGHT),
+        (1195, 0),
+        (1235, keys::BTN_RIGHT),
+        (1240, 0),
+        (1280, keys::BTN_RIGHT),
+        (1285, 0),
+        (1325, keys::BTN_RIGHT),
+        (1330, 0),
+        (1370, keys::BTN_RIGHT),
+        (1375, 0),
+        (1415, keys::BTN_RIGHT),
+        (1420, 0),
+        (1460, keys::BTN_RIGHT),
+        (1465, 0),
+        (1505, keys::BTN_RIGHT),
+        (1510, 0),
+        (1550, keys::BTN_RIGHT),
+        (1555, 0),
+        (1595, keys::BTN_RIGHT),
+        (1600, 0),
+        (1640, keys::BTN_RIGHT),
+        (1645, 0),
+        (1685, keys::BTN_RIGHT),
+        (1690, 0),
+        (1730, keys::BTN_RIGHT),
+        (1735, 0),
+        (1775, keys::BTN_RIGHT),
+        (1780, 0),
+        (1820, keys::BTN_RIGHT),
+        (1825, 0),
+        (1865, keys::BTN_RIGHT),
+        (1870, 0),
+    ];
+
+    // The selection itself: one compiled-in script per build, chosen by feature. A gate build names
+    // none of the three, so it gets the script `make album-test` asserts on.
+    #[cfg(all(feature = "input-replay", feature = "replay-script-a"))]
+    const REPLAY_SCRIPT: &[(u32, u16)] = REPLAY_SCRIPT_A;
+    #[cfg(all(feature = "input-replay", feature = "replay-script-b"))]
+    const REPLAY_SCRIPT: &[(u32, u16)] = REPLAY_SCRIPT_B;
+    #[cfg(all(feature = "input-replay", feature = "replay-script-c"))]
+    const REPLAY_SCRIPT: &[(u32, u16)] = REPLAY_SCRIPT_C;
+    #[cfg(all(
+        feature = "input-replay",
+        not(any(
+            feature = "replay-script-a",
+            feature = "replay-script-b",
+            feature = "replay-script-c"
+        ))
+    ))]
+    const REPLAY_SCRIPT: &[(u32, u16)] = &GATE_REPLAY_SCRIPT;
+
+    // One script per build: two scenario features would silently pick one of them by `cfg` order.
+    #[cfg(all(feature = "replay-script-a", feature = "replay-script-b"))]
+    compile_error!("replay-script-a and replay-script-b are two different key scripts; pick one");
+    #[cfg(all(feature = "replay-script-b", feature = "replay-script-c"))]
+    compile_error!("replay-script-b and replay-script-c are two different key scripts; pick one");
+    #[cfg(all(feature = "replay-script-a", feature = "replay-script-c"))]
+    compile_error!("replay-script-a and replay-script-c are two different key scripts; pick one");
 
     /// The track a direction command moves to, §5.3's wrap at the album's ends.
     ///
@@ -3000,7 +3146,7 @@ mod rom {
         #[cfg(not(feature = "input-replay"))]
         let input_source = keys::Hardware::new();
         #[cfg(feature = "input-replay")]
-        let input_source = keys::Replay::new(&REPLAY_SCRIPT);
+        let input_source = keys::Replay::new(REPLAY_SCRIPT);
         // Which source fed this run, always, and the honesty line §10.5 requires: the shipped
         // artifact reads the keypad, and a headless run therefore cannot have observed a press. The
         // REPLAY arm is the gate's only witness of the seam and says that it is a script.
