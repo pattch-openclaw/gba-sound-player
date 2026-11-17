@@ -1486,6 +1486,14 @@ rewritten to the accurate constraint, and §10.1 gets its first real linker-map 
 teardown, which is the shape §4.4's skip path wants in PR-3b. It witnessed nothing but its own drain
 count, so PR-3b derives that sequence properly, with tests, rather than inheriting a rehearsal.
 
+**PR-3a's first two hardware legs were witnessed on 2026-11-16, by the caller, on a GBA** — see AP-7a.
+The second one is the one that closed this loop: the same person who could not see fix 2's
+violet→blue lamp confirmed "audio plays correctly, then the screen goes blue and reads `PASSED`". A
+verdict scheme is not validated by its luminance arithmetic; it is validated by the verifier reading
+it. The ROM hashes those runs used are recorded against AP-7a, and a later rebuild on a moved `main`
+(ULI2 PR-E merged, PR #148 reverted) reproduced **both images byte-identical**, which is the strongest
+reproducibility evidence this application has produced short of AP-5's full two-run gate.
+
 Phase 0 exists because four things in this plan are genuinely new to this tree
 and each has a way to be cheaply wrong: objects/sprites (nothing shipped draws
 one), multiple simultaneously-shown backgrounds (`text.rs` shows one, one-shot),
@@ -1568,6 +1576,7 @@ the rule that a gate touching a non-default configuration runs as its own target
 | **AP-5** | `album.toml` + WAVs → ROM end to end; two runs → identical bytes; every refusal in §9 fires with its message — **the Phase 3 set; the four §9.0 refusals that land in Phase 1 are witnessed by AP-1** | `make album-bake-check` |
 | **AP-6** | Each viz, alone and paired with art, holds `underflows = 0`, stays inside its §10.2 line, and leaves the audio cost breakdown unchanged vs the `none` control arm | `make album-viz-test` + on-target timing, `none` as control |
 | **AP-7** | Hardware: GBA 001 + GBA SP, two runs each, `none`/`bar`/`skyline`/`game`, with the map-file memory report attached and `.iwram` growth flagged; **and the run's verdict must be legible without colour vision (§5.6)** — a pass a verifier cannot perceive is not a witnessed pass | two units, a notebook, and a `flac-docs/history.md`-style record. **Partial witness already held (2026-11-16, PR-3a):** one unit, `album-player.gba`, track 1 end to end — audio played clean, no stutter and no non-encoder artifacts, reported by the caller from hardware. That is the first time this application's path has been heard; it is not AP-7, which needs both units, the viz/game arms and the memory report |
+| **AP-7a** (informal, but name it) | **Hardware legs already witnessed by a human, one unit.** (1) PR-3a, `album-player.gba` sha256 `62271aa2…33e1c5` — 30 s of track 1, audio clean, no stutter, no non-encoder artifacts. (2) PR-3a fix 4, `album-player-fast.gba` sha256 `3fc1f184…310a25` — audio correct, **then a blue screen reading `PASSED`**: the §5.6 scheme witnessed on hardware by the colourblind verifier it was revised for. Both are one unit, one track, no keys, no UI — a listen and a legible verdict, not a gate closure | the caller's notebook, 2026-11-16. Recorded here rather than only in a PR body, because "did a human hear it / read it" is the one claim this repository's emulator cannot make for itself (§10.5, R3) |
 | **AP-8** | Reach: the web config produces an `album.toml` the CLI bakes unchanged; the game under the watermark rule never admits an underrun | `make album-web-check` (headless, config diff) + AP-6's arms with `game = on` |
 | **AP-9** | **The seam holds:** the same screen/layout suite passes against `backend-flac`, `backend-uli2` and `stub`; no module outside `src/backend/` names a codec crate (a build-time fact, not a code-review hope). **Phase 1 reads this as: all three arms compile, and the suite *runs* on `stub` + `flac`; three-way runtime parity is witnessed in Phase 5, because the lossy backend has no real-time decode (U4) and no in-tree encoder (R7) yet — the arms that cannot have assets cannot be blamed for it** | three `cargo` arms + a dependency check on the app crate's module graph |
 
