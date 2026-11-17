@@ -209,12 +209,17 @@ mod rom {
         geometry::CHUNK_SAMPLES as u16,
     );
 
-    /// The gate track: **track 1**, "Bioluminescent Clip 1", the 30 s clip.
+    /// **The track this image starts on: 1, and that is a fixture choice, not the album's.**
     ///
-    /// Track 0 is the 4.3-minute full master (`assets::TRACKS[0]`: 2,069 frames / 4,237,112
-    /// samples). Playing that would make the headless gate a 4.3-minute run for no extra proof —
-    /// same code, same feeder, four times the clock. PR-3b's traversal walks past both.
-    const PLAY_TRACK: usize = 1;
+    /// The album starts at track 0, and §1's start-to-finish playthrough begins there; this image
+    /// says its own start out loud in the boot log so the number cannot be read as a property of the
+    /// album. The reason for 1 is the gate's clock: track 0 is the 4.3-minute full master
+    /// (`assets::TRACKS[0]`: 2,069 frames / 4,237,112 samples, 4:18), 8.6× the clip's 491,520
+    /// samples, so a run starting at 0 plays 9,457,264 album samples (~9.6 min of audio) against
+    /// this one's 5,220,152 (~5.3 min) for no extra proof — same code, same feeder, same traversal.
+    /// A product build starts at 0; a gate build starts at 1. There is deliberately **no** feature or
+    /// make knob for it: each artifact is one image, and the log names which start it used.
+    const START_TRACK: usize = 1;
 
     /// The audited whole-track fold's caps, in frames: **512** for one track, **1,024** for a whole
     /// proof pass.
@@ -312,6 +317,17 @@ mod rom {
         /// again, which is why the hand-off ledger below adds the two.
         handler_entries: u32,
         tail_periods: u32,
+        /// Samples the most recent chunk did not carry: the zero padding of a classified tail, and
+        /// `0` for a full chunk. This is the first term of a track boundary's audible gap — the
+        /// silence at the end of the last period that carried the outgoing track's audio.
+        ///
+        /// A `Starved` period leaves it alone on purpose: after a visit drains, the feeder serves
+        /// starved periods before the hand-off, and the padding they follow is still the tail's.
+        tail_padding: u32,
+        /// `starved_periods` when the main loop observed a visit's drain and posted the advance.
+        /// The delta to the hand-off is that boundary's starved count: the fade, the loop's
+        /// detection, and nothing of the next track.
+        advance_starved_at: u32,
         /// Periods the feeder entered with no ring data at all. One of these is the silence
         /// between a track's last sample and its hand-off (PR-3b-iii-A): `finished` keeps it from
         /// being an underflow, but it is still a hand-off that carried nothing, so the hand-off
@@ -388,6 +404,8 @@ mod rom {
         underflows: 0,
         handler_entries: 0,
         tail_periods: 0,
+        tail_padding: 0,
+        advance_starved_at: 0,
         starved_periods: 0,
         primes: 0,
         periods_before: 0,
@@ -1233,9 +1251,15 @@ mod rom {
         // `RingFeed`'s `consumed` by construction rather than by a parallel computation. PR-3b-i
         // reads it and prints it; PR-3b-ii drives the bar and the mm:ss readout from it.
         let committed = match verdict {
-            Chunk::Full => CHUNK as u32,
+            Chunk::Full => {
+                stats.tail_padding = 0;
+                CHUNK as u32
+            }
             Chunk::Tail { real } => {
                 stats.tail_periods += 1;
+                // The boundary gap's sub-period term: what this period did not carry, and the DMA
+                // therefore rendered as silence after the visit's last real sample.
+                stats.tail_padding = CHUNK as u32 - real as u32;
                 real as u32
             }
             Chunk::Starved => {
@@ -1311,6 +1335,12 @@ mod rom {
         /// and the record being opened cannot be lost from the delta.
         underflows: u32,
         underflows_at: u32,
+        /// The starved periods now, and when the advancing visit's drain was observed: the delta is
+        /// the track boundary's own silence, in whole periods (PR-3b-iii-B). A press adds a
+        /// press-to-hand-off wait; a drain has none, so this delta is the whole of the machinery's
+        /// share of the gap.
+        starved: u32,
+        starved_at: u32,
     }
 
     /// What the wire watch has seen so far (D4's "measured at AP-1, not asserted").
@@ -1324,6 +1354,8 @@ mod rom {
                 content_at: stats.watch_content_at,
                 underflows: stats.underflows,
                 underflows_at: stats.watch_underflows_at,
+                starved: stats.starved_periods,
+                starved_at: stats.advance_starved_at,
             }
         })
     }
@@ -1360,6 +1392,11 @@ mod rom {
         /// The session clock at the instant of the hand-off, before any cover chunk could be
         /// committed. The new visit's paint base is this plus the cover (see the caller).
         committed: u32,
+        /// Samples of silence in the outgoing visit's last chunk: the zero padding of its classified
+        /// tail, read inside the hand-off's section so a cover chunk taken by the feeder afterwards
+        /// cannot clear it. Zero when the visit ended on a full chunk. This is the sub-period term of
+        /// a track boundary's gap (PR-3b-iii-B).
+        tail_padding: u32,
     }
 
     /// §4.4's steps 2, 4 (its first chunk) and 5's arming — in **one** critical section.
@@ -1405,25 +1442,34 @@ mod rom {
             let dropped = if truncate {
                 let dropped = feed.truncate() as u32;
                 stats.dropped_samples = stats.dropped_samples.saturating_add(dropped);
-                stats.watch_armed = true;
-                stats.watch_at = stats.handler_entries;
-                stats.watch_silent_at = 0;
-                stats.watch_new_at = 0;
-                stats.watch_content_at = 0;
-                stats.watch_underflows_at = stats.underflows;
                 dropped
             } else {
-                // No stale audio, so no watch: it exists to resolve a press's skip row, and a
-                // track end has no press to measure. `old == 0` is structural here — the ring was
-                // drained before the hand-off — and the host gate checks it against the wire.
+                // Nothing stale to drop: the ring was drained before the hand-off, so `dropped` is
+                // zero by construction rather than by measurement.
                 0
             };
+            // The wire watch is armed for **both** kinds of hand-off (PR-3b-iii-B). A press's row
+            // uses it to say no stale audio followed the truncate; a track end's uses the same latch
+            // to say the same of a drained ring, and to put a measured number on the boundary's
+            // silence. A press adds its own press-to-hand-off wait; a drain has none, because the
+            // trigger is the drain itself.
+            stats.watch_armed = true;
+            stats.watch_at = stats.handler_entries;
+            stats.watch_silent_at = 0;
+            stats.watch_new_at = 0;
+            stats.watch_content_at = 0;
+            stats.watch_underflows_at = stats.underflows;
+            let tail_padding = stats.tail_padding;
             stats.finished = false;
             let committed = position::committed_samples();
             feed.push_bytes(&ZEROS, &ZEROS)
                 .map_err(|_| "the cover's first chunk did not fit")?;
             stats.cover_samples = stats.cover_samples.saturating_add(CHUNK as u32);
-            Ok(HandOff { dropped, committed })
+            Ok(HandOff {
+                dropped,
+                committed,
+                tail_padding,
+            })
         })
     }
 
@@ -1776,6 +1822,210 @@ mod rom {
         }
     }
 
+    /// How many track-end advances the run keeps for its end-of-run log: [`VISIT_LOG`]'s visits can
+    /// hold at most one fewer, and a fixture with more advances than this is not a gate.
+    const ADVANCE_LOG: usize = 16;
+
+    /// One track-end auto-advance, in feeder periods and off the same wire watch as a skip's row, so
+    /// the two can be read side by side (PR-3b-iii-B).
+    ///
+    /// Two things a skip's row has are missing here, and both are properties: there is no press, so
+    /// no `press_to_handoff` term (the trigger is the drain); and there is no truncate, so `dropped`
+    /// is zero by construction rather than measured. What the row adds is the **gap**: a drained
+    /// ring means the silence a listener hears at the boundary is countable from three terms — the
+    /// outgoing visit's tail padding, the periods the feeder was starved between the drain and the
+    /// hand-off, and the cover the hand-off pushes. Q4 rules that the lossless path *has* inter-track
+    /// gaps and says so; this is the number it says it with.
+    #[derive(Clone, Copy)]
+    struct AdvanceRecord {
+        from_track: usize,
+        to_track: usize,
+        /// The mark: the hand-off's period.
+        at: u32,
+        silent_at: u32,
+        new_at: u32,
+        content_at: u32,
+        underflows_at: u32,
+        underflows: u32,
+        /// Starved periods from the drain to the hand-off.
+        starved: u32,
+        /// Samples of zero padding in the outgoing visit's last chunk.
+        tail_padding: u32,
+        open: bool,
+    }
+
+    impl AdvanceRecord {
+        /// Stale-track periods heard after the hand-off, on the skip row's convention: the raw
+        /// reading minus the watch's floor. A drained visit left nothing queued, so this can only be
+        /// zero — a non-zero reading would be a hand-off that replayed the old track.
+        fn old(&self) -> u32 {
+            self.silent_at.wrapping_sub(self.at).saturating_sub(1)
+        }
+
+        fn underflow_delta(&self) -> u32 {
+            self.underflows.saturating_sub(self.underflows_at)
+        }
+
+        /// Periods from the hand-off to the first chunk handed over after the cover countdown: the
+        /// machinery's transition, `SKIP_PRIME_CHUNKS + 1` and nothing else.
+        fn content_at(&self) -> u32 {
+            self.content_at.wrapping_sub(self.at)
+        }
+
+        /// Samples of silence between the outgoing visit's last real sample and the incoming
+        /// track's first chunk: tail padding + starved periods + the cover.
+        ///
+        /// The cover is [`SKIP_PRIME_CHUNKS`] periods here, not + 1: the mark's own period is
+        /// already counted in `starved` (the hand-off happens inside it, after the feeder served a
+        /// starved chunk), which is why a skip's `content_at` reads 5 while four cover chunks are
+        /// pushed. The new track's own head, if it opens on digital silence, is not in this figure:
+        /// it belongs to the track, exactly as a skip's `head_silence` does.
+        fn gap_samples(&self) -> u32 {
+            self.tail_padding.saturating_add(
+                self.starved
+                    .saturating_add(SKIP_PRIME_CHUNKS)
+                    .saturating_mul(CHUNK as u32),
+            )
+        }
+
+        /// The boundary's claim: the new track's first chunk at the machinery's
+        /// `SKIP_PRIME_CHUNKS + 1` periods, no stale audio after the mark, and no underflow booked.
+        /// The gap is measured and printed but **not gated** — §4.4 and Q4 accept an inter-track gap
+        /// in v1, and closing it is Phase 5's cross-track ring bridge.
+        fn ok(&self) -> bool {
+            !self.open
+                && self.new_at != 0
+                && self.content_at() == SKIP_PRIME_CHUNKS + 1
+                && self.old() == 0
+                && self.underflow_delta() == 0
+        }
+    }
+
+    /// The run's advances: the verdict's term, and the rows the log prints.
+    struct Advances {
+        records: [AdvanceRecord; ADVANCE_LOG],
+        recorded: usize,
+        /// Advances past the log: gated like [`Visits::overflow`].
+        overflow: u32,
+    }
+
+    impl Advances {
+        fn new() -> Self {
+            Self {
+                records: core::array::from_fn(|_| AdvanceRecord {
+                    from_track: 0,
+                    to_track: 0,
+                    at: 0,
+                    silent_at: 0,
+                    new_at: 0,
+                    content_at: 0,
+                    underflows_at: 0,
+                    underflows: 0,
+                    starved: 0,
+                    tail_padding: 0,
+                    open: false,
+                }),
+                recorded: 0,
+                overflow: 0,
+            }
+        }
+
+        /// Record an advance's hand-off. The watch fields stay zero until it resolves.
+        fn begin(&mut self, from: usize, to: usize, hand_off: &HandOff, watch: &Watch) {
+            if self.recorded == ADVANCE_LOG {
+                self.overflow = self.overflow.saturating_add(1);
+                return;
+            }
+            self.records[self.recorded] = AdvanceRecord {
+                from_track: from,
+                to_track: to,
+                at: watch.at,
+                silent_at: 0,
+                new_at: 0,
+                content_at: 0,
+                underflows_at: watch.underflows_at,
+                underflows: watch.underflows,
+                starved: watch.starved.saturating_sub(watch.starved_at),
+                tail_padding: hand_off.tail_padding,
+                open: true,
+            };
+            self.recorded += 1;
+        }
+
+        /// Whether an advance is still waiting for the new track to reach the wire.
+        fn open(&self) -> bool {
+            self.recorded > 0 && self.records[self.recorded - 1].open
+        }
+
+        /// Take the watch's reading for the open advance, if it has resolved.
+        fn resolve(&mut self, watch: &Watch) -> bool {
+            if !self.open() {
+                return false;
+            }
+            let record = &mut self.records[self.recorded - 1];
+            record.underflows = watch.underflows;
+            if watch.new_at == 0 {
+                return false;
+            }
+            record.silent_at = watch.silent_at;
+            record.new_at = watch.new_at;
+            record.content_at = watch.content_at;
+            record.open = false;
+            true
+        }
+
+        /// Every advance landed at the machinery's `SKIP_PRIME_CHUNKS + 1` periods with no stale
+        /// audio and no underflow, per [`AdvanceRecord::ok`].
+        fn ok(&self) -> bool {
+            let mut clean = self.overflow == 0 && !self.open();
+            for record in &self.records[..self.recorded] {
+                clean &= record.ok();
+            }
+            clean
+        }
+
+        /// The end-of-run lines: one summary, then one row per advance with its gap in periods, in
+        /// samples and in milliseconds. One period is `CHUNK / RATE_HZ` = 34.18 ms at 16,384 Hz;
+        /// that conversion is stated here rather than left to the reader because it is the figure
+        /// Q4's ruling is quoted with.
+        fn report(&self) {
+            agb::println!(
+                "[album-rom] advance: advances={} limit={} expected_content_at={} periods [{}]",
+                self.recorded,
+                ADVANCE_LOG,
+                SKIP_PRIME_CHUNKS + 1,
+                if self.ok() { "PASS" } else { "FAIL" }
+            );
+            for record in &self.records[..self.recorded] {
+                let gap = record.gap_samples();
+                // Two divides, once per advance and after the teardown — never on the audio path.
+                let tenths = (gap * 10 + CHUNK as u32 / 2) / CHUNK as u32;
+                let ms = u64::from(gap) * 1_000 / u64::from(geometry::RATE_HZ);
+                agb::println!(
+                    "[album-rom] advance: \u{2192}track {} (from {}) content_at={} periods old={} underflow_delta={} starved={} gap={}.{} periods ({} samples = {} ms at {} Hz) [{}]",
+                    record.to_track,
+                    record.from_track,
+                    record.content_at(),
+                    record.old(),
+                    record.underflow_delta(),
+                    record.starved,
+                    tenths / 10,
+                    tenths % 10,
+                    gap,
+                    ms,
+                    geometry::RATE_HZ,
+                    if record.ok() { "PASS" } else { "FAIL" }
+                );
+            }
+            if !self.ok() {
+                agb::println!(
+                    "[album-rom] FAIL a track-end advance did not land: every advance must reach the new track's first chunk {} periods after the hand-off, with no stale audio after the mark and no underflow booked",
+                    SKIP_PRIME_CHUNKS + 1
+                );
+            }
+        }
+    }
+
     /// §4.4's pause, applied by the main loop at a period boundary: the timer chain, then both sound
     /// DMAs, and nothing else — the ring and the decoder are left exactly as they are.
     ///
@@ -1830,6 +2080,19 @@ mod rom {
             let feed = FEED.borrow_ref(cs);
             stats.finished && feed.consumed() >= feed.pushed()
         })
+    }
+
+    /// Latch the starved periods at the instant a visit's drain is observed and its advance posted.
+    ///
+    /// The feeder is running (the chain is stopped only at teardown), and from the drain until the
+    /// hand-off's cover lands its ring is empty, so every period there is `Starved` — with `finished`
+    /// set, so none is an underflow. Those periods are the machinery's share of the boundary's
+    /// silence; `transition_hand_off` reads the delta against this baseline (PR-3b-iii-B).
+    fn note_advance_start() {
+        critical_section::with(|cs| {
+            let mut stats = STATS.borrow_ref_mut(cs);
+            stats.advance_starved_at = stats.starved_periods;
+        });
     }
 
     /// The feeder's entry count — the fade's own budget, read at the two ends of a transition.
@@ -2584,6 +2847,10 @@ mod rom {
             album.rate_hz(),
             album.album_title()
         );
+        agb::println!(
+            "[album-rom] start_track={} (fixture choice: track 0 is 4.3 min; \u{a7}1's start-to-finish playthrough starts at 0)",
+            START_TRACK
+        );
 
         // §D-C rule 2: the generated pins against the manifest, then the arm's own constructor.
         // `open()` cross-checks every pin (including each track's bounded content tripwire); the
@@ -2597,8 +2864,8 @@ mod rom {
 
         // The gate track's own entry against its bake pin, field by field. `verify_pins` has
         // already swept every track; this is the pair the rest of `main` reads numbers from.
-        let track: Track<'static> = album.track(PLAY_TRACK as u32);
-        let pin = &assets::TRACKS[PLAY_TRACK];
+        let track: Track<'static> = album.track(START_TRACK as u32);
+        let pin = &assets::TRACKS[START_TRACK];
         if track.frames != pin.frames {
             refuse(
                 &mut gfx,
@@ -2613,7 +2880,7 @@ mod rom {
         }
         agb::println!(
             "[album-rom] track {}: \"{}\" {} frames, {} samples, {} asset bytes",
-            PLAY_TRACK,
+            START_TRACK,
             track.title,
             pin.frames,
             pin.n_samples,
@@ -2622,10 +2889,10 @@ mod rom {
 
         // The FLAC boot gate for the gate track (§D-C rule 3): profile, stereo, rate identity and
         // the container's pins, all inside `start_track`.
-        if let Err(error) = source.start_track(PLAY_TRACK) {
+        if let Err(error) = source.start_track(START_TRACK) {
             refuse(
                 &mut gfx,
-                &format!("track {PLAY_TRACK} failed its boot gate: {error}"),
+                &format!("track {START_TRACK} failed its boot gate: {error}"),
             );
         }
         let after_gate = clock.read();
@@ -2643,7 +2910,7 @@ mod rom {
             FRAME_SAMPLES
         );
 
-        let mut producer = Producer::new(source, PLAY_TRACK);
+        let mut producer = Producer::new(source, START_TRACK);
 
         // ---- prefill (ring only; the consumer does not exist yet)
         let prefilled = match producer.prefill(PREFILL_SAMPLES) {
@@ -2737,16 +3004,18 @@ mod rom {
         let mut paint = Paint::new();
         paint.start(producer.total_samples as u32, 0);
         let mut visits = Visits::new();
-        visits.begin(PLAY_TRACK, 0);
+        visits.begin(START_TRACK, 0);
         let mut skips = Skips::new();
+        let mut advances = Advances::new();
         let mut pauses = Pauses::new();
         // A transition whose fade is in flight: the track its hand-off must go to. Kept apart from
         // the transport because the target is the caller's arithmetic (§5.3's wrap for a press,
         // `i + 1` for a track's end), not the machine's.
         let mut pending: Option<usize> = None;
         // Whether that transition is a track's end rather than a press (PR-3b-iii-A). It is the
-        // one difference at the hand-off: there is no truncate and no skip row, because the ring
-        // was drained when the transition started and there was no press to measure.
+        // one difference at the hand-off: there is no truncate, because the ring was drained when
+        // the transition started. It has a row of its own all the same (PR-3b-iii-B): the
+        // `/advance:` ledger reads the same wire watch a skip's does.
         let mut pending_auto = false;
         // The album reached its last track's end: the loop stops there instead of wrapping (§1).
         let mut album_end = false;
@@ -2851,11 +3120,17 @@ mod rom {
                 paint.sample();
                 idle = 0;
             }
-            // A skip's measurement closes as soon as the wire has carried the new track: the watch
-            // is read and disarmed here so the scan stops costing the feeder its pass over the slots.
+            // A skip's or an advance's measurement closes as soon as the wire has carried the new
+            // track: the watch is read and disarmed here so the scan stops costing the feeder its
+            // pass over the slots.
             if skips.open() {
                 let watch = watch_state();
                 if skips.resolve(&watch) {
+                    watch_disarm();
+                }
+            } else if advances.open() {
+                let watch = watch_state();
+                if advances.resolve(&watch) {
                     watch_disarm();
                 }
             }
@@ -2911,6 +3186,9 @@ mod rom {
                     if !auto {
                         let watch = watch_state();
                         skips.begin(from, next, pending_at, &hand_off, &watch);
+                    } else {
+                        let watch = watch_state();
+                        advances.begin(from, next, &hand_off, &watch);
                     }
                     // Step 3: the seam call. Its cost is a container parse plus the first frame's
                     // decode, and it is spent behind `SKIP_PRIME_CHUNKS` periods of silence cover.
@@ -2953,7 +3231,10 @@ mod rom {
                 } else {
                     // §12.2's admission rule: the ring has just drained, so it has the whole
                     // transition's headroom. The fade is the press path's — the one omission is the
-                    // truncate, which the hand-off makes because there is nothing stale left.
+                    // truncate, which the hand-off makes because there is nothing stale left. The
+                    // starved baseline is latched here, before the fade spends its period, so the
+                    // advance's row counts every period the boundary carried nothing.
+                    note_advance_start();
                     match critical_section::with(|cs| TRANSPORT.borrow_ref_mut(cs).skip()) {
                         Step::FadeOut => {
                             pending = Some(producer.track + 1);
@@ -2991,11 +3272,17 @@ mod rom {
             );
             halt = Some("frame count");
         }
-        // Take the last skip's reading before the drain: the wire watch resolves on the new track's
-        // first chunk, long before the ring empties, so this is not the drain's business.
+        // Take the last skip's (or advance's) reading before the drain: the wire watch resolves on
+        // the new track's first chunk, long before the ring empties, so this is not the drain's
+        // business.
         if skips.open() {
             let watch = watch_state();
             skips.resolve(&watch);
+            watch_disarm();
+        }
+        if advances.open() {
+            let watch = watch_state();
+            advances.resolve(&watch);
             watch_disarm();
         }
 
@@ -3228,6 +3515,11 @@ mod rom {
         // record is: `agb::println!` is a semihosting trap and the rows are filled on the audio path.
         skips.report();
 
+        // ---- the track boundaries (PR-3b-iii-B): one row per auto-advance, read off the same wire
+        // watch a skip's row is, with the boundary's audible gap in periods, samples and ms. This is
+        // the measured form of Q4's ruling — the lossless path has inter-track gaps and says so.
+        advances.report();
+
         // ---- the session clock (§10.4), printed where the ledger it mirrors was printed. The
         // equality is structural — the clock is incremented by exactly what `take_chunk` returned —
         // so a MISMATCH means the increment and the ledger have come apart, which is why it is part
@@ -3377,11 +3669,16 @@ mod rom {
         // as `Skips::report` prints. On the shipped HARDWARE arm `skips=0` is the honest reading of a
         // headless run and the term is trivially true, the same way `presses=0` is.
         let skips_ok = skips.ok();
+        // The track boundaries, measured per advance rather than assumed from `visits >= 2`: every
+        // advance must reach the new track's first chunk at `SKIP_PRIME_CHUNKS + 1` periods with no
+        // stale audio after the mark and no underflow booked, exactly as `Advances::report` prints.
+        let advances_ok = advances.ok();
         let pass = ledger_ok
             && audit_ok
             && hand_offs_ok
             && pauses_ok
             && skips_ok
+            && advances_ok
             && cadence_ok
             && handler_ok
             && term_ok(reaction_ok)
@@ -3401,7 +3698,7 @@ mod rom {
         // the two artifacts.
         #[cfg(feature = "deep-audit")]
         agb::println!(
-            "[album-rom] verdict {} — screen {} \"{}\" (ledger={}, audit={}, handoffs={}, pause={}, skip={}, cadence={}, isr={}, reaction={}, pcm={}, fifo={}, assets={}, proof_tracks={}/{})",
+            "[album-rom] verdict {} — screen {} \"{}\" (ledger={}, audit={}, handoffs={}, pause={}, skip={}, advance={}, cadence={}, isr={}, reaction={}, pcm={}, fifo={}, assets={}, proof_tracks={}/{})",
             word,
             screen,
             word,
@@ -3410,6 +3707,7 @@ mod rom {
             hand_offs_ok,
             pauses_ok,
             skips_ok,
+            advances_ok,
             cadence_ok,
             handler_ok,
             term_name(reaction_ok),
@@ -3423,7 +3721,7 @@ mod rom {
         );
         #[cfg(not(feature = "deep-audit"))]
         agb::println!(
-            "[album-rom] verdict {} — screen {} \"{}\" (ledger={}, audit={}, handoffs={}, pause={}, skip={}, cadence={}, isr={}, reaction={}, pcm={}, fifo={}, assets={} — built without deep-audit)",
+            "[album-rom] verdict {} — screen {} \"{}\" (ledger={}, audit={}, handoffs={}, pause={}, skip={}, advance={}, cadence={}, isr={}, reaction={}, pcm={}, fifo={}, assets={} — built without deep-audit)",
             word,
             screen,
             word,
@@ -3432,6 +3730,7 @@ mod rom {
             hand_offs_ok,
             pauses_ok,
             skips_ok,
+            advances_ok,
             cadence_ok,
             handler_ok,
             term_name(reaction_ok),
