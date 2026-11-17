@@ -679,6 +679,103 @@ fn the_flac_arm_folds_track_1s_fifo_bytes_to_the_bake_pins() {
     );
 }
 
+/// The skip log's `head_silence = 8` on the two full-master tracks is the **track's own head**, not
+/// the wire watch mistaking a quiet passage for silence.
+///
+/// The seam is the real one (`FlacSource` → `pull_frame` → the same `convert_frame` the producer
+/// runs), because neither of the two cheaper sources can decide it: Q15's `silencedetect −42 dB /
+/// 0.12 s` says where the *reference master* is quiet, which a near-zero sample satisfies as well as
+/// a zero one, and the encoder's own report is not the FIFO bytes. The watch calls a period silent
+/// when every one of its bytes is `0x00`, so this test asks exactly that question of the first
+/// `8 × 560 = 4,480` samples the ROM's number is a claim about — all zero means the ROM is reporting
+/// real music's silence and the log line is right; a non-zero byte inside that span would mean the
+/// watch is calling a quiet passage silent and the bound belongs on `to_new` too.
+///
+/// The ninth chunk is decoded as well, for the other side of the same claim: `head_silence = 8`
+/// says the head is exactly eight periods, so the first byte after them must be audible.
+#[cfg(feature = "backend-flac")]
+#[test]
+fn the_masters_head_is_digital_silence_in_the_fifos_own_bytes() {
+    use album_player::backend::flac::FlacSource;
+    use gba_playback::playback::convert_frame;
+
+    const TRACK: usize = 0;
+    // The eight periods the skip log reads (`SkipRecord::head_silence`), plus the ninth chunk that
+    // has to be audible for "exactly 8" to be the claim rather than ">= 8".
+    const HEAD_CHUNKS: usize = 8;
+    const HEAD_SAMPLES: usize = HEAD_CHUNKS * geometry::CHUNK_SAMPLES as usize;
+    const PROBE_SAMPLES: usize = HEAD_SAMPLES + geometry::CHUNK_SAMPLES as usize;
+
+    let mut source = FlacSource::new(parsed()).expect("the album opens");
+    source
+        .start_track(TRACK)
+        .expect("track 0's container gates");
+
+    let mut interleaved = vec![0i16; 2 * geometry::FRAME_SAMPLES as usize];
+    let mut left = vec![0i32; geometry::FRAME_SAMPLES as usize];
+    let mut right = vec![0i32; geometry::FRAME_SAMPLES as usize];
+    let mut bytes_l = vec![0u8; PROBE_SAMPLES];
+    let mut bytes_r = vec![0u8; PROBE_SAMPLES];
+    let mut got = 0usize;
+    while got < PROBE_SAMPLES {
+        let n = source
+            .pull_frame(&mut interleaved)
+            .expect("a frame decodes");
+        assert_ne!(
+            n, 0,
+            "track 0 ended inside its own first {PROBE_SAMPLES} samples"
+        );
+        let n = n.min(PROBE_SAMPLES - got);
+        for index in 0..n {
+            left[index] = i32::from(interleaved[2 * index]);
+            right[index] = i32::from(interleaved[2 * index + 1]);
+        }
+        convert_frame(
+            &left[..n],
+            &right[..n],
+            &mut bytes_l[got..got + n],
+            &mut bytes_r[got..got + n],
+        )
+        .expect("the decoded frame is inside the int16 profile");
+        got += n;
+    }
+
+    // The ROM's number: the first eight periods hand the DMA all-zero bytes, so the watch's silence
+    // is the track's.
+    assert!(
+        bytes_l[..HEAD_SAMPLES].iter().all(|&byte| byte == 0)
+            && bytes_r[..HEAD_SAMPLES].iter().all(|&byte| byte == 0),
+        "the master's first {HEAD_SAMPLES} FIFO samples are not all zero — the watch is calling a \
+         quiet passage silent, so `head_silence` is mis-predicated and `to_new` needs the bound"
+    );
+    // And exactly eight: the ninth chunk is audible on at least one channel, which is why the ROM
+    // reads 8 and not more.
+    assert!(
+        bytes_l[HEAD_SAMPLES..PROBE_SAMPLES]
+            .iter()
+            .chain(&bytes_r[HEAD_SAMPLES..PROBE_SAMPLES])
+            .any(|&byte| byte != 0),
+        "the ninth chunk is silent too, so `head_silence` is longer than the 8 the ROM read"
+    );
+    // The exact index the ROM's comment names, so a change to the asset or the seam moves this
+    // test rather than leaving a stale number in the log's own explanation: the master's first
+    // non-zero sample is a −1 at 4,951, which `>> 8` turns into 0xFF on both channels.
+    for (channel, bytes) in [("left", &bytes_l), ("right", &bytes_r)] {
+        let first = bytes
+            .iter()
+            .position(|&byte| byte != 0)
+            .expect("the ninth chunk was just asserted audible");
+        assert_eq!(
+            first, 4_951,
+            "the {channel} channel's first non-zero FIFO byte moved"
+        );
+        assert_eq!(
+            bytes[first], 0xFF,
+            "the first audible {channel} byte is not -1 >> 8"
+        );
+    }
+}
+
 // -------------------------------------------------------------------------------------------------
 // 5. The verdict screen's words against the tracked font subset
 // -------------------------------------------------------------------------------------------------
@@ -1280,7 +1377,8 @@ fn the_lead_subtraction_cannot_underflow() {
 
 use album_player::pcm::{AlbumMeta, TrackMeta};
 use album_player::transport::{
-    FADE_SAMPLES, GAIN_UNITY, HandOffGain, State, Step, Transport, scale_byte,
+    FADE_SAMPLES, GAIN_UNITY, HandOffGain, SKIP_PRESS_TO_HANDOFF_PERIODS, SKIP_PRIME_CHUNKS, State,
+    Step, Transport, scale_byte,
 };
 use gba_playback::playback::{Chunk, PushError, RingFeed, convert_frame, fifo_byte};
 
@@ -1299,29 +1397,62 @@ fn pattern_sample(i: u32) -> i32 {
     ((i % 512) as i32 - 256) * 60
 }
 
-/// A `PcmSource` with no codec: one track of `total` samples, frames of `FRAME_SAMPLES`, and the
+/// A `PcmSource` with no codec: `tracks` of samples in play order, frames of `FRAME_SAMPLES`, and the
 /// closed form above. It is the model's producer input, so the seam is exercised through its real
 /// trait rather than through a special-shaped helper.
+///
+/// `lead_silent` is the number of **digital-silence** samples at every track's head. It exists because
+/// a track that fades in offends the one question a wire can answer ("are these bytes zero?") and the
+/// skip log has a term for it; one track in the ROM's own fixture opens that way.
 struct FakeSource {
     at: u32,
-    total: u32,
+    /// The current track's index.
+    track: usize,
+    /// Track lengths, in album sample order.
+    tracks: Vec<u32>,
+    /// Samples of digital silence at the head of every track (`0` = opens audibly).
+    lead_silent: u32,
 }
 
 impl FakeSource {
-    fn new(total: u32) -> Self {
-        Self { at: 0, total }
+    /// An album whose tracks are `tracks` samples long, each opening with `lead_silent` zeros.
+    fn album(tracks: &[u32], lead_silent: u32) -> Self {
+        Self {
+            at: 0,
+            track: 0,
+            tracks: tracks.to_vec(),
+            lead_silent,
+        }
+    }
+
+    /// Samples in the current track.
+    fn len(&self) -> u32 {
+        self.tracks[self.track]
+    }
+
+    /// Sample `i` of the current track: the closed form, gated to silence for the track's own head.
+    fn sample(&self, i: u32) -> i32 {
+        if i < self.lead_silent {
+            0
+        } else {
+            pattern_sample(i)
+        }
     }
 }
 
 impl PcmSource for FakeSource {
     fn n_tracks(&self) -> usize {
-        1
+        self.tracks.len()
     }
 
     fn track(&self, index: usize) -> Option<TrackMeta> {
-        (index == 0).then_some(TrackMeta {
-            start_sample: 0,
-            n_samples: self.total,
+        if index >= self.tracks.len() {
+            return None;
+        }
+        let start_sample = self.tracks[..index].iter().sum::<u32>();
+        Some(TrackMeta {
+            start_sample,
+            n_samples: self.tracks[index],
             title: "fake",
             artist: "",
         })
@@ -1332,7 +1463,7 @@ impl PcmSource for FakeSource {
             title: "fake",
             artist: "",
             year: 0,
-            n_samples: self.total,
+            n_samples: self.tracks.iter().sum(),
             art: None,
         }
     }
@@ -1342,9 +1473,13 @@ impl PcmSource for FakeSource {
     }
 
     fn start_track(&mut self, index: usize) -> Result<(), SourceError> {
-        if index != 0 {
-            return Err(SourceError::NoSuchTrack { index, n_tracks: 1 });
+        if index >= self.tracks.len() {
+            return Err(SourceError::NoSuchTrack {
+                index,
+                n_tracks: self.tracks.len(),
+            });
         }
+        self.track = index;
         self.at = 0;
         Ok(())
     }
@@ -1360,9 +1495,9 @@ impl PcmSource for FakeSource {
                 need: FRAME,
             });
         }
-        let n = ((self.total - self.at) as usize).min(FRAME);
+        let n = ((self.len() - self.at) as usize).min(FRAME);
         for i in 0..n {
-            let value = pattern_sample(self.at + i as u32) as i16;
+            let value = self.sample(self.at + i as u32) as i16;
             out[2 * i] = value;
             out[2 * i + 1] = value;
         }
@@ -1401,6 +1536,125 @@ impl Pause {
     }
 }
 
+/// One skip, measured the way the ROM's wire watch measures it: the same stamps, the same
+/// subtractions, so these numbers and the ROM's `skip:` rows are one arithmetic rather than two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Skip {
+    from: usize,
+    to: usize,
+    /// The mark: the period index the hand-off's critical section ran in.
+    at: u32,
+    /// The first all-silent period after the mark, then the first non-silent one after that.
+    silent_at: u32,
+    new_at: u32,
+    /// The first period whose chunk is handed over after the cover countdown.
+    content_at: u32,
+    underflows_at: u32,
+    underflows: u32,
+    /// Samples `truncate()` stepped over.
+    dropped: u32,
+    /// The period the main loop took the post on.
+    press_at: u32,
+    /// The new track has not reached the wire yet.
+    open: bool,
+}
+
+impl Skip {
+    /// Periods from the mark to the first silent chunk on the wire; `1` is the watch's floor.
+    fn silent_after_mark(&self) -> u32 {
+        self.silent_at.wrapping_sub(self.at)
+    }
+
+    /// Stale-track periods heard after the hand-off — the floor subtracted, as the probe's table does.
+    fn old(&self) -> u32 {
+        self.silent_after_mark().saturating_sub(1)
+    }
+
+    /// Periods the wire carried the cover's silence.
+    fn silence(&self) -> u32 {
+        self.new_at.wrapping_sub(self.silent_at)
+    }
+
+    /// Periods from the hand-off to the first non-silent chunk: the probe's own `new_at − at`.
+    fn to_new(&self) -> u32 {
+        self.new_at.wrapping_sub(self.at)
+    }
+
+    /// Periods from the hand-off to the first chunk handed over after the cover countdown.
+    fn content_at(&self) -> u32 {
+        self.content_at.wrapping_sub(self.at)
+    }
+
+    /// Periods of the new track's own digital silence that follow the cover.
+    fn head_silence(&self) -> u32 {
+        self.to_new().saturating_sub(self.content_at())
+    }
+
+    fn underflow_delta(&self) -> u32 {
+        self.underflows.saturating_sub(self.underflows_at)
+    }
+
+    /// Periods from the loop taking the post to the hand-off: the frame loop's own latency.
+    fn press_to_handoff(&self) -> u32 {
+        self.at.wrapping_sub(self.press_at)
+    }
+}
+
+/// The ROM's `Paint` (`album_play_main.rs`), at period granularity: §4.4's three invariants, checked on
+/// every frame the loop reads. `start` clears the last read without clearing the regression counter,
+/// because a new visit's base is the one intended step back and must not be booked as one.
+struct PaintModel {
+    total: u32,
+    base: u32,
+    last: u32,
+    frames: u32,
+    regressions: u32,
+}
+
+impl PaintModel {
+    const fn new() -> Self {
+        Self {
+            total: 0,
+            base: 0,
+            last: 0,
+            frames: 0,
+            regressions: 0,
+        }
+    }
+
+    /// Start a visit: the track's length, and the session clock its own timeline starts from.
+    fn start(&mut self, total: u32, base: u32) {
+        self.total = total;
+        self.base = base;
+        self.last = 0;
+    }
+
+    /// What the display shows for a session clock reading — the ROM's subtraction, saturating.
+    fn position(&self, committed: u32) -> u32 {
+        paint_position(committed.saturating_sub(self.base), self.total)
+    }
+
+    /// One frame's read, with the monotonicity check.
+    fn sample(&mut self, committed: u32) {
+        let paint = self.position(committed);
+        if paint < self.last {
+            self.regressions += 1;
+        }
+        self.last = paint;
+        self.frames += 1;
+    }
+}
+
+/// What a visit's end sends the run to (ALBUM-PLAYER.md D5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VisitEnd {
+    /// A non-last track's end: the next track was started through the skip's hand-off, minus the
+    /// truncate (there was nothing stale to drop). The `Skip` is the wire's own reading of it.
+    Advance(Skip),
+    /// The last track's end: the album is over and no producer was restarted.
+    AlbumEnd,
+}
+
 /// The ROM's two halves at period granularity, with the real ring, the real gain and the real state
 /// machine. Every field that is a counter exists because a claim reads it.
 struct Model {
@@ -1413,7 +1667,6 @@ struct Model {
     bytes_l: Vec<u8>,
     bytes_r: Vec<u8>,
     frames: usize,
-    total: u32,
     finished: bool,
     /// The session clock (`position::commit`): incremented by what each hand-off committed.
     committed: u32,
@@ -1430,21 +1683,37 @@ struct Model {
     /// The hand-off gain after each hand-off, so the schedule is readable in periods.
     gains: Vec<i32>,
     pauses: Vec<Pause>,
+    /// Feeder periods served — the ROM's `handler_entries`, so a skip's stamps are its own arithmetic
+    /// rather than a second convention.
+    periods: u32,
+    /// The armed wire watch: the skip whose hand-off has happened and whose new track has not reached
+    /// the wire yet. `Some` is exactly the ROM's `watch_armed`.
+    watch: Option<Skip>,
+    /// Every skip this run measured, resolved or not.
+    skips: Vec<Skip>,
+    /// §4.4's painted position, sampled once per period (§8d).
+    paint: PaintModel,
+    /// Σ samples every `truncate()` in this run stepped over: the ring's ledger minus the clock.
+    dropped: u32,
 }
 
 impl Model {
     fn new(total: u32) -> Self {
+        Self::album(&[total], 0)
+    }
+
+    /// A model over an album of `tracks` lengths whose tracks each open with `lead_silent` zeros.
+    fn album(tracks: &[u32], lead_silent: u32) -> Self {
         Self {
             feed: RingFeed::new(),
             transport: Transport::new(),
-            source: FakeSource::new(total),
+            source: FakeSource::album(tracks, lead_silent),
             interleaved: vec![0i16; 2 * FRAME],
             left: vec![0i32; FRAME],
             right: vec![0i32; FRAME],
             bytes_l: vec![0u8; FRAME],
             bytes_r: vec![0u8; FRAME],
             frames: 0,
-            total,
             finished: false,
             committed: 0,
             underflows: 0,
@@ -1454,6 +1723,11 @@ impl Model {
             dma_l: Vec::new(),
             gains: Vec::new(),
             pauses: Vec::new(),
+            periods: 0,
+            watch: None,
+            skips: Vec::new(),
+            paint: PaintModel::new(),
+            dropped: 0,
         }
     }
 
@@ -1505,8 +1779,10 @@ impl Model {
         }
         self.frames += 1;
         // The ROM sets `finished` in the same critical section as the final push, so the last short
-        // chunk is a classified tail rather than an underflow.
-        if self.feed.pushed() as u32 == self.total {
+        // chunk is a classified tail rather than an underflow. A track's own end is not the stream's:
+        // only the last track's does that, which is what keeps a skip's old track from ending the run.
+        if self.source.at == self.source.len() && self.source.track + 1 == self.source.tracks.len()
+        {
             self.finished = true;
         }
         true
@@ -1533,13 +1809,19 @@ impl Model {
     }
 
     /// One feeder period: `take_chunk` into the ping-pong slot, the hand-off gain on that slot, then
-    /// the session clock — the ROM's `feeder`, in the same order.
+    /// the session clock — the ROM's `feeder`, in the same order. The wire watch's two readings and
+    /// the paint sample ride along because they are what the period *did*, not a second run of it.
     fn period(&mut self) -> Chunk {
         assert_ne!(
             self.transport.state(),
             State::Paused,
             "a period was served with the chain frozen"
         );
+        // Read *before* the gain spends this chunk's cover count, exactly as the ROM's feeder does: a
+        // countdown of one means this is the cover's last chunk, so the next period is the new
+        // track's own first.
+        let last_cover = self.watch.is_some_and(|w| w.content_at == 0)
+            && self.transport.gain().held_chunks() == 1;
         let (mut l, mut r) = ([0u8; CHUNK], [0u8; CHUNK]);
         let verdict = self.feed.take_chunk(&mut l, &mut r, CHUNK, self.finished);
         self.ring_l.extend_from_slice(&l);
@@ -1556,16 +1838,56 @@ impl Model {
                 }
             }
         }
+        self.periods += 1;
+        // The wire, after the gain: `0x00` in every byte is the FIFO's own silence verdict, and
+        // `take_chunk` zero-fills what a `Starved`/`Tail` chunk did not fill.
+        let silent = l.iter().all(|&b| b == 0) && r.iter().all(|&b| b == 0);
+        self.watch_update(last_cover, silent);
+        self.paint.sample(self.committed);
         self.ledger();
         verdict
     }
 
+    /// One reading of the ROM's wire watch (`SkipRecord`'s two stamps), then close the skip if the
+    /// new track has reached the wire.
+    fn watch_update(&mut self, last_cover: bool, silent: bool) {
+        let Some(watch) = self.watch.as_mut() else {
+            return;
+        };
+        if last_cover {
+            // The entry after the one that spent the last cover count: the ROM computes the same
+            // index from `handler_entries + 2` inside a feeder entry whose counter has not yet been
+            // incremented, and both are the *schedule's* content point, not the wire's.
+            watch.content_at = self.periods + 1;
+        }
+        if watch.new_at == 0 {
+            if watch.silent_at == 0 {
+                if silent {
+                    watch.silent_at = self.periods;
+                }
+            } else if !silent {
+                watch.new_at = self.periods;
+            }
+        }
+        watch.underflows = self.underflows;
+        if watch.new_at != 0 {
+            let mut resolved = self.watch.take().expect("just borrowed");
+            resolved.open = false;
+            *self.skips.last_mut().expect("armed by press_skip") = resolved;
+        }
+    }
+
     /// The invariant the whole design rests on: the session clock is the ring's own ledger, not a
     /// parallel computation.
+    ///
+    /// With a truncate in the run the ledger is `consumed − dropped`, not `consumed`: `truncate()`
+    /// steps the ring's consumer over the stale span in one assignment, so it is never handed to the
+    /// DMA and never reaches the clock. The ROM prints the same three figures (`committed`, `dropped`,
+    /// `ledger`) for the same reason.
     fn ledger(&self) {
         assert_eq!(
             self.committed,
-            self.feed.consumed() as u32,
+            self.feed.consumed() as u32 - self.dropped,
             "the session clock and the ring ledger parted"
         );
     }
@@ -1655,6 +1977,246 @@ impl Model {
                 self.period();
             }
         }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // 8d. §4.4's skip: the hand-off, measured from the wire
+    // ---------------------------------------------------------------------------------------------
+
+    /// Push one whole chunk of zeros — §4.4 step 4's cover, and the ROM's `push_cover_chunk`.
+    ///
+    /// **Whole chunks, always.** A partial push left in the ring while the producer runs can never be
+    /// taken (`take_chunk` takes whole chunks only) and starves the DMA forever, so the length is
+    /// asserted here rather than trusted: this is the model's copy of the rule, and the assertion is
+    /// what would fail if the cover ever became `prime × chunk` in aggregate instead of per push.
+    fn push_cover(&mut self) {
+        let before = self.feed.pushed();
+        let zeros = [0u8; CHUNK];
+        assert!(
+            self.feed.push_bytes(&zeros, &zeros).is_ok(),
+            "the cover's chunk did not fit: {} free",
+            self.feed.free_samples()
+        );
+        assert_eq!(
+            self.feed.pushed() - before,
+            CHUNK,
+            "a cover push was not one whole chunk"
+        );
+        assert_eq!(
+            self.feed.ready() % CHUNK,
+            0,
+            "the ring holds a partial chunk after a cover push"
+        );
+    }
+
+    /// One direction press and the loop's frame slice around it, as the ROM performs it.
+    ///
+    /// `pass_periods` is how many feeder periods the pass's own producer decode takes — a pass is one
+    /// producer frame of decode, so this is the quantity `SKIP_PRESS_TO_HANDOFF_PERIODS` bounds. The
+    /// press is taken at the top of the pass, the fade is spent by the feeder inside it, and the
+    /// hand-off runs at the decision at its end; `pass_periods` therefore *is* the press→hand-off
+    /// wait, which is what makes the bound checkable here rather than only in a ROM log.
+    ///
+    /// Returns the resolved skip, so a caller asserts on numbers rather than on side effects.
+    fn press_skip(&mut self, to: usize, primed_chunks: u32, pass_periods: u32) -> Skip {
+        assert!(pass_periods >= 1, "a pass with no decode cannot fade");
+        let from = self.source.track;
+        let press_at = self.periods;
+        assert_eq!(
+            self.transport.skip(),
+            Step::FadeOut,
+            "a skip from Playing must fade out"
+        );
+        for _ in 0..pass_periods {
+            self.period();
+        }
+        assert_eq!(
+            self.transport.tick(),
+            Step::SkipHandOff,
+            "the fade did not settle inside the press's own pass"
+        );
+
+        // §4.4 steps 2-5's arming, in one section: the transport's transition (which arms the cover
+        // hold), the truncate, and the cover's first whole chunk. A feeder period landing between the
+        // truncate and that chunk would be `Starved` and would book an underflow from the window
+        // alone — the probe's `truncate_stale` — which is why the model performs them together and
+        // `the_truncate_and_the_covers_first_chunk_share_one_section` also shows the bare shape fail.
+        assert!(
+            self.transport.begin_reprime(primed_chunks),
+            "the transport was not in its fade"
+        );
+        let dropped = self.truncate();
+        let committed = self.committed;
+        self.push_cover();
+        for _ in 1..primed_chunks {
+            self.push_cover();
+        }
+        // Nothing stale survives the truncate and nothing but whole cover chunks was left behind at its
+        // end: this is the same-critical-section rule, read off the ring instead of argued.
+        assert_eq!(
+            self.feed.ready(),
+            primed_chunks as usize * CHUNK,
+            "the hand-off left something in the ring besides the cover"
+        );
+
+        // The mark is taken **here**, inside the hand-off's section — the same instant the ROM stamps
+        // `watch_at` — so the fade-out and the stale-but-silent periods it cost are behind it.
+        let at = self.periods;
+        self.watch = Some(Skip {
+            from,
+            to,
+            at,
+            silent_at: 0,
+            new_at: 0,
+            content_at: 0,
+            underflows_at: self.underflows,
+            underflows: self.underflows,
+            dropped,
+            press_at,
+            open: true,
+        });
+        self.skips.push(self.watch.expect("just armed"));
+
+        // Step 3: the seam call, spent behind the cover, and the new visit's timeline starts after it.
+        self.source
+            .start_track(to)
+            .expect("the skip's target track exists");
+        let base = committed + primed_chunks * CHUNK as u32;
+        self.paint.start(self.source.len(), base);
+
+        // The wire has to resolve it: the caller reads the numbers, not a promise. The loop is the
+        // ROM's — produce while a whole frame fits, serve a period, then the pass's transport decision
+        // — because a re-prime that is not fed would starve and book an underflow that belongs to the
+        // model, and a transport left in `Repriming` would refuse the next press.
+        while self.watch.is_some() || self.transport.state() != State::Playing {
+            if self.feed.free_samples() >= FRAME {
+                self.produce();
+            } else {
+                self.period();
+            }
+            assert_eq!(
+                self.transport.tick(),
+                Step::Idle,
+                "an unexpected step while the ramp back was completing"
+            );
+        }
+        self.skips.last().copied().expect("resolved above")
+    }
+
+    /// `RingFeed::truncate()`, with the run's own Σ of what it stepped over: the term the ledger and the
+    /// ROM's `dropped=` figure both read.
+    fn truncate(&mut self) -> u32 {
+        let dropped = self.feed.truncate() as u32;
+        self.dropped += dropped;
+        dropped
+    }
+
+    /// Fill the ring until a whole frame no longer fits — the deep queue a skip's truncate is for.
+    fn fill_deep(&mut self) {
+        while self.feed.free_samples() >= FRAME {
+            assert!(self.produce(), "the source ended before the ring filled");
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // 8e. A track's end, and the album's (PR-3b-iii-A, ALBUM-PLAYER.md D5)
+    // ---------------------------------------------------------------------------------------------
+
+    /// Play this visit to its end and let the ring drain — the ROM's frame loop at a visit's end.
+    ///
+    /// The producer stops at its own last frame; the feeder then hands the queued span over. The
+    /// visit's `finished` is set here because the ROM sets it in the last push's critical section:
+    /// a starved period inside the end-of-track fade is therefore a silence, not an underflow.
+    fn play_visit_out(&mut self) {
+        while self.source.at < self.source.len() {
+            if self.feed.free_samples() >= FRAME {
+                assert!(self.produce(), "the fake source ended mid-visit");
+            } else {
+                self.period();
+            }
+        }
+        self.finished = true;
+        while self.feed.ready() > 0 {
+            self.period();
+        }
+        assert_eq!(self.feed.ready(), 0, "the visit's own ring did not drain");
+    }
+
+    /// The main loop's end-of-visit decision — `album_play_main.rs`'s drained check.
+    ///
+    /// A non-last track posts the advance through the same transport entry a press uses, then the
+    /// same hand-off a skip performs **minus the truncate**: the ring is drained, so there is
+    /// nothing stale to drop and `dropped` is zero. The last track posts `AlbumEnd` and starts
+    /// nothing — no wrap, because §1 is start-to-finish and §5.3's wrap is the buttons'.
+    fn end_of_visit(&mut self) -> VisitEnd {
+        assert_eq!(self.source.at, self.source.len(), "the visit is not over");
+        assert_eq!(self.feed.ready(), 0, "the visit has not drained");
+        let from = self.source.track;
+        let next = from + 1;
+        if next >= self.source.tracks.len() {
+            return VisitEnd::AlbumEnd;
+        }
+
+        let press_at = self.periods;
+        assert_eq!(
+            self.transport.skip(),
+            Step::FadeOut,
+            "a track end must enter the transition from Playing"
+        );
+        // The fade has no bytes to act on (the ring is empty), so this one period is silence;
+        // `finished` is still set, so it is not booked as an underflow.
+        self.period();
+        assert_eq!(
+            self.transport.tick(),
+            Step::SkipHandOff,
+            "the end-of-track fade did not settle"
+        );
+        assert!(
+            self.transport.begin_reprime(SKIP_PRIME_CHUNKS),
+            "the transport was not in its transition"
+        );
+        let committed = self.committed;
+        self.push_cover();
+        for _ in 1..SKIP_PRIME_CHUNKS {
+            self.push_cover();
+        }
+        // The watch is the skip ledger's, reused here to answer the one question a track end
+        // raises about the wire: is anything of the old track heard after the hand-off?
+        let at = self.periods;
+        self.watch = Some(Skip {
+            from,
+            to: next,
+            at,
+            silent_at: 0,
+            new_at: 0,
+            content_at: 0,
+            underflows_at: self.underflows,
+            underflows: self.underflows,
+            dropped: 0,
+            press_at,
+            open: true,
+        });
+        self.skips.push(self.watch.expect("just armed"));
+        self.finished = false;
+        self.source
+            .start_track(next)
+            .expect("the advance's target track exists");
+        let base = committed + SKIP_PRIME_CHUNKS * CHUNK as u32;
+        self.paint.start(self.source.len(), base);
+
+        while self.watch.is_some() || self.transport.state() != State::Playing {
+            if self.feed.free_samples() >= FRAME {
+                assert!(self.produce(), "the next track ended inside the transition");
+            } else {
+                self.period();
+            }
+            assert_eq!(
+                self.transport.tick(),
+                Step::Idle,
+                "an unexpected step while the advance's ramp back was completing"
+            );
+        }
+        VisitEnd::Advance(self.skips.last().copied().expect("resolved above"))
     }
 }
 
@@ -2098,5 +2660,474 @@ fn a_frozen_ring_refuses_a_push_and_resume_delivers_it() {
     assert!(
         !model.ring_l.contains(&0x80),
         "the refused frame's bytes reached the ring"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// 8d. Skip: the hand-off, measured off the wire (PR-3b-ii-B2b)
+// ---------------------------------------------------------------------------------------------
+//
+// The ROM's evidence for §4.4's skip is a `skip:` row per hand-off, measured by a wire watch in the
+// feeder. This section is the same machine — the real `RingFeed`, the real `Transport`, the real
+// `HandOffGain` — driven by a fake source and read the same way, so the ROM's rows are checkable
+// arithmetic rather than a log nobody can reproduce.
+//
+// The one thing this cannot witness is the cost of a real decode or the real frame loop's cadence:
+// `pass_periods` is the model's *parameter* for a pass, and the bound below is what the ROM measures.
+
+/// A track long enough for several visits against a 36-chunk ring, and an exact multiple of a chunk so
+/// a visit can be played to its last sample without a classified tail.
+const SKIP_TRACK: u32 = 117 * CHUNK as u32;
+
+/// §4.4 step 5's own number: the new track's first chunk reaches the wire `prime + 1` periods after
+/// the hand-off, measured from the START of the hand-off, at every prime the probe swept.
+///
+/// The probe measured `to_new = prime + 1` with `underflows = 0` at every prime including 2
+/// (`examples/album_probe/README.md` → "The deep arm": 3, 5, 9 and 17 periods at 2, 4, 8 and 16).
+/// This drives the app's own `begin_reprime` order and reads the same number off the wire, so the
+/// shipped machine and the measured one are one arithmetic — and the shipped prime, 4, is a row of
+/// that table rather than a number chosen beside it.
+#[test]
+fn a_skip_lands_the_new_track_prime_plus_one_periods_after_the_hand_off() {
+    assert_eq!(
+        SKIP_PRIME_CHUNKS, 4,
+        "the shipped prime is one of the swept rows"
+    );
+    for (prime, probe_row) in [(2u32, 3u32), (4, 5), (8, 9), (16, 17)] {
+        let mut model = Model::album(&[SKIP_TRACK; 3], 0);
+        model.prefill();
+        assert!(model.prime());
+        model.paint.start(SKIP_TRACK, 0);
+        model.run_periods(4);
+        model.fill_deep();
+
+        let skip = model.press_skip(1, prime, 1);
+        assert_eq!(
+            skip.content_at(),
+            prime + 1,
+            "prime {prime}: the machinery's content point moved"
+        );
+        assert_eq!(
+            skip.to_new(),
+            probe_row,
+            "prime {prime}: the probe's row was {probe_row} periods"
+        );
+        // An audibly-opening track, so the wire's transition IS the machinery's: the two figures agree
+        // and `head_silence` is zero. The next test is the one where they differ.
+        assert_eq!(skip.head_silence(), 0);
+        assert_eq!(skip.silence(), prime, "the cover's own silence, in periods");
+        assert_eq!(
+            skip.old(),
+            0,
+            "prime {prime}: stale audio after the hand-off"
+        );
+        assert_eq!(skip.underflow_delta(), 0, "prime {prime}: an underflow");
+        assert_eq!(skip.press_to_handoff(), 1);
+    }
+}
+
+/// A skip at a deep queue drops the queued span, books no underflow and hears no stale period, at
+/// every one of `N` hand-offs.
+///
+/// This is the truncate's whole justification: before it, a skip had to drain a 1.23 s queue. The
+/// queue is deliberately nearly the whole ring at each mark, and `dropped` is checked against what
+/// was actually queued — minus the fade's own chunk, which was handed over, not dropped.
+#[test]
+fn a_deep_queue_skip_drops_the_queued_span_and_books_no_underflow() {
+    const N: u32 = 5;
+    let visits: [usize; N as usize + 1] = [0, 1, 2, 0, 1, 2];
+    let mut model = Model::album(&[SKIP_TRACK; 3], 0);
+    model.prefill();
+    assert!(model.prime());
+    model.paint.start(SKIP_TRACK, 0);
+    model.run_periods(4);
+
+    let mut dropped_total = 0u32;
+    let mut queued_least = u32::MAX;
+    for step in 0..N {
+        model.fill_deep();
+        let queued = model.feed.ready() as u32;
+        assert!(
+            queued >= RING as u32 - CHUNK as u32,
+            "step {step}: the queue was not deep — {queued} samples ready"
+        );
+        queued_least = queued_least.min(queued);
+        let skip = model.press_skip(visits[step as usize + 1], SKIP_PRIME_CHUNKS, 1);
+        assert_eq!(
+            skip.dropped + CHUNK as u32,
+            queued,
+            "step {step}: the truncate dropped {} of {queued} queued samples",
+            skip.dropped
+        );
+        dropped_total += skip.dropped;
+        assert_eq!(
+            skip.old(),
+            0,
+            "step {step}: a stale period reached the wire"
+        );
+        assert_eq!(
+            skip.underflow_delta(),
+            0,
+            "step {step}: the hand-off booked an underflow"
+        );
+        assert_eq!(skip.content_at(), SKIP_PRIME_CHUNKS + 1);
+        assert_eq!(
+            skip.to_new(),
+            SKIP_PRIME_CHUNKS + 1,
+            "step {step}: this fixture's tracks open audibly"
+        );
+        assert_eq!(skip.from, visits[step as usize]);
+        assert_eq!(skip.to, visits[step as usize + 1]);
+    }
+    assert_eq!(model.skips.len(), N as usize);
+    assert!(
+        dropped_total >= (queued_least - CHUNK as u32) * N,
+        "the truncate stepped over less than was queued (least queue {queued_least})"
+    );
+    assert_eq!(model.underflows, 0, "the run booked an underflow");
+    // The ledger still closes with N truncates in it: the covers are in `pushed` and in `consumed`.
+    assert_eq!(
+        model.feed.pushed() as u32,
+        model.feed.consumed() as u32 + model.feed.ready() as u32
+    );
+    assert_eq!(
+        model.committed + model.dropped,
+        model.feed.consumed() as u32,
+        "the clock plus the dropped span is the ring's ledger"
+    );
+}
+
+/// The truncate and the cover's first whole chunk share one critical section — and the bare shape
+/// fails, which is what makes the first half an assertion rather than a tautology.
+///
+/// The probe spent a run on this (`probe_hw.rs:840-875`, `truncate_stale`): a bare truncate leaves a
+/// window in which a feeder period finds an empty ring while the producer still has work, and that
+/// period is `Starved` — an underflow that is an artifact of the window, not of the audio.
+#[test]
+fn the_truncate_and_the_covers_first_chunk_share_one_section() {
+    // (a) the shipped order: no starved period, no stale period, no underflow.
+    let mut model = Model::album(&[SKIP_TRACK; 2], 0);
+    model.prefill();
+    assert!(model.prime());
+    model.paint.start(SKIP_TRACK, 0);
+    model.run_periods(4);
+    model.fill_deep();
+    let skip = model.press_skip(1, SKIP_PRIME_CHUNKS, 1);
+    assert_eq!(skip.underflow_delta(), 0);
+    assert_eq!(skip.old(), 0);
+
+    // (b) the bare truncate, with the producer still holding work: one starved period, booked.
+    let mut bare = Model::album(&[SKIP_TRACK; 2], 0);
+    bare.prefill();
+    assert!(bare.prime());
+    bare.paint.start(SKIP_TRACK, 0);
+    bare.run_periods(4);
+    bare.fill_deep();
+    assert_eq!(bare.transport.skip(), Step::FadeOut);
+    bare.period();
+    assert_eq!(bare.transport.tick(), Step::SkipHandOff);
+    assert!(bare.transport.begin_reprime(SKIP_PRIME_CHUNKS));
+    let dropped = bare.truncate();
+    assert!(dropped > 0, "the bare arm had nothing to truncate");
+    bare.source.start_track(1).expect("track 1 exists");
+    let before = bare.underflows;
+    assert_eq!(
+        bare.period(),
+        Chunk::Starved,
+        "a bare truncate did not leave the feeder an empty ring"
+    );
+    assert_eq!(
+        bare.underflows,
+        before + 1,
+        "the window's starved period was not booked"
+    );
+}
+
+/// Every cover push is one whole chunk, and a partial span in the ring can never be handed over.
+///
+/// `take_chunk` takes whole chunks only, so a partial push left in the ring while the producer runs
+/// starves the DMA forever. The model asserts the length at every cover push (`Model::push_cover`) and
+/// this test witnesses the rule from the other side, with a deliberately partial ring.
+#[test]
+fn a_cover_push_is_a_whole_chunk_and_a_partial_span_starves() {
+    let mut model = Model::album(&[SKIP_TRACK; 2], 0);
+    model.prefill();
+    assert!(model.prime());
+    model.paint.start(SKIP_TRACK, 0);
+    model.run_periods(4);
+    model.fill_deep();
+    // `press_skip` asserts the ring holds exactly `prime` whole chunks at the mark; read it here too,
+    // because a reader of this test should see the claim rather than infer it.
+    let skip = model.press_skip(1, SKIP_PRIME_CHUNKS, 1);
+    assert_eq!(skip.content_at(), SKIP_PRIME_CHUNKS + 1);
+
+    // Now the negative half: drain what whole chunks can take, step over the sub-chunk remainder (a
+    // stream's own tail, not a skip), push half a chunk, and watch a period starve rather than hand
+    // over a headless buffer.
+    while model.feed.ready() >= CHUNK {
+        model.period();
+    }
+    let _ = model.truncate();
+    assert_eq!(model.feed.ready(), 0);
+    let half = [0x11u8; CHUNK / 2];
+    assert!(model.feed.push_bytes(&half, &half).is_ok());
+    let before = model.underflows;
+    assert_eq!(
+        model.period(),
+        Chunk::Starved,
+        "take_chunk handed over a partial chunk"
+    );
+    assert_eq!(
+        model.feed.ready() as usize,
+        CHUNK / 2,
+        "a starved period consumed the partial span"
+    );
+    assert_eq!(model.underflows, before + 1);
+}
+
+/// §4.4's painted position across a skip: 0 at each track's start, never backwards inside a visit,
+/// and `n_samples` at its end.
+///
+/// The mechanism is the visit's clock base — the hand-off's instant plus the cover — so the cover is
+/// committed to the session clock (it is handed to the DMA) and yet is not part of any track. That is
+/// what makes "0 at a track start" true again once a run can skip.
+#[test]
+fn the_painted_position_keeps_the_invariants_across_a_skip() {
+    let mut model = Model::album(&[SKIP_TRACK; 3], 0);
+    model.prefill();
+    assert!(model.prime());
+    model.paint.start(SKIP_TRACK, 0);
+    model.run_periods(6);
+    assert!(
+        model.paint.position(model.committed) > 0,
+        "the first visit never painted"
+    );
+
+    model.fill_deep();
+    let base_before = model.paint.base;
+    model.press_skip(1, SKIP_PRIME_CHUNKS, 1);
+    let base = model.paint.base;
+    assert!(
+        base > base_before,
+        "the new visit did not get its own clock base"
+    );
+    // The hand-off's instant is `base` minus the cover, so the visit's own clock is not yet positive
+    // there — which is the saturating subtraction the ROM relies on.
+    assert_eq!(
+        model
+            .paint
+            .position(base - SKIP_PRIME_CHUNKS * CHUNK as u32),
+        0
+    );
+    assert_eq!(model.paint.position(base), 0, "not 0 at the track's start");
+    assert_eq!(
+        model.paint.position(base + LEAD_SAMPLES),
+        0,
+        "the first audible sample is not at 0"
+    );
+
+    // Play this visit out, never producing past the track's own samples.
+    while model.paint.position(model.committed) < SKIP_TRACK {
+        if model.source.at < model.source.len() && model.feed.free_samples() >= FRAME {
+            assert!(model.produce());
+        } else {
+            model.period();
+        }
+    }
+    assert_eq!(
+        model.paint.position(model.committed),
+        SKIP_TRACK,
+        "the visit did not end on the track's total"
+    );
+    assert_eq!(
+        model.paint.regressions, 0,
+        "the painted position ran backwards across a skip"
+    );
+    assert_eq!(
+        model.paint.position(model.committed + CHUNK as u32),
+        SKIP_TRACK
+    );
+}
+
+/// The skip log's `head_silence` is the **new track's own lead-in**, not the hand-off's — and the
+/// frame loop's wait, which is the part the app owns, is bounded separately.
+///
+/// This is the ROM's finding written as a check. Three of that run's seven skips read `to_new = 13`
+/// beside a gated `expected 5`, and the two tracks they landed on are the two that carry the album's
+/// full master from offset 0: its head is 4,480 samples of digital silence (273 ms at 16,384 Hz), and
+/// the first non-zero sample there is a **−1** at index 4,951, inside the ninth chunk, which
+/// `fifo_byte`'s `>> 8` turns into `0xFF` — a full-scale-negative byte. So the wire stops calling the
+/// track silent exactly 8 periods after its own first chunk. Nothing in the
+/// hand-off moved: `content_at` was 5 on every one of the seven. So a track that fades in offends the
+/// one question a wire can answer, and `to_new = content_at + head_silence` is a fact about the track.
+///
+/// What the *app* owns is the press → hand-off wait, and that one is bounded: a pass is one producer
+/// frame of decode, the feeder spends one period fading inside it, so the wait is the pass's length in
+/// periods and `SKIP_PRESS_TO_HANDOFF_PERIODS` is the ceiling. The last block shows the bound can fail,
+/// which is what makes it a gate rather than a decoration.
+#[test]
+fn a_skip_onto_a_track_that_opens_silent_reads_as_the_tracks_own_lead_in() {
+    const LEAD_CHUNKS: u32 = 3;
+    let lead = LEAD_CHUNKS * CHUNK as u32;
+
+    let mut model = Model::album(&[SKIP_TRACK; 3], lead);
+    model.prefill();
+    assert!(model.prime());
+    model.paint.start(SKIP_TRACK, 0);
+    model.run_periods(4);
+    model.fill_deep();
+    let skip = model.press_skip(1, SKIP_PRIME_CHUNKS, 1);
+
+    assert_eq!(
+        skip.content_at(),
+        SKIP_PRIME_CHUNKS + 1,
+        "the machinery's transition moved: it is always the cover plus one"
+    );
+    assert_eq!(
+        skip.head_silence(),
+        LEAD_CHUNKS,
+        "the wire's delay is not the track's lead-in"
+    );
+    assert_eq!(skip.to_new(), SKIP_PRIME_CHUNKS + 1 + LEAD_CHUNKS);
+    assert_eq!(skip.old(), 0);
+    assert_eq!(skip.underflow_delta(), 0);
+
+    // The same head, with nothing skipped: the first non-silent DMA chunk is the same one, so the
+    // lead-in belongs to the track and not to the hand-off.
+    let mut cold = Model::album(&[SKIP_TRACK], lead);
+    cold.prefill();
+    assert!(cold.prime());
+    cold.paint.start(SKIP_TRACK, 0);
+    cold.run_periods(LEAD_CHUNKS + 2);
+    let first_audible = cold
+        .dma_l
+        .chunks(CHUNK)
+        .position(|c| c.iter().any(|&b| b != 0))
+        .expect("the fake track is not silent forever");
+    assert_eq!(
+        first_audible as u32, LEAD_CHUNKS,
+        "the track's own head is not the lead-in the skip log reported"
+    );
+
+    // The frame loop's bound, in the units the ROM gates it in: the wait is the pass's length.
+    for pass in 1..=SKIP_PRESS_TO_HANDOFF_PERIODS {
+        let mut m = Model::album(&[SKIP_TRACK; 2], 0);
+        m.prefill();
+        assert!(m.prime());
+        m.run_periods(4);
+        let skip = m.press_skip(1, SKIP_PRIME_CHUNKS, pass);
+        assert_eq!(
+            skip.press_to_handoff(),
+            pass,
+            "a {pass}-period pass did not set the press→hand-off wait"
+        );
+        assert!(skip.press_to_handoff() <= SKIP_PRESS_TO_HANDOFF_PERIODS);
+    }
+    let mut slow = Model::album(&[SKIP_TRACK; 2], 0);
+    slow.prefill();
+    assert!(slow.prime());
+    slow.run_periods(4);
+    let over = slow.press_skip(1, SKIP_PRIME_CHUNKS, SKIP_PRESS_TO_HANDOFF_PERIODS + 1);
+    assert!(
+        over.press_to_handoff() > SKIP_PRESS_TO_HANDOFF_PERIODS,
+        "a pass longer than the bound still passed it, so the bound gates nothing"
+    );
+}
+
+/// A non-last track's end is an **advance**, not the album's end: the producer finishing plus a
+/// drained ring posts the next track through the same hand-off a skip uses — with no truncate,
+/// because the ring holds nothing stale — and the wire hears no old-track audio after it.
+///
+/// This is D5's first half on the host, with the real `RingFeed`, the real `Transport` and the
+/// fake source. The numbers are the skip ledger's, so the ROM's own `feed:`/`traversal:` lines and
+/// this test are one arithmetic rather than two.
+#[test]
+fn a_track_end_advances_to_the_next_track_with_no_stale_audio_or_underflow() {
+    // Longer than the ring (so the transition's own feeding cannot reach the track's end before
+    // the wire has resolved) and a whole number of chunks (no classified tail at the visit's end).
+    const VISIT: u32 = 117 * CHUNK as u32;
+    let mut model = Model::album(&[VISIT, VISIT], 0);
+    model.prefill();
+    assert!(model.prime());
+    model.paint.start(VISIT, 0);
+    model.run_periods(3);
+
+    model.play_visit_out();
+    let committed_before = model.committed;
+    let advance = match model.end_of_visit() {
+        VisitEnd::Advance(skip) => skip,
+        VisitEnd::AlbumEnd => panic!("a non-last track's end was taken for the album's"),
+    };
+
+    assert_eq!(advance.from, 0);
+    assert_eq!(advance.to, 1, "the advance did not land on the next track");
+    assert_eq!(
+        advance.dropped, 0,
+        "the advance truncated a ring that had already drained"
+    );
+    assert_eq!(
+        advance.old(),
+        0,
+        "stale audio from the ending track followed the hand-off"
+    );
+    assert_eq!(
+        advance.underflow_delta(),
+        0,
+        "the advance booked an underflow: the fade's silence was not a tail"
+    );
+    assert_eq!(
+        advance.content_at(),
+        SKIP_PRIME_CHUNKS + 1,
+        "the advance's transition is not the skip's cover plus one period"
+    );
+    assert_eq!(model.source.track, 1);
+    assert_eq!(
+        model.transport.state(),
+        State::Playing,
+        "the advance did not finish the transition"
+    );
+    assert!(
+        model.committed > committed_before,
+        "the advance handed nothing over"
+    );
+    // The visit's own timeline: 0 at its new base, and no frame ever painted below the last.
+    assert_eq!(model.paint.position(model.paint.base), 0);
+    assert_eq!(
+        model.paint.regressions, 0,
+        "the painted position ran backwards through the advance"
+    );
+}
+
+/// The last track's end is the album's: it posts `AlbumEnd`, wraps nowhere (§5.3's wrap is the
+/// buttons'), and the producer is not restarted on a phantom track 0.
+#[test]
+fn the_albums_last_track_end_posts_album_end_and_restarts_nothing() {
+    const VISIT: u32 = 2 * PREFILL as u32;
+    let mut model = Model::album(&[VISIT], 0);
+    model.prefill();
+    assert!(model.prime());
+    model.paint.start(VISIT, 0);
+    model.run_periods(2);
+
+    model.play_visit_out();
+    assert_eq!(model.end_of_visit(), VisitEnd::AlbumEnd);
+    assert_eq!(
+        model.source.track, 0,
+        "the album-end path wrapped to track 0"
+    );
+    assert_eq!(model.source.at, VISIT);
+    assert_eq!(model.feed.ready(), 0, "the last visit did not drain");
+    let frames = model.frames;
+    assert!(
+        !model.produce(),
+        "the producer was restarted after the album's last track"
+    );
+    assert_eq!(
+        model.frames, frames,
+        "a frame was decoded after the album's end"
+    );
+    assert_eq!(
+        model.paint.regressions, 0,
+        "the painted position ran backwards at the album's end"
     );
 }
