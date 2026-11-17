@@ -55,9 +55,10 @@
 //!                posted action + one position read) before any further decode; until frames ==
 //!                the pin's total_frames
 //! pause / resume a Start/A edge is taken at the next period boundary: the hand-off gain ramps to
-//!                zero inside one chunk, then timers 1/0/2 and both sound DMAs stop with the ring
-//!                and the decoder untouched; a second edge primes both DMA buffers from the same
-//!                ring head (which is the sample the freeze stopped on), re-arms, and ramps back up
+//!                zero inside one chunk, that chunk is played out over the next period, then timers
+//!                1/0/2 and both sound DMAs stop with the ring and the decoder untouched; a second
+//!                edge primes both DMA buffers from the ring head (the next sample — the ramped
+//!                buffer is not replayed), re-arms, and ramps back up
 //! finish         `finished` is set in the same critical section as the final push
 //! track end      drained (`consumed == pushed`) → advance through the same hand-off a skip uses minus
 //!                the truncate, or, on the last track, `end=ALBUM_END` with no wrap
@@ -137,6 +138,19 @@
 //! **not** say those bytes reached the DMA — a ROM that had played track 2 would still MATCH. What
 //! witnesses the bytes actually carried is the ring ledger (`pushed == consumed == expected`) plus
 //! the boot-time pin cross-checks.
+//!
+//! ## What the ROM cannot witness, and what stands in for it
+//!
+//! The cart's own witnesses stop at the hand-off. The ring ledger says what `take_chunk` consumed;
+//! the period audit says the re-arm beat the FIFO's grace; `old`/`content_at` say what the bytes
+//! after a hand-off looked like. None of them can see the *audible stream* across a transition: a
+//! pause tears the DMA down between periods and nothing in the cart samples what left the DAC, so a
+//! chunk served at zero gain and a chunk of the cover are indistinguishable on the wire. The
+//! transport's witness is therefore the **host model** (`tests/album_seam_host.rs`), which drives
+//! the same `RingFeed` + `Transport` + double-buffer hand-off and records the post-gain bytes
+//! exactly as they are handed to `rearm_dma`; `pcm`/`fifo` here are a **content/decoder** witness
+//! (which bytes of which track the decoder produced) and are never cited for the transport. Sound
+//! on a cartridge is AP-7's, by ear.
 
 #![cfg_attr(target_arch = "arm", no_std)]
 #![cfg_attr(target_arch = "arm", no_main)]
@@ -163,7 +177,7 @@ mod rom {
     use album_player::position;
     use album_player::text;
     use album_player::transport::{
-        SKIP_PRESS_TO_HANDOFF_PERIODS, SKIP_PRIME_CHUNKS, State, Step, Transport,
+        FADE_PERIODS, SKIP_PRESS_TO_HANDOFF_PERIODS, SKIP_PRIME_CHUNKS, State, Step, Transport,
     };
     use gba_audio_hw::{
         AudioChain, CycleCounter, arm_audio_chain, clear_timer1_if, enable_sound, io_read_u16,
@@ -500,9 +514,18 @@ mod rom {
     /// uninterruptible decode — 3.7–3.9 of AP-0's 280,896-cycle video frames — so a main loop cannot
     /// observe the keypad once per frame at any poll rate. The vblank handler is the only code in
     /// this system that runs at video rate, so the sample moves here and the main loop consumes what
-    /// it posts (`Input::take`). §4.4's observable then has a floor of one video frame for the
-    /// sample plus the wait for the next audio period boundary (one period is 2.04 video frames),
-    /// which is the ~3 video frames that replaces the unreachable "within one video frame".
+    /// it posts (`Input::take`).
+    ///
+    /// **The floor, in full.** §4.4's observable is *not* three video frames, which is what an
+    /// earlier version of this comment claimed by counting only the sample and the period boundary.
+    /// The chain is: the debounce frame (≤ 1 video frame, `detect_max`), **plus the wait for the main
+    /// loop to take the post** — the consumer runs at producer cadence, so that leg is one producer
+    /// frame, 3.7–3.9 video frames (`take_max`) — plus the boundary the transition cannot straddle
+    /// (one period = 2.04 video frames, `boundary_max`). The ROM prints all three and their sum; the
+    /// `reaction` verdict term gates each against its bound, and the sum is ~18 video frames ≈ 306 ms
+    /// end to end once the skip's 5-period cover is added. None of these legs can be removed: the
+    /// sample is a vblank's, the take cannot pre-empt a decode frame, and a transition may not
+    /// straddle a period.
     ///
     /// **What it costs the audio, and how that is known rather than hoped.** This handler and the
     /// feeder are both IRQs at the same priority, so a timer1 overflow that is pending while this
@@ -613,6 +636,28 @@ mod rom {
         (PERIOD_CYCLES + VIDEO_PERIOD_CYCLES - 1) / VIDEO_PERIOD_CYCLES;
     const _: () = assert!(MAX_BOUNDARY_FRAMES == 3);
 
+    /// The largest main-loop pass, in video frames, that this system can show: **6**.
+    ///
+    /// `4` is measured, not chosen: a pass that decodes spends one producer frame inside its inner
+    /// loop, PR-3b-ii-A measured that frame at 1.04–1.09 M cycles of uninterruptible decode, and one
+    /// video frame is 280,896 cycles — so 1.09 M c is 3.88 frames, i.e. 4. The other two are the
+    /// pass's own edges: its length is the difference of two latch reads, so a pass that begins just
+    /// before a vblank and ends just after the next due one reads one frame longer than the work it
+    /// did, and the body after the inner loop (the take, one position read, the transport's tick)
+    /// can straddle one more. Both the const asserts below and the gate read this as a **ceiling on
+    /// the run's own measured worst pass** ([`Input::pass_max`]); the bound a take is gated against
+    /// is that same measurement ([`Input::take_max`]), which is why neither number is this file's
+    /// opinion. The gate run measures 5.
+    const MAX_PASS_FRAMES: u32 = 4 + 1 + 1;
+    // The 4 of the sum above, from the measurement: 3 video frames is under the 1.09 M-cycle
+    // producer frame and 4 is over it, so four is the least whole-frame count that holds one.
+    const _: () = assert!(3 * VIDEO_PERIOD_CYCLES < 1_090_000);
+    const _: () = assert!(4 * VIDEO_PERIOD_CYCLES > 1_090_000);
+    // Only the REPLAY arm measures a pass and reads the ceiling; the shipped arm still pins the
+    // arithmetic so the number cannot drift unnoticed.
+    #[cfg(not(feature = "input-replay"))]
+    const _: () = assert!(MAX_PASS_FRAMES == 6);
+
     /// Video frames from a detection to the next audio period boundary.
     ///
     /// `cycles` is what is left of the current period, so it is at most `PERIOD_CYCLES` = 573,440
@@ -677,6 +722,22 @@ mod rom {
         detect_max: u32,
         /// The largest wait, in video frames, from a detection to the next period boundary.
         boundary_max: u32,
+        /// The latch of the vblank that posted the action now in the slot. It is what makes the
+        /// ISR→consumer half of the lateness measurable: `Input::take` subtracts the latch it reads
+        /// from this one, and the consumer runs at producer cadence, not video cadence. Measured
+        /// beside `detect_max` and for the same reason: only a scripted run has a press to time.
+        #[cfg(feature = "input-replay")]
+        posted_latch: u32,
+        /// The largest wait, in video frames, from a post to the main loop taking it. **This is the
+        /// term the previous log did not have**: the action is taken at the top of a pass, after the
+        /// producer's inner loop, and one producer frame is 3.7–3.9 video frames of uninterruptible
+        /// decode, so a press cannot be served inside the frame it was detected on.
+        #[cfg(feature = "input-replay")]
+        take_max: u32,
+        /// The largest main-loop pass, in video frames: the bound [`Self::take_max`] is gated
+        /// against, measured by this run rather than chosen here.
+        #[cfg(feature = "input-replay")]
+        pass_max: u32,
         /// Actions the main loop took out of the slot.
         consumed: u32,
         log: [KeyEvent; EDGE_LOG],
@@ -695,6 +756,12 @@ mod rom {
                 #[cfg(feature = "input-replay")]
                 detect_max: 0,
                 boundary_max: 0,
+                #[cfg(feature = "input-replay")]
+                posted_latch: 0,
+                #[cfg(feature = "input-replay")]
+                take_max: 0,
+                #[cfg(feature = "input-replay")]
+                pass_max: 0,
                 consumed: 0,
                 log: core::array::from_fn(|_| KeyEvent {
                     frame: 0,
@@ -727,6 +794,10 @@ mod rom {
             let events = self.sampler.sample(raw);
 
             if events.action().is_some() {
+                #[cfg(feature = "input-replay")]
+                {
+                    self.posted_latch = latch;
+                }
                 // What is left of the current period, in audio cycles: timer1's counter runs up from
                 // `TM1_RELOAD` to its overflow, so `TM1_DATA − TM1_RELOAD` is the samples elapsed and
                 // the rest of the chunk is the wait. `TICKS_PER_SAMPLE` is a constant, so the
@@ -778,12 +849,34 @@ mod rom {
         }
 
         /// Take the newest action the handler posted, if any — the consumer half of the seam.
+        ///
+        /// The ISR→take wait is measured **here**, at the instant the main loop actually takes the
+        /// post: the latch difference to the vblank that posted it, in video frames. That wait is a
+        /// producer frame wide, not a video frame — the consumer runs at producer cadence — which is
+        /// the reason this term exists.
         fn take(&mut self) -> Option<keys::Detected> {
             let detected = self.sampler.take();
             if detected.is_some() {
                 self.consumed = self.consumed.saturating_add(1);
+                #[cfg(feature = "input-replay")]
+                {
+                    let waited = frame_latch().wrapping_sub(self.posted_latch);
+                    if waited > self.take_max {
+                        self.take_max = waited;
+                    }
+                }
             }
             detected
+        }
+
+        /// One main-loop pass's length, in video frames — the bound `take_max` is gated against,
+        /// because a take happens at the top of a pass and its predecessor is the widest wait the
+        /// slot can hold.
+        #[cfg(feature = "input-replay")]
+        fn note_pass(&mut self, frames: u32) {
+            if frames > self.pass_max {
+                self.pass_max = frames;
+            }
         }
 
         /// Video frames sampled.
@@ -803,12 +896,16 @@ mod rom {
             self.worst_handler <= REARM_GRACE_SAMPLES
         }
 
-        /// Whether a scripted press was detected within its debounce frame and the action's wait for
-        /// the next period boundary was inside one period. Not measurable without a script, so the
-        /// verdict term is `SKIPPED` on the shipped arm.
+        /// Whether a scripted press was detected within its debounce frame, the action was taken
+        /// inside one main-loop pass, and the action's wait for the next period boundary was inside
+        /// one period. The first two are the seam's floor — a press cannot be served sooner than the
+        /// pass it landed in (see [`MAX_PASS_FRAMES`]) — and the third the audio clock's. Not
+        /// measurable without a script, so the verdict term is `SKIPPED` on the shipped arm.
         #[cfg(feature = "input-replay")]
         fn reaction_ok(&self) -> bool {
             self.detect_max <= keys::DEBOUNCE_FRAMES as u32 - 1
+                && self.pass_max <= MAX_PASS_FRAMES
+                && self.take_max <= self.pass_max
                 && self.boundary_max <= MAX_BOUNDARY_FRAMES
         }
 
@@ -853,16 +950,26 @@ mod rom {
             #[cfg(feature = "input-replay")]
             {
                 agb::println!(
-                    "[album-rom] input: edges={} detect_latency max={} frames, action@next-period max={} frames",
+                    "[album-rom] input: edges={} detect_latency max={} frames (bound {}) action@next-period max={} frames (bound {})",
                     self.sampler.presses(),
                     self.detect_max,
-                    self.boundary_max
+                    keys::DEBOUNCE_FRAMES as u32 - 1,
+                    self.boundary_max,
+                    MAX_BOUNDARY_FRAMES
+                );
+                agb::println!(
+                    "[album-rom] input: take_latency max={} frames (bound {} = this run's worst main-loop pass, ceiling {} frames) — ISR→take, gated by the reaction term",
+                    self.take_max,
+                    self.pass_max,
+                    MAX_PASS_FRAMES
                 );
                 if !self.reaction_ok() {
                     agb::println!(
-                        "[album-rom] FAIL the reaction: a scripted press was detected {} frames after its mask change (limit {}) and an action waited {} frames for a period boundary (limit {})",
+                        "[album-rom] FAIL the reaction: a scripted press was detected {} frames after its mask change (limit {}), taken {} frames after its post (bound {} = the run's worst pass), and an action waited {} frames for a period boundary (limit {})",
                         self.detect_max,
                         keys::DEBOUNCE_FRAMES as u32 - 1,
+                        self.take_max,
+                        self.pass_max,
                         self.boundary_max,
                         MAX_BOUNDARY_FRAMES
                     );
@@ -917,6 +1024,18 @@ mod rom {
             Some(input) => input.take(),
             None => None,
         })
+    }
+
+    /// Record one main-loop pass's length, in video frames, for the reaction gate's measured bound
+    /// ([`Input::pass_max`]). Called once per pass from the frame loop, the only place that knows
+    /// where a pass begins and ends.
+    #[cfg(feature = "input-replay")]
+    fn note_pass(frames: u32) {
+        critical_section::with(|cs| {
+            if let Some(input) = INPUT.borrow_ref_mut(cs).as_mut() {
+                input.note_pass(frames);
+            }
+        });
     }
 
     // -------------------------------------------------------------- the frame's other half
@@ -1111,6 +1230,10 @@ mod rom {
     /// *here* — after the copy and before the re-arm, in the same critical section — fades exactly
     /// what is about to be heard and never touches the ring. That is what makes a pause resumable
     /// without a seek; the producer-side shape the probe uses would dim 1.23 s of queued audio.
+    ///
+    /// The gain's home also owns the transition's deferral (`Transport::note_hand_off`): the note is
+    /// taken **before** the gain is applied, so it asks about the slot the previous period handed over
+    /// — the one that is finishing now — not about the ramp this period is about to apply.
     fn take_into_slot(
         bufs: &mut SndBufs,
         feed: &mut RingFeed<RING_SAMPLES>,
@@ -1146,6 +1269,10 @@ mod rom {
                 (&mut l1[..], &mut r1[..])
             };
             let taken = feed.take_chunk(dl, dr, CHUNK, finished);
+            // The deferral's whole cost (see `Transport::note_hand_off`): this is the boundary at
+            // which the previous slot has finished playing, so the transport can tell that a
+            // ramped-but-silent chunk has been served rather than merely handed over.
+            transport.note_hand_off();
             // The hand-off, in place: no copy, no second buffer, and the ring's bytes are read
             // once and never written.
             transport.apply(dl, dr);
@@ -1183,10 +1310,11 @@ mod rom {
     /// here would be a second timer read pair on the deadline the bracket is protecting, so the
     /// measure of this handler's cost is the audit the reads above already feed: a feeder slower than
     /// the FIFO's 16-sample grace is `late`/`late_max`, and one that misses a period entirely is
-    /// `coalesced`. The steady-state cost is one `is_transparent` compare (a period with no fade in
-    /// flight returns immediately); a fade period pays a multiply, shift and clamp per channel-sample
-    /// over one chunk. Both runs' audits read `coalesced=0 late=0 late_max=0`, including the four
-    /// fade chunks the REPLAY run served, so the addition did not move the deadline.
+    /// `coalesced`. The steady-state cost is one `is_transparent` compare plus the deferral's one
+    /// `is_silent` compare and a store (a period with no fade in flight returns immediately); a fade
+    /// period pays a multiply, shift and clamp per channel-sample over one chunk. Both runs' audits
+    /// read `coalesced=0 late=0 late_max=0`, including the fade chunks the REPLAY run served, so the
+    /// addition did not move the deadline.
     fn feeder(cs: critical_section::CriticalSection<'_>) {
         // The audit reads stay first, exactly as the harness orders them: their whole point is how
         // long the interrupt sat, and any work before them would be inside the answer
@@ -1450,7 +1578,7 @@ mod rom {
             };
             // The wire watch is armed for **both** kinds of hand-off (PR-3b-iii-B). A press's row
             // uses it to say no stale audio followed the truncate; a track end's uses the same latch
-            // to say the same of a drained ring, and to put a measured number on the boundary's
+            // to say the same of a drained ring, and to put a number on the boundary's
             // silence. A press adds its own press-to-hand-off wait; a drain has none, because the
             // trigger is the drain itself.
             stats.watch_armed = true;
@@ -1567,9 +1695,12 @@ mod rom {
         underflows: u32,
         /// Samples `truncate()` stepped over at this hand-off.
         dropped: u32,
-        /// The period the main loop took the post on: what makes the press's own cost measurable
-        /// rather than inferable. See [`SkipRecord::press_to_handoff`].
-        press_at: u32,
+        /// The period the main loop took the post on: what makes the frame loop's own cost
+        /// measurable rather than inferable. It is the **take**, not the press: the press→detect and
+        /// detect→take legs are the ISR seam's and are measured by `Input` (the verdict's `reaction`
+        /// term), so this field's row starts where the main loop woke up. See
+        /// [`SkipRecord::take_to_handoff`].
+        take_at: u32,
         /// The watch has not resolved yet.
         open: bool,
     }
@@ -1649,15 +1780,39 @@ mod rom {
         /// Periods from the main loop taking the post to the hand-off's critical section: the part
         /// of the listener's wait that this app owns.
         ///
-        /// Measured, not inferred. It spans the one fade period §4.4 step 1 costs plus however long
-        /// the frame loop takes to come back around to see the gain has reached silence, so a
-        /// regression in that loop (a longer decode pass, a loop that stops serving latches) moves
-        /// this number and nothing else in the ledger. The rest of the wait to audio is
-        /// [`SkipRecord::content_at`] — the cover — and [`SkipRecord::head_silence`], which is the
-        /// new track's own. The bound it is gated against is the contract's,
-        /// [`SKIP_PRESS_TO_HANDOFF_PERIODS`].
-        fn press_to_handoff(&self) -> u32 {
-            self.at.wrapping_sub(self.press_at)
+        /// Measured, not inferred, and **not** the press's whole latency: it starts at the take, so
+        /// the press→detect (≤ 1 video frame) and detect→take (one main-loop pass — a producer frame
+        /// is 3.7–3.9 video frames of uninterruptible decode) legs are outside it and are the
+        /// `reaction` term's. What it does span is the one fade period §4.4 step 1 costs plus
+        /// however long the frame loop takes to come back around to see the gain has reached silence,
+        /// so a regression in that loop (a longer decode pass, a loop that stops serving latches)
+        /// moves this number and nothing else in the ledger. The rest of the wait to audio is
+        /// [`SkipRecord::content_at`] — the cover, 5 periods = 171 ms — and
+        /// [`SkipRecord::head_silence`], which is the new track's own.
+        ///
+        /// The physical floor, stated once: the transition cannot straddle a decode frame (the take
+        /// happens after the producer's inner loop, so its floor is one producer frame) and cannot
+        /// straddle a period (`apply` runs at a boundary, and one period is 2.04 video frames). The
+        /// three legs read together are therefore ~1 + 3.9 + 2.04 ≈ 7 video frames ≈ 115 ms to the
+        /// hand-off, before the cover.
+        ///
+        /// The bound it is gated against is the contract's [`SKIP_PRESS_TO_HANDOFF_PERIODS`], whose
+        /// name predates the three-legged split: its value bounds this leg only.
+        fn take_to_handoff(&self) -> u32 {
+            self.at.wrapping_sub(self.take_at)
+        }
+
+        /// The truncate's real witness: the samples `RingFeed::truncate()` discarded.
+        ///
+        /// `old` cannot be that witness — during the ramped tail the gain is at zero, so a stale
+        /// chunk served there reads as silence just like an empty ring, and `old == 0` cannot tell
+        /// "nothing stale was served" from "something stale was served quietly". `dropped` is what
+        /// makes the claim checkable: a pressed skip must step over a queued span (at least one
+        /// sample), and cannot step over more than the ring can hold less the [`FADE_PERIODS`]
+        /// chunks the feeder served before the hand-off (`RING_SAMPLES - FADE_PERIODS × CHUNK`).
+        fn dropped_is_a_truncate(&self) -> bool {
+            self.dropped >= 1
+                && self.dropped <= (RING_SAMPLES - FADE_PERIODS as usize * CHUNK) as u32
         }
 
         /// The machinery's claim about one skip, and the frame loop's — nothing about the *track*.
@@ -1666,9 +1821,11 @@ mod rom {
         /// so `SKIP_PRIME_CHUNKS + 1`. `to_new` is **not** gated against it, because a track whose
         /// own head is digital silence cannot be told from the cover on the wire (see
         /// [`SkipRecord::head_silence`]); `to_new >= content_at` is the only order claim the bytes
-        /// can make. `old` and `underflow_delta` are what a hand-off that got its truncate or its
-        /// critical section wrong would book, and `press_to_handoff` is the frame loop's own
-        /// latency, bounded by [`SKIP_PRESS_TO_HANDOFF_PERIODS`].
+        /// can make. `old` and `underflow_delta` are what a hand-off that got its critical section
+        /// wrong would book, but `old` is the weaker term (see
+        /// [`SkipRecord::dropped_is_a_truncate`]) — `dropped` is the truncate's own witness — and
+        /// `take_to_handoff` is the frame loop's own latency, bounded by
+        /// [`SKIP_PRESS_TO_HANDOFF_PERIODS`].
         fn ok(&self) -> bool {
             !self.open
                 && self.new_at != 0
@@ -1676,7 +1833,8 @@ mod rom {
                 && self.to_new() >= self.content_at()
                 && self.old() == 0
                 && self.underflow_delta() == 0
-                && self.press_to_handoff() <= SKIP_PRESS_TO_HANDOFF_PERIODS
+                && self.dropped_is_a_truncate()
+                && self.take_to_handoff() <= SKIP_PRESS_TO_HANDOFF_PERIODS
         }
     }
 
@@ -1704,7 +1862,7 @@ mod rom {
                     underflows_at: 0,
                     underflows: 0,
                     dropped: 0,
-                    press_at: 0,
+                    take_at: 0,
                     open: false,
                 }),
                 recorded: 0,
@@ -1718,7 +1876,7 @@ mod rom {
             &mut self,
             from: usize,
             to: usize,
-            press_at: u32,
+            take_at: u32,
             hand_off: &HandOff,
             watch: &Watch,
         ) {
@@ -1736,7 +1894,7 @@ mod rom {
                 underflows_at: watch.underflows_at,
                 underflows: watch.underflows,
                 dropped: hand_off.dropped,
-                press_at,
+                take_at,
                 open: true,
             };
             self.recorded += 1;
@@ -1778,32 +1936,50 @@ mod rom {
             clean
         }
 
+        /// The worst observed `take→hand-off` and `content_at`, in periods: the two legs of the
+        /// listener's wait the skip rows own. The end-of-run chain line adds them to the ISR seam's
+        /// three legs, so press→audible is printed as one number instead of inferred.
+        #[cfg(feature = "input-replay")]
+        fn worst_legs(&self) -> (u32, u32) {
+            let mut hand_off = 0u32;
+            let mut audible = 0u32;
+            for record in &self.records[..self.recorded] {
+                hand_off = hand_off.max(record.take_to_handoff());
+                audible = audible.max(record.content_at());
+            }
+            (hand_off, audible)
+        }
+
         /// The end-of-run lines: one summary, then one row per skip in the probe's units.
         ///
         /// Every gated term is printed next to the number it is gated against, and the track's own
-        /// lead-in is printed last, named as the track's: a row that showed `to_new=13` beside an
+        /// lead-in is printed last as `head_silence`: a row that showed `to_new=13` beside an
         /// unlabelled "expected 5" is what a reader (rightly) took for a failing assertion
-        /// (ALBUM-PLAYER.md §4.5's ledger rule).
+        /// (ALBUM-PLAYER.md §4.5's ledger rule). The row's `old=(weak: zero-gain hides stale)` is the
+        /// short form of the summary's note: `old` cannot witness a stale chunk served at zero gain.
+        /// The numeric `dropped` bound is in the summary and the ROM's `ok()`, not the row, because
+        /// a line past 256 bytes is truncated by the harness's logger.
         fn report(&self) {
             agb::println!(
-                "[album-rom] skip: skips={} ignored={} limit={} expected_content_at={} press\u{2192}hand-off<={} periods [{}]",
+                "[album-rom] skip: skips={} ignored={} limit={} expected_content_at={} take\u{2192}hand-off<={} periods (old=0 is weak: zero-gain hides stale; dropped= is the truncate witness, 1..={}) [{}]",
                 self.recorded,
                 self.ignored,
                 SKIP_LOG,
                 SKIP_PRIME_CHUNKS + 1,
                 SKIP_PRESS_TO_HANDOFF_PERIODS,
+                RING_SAMPLES - FADE_PERIODS as usize * CHUNK,
                 if self.ok() { "PASS" } else { "FAIL" }
             );
             for record in &self.records[..self.recorded] {
                 agb::println!(
-                    "[album-rom] skip: \u{2192}track {} (from {}) content_at={} periods (expected {}) old={} underflow_delta={} press\u{2192}hand-off={} periods (bound {}) head_silence={} periods (the new track's own lead-in, ungated) to_new={} periods silence={} dropped={} [{}]",
+                    "[album-rom] skip: \u{2192}track {} (from {}) content_at={} periods (expected {}) old={} (weak: zero-gain hides stale) underflow_delta={} take\u{2192}hand-off={} periods (bound {}) head_silence={} periods to_new={} periods silence={} dropped={} [{}]",
                     record.to_track,
                     record.from_track,
                     record.content_at(),
                     SKIP_PRIME_CHUNKS + 1,
                     record.old(),
                     record.underflow_delta(),
-                    record.press_to_handoff(),
+                    record.take_to_handoff(),
                     SKIP_PRESS_TO_HANDOFF_PERIODS,
                     record.head_silence(),
                     record.to_new(),
@@ -1814,7 +1990,7 @@ mod rom {
             }
             if !self.ok() {
                 agb::println!(
-                    "[album-rom] FAIL a skip did not land: every skip's cover must be {} chunks followed at once by the new track's own chunk, with no stale audio after the hand-off, no underflow booked, and every press inside its {}-period hand-off bound",
+                    "[album-rom] FAIL a skip did not land: every skip's cover must be {} chunks followed at once by the new track's own chunk, with no stale audio after the hand-off, no underflow booked, a truncate that dropped a queued span no larger than the ring, and every press inside its {}-period hand-off bound (old=0 alone cannot see a stale chunk served at zero gain — dropped= is the truncate's witness)",
                     SKIP_PRIME_CHUNKS,
                     SKIP_PRESS_TO_HANDOFF_PERIODS
                 );
@@ -1830,12 +2006,14 @@ mod rom {
     /// the two can be read side by side (PR-3b-iii-B).
     ///
     /// Two things a skip's row has are missing here, and both are properties: there is no press, so
-    /// no `press_to_handoff` term (the trigger is the drain); and there is no truncate, so `dropped`
+    /// no `take_to_handoff` term (the trigger is the drain); and there is no truncate, so `dropped`
     /// is zero by construction rather than measured. What the row adds is the **gap**: a drained
     /// ring means the silence a listener hears at the boundary is countable from three terms — the
     /// outgoing visit's tail padding, the periods the feeder was starved between the drain and the
     /// hand-off, and the cover the hand-off pushes. Q4 rules that the lossless path *has* inter-track
-    /// gaps and says so; this is the number it says it with.
+    /// gaps and says so; this is the number it says it with. It is **derived**, not measured: 4 of
+    /// its periods are the `SKIP_PRIME_CHUNKS` design constant, and only `tail_padding` and `starved`
+    /// are counted.
     #[derive(Clone, Copy)]
     struct AdvanceRecord {
         from_track: usize,
@@ -1851,6 +2029,11 @@ mod rom {
         starved: u32,
         /// Samples of zero padding in the outgoing visit's last chunk.
         tail_padding: u32,
+        /// Samples `truncate()` stepped over: **zero by construction** here — a track end reaches
+        /// its hand-off only after the ring has drained, so there was nothing stale to drop. Printed
+        /// and gated so the track-end row's claim is the same shape as a press's, not an unstated
+        /// omission.
+        dropped: u32,
         open: bool,
     }
 
@@ -1889,8 +2072,11 @@ mod rom {
         }
 
         /// The boundary's claim: the new track's first chunk at the machinery's
-        /// `SKIP_PRIME_CHUNKS + 1` periods, no stale audio after the mark, and no underflow booked.
-        /// The gap is measured and printed but **not gated** — §4.4 and Q4 accept an inter-track gap
+        /// `SKIP_PRIME_CHUNKS + 1` periods, no stale audio after the mark, no underflow booked, and
+        /// no truncate — the ring had already drained, so `dropped` must be zero. Note that `old`
+        /// alone is the weaker witness (a stale chunk served at zero gain would read as silence);
+        /// the advance's stronger witness is that every sample was handed over before the mark.
+        /// The gap is derived and printed but **not gated** — §4.4 and Q4 accept an inter-track gap
         /// in v1, and closing it is Phase 5's cross-track ring bridge.
         fn ok(&self) -> bool {
             !self.open
@@ -1898,6 +2084,7 @@ mod rom {
                 && self.content_at() == SKIP_PRIME_CHUNKS + 1
                 && self.old() == 0
                 && self.underflow_delta() == 0
+                && self.dropped == 0
         }
     }
 
@@ -1923,6 +2110,7 @@ mod rom {
                     underflows: 0,
                     starved: 0,
                     tail_padding: 0,
+                    dropped: 0,
                     open: false,
                 }),
                 recorded: 0,
@@ -1947,6 +2135,7 @@ mod rom {
                 underflows: watch.underflows,
                 starved: watch.starved.saturating_sub(watch.starved_at),
                 tail_padding: hand_off.tail_padding,
+                dropped: hand_off.dropped,
                 open: true,
             };
             self.recorded += 1;
@@ -2002,13 +2191,14 @@ mod rom {
                 let tenths = (gap * 10 + CHUNK as u32 / 2) / CHUNK as u32;
                 let ms = u64::from(gap) * 1_000 / u64::from(geometry::RATE_HZ);
                 agb::println!(
-                    "[album-rom] advance: \u{2192}track {} (from {}) content_at={} periods old={} underflow_delta={} starved={} gap={}.{} periods ({} samples = {} ms at {} Hz) [{}]",
+                    "[album-rom] advance: \u{2192}track {} (from {}) content_at={} periods old={} (weak: zero-gain hides stale) underflow_delta={} starved={} dropped={} (a drained ring has nothing to drop) gap={}.{} periods ({} samples = {} ms at {} Hz) [{}]",
                     record.to_track,
                     record.from_track,
                     record.content_at(),
                     record.old(),
                     record.underflow_delta(),
                     record.starved,
+                    record.dropped,
                     tenths / 10,
                     tenths % 10,
                     gap,
@@ -2019,7 +2209,7 @@ mod rom {
             }
             if !self.ok() {
                 agb::println!(
-                    "[album-rom] FAIL a track-end advance did not land: every advance must reach the new track's first chunk {} periods after the hand-off, with no stale audio after the mark and no underflow booked",
+                    "[album-rom] FAIL a track-end advance did not land: every advance must reach the new track's first chunk {} periods after the hand-off, with no stale audio after the mark, no underflow booked, and dropped=0 (the ring had drained; a track end never truncates)",
                     SKIP_PRIME_CHUNKS + 1
                 );
             }
@@ -2848,8 +3038,15 @@ mod rom {
             album.album_title()
         );
         agb::println!(
-            "[album-rom] start_track={} (fixture choice: track 0 is 4.3 min; \u{a7}1's start-to-finish playthrough starts at 0)",
+            "[album-rom] start_track={} (this gate starts at track 1; the product plays the record from its first track)",
             START_TRACK
+        );
+        // §14 R5's gap, stated rather than implied: R5 promises a named `DATA ERROR`, a skip forward
+        // and a stop at the end when a mid-album decode fails. PR-3b builds none of that — a decode
+        // failure aborts `FAILED` — so the omission is printed in every run's log and cannot be read
+        // as an implemented path. Building it is a later PR's work; this line is the whole of it here.
+        agb::println!(
+            "[album-rom] error path: not implemented in PR-3b; a mid-album decode failure aborts FAILED (R5 open)"
         );
 
         // §D-C rule 2: the generated pins against the manifest, then the arm's own constructor.
@@ -3020,13 +3217,19 @@ mod rom {
         // The album reached its last track's end: the loop stops there instead of wrapping (§1).
         let mut album_end = false;
         // The period the loop took that post on — the start of the one wait this app owns. See
-        // `SkipRecord::press_to_handoff`.
+        // `SkipRecord::take_to_handoff`.
         let mut pending_at: u32 = 0;
         let n_tracks = album.n_tracks() as usize;
         let mut halt: Option<&'static str> = None;
         // Passes in a row with a full ring and no frame due — the wedge bound ([`WEDGE_PASSES`]).
         let mut idle: u32 = 0;
         'frames: loop {
+            // Where this pass starts on the video clock. The reaction gate's bound is the widest pass
+            // the run shows ([`Input::pass_max`]): a take happens at the top of a pass and drains a
+            // slot filled during the pass before, so no take can wait longer than one pass. Only the
+            // REPLAY arm measures it — it is the arm with a scripted press to time.
+            #[cfg(feature = "input-replay")]
+            let pass_start = frame_latch();
             // The producer runs while the transport is a feeding state — `Playing`, or `Repriming`,
             // where the new track's audio has to reach the ring behind the skip's silence cover.
             if transport_state().feeds() {
@@ -3263,6 +3466,8 @@ mod rom {
                 halt = Some("ring wedged");
                 break;
             }
+            #[cfg(feature = "input-replay")]
+            note_pass(frame_latch().wrapping_sub(pass_start));
         }
         if halt.is_none() && producer.frames != producer.total_frames {
             agb::println!(
@@ -3515,9 +3720,35 @@ mod rom {
         // record is: `agb::println!` is a semihosting trap and the rows are filled on the audio path.
         skips.report();
 
+        // ---- the listener's whole wait, term by term and then summed. The reaction line above prints
+        // the audio clock's phase at detection and the ISR seam's two frame legs; the skip rows print
+        // the two period legs. None of them is the press→audible number on its own, and reading any
+        // one of them as it is what made the earlier "≤ 3 video frames" claim: the physical floor is
+        // the debounce frame, plus one producer frame of decode the take cannot interrupt, plus the
+        // period boundary the transition cannot straddle, plus the cover. This line is the sum of the
+        // worst of each term, not the worst of the sum — it is an upper bound, and it is what a
+        // listener's worst press actually costs.
+        #[cfg(feature = "input-replay")]
+        {
+            let (worst_hand_off, worst_audible) = skips.worst_legs();
+            let seam_frames = input.detect_max + input.take_max;
+            // One u64 divide in the report path, after the teardown, never on a measured path.
+            let cycles = u64::from(seam_frames) * u64::from(VIDEO_PERIOD_CYCLES)
+                + u64::from(worst_hand_off + worst_audible) * u64::from(PERIOD_CYCLES);
+            agb::println!(
+                "[album-rom] latency: press→detect={}f + detect→take={}f + take→hand-off={}p + hand-off→audible={}p (cover) = press→audible {} frames = {} ms (worst per term; gated by reaction + skip rows; +the new track's own head_silence if it opens silent)",
+                input.detect_max,
+                input.take_max,
+                worst_hand_off,
+                worst_audible,
+                cycles / u64::from(VIDEO_PERIOD_CYCLES),
+                cycles * 1_000 / 16_777_216
+            );
+        }
+
         // ---- the track boundaries (PR-3b-iii-B): one row per auto-advance, read off the same wire
         // watch a skip's row is, with the boundary's audible gap in periods, samples and ms. This is
-        // the measured form of Q4's ruling — the lossless path has inter-track gaps and says so.
+        // the derived form of Q4's ruling — the lossless path has inter-track gaps and says so.
         advances.report();
 
         // ---- the session clock (§10.4), printed where the ledger it mirrors was printed. The
@@ -3669,7 +3900,7 @@ mod rom {
         // as `Skips::report` prints. On the shipped HARDWARE arm `skips=0` is the honest reading of a
         // headless run and the term is trivially true, the same way `presses=0` is.
         let skips_ok = skips.ok();
-        // The track boundaries, measured per advance rather than assumed from `visits >= 2`: every
+        // The track boundaries, checked per advance rather than assumed from `visits >= 2`: every
         // advance must reach the new track's first chunk at `SKIP_PRIME_CHUNKS + 1` periods with no
         // stale audio after the mark and no underflow booked, exactly as `Advances::report` prints.
         let advances_ok = advances.ok();

@@ -1095,6 +1095,14 @@ album-pack-check: toolchain-check
 # ring, that a pause freezes the session clock and the ring head, that a resume drops or repeats no
 # sample, that three scripted pauses book no underflow, and that a frozen ring refuses a push.
 #
+# PR-3b-fix1 adds the **post-gain stream witness**, which is the transport's own: the model records
+# every byte handed to `rearm_dma` after the gain, and asserts that across a pause/resume the stream is
+# the source's, contiguous, differing only inside the two declared ramp windows (and the all-zero
+# play-out period the freeze cuts), and that the chunk carrying the ramp is *served* — played out —
+# before the freeze. That test fails if the deferral is removed; the ROM's `pcm`/`fifo` folds are a
+# decoder/content witness (a cold re-decode) and cannot see any of it, so they are never cited here
+# for the transport.
+#
 # PR-3b-ii-B2b adds **§4.4's skip**: the same machine through `begin_reprime` + `truncate()` + the
 # cover, read the way the ROM's wire watch reads it — `to_new = prime + 1` at every prime the probe
 # swept (2/4/8/16 → 3/5/9/17 periods), `old = 0` and `underflow_delta = 0` across five skips at a
@@ -1117,7 +1125,7 @@ album-seam-test: toolchain-check
 	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_SEAM_GATE_LOG)) \
 	    || { echo "album-seam-test: the host suite did not pass — see $(ALBUM_SEAM_GATE_LOG)"; exit 1; }; \
 	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_SEAM_GATE_LOG))); \
-	  [ -n "$$n" ] && [ "$$n" -ge 51 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 51 — a green that names nothing is not a green"; exit 1; }
+	  [ -n "$$n" ] && [ "$$n" -ge 54 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 54 — a green that names nothing is not a green"; exit 1; }
 	@cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) build --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) \
 	    --no-default-features --features backend-stub >> $(abspath $(ALBUM_SEAM_GATE_LOG)) 2>&1 \
@@ -1133,7 +1141,9 @@ album-seam-test: toolchain-check
 	@echo "  skip lands the new track at prime+1 periods with no stale audio and no underflow, with the"
 	@echo "  hand-off's waits split into the track's own lead-in and the frame loop's bounded share, and a"
 	@echo "  track's end advances through the same hand-off minus the truncate while the album's last track"
-	@echo "  stops and starts nothing."
+	@echo "  stops and starts nothing. The deferral is witnessed on the post-gain stream: the ramped chunk is"
+	@echo "  served (played out) before the freeze, and across a pause/resume the bytes handed to rearm_dma are"
+	@echo "  the source's own, contiguous, with only the two declared ramp windows differing."
 
 # The playback ROM (PR-3a step iii): `ALBM1` + the packed blobs → the app's own chain at 16,384 Hz.
 # It boots, verifies its own album (§D-C), plays track 1 end to end through the shipped feeder, and
@@ -1198,8 +1208,16 @@ album-player-rom: album-bake
 #
 # Every assertion is a named failure rather than a bare grep, and `content_at=5 periods (expected 5)`
 # is `SKIP_PRIME_CHUNKS + 1` = 4 + 1, the cover's depth — written here as the gate's own arithmetic
-# instead of read back from the run it is gating. The log's `advance:` rows carry the measured
-# track-boundary gap; the closing echo prints them, and they are what §4.4's Q4 ruling is stated on.
+# instead of read back from the run it is gating. The log's `advance:` rows carry the boundary gap:
+# 4 of its periods are the `SKIP_PRIME_CHUNKS` design constant, the rest is counted, so it is
+# **derived**, not measured — the echo says so and no comment here calls it measured.
+#
+# The rows and the latency terms are read, not only the summaries (PR-3b-fix2): every `pause:` row
+# must show `gain=0` at the freeze and `dropped=0` across the pause, every latency leg in the
+# `input:`/`latency:` lines and in the skip rows is compared with its bound, the ISR bracket must be
+# under the 16-sample grace, and the set of `proof track N:` lines is compared with the set of
+# `feed: … track=N` visits — a visited track with no proof row, or a proof row for a track nobody
+# visited, fails. Each is its own named assertion, so a doctored log names the term it doctored.
 album-test: toolchain-check album-bake
 	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin album-play --features "input-replay deep-audit"
 	agb-gbafix $(ALBUM_ROM_BIN) -o $(ALBUM_REPLAY_ROM)
@@ -1231,9 +1249,9 @@ album-test: toolchain-check album-bake
 	  rows=$$(grep -c '^\[album-rom\] skip: →track' $(ALBUM_TEST_LOG) || true); \
 	  [ "$$rows" -eq "$$skips" ] \
 	    || { echo "album-test: $$rows skip rows for skips=$$skips — the log is truncated or a skip printed no row"; exit 1; }; \
-	  bad=$$(grep '^\[album-rom\] skip: →track' $(ALBUM_TEST_LOG) | grep -vc 'content_at=5 periods (expected 5) old=0 underflow_delta=0' || true); \
+	  bad=$$(grep '^\[album-rom\] skip: →track' $(ALBUM_TEST_LOG) | grep -Evc 'content_at=5 periods \(expected 5\) old=0 .*underflow_delta=0 .*dropped=[1-9][0-9]*' || true); \
 	  [ "$$bad" -eq 0 ] \
-	    || { echo "album-test: $$bad skip row(s) with content_at != 5, stale audio after the hand-off (old != 0) or an underflow delta"; exit 1; }; \
+	    || { echo "album-test: $$bad skip row(s) with content_at != 5, stale audio after the hand-off (old != 0), an underflow delta, or no truncate (dropped=0 — a pressed skip must step over a queued span)"; exit 1; }; \
 	  bad=$$(grep '^\[album-rom\] skip: →track' $(ALBUM_TEST_LOG) | grep -vc '\[PASS\]' || true); \
 	  [ "$$bad" -eq 0 ] \
 	    || { echo "album-test: $$bad skip row(s) are not [PASS]"; exit 1; }; \
@@ -1242,15 +1260,51 @@ album-test: toolchain-check album-bake
 	    || { echo "album-test: pause: pairs=$$pairs, needs >= 1 — the pause half of the script did not run"; exit 1; }; \
 	  grep -q '^\[album-rom\] pause: pairs=[1-9][0-9]* .*\[PASS\]' $(ALBUM_TEST_LOG) \
 	    || { echo "album-test: the pause summary is not [PASS]"; exit 1; }; \
+	  prow=$$(grep -c '^\[album-rom\] pause [0-9]' $(ALBUM_TEST_LOG) || true); \
+	  [ "$$prow" -eq "$$pairs" ] \
+	    || { echo "album-test: $$prow pause row(s) for pairs=$$pairs — a pair printed no row, or a row is not a pair"; exit 1; }; \
+	  bad=$$(grep '^\[album-rom\] pause [0-9]' $(ALBUM_TEST_LOG) | grep -Evc 'fade_periods=[0-9][0-9]* gain=0 committed=[0-9][0-9]* ; resume@frame=[0-9][0-9]* committed=[0-9][0-9]* dropped=0 \[PASS\]$$' || true); \
+	  [ "$$bad" -eq 0 ] \
+	    || { echo "album-test: $$bad pause row(s) did not reach gain=0 before the freeze or booked dropped!=0 across the pause — the row, not only the summary, is read here"; exit 1; }; \
+	  detect=$$(sed -n 's/.*detect_latency max=\([0-9][0-9]*\) frames.*/\1/p' $(ALBUM_TEST_LOG)); \
+	  [ -n "$$detect" ] && [ "$$detect" -le 1 ] \
+	    || { echo "album-test: detect_latency max='$$detect' frames, must be <= 1 (DEBOUNCE_FRAMES - 1) — the press->detect leg is outside its bound or the line is missing"; exit 1; }; \
+	  take=$$(sed -n 's/.*take_latency max=\([0-9][0-9]*\) frames.*/\1/p' $(ALBUM_TEST_LOG)); \
+	  tbound=$$(sed -n 's/.*take_latency max=[0-9][0-9]* frames (bound \([0-9][0-9]*\) .*/\1/p' $(ALBUM_TEST_LOG)); \
+	  tceil=$$(sed -n "s/.*take_latency max=[0-9][0-9]* frames (bound [0-9][0-9]* = this run's worst main-loop pass, ceiling \([0-9][0-9]*\) frames).*/\1/p" $(ALBUM_TEST_LOG)); \
+	  [ -n "$$take" ] && [ -n "$$tbound" ] && [ -n "$$tceil" ] \
+	    || { echo "album-test: the take_latency line is missing a number (max='$$take', bound='$$tbound', ceiling='$$tceil') — the ISR->take leg is not measured"; exit 1; }; \
+	  [ "$$take" -le "$$tbound" ] \
+	    || { echo "album-test: take_latency max=$$take frames is past its bound of $$tbound (the run's own worst main-loop pass) — a press waited more than one pass"; exit 1; }; \
+	  [ "$$tbound" -le "$$tceil" ] \
+	    || { echo "album-test: the take bound $$tbound frames is past the ceiling of $$tceil (one producer frame + latch step) — the frame loop itself got slower, not the take"; exit 1; }; \
+	  bnd=$$(sed -n 's/.*action@next-period max=\([0-9][0-9]*\) frames.*/\1/p' $(ALBUM_TEST_LOG)); \
+	  [ -n "$$bnd" ] && [ "$$bnd" -le 3 ] \
+	    || { echo "album-test: action@next-period max='$$bnd' frames, must be <= 3 (one period is 2.04 video frames)"; exit 1; }; \
+	  bad=$$(grep '^\[album-rom\] skip: →track' $(ALBUM_TEST_LOG) | grep -Evc 'take→hand-off=[0-3] periods \(bound 3\)' || true); \
+	  [ "$$bad" -eq 0 ] \
+	    || { echo "album-test: $$bad skip row(s) whose take->hand-off is outside its 3-period bound (or whose row does not carry it)"; exit 1; }; \
+	  isr=$$(sed -n 's/.*vblank ISR worst=\([0-9][0-9]*\) samples.*/\1/p' $(ALBUM_TEST_LOG)); \
+	  [ -n "$$isr" ] && [ "$$isr" -lt 16 ] \
+	    || { echo "album-test: the ISR line's worst='$$isr' samples, must be < 16 (the 16-sample re-arm grace) — a handler that long delays the feeder past the DMA's reload"; exit 1; }; \
+	  grep -q '^\[album-rom\] input: vblank ISR worst=[0-9][0-9]* samples = [0-9][0-9]*c over [0-9][0-9]* frames (grace limit 16 samples) \[PASS\]' $(ALBUM_TEST_LOG) \
+	    || { echo "album-test: the ISR bracket line is missing or not [PASS] against its 16-sample grace"; exit 1; }; \
+	  visited=$$(sed -n 's/^\[album-rom\] feed: visit=[0-9][0-9]* track=\([0-9][0-9]*\) .*/\1/p' $(ALBUM_TEST_LOG) | sort -n -u | tr '\n' ' '); \
+	  proved=$$(sed -n 's/^\[album-rom\] proof track \([0-9][0-9]*\): .*/\1/p' $(ALBUM_TEST_LOG) | sort -n -u | tr '\n' ' '); \
+	  [ -n "$$visited" ] && [ "$$visited" = "$$proved" ] \
+	    || { echo "album-test: the proof's track set '$$proved' != the visited set '$$visited' — a visited track has no proof row (MATCH, an aliased blob, or the named SKIPPED) or a never-visited track has one"; exit 1; }; \
+	  vrows=$$(grep -c '^\[album-rom\] feed: visit=' $(ALBUM_TEST_LOG) || true); \
+	  [ "$$vrows" -eq "$$visits" ] \
+	    || { echo "album-test: $$vrows feed visit row(s) for visits=$$visits — a visit is missing from the ledger the proof's track set is compared with"; exit 1; }; \
 	  advances=$$(sed -n 's/.*advance: advances=\([0-9][0-9]*\) .*/\1/p' $(ALBUM_TEST_LOG)); \
 	  [ -n "$$advances" ] && [ "$$advances" -ge 1 ] \
 	    || { echo "album-test: advance: advances=$$advances, needs >= 1 — the album never crossed a track boundary"; exit 1; }; \
 	  arows=$$(grep -c '^\[album-rom\] advance: →track' $(ALBUM_TEST_LOG) || true); \
 	  [ "$$arows" -eq "$$advances" ] \
 	    || { echo "album-test: $$arows advance rows for advances=$$advances — a boundary printed no row"; exit 1; }; \
-	  bad=$$(grep '^\[album-rom\] advance: →track' $(ALBUM_TEST_LOG) | grep -vc 'content_at=5 periods old=0 underflow_delta=0' || true); \
+	  bad=$$(grep '^\[album-rom\] advance: →track' $(ALBUM_TEST_LOG) | grep -Evc 'content_at=5 periods old=0 .*underflow_delta=0 .*dropped=0 ' || true); \
 	  [ "$$bad" -eq 0 ] \
-	    || { echo "album-test: $$bad advance row(s) with content_at != 5 (= SKIP_PRIME_CHUNKS + 1), stale audio (old != 0) or an underflow delta"; exit 1; }; \
+	    || { echo "album-test: $$bad advance row(s) with content_at != 5 (= SKIP_PRIME_CHUNKS + 1), stale audio (old != 0), an underflow delta, or a truncate (dropped != 0 — a drained ring has nothing to drop)"; exit 1; }; \
 	  bad=$$(grep '^\[album-rom\] advance: →track' $(ALBUM_TEST_LOG) | grep -vc '\[PASS\]' || true); \
 	  [ "$$bad" -eq 0 ] \
 	    || { echo "album-test: $$bad advance row(s) are not [PASS]"; exit 1; }; \
@@ -1268,12 +1322,19 @@ album-test: toolchain-check album-bake
 	  n=$$(grep -c '^\[album-rom\]' $(ALBUM_TEST_LOG) || true); \
 	  [ "$$n" -ge 60 ] \
 	    || { echo "album-test: the log holds $$n '[album-rom]' lines, needs >= 60 — an empty or truncated log is not a pass"; exit 1; }
-	@grep -E '^\[album-rom\] (traversal|skip: skips|pause: pairs|advance: )' $(ALBUM_TEST_LOG)
+	@grep -E '^\[album-rom\] (traversal|skip: skips|pause: pairs|pause [0-9]|advance: |input: edges|input: take_latency|latency: |input: vblank ISR)' $(ALBUM_TEST_LOG)
 	@echo "album-test passed: the album played through to its end with every gated term true — underflows=0,"
-	@echo "  coalesced=0, late=0, every skip's cover 5 periods with old=0, every pause pair exact, every"
-	@echo "  track-end advance at SKIP_PRIME_CHUNKS+1 with old=0 and underflow_delta=0, and every content"
-	@echo "  proof MATCH (the only SKIPPED leg is the track-2 fold cap, named in the gate). The advance rows"
-	@echo "  above carry the measured track-boundary gap. Verdict: $(ALBUM_TEST_LOG)"
+	@echo "  coalesced=0, late=0, every skip's cover 5 periods with old=0 (the weaker witness: at zero gain"
+	@echo "  a stale chunk would also read 0) and dropped>0 as the truncate's own witness, every track-end advance"
+	@echo "  at SKIP_PRIME_CHUNKS+1 with old=0, dropped=0 and underflow_delta=0, every content proof MATCH (the only"
+	@echo "  SKIPPED leg is the track-2 fold cap, named in the gate), and the proof's track set equal to the visited set."
+	@echo "  Every pause ROW is read, not only its summary: gain=0 at the freeze and dropped=0 across the pause — both"
+	@echo "  arms of a clock-delta tautology, so they show the chain stopped, not that no sample was lost at the wire."
+	@echo "  Every latency leg is read and inside its bound: press->detect <= 1 frame, detect->take <= the run's own"
+	@echo "  worst main-loop pass (itself <= one producer frame + the latch step), action@next-period <= 3 frames, a"
+	@echo "  skip's take->hand-off <= 3 periods, and the ISR bracket < 16 samples of the audio clock. The advance rows"
+	@echo "  above carry the derived track-boundary gap (4 of its periods are the SKIP_PRIME_CHUNKS constant; the rest is"
+	@echo "  counted). Verdict: $(ALBUM_TEST_LOG)"
 
 # ===========================================================================
 # Aggregates
