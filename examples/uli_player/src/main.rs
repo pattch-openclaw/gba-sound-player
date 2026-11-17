@@ -154,9 +154,24 @@ static PLAYER: Mutex<RefCell<Player<RING_SAMPLES>>> =
 
 /// The one piece of player state the feeder must read: whether a starved period
 /// is an underrun (`false`) or a tail (`true`).
+/// The period timer's data register and its reload: how far past the overflow a
+/// handler entry is, in samples. The DMA replays the previous slot once the FIFO
+/// has drained half of it (16 samples at 32,768 Hz), so a handler that arrives
+/// later than that splices mid-waveform — audible, and **invisible to a ledger
+/// that counts samples**. This is the measurement that sees it.
+const REG_TM1_DATA: usize = 0x0400_0104;
+const TM1_RELOAD: u16 = 0u16.wrapping_sub(PERIOD as u16);
+/// Samples of grace before a late re-arm is audible (the FIFO's half level).
+const REARM_GRACE_SAMPLES: u16 = 16;
+
 struct Ui {
     finished: bool,
     paused: bool,
+    /// Handler entries that arrived after the DMA's grace window: the audible
+    /// artifact the underrun ledger cannot see.
+    late: u32,
+    /// The worst lateness seen, in samples past the overflow.
+    max_late_samples: u16,
     /// True while a requested skip is being serviced (queue dropped, source
     /// re-seeked, prefilled). A starved period there is the skip's bounded gap,
     /// not an underrun: the plan allows a skip a short delay.
@@ -167,6 +182,8 @@ struct Ui {
 static UI: Mutex<RefCell<Ui>> = Mutex::new(RefCell::new(Ui {
     finished: false,
     paused: false,
+    late: 0,
+    max_late_samples: 0,
     skipping: false,
     skip_to: None,
 }));
@@ -195,9 +212,18 @@ unsafe fn rearm_dma(lsrc: *const u8, rsrc: *const u8) {
 /// One feeder period: the ring into the off-screen slot, then hand the DMA that
 /// slot. Allocates nothing, logs nothing — agb's interrupt-handler contract.
 fn feeder(cs: critical_section::CriticalSection<'_>) {
+    // SAFETY: fixed I/O address, read-only, 16-bit access as documented.
+    let t1 = unsafe { io_read_u16(REG_TM1_DATA) };
+    let past = t1.wrapping_sub(TM1_RELOAD);
     let mut bufs = BUFS.borrow_ref_mut(cs);
     let mut player = PLAYER.borrow_ref_mut(cs);
-    let ui = UI.borrow_ref(cs);
+    let mut ui = UI.borrow_ref_mut(cs);
+    if past > ui.max_late_samples {
+        ui.max_late_samples = past;
+    }
+    if past > REARM_GRACE_SAMPLES {
+        ui.late = ui.late.saturating_add(1);
+    }
     let quiescent = ui.finished || ui.paused || ui.skipping;
     let SndBufs { l, r, next } = &mut *bufs;
     let i = *next;
@@ -318,6 +344,8 @@ struct Report {
     finish: Finish,
     boundary_worst: u32,
     boundary_frames: u32,
+    late: u32,
+    max_late_samples: u16,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -381,7 +409,9 @@ fn run(gba: &mut agb::Gba) -> Report {
                   skips: u32,
                   finish: Finish,
                   boundary_worst: u32,
-                  boundary_frames: u32| Report {
+                  boundary_frames: u32,
+                  late: u32,
+                  max_late_samples: u16| Report {
         ok,
         frames,
         worst,
@@ -392,13 +422,28 @@ fn run(gba: &mut agb::Gba) -> Report {
         finish,
         boundary_worst,
         boundary_frames,
+        late: 0,
+        max_late_samples: 0,
     };
 
     let album = match Album::parse(ALBUM) {
         Ok(a) => a,
         Err(e) => {
             agb::println!("[uli-player] FAIL album parse: {:?}", e);
-            return report(false, 0, 0, 0, 0, Ledger::default(), 0, Finish::Error, 0, 0);
+            return report(
+                false,
+                0,
+                0,
+                0,
+                0,
+                Ledger::default(),
+                0,
+                Finish::Error,
+                0,
+                0,
+                0,
+                0,
+            );
         }
     };
     let tables = unsafe { &mut *core::ptr::addr_of_mut!(TABLES) };
@@ -412,14 +457,40 @@ fn run(gba: &mut agb::Gba) -> Report {
         Ok(d) => d,
         Err(e) => {
             agb::println!("[uli-player] FAIL tables: {:?}", e);
-            return report(false, 0, 0, 0, 0, Ledger::default(), 0, Finish::Error, 0, 0);
+            return report(
+                false,
+                0,
+                0,
+                0,
+                0,
+                Ledger::default(),
+                0,
+                Finish::Error,
+                0,
+                0,
+                0,
+                0,
+            );
         }
     };
     let mut source = match UliSource::new(album, dec) {
         Ok(s) => s,
         Err(e) => {
             agb::println!("[uli-player] FAIL seek: {:?}", e);
-            return report(false, 0, 0, 0, 0, Ledger::default(), 0, Finish::Error, 0, 0);
+            return report(
+                false,
+                0,
+                0,
+                0,
+                0,
+                Ledger::default(),
+                0,
+                Finish::Error,
+                0,
+                0,
+                0,
+                0,
+            );
         }
     };
 
@@ -469,7 +540,20 @@ fn run(gba: &mut agb::Gba) -> Report {
     });
     if !primed {
         agb::println!("[uli-player] FAIL prime: the ring had less than one period");
-        return report(false, 0, 0, 0, 0, Ledger::default(), 0, Finish::Error, 0, 0);
+        return report(
+            false,
+            0,
+            0,
+            0,
+            0,
+            Ledger::default(),
+            0,
+            Finish::Error,
+            0,
+            0,
+            0,
+            0,
+        );
     }
     enable_sound();
     // SAFETY: fixed I/O address; a pending Timer1 bit would enter the feeder
@@ -639,8 +723,14 @@ fn run(gba: &mut agb::Gba) -> Report {
             break;
         }
 
-        // The UI redraws about once a second; the feeder keeps running.
-        if redraw == 0 {
+        // The UI redraws about once a second; the feeder keeps running. `ui-off`
+        // builds the end-only screen, so a hardware comparison can say whether
+        // the perceived drops belong to the redraw or to the chain.
+        #[cfg(feature = "ui-off")]
+        let redraw_disabled = true;
+        #[cfg(not(feature = "ui-off"))]
+        let redraw_disabled = false;
+        if redraw == 0 && !redraw_disabled {
             let (ledger, paused_now) = critical_section::with(|cs| {
                 (PLAYER.borrow_ref(cs).ledger, UI.borrow_ref(cs).paused)
             });
@@ -708,6 +798,16 @@ fn run(gba: &mut agb::Gba) -> Report {
         ui_mean,
         ui_worst
     );
+    let (late, max_late) = critical_section::with(|cs| {
+        let ui = UI.borrow_ref(cs);
+        (ui.late, ui.max_late_samples)
+    });
+    agb::println!(
+        "[uli-player] feeder late={} (entries >{} samples past the overflow) max_late={} samples",
+        late,
+        REARM_GRACE_SAMPLES,
+        max_late
+    );
     agb::println!(
         "[uli-player] feeder periods={} served={} underruns={} tails={} frames_fed={} max_ready={}",
         ledger.periods,
@@ -736,6 +836,8 @@ fn run(gba: &mut agb::Gba) -> Report {
         finish,
         boundary_worst,
         boundary_frames,
+        late,
+        max_late,
     )
 }
 

@@ -49,6 +49,10 @@ autoskip = []
 # capacity rather than its stated one.
 cross-corpus = []
 
+# No periodic redraw: the end-only screen. Built so a hardware run can attribute
+# the perceived audio drops either to the UI's redraw window or to the chain.
+ui-off = []
+
 [[bin]]
 name = "uli-player"
 path = "src/main.rs"

@@ -2452,6 +2452,50 @@ Frame-101 attribution of the 523,267 (by difference, one image): kernels
 Kernels against the C record's 134,600 are 2.44×; entropy per
 coefficient against the C bench's entropy+dequant (~41 c/coef) is ~6.6×.
 
+### Hardware, GBA SP (2026-11-16) — the three player ROMs, and a late-re-arm finding
+
+**Every run below passed**, and the two runs of each ROM are **identical to the
+cycle** — the determinism the FLAC ledger demands as a witness, now on this
+target. The GBA 001 was unavailable (hardware fault), so this is one unit.
+
+| ROM | worst (frame) | mean | margin at worst | periods | underruns | tails | skips |
+|---|---|---:|---:|---|---:|---:|---:|
+| `uli-player` (headphone) | 247,789 (f13,905) = **94.52%** | 213,362 = 81.39% | 5.48 pts | 16,552 | 0 | 0 | 0 |
+| `uli-player-speaker` | 251,365 (f16,196) = **95.89%** | 216,547 = 82.61% | 4.11 pts | 16,552 | 0 | 0 | 0 |
+| `uli-player-two-track` | 247,876 (f17,158) = **94.56%** | 212,133 = 80.92% | 5.44 pts | 20,546 | 0 | 1 | 1 |
+
+- Against mGBA on the same images: **+1.11 / +1.31 points** on the headphone build
+  (247,789 vs 244,879; 213,362 vs 209,937) — the silicon penalty is ~1 point here,
+  far smaller than the LPC row the FLAC ledger recorded, and the worst frame still
+  leaves 4–5.5 points of the period.
+- The two-track run exercises a real track change on silicon: `tails 1 skips 1`,
+  zero underruns — the skip's bounded gap accounted as a tail, as designed.
+
+**The finding: audible drops the ledger cannot see.** The listening report is
+"brief drops, frequently" during the runs, while every ledger field says clean.
+That is a **late re-arm**, and it is now measured: at each feeder entry the ROM
+reads the period timer and counts entries that arrive more than the DMA's grace
+(the FIFO's 16 samples) past the overflow.
+
+| image | redraw | `late` entries | `max_late` | underruns |
+|---|---|---:|---:|---:|
+| `uli-player` (1 Hz live text) | 268 redraws | **104** | 34 samples | 0 |
+| `uli-player-noui` (`--features ui-off`) | none | **1** | 17 samples | 0 |
+
+**The 1 Hz text redraw causes 104 of the 105 late entries.** A late re-arm is
+audible (the DMA replays the previous slot and splices mid-waveform) but it is not
+a starved period, so the underrun ledger is blind to it by construction — the
+player's PASS was true and the listening report is also true. The measured cost of
+the redraw is ~410–470 k cycles (1.6–1.8 periods), inside agb's display path, and
+that is longer than the 488 µs grace.
+
+Consequence for the product, and it is the plan's own rule ("the UI is the slack;
+audio has priority"): **the audio-critical default is the end-only screen**
+(`ui-off`), and a live UI has to be built so it does not block the feeder — a
+digit-tile clock rather than a full background rebuild per second, or rendering
+sliced across periods. `late` is the gate for that work, and it is on the final
+screen next to the ledger.
+
 ### PR D, album-scale (2026-11-16, mGBA, WAITCNT 4/2) — the full-length player build
 
 `make uli-player-cross`: E3-b's twelve tracks in one player ROM, 33,407,264 B of a
