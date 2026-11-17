@@ -513,7 +513,7 @@ in terms of what the user may observe, not in cycles:
 
 | observable | v1 target (measured at AP-1, not asserted) |
 |---|---|
-| Screen changes to the new track (title, index, bar reset) | **≤ 3 video frames (~50 ms) of the press** — corrected 2026-11-17 from "within one video frame", which is unreachable from the main loop; see the ruling below |
+| Screen changes to the new track (title, index, bar reset) | **press → audible transition: 18 video frames ≈ 306 ms measured** (corrected 2026-11-17 from "≤ 3 frames ≈ 50 ms", which was arithmetic about the sample-and-period floor with no measurement of the loop behind it — see the chain below) |
 | Audio of the new track begins | ≤ ~0.6 s, and that number is `SKIP_PRIME_CHUNKS`, a policy knob (§4.4 below). **The precondition is met: step 2 truncates the ring (Q13b, landed 2026-11-15). Measured at the ring's ceiling depth, the truncate reads `SKIP_PRIME_CHUNKS + 1` periods — 3/5/9/17 periods = 102.5/170.9/307.6/581.1 ms for prime 2/4/8/16 — inside this row at every setting; drain and consume-and-discard still read 39–53 periods = 1.33–1.81 s.** |
 | Clicks / pops at the transition | none: fades, never a mid-waveform splice |
 | Underruns attributed to a skip | 0, including the silence fed during the re-prime |
@@ -528,10 +528,43 @@ runs at video rate, and the observable is restated as a floor with two named ter
 
 | term | bound | why it is that number |
 |---|---|---|
-| press → edge detected | ≤ 1 video frame (16.7 ms) | the keypad is sampled once per frame; measured `detect_latency max=1` |
-| detected → action taken | ≤ 2 video frames | the action must land on an **audio period boundary** — changing what the DMA is mid-playing is exactly the splice this table forbids — and one period is 2.04 video frames; measured `action@next-period max=2` |
-| **total, press → transition** | **≤ 3 frames ≈ 50 ms** | read as instant by a person; the row above is now this, not one frame |
-| first sample of the *new* track audible | + `SKIP_PRIME_CHUNKS + 1` periods = 171 ms | D2, unchanged |
+| press → edge detected | ≤ 1 video frame (16.7 ms) | the keypad is sampled once per frame in the vblank ISR; measured `detect_latency max=1` |
+| detected → action taken | **3 frames measured** (was claimed ≤ 2) | the action is taken at the top of a main-loop pass, and a pass is bounded by a producer frame of 3.7–3.9 video frames — **a transition cannot straddle a decode frame**, so this leg has a floor set by the codec's own unit of work; measured `take_latency max=3`, gated against the run's own worst pass |
+| taken → hand-off | ≤ 3 periods (bound), 2 measured | the ramp must be **served** before the freeze/truncate — the deferral below |
+| hand-off → the new track's first sample | `SKIP_PRIME_CHUNKS + 1` = 5 periods | D2, unchanged |
+| **total, press → audible** | **18 frames ≈ 306 ms** | the legs summed, printed as the ROM's `latency:` line and gated **per leg**, not as one number |
+
+**And ≈ 580 ms onto tracks 0 and 2** — the two full-master visits — because this recording opens with
+**4,480 samples of exact digital silence**: measured through the real seam, those FIFO bytes are `0x00` on
+both channels and the first non-zero byte is at index **4,951**, which is why the wire watch reads 8 more
+silent periods. That is music, not machinery — but it puts the *worst* case right at §4.4's ≤ ~0.6 s
+ceiling rather than comfortably inside it. Re-making that choice (`SKIP_PRIME_CHUNKS = 2` would recover
+~68 ms) belongs to real ears at Phase 5, not to arithmetic now.
+
+**A fade must be served, not merely handed over (ruled 2026-11-17, review round).** The first cut applied
+the ramp to the slot handed to the DMA and then froze or truncated *immediately* — at which point the DMA
+was at sample ~0 of the very chunk carrying the whole ramp, so the listener heard the **previous** chunk
+end mid-waveform at unity gain, up to 560 samples were dropped, and the 15.6 ms fade was never audible on
+either pause or skip. §4.4's own "none: fades, never a mid-waveform splice" row is what this violated, in
+code that cites that row. A transition now waits for the hand-off *after* the ramped chunk has been served
+(`served_silent`, latched by the feeder), at a cost of exactly one period. The difference between a fade
+in the code and a fade the listener hears.
+
+**pause / resume — the contract, defined here because it existed nowhere before PR-3b.** A4 asked for
+pause, §2's feeder row asserted it would be a state rather than new machinery, and neither said what it
+means. `pause`: ramp the **hand-off** gain to zero, then **freeze** — both sound DMAs and the timer chain
+stopped, producer halted, the ring exactly as it was. `resume`: re-prime both DMA buffers from the ring
+head (a *prime*, not a seek — the head is the sample the freeze stopped on), re-arm in the shipped order,
+ramp back up. No truncate, no seek, no re-decode; the session clock stops with the chain, which is why a
+paused clock cannot tick. Rejected, reasons in the code: *truncate-and-re-decode* (discard-forward from
+the **track start** — ~77 s of CPU minutes in, since the seam has no seek, Q5) and *keep-feeding-silence*
+(the queued 1.23 s plays out before any fade begins, and `committed` keeps advancing so the displayed time
+runs while "paused").
+
+**The inter-track gap is a number now, not an admission**: **214 / 229 ms** (6.3 / 6.7 periods) at a
+track-end boundary, printed on each `advance:` row with its decomposition — tail padding, two starved
+periods, and the cover. Four of those periods are the `SKIP_PRIME_CHUNKS` **constant**, so the figure is
+honestly labelled *derived*; only the padding and starved counts are measured. See Q4.
 
 Two things this costs, recorded because both are load-bearing later. **The ISR must stay inside the
 re-arm grace**: there is no interrupt nesting on the ARM7TDMI, so a vblank handler running when timer1
@@ -788,7 +821,12 @@ a scripted key log is exactly the same input the test harness feeds the ROM
 | **hold L at boot** | program `WAITCNT = 0x0000` (4/2, no prefetch) | — | the conservative-cartridge arm this project's records already measure against: a slow reproduction cart gets a documented fallback instead of a mystery |
 
 Deliberately absent: anything requiring two buttons *within a time window*, and
-anything that reads differently in an emulator than on hardware.
+anything that reads differently in an emulator than on hardware — **with one honest exception, stated
+here because this file's gates depend on it.** The emulator cannot press a key at all
+(§13 AP-1), so the gate replays a scripted key log through `keys.rs`, which is the same state machine
+the hardware path drives but is *not* the hardware path: the `ButtonController` round trip and every
+physical-press claim are owed to AP-7a, and the ROM logs which input source it used so no run can imply
+a press it never saw.
 
 ### 5.4 Palette allocation (the constraint that shapes the art)
 
@@ -1535,6 +1573,24 @@ it. The ROM hashes those runs used are recorded against AP-7a, and a later rebui
 (ULI2 PR-E merged, PR #148 reverted) reproduced **both images byte-identical**, which is the strongest
 reproducibility evidence this application has produced short of AP-5's full two-run gate.
 
+**PR-3b landed 2026-11-17: the album plays through, and the buttons do something.** Keys (`keys.rs` —
+the first code in this repository ever to read a keypad), the session clock (`position.rs`, §10.4's ruled
+u32 in `.iwram`, +4 bytes, price paid as written), the transport (`transport.rs`: pause, skip, restart,
+track-end auto-advance, `ALBUM_END`), the **hand-off gain** that makes a fade audible, and
+`make album-test`. `SKIP_PRIME_CHUNKS = 4`, chosen from the probe's sweep rather than guessed (D2).
+Measured and now in §4.4: the four-leg reaction chain (press → audible **306 ms**, ~580 ms onto a
+silence-headed track), the inter-track boundary gap (**214 / 229 ms**, and *derived* — four of its
+periods are the cover constant), and the pause contract, which had never been written down anywhere.
+Three claims this round retracted rather than repaired silently, all of them worth the reader's
+attention because each was asserted confidently first: *(1)* my own "≤ 3 frames ≈ 50 ms" from fix 4's
+round was arithmetic about a floor with the loop's own latency left out of it; *(2)* "the content proofs
+match through a pause, therefore a pause drops no sample" was **false** — those folds are a cold
+re-decode and are invariant to the transport, so the transport witness moved to a host model that records
+the post-gain bytes handed to `rearm_dma`; *(3)* the fade that §4.4 exists to require was being cut by
+the transition that played it, for two rounds, by code quoting the row it violated. §13's AP-1 row is
+amended for the two promises this harness physically cannot keep (no key injection, no audio capture) and
+states plainly that **click-free-to-an-ear and physical presses remain unwitnessed until AP-7a**.
+
 Phase 0 exists because four things in this plan are genuinely new to this tree
 and each has a way to be cheaply wrong: objects/sprites (nothing shipped draws
 one), multiple simultaneously-shown backgrounds (`text.rs` shows one, one-shot),
@@ -1610,7 +1666,7 @@ the rule that a gate touching a non-default configuration runs as its own target
 | Gate | Claim | Witness |
 |---|---|---|
 | **AP-0** | The probe ROMs run: objects + 3 BGs + text present simultaneously, the frame cost breakdown closes with UI terms, VRAM/OBJ split and refresh cost recorded, the skip gap measured | **Closed 2026-11-14** (`examples/album_probe/README.md`): measured — UI **1.89%** of a period, feeder 0.92%, one 4bpp tile write 726 c, art upload 0.60 period, video period 280,896 c, and the skip sweep's drain/drop ceiling (§4.4, Q13b). Not measured, still targets: viz (AP-6), game (AP-8), the ≥ 20% reserve — plus every screen and sound claim in the record's NOT VERIFIED section |
-| **AP-1** | **the ROM under test was built by `make album-rom ALBUM=examples/album_player/album.toml` from a fresh clone, with no untracked input and nothing fetched (§2.3)**; ≥2 tracks play to the end of the album, pause/resume and next/prev work **from scripted button presses**, `underflows = 0`, fades produce no click, and a skip's silence is bounded by `SKIP_PRIME_CHUNKS`; **audio begins within 1.5 s of boot**, read from the ROM's own `boot: total=…c` line (§10.5 — 589 ms measured on the 4-track fixture, ~36 KiB per track of that, so a 32-track album needs the tripwire windows shrunk) | `make album-test`: `mgba-test-runner` with a scripted key log, plus a captured-audio comparison against a reference decode of the same asset. **Also runs here, because the packer does: two consecutive packs → byte-identical blobs, and `ALBM1` re-read through the shipping `meta.rs` agrees with `album.toml` field by field** |
+| **AP-1** | **the ROM under test was built by `make album-rom ALBUM=examples/album_player/album.toml` from a fresh clone, with no untracked input and nothing fetched (§2.3)**; ≥2 tracks play to the end of the album, pause/resume and next/prev work **from a scripted key log replayed at the keys layer**, `underflows = 0`, `old = 0` and `dropped > 0` on every pressed skip and `dropped = 0` on every track-end advance, a skip's cover is `SKIP_PRIME_CHUNKS + 1` periods, the boundary gap is printed with its decomposition (§4.4), and **audio begins within 1.5 s of boot** (measured 578–580 ms on the 4-track fixture; ~36 KiB per track of that, so a 32-track album needs the tripwire windows shrunk) | `make album-test` (**landed PR-3b**): the REPLAY arm (`--features "input-replay deep-audit"`) run headless, every assertion read off the **log** with a named refusal per failed term; exit 124 is the pass path, ~2m27s, deterministic (two runs' logs `cmp` byte-identical), and 21 doctored logs tried against it — 19 refused by name. **Two of this row's original promises are not deliverable by this harness, and are re-stated rather than quietly dropped:** *(i)* "scripted button presses" cannot mean the emulator's input layer — `mgba-test-runner` exposes no key-log, stdin, env or socket path (verified on the installed binary) — so the script is replayed through `keys.rs` via `update_with_state`, the ROM prints which source it used, and **a green here is never evidence that a physical press reaches a cartridge** (that leg is AP-7a); *(ii)* "a captured-audio comparison against a reference decode" has **no tool** — the runner records no audio — so the witness is on-ROM and in the model: per-track `pcm`/`fifo` folds against **each visit's own** pins, the whole-region `assets` fold, the ring ledger, and a host model that records the **post-gain bytes handed to `rearm_dma`** and asserts contiguity across a pause (§4.4). The folds are a *decoder* witness only — they were cited as a transport one, wrongly, and that claim is retracted here as well as in the code. **What AP-1 still cannot claim: that a transition is click-free to an ear, or that a real press works.** Until AP-7a listens, this gate is green on the emulator's terms only. **Also runs here, because the packer does: two consecutive packs → byte-identical blobs, and `ALBM1` re-read through the shipping `meta.rs` agrees with `album.toml` field by field** |
 | **AP-2** | mm:ss elapsed + remaining match the durations **the same build's pack step printed** to ≤1 s (§6; the tool is Phase 1's as of §9.0, so this differential exists from the first album build rather than waiting for Phase 3); bar and time never disagree by more than one cell and never move backwards; no `__aeabi_*div*` in the playback/UI path | host twin on `position.rs`/`layout.rs` + objdump/symbol fact on the linked `.gba` + the bake's printed track table |
 | **AP-3** | Every screen's map renders to the expected host snapshot from the same `layout.rs`, and every string on every screen *fits* 240×160 | host snapshot test + on-screen fit verdict (the `text::measure` precedent) |
 | **AP-4** | `ART1` is reproducible byte-for-byte from the source PNG, re-reads through the shipping parser, never exceeds its tile/palette allocation (linker map + VRAM audit), and refuses an off-palette source image | `make album-art-check` |
@@ -1656,7 +1712,7 @@ Numbered in this file's own space (the codec tracks keep theirs).
 | Q1 | Which backend is v1's default *artifact*? | **The application supports both and favours neither** (§4.2b, AP-9). U4 is not met yet (105% worst / 89% mean, §2), so the lossy backend is a *near* candidate for the album-length image; it becomes a real one when U4 lands with margin and the default once **U5** gives it zero-underrun playback on hardware — the lossless backend stays the default until then because it is the one with hardware witnesses today, and it stays a build forever, as the A/B control. Either way this is a shipping decision about which artifact `make album-rom` builds by default, not a design assumption: nothing in the app may depend on it. |
 | Q2 | App-side manifest, or extend a codec's container with album fields? | **App-side `ALBM1`, for both backends equally** — the decoupling argument is §4.3: an album feature must be available to both codecs or it is not a feature, it is a branch. Revisit only if a future format revision is happening for codec reasons anyway. |
 | Q3 | An in-repo encoder for the lossy backend? | **Settled for v1 by the codec track** (2026-11-14): the encoder of record is used off-tree to produce assets, nothing is built from it and no C is vendored. This app therefore bakes from a *pre-encoded asset* on that backend. A Rust encoder remains a codec-track milestone; nothing in Phases 0–4 blocks on it. |
-| Q4 | Gapless playback? | ULI2 is gapless by construction (one stream, track boundaries are positions). The FLAC path is N blobs and will gap **audibly** unless the ring is bridged at a track boundary. **v1 rules: lossless path has inter-track gaps, and we say so**; bridging is a Phase 5 item. |
+| Q4 | Gapless playback? | ULI2 is gapless by construction (one stream, track boundaries are positions). The FLAC path is N blobs and will gap **audibly** unless the ring is bridged at a track boundary. **v1 rules: the lossless path has inter-track gaps and we say so — with the number now: 214 / 229 ms at a track-end boundary (§4.4), of which four periods are the `SKIP_PRIME_CHUNKS` cover and the rest is tail padding plus two starved periods.** A pressed skip is a larger gap by design (306 ms of chain, plus the destination's own lead-in). Bridging stays a Phase 5 item, and it is the first feature that must not assume a decoder can be pre-rolled into the old track's queue. |
 | Q5 | Seek inside a track? | Deferred past v1. The UI affordance (a scrub screen) is the work; granularity is whatever the linked backend offers, which is why it arrives as a `PcmSource` **capability** (§4.2) and never as a constant in a screen. |
 | Q6 | Does `bands` earn its ~243 KB in v1? | Probably not: `loud`+`beat` is 91 KB and drives two of the four visualisations. **v1 ships `loud`+`beat`;** `bands` is a switch, priced in the bake report, and the spectrum view is its own PR. |
 | Q7 | Art box size and default mode? | 120×120 `cover` for art-only; 160×96 when a viz is on. To be confirmed on a real screen in Phase 2, not in a document. |
