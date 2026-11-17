@@ -1377,8 +1377,8 @@ fn the_lead_subtraction_cannot_underflow() {
 
 use album_player::pcm::{AlbumMeta, TrackMeta};
 use album_player::transport::{
-    FADE_SAMPLES, GAIN_UNITY, HandOffGain, SKIP_PRESS_TO_HANDOFF_PERIODS, SKIP_PRIME_CHUNKS, State,
-    Step, Transport, scale_byte,
+    FADE_PERIODS, FADE_SAMPLES, GAIN_UNITY, HandOffGain, SKIP_PRESS_TO_HANDOFF_PERIODS,
+    SKIP_PRIME_CHUNKS, State, Step, Transport, scale_byte,
 };
 use gba_playback::playback::{Chunk, PushError, RingFeed, convert_frame, fifo_byte};
 
@@ -1798,6 +1798,9 @@ impl Model {
             Chunk::Starved => return false,
         };
         self.ring_l.extend_from_slice(&l);
+        // The deferral note, as the ROM's feeder takes it: it asks about the slot the previous
+        // period handed over, which has just finished playing.
+        self.transport.note_hand_off();
         self.transport.apply(&mut l, &mut r);
         self.dma_l.extend_from_slice(&l);
         self.committed += real as u32;
@@ -1825,6 +1828,7 @@ impl Model {
         let (mut l, mut r) = ([0u8; CHUNK], [0u8; CHUNK]);
         let verdict = self.feed.take_chunk(&mut l, &mut r, CHUNK, self.finished);
         self.ring_l.extend_from_slice(&l);
+        self.transport.note_hand_off();
         self.transport.apply(&mut l, &mut r);
         self.dma_l.extend_from_slice(&l);
         self.handoffs += 1;
@@ -1917,7 +1921,6 @@ impl Model {
                 other => panic!("unexpected step {other:?}"),
             }
         }
-        assert_eq!(self.transport.state(), State::Paused);
         let pause = Pause {
             committed_at_toggle,
             frozen_committed: self.committed,
@@ -2015,7 +2018,13 @@ impl Model {
     /// producer frame of decode, so this is the quantity `SKIP_PRESS_TO_HANDOFF_PERIODS` bounds. The
     /// press is taken at the top of the pass, the fade is spent by the feeder inside it, and the
     /// hand-off runs at the decision at its end; `pass_periods` therefore *is* the press→hand-off
-    /// wait, which is what makes the bound checkable here rather than only in a ROM log.
+    /// wait when the pass is long enough, which is what makes the bound checkable here rather than
+    /// only in a ROM log.
+    ///
+    /// The deferral ([`FADE_PERIODS`]) is the floor: a decision taken one period after the press
+    /// cannot hand off, because the buffer the ramp was applied to has not yet been played out. The
+    /// loop therefore serves one more period and asks again, exactly as the ROM's cheap passes do
+    /// after the decode — that extra period is the deferral, and it is part of the measured wait.
     ///
     /// Returns the resolved skip, so a caller asserts on numbers rather than on side effects.
     fn press_skip(&mut self, to: usize, primed_chunks: u32, pass_periods: u32) -> Skip {
@@ -2027,14 +2036,25 @@ impl Model {
             Step::FadeOut,
             "a skip from Playing must fade out"
         );
+        let mut served = 0;
         for _ in 0..pass_periods {
             self.period();
+            served += 1;
         }
-        assert_eq!(
-            self.transport.tick(),
-            Step::SkipHandOff,
-            "the fade did not settle inside the press's own pass"
-        );
+        loop {
+            match self.transport.tick() {
+                Step::SkipHandOff => break,
+                Step::Idle => {
+                    assert!(
+                        served < SKIP_PRESS_TO_HANDOFF_PERIODS,
+                        "the deferral never let the hand-off happen"
+                    );
+                    self.period();
+                    served += 1;
+                }
+                other => panic!("unexpected step {other:?} while fading out"),
+            }
+        }
 
         // §4.4 steps 2-5's arming, in one section: the transport's transition (which arms the cover
         // hold), the truncate, and the cover's first whole chunk. A feeder period landing between the
@@ -2163,14 +2183,24 @@ impl Model {
             Step::FadeOut,
             "a track end must enter the transition from Playing"
         );
-        // The fade has no bytes to act on (the ring is empty), so this one period is silence;
-        // `finished` is still set, so it is not booked as an underflow.
-        self.period();
-        assert_eq!(
-            self.transport.tick(),
-            Step::SkipHandOff,
-            "the end-of-track fade did not settle"
-        );
+        // The fade has no bytes to act on (the ring is empty), so its periods are silence; `finished`
+        // is still set, so neither is booked as an underflow. The deferral applies here too — the
+        // advance reuses `skip()`/`SkipHandOff`, one mechanism and not a fork — so the transition
+        // takes `FADE_PERIODS` periods from the press to the hand-off, exactly as a press's does.
+        let mut fade_periods = 0;
+        loop {
+            self.period();
+            fade_periods += 1;
+            match self.transport.tick() {
+                Step::SkipHandOff => break,
+                Step::Idle => assert!(
+                    fade_periods < FADE_PERIODS,
+                    "the end-of-track fade never settled"
+                ),
+                other => panic!("unexpected step {other:?} at a track end"),
+            }
+        }
+        assert_eq!(fade_periods, FADE_PERIODS);
         assert!(
             self.transport.begin_reprime(SKIP_PRIME_CHUNKS),
             "the transport was not in its transition"
@@ -2266,7 +2296,7 @@ fn silence_at_the_hand_off_is_the_centre_zero_not_a_dc_offset() {
 #[test]
 fn the_hand_off_fade_is_monotone_and_completes_inside_one_chunk() {
     // 256 samples < a 560-sample chunk: a fade finishes inside the buffer that starts playing, which
-    // is why a pause can freeze the chain at the next period boundary instead of stopping mid-ramp.
+    // is why the transport can defer the freeze to the boundary after it instead of stopping mid-ramp.
     assert!((FADE_SAMPLES as usize) < CHUNK);
     // A constant positive byte makes the scaled value a monotone function of k, so the byte stream
     // itself witnesses the ramp's shape.
@@ -2359,8 +2389,8 @@ fn the_hand_off_gain_schedule_is_monotone_to_zero_and_transparent_at_full() {
     let pause_at = model.gains.len();
     let pause = model.press_pause();
     assert_eq!(
-        pause.fade_periods, 1,
-        "the fade did not complete inside one period"
+        pause.fade_periods, FADE_PERIODS,
+        "the fade plus its play-out period did not fit in {FADE_PERIODS} periods"
     );
     assert_eq!(
         pause.gain_at_freeze, 0,
@@ -2377,9 +2407,13 @@ fn the_hand_off_gain_schedule_is_monotone_to_zero_and_transparent_at_full() {
 
     // The fade chunk, sample by sample: the ring's byte scaled by that sample's gain, one step down
     // from full scale. This is the whole mechanism — the gain is applied at the hand-off, and the
-    // ring's own bytes are what the unscaled capture shows beside it.
-    let faded = &model.dma_l[model.dma_l.len() - CHUNK..];
-    let ring = &model.ring_l[model.ring_l.len() - CHUNK..];
+    // ring's own bytes are what the unscaled capture shows beside it. It is the second-to-last
+    // hand-off: the last one is the play-out period, served at gain zero so the ramped buffer can
+    // finish playing before the freeze.
+    let faded =
+        &model.dma_l[model.dma_l.len() - FADE_PERIODS as usize * CHUNK..model.dma_l.len() - CHUNK];
+    let ring = &model.ring_l
+        [model.ring_l.len() - FADE_PERIODS as usize * CHUNK..model.ring_l.len() - CHUNK];
     for i in 0..CHUNK {
         let k = (FADE_SAMPLES - i as i32).clamp(0, 256);
         assert_eq!(
@@ -2395,6 +2429,13 @@ fn the_hand_off_gain_schedule_is_monotone_to_zero_and_transparent_at_full() {
     assert!(
         ring[FADE_SAMPLES as usize..].iter().any(|&b| b != 0x00),
         "the ring's own bytes there were silent too, so the fade proves nothing"
+    );
+    // The play-out period is the deferral: it is served at gain zero, so it is all centre bytes.
+    // Cutting the chain here loses nothing audible, which is the whole reason `tick` waits for it.
+    assert_eq!(
+        &model.dma_l[model.dma_l.len() - CHUNK..],
+        &vec![0x00u8; CHUNK][..],
+        "the chunk served while the gain was silent is not silence"
     );
 
     // Resume: the ramp starts at the centre and reaches full scale inside the primed chunk, and the
@@ -2425,6 +2466,184 @@ fn the_hand_off_gain_schedule_is_monotone_to_zero_and_transparent_at_full() {
 // ---------------------------------------------------------------------------------------------
 // 8b. Pause: what it touches, and what it leaves alone
 // ---------------------------------------------------------------------------------------------
+
+/// **Item 1's regression test: the transition is deferred until the ramped chunk has been played.**
+///
+/// The ramp is applied to the slot handed to the DMA, and that slot *begins* playing at the
+/// `rearm_dma` that hands it over. So a `tick` that fires on `gain.is_silent()` alone freezes the
+/// chain at sample 0 of the chunk that carries the fade: the listener hears the previous chunk end
+/// at unity gain, the 15.6 ms ramp is never heard, and up to a chunk is cut mid-waveform — the
+/// splice §4.4 forbids. This test drives the transition one period at a time and asserts the first
+/// decision is `Idle` (the buffer was handed over but not yet played), and that the freeze only
+/// happens after the next hand-off, whose chunk is silence in every byte. Remove the deferral and
+/// the first `tick` returns `Freeze`: this test goes red.
+#[test]
+fn the_deferral_serves_the_ramped_chunk_before_the_freeze_so_the_fade_reaches_the_speaker() {
+    let mut model = Model::new(TOTAL);
+    model.prefill();
+    assert!(model.prime());
+    model.run_periods(8);
+
+    let before = model.dma_l.len();
+    let consumed_before = model.feed.consumed();
+    assert_eq!(model.transport.toggle(true), Step::FadeOut);
+
+    // Period 1: the ramp is applied to the slot the DMA is about to start playing. The gain is
+    // silent at the end of it, but the chunk carrying the silence has only just begun.
+    model.period();
+    assert!(model.transport.gain().is_silent());
+    assert!(
+        !model.transport.served_silent_tail(),
+        "the feeder claimed the silent tail was served on the ramp's own period"
+    );
+    assert_eq!(
+        model.transport.tick(),
+        Step::Idle,
+        "the pause froze on the ramp's own period: the fade would never reach the speaker"
+    );
+    assert_eq!(model.transport.state(), State::Pausing);
+
+    // Period 2: served at gain zero, i.e. handed over at the boundary where the ramped buffer has
+    // finished playing. Only now may the chain freeze.
+    model.period();
+    assert!(model.transport.served_silent_tail());
+    assert_eq!(model.transport.tick(), Step::Freeze);
+    assert_eq!(model.transport.state(), State::Paused);
+    assert_eq!(
+        (model.dma_l.len() - before) / CHUNK,
+        FADE_PERIODS as usize,
+        "the pause did not serve exactly the fade plus its play-out period"
+    );
+
+    // The chunk the ramp was applied to: unity gain at its first sample, the declared one-step-per-
+    // sample window down to the centre, then the centre for the rest of the buffer.
+    let ramped = &model.dma_l[before..before + CHUNK];
+    let source = &model.ring_l[before..before + CHUNK];
+    for i in 0..CHUNK {
+        let k = (FADE_SAMPLES - i as i32).clamp(0, 256);
+        assert_eq!(
+            ramped[i],
+            scale_byte(source[i], k),
+            "sample {i} of the ramped chunk is not the ring's byte at gain {k}"
+        );
+    }
+    assert_eq!(ramped[0], source[0], "the fade did not start at full gain");
+    assert!(
+        ramped[FADE_SAMPLES as usize..].iter().all(|&b| b == 0),
+        "the ramped chunk's tail is not silence, so the ramp did not complete"
+    );
+    assert!(
+        source[FADE_SAMPLES as usize..].iter().any(|&b| b != 0),
+        "the ring's bytes in the ramp's tail were silent, so this proves nothing"
+    );
+    // The chunk the freeze lands on: silence in every byte, so cutting it loses no waveform. This
+    // is the absorption of the deferral's one period.
+    let silent = &model.dma_l[before + CHUNK..before + FADE_PERIODS as usize * CHUNK];
+    assert!(
+        silent.iter().all(|&b| b == 0),
+        "the period served while the gain was silent is not silence"
+    );
+
+    // The ring moved by exactly those two periods and the producer was not fed: a pause takes
+    // chunks, never drops or repeats one, and the ledger closes across the freeze.
+    let served = FADE_PERIODS as usize * CHUNK;
+    assert_eq!(model.feed.consumed(), consumed_before + served);
+    assert_eq!(
+        model.feed.pushed(),
+        model.feed.consumed() + model.feed.ready()
+    );
+    assert_eq!(model.committed, model.feed.consumed() as u32);
+    assert_eq!(model.underflows, 0);
+}
+
+/// Across a pause/resume the **post-gain** byte stream handed to `rearm_dma` is the source's own
+/// stream, contiguous, with the only differences inside the declared ramp windows and the play-out
+/// period the freeze cuts.
+///
+/// This is the transport witness the ROM cannot be. The ROM's `pcm`/`fifo`/`assets` folds are a
+/// cold re-decode and a region fold — a **decoder/content** witness, invariant to what the ring and
+/// the DMA did — and it has no playback cursor to read. Here every byte the feeder hands over after
+/// the gain is recorded, so a dropped, repeated or reordered chunk is a byte difference outside the
+/// named windows rather than an inference. What it still cannot witness is the DAC and the speaker
+/// (AP-7), or the real period IRQ's timing.
+#[test]
+fn the_handed_over_stream_is_contiguous_across_a_pause_except_the_declared_ramps() {
+    let mut model = Model::new(TOTAL);
+    model.prefill();
+    assert!(model.prime());
+    model.run_periods(7);
+
+    let fade_out = model.dma_l.len() / CHUNK;
+    let pause = model.press_pause();
+    let ramp_in = model.dma_l.len() / CHUNK;
+    model.press_resume(0);
+    model.run_periods(6);
+    assert_eq!(model.pauses[0].fade_periods, FADE_PERIODS);
+    assert_eq!(pause.dropped(), 0);
+
+    // The source's own bytes, one chunk per hand-off. The run is far shorter than the track, so
+    // every byte is a real sample rather than `take_chunk`'s tail padding.
+    let source: Vec<u8> = (0..model.dma_l.len() as u32)
+        .map(|i| fifo_byte(pattern_sample(i)))
+        .collect();
+    assert_eq!(model.dma_l.len() % CHUNK, 0);
+    let chunks = model.dma_l.len() / CHUNK;
+    assert_eq!(chunks, ramp_in + 1 + 6);
+
+    for c in 0..chunks {
+        let got = &model.dma_l[c * CHUNK..(c + 1) * CHUNK];
+        let src = &source[c * CHUNK..(c + 1) * CHUNK];
+        if c == fade_out {
+            // Window 1: the declared ramp-out, sample for sample.
+            let mut last = GAIN_UNITY;
+            for i in 0..CHUNK {
+                let k = (FADE_SAMPLES - i as i32).clamp(0, 256);
+                assert_eq!(
+                    got[i],
+                    scale_byte(src[i], k),
+                    "chunk {c} sample {i}: the ramp-out"
+                );
+                assert!(k <= last, "the ramp-out went up at sample {i}");
+                last = k;
+            }
+        } else if c == fade_out + 1 {
+            // The play-out period: the same source samples at gain zero, and the freeze cuts it, so
+            // it is handed over but never heard. No sample is *missing* from the audible stream.
+            assert!(
+                got.iter().all(|&b| b == 0),
+                "the play-out period is not silence at gain zero"
+            );
+        } else if c == ramp_in {
+            // Window 2: the declared ramp-in on the very next source chunk — contiguous with the
+            // last heard one, so no sample was skipped or replayed across the freeze.
+            let mut last = 0;
+            for i in 0..CHUNK {
+                let k = (i as i32).clamp(0, 256);
+                assert_eq!(
+                    got[i],
+                    scale_byte(src[i], k),
+                    "chunk {c} sample {i}: the ramp-in"
+                );
+                assert!(k >= last, "the ramp-in went down at sample {i}");
+                last = k;
+            }
+        } else {
+            assert_eq!(
+                got, src,
+                "chunk {c} of the handed-over stream is not the source's"
+            );
+        }
+    }
+
+    // The ledgers close across both transitions: the clock is the ring's consumed span, the producer
+    // never ran while frozen, and no truncate is in this run.
+    assert_eq!(
+        model.feed.pushed(),
+        model.feed.consumed() + model.feed.ready()
+    );
+    assert_eq!(model.committed, model.feed.consumed() as u32);
+    assert_eq!(model.underflows, 0);
+}
 
 /// A pause fades the **hand-off** and never the ring.
 ///
@@ -2592,7 +2811,7 @@ fn scripted_pauses_book_no_underflow_and_every_hand_off_is_a_period_or_a_prime()
     for pause in &model.pauses {
         assert_eq!(pause.dropped(), 0, "a scripted pause dropped samples");
         assert_eq!(pause.gain_at_freeze, 0);
-        assert_eq!(pause.fade_periods, 1);
+        assert_eq!(pause.fade_periods, FADE_PERIODS);
     }
 
     // And the bytes the DMA was handed are the source's, in order, with only the fades' scaling on
@@ -2622,18 +2841,23 @@ fn a_frozen_ring_refuses_a_push_and_resume_delivers_it() {
     }
     let pushed = model.feed.pushed();
 
+    let free_before = model.feed.free_samples();
+    assert!(
+        free_before < FRAME,
+        "the ring was not at its flow-control limit"
+    );
     model.press_pause();
-    // The fade's own chunk is a period, so the frozen ring has room for exactly what it served.
+    // The pause serves the fade and its play-out period, so the frozen ring holds more room than the
+    // producer's flow-control gate allows — and it is still frozen, so nothing is pushed into it.
     let free = model.feed.free_samples();
-    assert!(free < FRAME, "the ring was not full: {free} free");
-    // A frame-sized push into the frozen ring is refused, and nothing is credited. 0x80 is chosen
-    // because the fake source cannot produce it (its bytes span ±60 codes), so it is a marker.
+    assert_eq!(free, free_before + FADE_PERIODS as usize * CHUNK);
+    // A push one sample larger than the frozen room is refused, and nothing is credited. 0x80 is
+    // chosen because the fake source cannot produce it (its bytes span ±60 codes), so it is a marker.
+    let marker = vec![0x80u8; free + 1];
     assert_eq!(
-        model
-            .feed
-            .push_bytes(&vec![0x80; FRAME], &vec![0x80; FRAME]),
+        model.feed.push_bytes(&marker, &marker),
         Err(PushError::OutOfSpace {
-            need: FRAME,
+            need: free + 1,
             have: free
         })
     );
@@ -2722,8 +2946,91 @@ fn a_skip_lands_the_new_track_prime_plus_one_periods_after_the_hand_off() {
             "prime {prime}: stale audio after the hand-off"
         );
         assert_eq!(skip.underflow_delta(), 0, "prime {prime}: an underflow");
-        assert_eq!(skip.press_to_handoff(), 1);
+        assert_eq!(skip.press_to_handoff(), FADE_PERIODS);
     }
+}
+
+/// A skip's **post-gain** stream after the hand-off is the cover's silence, then the new track's own
+/// bytes under the declared ramp-in — not one old-track byte survives the truncate.
+///
+/// `old == 0` is checked on the same run and is the weaker witness: during the ramped tail the gain
+/// is zero, so a stale chunk would read as silence too. This test reads the bytes the DMA was
+/// actually handed: the chunk after the fade-out is `0x00` throughout, the whole cover is `0x00`
+/// chunk for chunk, and the first new chunk is the new source's samples at the ramp-in's gain.
+#[test]
+fn a_skips_post_gain_stream_is_the_cover_then_the_new_tracks_own_bytes() {
+    let mut model = Model::album(&[SKIP_TRACK; 2], 0);
+    model.prefill();
+    assert!(model.prime());
+    model.paint.start(SKIP_TRACK, 0);
+    model.run_periods(4);
+    model.fill_deep();
+    let skip = model.press_skip(1, SKIP_PRIME_CHUNKS, 1);
+
+    // The mark is the hand-off's period; every hand-off appends one chunk, so its chunk index is the
+    // period index. The chunk served *at* the mark is the last of the old track, and its tail is
+    // already silence from the ramp.
+    let at = skip.at as usize;
+    assert_eq!(
+        model.dma_l.len() / CHUNK,
+        at + 1 + SKIP_PRIME_CHUNKS as usize + 1
+    );
+    let faded = &model.dma_l[at * CHUNK..(at + 1) * CHUNK];
+    assert!(
+        faded[FADE_SAMPLES as usize..].iter().all(|&b| b == 0),
+        "the last old-track chunk did not finish on the ramp's silent tail"
+    );
+
+    // Every cover chunk is whole and exactly silent. This is what "nothing stale is served after the
+    // hand-off" means in bytes: the old track's source bytes at these indices are non-zero, so a
+    // survivor would show here.
+    for c in at + 1..=at + SKIP_PRIME_CHUNKS as usize {
+        assert_eq!(
+            &model.dma_l[c * CHUNK..(c + 1) * CHUNK],
+            &vec![0u8; CHUNK][..],
+            "cover chunk {c} is not silence, so something survived the truncate"
+        );
+    }
+
+    // The new track's first chunk, under the ramp-in from the centre. `start_track` reset the source
+    // to sample 0, so its bytes are the closed form from there.
+    let first_new = at + SKIP_PRIME_CHUNKS as usize + 1;
+    assert_eq!(first_new - at, skip.content_at() as usize);
+    let got = &model.dma_l[first_new * CHUNK..(first_new + 1) * CHUNK];
+    let mut last = 0;
+    for i in 0..CHUNK {
+        let k = (i as i32).clamp(0, 256);
+        assert_eq!(
+            got[i],
+            scale_byte(fifo_byte(pattern_sample(i as u32)), k),
+            "sample {i} of the new track's first chunk is not its byte at gain {k}"
+        );
+        assert!(k >= last, "the ramp-in went down at sample {i}");
+        last = k;
+    }
+    assert_eq!(got[0], 0x00, "the ramp-in did not start at the centre");
+    assert!(
+        got[FADE_SAMPLES as usize..]
+            .iter()
+            .enumerate()
+            .all(|(j, &b)| b == fifo_byte(pattern_sample(FADE_SAMPLES as u32 + j as u32))),
+        "the ramp-in did not return to full gain inside the new track's first chunk"
+    );
+
+    // The ledger and the ring: the truncate accounts for the queued span exactly, and nothing was
+    // replayed across the hand-off.
+    assert_eq!(
+        model.feed.pushed(),
+        model.feed.consumed() + model.feed.ready()
+    );
+    assert_eq!(
+        model.committed + model.dropped,
+        model.feed.consumed() as u32,
+        "the clock plus the truncate's span is the ring's ledger"
+    );
+    assert_eq!(skip.old(), 0);
+    assert_eq!(skip.underflow_delta(), 0);
+    assert_eq!(model.underflows, 0);
 }
 
 /// A skip at a deep queue drops the queued span, books no underflow and hears no stale period, at
@@ -2754,7 +3061,7 @@ fn a_deep_queue_skip_drops_the_queued_span_and_books_no_underflow() {
         queued_least = queued_least.min(queued);
         let skip = model.press_skip(visits[step as usize + 1], SKIP_PRIME_CHUNKS, 1);
         assert_eq!(
-            skip.dropped + CHUNK as u32,
+            skip.dropped + FADE_PERIODS * CHUNK as u32,
             queued,
             "step {step}: the truncate dropped {} of {queued} queued samples",
             skip.dropped
@@ -2781,7 +3088,7 @@ fn a_deep_queue_skip_drops_the_queued_span_and_books_no_underflow() {
     }
     assert_eq!(model.skips.len(), N as usize);
     assert!(
-        dropped_total >= (queued_least - CHUNK as u32) * N,
+        dropped_total >= (queued_least - FADE_PERIODS * CHUNK as u32) * N,
         "the truncate stepped over less than was queued (least queue {queued_least})"
     );
     assert_eq!(model.underflows, 0, "the run booked an underflow");
@@ -2824,6 +3131,10 @@ fn the_truncate_and_the_covers_first_chunk_share_one_section() {
     bare.run_periods(4);
     bare.fill_deep();
     assert_eq!(bare.transport.skip(), Step::FadeOut);
+    bare.period();
+    // One period only ramps: the buffer it was applied to is still playing, so the hand-off must
+    // not happen yet (that is the deferral, and the whole point of this arm's window).
+    assert_eq!(bare.transport.tick(), Step::Idle);
     bare.period();
     assert_eq!(bare.transport.tick(), Step::SkipHandOff);
     assert!(bare.transport.begin_reprime(SKIP_PRIME_CHUNKS));
@@ -3018,8 +3329,8 @@ fn a_skip_onto_a_track_that_opens_silent_reads_as_the_tracks_own_lead_in() {
         let skip = m.press_skip(1, SKIP_PRIME_CHUNKS, pass);
         assert_eq!(
             skip.press_to_handoff(),
-            pass,
-            "a {pass}-period pass did not set the press→hand-off wait"
+            pass.max(FADE_PERIODS),
+            "a {pass}-period pass did not set the press→hand-off wait (floor: the {FADE_PERIODS}-period deferral)"
         );
         assert!(skip.press_to_handoff() <= SKIP_PRESS_TO_HANDOFF_PERIODS);
     }
@@ -3080,6 +3391,41 @@ fn a_track_end_advances_to_the_next_track_with_no_stale_audio_or_underflow() {
         SKIP_PRIME_CHUNKS + 1,
         "the advance's transition is not the skip's cover plus one period"
     );
+    // The wire, in bytes: the fade's two periods (the ring was drained, so both are starved
+    // silence), the whole cover, and then the new track's first chunk under the declared ramp-in.
+    // Nothing of the ending track can appear here — `old == 0` is checked above, but this is the
+    // byte-level statement of the same thing.
+    let at = advance.at as usize;
+    assert_eq!(
+        model.dma_l.len() / CHUNK,
+        at + 1 + SKIP_PRIME_CHUNKS as usize + 1
+    );
+    for c in at..at + SKIP_PRIME_CHUNKS as usize + 1 {
+        assert_eq!(
+            &model.dma_l[c * CHUNK..(c + 1) * CHUNK],
+            &vec![0u8; CHUNK][..],
+            "chunk {c} of the advance is not silence"
+        );
+    }
+    let first_new = at + SKIP_PRIME_CHUNKS as usize + 1;
+    let got = &model.dma_l[first_new * CHUNK..(first_new + 1) * CHUNK];
+    for i in 0..CHUNK {
+        let k = (i as i32).clamp(0, 256);
+        assert_eq!(
+            got[i],
+            scale_byte(fifo_byte(pattern_sample(i as u32)), k),
+            "sample {i} of the advance's new track is not its byte at gain {k}"
+        );
+    }
+    assert_eq!(
+        model.feed.pushed(),
+        model.feed.consumed() + model.feed.ready()
+    );
+    assert_eq!(
+        model.committed + model.dropped,
+        model.feed.consumed() as u32
+    );
+    assert_eq!(model.underflows, 0);
     assert_eq!(model.source.track, 1);
     assert_eq!(
         model.transport.state(),

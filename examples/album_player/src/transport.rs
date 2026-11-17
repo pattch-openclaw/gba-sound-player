@@ -16,10 +16,12 @@
 //! | press → edge | the vblank ISR's [`keys::Sampler`](crate::keys::Sampler) debounces and posts | ≤ 1 video frame |
 //! | edge → fade begins | the main loop takes the post and issues [`Transport::toggle`] at a period boundary | ≤ 1 producer frame + 1 period (the loop is inside a decode until then) |
 //! | fade | the feeder scales the hand-off slot, full scale → silence | ≤ one period, and 256 samples inside it |
-//! | freeze | the main loop stops timer1, then timer0/timer2, then both sound DMAs | the next main-loop pass after silence |
+//! | play-out | the feeder serves one more period, so the ramped buffer is played to its silent tail | one period |
+//! | freeze | the main loop stops timer1, then timer0/timer2, then both sound DMAs | the next main-loop pass after that period |
 //!
-//! **`pause`:** ramp the hand-off gain to zero, then freeze — stop both sound DMAs and the timer
-//! chain, halt the producer, and leave the ring exactly as it is.
+//! **`pause`:** ramp the hand-off gain to zero, let the buffer carrying the ramp be played out, then
+//! freeze — stop both sound DMAs and the timer chain, halt the producer, and leave the ring exactly
+//! as it is.
 //!
 //! **`resume`:** re-prime both DMA buffers from the ring head and re-arm in the shipped order
 //! (`enable_sound` → prime → `clear_timer1_if` → the already-installed handler →
@@ -52,23 +54,30 @@
 //!   fade: re-targeting while frozen would need a second re-prime path and a way to cancel a queued
 //!   silence cover, and no §5.3 row asks for it. The caller counts the ignore.
 //!
-//! **A skip's wait to audio is three numbers, not one, and they belong to three different parties**
-//! (§4.4's D2 row is corrected to read this): *press → hand-off* is the frame loop's
-//! ([`SKIP_PRESS_TO_HANDOFF_PERIODS`], measured 1 period); *hand-off → the new track's first chunk* is
-//! the cover's ([`SKIP_PRIME_CHUNKS`] + 1 = 5 periods, and that is §4.4 step 5's claim); and anything
+//! **A skip's wait to audible audio is four numbers, not one, and they belong to three different
+//! parties** (§4.4's D2 row is corrected to read this): *press → detection* is the ISR's debounce
+//! (≤ 1 video frame); *detection → the post being taken* is the frame loop's and is **one producer
+//! frame**, 3.7–3.9 video frames of uninterruptible decode (measured 3 on the gate run) — the leg a
+//! log that only printed the audio clock's phase at detection could not see; *take → hand-off* is
+//! [`SKIP_PRESS_TO_HANDOFF_PERIODS`] periods, whose name predates the four-legged split and whose
+//! value bounds only this leg (measured 2 periods); *hand-off → the new track's first chunk* is the
+//! cover's ([`SKIP_PRIME_CHUNKS`] + 1 = 5 periods, and that is §4.4 step 5's claim); and anything
 //! beyond that is the **track's own head** — a chunk of digital silence at the top of a track is
 //! byte-identical to a chunk of the cover, so `to_new` reads `content_at + head_silence` and only the
 //! track can say how long its own lead-in is. The gate fixture's two full-master tracks read 8
 //! periods of that (its head is 4,480 all-zero samples; the first non-zero one is a −1 in the ninth
-//! chunk); its two clips read 0. So the worst case a listener waits, press to audible audio, is
-//! **14 periods = 479 ms**, plus the ≤ 1 video frame the vblank ISR owns for the detection (16.7 ms):
-//! **≤ ~496 ms** on this album — inside §4.4's ≤ ~0.6 s, but not the 171 ms D2 counted, because D2
-//! counted the cover alone.
+//! chunk); its two clips read 0. So the worst case a listener waits, press to the new track's first
+//! audible byte, is **14 periods = 479 ms, plus one producer frame ≈ 65 ms for the ISR→take wait and
+//! ≤ 1 video frame = 16.7 ms for the debounce: ~561 ms** on this album — inside §4.4's ≤ ~0.6 s, but
+//! not the 171 ms D2 counted, because D2 counted the cover alone. The ROM prints each leg and their
+//! sum (`latency:` line), and both the `reaction` term and the skip rows gate them.
 //!
 //! Four consequences follow, and each is the reason a simpler-looking design was rejected:
 //!
 //! - **The position is exact.** Nothing is dropped, so no truncate, no seek and no re-decode is
-//!   needed, and the resume continues on the sample the freeze stopped on.
+//!   needed, and the resume continues on the ring's next sample. (The clock is exact; the buffer the
+//!   DMA had already played out is not replayed — see [`Transport::tick`]'s deferral, which is what
+//!   makes that buffer the ramped one and not a mid-waveform cut.)
 //! - **The displayed time does not run while paused.** [`position`](crate::position)'s session
 //!   clock is incremented *in* the period IRQ, so stopping the timer chain stops the clock; §4.4's
 //!   never-backwards / 0-at-start / `n_samples`-at-end invariants hold across a pause by
@@ -122,10 +131,21 @@
 /// The hand-off fade window, in samples: **256** = 15.6 ms at the album's 16,384 Hz.
 ///
 /// §4.4's shape and §6's arithmetic: one gain step per sample, `>> 8` rather than a divide, monotone
-/// by construction. It must finish inside ONE DMA buffer so the chain can be frozen at the next
-/// period boundary rather than mid-ramp — the app's chunk is 560 samples and its geometry asserts
+/// by construction. It must finish inside ONE DMA buffer so that buffer is the one the chain lets
+/// play out before freezing — the app's chunk is 560 samples and its geometry asserts
 /// `FADE_SAMPLES < CHUNK_SAMPLES`.
 pub const FADE_SAMPLES: i32 = 256;
+
+/// The feeder periods a fade costs before a transition may take effect: **2**.
+///
+/// The first is the period whose hand-off slot carries the ramp (it *starts* playing at that
+/// boundary); the second is the one served at the next boundary, when the ramped buffer has finished
+/// playing and [`Transport::note_hand_off`] lets [`Transport::tick`] proceed. A transition that fired
+/// after one period would stop the chain on the fade it exists for and cut the previous chunk
+/// mid-waveform — §4.4's "fades, never a mid-waveform splice". The deferral is why every transition
+/// is one period slower than the fade itself, and why the ring still holds at most
+/// `RING_SAMPLES − FADE_PERIODS × CHUNK` when a skip truncates it.
+pub const FADE_PERIODS: u32 = 2;
 
 /// Full gain: a byte passes unchanged (`k / 256` == 1).
 pub const GAIN_UNITY: i32 = 256;
@@ -149,27 +169,35 @@ pub const GAIN_UNITY: i32 = 256;
 /// [`SKIP_PRESS_TO_HANDOFF_PERIODS`] on the front and the new track's own `head_silence` on the back.
 pub const SKIP_PRIME_CHUNKS: u32 = 4;
 
-/// The bound on a skip's **press → hand-off** latency, in feeder periods: **3**.
+/// The bound on a skip's **take → hand-off** latency, in feeder periods: **3**.
 ///
-/// The wait a listener can put a number on is `press → hand-off → content → audible`, and three
-/// different parties own the four terms (the track's own lead-in included). This one is the frame
-/// loop's: the post is taken at the top of a pass, the feeder spends one period fading (§4.4 step 1 — `FADE_SAMPLES` < `CHUNK_SAMPLES`, so
-/// it completes inside that one chunk), and the loop can only see the resulting silence at a pass
-/// *after* that boundary. So the term is the number of period boundaries one pass crosses, and a pass
-/// is one producer frame of decode: measured at 1.04–1.09 M cycles = **1.85–1.9 periods** (that
-/// figure is the one `keys.rs` states for why the keypad sample could not stay in this loop), so a
-/// pass crosses one boundary and two is already generous. Three is the bound on a pass up to
-/// ~1.6× the measured decode cost, which still fails a loop that stopped serving latches or needed a
-/// second pass to hand off.
+/// The name predates the three-legged split; the value bounds only the leg the frame loop owns, from
+/// the main loop taking the post to the hand-off's critical section — the press→detect and
+/// detect→take legs are in front of it and are the ROM's `reaction` term.
 ///
-/// Measured on the REPLAY arm's seven skips (`input-replay`, `make album-rom`'s image): **1 period on
-/// every one of them**, so the gate is 3× the observed value. The other two terms are not this one's:
-/// the cover is [`SKIP_PRIME_CHUNKS`] + 1 = 5 periods (`content_at`), and the track's own lead-in is
-/// `head_silence` — 8 periods on both full-master tracks in the gate fixture, 0 on its clips. Worst
-/// case observed end to end is therefore 1 + 13 = **14 periods = 479 ms** for a skip onto a track
-/// that opens with digital silence, and 6 periods = 205 ms onto one that opens audibly: both inside
-/// §4.4's ≤ ~0.6 s observable, and the plan's D2 row said 171 ms for the machinery alone because it
-/// counted the cover and not the track's own head.
+/// The wait a listener can put a number on is `press → take → hand-off → content → audible`, and
+/// three different parties own the four terms (the track's own lead-in included). This one is the
+/// frame loop's, and since PR-3b-fix1 it carries the deferral: the post is taken at the top of a pass, the
+/// feeder spends one period fading (§4.4 step 1 — `FADE_SAMPLES` < `CHUNK_SAMPLES`, so it completes
+/// inside that one chunk), and the transition then waits one more period so that chunk is played out
+/// before the hand-off ([`FADE_PERIODS`]). So the term is the number of period boundaries one pass
+/// crosses, plus the deferral: a pass is one producer frame of decode, measured at 1.04–1.09 M cycles
+/// = **1.85–1.9 periods** (that figure is the one `keys.rs` states for why the keypad sample could
+/// not stay in this loop), so two boundaries is enough and three is the bound on a pass up to ~1.6×
+/// the measured decode cost. It still fails a loop that stopped serving the deferral latch or needed
+/// two extra passes to hand off.
+///
+/// Measured on the REPLAY arm's skips (`input-replay`, `make album-rom`'s image): **2 periods on
+/// every one of the nine** in the current script, so the gate is 1.5× the observed value. The other
+/// two terms are not this one's: the cover is [`SKIP_PRIME_CHUNKS`] + 1 = 5 periods (`content_at`), and the track's own
+/// lead-in is `head_silence` — 8 periods on both full-master tracks in the gate fixture, 0 on its
+/// clips. Worst case observed end to end is therefore 2 + 13 = **15 periods = 513 ms** for a skip
+/// onto a track that opens with digital silence, plus the seam's two legs (≤ 1 video frame for the
+/// debounce + 3 frames = 50 ms for the take, 67 ms together): **~580 ms**. Onto a track that opens
+/// audibly it is 2 + 5 = 7 periods = 239 ms + 67 ms = **306 ms**, which is the ROM's own `latency:`
+/// line (`press→audible 18 frames = 306 ms`). The first is still inside §4.4's ≤ ~0.6 s observable,
+/// where the pre-fix numbers were 14 periods = 479 ms and 6 periods = 205 ms — and neither of those,
+/// nor D2's 171 ms for the machinery alone, counted the two seam legs or the track's own head.
 pub const SKIP_PRESS_TO_HANDOFF_PERIODS: u32 = 3;
 
 /// One FIFO byte in the form [`fifo_byte`](gba_playback::playback::fifo_byte) produces, scaled by
@@ -310,6 +338,12 @@ impl HandOffGain {
         if covering && self.hold == 0 {
             self.step = 1;
         }
+        // A fade that has reached the floor is finished, not still falling: the next slot is scaled
+        // at a constant zero rather than re-playing the ramp. The output is identical either way
+        // (the clamp already held `k` at 0), so this is the schedule saying what actually happened.
+        if self.k == 0 && self.step < 0 {
+            self.step = 0;
+        }
     }
 }
 
@@ -367,7 +401,8 @@ pub enum Step {
     /// Re-prime the hand-off from the ring head and re-arm the chain; the gain is already ramping
     /// in, and the primed chunk is the ramp's first chunk.
     Prime,
-    /// A skip's fade reached silence: perform the hand-off **now**, and in one critical section —
+    /// A skip's fade reached silence and the ramped buffer has been played out: perform the
+    /// hand-off **now**, and in one critical section —
     /// [`Transport::begin_reprime`] (which arms the gain's cover hold), `RingFeed::truncate()`, the
     /// producer's `finished` reset and the cover's first whole chunk. The state stays
     /// [`State::Skipping`] until that section runs, so no feeder period can land between the hold
@@ -386,6 +421,16 @@ pub enum Step {
 pub struct Transport {
     state: State,
     gain: HandOffGain,
+    /// Whether a whole hand-off has been served since the gain reached silence.
+    ///
+    /// The ramp is applied to the slot handed to the DMA, and that slot *starts* playing at the
+    /// `rearm_dma` that hands it over. So "the gain is silent" means the chunk that ends silent has
+    /// just begun — freezing or truncating there throws the fade away and cuts the previous chunk
+    /// mid-waveform (§4.4's "fades, never a mid-waveform splice" forbids exactly that). The feeder
+    /// sets this at the next period it serves, which is the boundary at which the ramped buffer has
+    /// finished playing; [`tick`](Self::tick) refuses to transition until it is set. Cleared
+    /// whenever a fade starts or the state changes, so it can never shorten a later transition.
+    served_silent: bool,
 }
 
 impl Transport {
@@ -395,6 +440,7 @@ impl Transport {
         Self {
             state: State::Playing,
             gain: HandOffGain::full(),
+            served_silent: false,
         }
     }
 
@@ -419,6 +465,24 @@ impl Transport {
         self.gain.apply(left, right);
     }
 
+    /// The feeder served one period: one `take_chunk` and one `rearm_dma`.
+    ///
+    /// Call it after the chunk is taken and **before** [`apply`](Self::apply) — it is asking whether
+    /// the previous hand-off's buffer was already silent, i.e. whether the ramped buffer has now
+    /// finished playing. One compare and one store, no multiply: the timer1 feeder's per-period
+    /// work stays inside `REARM_GRACE_SAMPLES`.
+    pub fn note_hand_off(&mut self) {
+        if self.gain.is_silent() {
+            self.served_silent = true;
+        }
+    }
+
+    /// Whether a period has been served since the gain reached silence.
+    #[must_use]
+    pub const fn served_silent_tail(&self) -> bool {
+        self.served_silent
+    }
+
     /// One command: `toggle` is "the listener pressed pause/resume this pass".
     ///
     /// A toggle from [`State::Playing`] starts the fade-out; a toggle from [`State::Paused`] starts
@@ -431,11 +495,13 @@ impl Transport {
             State::Playing => {
                 self.state = State::Pausing;
                 self.gain.fade_out();
+                self.served_silent = false;
                 Step::FadeOut
             }
             State::Paused => {
                 self.state = State::Resuming;
                 self.gain.fade_in();
+                self.served_silent = false;
                 Step::Prime
             }
             // A transition in flight, or a skip's: the contract has no cancel, and a pause pressed
@@ -453,6 +519,7 @@ impl Transport {
         if self.state == State::Playing {
             self.state = State::Skipping;
             self.gain.fade_out();
+            self.served_silent = false;
             Step::FadeOut
         } else {
             Step::Ignored
@@ -475,6 +542,7 @@ impl Transport {
         }
         self.state = State::Repriming;
         self.gain.fade_in_after(cover_chunks);
+        self.served_silent = false;
         true
     }
 
@@ -484,19 +552,30 @@ impl Transport {
     /// `Freeze` moves the state to `Paused` here rather than in a second call, so the caller cannot
     /// perform the freeze and forget to record it — or record it and forget to perform it. The skip
     /// hand-off is deliberately *not* like that: see [`Step::SkipHandOff`].
+    ///
+    /// **Neither fires on `is_silent()` alone.** The gain is zero at the first `apply`, i.e. at the
+    /// hand-off of the chunk that ends the ramp, and the DMA is at sample 0 of that chunk when the
+    /// main loop next passes. Firing there stops the chain (a pause) or truncates the ring (a skip)
+    /// on the ramp that was meant to be heard, so the deferral is the condition: a whole period must
+    /// have been served since the gain reached silence, which is exactly the boundary at which the
+    /// ramped buffer finished playing (`Transport::note_hand_off`). One rule, both transition arms —
+    /// the track-end advance goes through `skip`/`SkipHandOff` and gets it without a second path.
     pub fn tick(&mut self) -> Step {
         match self.state {
-            State::Pausing if self.gain.is_silent() => {
+            State::Pausing if self.gain.is_silent() && self.served_silent => {
                 self.state = State::Paused;
+                self.served_silent = false;
                 Step::Freeze
             }
-            State::Skipping if self.gain.is_silent() => Step::SkipHandOff,
+            State::Skipping if self.gain.is_silent() && self.served_silent => Step::SkipHandOff,
             State::Resuming if self.gain.is_full() => {
                 self.state = State::Playing;
+                self.served_silent = false;
                 Step::Idle
             }
             State::Repriming if self.gain.is_full() => {
                 self.state = State::Playing;
+                self.served_silent = false;
                 Step::Idle
             }
             _ => Step::Idle,
