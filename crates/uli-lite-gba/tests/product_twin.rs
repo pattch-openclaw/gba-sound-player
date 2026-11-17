@@ -9,7 +9,12 @@ use uli_lite::format::M;
 use uli_lite::{Album, CodeTables, Decoder, DecoderState, PortableKernels};
 use uli_lite_gba::{GbaDecoder, HotState};
 
-const BLOB: &[u8] = include_bytes!("../../uli-lite/tests/fixtures/uli2_tiny.uli");
+static BLOB_STORAGE: uli_lite::Aligned<
+    { include_bytes!("../../uli-lite/tests/fixtures/uli2_tiny.uli").len() },
+> = uli_lite::Aligned(*include_bytes!(
+    "../../uli-lite/tests/fixtures/uli2_tiny.uli"
+));
+const BLOB: &[u8] = &BLOB_STORAGE.0;
 
 fn outputs(
     d: &mut Decoder<'_, '_, PortableKernels>,
@@ -160,4 +165,31 @@ fn product_build_compiles_the_diagnostics_out() {
     );
     assert_eq!(product.ops(), uli_lite::Ops::ZERO);
     assert_eq!((product.xover(), product.hfnz()), (0, 0));
+}
+
+/// The product reader loads the stream with aligned `u16` reads (one `ldrh` per
+/// refill), which is only sound for a halfword-aligned blob. An odd-based blob
+/// must be **rejected by name**, not decoded — this is the witness that the
+/// alignment contract is enforced rather than assumed, and that a future
+/// embedder which forgets `uli_lite::Aligned` gets a diagnosable error.
+#[test]
+fn product_decoder_rejects_an_unaligned_blob() {
+    // `Vec` is aligned; the byte at index 0 shifts the album to an odd address
+    // while keeping its contents byte-identical and self-contained.
+    let mut shifted = Vec::with_capacity(BLOB.len() + 1);
+    shifted.push(0u8);
+    shifted.extend_from_slice(BLOB);
+    let odd = &shifted[1..];
+    assert_eq!(
+        (odd.as_ptr() as usize) & 1,
+        1,
+        "the test needs an odd-based slice"
+    );
+    let album = uli_lite::Album::parse(odd).expect("the album itself is intact");
+    let mut tables = uli_lite::CodeTables::new();
+    let mut hot = HotState::new();
+    assert_eq!(
+        GbaDecoder::new(album, &mut tables, &mut hot).err(),
+        Some(uli_lite::Error::UnalignedStream)
+    );
 }

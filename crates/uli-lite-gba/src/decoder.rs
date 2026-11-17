@@ -271,17 +271,40 @@ impl BitReader {
             valid: 0,
             bad: false,
         };
+        // The stream is read with aligned `u16` loads (one `ldrh` per refill
+        // instead of two `ldrb` + an `orr`; see `load`). That is sound only if
+        // the base is halfword-aligned. The container already requires an even
+        // *offset* (`Album::parse` rejects `stream_off & 1`), so the only way
+        // to get an odd base is a caller-supplied blob at an odd address — and
+        // `&[u8]` gives no alignment guarantee, so it is checked here rather
+        // than assumed. Rejection, not arithmetic: the decision log's rule for
+        // input this decoder cannot honour.
+        if (base as usize) & 1 != 0 {
+            br.bad = true;
+        }
         br.set_pos(bitpos);
         br
     }
 
-    /// Load the halfword at `p`. The caller has checked that both bytes exist.
+    /// Load the halfword at `p` — **one `ldrh`**.
+    ///
+    /// The C reference reads `*(b)->p++` from a `const uint16_t*`, i.e. one
+    /// halfword load. Ours used to be two byte loads plus a shift-or, because
+    /// ARM7TDMI has no unaligned halfword access and a `&[u8]` base could be
+    /// odd — four instructions on the single most-executed path in the decoder
+    /// (~900 refills per frame). [`Self::new`] now establishes even alignment
+    /// once, so the load is an aligned `u16` read and LLVM emits `ldrh`.
+    ///
+    /// # Safety
+    /// `p` must be halfword-aligned and have two readable bytes. [`Self::new`]
+    /// pins the alignment for every pointer the reader forms, and each call site
+    /// checks the bound first.
     #[inline(always)]
     #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
     unsafe fn load(p: *const u8) -> u32 {
-        // Two byte loads: the stream's byte alignment is not guaranteed, and
-        // ARM7TDMI has no unaligned halfword access.
-        unsafe { *p as u32 | ((*p.add(1) as u32) << 8) }
+        // SAFETY: the caller guarantees alignment (invariant of `new`) and
+        // two readable bytes (`refill`/`peek`/`set_pos` bound-check first).
+        unsafe { (p as *const u16).read() as u32 }
     }
 
     /// Absolute bit position of the next unconsumed bit.
@@ -608,7 +631,39 @@ fn huff_slow(hw: u32, p: &Huffman) -> u16 {
 #[inline(always)]
 #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
 unsafe fn zero16(p: *mut i32) {
-    // SAFETY: the caller guarantees 16 writable i32 at `p`.
+    // `stmia`, in asm: the reference's `zero16` is two zeroed registers and four
+    // `stmia`. The Rust `[i32; 4]` stores below were instead lowered to a
+    // **call** to `__aeabi_memclr4` (an ARM→Thumb veneer, a push/pop and a
+    // loop), because both the in-band fill and the post-EOB tail went through
+    // it — so a zero band cost a call frame and a loop.
+    //
+    // Eight `stmia` of one register pair rather than four of two pairs: the
+    // 4-register form is 4 instructions instead of 8, but it clobbers `r3` and
+    // `r12` as well, and `r12` is LLVM's scratch in ARM mode. Measured, the
+    // 2-register form is faster on the worst frame (210,833 vs 210,967) — this
+    // kernel's cost is dominated by what the clobbers do to the *surrounding*
+    // register allocation, not by its own instruction count. Bit-identical
+    // either way.
+    #[cfg(target_arch = "arm")]
+    unsafe {
+        core::arch::asm!(
+            "mov r1, #0",
+            "mov r2, #0",
+            "stmia {p}!, {{r1, r2}}",
+            "stmia {p}!, {{r1, r2}}",
+            "stmia {p}!, {{r1, r2}}",
+            "stmia {p}!, {{r1, r2}}",
+            "stmia {p}!, {{r1, r2}}",
+            "stmia {p}!, {{r1, r2}}",
+            "stmia {p}!, {{r1, r2}}",
+            "stmia {p}!, {{r1, r2}}",
+            p = inout(reg) p => _,
+            out("r1") _, out("r2") _,
+            options(nostack),
+        );
+    }
+    // Host build (and anything else): the portable form. Bit-identical.
+    #[cfg(not(target_arch = "arm"))]
     unsafe {
         let mut i = 0;
         while i < BANDW {
@@ -669,6 +724,19 @@ unsafe fn dec_chan(
     /// Ensure at least 17 valid bits (or set `bad`): one halfword, and a second
     /// only when the window was empty. 17 and not 16 because a group reads
     /// `rbits` raw bits and then a sign bit.
+    ///
+    /// **The bounds check stays, and it was measured.** Three shapes were tried
+    /// here in the 2026-11-16 sweep and this is the fastest:
+    /// 1. *branchless clamp* — pick `min(next, end - 2)` with a predicated move
+    ///    and detect truncation once per channel: defeats the taken branch, but
+    ///    the load address now depends on `end`, which puts an extra link in the
+    ///    critical path ahead of every load. **Measured +1,352 cycles/frame**
+    ///    against this shape, so it is not the win the branch count suggests.
+    /// 2. *`bad` updated per refill* (`bad |= over`): the flag stops being
+    ///    written only on the error path and becomes live across the whole
+    ///    loop. Measured worse again, for the register pressure.
+    /// 3. this one. The check is a compare and a branch, and the branch is
+    ///    taken on the common path — but the address chain stays 1 instruction.
     macro_rules! refill {
         () => {{
             if valid < 17 {
@@ -845,7 +913,12 @@ unsafe fn dec_chan(
     }
 
     let k = tables.k;
-    if k > MAXK {
+    // A rejected stream never reaches the band loop: `decode_frame` checks
+    // `bad` after the frame header and before this call, so this is a
+    // belt-and-braces early-out that keeps the reader's preconditions local to
+    // this function instead of an unstated property of the caller. One compare
+    // per channel, not per symbol.
+    if bad || k > MAXK {
         bad = true;
         return (
             0,
@@ -1061,6 +1134,16 @@ impl<'a, 's> GbaDecoder<'a, 's> {
         tables: &'s mut CodeTables,
         hot: &'s mut HotState,
     ) -> Result<Self, Error> {
+        // The bit reader loads the stream with aligned `u16` reads (one `ldrh`
+        // per refill instead of two `ldrb` + a shift-or). That is sound only for
+        // a halfword-aligned stream, which the container guarantees as an even
+        // *offset* (`Album::parse` rejects `stream_off & 1`) but cannot
+        // guarantee as an *address* — `include_bytes!` has alignment 1. Checked
+        // once here rather than per load, and named rather than reported as a
+        // bitstream error: see `uli_lite::Aligned` for the fix.
+        if (album.stream().as_ptr() as usize) & 1 != 0 {
+            return Err(Error::UnalignedStream);
+        }
         tables.parse_into(album.tables())?;
         hot.reset();
         let tables: &'s CodeTables = tables;
@@ -1369,7 +1452,14 @@ mod tests {
     use super::{BitReader, esc};
     use uli_lite::Album;
 
-    const BLOB: &[u8] = include_bytes!("../../uli-lite/tests/fixtures/uli2_tiny.uli");
+    // Halfword-aligned: the product reader uses aligned `u16` loads (see
+    // `uli_lite::Aligned`), and this blob is odd-based without the wrapper.
+    static BLOB_STORAGE: uli_lite::Aligned<
+        { include_bytes!("../../uli-lite/tests/fixtures/uli2_tiny.uli").len() },
+    > = uli_lite::Aligned(*include_bytes!(
+        "../../uli-lite/tests/fixtures/uli2_tiny.uli"
+    ));
+    const BLOB: &[u8] = &BLOB_STORAGE.0;
 
     fn hw(stream: &[u8], i: usize) -> u64 {
         let b = &stream[i * 2..i * 2 + 2];

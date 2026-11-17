@@ -286,7 +286,12 @@ mod tests {
 
     use super::{Frame, PcmSource, SourceError, UliSource};
 
-    const CORPUS: &[u8] = include_bytes!("../../uli-lite/tests/fixtures/uli2_tiny.uli");
+    const CORPUS_BLOB: uli_lite::Aligned<
+        { include_bytes!("../../uli-lite/tests/fixtures/uli2_tiny.uli").len() },
+    > = uli_lite::Aligned(*include_bytes!(
+        "../../uli-lite/tests/fixtures/uli2_tiny.uli"
+    ));
+    const CORPUS: &[u8] = &CORPUS_BLOB.0;
     fn fnv(mut h: u32, bytes: &[u8]) -> u32 {
         for &b in bytes {
             h ^= u32::from(b);

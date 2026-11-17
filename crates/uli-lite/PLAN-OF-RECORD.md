@@ -207,31 +207,35 @@ above are history; this section is the live order of work.
 
 ### Where we are
 
-Production frame **210,355 worst (frame 83) / 185,207 mean = 80.2% / 70.7%** of
-the 262,144-cycle period, after the 2026-11-16 root-cause audit (two landed
-steps, below). Both are under the period, and the decode wall cleared 100% in
-Step 1: Steps 1a-1e took it a further 30,181, and the audit took another
-**9,282 mean / 8,896 worst**, for **-64,229 off the worst frame** since the
-Step 0 baseline. Against the C record (181,928 = 69.4%) we are **1.16x**, down
-from 1.21x. **`.iwram` headroom is ~2,196 B** (27,308 B of 30,320 B usable at
-the 844 B measured stack).
+**The decode wall on the album corpus is 210,787 worst (f16,204) / 179,226
+mean = 80.41% / 68.37%**, and the **gate total (decode + convert + IRQ + DMA) is
+242,370 worst / 210,626 mean = 92.46% / 80.35%**, with **19,774 cycles (7.54
+points) of margin at the worst frame** and zero starved periods over 16,552.
+Both are re-measured 2026-11-16 after the root-cause audit (two steps) and the
+loose-ends sweep (two steps). The 129-frame iteration corpus reads 210,833 / f83
+/ 183,242 mean = 80.43% / 69.90%.
+
+Against the C record (181,928 = 69.4%) the decode wall is **1.16x** on the worst
+frame and **1.03x** on the mean. `.iwram` headroom is ~2,196 B (27,3xx B of
+30,320 B usable at the 844 B measured stack).
 
 Two different targets, not one:
 
 - **to work** — the decode wall must fit with room for the gate total (DMA, IRQ,
-  convert) and this tree's UI: target **<= ~85%**. **MET (80.2%), with ~12,600
-  cycles of margin.** The ceiling itself is still to be measured at the first
-  gate-total arm (U4), and PR E's album gate total has to be re-taken against
-  these numbers.
-- **to match C** — cut a further **~28,400** (worst) / **~32,200** (mean). Not a
-  requirement; C has 31% slack by design. But it is no longer a distant target:
-  the audit found the remaining gap is **five named, addressable items** rather
-  than "LLVM is worse than gcc" (below).
+  convert) and this tree's UI: target **<= ~85%**. **MET twice over (80.4%
+  decode, 92.5% gate total).** The gate total is now measured, not assigned, and
+  it leaves 7.54 points at the worst frame.
+- **to match C** — cut a further **~28,900** (worst) / **~2,700** (mean). Not a
+  requirement; C has 31% slack by design. **On the mean we are 1.03x C** — the
+  remaining gap is one worst-frame shape, not a systematic deficit.
 
-**80.2% is not "real time".** It is the entropy + M/S + synthesis work for one
-frame; the feeder's convert/IRQ/DMA and the UI are not in it, and U4's ceiling is
-a measured gate total. But the decode wall now has 19.8% of the period spare, and
-the headroom target is met with ~12,600 cycles to spare.
+**92.46% gate total is not "real time" either.** It is measured in mGBA with the
+shipping `RingFeed` and the real timebase, which does not model the cart prefetch
+buffer or DMA/code-fetch arbitration, and this tree's UI is not in it — the
+hardware run recorded 104 *late re-arms* from a 1 Hz text redraw alone. So U4's
+ceiling stays written down as the period. What has changed is that the margin is
+now **7.54 points at the worst frame** instead of 3.98, and the UI's measured
+1.6-1.8 period redraw is the thing that consumes it.
 
 ### Root-cause audit against the C product decoder (2026-11-16)
 
@@ -388,6 +392,30 @@ whole reader's *mechanics* at 4,801 cycles (5.5% of the entropy path), so expect
 ~1,500-2,000, not more. Planned, and it also removes two instructions of
 per-refill shape from every arm that carries a refill.
 
+**LANDED 2026-11-16 — but the projection was wrong about where the win was, and
+the alignment contract is a real cost.** Measured: **−755 mean / +820 worst** on
+the 129-frame corpus (sum 23,891,692 → 23,794,249), and it shrank `dec_chan` from
+1,394 to 1,240 instructions and its stack references from 259 to 174.
+
+What it took, which the projection did not anticipate: `include_bytes!` gives
+`&[u8]` **no alignment guarantee**, and the embedded albums were measured landing
+on an **odd address** (`0x8010093` in the bench ROM). Odd bases are therefore the
+*normal* case here, not an edge case, so a single `ldrh` needed an explicit
+contract rather than a cast:
+
+- `uli_lite::Aligned<const N: usize>` (`#[repr(align(8))]`) — a blob wrapper, one
+  line at each of the **13** embed sites, because the format's stream is a
+  halfword sequence and the C reference reads it through a `const uint16_t *`.
+- `Error::UnalignedStream`, checked **once** in `GbaDecoder::new` rather than per
+  load, and witnessed by `product_decoder_rejects_an_unaligned_blob` — an
+  odd-based blob is rejected by name, not decoded into UB, so a future embedder
+  that forgets the wrapper gets a diagnosable error instead of a silent codegen
+  regression.
+
+The *reader* change is one line: `(p as *const u16).read()` instead of two
+`ldrb` + `orr` + `lsl`. That is the whole code delta; the rest of the work is the
+precondition that makes it sound.
+
 #### E — loose ends: checks and shapes C does not pay for (**open, a category**)
 
 This is a **general category, not a single bug**, and it is where the rest of the
@@ -414,6 +442,33 @@ the album is parsed and length-validated before the first frame.
 
 **Expect this category to be worth more than any remaining kernel item.** It is
 not a rewrite: it is a series of small, individually measurable removals.
+
+**LANDED / MEASURED 2026-11-16 — the category is real but its shape is not the
+one this table implies.** What the sweep actually returned, in order:
+
+| item | outcome |
+|---|---|
+| `zero16` → `bl __aeabi_memclr4` | **landed, −1,170 mean.** Four inline `stmia` in asm (the reference's own shape). This was the largest single item in the category and the easiest. |
+| reader `ldrh` (D above) | **landed, −755 mean / +820 worst.** |
+| `refill` bounds test | **measured, KEPT.** Three shapes were built. Removing the branch via a *branchless clamped load* (`min(next, end-2)` with a predicated move, truncation detected once per channel) **cost +1,352 cycles/frame**: the load address then depends on `end`, which puts an extra link in the critical path ahead of every load and outweighs the 3-cycle taken branch it removes. Folding `bad` into a per-refill `bad \|= over` was worse again (the flag becomes live across the loop). The branch stays, and the three measured shapes are recorded at the macro. |
+| `huff_consume!` length test | **not taken.** Removing it needs a failure signal that is not a per-symbol branch; every option tried in design either forces `bad` into memory (the Step-1a trap) or lets a malformed stream spin. `ands`+`beq` is 2 instructions on a not-taken branch. The remaining prize is ~1 cycle/symbol. |
+| `esc` guard, `esck` reload | **not taken.** ~2 compares per *escape* (140 on the worst frame), not per symbol; the parser's `esck <= 24` bound makes `t < 32` a live check, so tightening it is a format/parser change, not a codegen one. |
+
+**So: this category delivered ~1,925 mean (1.27% of the frame, 0.75 points of the
+period) and its ceiling is now ~2,000 more, not the 3,500-5,500 projected.** The
+reason is instructive and matches what 1e-ii found from the other direction:
+**almost every item here is a *branch*, and ARM7TDMI's cost model is 1 cycle for
+the compare and 3 for the taken branch** — so the win is not in counting
+instructions, it is in whether a shape can be made branch-free. Rust cannot emit
+ARM conditional instructions (`ldrhne`, `addne` — no `it` block on v4T), so every
+predicated C idiom becomes a branch, and the two shapes that *are* expressible
+(predicated move, select) cost more in the address chain than the branch saved.
+**That is the frame pointer's problem wearing different clothes**: what is left
+in this category is bounded by codegen shape, not by slack in our source.
+
+The one item that did pay in the predicted way, `zero16`, paid because it moved
+the work from a *call* to straight-line instructions — no branch to remove, just
+a call frame and a loop to delete.
 
 #### The method note this audit earns
 
@@ -540,14 +595,16 @@ is five named items with a shape, not a block called "entropy".**
 
 **Open, in the order they should be taken:**
 
-6. **The reader's `ldrh` + the "loose ends" contract sweep** (audit D and E,
-   together **~3,500-5,500 projected**). They are one work item because they touch
-   the same lines: an alignment contract on the stream gives the single `ldrh`,
-   and the same pass removes the per-symbol bounds/`bad`/validity tests that
-   exist for malformed streams the parser already rejects at open. **This is the
-   largest remaining category**, it is a series of small individually measurable
-   removals rather than a rewrite, and it should be measured as a group with a
-   per-removal frame delta where the arms allow it.
+6. ~~**The reader's `ldrh` + the "loose ends" contract sweep.**~~ **DONE
+   (2026-11-16): −1,925 mean / −1,965 on the 129-frame corpus, −1,695 mean on the
+   album, −9,342 worst / −10,619 mean on the gate total.** Two items landed (the
+   single `ldrh` behind a new `uli_lite::Aligned` alignment contract, and `zero16`
+   as four inline `stmia`); three were **measured and kept or dropped** (the
+   `refill` bounds branch, `huff_consume`'s length test, the `esc` guard). The
+   projection of 3,500-5,500 was wrong in an informative way — see "Root-cause
+   audit", E: **almost every item here is a branch, and ARM7TDMI charges 3 cycles
+   for a taken one**, so what looked like instruction slack is really the target's
+   lack of predication. Remaining ceiling ~2,000.
 7. **The frame pointer** (audit C). One fewer register than gcc in every Rust
    function. Needs a custom target JSON, an answer on unwinding, and a
    whole-image control build. **Dedicated consideration, not a micro-step** — see
@@ -1097,9 +1154,12 @@ that I do not".
 
 **What is left, ranked, with the ceiling each one is bounded by:**
 
-1. **The reader `ldrh` + the loose-ends contract sweep — ~3,500-5,500.** Audit D
-   and E. The largest remaining category, and a series of small measurable
-   removals rather than a rewrite. **Take this first.**
+1. ~~**The reader `ldrh` + the loose-ends contract sweep.**~~ **DONE 2026-11-16:
+   −1,925 mean, −9,342 worst on the gate total.** Audit D and E. The projection
+   (3,500-5,500) was right about the category and wrong about the mechanism: the
+   win was `zero16`'s deleted *call* and the deleted *loads*, not the deleted
+   branches — every branch-removal shape measured **worse**. Remaining ceiling
+   ~2,000, and it needs predication the target does not have.
 2. **The frame pointer — unsized, deliberately.** Audit C: one fewer register
    than gcc in every Rust function, pinned by the target spec. Needs a custom
    target JSON, an unwinding answer, and a whole-image control. **Do not size it
@@ -2202,6 +2262,54 @@ biased (see the audit's method note): removing an arm that changes `X` also
 changes the synthesis kernels' cost, which is data-dependent through `Rs`.
 Frame deltas of real changes are quoted above; per-kernel rows stay locators.
 
+### Loose-ends sweep (2026-11-16, mGBA, WAITCNT 4/2)
+
+Audit items D and E: the single `ldrh` behind a new `uli_lite::Aligned`
+alignment contract, and `zero16` as four inline `stmia`. Every arm: both album
+pins PASS (129-frame) / the album pin PASS (album corpus), `xover=0 hfnz=0`,
+`msasm=true` twin PASS, **two runs identical to the cycle**.
+
+**129-frame iteration corpus** (sums over 129):
+
+| arm | worst (frame) | mean | sum | of period |
+|---|---:|---:|---:|---|
+| HEAD (after #152) | 210,355 (f83) | 185,207 | 23,891,692 | 80.24% / 70.65% |
+| + `ldrh` | 211,175 (f83) | 184,451 | 23,794,249 | 80.55% / 70.36% |
+| + `zero16` asm | **210,833 (f83)** | **183,242** | **23,638,173** | **80.43% / 69.90%** |
+| delta | **+478** | **−1,965 (−0.75 pts)** | −253,519 | |
+
+**Album corpus** (16,553 frames, `assets/biomaster.uli`) — the tail instrument:
+
+| arm | worst (frame) | mean | of period |
+|---|---:|---:|---|
+| HEAD (after #152) | 211,050 (f13,698) | 180,921 | 80.51% / 69.02% |
+| **sweep** | **210,787 (f16,204)** | **179,226** | **80.41% / 68.37%** |
+| delta | −263 | **−1,695 (−0.65 pts)** | |
+
+**Gate total** (decode + convert + push + IRQ + DMA, shipping `RingFeed`, real
+32,768 Hz timebase, player model — 16,545 timed windows, 16,552 periods):
+
+| arm | worst | mean | margin at worst |
+|---|---:|---:|---|
+| PR E (2026-11-15, pre-#152) | 251,712 = 96.02% | 221,245 = 84.40% | 3.98 pts |
+| **now** | **242,370 = 92.46%** | **210,626 = 80.35%** | **7.54 pts (19,774 cyc)** |
+
+`gate feeder ... starved_entries=0 pushed=8475136 consumed=8475136
+frames_over_period=0`. This is the re-measurement the audit's item 9 required.
+
+**Code-shape facts** (image-specific):
+
+- `dec_chan` 1,394 → 1,240 instructions, stack/frame references 259 → 174.
+- `__aeabi_memclr4` is gone from `dec_chan` (13 `stm` in its place).
+- `uli_ms_arm` 68 B; `.iwram` 27,3xx B with an 844 B measured stack.
+
+**Read the worst-frame row with care.** On the 129-frame corpus the worst frame
+(f83) is **+478 cycles worse** while every frame in aggregate is 1,965 better;
+on the album the worst frame is −263 and the mean −1,695. The 129-frame delta is a
+layout/register-allocation artifact on one quad-heavy frame, and it is exactly the
+±3% warning this file already carries — the album corpus is the instrument that
+decides, and both of its rows improve.
+
 ### Phase 1b baseline (2026-11-13, mGBA, WAITCNT 4/2)
 
 Worst / mean frame, 129-frame corpus, 262,144-cycle period:
@@ -3266,6 +3374,34 @@ counts above come from the host.
 
 ## Decision log
 
+- **2026-11-16 — loose-ends sweep landed (audit D + E): the gate total is now
+  92.46% worst / 80.35% mean, and the category's ceiling is lower than projected.**
+  Two items landed: the reader's **single `ldrh`** (previously two `ldrb` + `orr`
+  + `lsl` on the most-executed path in the decoder) and **`zero16` as four inline
+  `stmia`** (previously a `bl __aeabi_memclr4` call, ARM→Thumb veneer included).
+  129-frame corpus **185,207 → 183,242 mean (−1,965, −0.75 pts)**, album corpus
+  **180,921 → 179,226 mean (−1,695)** with worst 211,050 → 210,787, and the **gate
+  total 251,712 → 242,370 worst (96.02% → 92.46%) / 221,245 → 210,626 mean (84.40%
+  → 80.35%), margin 3.98 → 7.54 points**, zero starved periods. `dec_chan` 1,394
+  → 1,240 instructions, stack references 259 → 174. **With it, the `ldrh` needed
+  a real contract, not a cast**: `include_bytes!` gives `&[u8]` no alignment
+  guarantee and the embedded albums were measured landing on an **odd address**,
+  so odd bases are the normal case — hence `uli_lite::Aligned` (13 embed sites)
+  and `Error::UnalignedStream`, checked once at open and witnessed by a test that
+  an odd-based blob is *rejected*, not decoded into UB. **Decision — three items
+  measured and NOT taken, recorded so they are not re-attempted:** (i) the
+  `refill` bounds branch, removed via a branchless clamped load, measured
+  **+1,352 cycles/frame** — the load address then depends on `end`, which costs
+  more in the critical path than the 3-cycle taken branch it saves; folding `bad`
+  into a per-refill OR was worse again. (ii) `huff_consume`'s length test — every
+  failure-signal design either forces `bad` into memory (the Step-1a trap) or lets
+  a malformed stream spin, for ~1 cycle/symbol. (iii) the `esc` guard, which is
+  per *escape* and needs a parser bound change. **The general lesson, and it
+  changes how this file should read the C-vs-us gap: almost every item in the
+  "loose ends" category is a *branch*, ARM7TDMI charges 3 cycles for a taken one,
+  and Rust cannot emit ARM conditionals (no `it` on v4T) — so what looked like
+  instruction slack is the target's lack of predication.** The category delivered
+  1,925 mean and has ~2,000 left, not the 3,500-5,500 projected.
 - **2026-11-16 — root-cause audit against the C product decoder; the FFT
   multiply operands and the M/S kernel landed for −9,282 mean / −8,896 worst.**
   The audit read `gba-audio`'s decoder and asm line by line instead of comparing

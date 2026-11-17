@@ -748,7 +748,7 @@ claims to be measured, not inherited from `gba-audio`.
 | **U1 — reference** | `uli-lite` remains a bit-exact, host-testable reference and oracle (no longer a portable-product claim). | `make uli-test`; committed corpus; thumbv4t `check` |
 | **U2 — bit-exact host** | The Rust core matches the C integer reference frame-for-frame on the committed corpus and rejects malformed frames without panic. | `make uli-test`; pinned hashes |
 | **U3 — bit-exact product** | The product kernel set (`ArmKernels`) decodes the corpus to the pinned int8/int16 frames, in the host full-frame twin and on the target. **Met (PR A).** | `make uli-bench` (both arms + on-target twin); `make uli-overlay-test` (host kernel + decoder twins) |
-| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Met on the album corpus (PR E, 2026-11-15): decode 220,062 = 83.94% worst; gate total 251,712 = 96.02% worst / 84.40% mean in the player model (the same arm verifying in-loop reads 98.33% and starves 12.06 s, which is the harness); ceiling written down as the 262,144-cycle period, 10,432 cycles of margin at the worst frame; no UI, mGBA only.** Ladder: 204% (PR B) -> 200% (split `huff`) -> 186% -> 175% -> 164% (asm FFT) -> 162% -> 157% (`iwram-tw`) -> 148% (`iwram-tables`) -> 138% (C-3d) -> **274,198 / 232,090 = 105% / 89%** (C-3). **Step 0 (2026-11-15) attributed the worst frame (f98) by difference in the product image: synthesis 162,987 (59%), entropy/dequant/M-S 110,741 (40%), wrapper 486 - i.e. 69% of the 92,286-cycle distance to the C worst-frame shape is the entropy path and 31% synthesis. Per channel the kernels are 1.10-1.33x C (pre 1.22x, fft 1.33x, post 1.10x, ola 1.11x), so the previous 'asm kernels first, ~194,000 prize' order is retired; the live order is in `crates/uli-lite/PLAN-OF-RECORD.md` ('Critical path to real time').** **Root-cause audit (2026-11-16): the 129-frame product frame is now 210,355 worst (f83) / 185,207 mean = 80.24% / 70.65%, −8,896 worst / −9,282 mean, ratio to C 1.205x → 1.156x, in two bit-exact steps (the FFT's reversed multiply operands and a hand-written M/S kernel). PR E's album gate total (96.02% / 84.40%) was taken at a 74.2% mean decode and must be re-measured before this gate is quoted again; expected ≈92.5% / 81%.** | `make uli-bench`; mGBA, then hardware |
+| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Met on the album corpus (PR E, 2026-11-15): decode 220,062 = 83.94% worst; gate total 251,712 = 96.02% worst / 84.40% mean in the player model (the same arm verifying in-loop reads 98.33% and starves 12.06 s, which is the harness); ceiling written down as the 262,144-cycle period, 10,432 cycles of margin at the worst frame; no UI, mGBA only.** Ladder: 204% (PR B) -> 200% (split `huff`) -> 186% -> 175% -> 164% (asm FFT) -> 162% -> 157% (`iwram-tw`) -> 148% (`iwram-tables`) -> 138% (C-3d) -> **274,198 / 232,090 = 105% / 89%** (C-3). **Step 0 (2026-11-15) attributed the worst frame (f98) by difference in the product image: synthesis 162,987 (59%), entropy/dequant/M-S 110,741 (40%), wrapper 486 - i.e. 69% of the 92,286-cycle distance to the C worst-frame shape is the entropy path and 31% synthesis. Per channel the kernels are 1.10-1.33x C (pre 1.22x, fft 1.33x, post 1.10x, ola 1.11x), so the previous 'asm kernels first, ~194,000 prize' order is retired; the live order is in `crates/uli-lite/PLAN-OF-RECORD.md` ('Critical path to real time').** **Root-cause audit (2026-11-16) plus the loose-ends sweep (2026-11-16): the album decode wall is 210,787 worst (f16,204) / 179,226 mean = 80.41% / 68.37%, and the gate total is **RE-MEASURED** at 242,370 worst / 210,626 mean = 92.46% / 80.35% — 7.54 points of margin at the worst frame, zero starved periods over 16,552 — so the ceiling in use is still the period, not a playback claim on hardware (mGBA, no UI). The 129-frame iteration corpus reads 210,833 / f83 / 183,242 mean = 80.43% / 69.90%. Ratio to C: 1.16x worst, **1.03x mean**.** | `make uli-bench`; mGBA, then hardware |
 | **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | **Met on hardware (GBA SP, 2026-11-16) for the three player ROMs, two runs each, identical to the cycle**: headphone 94.52% worst / 81.39% mean, speaker 95.89% / 82.61%, two-track 94.56% / 80.92%, all with 0 underruns; the GBA 001 was unavailable. **With one open defect**: the 1 Hz text redraw delays the feeder past the DMA's grace on 104 of 16,553 periods (audible splices; `late`, not underruns), so the audio default is the end-only screen until the UI is made non-blocking. **Met in mGBA too.** `make uli-player` (headphone) and `make uli-player-speaker`: zero underruns, period audit closed (periods = served + 1 tail), ring full, three builds measured (2026-11-16). The hardware half is still owed — two units × two runs of *this* player; the manual listen that has happened is the PR E audio-only ROM, which carried no counted ledger. |
 | **U6 — memory** | IWRAM/EWRAM/stack stay inside the product budget with the UI and feeder linked. | linker map + runtime stack check |
 | **U7 — licensing/spec** | A public crate, if published, has a permissive license and a standalone format specification; otherwise it remains `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** |
@@ -846,6 +846,28 @@ product codec without pretending one codec covers both jobs.
 ---
 
 ## Decision log
+
+- **2026-11-16 — the loose-ends sweep landed, and it re-measured the gate.** Two of
+  the three open audit items are in: the bit reader's **single `ldrh`** and
+  **`zero16` as four inline `stmia`** (it had been a `bl __aeabi_memclr4` call).
+  129-frame corpus **185,207 → 183,242 mean**, album **180,921 → 179,226 mean**,
+  and the **gate total 251,712 → 242,370 worst (96.02% → 92.46%) / 221,245 →
+  210,626 mean (84.40% → 80.35%)** with **7.54 points of margin** and zero starved
+  periods — the re-measurement the audit required before U4 was quoted again.
+  **The `ldrh` needed a contract, not a cast**: `include_bytes!` gives no alignment
+  guarantee and the embedded albums were measured landing on an **odd address**, so
+  the tree now has `uli_lite::Aligned` (13 embed sites) and
+  `Error::UnalignedStream`, checked once at open and witnessed by a test that an
+  odd-based blob is *rejected* rather than decoded into UB. **Three further items
+  were measured and rejected**, and the reason is the finding: almost everything
+  left in that category is a **branch**, ARM7TDMI charges **3 cycles for a taken
+  one**, and Rust cannot emit ARM conditional instructions (no `it` on v4T) — a
+  branchless clamped refill measured **+1,352 cycles/frame** because the load
+  address then depends on `end`. So that category's ceiling is **~2,000**, not the
+  projected 3,500-5,500, and the same limit — predication, and the frame pointer
+  that costs a register in every Rust function — is what stands between the decode
+  wall and C's number. **On the mean we are now 1.03x C; the remaining gap is one
+  worst-frame shape, not a systematic deficit.**
 
 - **2026-11-16 — aggressive performance targeting, after a root-cause audit against
   the C decoder's code.** Six rounds of loop tuning had reached ~1% of the frame
