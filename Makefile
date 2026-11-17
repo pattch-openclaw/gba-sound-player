@@ -9,7 +9,7 @@
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
-        album-bake album-pack-check album-seam-test album-rom album-player-rom \
+        album-bake album-pack-check album-seam-test album-rom album-player-rom album-test \
         uli-spike-rom clean clean-cache check help toolchain-check
 
 # ===========================================================================
@@ -186,6 +186,10 @@ ALBUM_ROM := album-player.gba
 # front of. `*.gba` in `clean-outputs` covers this name — checked, not assumed.
 ALBUM_FAST_ROM := album-player-fast.gba
 ALBUM_ROM_RUN_LOG := album-rom-run.log
+# AP-1's gate arm (PR-3b-iii-B): the same audited bin with `input-replay`'s compiled-in key script,
+# because a headless run cannot press a key. Its own image and log, so `album-rom`'s stay untouched.
+ALBUM_REPLAY_ROM := album-player-replay.gba
+ALBUM_TEST_LOG := album-test.log
 
 # --- the core and its overlay -------------------------------------------------
 FLAC_CRATE_DIR_MANIFEST := $(abspath crates/flac-lite/Cargo.toml)
@@ -1174,6 +1178,103 @@ album-player-rom: album-bake
 	@echo "  run: timeout -k 5 600 $(GBA_TEST_RUNNER) $(ALBUM_FAST_ROM) 2>&1 | grep '^\[album-rom\]'"
 	@echo "  this build does not verify decoded content: pcm/fifo/assets are SKIPPED, by design."
 
+# AP-1's gate (PR-3b-iii-B): the album plays **through** its tracks — two or more visits, every skip,
+# every pause, and every track-end advance — and the run's own log is the verdict.
+#
+# The audited `album-rom` is a HARDWARE build, and a headless run cannot press a key, so the only
+# image that can witness a skip, a pause or an advance is the REPLAY arm: the same ROM with
+# `input-replay`'s compiled-in key script. It is built WITH `deep-audit` (named explicitly, so a
+# change to the crate's default features cannot silently turn this gate into an unaudited one): the
+# content proofs are part of the verdict here, not an optional extra.
+#
+# The verdict is the LOG, never the exit status. A PASS prints its verdict and then loops forever, so
+# the leash is what ends the run and **exit 124 IS this gate's pass path** — the run's first
+# assertion says so out loud. The leash has real headroom: the measured time-to-verdict for this arm
+# is **17.2 s** (18.3 s on the run before it) against 120 s, ~7x slack for a slower host.
+#
+# The fixture starts on track 1 (`START_TRACK`): track 0 is the 4.3-minute master, and starting there
+# would make this run ~1.8x longer for the same proof. The ROM prints `start_track=1` at boot so the
+# choice is never read as the album's own start.
+#
+# Every assertion is a named failure rather than a bare grep, and `content_at=5 periods (expected 5)`
+# is `SKIP_PRIME_CHUNKS + 1` = 4 + 1, the cover's depth — written here as the gate's own arithmetic
+# instead of read back from the run it is gating. The log's `advance:` rows carry the measured
+# track-boundary gap; the closing echo prints them, and they are what §4.4's Q4 ruling is stated on.
+album-test: toolchain-check album-bake
+	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin album-play --features "input-replay deep-audit"
+	agb-gbafix $(ALBUM_ROM_BIN) -o $(ALBUM_REPLAY_ROM)
+	@status=0; \
+	  timeout -k 5 120 $(GBA_TEST_RUNNER) $(ALBUM_REPLAY_ROM) > $(ALBUM_TEST_LOG) 2>&1 || status=$$?; \
+	  [ $$status -eq 124 ] \
+	    && echo "album-test: the runner ended at the leash (exit 124), which is the pass path — a PASS loops forever" \
+	    || echo "album-test: the runner exited $$status, not 124; the log is still the verdict (a refused boot exits early)"; \
+	  grep -q '^\[album-rom\] verdict PASSED' $(ALBUM_TEST_LOG) \
+	    || { echo "album-test: no 'verdict PASSED' line — the run did not finish, or a gated term failed; see $(ALBUM_TEST_LOG)"; exit 1; }; \
+	  grep -q 'ledger=true, audit=true, handoffs=true, pause=true, skip=true, advance=true, cadence=true, isr=true, reaction=true, pcm=true, fifo=true, assets=true' $(ALBUM_TEST_LOG) \
+	    || { echo "album-test: a gated verdict term is not true — the verdict line names it; see $(ALBUM_TEST_LOG)"; exit 1; }; \
+	  grep -q 'built without deep-audit' $(ALBUM_TEST_LOG) \
+	    && { echo "album-test: the gate arm was built without deep-audit — its content proofs were SKIPPED, not passed"; exit 1; } || true; \
+	  grep -q 'feed: .*underflows=0' $(ALBUM_TEST_LOG) \
+	    || { echo "album-test: the ring booked an underflow — the feed line's underflows= is not 0"; exit 1; }; \
+	  grep -q 'audit: hw_periods=[0-9]* coalesced=0 late=0' $(ALBUM_TEST_LOG) \
+	    || { echo "album-test: the period audit refuses the run — coalesced or late is not 0"; exit 1; }; \
+	  visits=$$(sed -n 's/.*traversal: visits=\([0-9][0-9]*\) .*/\1/p' $(ALBUM_TEST_LOG)); \
+	  [ -n "$$visits" ] && [ "$$visits" -ge 2 ] \
+	    || { echo "album-test: traversal read '$$visits' visits, needs >= 2 — a one-track run never reached a boundary"; exit 1; }; \
+	  grep -q '^\[album-rom\] traversal: .* end=ALBUM_END' $(ALBUM_TEST_LOG) \
+	    || { echo "album-test: the traversal did not reach end=ALBUM_END — it wrapped or stopped early"; exit 1; }; \
+	  skips=$$(sed -n 's/.*skip: skips=\([0-9][0-9]*\) .*/\1/p' $(ALBUM_TEST_LOG)); \
+	  [ -n "$$skips" ] && [ "$$skips" -ge 1 ] \
+	    || { echo "album-test: skip: skips=$$skips, needs >= 1 — the REPLAY script's skips did not run"; exit 1; }; \
+	  grep -q '^\[album-rom\] skip: skips=[1-9][0-9]* .*expected_content_at=5 .*\[PASS\]' $(ALBUM_TEST_LOG) \
+	    || { echo "album-test: the skip summary is not [PASS] (or expected_content_at is not 5 = SKIP_PRIME_CHUNKS + 1)"; exit 1; }; \
+	  rows=$$(grep -c '^\[album-rom\] skip: →track' $(ALBUM_TEST_LOG) || true); \
+	  [ "$$rows" -eq "$$skips" ] \
+	    || { echo "album-test: $$rows skip rows for skips=$$skips — the log is truncated or a skip printed no row"; exit 1; }; \
+	  bad=$$(grep '^\[album-rom\] skip: →track' $(ALBUM_TEST_LOG) | grep -vc 'content_at=5 periods (expected 5) old=0 underflow_delta=0' || true); \
+	  [ "$$bad" -eq 0 ] \
+	    || { echo "album-test: $$bad skip row(s) with content_at != 5, stale audio after the hand-off (old != 0) or an underflow delta"; exit 1; }; \
+	  bad=$$(grep '^\[album-rom\] skip: →track' $(ALBUM_TEST_LOG) | grep -vc '\[PASS\]' || true); \
+	  [ "$$bad" -eq 0 ] \
+	    || { echo "album-test: $$bad skip row(s) are not [PASS]"; exit 1; }; \
+	  pairs=$$(sed -n 's/.*pause: pairs=\([0-9][0-9]*\) .*/\1/p' $(ALBUM_TEST_LOG)); \
+	  [ -n "$$pairs" ] && [ "$$pairs" -ge 1 ] \
+	    || { echo "album-test: pause: pairs=$$pairs, needs >= 1 — the pause half of the script did not run"; exit 1; }; \
+	  grep -q '^\[album-rom\] pause: pairs=[1-9][0-9]* .*\[PASS\]' $(ALBUM_TEST_LOG) \
+	    || { echo "album-test: the pause summary is not [PASS]"; exit 1; }; \
+	  advances=$$(sed -n 's/.*advance: advances=\([0-9][0-9]*\) .*/\1/p' $(ALBUM_TEST_LOG)); \
+	  [ -n "$$advances" ] && [ "$$advances" -ge 1 ] \
+	    || { echo "album-test: advance: advances=$$advances, needs >= 1 — the album never crossed a track boundary"; exit 1; }; \
+	  arows=$$(grep -c '^\[album-rom\] advance: →track' $(ALBUM_TEST_LOG) || true); \
+	  [ "$$arows" -eq "$$advances" ] \
+	    || { echo "album-test: $$arows advance rows for advances=$$advances — a boundary printed no row"; exit 1; }; \
+	  bad=$$(grep '^\[album-rom\] advance: →track' $(ALBUM_TEST_LOG) | grep -vc 'content_at=5 periods old=0 underflow_delta=0' || true); \
+	  [ "$$bad" -eq 0 ] \
+	    || { echo "album-test: $$bad advance row(s) with content_at != 5 (= SKIP_PRIME_CHUNKS + 1), stale audio (old != 0) or an underflow delta"; exit 1; }; \
+	  bad=$$(grep '^\[album-rom\] advance: →track' $(ALBUM_TEST_LOG) | grep -vc '\[PASS\]' || true); \
+	  [ "$$bad" -eq 0 ] \
+	    || { echo "album-test: $$bad advance row(s) are not [PASS]"; exit 1; }; \
+	  grep -q 'pcm_fnv=.*\[MATCH\]' $(ALBUM_TEST_LOG) && grep -q 'fifo L=.*\[MATCH\]' $(ALBUM_TEST_LOG) \
+	    && grep -q 'audit: assets=[0-9]*c \[MATCH\]' $(ALBUM_TEST_LOG) \
+	    || { echo "album-test: a content proof is not MATCH (pcm, fifo or the asset fold)"; exit 1; }; \
+	  bad=$$(grep '^\[album-rom\] proof' $(ALBUM_TEST_LOG) | grep -v '\[MATCH\]\|same packed blob\|redecode=\|^\[album-rom\] proof: tracks folded=' | grep -vc 'SKIPPED — 2069 frames is past the audited fold' || true); \
+	  [ "$$bad" -eq 0 ] \
+	    || { echo "album-test: $$bad proof line(s) are neither MATCH, an aliased blob, nor the named track-2 fold cap"; exit 1; }; \
+	  skipped=$$(grep -c 'SKIPPED' $(ALBUM_TEST_LOG) || true); \
+	  [ "$$skipped" -eq 1 ] \
+	    || { echo "album-test: the log holds $$skipped SKIPPED line(s), expected exactly the track-2 fold cap — a leg was skipped, not passed"; exit 1; }; \
+	  grep -q "^\[album-rom\] proof track 2: SKIPPED — 2069 frames is past the audited fold's cap" $(ALBUM_TEST_LOG) \
+	    || { echo "album-test: the one permitted SKIPPED is not the track-2 fold-cap leg — a new leg is passing unnoticed"; exit 1; }; \
+	  n=$$(grep -c '^\[album-rom\]' $(ALBUM_TEST_LOG) || true); \
+	  [ "$$n" -ge 60 ] \
+	    || { echo "album-test: the log holds $$n '[album-rom]' lines, needs >= 60 — an empty or truncated log is not a pass"; exit 1; }
+	@grep -E '^\[album-rom\] (traversal|skip: skips|pause: pairs|advance: )' $(ALBUM_TEST_LOG)
+	@echo "album-test passed: the album played through to its end with every gated term true — underflows=0,"
+	@echo "  coalesced=0, late=0, every skip's cover 5 periods with old=0, every pause pair exact, every"
+	@echo "  track-end advance at SKIP_PRIME_CHUNKS+1 with old=0 and underflow_delta=0, and every content"
+	@echo "  proof MATCH (the only SKIPPED leg is the track-2 fold cap, named in the gate). The advance rows"
+	@echo "  above carry the measured track-boundary gap. Verdict: $(ALBUM_TEST_LOG)"
+
 # ===========================================================================
 # Aggregates
 # ===========================================================================
@@ -1274,7 +1375,7 @@ clean-outputs:
 	@rm -f $(SPIKE_CRATE_DIR)/assets/rate_*.bin
 	@rm -f uli-bench*.log uli-attrib*.log
 	@rm -f album-probe*.log
-	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_ROM_RUN_LOG)
+	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_ROM_RUN_LOG) $(ALBUM_TEST_LOG)
 	@find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} + 2>/dev/null || true
 
 # The caches: the fifteen workspaces' `target/` dirs, discovered from the tree.
@@ -1381,7 +1482,10 @@ help:
 	@echo "      album-rom -> $(ALBUM_ROM) (bake + the audited ROM: all five verdict terms true; run it"
 	@echo "      with mgba-test-runner and read the [album-rom] ledger — exit 124 IS the pass),"
 	@echo "      album-player-rom -> $(ALBUM_FAST_ROM) (the same ROM built without deep-audit: no cold"
-	@echo "      re-decode, no asset fold, and the verdict says pcm/fifo/assets=SKIPPED)."
+	@echo "      re-decode, no asset fold, and the verdict says pcm/fifo/assets=SKIPPED),"
+	@echo "      album-test -> $(ALBUM_REPLAY_ROM) (AP-1's gate: the REPLAY arm run headless to the album's"
+	@echo "      end; every gated term, skip, pause and track-end advance asserted from $(ALBUM_TEST_LOG),"
+	@echo "      exit 124 being the pass path)."
 	@echo "  Tests/format:  test (test-rom + flac-test + uli-test), test-rom, check, format"
 	@echo "  Housekeeping:  clean (outputs only; caches kept), clean-deep (+ every"
 	@echo "                 workspace's target/), clean-cache (container volumes),"
