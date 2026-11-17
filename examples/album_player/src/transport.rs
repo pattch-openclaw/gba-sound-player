@@ -1,9 +1,9 @@
 //! `transport.rs` — the playback transport, and §4.4's pause / resume contract.
 //!
-//! PR-3b, step ii-B2a. Skip lands in ii-B2b, so this module knows exactly four states and every one
-//! of them is reachable: `Playing`, `Pausing`, `Paused`, `Resuming`. There is no `Skipping`, no
-//! `TrackEnd` and no `Error` variant, because a state the caller cannot act on is a lie about what
-//! the code can do.
+//! PR-3b, step ii-B2a defined pause; ii-B2b adds skip. Every state below is reachable and every one
+//! of them has a caller: `Playing`, `Pausing`, `Paused`, `Resuming`, `Skipping`, `Repriming`.
+//! `TrackEnd`/`Ended` and the decode-error state are ii-B2b's stage 2 and are not declared before
+//! they exist.
 //!
 //! ## The contract, written down here because pause had none anywhere in the record
 //!
@@ -24,6 +24,46 @@
 //! **`resume`:** re-prime both DMA buffers from the ring head and re-arm in the shipped order
 //! (`enable_sound` → prime → `clear_timer1_if` → the already-installed handler →
 //! `arm_audio_chain`), ramping the gain back up.
+//!
+//! **`skip`** is §4.4's six steps with the gain at the hand-off (D4, ii-B2b):
+//!
+//! | step | what happens | who |
+//! |---|---|---|
+//! | 1 | the hand-off gain ramps to zero over one chunk — the listener hears the track that is actually playing fade | feeder, via [`Transport::skip`] |
+//! | 2 | `RingFeed::truncate()` **and the first whole chunk of the silence cover in the same critical section** | main loop, inside [`Transport::begin_reprime`]'s section |
+//! | 3 | `source.start_track(i ± 1)` — the seam call; per-backend repositioning stays adapter-internal | main loop |
+//! | 4 | the rest of the cover: [`SKIP_PRIME_CHUNKS`] whole chunks of zeros, so no feeder period can starve | main loop |
+//! | 5 | the new track's audio is produced behind the cover | producer |
+//! | 6 | the ramp back up starts on the chunk **after** the cover, so the new track's own samples are the ones that fade in | feeder, via [`HandOffGain::fade_in_after`] |
+//!
+//! Three properties of that table are load-bearing and each is a bug the probe paid for:
+//!
+//! - **The truncate and the cover's first chunk share one critical section.** A bare truncate leaves
+//!   a window in which a feeder period finds an empty ring with the producer still running: that
+//!   period is `Starved` and books an underflow that is really an artifact of the window
+//!   (`examples/album_probe/src/probe_hw.rs:840-875`, whose `truncate_stale` does exactly this).
+//! - **The ramp-in cannot start before the cover has been handed over.** The gain is applied by the
+//!   feeder to whatever chunk it takes; if the ramp began while cover chunks were still queued, the
+//!   ramp would be spent on silence and the new track's first chunk would arrive at full gain — a
+//!   click, which is the one thing the ramp exists to avoid. [`HandOffGain::fade_in_after`] holds the
+//!   gain at zero for exactly the cover's chunks.
+//! - **A skip while paused, or during another transition, is [`Step::Ignored`].** The contract has no
+//!   cancel — reversing a fade half-way is a click of its own — and a frozen chain has no hand-off to
+//!   fade: re-targeting while frozen would need a second re-prime path and a way to cancel a queued
+//!   silence cover, and no §5.3 row asks for it. The caller counts the ignore.
+//!
+//! **A skip's wait to audio is three numbers, not one, and they belong to three different parties**
+//! (§4.4's D2 row is corrected to read this): *press → hand-off* is the frame loop's
+//! ([`SKIP_PRESS_TO_HANDOFF_PERIODS`], measured 1 period); *hand-off → the new track's first chunk* is
+//! the cover's ([`SKIP_PRIME_CHUNKS`] + 1 = 5 periods, and that is §4.4 step 5's claim); and anything
+//! beyond that is the **track's own head** — a chunk of digital silence at the top of a track is
+//! byte-identical to a chunk of the cover, so `to_new` reads `content_at + head_silence` and only the
+//! track can say how long its own lead-in is. The gate fixture's two full-master tracks read 8
+//! periods of that (its head is 4,480 all-zero samples; the first non-zero one is a −1 in the ninth
+//! chunk); its two clips read 0. So the worst case a listener waits, press to audible audio, is
+//! **14 periods = 479 ms**, plus the ≤ 1 video frame the vblank ISR owns for the detection (16.7 ms):
+//! **≤ ~496 ms** on this album — inside §4.4's ≤ ~0.6 s, but not the 171 ms D2 counted, because D2
+//! counted the cover alone.
 //!
 //! Four consequences follow, and each is the reason a simpler-looking design was rejected:
 //!
@@ -90,6 +130,48 @@ pub const FADE_SAMPLES: i32 = 256;
 /// Full gain: a byte passes unchanged (`k / 256` == 1).
 pub const GAIN_UNITY: i32 = 256;
 
+/// The skip's silence cover, in chunks: **4** — §4.4 step 5's re-prime depth (D2).
+///
+/// Chosen from measured evidence, not guessed: the probe's deep-arm sweep recorded `to_new =
+/// prime + 1` periods with `underflows = 0` at **every** prime including 2
+/// (`examples/album_probe/README.md` → "The deep arm", truncate rows `:319-322`), so 4 sits inside
+/// witnessed territory with 2× margin over the shallowest arm tested. Four chunks = 2,240 samples =
+/// **171 ms** of silence between tracks, well inside §4.4's ≤ ~0.6 s observable, where prime 16
+/// (581 ms) sits at its edge.
+///
+/// The observable does not decide this number — with a truncate in the ring the queue term is gone,
+/// so `to_new` is linear in the prime and only binds past 16. What decides it is the silence a
+/// listener hears between two tracks: this is a **product choice about the gap**, not a budget.
+/// Q15's note applies to the ramp at the end of it: a clip that starts loud is the better transient
+/// test, and this fixture's clips start in the master's quietest 50 ms window.
+///
+/// 171 ms is this cover alone, and it is **not** the whole wait a listener feels: add
+/// [`SKIP_PRESS_TO_HANDOFF_PERIODS`] on the front and the new track's own `head_silence` on the back.
+pub const SKIP_PRIME_CHUNKS: u32 = 4;
+
+/// The bound on a skip's **press → hand-off** latency, in feeder periods: **3**.
+///
+/// The wait a listener can put a number on is `press → hand-off → content → audible`, and three
+/// different parties own the four terms (the track's own lead-in included). This one is the frame
+/// loop's: the post is taken at the top of a pass, the feeder spends one period fading (§4.4 step 1 — `FADE_SAMPLES` < `CHUNK_SAMPLES`, so
+/// it completes inside that one chunk), and the loop can only see the resulting silence at a pass
+/// *after* that boundary. So the term is the number of period boundaries one pass crosses, and a pass
+/// is one producer frame of decode: measured at 1.04–1.09 M cycles = **1.85–1.9 periods** (that
+/// figure is the one `keys.rs` states for why the keypad sample could not stay in this loop), so a
+/// pass crosses one boundary and two is already generous. Three is the bound on a pass up to
+/// ~1.6× the measured decode cost, which still fails a loop that stopped serving latches or needed a
+/// second pass to hand off.
+///
+/// Measured on the REPLAY arm's seven skips (`input-replay`, `make album-rom`'s image): **1 period on
+/// every one of them**, so the gate is 3× the observed value. The other two terms are not this one's:
+/// the cover is [`SKIP_PRIME_CHUNKS`] + 1 = 5 periods (`content_at`), and the track's own lead-in is
+/// `head_silence` — 8 periods on both full-master tracks in the gate fixture, 0 on its clips. Worst
+/// case observed end to end is therefore 1 + 13 = **14 periods = 479 ms** for a skip onto a track
+/// that opens with digital silence, and 6 periods = 205 ms onto one that opens audibly: both inside
+/// §4.4's ≤ ~0.6 s observable, and the plan's D2 row said 171 ms for the machinery alone because it
+/// counted the cover and not the track's own head.
+pub const SKIP_PRESS_TO_HANDOFF_PERIODS: u32 = 3;
+
 /// One FIFO byte in the form [`fifo_byte`](gba_playback::playback::fifo_byte) produces, scaled by
 /// `k / 256`.
 ///
@@ -121,6 +203,9 @@ pub fn scale_byte(byte: u8, k: i32) -> u8 {
 pub struct HandOffGain {
     k: i32,
     step: i32,
+    /// Hand-off chunks still to be handed over at gain zero before the ramp-in starts: a skip's
+    /// silence cover. Zero in every state but a skip.
+    hold: u32,
 }
 
 impl HandOffGain {
@@ -130,6 +215,7 @@ impl HandOffGain {
         Self {
             k: GAIN_UNITY,
             step: 0,
+            hold: 0,
         }
     }
 
@@ -142,7 +228,7 @@ impl HandOffGain {
     /// Whether the next slot passes byte-for-byte unchanged.
     #[must_use]
     pub const fn is_transparent(&self) -> bool {
-        self.k == GAIN_UNITY && self.step == 0
+        self.k == GAIN_UNITY && self.step == 0 && self.hold == 0
     }
 
     /// Whether the gain has reached zero — the pause contract's freeze point.
@@ -151,10 +237,33 @@ impl HandOffGain {
         self.k == 0
     }
 
-    /// Whether the gain is back at full scale — a resume's completion point.
+    /// Whether the gain is back at full scale — a resume's, or a skip's ramp-in's, completion point.
+    ///
+    /// The `hold` term matters: while a skip's silence cover is still being handed over the gain is
+    /// at zero, so this cannot be true, and a caller that used it to mean "the transition is over"
+    /// cannot end the transition on a cover chunk.
     #[must_use]
     pub const fn is_full(&self) -> bool {
-        self.k == GAIN_UNITY
+        self.k == GAIN_UNITY && self.hold == 0
+    }
+
+    /// Hand-off chunks the gain will hold at zero before ramping in (a skip's cover remainder).
+    #[must_use]
+    pub const fn held_chunks(&self) -> u32 {
+        self.hold
+    }
+
+    /// Fade in **after** `chunks` more hand-off chunks, which are the skip's silence cover.
+    ///
+    /// From silence, not from wherever the gain was: step 6 is a ramp up from nothing, and the cover
+    /// chunks between here and the new track are zeros, so the gain is pinned at zero and each cover
+    /// chunk decrements the hold in [`apply`](Self::apply). The chunk that spends the last count is
+    /// still silence (it is a cover chunk), and the ramp starts on the chunk **after** it — the new
+    /// track's first samples — which is what keeps the fade-in on the audio a listener hears.
+    pub fn fade_in_after(&mut self, chunks: u32) {
+        self.k = 0;
+        self.step = if chunks == 0 { 1 } else { 0 };
+        self.hold = chunks;
     }
 
     /// Fade toward silence from wherever the gain currently stands (a pause).
@@ -182,17 +291,25 @@ impl HandOffGain {
     /// Call it on the buffers `take_chunk` just filled and before they are re-armed: the bytes it
     /// touches are the bytes about to play, and the ring they came from is not read or written here.
     pub fn apply(&mut self, left: &mut [u8], right: &mut [u8]) {
-        if self.is_transparent() {
-            return;
+        // A skip's cover chunk is handed over at gain zero, and the ramp-up is armed for the chunk
+        // *after* the last one — never on it, or the new track would arrive at full gain.
+        let covering = self.hold > 0;
+        if covering {
+            self.hold -= 1;
         }
-        let n = left.len().min(right.len());
-        let mut k = self.k;
-        for (l, r) in left[..n].iter_mut().zip(right[..n].iter_mut()) {
-            *l = scale_byte(*l, k);
-            *r = scale_byte(*r, k);
-            k = (k + self.step).clamp(0, GAIN_UNITY);
+        if !self.is_transparent() {
+            let n = left.len().min(right.len());
+            let mut k = self.k;
+            for (l, r) in left[..n].iter_mut().zip(right[..n].iter_mut()) {
+                *l = scale_byte(*l, k);
+                *r = scale_byte(*r, k);
+                k = (k + self.step).clamp(0, GAIN_UNITY);
+            }
+            self.k = k;
         }
-        self.k = k;
+        if covering && self.hold == 0 {
+            self.step = 1;
+        }
     }
 }
 
@@ -202,7 +319,7 @@ impl Default for HandOffGain {
     }
 }
 
-/// The four states of PR-3b-ii-B2a. See the module docs for each one's entry and exit.
+/// The transport's states. See the module docs for each one's entry and exit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     /// The chain is armed and the hand-off is at full gain.
@@ -214,6 +331,26 @@ pub enum State {
     /// The chain has been primed and re-armed with the gain ramping up; the ramp completes inside
     /// the primed chunk, so this state lasts one period.
     Resuming,
+    /// A skip's fade-out is in flight: the chain still runs and is playing the old track, ramping
+    /// down. The hand-off (truncate + cover) has not happened yet, so the ring is untouched.
+    Skipping,
+    /// The hand-off happened: the ring holds the silence cover and the gain is held at zero for
+    /// exactly those chunks, then ramps in on the new track's first one. The producer feeds in this
+    /// state (that is what puts the new track behind the cover).
+    Repriming,
+}
+
+impl State {
+    /// Whether the producer may push a frame in this state.
+    ///
+    /// A pause must not be fed another frame — that is D3's whole point — while a skip is the
+    /// opposite: the new track's audio has to reach the ring behind the silence cover, or the cover
+    /// runs out and the feeder starves. [`State::Repriming`] is therefore a feeding state, and this
+    /// predicate is the one place that judgement lives.
+    #[must_use]
+    pub const fn feeds(self) -> bool {
+        matches!(self, State::Playing | State::Repriming)
+    }
 }
 
 /// What the main loop must do to the hardware for one decision. Both the per-command and the
@@ -230,6 +367,12 @@ pub enum Step {
     /// Re-prime the hand-off from the ring head and re-arm the chain; the gain is already ramping
     /// in, and the primed chunk is the ramp's first chunk.
     Prime,
+    /// A skip's fade reached silence: perform the hand-off **now**, and in one critical section —
+    /// [`Transport::begin_reprime`] (which arms the gain's cover hold), `RingFeed::truncate()`, the
+    /// producer's `finished` reset and the cover's first whole chunk. The state stays
+    /// [`State::Skipping`] until that section runs, so no feeder period can land between the hold
+    /// being armed and the ring being emptied.
+    SkipHandOff,
     /// A toggle arrived while a transition was in flight. The contract has no cancel — reversing a
     /// fade half-way would be a click of its own — so it is ignored, and the caller counts it.
     Ignored,
@@ -295,22 +438,64 @@ impl Transport {
                 self.gain.fade_in();
                 Step::Prime
             }
-            State::Pausing | State::Resuming => Step::Ignored,
+            // A transition in flight, or a skip's: the contract has no cancel, and a pause pressed
+            // during a skip would have to choose between the two fades. Ignored, and counted.
+            State::Pausing | State::Resuming | State::Skipping | State::Repriming => Step::Ignored,
         }
     }
 
-    /// One main-loop pass's decision, independent of commands: has the fade finished, and has the
-    /// ramp back returned to full gain?
+    /// One skip request: a direction command while a track is playing.
+    ///
+    /// From [`State::Playing`] this issues the ramp-out and returns [`Step::FadeOut`]; from every
+    /// other state it is [`Step::Ignored`], and the caller counts it (see the module docs for why a
+    /// skip while paused is not defined rather than merely unimplemented).
+    pub fn skip(&mut self) -> Step {
+        if self.state == State::Playing {
+            self.state = State::Skipping;
+            self.gain.fade_out();
+            Step::FadeOut
+        } else {
+            Step::Ignored
+        }
+    }
+
+    /// The skip's hand-off, first half: move to [`State::Repriming`] and hold the gain at zero for
+    /// the `cover_chunks` chunks the caller is about to push as silence.
+    ///
+    /// **Call this inside the same critical section as the truncate.** It is what arms
+    /// [`HandOffGain::fade_in_after`], and a feeder period landing between the two would consume a
+    /// cover count on a chunk of the old track — starting the ramp one chunk early, which puts the
+    /// new track's first samples on the wire at full gain.
+    ///
+    /// Returns `false` if the transport was not [`State::Skipping`], so the caller cannot re-arm a
+    /// hold it has already spent.
+    pub fn begin_reprime(&mut self, cover_chunks: u32) -> bool {
+        if self.state != State::Skipping {
+            return false;
+        }
+        self.state = State::Repriming;
+        self.gain.fade_in_after(cover_chunks);
+        true
+    }
+
+    /// One main-loop pass's decision, independent of commands: has the fade finished, is a skip
+    /// ready to hand off, and has the ramp back returned to full gain?
     ///
     /// `Freeze` moves the state to `Paused` here rather than in a second call, so the caller cannot
-    /// perform the freeze and forget to record it — or record it and forget to perform it.
+    /// perform the freeze and forget to record it — or record it and forget to perform it. The skip
+    /// hand-off is deliberately *not* like that: see [`Step::SkipHandOff`].
     pub fn tick(&mut self) -> Step {
         match self.state {
             State::Pausing if self.gain.is_silent() => {
                 self.state = State::Paused;
                 Step::Freeze
             }
+            State::Skipping if self.gain.is_silent() => Step::SkipHandOff,
             State::Resuming if self.gain.is_full() => {
+                self.state = State::Playing;
+                Step::Idle
+            }
+            State::Repriming if self.gain.is_full() => {
                 self.state = State::Playing;
                 Step::Idle
             }

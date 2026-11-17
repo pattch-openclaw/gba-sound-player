@@ -1091,6 +1091,13 @@ album-pack-check: toolchain-check
 # ring, that a pause freezes the session clock and the ring head, that a resume drops or repeats no
 # sample, that three scripted pauses book no underflow, and that a frozen ring refuses a push.
 #
+# PR-3b-ii-B2b adds **§4.4's skip**: the same machine through `begin_reprime` + `truncate()` + the
+# cover, read the way the ROM's wire watch reads it — `to_new = prime + 1` at every prime the probe
+# swept (2/4/8/16 → 3/5/9/17 periods), `old = 0` and `underflow_delta = 0` across five skips at a
+# nearly-full queue, no starved period inside the truncate window (with the bare truncate shown to book
+# one), whole-chunk cover pushes, §4.4's three position invariants across a skip, and the two waits the
+# skip log reports: the track's own `head_silence` and the frame loop's `SKIP_PRESS_TO_HANDOFF_PERIODS`.
+#
 # Same shape as `album-pack-check`: neutral cwd, explicit host target, a log, and a collected-test
 # floor — a green that names nothing is not a green. The second leg is the stub-only build, which is
 # what makes "a stub image links no codec at all" an observed fact rather than a claim about one test
@@ -1106,7 +1113,7 @@ album-seam-test: toolchain-check
 	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_SEAM_GATE_LOG)) \
 	    || { echo "album-seam-test: the host suite did not pass — see $(ALBUM_SEAM_GATE_LOG)"; exit 1; }; \
 	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_SEAM_GATE_LOG))); \
-	  [ -n "$$n" ] && [ "$$n" -ge 42 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 42 — a green that names nothing is not a green"; exit 1; }
+	  [ -n "$$n" ] && [ "$$n" -ge 51 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 51 — a green that names nothing is not a green"; exit 1; }
 	@cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) build --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) \
 	    --no-default-features --features backend-stub >> $(abspath $(ALBUM_SEAM_GATE_LOG)) 2>&1 \
@@ -1116,9 +1123,13 @@ album-seam-test: toolchain-check
 	@echo "  track decodes to its fnv_pcm pin on the host, its FIFO bytes fold to the bake's fnv_fifo_l/fnv_fifo_r"
 	@echo "  as the ROM will push them, a stub-only build links no decoder, the input seam's edges/debounce/"
 	@echo "  autorepeat/control-map/chord rules hold and the REPLAY script lands on its own frames, the"
-	@echo "  painted position obeys §4.4's three invariants with a saturating lead, and the hand-off gain"
+	@echo "  painted position obeys §4.4's three invariants with a saturating lead, the hand-off gain"
 	@echo "  and §4.4's pause contract hold: a fade is monotone to silence and back, applied to the DMA slot"
-	@echo "  and never the ring, and a pause/resume keeps the position exact with no underflow."
+	@echo "  and never the ring, and a pause/resume keeps the position exact with no underflow, and §4.4's"
+	@echo "  skip lands the new track at prime+1 periods with no stale audio and no underflow, with the"
+	@echo "  hand-off's waits split into the track's own lead-in and the frame loop's bounded share, and a"
+	@echo "  track's end advances through the same hand-off minus the truncate while the album's last track"
+	@echo "  stops and starts nothing."
 
 # The playback ROM (PR-3a step iii): `ALBM1` + the packed blobs → the app's own chain at 16,384 Hz.
 # It boots, verifies its own album (§D-C), plays track 1 end to end through the shipped feeder, and
