@@ -1610,45 +1610,90 @@ the transition that played it, for two rounds, by code quoting the row it violat
 amended for the two promises this harness physically cannot keep (no key injection, no audio capture) and
 states plainly that **click-free-to-an-ear and physical presses remain unwitnessed until AP-7a**.
 
-**PR-3c is this phase's next piece, scoped here rather than left to be rediscovered (2026-11-19, from
-Q18's ruling). A resume into an under-run ring must produce audio.** What it does today is halt the album:
-`Chunk::Starved` makes `prime_hand_off()` return false (`src/album_play_main.rs:1777`), the run stops with
-reason `resume` (`:3871,3873`) on a bare red `FAILED`, and **nothing in that block is feature-gated** — that
-is what a person playing `make album-player-rom` meets. The mechanism already exists; only the transition is
-missing: `Transport::begin_reprime`, `State::Repriming`, the *scheduled* ramp `fade_in_after(chunks)`
-(starts on the chunk after the last cover one) and `State::feeds()` refilling behind the cover, all reached
-today from `Skipping` alone (`src/transport.rs:587-591`) — deliberately, since PR-3b-iii's subject is the skip
-contract. The work itself is small and one sentence: **let a starved resume take that path instead of
-refusing** — a counted cover of N whole chunks from a ring head that must not move, ramp starting after the
-last cover chunk rather than at the press. What it must carry to be mergeable, in review order:
+**PR-3c — landed on `feat/album-player-pr3c-resume-refill` (2026-11-23). A resume into an under-run ring
+produces audio.** What it used to do was halt the album: `Chunk::Starved` made `prime_hand_off()` return
+false (`src/album_play_main.rs:1777` at the scoping), the run stopped with reason `resume` on a bare red
+`FAILED`, and **nothing in that block was feature-gated** — that is what a person playing
+`make album-player-rom` met. The mechanism named above (`begin_reprime`, `State::Repriming`,
+`fade_in_after(chunks)`) is **not** the path this PR took, and the reason is §4.4 rather than taste:
+`Repriming` is reachable only through `begin_reprime`, which is called in the same critical section as
+`truncate()`, and `truncate()` **steps the consumer over the stale span** — a seek, which for a skip is the
+whole point (§4.4 step 5) and for a pause is the one thing its own row refuses (`resumed_committed` must
+equal `frozen_committed`). Q18's ruling that the ring head must not move therefore selects the mechanism.
+What the PR is instead, in one sentence: **the press is routed by the ring's own answer, and a ring that
+cannot give the prime its first chunk is refilled with the chain still frozen.** `Transport::toggle` now
+takes `primable` (`src/transport.rs:692`), the frame loop asks the ring first with `ring_primable()`
+(`src/album_play_main.rs:1807` — `ready() >= CHUNK || (finished && ready() > 0)`, which is `take_chunk`'s
+own two answers and not a guess about the next pass), and the `Paused` arm of `toggle` goes to a new
+[`State::Buffering`] and returns `Step::Buffer` (`src/transport.rs:524,597,719-721`) instead of starting a
+ramp nothing can be served on. `State::feeds()` grows to include it (`:551`) so the producer runs; a new
+`State::pass_timeable()` (`:567`) keeps the two gates apart, because the two questions a state answers —
+*may the producer fill this ring*, *may this pass be timed on the audio clock* — are the same set except
+here, and timing a pass against a stopped counter books a false underflow on every pass of the wait.
+`Transport::end_buffer()` (`:759`) then leaves `Buffering`, starts the ramp and returns the same
+`Step::Prime` the direct resume returns: **the ramp starts on the arm's chunk, not at the press**, which is
+`HandOffGain::fade_in_after`'s own lesson applied one state earlier — a ramp is spent on whatever the
+feeder hands over next, and a frozen chain hands over nothing. The arm itself is the ordinary
+`resume_arm` → `prime_hand_off` → `arm_audio_chain` sequence taken on the ring head the freeze stopped on.
 
-1. **A §4.4 D2 leg for resume → first audible sample**, with its bound a function of the run's own measurement
-   — the sibling of `pause_to_freeze_bound` and `take_to_handoff_bound` — printed in the pause row as
-   `resume→audio=N periods (bound M)`. Never a constant: R13.
-2. **The counter the refusal stops providing.** Today the condition has *no number at all*; the model is the
-   skip row's own `dropped=` / `silence=` / `head_silence=` (`:2450`) and the ledger invariant beside it
-   (`:466`), including the part that makes a cover honest: a cover chunk is pushed and consumed but is not
-   track content, which is why `dropped=` stays 0 across one by definition.
-3. **The A11 affordance.** The wait has to be visible to the listener, not only to the audit — which makes
-   PR-3c the first consumer of the context-dependent action layer §5.3 defers to a layer **above** `keys.rs`
-   (#157's review note), so the action-map question lands here rather than in the shell's PR.
-4. **Host tests in the seam harness**: the new `Paused → Repriming` transition; the cover count driving
-   `fade_in_after`; and the test that proves the design does not seek — `frozen_committed == resumed_committed`
-   surviving a cover (§4.4's no-seek claim; recorded at `:2906`, refused at `:2992`) — plus a bound test in the
-   `the_*_bound_moves_with_the_machine` family, a `Makefile` collected-test floor bump and an `album-test`
-   witness pattern for the new row term.
-5. **Two decisions that are the caller's, not the implementer's:** how much cover (N), and the maximum a
-   listener may be kept waiting. With the chain un-armed nothing is consumed, so the ring's own capacity
-   (**36 chunks = 1,230 ms**) ceilings any "don't arm until there is audio" design — that ceiling is exactly
-   what makes a counted cover the shape for longer waits. A *truly* empty album (not a shallow ring) stays
-   §15 Q13's and R5's error-path subject and is out of scope here.
+What it carries, item by item against the list above:
 
-One smaller thing it owes, from R13's screen half: **a halt is not a verdict term**, so today it prints an
-unnamed red. Either that path stops halting — because it is now a covered wait — or the screen learns to name
-a halt's reason; leaving both unaddressed is how a correct cartridge ends up showing red with no explanation.
-It was not folded into #158/#159/#160 because each of those carries a single claim (the pause's no-seek ledger
-claim, the skip's hand-off contract, the verdict's integrity), and a behaviour change plus a new latency leg
-would blur whichever one it sat in. Q18's row is the spec; this paragraph is the work item.
+1. **A leg with a bound, printed in the pause row — as `resume→arm=N frames (bound M)`, not
+   `resume→audio=`.** `resume_to_audio_bound(worst_pass_frames, boundary_frames)` (`src/transport.rs:317`)
+   is `PREFILL_FRAMES × worst_pass_frames + MAX_BOUNDARY_FRAMES`: the decode the run's own measured pass
+   price charges for the prefill's depth, plus the alignment allowance every leg that ends at an audio
+   period is given. It is a function of the run's measurement — on an `input-replay` arm the worst pass is
+   this run's own `producer_max_cycles`; elsewhere the row prints `bound=not measured on this arm` rather
+   than a number copied from an emulator (R13). The leg it bounds is press/take → **re-arm**, and the row
+   names that: the primed chunk *is* the ramp's first chunk, so the rest of the way to the first audible
+   sample is the ramp plus the play-out the `Resuming` state, the `latency:` lines and the `reaction=`
+   terms already measure. The scoping asked for one row that runs end to end; that composition is the
+   remaining half of item 1 and is recorded as open rather than done here.
+2. **The counter the refusal stopped providing.** `Pauses` counts `refills` (`:2956,3026`) and the summary
+   line prints `refills=N` **whatever its value** (`:3125`), with `primable=yes|no` on every row (`:3141`)
+   so a branch that never happened and a branch never printed stay distinguishable; `album-test` reads the
+   count against the rows and fails if they disagree. `dropped=` stays the pause's own term and is still 0
+   on both routes — no cover is pushed, so the question "is a cover chunk track content?" does not arise on
+   this path, and the no-seek witness is structural instead: `head_at_press == resumed_committed`, refused
+   in `record_ok` (`:3089`) for every refill row.
+3. **Not done: the A11 affordance.** The wait is now counted, printed and bounded, and it is still invisible
+   to the person holding the cartridge: a paused-and-refilling product looks exactly like a paused one. This
+   is the first consumer of the context-dependent action layer §5.3 defers above `keys.rs` (#157), and that
+   deferral is why it is left to a caller's decision rather than invented beside a mixer.
+4. **Host tests, and the gate**: `tests/album_seam_host.rs:3180` ("8c-bis") — the route taken and the same
+   byte stream after it (a fixture that reaches a 160-sample ring through **full** periods, so its
+   `underflows` is 0 and the stream comparison is unqualified); the negative half (a ring that can prime
+   pays nothing); `resume_routes_by_what_the_ring_answers_not_by_what_the_state_hopes`, which compares
+   `primable` with what `take_chunk` actually replies at every depth around the boundary; the frame count
+   against the boot prefill's own; the wait against the bound at four pass lengths; and the state-gate
+   table. The `album-seam-test` floor is 68, and `album-test`'s pause patterns now read the new terms.
+5. **Both caller decisions, encoded rather than answered.** There is no cover count `N` to choose: the wait
+   ends at the **boot prefill's own target** (`geometry::PREFILL_SAMPLES`), which is exactly
+   `geometry::PREFILL_FRAMES` frames from any depth a refill can start from — pinned at
+   `src/geometry.rs:284,288-291` and once as a runtime fact against the real ring. That geometry is
+   what satisfies "no new number", and the 36-chunk ceiling the scoping cites is not approached
+   from below: an entry depth `< CHUNK` plus `PREFILL_FRAMES` frames peaks at 10,799 of 20,160 samples.
+   The **maximum wait** is likewise not a duration anyone chose: it is `resume_to_audio_bound`, i.e. the
+   run's own pass price times the decode that is actually needed. What the caller still owns is item 3 and
+   the visible half of item 1.
+
+What is unwitnessed, stated as such: **no ROM arm has ever met this branch.** On every hardware leg recorded
+so far the ring still held the prefill's depth when resume was pressed, so the row prints `refills=0` and the
+hardware evidence for PR-3c is that the branch is priced and does not fire — not that it works. That is a
+fact about the fixtures and the U4 margin, not a reason to leave the path untested, and the host half is
+where it is exercised today; a cart run whose producer falls behind far enough to drain a paused ring is the
+arm that would finally print `primable=no`. Q18's row is still the spec; this paragraph is the record of
+what was built against it. The old halt is now taken **only** for the case this item keeps out of scope — a
+stream that has ended with an empty ring — and it is taken at the press, on a line that names it as Q13's
+album-end case rather than as a failed prime; without that guard PR-3c would have made that case worse rather
+than better, because an empty ring never reaches the target and the run would have sat in `Buffering` with a
+frozen chain and never printed its end lines. The `Err` in `complete_resume` (`:1869`) stays as a named
+refusal the routing makes unreachable: a frozen chain consumes nothing, so the ring's answer cannot go stale
+between the ask and the arm, and the refill arms at the prefill's depth. A refusal that states its reason is
+what R13's screen half asked for in place of a bare red; the shallow-ring condition no longer has a verdict,
+it has a count. **Stated as a gap, not a pass:** the host model asserts that combination instead of modelling
+it (`refill_to_target`'s `!finished` assertion), so the exhausted-stream branch is witnessed on the ROM's
+routing rules and not by a host fixture.
 
 Phase 0 exists because four things in this plan are genuinely new to this tree
 and each has a way to be cheaply wrong: objects/sprites (nothing shipped draws
@@ -1788,7 +1833,7 @@ Numbered in this file's own space (the codec tracks keep theirs).
 | Q15 | What is Phase 1's album made of, given per-album assets are not committed (§2.3)? | **Ruled 2026-11-15: N entries over one properly-encoded master.** The fixture repeats the same encoded `assets/sound/bioluminescent.wav` as full-length tracks titled "Bioluminescent 1", "Bioluminescent 2", …, plus at least one short **"Bioluminescent Clip 1"** so the list carries *unequal* durations, alternating clips and full tracks to scale to whatever portion of the cart a test wants. Real music, zero new tracked bytes, and it exercises the source → ROM pipeline Phase 1 exists to build instead of a synthetic stand-in for it. The consequences are measured, and they are this ruling's to handle: |
 | Q16 | Who measures the decode rows an album actually hits — FIXED-1/2/3 at 2048-sample frames — and does Phase 1 wait for them? | **Recorded, and not the app's to close** (§2.1: this file reopens no codec decision). `MEASURED_DECODE` holds one row at the product block size, `(2048, "fixed", 0)`, and real music contains no order-0 frames (§10.2b) — so every album-shaped build packs under `--master`'s blanket waiver instead of against a measurement. **The ask of the FLAC track:** three hardware rows for `(2048,"fixed",1/2/3)`, taken on frames whose `frames_sha256` the album bake can reproduce, so the guard can check real music against real numbers and retire the waiver on the product path. **Phase 1 does not wait:** it budgets against C2's measured real-audio aggregate (decode 23.656%, work/frame 32.208% on hardware) and labels that, in its own log, as an asset-level mean rather than a worst-frame row. The per-track census the bake already prints is the app's contribution, handed across with the UI-cost addend. |
 | Q17 | Does `assets/sound/test.wav` still earn its 17 MB? | **Answered 2026-11-15: kept, and renamed to what it actually is — `assets/sound/bioluminescent-32768hz-8bit-stereo.wav`.** Measured before naming: `pcm_u8`, **32,768 Hz**, **2 channels**, **8 bits/sample**, block align 2, 16,948,526 B, 258.61 s, 524 kbit/s, encoder `Lavf63.1.101` — exactly the form `scripts/convert_stereo.sh` writes (`-ac 2 -ar 32768 -c:a pcm_u8`), of the same performance as the master (correlation **+1.000** at t = 10/60/200 s). So it is not a second recording and not a stray: it is the 32,768 Hz-era render at the 8-bit played depth, regenerable in-tree from a tracked input, which puts it squarely in §2.3's instrument class. What it was *not* earning was its name — `test.wav` said nothing about rate, depth or channels, and the script's default output path pointed back at it, so every fresh conversion re-created the same ambiguity. The rename is the fix; the script now names its output after what it contains. |
-| Q18 | What should a listener hear when they press resume on a ring that has underrun? | **Recorded 2026-11-18 (PR-3b-ii review); the ruling below is the caller's, 2026-11-19.** **What this head does today:** a resume press whose ring has nothing to give ends the album. `Transport::toggle` takes `Paused → Resuming`, starts the ramp *immediately* and asks for a prime (`src/transport.rs:538-553` — `self.gain.fade_in()` at 551, `Step::Prime`); the frame loop then calls `prime_hand_off()`, whose `take_into_slot` hits `Chunk::Starved` and returns false (`src/album_play_main.rs:1765-1786`, the `return false` at 1777), so the log prints `FAIL the resume had nothing to prime — the ring was empty` and the run halts with reason `resume` (`:3871,3873`); the pause record's resume half is never written (`pauses.resumed` is reached only on the success path, `:3876`). **That is not a gate-only arm** — nothing in that block is feature-gated, so the `make album-player-rom` build a person actually plays does the same — and because a halt is not a verdict term, the screen carries a bare red `FAILED` with the reason only in the log (`src/album_play_main.rs:91,101`; `refuse()` at `:3499-3510` is the boot-path shape of the same gap). So today's answer is: **the album stops and the listener is not told why.** **When it can happen:** `Step::Freeze` stops the chain (`:3897-3901`), so a pause does not drain the ring — the empty ring has to predate the press. The sequence is a pause taken while the album is already underflowing and a resume before the producer refills. That is reachable rather than hypothetical: the plan records **U4 (real-time decode) as not met — 105% worst / 89% mean** (§3, quoted to `PLAN-OF-RECORD.md`), and a cart's ROM fetches cost cycles the emulator does not model, which is R13's own lesson; a skip that left a 4-chunk ring ahead of the pause makes it likelier. The 2026-11-19 session that closed R13 (AP-7a (4)) worked the pause/resume pair hard and did not meet it, which bounds the frequency and not the defect. **Ruled, not open:** a product must not stop — **a listener should expect audio to resume.** The open part is narrowed to *how much cover, and how the wait is shown*. **Why the existing mechanism is not already the answer:** `State::Repriming` is entered only by `Transport::begin_reprime`, which returns false unless the state is already `Skipping` (`src/transport.rs:587-591`), and that is deliberate — PR-3b-iii's subject is the skip contract. Its ramp is *scheduled*: `HandOffGain::fade_in_after(chunks)` starts the fade on the chunk after the last cover one (`src/transport.rs:339-343`) and `State::feeds()` (`:433`) keeps the producer refilling behind the cover. There is no path from `Paused` into it, and this PR changes no behaviour, so the resume leg is untouched. **Corrected 2026-11-19 — this row's first version (34c6ee8) cited the pre-redesign tree.** `stats.starved_at_resume` and a `Starved at resume` row, `Stats::served_silent`, `HandOff::handoff_silent()`, `resume_at_mark`, `src/ring.rs`, and `transport.rs:292-299,332` are PR-3b-ii-B2b's shapes and none of them is in this head: the feed and `Chunk` now come from `crates/gba-playback/src/playback.rs`, the silence witnesses are the skip row's own fields (`:2450`: `underflow_delta=`, `head_silence=`, `silence=`) and `all_silent` (`:1607`), and `Transport::served_silent_tail()` (`src/transport.rs:530`) exists with no caller in the app. **The practical consequence: a resume that found nothing to prime has no counter at all** — the only witness is the FAIL line — which is R13's pattern again: a condition with no number attached is a condition that will be argued about instead of measured. **Scoped as PR-3c — §11 carries it as this phase's next work item (2026-11-19).** What that PR owes: (1) a **leg in §4.4 D2** for resume → first audible sample, bounded by this run's measured pass and its own producer rate rather than a constant (today's pause legs are press→freeze and the prime, and `pause_to_freeze_bound` bounds the *out* half only); (2) a **maximum on the wait** — with the chain un-armed nothing is consumed, so the ring's own capacity (**36 chunks = 1,230 ms**) ceilings any "don't arm until there is audio" design, which is exactly what makes a *counted cover* the shape for longer waits; the skip row's `dropped=`/`silence=` treatment is the model, since a cover chunk is pushed and consumed but is not track content (`:466`), and the shape was proved at `examples/album_probe/src/probe_hw.rs:859` (`truncate_stale`) and shipped for skips in `transition_hand_off` (`:1950-1975`), which pushes the cover's first whole chunk in the same critical section as the truncate; (3) an **A11 affordance** so the wait is visible to the human and not only to the audit, plus the **counter** the removal of the refusal makes mandatory — R13's lesson turned to face a halt: a red that stops a correct cartridge forever is a worse witness than a cover that is counted, printed and bounded. **Not the Q4/Q13b family**, which is about track boundaries: here the ring head must not move, and the pause's own claim is that the resume starts from the sample the freeze stopped on (`:2906` records it, `:2992` refuses if it moved). So "catch up from a later position" is **ruled out rather than deferred**, and "just stay paused" is not free either: the transport contract has no cancel, because reversing a half-served fade is a click of its own (§4.4). |
+| Q18 | What should a listener hear when they press resume on a ring that has underrun? | **Recorded 2026-11-18 (PR-3b-ii review); the ruling below is the caller's, 2026-11-19.** **What this head does today:** a resume press whose ring has nothing to give ends the album. `Transport::toggle` takes `Paused → Resuming`, starts the ramp *immediately* and asks for a prime (`src/transport.rs:538-553` — `self.gain.fade_in()` at 551, `Step::Prime`); the frame loop then calls `prime_hand_off()`, whose `take_into_slot` hits `Chunk::Starved` and returns false (`src/album_play_main.rs:1765-1786`, the `return false` at 1777), so the log prints `FAIL the resume had nothing to prime — the ring was empty` and the run halts with reason `resume` (`:3871,3873`); the pause record's resume half is never written (`pauses.resumed` is reached only on the success path, `:3876`). **That is not a gate-only arm** — nothing in that block is feature-gated, so the `make album-player-rom` build a person actually plays does the same — and because a halt is not a verdict term, the screen carries a bare red `FAILED` with the reason only in the log (`src/album_play_main.rs:91,101`; `refuse()` at `:3499-3510` is the boot-path shape of the same gap). So today's answer is: **the album stops and the listener is not told why.** **When it can happen:** `Step::Freeze` stops the chain (`:3897-3901`), so a pause does not drain the ring — the empty ring has to predate the press. The sequence is a pause taken while the album is already underflowing and a resume before the producer refills. That is reachable rather than hypothetical: the plan records **U4 (real-time decode) as not met — 105% worst / 89% mean** (§3, quoted to `PLAN-OF-RECORD.md`), and a cart's ROM fetches cost cycles the emulator does not model, which is R13's own lesson; a skip that left a 4-chunk ring ahead of the pause makes it likelier. The 2026-11-19 session that closed R13 (AP-7a (4)) worked the pause/resume pair hard and did not meet it, which bounds the frequency and not the defect. **Ruled, not open:** a product must not stop — **a listener should expect audio to resume.** The open part is narrowed to *how much cover, and how the wait is shown*. **Why the existing mechanism is not already the answer:** `State::Repriming` is entered only by `Transport::begin_reprime`, which returns false unless the state is already `Skipping` (`src/transport.rs:587-591`), and that is deliberate — PR-3b-iii's subject is the skip contract. Its ramp is *scheduled*: `HandOffGain::fade_in_after(chunks)` starts the fade on the chunk after the last cover one (`src/transport.rs:339-343`) and `State::feeds()` (`:433`) keeps the producer refilling behind the cover. There is no path from `Paused` into it, and this PR changes no behaviour, so the resume leg is untouched. **Corrected 2026-11-19 — this row's first version (34c6ee8) cited the pre-redesign tree.** `stats.starved_at_resume` and a `Starved at resume` row, `Stats::served_silent`, `HandOff::handoff_silent()`, `resume_at_mark`, `src/ring.rs`, and `transport.rs:292-299,332` are PR-3b-ii-B2b's shapes and none of them is in this head: the feed and `Chunk` now come from `crates/gba-playback/src/playback.rs`, the silence witnesses are the skip row's own fields (`:2450`: `underflow_delta=`, `head_silence=`, `silence=`) and `all_silent` (`:1607`), and `Transport::served_silent_tail()` (`src/transport.rs:530`) exists with no caller in the app. **The practical consequence: a resume that found nothing to prime has no counter at all** — the only witness is the FAIL line — which is R13's pattern again: a condition with no number attached is a condition that will be argued about instead of measured. **Scoped as PR-3c — §11 carries it as this phase's next work item (2026-11-19).** What that PR owes: (1) a **leg in §4.4 D2** for resume → first audible sample, bounded by this run's measured pass and its own producer rate rather than a constant (today's pause legs are press→freeze and the prime, and `pause_to_freeze_bound` bounds the *out* half only); (2) a **maximum on the wait** — with the chain un-armed nothing is consumed, so the ring's own capacity (**36 chunks = 1,230 ms**) ceilings any "don't arm until there is audio" design, which is exactly what makes a *counted cover* the shape for longer waits; the skip row's `dropped=`/`silence=` treatment is the model, since a cover chunk is pushed and consumed but is not track content (`:466`), and the shape was proved at `examples/album_probe/src/probe_hw.rs:859` (`truncate_stale`) and shipped for skips in `transition_hand_off` (`:1950-1975`), which pushes the cover's first whole chunk in the same critical section as the truncate; (3) an **A11 affordance** so the wait is visible to the human and not only to the audit, plus the **counter** the removal of the refusal makes mandatory — R13's lesson turned to face a halt: a red that stops a correct cartridge forever is a worse witness than a cover that is counted, printed and bounded. **Not the Q4/Q13b family**, which is about track boundaries: here the ring head must not move, and the pause's own claim is that the resume starts from the sample the freeze stopped on (`:2906` records it, `:2992` refuses if it moved). So "catch up from a later position" is **ruled out rather than deferred**, and "just stay paused" is not free either: the transport contract has no cancel, because reversing a half-served fade is a click of its own (§4.4). **Landed 2026-11-23** on `feat/album-player-pr3c-resume-refill`: §11's PR-3c record carries what was built (a ring-routed resume, `State::Buffering`, a frozen-chain refill to the prefill's own target, and `resume_to_audio_bound`), and the two knobs this row left open were resolved by borrowing that geometry rather than by choosing a number. What this row still owns as open is the visible half: the A11 affordance, and the row-side composition of a `resume→audio` leg. |
 
 **Q15 in detail — measured 2026-11-15, on the master itself.**
 

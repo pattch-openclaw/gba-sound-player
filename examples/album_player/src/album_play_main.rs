@@ -183,7 +183,8 @@ mod rom {
     use album_player::position;
     use album_player::text;
     use album_player::transport::{
-        SKIP_PRIME_CHUNKS, State, Step, Transport, pause_to_freeze_bound, take_to_handoff_bound,
+        SKIP_PRIME_CHUNKS, State, Step, Transport, pause_to_freeze_bound, resume_to_audio_bound,
+        take_to_handoff_bound,
     };
     use gba_audio_hw::{
         AudioChain, CycleCounter, arm_audio_chain, clear_timer1_if, enable_sound, io_read_u16,
@@ -1793,6 +1794,84 @@ mod rom {
         })
     }
 
+    /// Whether the ring can supply the resume's prime **now** — the question `take_chunk` asks, asked
+    /// one level earlier so the transport can route a starved resume instead of refusing it (PR-3c,
+    /// Q18's ruling: a product must not stop when a listener asks to hear the track again).
+    ///
+    /// Not a new threshold and not a second classification: `Chunk::Starved` is exactly what a
+    /// `ready() < CHUNK` ring hands a feeder, and a finished visit's short tail is a `Chunk::Tail` at
+    /// any `ready() > 0` — the same distinction `prime_hand_off`'s own `finished` argument selects, read
+    /// from the same `Stats::finished` flag. Asking it one pass early cannot make the answer wrong in a
+    /// way that matters: the chain is frozen, so nothing is being consumed underneath it, and the direct
+    /// arm still goes through `prime_hand_off`'s own `false` for the truly empty ring.
+    fn ring_primable() -> bool {
+        critical_section::with(|cs| {
+            let stats = STATS.borrow_ref(cs);
+            let feed = FEED.borrow_ref(cs);
+            feed.ready() >= CHUNK || (stats.finished && feed.ready() > 0)
+        })
+    }
+
+    /// Whether a starved resume's refill has reached the depth the plan requires before audio may start
+    /// at all: [`PREFILL_SAMPLES`], §4.2b's own figure and the boot prefill's target — not a second,
+    /// smaller number to argue about (PR-3c).
+    ///
+    /// The **caller** owns that question: `Transport::end_buffer` has no ring to look at and says so
+    /// ("the caller asks when the ring reaches the target and may ask on every pass afterwards"), and the
+    /// state machine's half is the state and the ramp. Keeping the threshold out of the transport is also
+    /// what keeps it a borrow of `geometry`'s constant rather than a second definition of it.
+    ///
+    /// `ready()`, not `pushed()`: the boot prefill measures an empty ring, where the two are the same
+    /// number, and here they are not. Crossing the target in a *whole* frame is the boot path's
+    /// behaviour too, and `geometry.rs` pins at compile time that every reachable entry depth reaches the
+    /// target in [`geometry::PREFILL_FRAMES`] frames — so the wait is never "the last few hundred
+    /// samples, forever".
+    fn ring_refilled() -> bool {
+        critical_section::with(|cs| FEED.borrow_ref(cs).ready() >= PREFILL_SAMPLES)
+    }
+
+    /// Re-arm the chain from the ring's head: the resume's arm, on either route the transport reached it
+    /// by (the direct prime, or PR-3c's refill — both answer [`Step::Prime`]).
+    ///
+    /// The order is the boot path's, for the boot path's reasons (`enable_sound` → prime →
+    /// `clear_timer1_if` → the already-installed handler → `arm_audio_chain`), under one critical
+    /// section for the reason `freeze_chain` gives: no vblank bracket may straddle the timer reset.
+    /// `prime_hand_off` takes its own nested section inside this one, which agb's implementation allows.
+    /// `false` is the truly empty album — §15 Q13's and R5's subject, not PR-3c's, and the caller keeps
+    /// its named FAIL for it.
+    fn resume_arm(timers: &mut agb::timer::AllTimers<'_>) -> bool {
+        critical_section::with(|_cs| {
+            if !prime_hand_off() {
+                return false;
+            }
+            enable_sound();
+            clear_timer1_if();
+            arm_audio_chain(timers, &CHAIN);
+            true
+        })
+    }
+
+    /// Close a resume: read the position the chain is being re-armed on, re-arm it, and complete the
+    /// pause's record. Both routes end here — the direct prime in the pass that served the press, a
+    /// refill in whichever pass reaches the target — and only *when* differs, which is the record's
+    /// business, not this function's.
+    ///
+    /// The position is read **before** the prime: the prime commits a chunk to the DMA, and the pause's
+    /// claim is about the sample the resume started from, not the one after its first buffer.
+    fn complete_resume(
+        timers: &mut agb::timer::AllTimers<'_>,
+        pauses: &mut Pauses,
+        press_frame: u32,
+        refilled: bool,
+    ) -> Result<(), &'static str> {
+        let at_resume = position::committed_samples();
+        if !resume_arm(timers) {
+            return Err("the resume had nothing to prime — the ring was empty");
+        }
+        pauses.resumed(press_frame, frame_latch(), at_resume, refilled);
+        Ok(())
+    }
+
     // ----------------------------------------------------- §4.4's skip, from both sides
 
     /// The wire watch's state and the counters around it, read in one instant.
@@ -2847,8 +2926,20 @@ mod rom {
         frozen_committed: u32,
         /// Feeder periods between the toggle and the freeze: the fade's own cost, in periods.
         fade_periods: u32,
+        /// The pass that served the resume press — the take, whichever route the transport answered by.
         resumed_frame: u32,
         resumed_committed: u32,
+        /// **PR-3c.** The pass that actually re-armed the chain. Equal to `resumed_frame` on the
+        /// direct route (the prime *is* the take's step), later when the ring had to be refilled, and
+        /// `0` while a refill is still open — which fails the pair, because a burst that never ends is
+        /// not a resume.
+        armed_frame: u32,
+        /// Whether the resume took PR-3c's refill route (the ring could not give the prime's chunk).
+        refilled: bool,
+        /// The session clock at the press that asked for a starved resume. Its equality with
+        /// `resumed_committed` is the no-seek invariant seen from the other side: the refill's frames
+        /// of decode moved nothing, because a frozen chain consumes nothing.
+        head_at_press: u32,
     }
 
     /// The pause ledger: totals for the verdict, and the first [`PAUSE_LOG`] pairs in full.
@@ -2858,9 +2949,17 @@ mod rom {
         /// Pause/resume toggles taken, and the ones ignored because a transition was in flight.
         toggles: u32,
         ignored: u32,
+        /// **PR-3c.** How many of this run's resumes found a ring too short to prime from and took the
+        /// refill route. Printed on the summary line even when it is `0`: a branch the fixture never
+        /// reaches has to read as an intentional zero rather than as an absent line, or a run that did
+        /// meet it looks identical to one that did not (§11 item 2).
+        refills: u32,
         /// The pair currently open: the toggle's frame and the feeder's entry count.
         opening_frame: u32,
         opening_periods: u32,
+        /// A starved resume's take: the pass that served it, and the ring head it was served on.
+        resume_press_frame: u32,
+        resume_press_head: u32,
         records: [PauseRecord; PAUSE_LOG],
         recorded: usize,
     }
@@ -2871,8 +2970,11 @@ mod rom {
                 pairs: 0,
                 toggles: 0,
                 ignored: 0,
+                refills: 0,
                 opening_frame: 0,
                 opening_periods: 0,
+                resume_press_frame: 0,
+                resume_press_head: 0,
                 records: core::array::from_fn(|_| PauseRecord {
                     action_frame: 0,
                     frozen_frame: 0,
@@ -2881,6 +2983,9 @@ mod rom {
                     fade_periods: 0,
                     resumed_frame: 0,
                     resumed_committed: 0,
+                    armed_frame: 0,
+                    refilled: false,
+                    head_at_press: 0,
                 }),
                 recorded: 0,
             }
@@ -2903,6 +3008,9 @@ mod rom {
                 fade_periods: periods.saturating_sub(self.opening_periods),
                 resumed_frame: 0,
                 resumed_committed: 0,
+                armed_frame: 0,
+                refilled: false,
+                head_at_press: 0,
             };
             if self.recorded < PAUSE_LOG {
                 self.records[self.recorded] = record;
@@ -2910,23 +3018,53 @@ mod rom {
             }
         }
 
+        /// A resume was taken on a ring too short to give the prime's chunk (PR-3c, Q18's ruling). The
+        /// pair's take frame and the ring head at that instant are recorded **now** — this is the pass
+        /// that served the press, and the row's `resume@frame=` has to keep naming the take rather than
+        /// the arm — and the chain stays frozen until the ring holds the prefill's depth again.
+        fn starved_resume(&mut self, frame: u32, head: u32) {
+            self.refills += 1;
+            self.resume_press_frame = frame;
+            self.resume_press_head = head;
+        }
+
         /// The chain was primed and re-armed: close the open pair and read off what it cost.
-        fn resumed(&mut self, frame: u32, committed: u32) {
+        ///
+        /// `press_frame` is the take, `armed_frame` the pass that re-armed, and the two are the same
+        /// pass unless `refilled` — which is why the leg between them is the ledger's only new number
+        /// and every existing term keeps its meaning. The toggle is counted here, as it was before
+        /// PR-3c, so `pairs * 2 + ignored == toggles` balances on either route; a starved resume that
+        /// never re-arms is short a pair *and* a toggle, so that check cannot see it and
+        /// `record_ok`'s `resumed_frame` term does.
+        fn resumed(&mut self, press_frame: u32, armed_frame: u32, committed: u32, refilled: bool) {
             self.toggles += 1;
             if self.recorded > 0 {
                 let record = &mut self.records[self.recorded - 1];
                 if record.resumed_frame == 0 {
-                    record.resumed_frame = frame;
+                    record.resumed_frame = press_frame;
+                    record.armed_frame = armed_frame;
                     record.resumed_committed = committed;
+                    record.refilled = refilled;
+                    record.head_at_press = self.resume_press_head;
                 }
             }
             self.pairs += 1;
+            self.resume_press_frame = 0;
+            self.resume_press_head = 0;
         }
 
         /// A toggle arrived while a transition was already running: no cancel, so it is counted.
         fn ignored(&mut self) {
             self.toggles += 1;
             self.ignored += 1;
+        }
+
+        /// Video frames between the pass that served the resume press and the pass that re-armed the
+        /// chain: **0** on the direct route by construction, `PREFILL_FRAMES` passes' worth when the
+        /// ring had to be refilled. PR-3c's leg, and the first of §4.4's legs whose unit is frames —
+        /// there are no periods to count while the chain is frozen.
+        fn resume_leg(record: &PauseRecord) -> u32 {
+            record.armed_frame.saturating_sub(record.resumed_frame)
         }
 
         /// Samples lost across a pair: zero by contract.
@@ -2940,18 +3078,30 @@ mod rom {
         /// true over a row that printed `FAIL` (R0). `freeze_bound` is this run's own, from
         /// [`pause_to_freeze_bound`]: the ledger's exactness, the fade having reached silence, and that
         /// leg lying inside the bound this run's measurements support.
-        fn record_ok(record: &PauseRecord, freeze_bound: u32) -> bool {
+        ///
+        /// `resume_bound` is PR-3c's counterpart, from [`resume_to_audio_bound`]; `None` means this arm
+        /// has no measured pass to price a refill with, and the row prints `bound=not measured` — the
+        /// same honesty `reaction`'s `SKIPPED` reaches on the shipped arm. The three terms it adds are
+        /// structural and checked on every arm: the re-arm never precedes the take; a refill's ring head
+        /// is the **same sample** at the press and at the arm (§4.4's no-seek invariant read from the
+        /// other side — the burst's frames of decode delivered nothing, because a frozen chain consumes
+        /// nothing); and the wait is inside the bound where there is one.
+        fn record_ok(record: &PauseRecord, freeze_bound: u32, resume_bound: Option<u32>) -> bool {
             record.frozen_gain == 0
                 && Self::dropped(record) == 0
                 && record.fade_periods <= freeze_bound
+                && record.armed_frame >= record.resumed_frame
+                && (!record.refilled || record.head_at_press == record.resumed_committed)
+                && resume_bound.is_none_or(|bound| Self::resume_leg(record) <= bound)
         }
 
-        /// Every pair kept the position exactly, every fade reached silence before the chain stopped
-        /// and did so inside this run's own bound on that leg, and every toggle is accounted for.
-        fn ok(&self, freeze_bound: u32) -> bool {
+        /// Every pair kept the position exactly, every fade reached silence before the chain stopped and
+        /// did so inside this run's own bound on that leg, every resume re-armed on the sample it was
+        /// asked for and inside its own bound, and every toggle is accounted for.
+        fn ok(&self, freeze_bound: u32, resume_bound: Option<u32>) -> bool {
             let mut clean = self.recorded > 0 || self.pairs == 0;
             for record in &self.records[..self.recorded] {
-                clean &= Self::record_ok(record, freeze_bound)
+                clean &= Self::record_ok(record, freeze_bound, resume_bound)
                     && record.frozen_frame >= record.action_frame
                     && record.resumed_frame >= record.frozen_frame;
             }
@@ -2959,17 +3109,28 @@ mod rom {
         }
 
         /// The end-of-run lines: one summary, then one line per pair (the first [`PAUSE_LOG`]). The
-        /// bound travels with the rows, because a row that prints a leg and no bound asks a human to
-        /// judge that number by eye.
-        fn report(&self, freeze_bound: u32) {
+        /// bounds travel with the rows, because a row that prints a leg and no bound asks a human to
+        /// judge that number by eye. `refills=` is printed whatever its value: on this fixture the
+        /// emulator's ring never drains inside a visit, so the refill branch is a deliberate zero, and a
+        /// line that is missing cannot be told apart from a branch that was met.
+        fn report(&self, freeze_bound: u32, resume_bound: Option<u32>) {
+            // The bound travels with the rows as a string so the not-measured case reads as words
+            // instead of a sentinel a human has to know. Allocated once, after the teardown, where every
+            // other report line is built.
+            let resume_bound_text = match resume_bound {
+                Some(bound) => format!("{bound}"),
+                None => "not measured on this arm".into(),
+            };
             agb::println!(
-                "[album-rom] pause: pairs={} toggles={} ignored={} limit={} bound={} [{}]",
+                "[album-rom] pause: pairs={} toggles={} ignored={} refills={} limit={} bound={} resume bound={} [{}]",
                 self.pairs,
                 self.toggles,
                 self.ignored,
+                self.refills,
                 PAUSE_LOG,
                 freeze_bound,
-                if self.ok(freeze_bound) {
+                resume_bound_text,
+                if self.ok(freeze_bound, resume_bound) {
                     "PASS"
                 } else {
                     "FAIL"
@@ -2977,7 +3138,7 @@ mod rom {
             );
             for (index, record) in self.records[..self.recorded].iter().enumerate() {
                 agb::println!(
-                    "[album-rom] pause {}: action@frame={} frozen@frame={} action→freeze={} periods (bound {}) gain={} committed={} ; resume@frame={} committed={} dropped={} [{}]",
+                    "[album-rom] pause {}: action@frame={} frozen@frame={} action→freeze={} periods (bound {}) gain={} committed={} ; resume@frame={} committed={} dropped={} primable={} resume→arm={} frames (bound {}) [{}]",
                     index + 1,
                     record.action_frame,
                     record.frozen_frame,
@@ -2988,16 +3149,19 @@ mod rom {
                     record.resumed_frame,
                     record.resumed_committed,
                     Self::dropped(record),
-                    if Self::record_ok(record, freeze_bound) {
+                    if record.refilled { "no" } else { "yes" },
+                    Self::resume_leg(record),
+                    resume_bound_text,
+                    if Self::record_ok(record, freeze_bound, resume_bound) {
                         "PASS"
                     } else {
                         "FAIL"
                     }
                 );
             }
-            if !self.ok(freeze_bound) {
+            if !self.ok(freeze_bound, resume_bound) {
                 agb::println!(
-                    "[album-rom] FAIL a pause did not hold: every pair must freeze at gain 0 within this run's bound ({freeze_bound} periods), resume on the sample it stopped on (dropped=0), and account for its toggles"
+                    "[album-rom] FAIL a pause did not hold: every pair must freeze at gain 0 within this run's bound ({freeze_bound} periods), resume on the sample it stopped on (dropped=0, and a refill's ring head unchanged across the burst), re-arm inside its own bound ({resume_bound_text} frames), and account for its toggles"
                 );
             }
         }
@@ -3783,8 +3947,12 @@ mod rom {
             // The pass's cost in cycles of the audio clock, for the bound both the `reaction` term
             // and the skip rows are gated against (R13: the pass's length belongs to the machine, so
             // the run measures it rather than borrowing an emulator's). A frozen chain has no clock
-            // to read, so only a pass the transport was feeding from start to end is timed.
-            let pass_clock = if transport_state().feeds() {
+            // to read, so only a pass the transport was feeding from start to end is timed — and
+            // `pass_timeable` is `feeds()` without `Buffering`, because PR-3c's refill pass *is* a pass
+            // and *is* bounded, but its cost is decode rather than a share of an audio period that is
+            // not running: timing it against a stopped counter would book the pass at a few cycles and
+            // lower the very bound the refill's own wait is gated against.
+            let pass_clock = if transport_state().pass_timeable() {
                 Some(audio_clock())
             } else {
                 None
@@ -3792,6 +3960,21 @@ mod rom {
             // The producer runs while the transport is a feeding state — `Playing`, or `Repriming`,
             // where the new track's audio has to reach the ring behind the skip's silence cover.
             if transport_state().feeds() {
+                // PR-3c: a starved resume's refill is a burst with the chain frozen, so the loop's own
+                // yield points do not apply to it — there is no audio to keep fed, and the ring is short
+                // by definition. It is held to **one frame per pass** instead, for two reasons this
+                // loop's structure pays for: the burst's price is then one ordinary pass's decode, which
+                // is the quantity this run already measures (`producer frame worst`) and which
+                // [`resume_to_audio_bound`] is written in; and a burst that ran to completion inside one
+                // pass would be `PREFILL_FRAMES` frames of decode with no vblank service in it — the
+                // frame slice below is the loop's only paint sample, its only input poll, and the only
+                // thing that keeps the watchdog fed.
+                //
+                // Read once per pass, not per frame: the state is another decision's to move, and a
+                // burst that stopped mid-way because a `tick()` changed the answer underneath it would
+                // be a wait with no bound at all. The refill's frames are ordinary producer frames and
+                // are timed as such, so the pass bound the wait is gated against includes them.
+                let refilling = transport_state() == State::Buffering;
                 while !paint.due() && producer.frames < producer.total_frames && producer.has_room()
                 {
                     idle = 0;
@@ -3820,6 +4003,43 @@ mod rom {
                         handler_samples(frame_clock, audio_clock())
                             .saturating_mul(geometry::TICKS_PER_SAMPLE),
                     );
+                    if refilling {
+                        // One frame per pass: the pass ends, the frame slice runs, and the next pass
+                        // continues the burst from the ring's new depth.
+                        break;
+                    }
+                }
+            }
+            // PR-3c: the refill ends where the plan says audio may start — the ring holding
+            // `PREFILL_SAMPLES` again, §4.2b's figure — and `end_buffer` owns the other half: the state,
+            // and the ramp that starts here rather than at the press because a ramp is spent on whatever
+            // the feeder hands over next, and a frozen chain hands over nothing. Its `Prime` is the
+            // direct resume's `Prime` on the same ring head, so the arm below *is* the same arm.
+            //
+            // The head is read inside `complete_resume`, **before** the prime, and `record_ok` compares
+            // it to the one latched at the press: that equality is this run's own witness that the
+            // burst's frames of decode delivered no sample of the paused track.
+            if transport_state() == State::Buffering && ring_refilled() {
+                match critical_section::with(|cs| TRANSPORT.borrow_ref_mut(cs).end_buffer()) {
+                    Step::Prime => {
+                        let press = pauses.resume_press_frame;
+                        if let Err(why) = complete_resume(&mut timers, &mut pauses, press, true) {
+                            agb::println!("[album-rom] FAIL {why}");
+                            halt = Some("resume");
+                            break 'frames;
+                        }
+                    }
+                    // Only reachable if the state moved underneath this pass, which only `tick()` can
+                    // do — and only out of `Resuming`, so it would mean the arm had already been taken:
+                    // a second prime in one pair is the bug, not a case to handle.
+                    Step::Idle => {}
+                    other => {
+                        agb::println!(
+                            "[album-rom] FAIL a starved resume answered {other:?} instead of re-arming"
+                        );
+                        halt = Some("resume refill");
+                        break 'frames;
+                    }
                 }
             }
             // The frame slice: the vblank handler detected the edge, stamped it with the frame it
@@ -3850,38 +4070,54 @@ mod rom {
             if let Some(detected) = detected
                 && detected.action == keys::Action::PauseToggle
             {
-                match critical_section::with(|cs| TRANSPORT.borrow_ref_mut(cs).toggle(true)) {
+                // The ring's answer, read before the state machine's: PR-3c routes a resume by it, and
+                // `Transport::toggle`'s doc says why the caller cannot ask afterwards.
+                let primable = ring_primable();
+                match critical_section::with(|cs| {
+                    TRANSPORT.borrow_ref_mut(cs).toggle(true, primable)
+                }) {
                     Step::FadeOut => pauses.begin(frame_latch(), handler_entries()),
                     Step::Prime => {
                         // §4.4's resume, in the boot path's order: the ring's head is the sample the
                         // freeze stopped on, so this is a prime and not a seek. The transport has
                         // already set the gain ramping in, and the primed chunk is the ramp's first.
-                        //
-                        // The position is read **before** the prime: the prime commits a chunk to
-                        // the DMA, and the pause's claim is about the sample the resume started
-                        // from, not the one after its first buffer.
-                        let at_resume = position::committed_samples();
-                        //
-                        // One critical section, for the reason `freeze_chain` gives: no vblank
-                        // bracket may straddle the timer reset. `prime_hand_off` takes its own
-                        // (nested) section inside this one, which agb's implementation allows.
-                        let armed = critical_section::with(|_cs| {
-                            if !prime_hand_off() {
-                                return false;
-                            }
-                            enable_sound();
-                            clear_timer1_if();
-                            arm_audio_chain(&mut timers, &CHAIN);
-                            true
+                        if let Err(why) =
+                            complete_resume(&mut timers, &mut pauses, frame_latch(), false)
+                        {
+                            agb::println!("[album-rom] FAIL {why}");
+                            halt = Some("resume");
+                            break 'frames;
+                        }
+                    }
+                    Step::Buffer => {
+                        // The one wait this route cannot wait out, and the case it is not: a stream that
+                        // has ended *and* a ring that is empty means there is nothing left to hear, so no
+                        // pass will ever push the frame the target needs. That is §15 Q13's truly-empty
+                        // album, which §11's PR-3c item keeps out of scope on purpose — and PR-3c must not
+                        // make it worse, which is what it would do by default: an empty ring cannot reach
+                        // PREFILL_SAMPLES, so the run would sit in `Buffering` with a frozen chain and
+                        // never print its end lines. The old halt at least terminated. So the press is
+                        // ended where it stands, with the reason naming whose case it is — which is also
+                        // what makes the `State::Buffering` entry claim true: having passed this gate, the
+                        // producer still has work, so the target is reachable from here by construction.
+                        let exhausted = critical_section::with(|cs| {
+                            STATS.borrow_ref(cs).finished && FEED.borrow_ref(cs).ready() == 0
                         });
-                        if !armed {
+                        if exhausted {
                             agb::println!(
-                                "[album-rom] FAIL the resume had nothing to prime — the ring was empty"
+                                "[album-rom] pause: the ring was empty and the stream had ended — nothing is left to hear, so this is the album's end and not a starved resume (Q13's case, out of PR-3c's scope)"
                             );
                             halt = Some("resume");
                             break 'frames;
                         }
-                        pauses.resumed(frame_latch(), at_resume);
+                        // Q18's ruling, not a stop: the listener asked to hear the track again and the
+                        // ring cannot give the prime's chunk, so the chain stays frozen, the head stays
+                        // where it was (§4.4's no-seek invariant), and the producer refills the ring to
+                        // the prefill's depth one frame per pass. This pass *is* the take — the row's
+                        // `resume@frame=` keeps naming the press and the leg to the arm is its own
+                        // number — and the head is latched here as the pair's no-seek witness: the same
+                        // value has to be read at the re-arm, with nothing delivered in between.
+                        pauses.starved_resume(frame_latch(), position::committed_samples());
                     }
                     Step::Ignored => pauses.ignored(),
                     _ => {}
@@ -4029,7 +4265,7 @@ mod rom {
             #[cfg(feature = "input-replay")]
             note_pass(frame_latch().wrapping_sub(pass_start));
             if let Some(entry) = pass_clock
-                && transport_state().feeds()
+                && transport_state().pass_timeable()
             {
                 note_pass_cycles(
                     handler_samples(entry, audio_clock())
@@ -4271,6 +4507,24 @@ mod rom {
         // next turn lies inside this leg. The ROM has recorded `fade_periods` since PR-3b-ii-B2a and
         // compared it to nothing: §4.4's fourth leg, and the one left unbounded.
         let pause_freeze_bound = pause_to_freeze_bound(input.pass_periods());
+        // PR-3c's counterpart for the resume rows. The refill is `PREFILL_FRAMES` producer frames of
+        // decode, and the loop takes one of them per pass, so the wait costs that many of *this run's*
+        // passes: the same pass ceiling the `reaction` term gates against, in frames, plus the boundary
+        // allowance every other leg of §4.4's chain is allowed (`MAX_BOUNDARY_FRAMES`, derived from the
+        // period and the vblank — not chosen). `resume_to_audio_bound` carries the argument; the number
+        // is not a constant because a cart's pass is not this emulator's (R13).
+        //
+        // `None` on the shipped arm: that arm measures no pass (`producer_max_cycles` is the replay
+        // arm's, and a shipped run has no scripted press to time), so the rows print
+        // `bound=not measured on this arm` and `record_ok` keeps only the structural terms — the same
+        // honesty `reaction`'s `SKIPPED` reaches on that arm.
+        #[cfg(feature = "input-replay")]
+        let resume_bound: Option<u32> = Some(resume_to_audio_bound(
+            frames_of(pass_bound_cycles(input.producer_max_cycles)),
+            MAX_BOUNDARY_FRAMES,
+        ));
+        #[cfg(not(feature = "input-replay"))]
+        let resume_bound: Option<u32> = None;
 
         // ---- the input seam's end-of-run lines (PR-3b-i, extended by PR-3b-ii-B1). The counts are
         // what a gate reads: a REPLAY build's script has a known number of edges and repeats, and a
@@ -4288,7 +4542,7 @@ mod rom {
         // ---- §4.4's pause ledger (PR-3b-ii-B2a): the pairs, and the one line each that says the
         // position did not move. Printed here, after the teardown, for the reason the key edges are:
         // `agb::println!` is a semihosting trap and the record is filled on the audio path.
-        pauses.report(pause_freeze_bound);
+        pauses.report(pause_freeze_bound, resume_bound);
 
         // ---- §4.4's skip ledger (PR-3b-ii-B2b): one row per skip, in the probe's own units, so these
         // lines can be read against its table ("The deep arm": `to_new = prime + 1`, and 5 periods at
@@ -4465,7 +4719,7 @@ mod rom {
         // (`handler_entries + primes`). On the HARDWARE arm `pairs=0` is the honest reading of a
         // headless run — nothing pressed a key — and the term is trivially true, exactly as
         // `presses=0` is.
-        let pauses_ok = pauses.ok(pause_freeze_bound);
+        let pauses_ok = pauses.ok(pause_freeze_bound, resume_bound);
         // §4.4's skip, measured per skip rather than asserted: every skip must reach its new track in
         // `SKIP_PRIME_CHUNKS + 1` periods with no stale audio after it and no underflow booked, exactly
         // as `Skips::report` prints. On the shipped HARDWARE arm `skips=0` is the honest reading of a

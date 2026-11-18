@@ -1,7 +1,8 @@
 //! `transport.rs` — the playback transport, and §4.4's pause / resume contract.
 //!
-//! PR-3b, step ii-B2a defined pause; ii-B2b adds skip. Every state below is reachable and every one
-//! of them has a caller: `Playing`, `Pausing`, `Paused`, `Resuming`, `Skipping`, `Repriming`.
+//! PR-3b, step ii-B2a defined pause; ii-B2b adds skip; PR-3c adds the state a resume pressed onto an
+//! under-run ring goes through. Every state below is reachable and every one of them has a caller:
+//! `Playing`, `Pausing`, `Paused`, `Resuming`, `Skipping`, `Repriming`, `Buffering`.
 //! `TrackEnd`/`Ended` and the decode-error state are ii-B2b's stage 2 and are not declared before
 //! they exist.
 //!
@@ -26,6 +27,30 @@
 //! **`resume`:** re-prime both DMA buffers from the ring head and re-arm in the shipped order
 //! (`enable_sound` → prime → `clear_timer1_if` → the already-installed handler →
 //! `arm_audio_chain`), ramping the gain back up.
+//!
+//! **…unless the ring cannot supply that prime's chunk**, in which case the resume refills first and
+//! arms when the refill is done (PR-3c, the ruling Q18 asked for). The press's second argument is the
+//! ring's own answer — whether `take_chunk` could take anything at all — and a *no* routes the press
+//! through [`State::Buffering`]: the chain stays frozen, the producer decodes to
+//! [`geometry::PREFILL_SAMPLES`] at one frame per pass, and only then does [`Transport::end_buffer`]
+//! answer with the same `Step::Prime` the ordinary resume answers with, on the same ring head. So the
+//! no-seek invariant below is stated once and holds on both routes:
+//!
+//! | step | what happens | bound |
+//! |---|---|---|
+//! | press → the decision | the ring is asked whether it holds a chunk `take_chunk` could take (or: the stream ended and something is queued) | the vblank latch's own granularity |
+//! | decision → the target | [`geometry::PREFILL_FRAMES`] = 5 passes, one decode frame each, nothing consumed | [`resume_to_audio_bound`] frames |
+//! | target → chain re-armed | prime, `enable_sound`, `clear_timer1_if`, `arm_audio_chain` | inside the row above's boundary allowance |
+//!
+//! The unit of that middle bound is **video frames**, not feeder periods, because there are no periods
+//! to count: a frozen chain's audio counter is a constant. It is the first bound in this family whose
+//! unit is not periods, and [`State::pass_timeable`] exists so the frame loop's pass timer stops
+//! asking the wrong predicate when it sees one.
+//!
+//! The leg ends at the **re-arm**, not at the first audible byte: what turns the chain back on is the
+//! same prime the direct resume asks for, and the primed chunk is already the ramp's first, so the
+//! sample after the re-arm is inside the one period the `Resuming` state already lasts. The press →
+//! detect → take legs in front of it are the `reaction` term's, unchanged by this PR.
 //!
 //! **`skip`** is §4.4's six steps with the gain at the hand-off (D4, ii-B2b):
 //!
@@ -115,6 +140,11 @@
 //! command, [`Transport::tick`] for "the fade has finished, freeze" / "the ramp is back, play", and
 //! the hardware work each step names. The state lives here so the host model drives the same
 //! machine the ROM does; nothing in this module names `agb`, a register or a timer.
+
+// The refill target and the frame count it costs are the shipped ring's own figures, derived in
+// `geometry.rs` — named here because a bound built from them belongs next to the leg it bounds, and
+// re-deriving them here would be the mistake §4.2b's "no new number" rule is about.
+use crate::geometry;
 
 // -------------------------------------------------------------------------------------------------
 // The hand-off gain (ALBUM-PLAYER.md §4.4, PR-3b-ii-B2a's D3)
@@ -246,6 +276,48 @@ pub const fn take_to_handoff_bound(pass_periods: u32) -> u32 {
 #[must_use]
 pub const fn pause_to_freeze_bound(pass_periods: u32) -> u32 {
     FADE_PERIODS + 1 + pass_periods
+}
+
+/// The bound on a starved resume's **press → the chain re-armed** leg, in **video frames**: the
+/// target's decode count priced at a whole pass of this run's own making, plus the boundary allowance
+/// the caller derives from its own period length.
+///
+/// **The unit is not the one this family usually uses, and that is the point.** The two siblings above
+/// count periods because their legs *are* periods: a fade is served by the feeder, a re-prime is
+/// handed over by it. This leg runs with the chain frozen — that is what [`State::Buffering`] means —
+/// so the audio clock is a stopped counter and the only clock in the run that advances is the vblank
+/// latch. The row prints `frames=` for the same reason the others print `periods`, and a reviewer who
+/// sees the two units side by side should read them as the same kind of claim: a leg that had no bound
+/// at all before this PR now has one, in the only unit that can hold it.
+///
+/// **The derivation, term by term.** The *count* is [`geometry::PREFILL_FRAMES`] — 5 — and it is not an
+/// estimate: the state is entered only when the ring holds less than one whole chunk, so the frames
+/// needed to reach [`geometry::PREFILL_SAMPLES`] are `ceil((PREFILL_SAMPLES − ready) / FRAME_SAMPLES)`,
+/// which that entry rule makes the same 5 for every reachable entry; `geometry.rs` pins it as a
+/// compile-time fact rather than trusting this paragraph. The *price* is `worst_pass_frames`, which
+/// each caller takes from its own machine: the ROM passes the plan's pass ceiling in frames
+/// (`frames_of(producer_max_cycles + the margin a pass is allowed)`), sound because a pass inside the
+/// burst does a strict *subset* of an ordinary pass's work — one decode frame plus the loop's slices,
+/// and no feed slice to run — and a host model passes the pass length it is itself running. The
+/// boundary allowance is the term the siblings also allow (a press lands anywhere inside a pass; the
+/// arm lands at the end of the pass that completes the target): the ROM passes its own
+/// `MAX_BOUNDARY_FRAMES`, derived from `PERIOD_CYCLES` and the video period rather than chosen.
+///
+/// **What it fails, and what it does not claim.** It fails a burst that never ends (an `end_buffer`
+/// that never fires, a target that is never reached), a lost transition, and a machine whose decode has
+/// gone outside what this run's own worst pass plus margin supports. It does **not** claim the wait is
+/// short in any listener's sense of that word; it says the wait is the prefill's own decode, priced by
+/// the run that paid it. It does **not** bound the re-arm → first audible byte: the re-arm's primed
+/// chunk is the ramp's first chunk, so that half is the one period [`State::Resuming`] already lasts —
+/// the leg `latency:`'s `hand-off→audible` term and the `reaction` term own.
+///
+/// `PREFILL_FRAMES` is a `const` because the plan already spends that decode at boot; the two arguments
+/// are not, because both belong to the machine being measured (R13).
+#[must_use]
+pub const fn resume_to_audio_bound(worst_pass_frames: u32, boundary_frames: u32) -> u32 {
+    geometry::PREFILL_FRAMES
+        .saturating_mul(worst_pass_frames)
+        .saturating_add(boundary_frames)
 }
 
 /// One FIFO byte in the form [`fifo_byte`](gba_playback::playback::fifo_byte) produces, scaled by
@@ -409,6 +481,14 @@ pub enum State {
     /// A fade-out has been issued and the chain is still running; the gain is falling to zero.
     Pausing,
     /// The fade reached silence and the chain is frozen. The ring and the decoder are untouched.
+    ///
+    /// Exited only by [`Transport::toggle`]: with `primable = true` the resume arms at once, with
+    /// `primable = false` it refills first (PR-3c, the ruling Q18 asked for — see
+    /// [`State::Buffering`]). [`tick`](Transport::tick) never acts here: with the chain stopped there is
+    /// no period to observe, so the state has no self-closing arm. A skip pressed while frozen is
+    /// refused for the reasons [`Transport::skip`]'s doc gives: the ring's head belongs to the track
+    /// being paused, and re-targeting it would need a second re-prime path and a way to cancel a
+    /// queued silence cover — the reason this module's own third bullet gives, not this state's.
     Paused,
     /// The chain has been primed and re-armed with the gain ramping up; the ramp completes inside
     /// the primed chunk, so this state lasts one period.
@@ -420,6 +500,31 @@ pub enum State {
     /// exactly those chunks, then ramps in on the new track's first one. The producer feeds in this
     /// state (that is what puts the new track behind the cover).
     Repriming,
+    /// A resume was pressed onto a ring that cannot supply the prime's chunk, so there is nothing to
+    /// arm **yet** — and the wait for something to arm is spent filling the ring instead of spent
+    /// refusing the press (PR-3c; Q18's ruling, ALBUM-PLAYER.md §11's PR-3c item).
+    ///
+    /// Not a seek and not a cover: the ring's head is still the sample [`State::Paused`] stopped on,
+    /// nothing is consumed while this state runs, and the depth it stops at is the boot prefill's own
+    /// [`geometry::PREFILL_SAMPLES`] — the one depth the plan already requires before audio starts, so
+    /// the frames it costs are [`geometry::PREFILL_FRAMES`], the same 5 frames the boot already pays,
+    /// and not a new budget anyone has to defend. Nor is it [`State::Repriming`], which *is* a seek
+    /// (`truncate`, hence a `dropped` count) and queues cover chunks so the chain keeps running: here
+    /// the chain stays frozen for the whole burst, which is what makes a refill of any length safe — a
+    /// frozen chain cannot starve, and a cover of a bounded depth could not bridge this wait anyway
+    /// (the Q18 ruling's first paragraph, and the reason this state exists at all).
+    ///
+    /// Refused by a second press (there is nothing to cancel: the chain is not moving) and by
+    /// [`Transport::skip`] (the same reason `Paused` gives). Exited by [`Transport::end_buffer`] on the
+    /// pass the target is reached. The caller that opened it first answers the one case this route cannot
+    /// wait out — a stream that has ended with an **empty** ring, where no pass will ever push another
+    /// frame — and ends the press there rather than entering this state, because that is §15 Q13's
+    /// truly-empty album and not this state's shallow ring (§11's PR-3c item keeps it out of scope, and an
+    /// un-waited-out wait would have been a regression against the halt it replaces). So having been
+    /// entered, the producer still has work: each pass pushes a whole frame into a ring nothing is
+    /// consuming, the target is 16 of 36 chunks, and the wait is bounded by construction rather than by a
+    /// timeout anyone would have to justify.
+    Buffering,
 }
 
 impl State {
@@ -429,8 +534,40 @@ impl State {
     /// opposite: the new track's audio has to reach the ring behind the silence cover, or the cover
     /// runs out and the feeder starves. [`State::Repriming`] is therefore a feeding state, and this
     /// predicate is the one place that judgement lives.
+    ///
+    /// PR-3c adds the one exception to the pause half of that rule, and it is bounded three ways, none
+    /// of them a timeout: [`State::Buffering`] feeds, because a resume pressed onto a ring that cannot
+    /// supply its prime's chunk has to refill that ring before it arms.
+    ///
+    /// - it is entered only from `Paused`, so nothing has been consumed since the freeze and the ring's
+    ///   head is still the sample the freeze stopped on — the refill appends, it cannot seek;
+    /// - it stops at the boot prefill's own target ([`geometry::PREFILL_SAMPLES`]), which is exactly
+    ///   [`geometry::PREFILL_FRAMES`] frames of decode, and the caller refuses the press outright when
+    ///   the visit has fewer frames left than that;
+    /// - the chain stays frozen for the whole of it, so nothing is played, committed, served or counted
+    ///   while it runs.
+    ///
+    /// What "a pause must not be fed another frame" exists to protect — a pause that quietly eats the
+    /// timeline — is untouched. The burst's frame count is printed in the pause ledger rather than
+    /// inferred from a green.
     #[must_use]
     pub const fn feeds(self) -> bool {
+        matches!(self, State::Playing | State::Repriming | State::Buffering)
+    }
+
+    /// Whether a main-loop pass in this state may be **timed on the audio clock**.
+    ///
+    /// Two requirements, and the states that meet them are not the same set as
+    /// [`feeds`](Self::feeds). The pass has to be one worth attributing: the producer must be decoding,
+    /// so the pass's cost *is* periods' worth of work — a pass in `Pausing` or `Skipping` is the loop's
+    /// own work with no decode in it, and timing it would attribute that cost to periods it did not
+    /// run. And the clock being read has to be running: a frozen chain's counter is a constant, and a
+    /// pass that re-arms the chain inside itself would read a delta straight across a timer restart —
+    /// the class of thing `MAX_BOUNDARY_FRAMES` and the ISR's own retry exist to keep out of a number.
+    /// That is `Playing | Repriming`: the two predicates agree everywhere except
+    /// [`State::Buffering`], where the producer runs and the chain does not.
+    #[must_use]
+    pub const fn pass_timeable(self) -> bool {
         matches!(self, State::Playing | State::Repriming)
     }
 }
@@ -449,6 +586,18 @@ pub enum Step {
     /// Re-prime the hand-off from the ring head and re-arm the chain; the gain is already ramping
     /// in, and the primed chunk is the ramp's first chunk.
     Prime,
+    /// **PR-3c.** A resume was pressed onto a ring that cannot supply the prime's chunk: keep the
+    /// chain frozen, decode one frame per pass to [`geometry::PREFILL_SAMPLES`], and call
+    /// [`Transport::end_buffer`] when the target is reached — which answers with the [`Step::Prime`]
+    /// the ordinary resume answers with, on the same ring head.
+    ///
+    /// Distinct from [`Step::Prime`] rather than folded into it because the caller has two different
+    /// jobs — one critical section that touches the chain, and a burst of *decode* with the chain
+    /// frozen — and because that wait has to be counted as its own leg
+    /// ([`resume_to_audio_bound`]) rather than hidden inside a step the ledger already prints. A run
+    /// that never answers `Buffer` pays nothing for the distinction: the arm is compiled and never
+    /// taken, exactly as [`Step::SkipHandOff`]'s is on a run with no skip.
+    Buffer,
     /// A skip's fade reached silence and the ramped buffer has been played out: perform the
     /// hand-off **now**, and in one critical section —
     /// [`Transport::begin_reprime`] (which arms the gain's cover hold), `RingFeed::truncate()`, the
@@ -535,7 +684,15 @@ impl Transport {
     ///
     /// A toggle from [`State::Playing`] starts the fade-out; a toggle from [`State::Paused`] starts
     /// the ramp-in and asks for the re-prime. Any other toggle is [`Step::Ignored`].
-    pub fn toggle(&mut self, toggle: bool) -> Step {
+    ///
+    /// `primable` is the ring's answer to one question — could the feeder take a chunk right now — and
+    /// it is the same question [`RingFeed::take_chunk`](gba_playback::playback::RingFeed::take_chunk)
+    /// asks, which the caller derives as `ready() >= CHUNK_SAMPLES` (or, when the stream has ended,
+    /// `ready() > 0`): not a new threshold, and no new policy either. A `false` does **not** refuse the
+    /// press: it routes it to [`State::Buffering`] and [`Step::Buffer`], which refills the ring with the
+    /// chain still frozen and then answers with the same `Step::Prime` this arm answers with directly
+    /// (PR-3c, Q18's ruling). See [`end_buffer`](Self::end_buffer) for the close.
+    pub fn toggle(&mut self, toggle: bool, primable: bool) -> Step {
         if !toggle {
             return Step::Idle;
         }
@@ -546,15 +703,35 @@ impl Transport {
                 self.served_silent = false;
                 Step::FadeOut
             }
-            State::Paused => {
+            State::Paused if primable => {
                 self.state = State::Resuming;
                 self.gain.fade_in();
                 self.served_silent = false;
                 Step::Prime
             }
+            // The resume's other route (PR-3c): the ring cannot give the prime its first chunk, so
+            // there is nothing to arm — and refusing the press is what this arm replaces. The chain
+            // stays frozen exactly as it was while paused; what changes is that the producer may run
+            // again (see [`State::feeds`]) until the prefill target is reached, and
+            // [`end_buffer`](Self::end_buffer) then turns this into the same `Step::Prime` the arm
+            // above answers with. `Resuming` is *not* entered here: the gain must stay at zero and the
+            // ramp must begin on the arm's own chunk, which is what that arm's `fade_in()` is for.
+            // Starting the ramp five decode frames early spends it on samples no one is playing, and
+            // then the first thing the listener hears is at full scale — the same lesson
+            // [`HandOffGain::fade_in_after`] records for a skip's cover.
+            State::Paused => {
+                self.state = State::Buffering;
+                Step::Buffer
+            }
             // A transition in flight, or a skip's: the contract has no cancel, and a pause pressed
-            // during a skip would have to choose between the two fades. Ignored, and counted.
-            State::Pausing | State::Resuming | State::Skipping | State::Repriming => Step::Ignored,
+            // during a skip would have to choose between the two fades. Ignored, and counted. A refill
+            // counts too — including a second press while refilling, which has nothing to cancel: the
+            // chain is not moving, and the burst has a target it will reach.
+            State::Pausing
+            | State::Resuming
+            | State::Skipping
+            | State::Repriming
+            | State::Buffering => Step::Ignored,
         }
     }
 
@@ -572,6 +749,24 @@ impl Transport {
         } else {
             Step::Ignored
         }
+    }
+
+    /// The refill is over: leave [`State::Buffering`], start the ramp, and ask for the prime.
+    ///
+    /// The caller asks when the ring reaches the target and may ask on every pass afterwards: only the
+    /// pass that finds itself in `Buffering` gets the [`Step::Prime`], the rest get [`Step::Idle`] and
+    /// cost nothing. The ramp starts **here** rather than at the press for the reason
+    /// [`HandOffGain::fade_in_after`] records for a skip: a ramp is spent on whatever the feeder hands
+    /// over next, and while the chain is frozen it hands over nothing.
+    #[must_use]
+    pub fn end_buffer(&mut self) -> Step {
+        if self.state != State::Buffering {
+            return Step::Idle;
+        }
+        self.state = State::Resuming;
+        self.gain.fade_in();
+        self.served_silent = false;
+        Step::Prime
     }
 
     /// The skip's hand-off, first half: move to [`State::Repriming`] and hold the gain at zero for

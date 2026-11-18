@@ -1317,7 +1317,7 @@ album-seam-test: toolchain-check
 	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_SEAM_GATE_LOG)) \
 	    || { echo "album-seam-test: the host suite did not pass — see $(ALBUM_SEAM_GATE_LOG)"; exit 1; }; \
 	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_SEAM_GATE_LOG))); \
-	  [ -n "$$n" ] && [ "$$n" -ge 60 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 60 — a green that names nothing is not a green"; exit 1; }
+	  [ -n "$$n" ] && [ "$$n" -ge 68 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 68 — a green that names nothing is not a green"; exit 1; }
 	@cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) build --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) \
 	    --no-default-features --features backend-stub >> $(abspath $(ALBUM_SEAM_GATE_LOG)) 2>&1 \
@@ -1335,7 +1335,13 @@ album-seam-test: toolchain-check
 	@echo "  track's end advances through the same hand-off minus the truncate while the album's last track"
 	@echo "  stops and starts nothing. The deferral is witnessed on the post-gain stream: the ramped chunk is"
 	@echo "  served (played out) before the freeze, and across a pause/resume the bytes handed to rearm_dma are"
-	@echo "  the source's own, contiguous, with only the two declared ramp windows differing."
+	@echo "  the source's own, contiguous, with only the two declared ramp windows differing. PR-3c's starved"
+	@echo "  resume is tested on the host because no ROM arm this repo has measured has ever needed it: the press"
+	@echo "  is routed by what the ring answers (its verdict compared against take_chunk at every boundary depth),"
+	@echo "  a ring that cannot prime refills to PREFILL_SAMPLES in PREFILL_FRAMES passes with no period served,"
+	@echo "  no clock movement and no dropped sample, its stream still the source's byte for byte, a ring that"
+	@echo "  can prime pays nothing for that branch, and the wait holds inside resume_to_audio_bound at four pass"
+	@echo "  lengths while the state that feeds the ring is kept apart from the state a pass may be timed on."
 
 # The playback ROM (PR-3a step iii): `ALBM1` + the packed blobs → the app's own chain at 16,384 Hz.
 # It boots, verifies its own album (§D-C), plays track 1 end to end through the shipped feeder, and
@@ -1472,14 +1478,18 @@ album-test: toolchain-check album-bake
 	  pairs=$$(sed -n 's/.*pause: pairs=\([0-9][0-9]*\) .*/\1/p' $(ALBUM_TEST_LOG)); \
 	  [ -n "$$pairs" ] && [ "$$pairs" -ge 1 ] \
 	    || { echo "album-test: pause: pairs=$$pairs, needs >= 1 — the pause half of the script did not run"; exit 1; }; \
-	  grep -q '^\[album-rom\] pause: pairs=[1-9][0-9]* .*\[PASS\]' $(ALBUM_TEST_LOG) \
-	    || { echo "album-test: the pause summary is not [PASS]"; exit 1; }; \
+	  grep -Eq '^\[album-rom\] pause: pairs=[1-9][0-9]* toggles=[0-9][0-9]* ignored=[0-9][0-9]* refills=[0-9][0-9]* limit=[0-9][0-9]* bound=[0-9][0-9]* resume bound=([0-9][0-9]*|not measured on this arm) \[PASS\]$$' $(ALBUM_TEST_LOG) \
+	    || { echo "album-test: the pause summary is not [PASS], or is missing the refills=/resume bound= terms PR-3c prints — an image whose ledger cannot say whether a resume had to wait is not a PR-3c image"; exit 1; }; \
+	  refills=$$(sed -n 's/.*pause: pairs=[0-9][0-9]* toggles=[0-9][0-9]* ignored=[0-9][0-9]* refills=\([0-9][0-9]*\) .*/\1/p' $(ALBUM_TEST_LOG)); \
+	  short=$$(grep -c '^\[album-rom\] pause [0-9].*primable=no' $(ALBUM_TEST_LOG) || true); \
+	  [ -n "$$refills" ] && [ "$$refills" -eq "$$short" ] \
+	    || { echo "album-test: the pause summary counts $$refills starved resume(s) while $$short row(s) print primable=no — the count and the rows have to be one story, because a branch this ledger never prints is not a branch that never happened"; exit 1; }; \
 	  prow=$$(grep -c '^\[album-rom\] pause [0-9]' $(ALBUM_TEST_LOG) || true); \
 	  [ "$$prow" -eq "$$pairs" ] \
 	    || { echo "album-test: $$prow pause row(s) for pairs=$$pairs — a pair printed no row, or a row is not a pair"; exit 1; }; \
-	  bad=$$(grep '^\[album-rom\] pause [0-9]' $(ALBUM_TEST_LOG) | grep -Evc 'action→freeze=[0-9][0-9]* periods \(bound [0-9][0-9]*\) gain=0 committed=[0-9][0-9]* ; resume@frame=[0-9][0-9]* committed=[0-9][0-9]* dropped=0 \[PASS\]$$' || true); \
+	  bad=$$(grep '^\[album-rom\] pause [0-9]' $(ALBUM_TEST_LOG) | grep -Evc 'action→freeze=[0-9][0-9]* periods \(bound [0-9][0-9]*\) gain=0 committed=[0-9][0-9]* ; resume@frame=[0-9][0-9]* committed=[0-9][0-9]* dropped=0 (primable=yes resume→arm=0 frames|primable=no resume→arm=[0-9][0-9]* frames) \(bound ([0-9][0-9]*|not measured on this arm)\) \[PASS\]$$' || true); \
 	  [ "$$bad" -eq 0 ] \
-	    || { echo "album-test: $$bad pause row(s) did not reach gain=0 before the freeze or booked dropped!=0 across the pause — the row, not only the summary, is read here"; exit 1; }; \
+	    || { echo "album-test: $$bad pause row(s) did not reach gain=0 before the freeze, booked dropped!=0 across the pause, or did not print its primable= and resume→arm= pair against a bound — the row, not only the summary, is read here"; exit 1; }; \
 	  detect=$$(sed -n 's/.*detect_latency max=\([0-9][0-9]*\) frames.*/\1/p' $(ALBUM_TEST_LOG)); \
 	  [ -n "$$detect" ] && [ "$$detect" -le 1 ] \
 	    || { echo "album-test: detect_latency max='$$detect' frames, must be <= 1 (DEBOUNCE_FRAMES - 1) — the press->detect leg is outside its bound or the line is missing"; exit 1; }; \
@@ -1557,6 +1567,11 @@ album-test: toolchain-check album-bake
 	@echo "  Every pause ROW is read, not only its summary: gain=0 at the freeze, dropped=0 across the pause, and the"
 	@echo "  action->freeze leg inside pause_to_freeze_bound — the deferral's own periods, one period of boundary"
 	@echo "  alignment, and one main-loop pass, because a pause is frozen by the loop rather than by the period ISR."
+	@echo "  PR-3c's half of the row is read as well: primable=yes|no on every row, refills= in the summary, and the"
+	@echo "  two cross-checked against each other — a branch this ledger never prints is not a branch that never"
+	@echo "  happened. Each row's resume→arm is held against resume_to_audio_bound (the prefill's own decode at this"
+	@echo "  run's measured pass price), and a direct arm — primable=yes — is required to take zero frames for it. On"
+	@echo "  the legs recorded so far no resume has needed the refill, and refills=0 is how the gate says that out loud."
 	@echo "  The first two were arms of a clock-delta tautology: they showed the chain had stopped, not that no sample"
 	@echo "  was lost at the wire, and the leg they left with no bound at all is bounded by this run's own measurement."
 	@echo "  Every latency leg is read and inside its bound: press->detect <= 1 frame, detect->take <= the run's own"
