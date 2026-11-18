@@ -355,20 +355,23 @@ crates/uli-lite/           reference + oracle (not shipped since 2026-11-14)
   tests/reference_corpus.rs + tests/fixtures/
   examples/gen_expected.rs frozen-vector maintenance tool
 
-crates/uli-lite-gba/       the product decoder (PR A: kernel seam wired)
-  src/lib.rs               `ArmKernels` + ARM-mode, unchecked kernels in
-                           `.iwram`; `iwram-tables` copies the 8,672 B tables
+crates/uli-lite-gba/       the product decoder — every hot kernel hand-written ARM
+                           asm in `.iwram`, plus the ARM-mode entropy/dequant path
+  src/decoder.rs           `GbaDecoder`: closed-world reader, `HotState`, `ClassTables`
+  src/lib.rs               `ArmKernels` + the kernel dispatch and `.iwram` statics
+  asm/{pre,post,ola,ms}_arm.s, asm/fft_arm_v5.s   the five kernels, each twinned
+                           bit-exactly against `uli_lite::imdct` on the ARM7TDMI
   tests/twin.rs            kernel differential vs the portable reference
-  tests/decoder_twin.rs    full-frame differential vs the portable decoder
-  (asm/imdct.s does not exist yet: asm is Phase 1d)
+  tests/product_twin.rs    full-frame differential vs the portable decoder
+  tests/premise.rs         the closed-world premise (`rbits`/`esck`) over the
+                           fixture and every generated corpus
 
-examples/uli_spike/        Phase 1 decode-only ROM
-  src/main.rs              embeds the corpus, parses ULA2, decodes, hashes int8/int16
-  assets/uli2_tiny.uli     the committed Phase 0 corpus
-
-examples/uli_bench/        the measurement vehicle (Phase 1b + PR A)
-  src/main.rs              proves the pins, then times full frames through both
-                           kernel sets and both kernel realisations
+examples/uli_bench/        the measurement vehicle: proves its own decode, then
+                           times full frames, per-kernel sums and both kernel
+                           realisations; also the attribution and gate arms
+examples/uli_player/,      the shipped player ROM, the ring/feeder host suite
+crates/uli-playback/       and the playback data path
+examples/album_probe/      the album manifest probe (AP-0), not the codec
 ```
 
 Both crates are **standalone workspaces** with their own `[workspace]` table,
@@ -477,46 +480,44 @@ tests and as the oracle; the product is free to be GBA-shaped.
 
 ## Porting plan
 
-### Implementation status (2026-11-13)
+### Implementation status (2026-11-19)
 
-- **Phase 0 — complete.** `crates/uli-lite` is a `no_std`, zero-dependency,
-  zero-allocation integer decoder. `make uli-test` compiles it for
-  `thumbv4t-none-eabi` and runs the committed 2-second corpus on the host:
-  int8 and int16 outputs, per-frame bits/bitpos/ops/cycle model, both seek
-  paths, malformed albums and short output buffers. It is bit-exact against
-  the C reference.
-- **Phase 1 — decode-only target witness.** `make uli-spike-rom` builds
-  `examples/uli_spike`; in mGBA it decodes all 129 frames, prints
-  `int8=e6e87652` and `int16=b3530978` (the C-reference album pins), reports
-  `xover=0 hfnz=0`, and PASSes.
-- **Phase 1b — measured (2026-11-13).** `make uli-bench` builds
-  `examples/uli_bench`; the image proves its own decode (twice, both pins),
-  then times every frame and both kernel realisations. Headline: **worst
-  frame 2,970,042 cycles = 1133% of the 262,144-cycle frame period** with the
-  portable core (25.3x before the ARM-mode kernel fix); a bounds-check-free
-  ARM overlay in IWRAM projects 2,122,748 = **810%**. The C/asm reference is
-  69.4%. U4 is **not met**; no playback claim is made. The measurement and
-  its consequences are below, and in “Decision log”.
-- **PR A — GBA-first architecture (2026-11-14).** The `Kernels` seam makes the
-  product kernel set selectable from `Decoder`; `uli-lite-gba` provides
-  `ArmKernels`; `make uli-bench` now decodes **full frames through both sets**
-  instead of projecting. Measured product arm: **1,829,247 worst (698%) /
-  1,322,800 mean (505%)**, both pinned; the same-image core control is
-  2,676,986 / 2,171,620 (1021% / 828%). The Phase 1b projection is retired.
-  Still ~7x the period; PR B is next.
-- **PR B — GBA-first hot path (2026-11-14).** `uli_lite_gba::GbaDecoder`
-  (`src/decoder.rs`) moves the 32-bit bit reader, unchecked canonical Huffman,
-  dequant and M/S into `uli-lite-gba` (ARM-mode, `.iwram`, sentinel errors),
-  twinned frame-for-frame on the host (`tests/product_twin.rs`). Measured full
-  frame: **533,605 worst (204%) / 463,660 mean (177%)**, both pinned; the
-  same-image core control is 1023% / 830% and `ArmKernels` 640% / 447%.
-  Non-synthesis `rest` fell 837,092 → 195,484 cycles/frame (4.3×), so synthesis
-  is 63% of the frame. PR B's ≤2× gate is met; U4 is not. Placement:
-  `HotState` is in EWRAM — an IWRAM placement stack-overflowed on target
-  (≈15.0 KiB stack needed); the host twin was green either way.
-- **Not yet:** hand-written asm (PR C, Phase 1d — now scoped to the synthesis
-  kernels, which are the whole remaining delta), playback, hardware runs, the
-  from-scratch Rust encoder/asset pipeline, or a licensing/publish decision.
+**ULI2 is at near-parity with the C + ASM reference and is the repository's
+product codec.** mGBA, WAITCNT 4/2, 262,144-cycle period, both corpora pinned
+(`xover=0 hfnz=0`):
+
+| | worst | mean | of period |
+|---|---:|---:|---:|
+| 129-frame fixture decode | 193,317 (f98) | 172,109 | 73.75% / 65.66% |
+| album decode wall (16,553 frames) | **194,695** (f4,998) | **169,354** | 74.27% / 64.60% |
+| **gate total** (decode + convert + IRQ + DMA) | **226,152** | **200,624** | **86.27% / 76.53%** |
+
+- **U2 (bit-exact host), U3 (bit-exact product) and U4 (real-time decode) are
+  met**; U4's ceiling stays written down as the period (mGBA, no UI). The gate
+  carries **13.73 points of margin at the worst frame, zero starved periods over
+  16,552**.
+- **Against the reference: 1.070x on the decode wall.** C's own record gives
+  decode 69.43% and gate 73.63%; ours are 74.27% and 86.27%. Of the remaining
+  12.6-point gate gap only **4.84 points are decode** — **7.80 points are the
+  convert/IRQ/DMA half**, at ~2.9x C's cost. The output half, not the codec, is
+  the largest remaining difference.
+- **All five hot kernels are hand-written asm** and individually twinned on the
+  ARM7TDMI: `pre` 1.00x C, `fft` 1.05–1.09x, `post` ~1.03x, `ola` 1.00x, M/S
+  0.64x (mean). Entropy/dequant is ~35,656 mean, **at or below C's 42–48k**.
+- **The product bit reader is closed-world** (`ULI2.md` decision log,
+  2026-11-19): no bounds test, no error flag, a 16-bit refill contract, because
+  the bake gate proves the stream before the ROM exists. `tests/premise.rs` is
+  that proof's seed; `uli_lite` remains the checked oracle.
+- **The player ships** (U5 met on hardware for three ROMs, with one open defect:
+  the 1 Hz text redraw delays the feeder on 104 of 16,553 periods).
+- **Still open:** the non-decode half of the gate (above); the dense-frame tail
+  of the entropy path; the from-scratch Rust encoder/asset pipeline; and a
+  licensing/publish decision (`publish = false`).
+
+The step-by-step ladder that produced these numbers — PRs A through E, the
+root-cause audit, the closed-world pass — is in
+[`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md), which
+is the authoritative ledger. This document is the decision record.
 
 ### Phase 1b — what the on-target measurement found (2026-11-13)
 
@@ -633,11 +634,12 @@ corpus, including error paths that must reject rather than panic.
 
 ### Phase 1 — GBA decode-only (landed)
 
-1. `examples/uli_spike`: embed a small album, parse the `ULA2` header, decode
-   frames, hash the int8 output, compare with the host pin. **Landed.**
-2. Put `DecoderState` in EWRAM (the ~100 KiB Huffman LUTs dominate). The hot
-   `X`, `buf`, `P` buffers are still inside that EWRAM state; their IWRAM
-   placement is PR B (Phase 1c-2). **Partially landed.**
+1. Embed a small album, parse the `ULA2` header, decode frames, hash the int8
+   output, compare with the host pin. **Landed** (that image has since been
+   retired; `examples/uli_bench` does the same job and more).
+2. Put the ~100 KiB Huffman LUTs in EWRAM and the hot state in IWRAM.
+   **Landed** — `HotState` (8,192 B) and `ClassTables` (560 B) are `.iwram`
+   statics; the code tables stay in `.ewram`.
 3. Start with the portable Rust kernels and measure. **Landed as Phase 1b** —
    and the measurement reordered the plan: asm is not the next step.
 
@@ -748,7 +750,7 @@ claims to be measured, not inherited from `gba-audio`.
 | **U1 — reference** | `uli-lite` remains a bit-exact, host-testable reference and oracle (no longer a portable-product claim). | `make uli-test`; committed corpus; thumbv4t `check` |
 | **U2 — bit-exact host** | The Rust core matches the C integer reference frame-for-frame on the committed corpus and rejects malformed frames without panic. | `make uli-test`; pinned hashes |
 | **U3 — bit-exact product** | The product kernel set (`ArmKernels`) decodes the corpus to the pinned int8/int16 frames, in the host full-frame twin and on the target. **Met (PR A).** | `make uli-bench` (both arms + on-target twin); `make uli-overlay-test` (host kernel + decoder twins) |
-| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Met on the album corpus (PR E, 2026-11-15): decode 220,062 = 83.94% worst; gate total 251,712 = 96.02% worst / 84.40% mean in the player model (the same arm verifying in-loop reads 98.33% and starves 12.06 s, which is the harness); ceiling written down as the 262,144-cycle period, 10,432 cycles of margin at the worst frame; no UI, mGBA only.** Ladder: 204% (PR B) -> 200% (split `huff`) -> 186% -> 175% -> 164% (asm FFT) -> 162% -> 157% (`iwram-tw`) -> 148% (`iwram-tables`) -> 138% (C-3d) -> **274,198 / 232,090 = 105% / 89%** (C-3). **Step 0 (2026-11-15) attributed the worst frame (f98) by difference in the product image: synthesis 162,987 (59%), entropy/dequant/M-S 110,741 (40%), wrapper 486 - i.e. 69% of the 92,286-cycle distance to the C worst-frame shape is the entropy path and 31% synthesis. Per channel the kernels are 1.10-1.33x C (pre 1.22x, fft 1.33x, post 1.10x, ola 1.11x), so the previous 'asm kernels first, ~194,000 prize' order is retired; the live order is in `crates/uli-lite/PLAN-OF-RECORD.md` ('Critical path to real time').** **Root-cause audit (2026-11-16), loose-ends sweep, target-spec change (2026-11-17) and the asm `post` kernel (2026-11-18): the album decode wall is 206,101 worst (f16,204) / 175,280 mean = 78.62% / 66.86%, and the gate total is **237,646 worst / 206,637 mean = 90.65% / 78.83% — 9.35 points of margin at the worst frame, zero starved periods over 16,552** — so the ceiling in use is still the period, not a playback claim on hardware (mGBA, no UI). On the `cross` corpus — the 12-track album the C record's own numbers were measured on — the decode wall is 207,148 worst (f27,693) / 170,939 mean = 79.02% / 65.21%, i.e. **1.139x worst / 1.117x mean against C**. The 129-frame iteration corpus reads 205,793 / f83 / 179,058 = 78.50% / 68.31%. The build target is a checked-in spec (`targets/thumbv4t-gba.json`, `frame-pointer: may-omit`) and **all five hot kernels on the product path (`pre`, `fft`, `post`, `ola`, M/S) are now hand-written ARM asm**, each twinned against the Rust reference on the ARM7TDMI.** | `make uli-bench`; mGBA, then hardware |
+| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling, written down as the **262,144-cycle period** (mGBA, no UI — not a hardware playback claim). | **Met (2026-11-19):** album decode wall **194,695 worst / 169,354 mean = 74.27% / 64.60%**; gate total **226,152 / 200,624 = 86.27% / 76.53%** — **13.73 points of margin at the worst frame, zero starved periods over 16,552**, `frames_over_period=0`. Against the C+ASM reference's own record (decode 69.43%, gate 73.63%) that is **1.070x on the decode wall**; of the remaining 12.6-point gate gap only 4.84 points are decode, the other 7.80 being the convert/IRQ/DMA half at ~2.9x C's cost. `make uli-gate`. The ladder that got here (PR A through E, the root-cause audit, the closed-world pass) is in `crates/uli-lite/PLAN-OF-RECORD.md`. |
 | **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | **Met on hardware (GBA SP, 2026-11-16) for the three player ROMs, two runs each, identical to the cycle**: headphone 94.52% worst / 81.39% mean, speaker 95.89% / 82.61%, two-track 94.56% / 80.92%, all with 0 underruns; the GBA 001 was unavailable. **With one open defect**: the 1 Hz text redraw delays the feeder past the DMA's grace on 104 of 16,553 periods (audible splices; `late`, not underruns), so the audio default is the end-only screen until the UI is made non-blocking. **Met in mGBA too.** `make uli-player` (headphone) and `make uli-player-speaker`: zero underruns, period audit closed (periods = served + 1 tail), ring full, three builds measured (2026-11-16). The hardware half is still owed — two units × two runs of *this* player; the manual listen that has happened is the PR E audio-only ROM, which carried no counted ledger. |
 | **U6 — memory** | IWRAM/EWRAM/stack stay inside the product budget with the UI and feeder linked. | linker map + runtime stack check |
 | **U7 — licensing/spec** | A public crate, if published, has a permissive license and a standalone format specification; otherwise it remains `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** |
@@ -846,6 +848,11 @@ product codec without pretending one codec covers both jobs.
 ---
 
 ## Decision log
+
+**Dated entries, newest first. The cycle figures inside older entries are the
+numbers *of that day* and are superseded by the current state at the top of
+[`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md); each
+entry is kept for the decision and its reasoning, not for its numbers.**
 
 - **2026-11-19 — the product ROM is closed-world: a well-formed stream is an
   input assumption, not a runtime obligation.** We own the encoder, the container

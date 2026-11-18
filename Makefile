@@ -13,7 +13,7 @@
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
         album-bake album-pack-check album-seam-test album-rom album-player-rom album-test \
-        uli-spike-rom clean clean-cache check help toolchain-check target-spec-check
+        clean clean-cache check help toolchain-check target-spec-check
 
 # ===========================================================================
 # Build settings
@@ -240,9 +240,6 @@ PLAYBACK_MANIFEST := $(abspath crates/gba-playback/Cargo.toml)
 
 # --- other codec tracks (their own entry points; not FLAC) --------------------
 ULI_CRATE_MANIFEST := $(abspath crates/uli-lite/Cargo.toml)
-ULI_SPIKE_DIR := examples/uli_spike
-ULI_SPIKE_BIN := $(ULI_SPIKE_DIR)/target/$(TARGET)/release/uli-spike
-ULI_SPIKE_ROM := uli-spike.gba
 ULI_OVERLAY_MANIFEST := $(abspath crates/uli-lite-gba/Cargo.toml)
 # The ULI2 measurement vehicle (examples/uli_bench/): prove the corpus pins on the
 # measured image, then time full frames through both kernel sets. An mGBA
@@ -288,7 +285,7 @@ WORKSPACES := . crates/flac-lite crates/flac-lite-gba crates/gba-playback \
               crates/gba-audio-hw \
               examples/flac_spike \
               examples/overlay-kernel-check examples/opus_spike \
-              crates/uli-lite crates/uli-lite-gba examples/uli_spike examples/uli_bench \
+              crates/uli-lite crates/uli-lite-gba examples/uli_bench \
               crates/uli-playback examples/uli_player \
               examples/album_probe
 
@@ -689,12 +686,6 @@ uli-check: toolchain-check
 	cd crates/uli-lite && $(CARGO) fmt --check
 	cd crates/uli-lite-gba && $(CARGO) fmt --check
 	cd $(ULI_BENCH_DIR) && $(CARGO) fmt --check
-
-# Phase 1 decode-only ROM: a correctness image, not a player and not a cycle record.
-uli-spike-rom: format
-	cd $(ULI_SPIKE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC)
-	agb-gbafix $(ULI_SPIKE_BIN) -o $(ULI_SPIKE_ROM)
-	@echo "ULI2 spike ROM built: $(ULI_SPIKE_ROM)"
 
 uli-bench-rom: format
 	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET_SPEC)
@@ -1725,18 +1716,23 @@ help:
 	@echo "     overlay-objdump, overlay-kernel-rom, overlay-kernel-test)"
 	@echo ""
 	@echo "  Other tracks:"
-	@echo "    ULI2 (ULI2.md — the repository's product codec): uli-test, uli-overlay-test,"
-	@echo "      uli-check, uli-fixture, native-uli-spike-rom, native-uli-bench-rom,"
-	@echo "      uli-bench (headless run + PASS/FAIL read from the log), uli-kernel-twin"
-	@echo "    ULI2 attribution (timing-only; pins fail by design): uli-attrib,"
-	@echo "      uli-attrib-subframe, uli-frame-ops"
-	@echo "    ULI2 PR D (the player): uli-player (headphone), uli-player-speaker (folded), uli-playback-test"
-	@echo "    ULI2 PR E/E3 (witness only; need ffmpeg + the sibling gba-audio checkout):"
-	@echo "      uli-adversarial-asset (E3-a density set), uli-cross-asset (E3-b 12-track album),"
-	@echo "      uli-two-track-asset + uli-playback-track-pin + uli-player-two-track (PR D witnesses);"
-	@echo "      ULI_CORPUS_FEATURE= selects the corpus for uli-album-bench / uli-gate"
-	@echo "      uli-album-asset (blob + C-sourced pin, both gitignored), uli-album-bench (the tail),"
-	@echo "      uli-gate (the gate total: decode + convert + IRQ + DMA)"
+	@echo "    ULI2 (ULI2.md — the repository's product codec). CI-shaped gates, cheapest first:"
+	@echo "      uli-check            rustfmt on the three ULI2 workspaces"
+	@echo "      uli-test             the core is bit-exact on the host corpus (U2)"
+	@echo "      uli-overlay-test     product path vs the portable reference, both builds, + premise"
+	@echo "      uli-fixture          regenerate the committed expected-vector file"
+	@echo "      uli-bench            build + run + read PASS: 129-frame cycle/witness image"
+	@echo "      uli-kernel-twin      the asm kernels are bit-exact on the ARM7TDMI"
+	@echo "      uli-gate-fixture     the gate total on the fixture (~2 s); uli-gate is the album (~2 min)"
+	@echo "    ULI2 player (the shipped path): uli-player (headphone), uli-player-speaker (folded),"
+	@echo "      uli-playback-test (the ring/feeder host suite), uli-play-rom (audio-only listen image)"
+	@echo "    ULI2 album-scale witnesses (need ffmpeg + the sibling gba-audio checkout; assets are"
+	@echo "      gitignored build output): uli-album-asset, uli-adversarial-asset, uli-cross-asset,"
+	@echo "      uli-two-track-asset, uli-playback-track-pin; then uli-album-bench (the tail),"
+	@echo "      uli-gate (the gate total: decode + convert + IRQ + DMA), uli-player-cross,"
+	@echo "      uli-player-two-track. ULI_CORPUS_FEATURE= selects the corpus for the bench/gate."
+	@echo "    ULI2 attribution (measurement instruments, NOT gates — pins fail by design; read the"
+	@echo "      timed window, never the verdict): uli-attrib, uli-attrib-subframe, uli-frame-ops"
 	@echo "    Opus (OPUS.md): native-opus-rom, opus-test"
 	@echo "    Album Player, Phase 0 (AP-0 — the probe aggregate; nothing here is"
 	@echo "      wired into flac-check or test): album-probe-rom (three probe ROMs),"

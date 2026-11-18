@@ -31,7 +31,7 @@ every target and gate below has been run green on this host.
 
 # 1. every ROM the tree builds, natively (built + linked + fixed)
 make native-rom native-flac-rom native-product-play-rom native-master-play-rom \
-     native-spike-rom native-overlay-kernel-rom native-opus-rom native-uli-spike-rom
+     native-spike-rom native-overlay-kernel-rom native-opus-rom native-uli-bench-rom
 #    INPUT=track.wav is required for master-* ; both are verified green on this host.
 
 # 2. every gate

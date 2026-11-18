@@ -1,10 +1,51 @@
 # ULI2 plan of record
 
-Status: **live since 2026-11-14; U4 open, decode wall under the frame period
-since Step 1 (2026-11-15).** This is the working
-plan for the ULI2 product codec. [`../../ULI2.md`](../../ULI2.md) remains the decision record
-(why ULI2, what it is, the licensing and encoder risks); this file owns the
-phases, gates, measurement ledger and the order of work.
+[`../../ULI2.md`](../../ULI2.md) is the decision record (why ULI2, what it is,
+the licensing and encoder risks). **This file owns the phases, gates, the
+measurement ledger and the order of work.**
+
+## Current state (2026-11-19)
+
+mGBA, WAITCNT 4/2, 262,144-cycle period, no UI. Both corpora pinned
+(`xover=0 hfnz=0`), two runs per image identical to the cycle.
+
+| | worst | mean | of period |
+|---|---:|---:|---:|
+| 129-frame fixture decode | 193,317 (f98) | 172,109 | 73.75% / 65.66% |
+| album decode wall (16,553 frames) | **194,695** (f4,998) | **169,354** | **74.27% / 64.60%** |
+| gate total (decode + convert + IRQ + DMA) | **226,152** | **200,624** | **86.27% / 76.53%** |
+
+- **U2, U3 and U4 are met.** U4's ceiling stays the period: **13.73 points of
+  margin at the worst frame, 0 starved periods over 16,552**.
+- **1.070x the C + ASM reference on the decode wall** (C: decode 69.43%, gate
+  73.63%). Of the 12.6-point gate gap, 4.84 points are decode and **7.80 are the
+  convert/IRQ/DMA half at ~2.9x C's cost** — the output path, not the codec, is
+  now the largest remaining difference.
+- **All five hot kernels are hand-written asm**, each twinned bit-exactly on the
+  ARM7TDMI (`make uli-kernel-twin`): `pre` 1.00x C, `fft` 1.05–1.09x, `post`
+  ~1.03x, `ola` 1.00x, M/S 0.64x (mean).
+- **Entropy/dequant is ~35,656 mean, at or below C's 42–48k.** The product
+  reader is **closed-world** — no bounds test, no error flag, 16-bit contract —
+  with `crates/uli-lite-gba/tests/premise.rs` asserting the premise and
+  `uli_lite` remaining the checked oracle.
+- **Placement:** `.iwram` 26,496 B of 32,768 (code + `HotState` 8,192 +
+  `ClassTables` 560 + `q3`/`clz6` 148); stack high-water 948 B (fixture) / 1,988 B
+  (gate); code tables in `.ewram`.
+- **Open:** the non-decode gate half; the dense-frame tail of entropy (the
+  sub-frame partition needs re-measuring on the product reader first — see "The
+  entropy path against the C+ASM reference"); a licensing/publish decision.
+
+**Everything below this line is the ledger that produced those numbers, in
+chronological order, and it is kept deliberately: this project's method is that
+a claim is worthless without its measured arm and a falsification is worth more
+than a projection.** Several intermediate figures are therefore superseded by
+the table above — where a passage was contradicted outright it is marked
+*Superseded* in place. Read the current state from this block; read the reasoning
+from the ledger. Two exceptions worth knowing: the kernel table's `fft` row and
+the `pre`/`ola`/M/S ratios were re-derived with bit-exact arms (2026-11-18), and
+`post` was the only instruction-named deficit and is closed.
+
+---
 
 **PR C-2 (as C-3a, with C-3c) landed 2026-11-14** — 523,267 → **488,685 worst /
 429,339 mean (200% → 186%)**, a measured 35,000 where 90,000 was projected.
@@ -3174,7 +3215,8 @@ confirm the projection.** A complete hand-written radix-4 DIF FFT
 (`crates/uli-lite-gba/asm/fft_arm.s`, ARM mode, `.iwram`, `global_asm!`) was
 written against our own oracle, twinned bit-exactly, and measured in isolation
 against the Rust ARM-mode `fft` in the same image. Instrument:
-`examples/uli_asm_probe` (on-target twin) and the bench's `asmfft` arm
+`examples/uli_asm_probe` (on-target twin; **since retired** — `make uli-kernel-twin`
+is the current witness) and the bench's `asmfft` arm
 (`make uli-bench` with `--features asm-fft`).
 
 | arm | cycles / FFT call | vs Rust | vs C record (~31,400) |
@@ -3294,7 +3336,7 @@ remaining genuine A..D loads / output stores / twiddle loads, and that record
 was measured on a different corpus and image, so `2.28×` is not a like-for-like
 statement — it is the honest gap to the number of record.
 
-Instruments: `examples/uli_asm_probe` (all three kernels twinned on the
+Instruments (**since retired**; `make uli-kernel-twin` replaces it): `examples/uli_asm_probe` (all three kernels twinned on the
 ARM7TDMI) and the bench's `asmfft`/`asmfft2`/`asmfft3` arms + `fftasm` twin.
 Note for future arms: the twin's scratch buffers had to move from `run()`'s
 stack to EWRAM statics — three 512-word kernels plus the ~15 KiB product-path
