@@ -1245,14 +1245,23 @@ album-pack-check: toolchain-check
 	@echo "  container's total_samples, (d) the writer's output re-read through meta.rs — plus two bakes"
 	@echo "  byte-identical and the ALBM1 host suite green."
 
-# The app seam's host gate (PR-3a steps ii and iii-A): the derived geometry pinned to the shipped
-# FLAC figures, the manifest/pin cross-check for every track, both backend arms through `PcmSource`,
-# the FLAC arm decoding the fixture's track to its committed `fnv_pcm` pin, and the ROM's whole path
-# for that track (`pull_frame` -> i32 -> `convert_frame` -> `fold_bytes`) reproducing the bake's
-# `fnv_fifo_l` / `fnv_fifo_r` — the sample-scale proof the ROM step rests on. Same shape as
-# `album-pack-check`: neutral cwd, explicit host target, a log, and a collected-test floor — a
-# green that names nothing is not a green. The second leg is the stub-only build, which is what
-# makes "a stub image links no codec at all" an observed fact rather than a claim about one test
+# The app seam's host gate (PR-3a steps ii and iii-A, extended by PR-3b-i): the derived geometry
+# pinned to the shipped FLAC figures, the manifest/pin cross-check for every track, both backend arms
+# through `PcmSource`, the FLAC arm decoding the fixture's track to its committed `fnv_pcm` pin, and
+# the ROM's whole path for that track (`pull_frame` -> i32 -> `convert_frame` -> `fold_bytes`)
+# reproducing the bake's `fnv_fifo_l` / `fnv_fifo_r` — the sample-scale proof the ROM step rests on.
+#
+# PR-3b-i adds the two halves that have nothing to do with audio being improved: the **input seam**
+# (edges, two-frame debounce, the autorepeat's exact first-repeat/interval frames, §5.3's control map,
+# the BIOS chord being absent by design, and the REPLAY script landing each entry on its own frame and
+# no adjacent one) and the **session clock's map** (§4.4's three invariants plus the saturating
+# `committed - LEAD_SAMPLES`). Those tests are host tests of the same machine the ROM drives; the
+# REPLAY script is replayed at the keys layer because `mgba-test-runner` cannot press a key, so a
+# green here is never evidence that a physical press reaches a cartridge (§13 AP-1, AP-7).
+#
+# Same shape as `album-pack-check`: neutral cwd, explicit host target, a log, and a collected-test
+# floor — a green that names nothing is not a green. The second leg is the stub-only build, which is
+# what makes "a stub image links no codec at all" an observed fact rather than a claim about one test
 # binary compiled with the default features.
 album-seam-test: toolchain-check
 	@test $$(find $(ALBUM_CRATE_DIR)/tests -name 'album_seam_host.rs' | wc -l) -eq 1 \
@@ -1265,7 +1274,7 @@ album-seam-test: toolchain-check
 	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_SEAM_GATE_LOG)) \
 	    || { echo "album-seam-test: the host suite did not pass — see $(ALBUM_SEAM_GATE_LOG)"; exit 1; }; \
 	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_SEAM_GATE_LOG))); \
-	  [ -n "$$n" ] && [ "$$n" -ge 22 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 22 — a green that names nothing is not a green"; exit 1; }
+	  [ -n "$$n" ] && [ "$$n" -ge 35 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 35 — a green that names nothing is not a green"; exit 1; }
 	@cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) build --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) \
 	    --no-default-features --features backend-stub >> $(abspath $(ALBUM_SEAM_GATE_LOG)) 2>&1 \
@@ -1273,7 +1282,9 @@ album-seam-test: toolchain-check
 	@echo "album-seam-test passed: the derived geometry matches the shipped FLAC figures, the manifest"
 	@echo "  and its generated pins agree for every track, both backend arms satisfy PcmSource, the shipped"
 	@echo "  track decodes to its fnv_pcm pin on the host, its FIFO bytes fold to the bake's fnv_fifo_l/fnv_fifo_r"
-	@echo "  as the ROM will push them, and a stub-only build links no decoder."
+	@echo "  as the ROM will push them, a stub-only build links no decoder, the input seam's edges/debounce/"
+	@echo "  autorepeat/control-map/chord rules hold and the REPLAY script lands on its own frames, and the"
+	@echo "  painted position obeys §4.4's three invariants with a saturating lead."
 
 # The playback ROM (PR-3a step iii): `ALBM1` + the packed blobs → the app's own chain at 16,384 Hz.
 # It boots, verifies its own album (§D-C), plays track 1 end to end through the shipped feeder, and

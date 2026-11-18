@@ -513,10 +513,36 @@ in terms of what the user may observe, not in cycles:
 
 | observable | v1 target (measured at AP-1, not asserted) |
 |---|---|
-| Screen changes to the new track (title, index, bar reset) | within one video frame of the button press |
+| Screen changes to the new track (title, index, bar reset) | **≤ 3 video frames (~50 ms) of the press** — corrected 2026-11-17 from "within one video frame", which is unreachable from the main loop; see the ruling below |
 | Audio of the new track begins | ≤ ~0.6 s, and that number is `SKIP_PRIME_CHUNKS`, a policy knob (§4.4 below). **The precondition is met: step 2 truncates the ring (Q13b, landed 2026-11-15). Measured at the ring's ceiling depth, the truncate reads `SKIP_PRIME_CHUNKS + 1` periods — 3/5/9/17 periods = 102.5/170.9/307.6/581.1 ms for prime 2/4/8/16 — inside this row at every setting; drain and consume-and-discard still read 39–53 periods = 1.33–1.81 s.** |
 | Clicks / pops at the transition | none: fades, never a mid-waveform splice |
 | Underruns attributed to a skip | 0, including the silence fed during the re-prime |
+
+**The one-frame row was wrong, and the measurement that says so is the reason input is sampled in
+the vblank handler (ruled 2026-11-17, PR-3b ii-A/ii-B1).** A producer frame of the lossless path —
+`pull_frame` → widen → `convert_frame` → push — costs **1.04–1.09 M cycles = 3.7–3.9 video frames and
+is uninterruptible**, because a FLAC frame is the atomic unit of decode. So no poll rate in the main
+loop can meet "within one video frame": ii-A measured one poll per 7.5 frames before the loop was even
+restructured. The sample therefore lives in the vblank ISR, which is the only code in this system that
+runs at video rate, and the observable is restated as a floor with two named terms rather than a wish:
+
+| term | bound | why it is that number |
+|---|---|---|
+| press → edge detected | ≤ 1 video frame (16.7 ms) | the keypad is sampled once per frame; measured `detect_latency max=1` |
+| detected → action taken | ≤ 2 video frames | the action must land on an **audio period boundary** — changing what the DMA is mid-playing is exactly the splice this table forbids — and one period is 2.04 video frames; measured `action@next-period max=2` |
+| **total, press → transition** | **≤ 3 frames ≈ 50 ms** | read as instant by a person; the row above is now this, not one frame |
+| first sample of the *new* track audible | + `SKIP_PRIME_CHUNKS + 1` periods = 171 ms | D2, unchanged |
+
+Two things this costs, recorded because both are load-bearing later. **The ISR must stay inside the
+re-arm grace**: there is no interrupt nesting on the ARM7TDMI, so a vblank handler running when timer1
+overflows delays the feeder, and the entire margin there is `REARM_GRACE_SAMPLES = 16` samples — so the
+handler brackets its own body on the audio clock and the worst bracket is a **verdict term**, measured
+at **1 sample = 1,024 c**, i.e. 6% of the grace (bracketing needs the period witness folded in, because
+timer1 reloads rather than counting from zero — a naive bracket reported 64,977 samples for a handler
+that took one). And **the main loop still runs at producer cadence** — `position` updated on 1,129 of
+1,791 frames — so when Phase 2 draws, its drawing must be driven off the **vblank latch**, not the
+main-loop iteration, or a screen change will wait up to four frames for a decoder that has nothing to do
+with it.
 
 The shipped geometry queues **1.23 s** of decoded audio
 (`RING_CHUNKS 36 × CHUNK_SAMPLES 560 = 20,160` samples at 16,384 Hz, per
@@ -648,6 +674,21 @@ live and separates **work share** from **wait**, and keeps the closure identity
 `audio time = stages + feeder + drain spin + residual` with the residual named.
 The app keeps that identity verbatim and adds UI terms to it, because an
 unexplained gap in a ledger is a bug in the ledger.
+
+**Measured, PR-3b-ii-A (2026-11-17, the gate track, mGBA).** The sketch's inner
+`while` cannot poll the latch more often than once per producer frame, because one
+frame of this stream — `pull_frame` → widen → `convert_frame` → push — costs
+1.04–1.09 M cycles: **3.7–3.9 of AP-0's 280,896-cycle video frames, all of them
+uninterruptible.** So the row above is implemented as written (the vblank handler
+latches; the main loop polls it) and the ROM *prints* the cadence instead of
+asserting one: `cadence: video_frames=1790 input_polls=1116 ratio=1116/1790
+max_gap=4 frames limit=5` — one poll per frame while the ring is full, one per ≤4
+while the decoder is running, against PR-3a's one per 7.5 frames. §4.4's "screen
+changes within one video frame of the button press" is **not** met by that and
+cannot be from the main loop: it needs the key *sample* (not merely the latch) in
+the vblank handler, or a decode sliced below one frame — a decision for ii-B,
+recorded here rather than glossed. The audio side is untouched by the restructure
+(`underflows=0`, `coalesced=0`, `late=0`, `handler_entries=877` before and after).
 
 One shipped gotcha to carry into the UI design, because it bit 6a-7b's first
 hardware run: agb's `TiledGraphicsFrame::commit` derives DISPCNT's
