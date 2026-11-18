@@ -780,6 +780,35 @@ P1-P5 is bit-exact by construction, so the pins stay the witness.
 | **P4** | Re-test C's `r1 = rq[1] * step` + `m == 1` fast path **after P1/P2** | unknown, 2–4k plausible | low — already written once and reverted | the existing note says it lost because *"its two operands are spilled"* |
 | **P5** | `Q3` (81 B) and `CLZ6` (64 B) to IWRAM | 0.5–1k/frame | trivial | `uli_g_q3` in IWRAM |
 
+**P2 LANDED (2026-11-19) — and the estimate above was 4x too high.** Shipped as
+`ClassTables`: a 560 B caller-owned IWRAM object (`ctype`/`rbits`/`esck`/`rq`)
+that `GbaDecoder::new` fills once per album, kept separate from `HotState` so the
+8,192 B invariant and `reset()`'s per-frame contract both survive. Measured,
+bit-exact, pins PASS on fixture and album:
+
+| | before | after | delta |
+|---|---:|---:|---:|
+| entropy + dequant, mean (bit-exact `entropy2`) | 41,973 | **41,075** | **−897** |
+| entropy at its worst frame (f62) | 64,226 | **61,728** | **−2,498** |
+| 129-frame product frame, worst / mean | 205,793 / 179,058 | **203,394 / 178,168** | −2,399 / −890 |
+| album decode wall, worst / mean | 206,101 / 175,280 | **203,913 / 174,532** | −2,188 / −748 |
+| gate total, worst / mean | 237,646 / 206,637 | **235,418 / 205,844** | −2,228 / −793 |
+| gate margin at the worst frame | 9.35 pts | **10.20 pts** | +0.85 |
+
+`.iwram` grew **784 B**, not 560: the table is 560 (the size assertion confirms
+it) and `dec_chan` grew **196 B** (0x1388 → 0x144c) because `class` arrives as a
+third pointer argument. Stack high-water 964 → 948 B.
+
+**Why the 3.7k projection was wrong, in the informative direction.** It counted
+the access (`ldrsh` from EWRAM, 4 cycles vs 1) and not what the access sits
+behind: the disassembly shows `ldr r4,[sp,#80]` — the **`rq` *pointer* reloaded
+from the stack** — then `add`, then `ldrsh`, then `mul`. Moving the table to
+IWRAM removes the last link and leaves the first two, and the extra pointer
+argument adds to the very register pressure that causes the spill. So the win is
+real and density-shaped (−2,498 at the densest frame against −897 on the mean),
+but it is a fifth of the projection, and the remaining `rq` cost is **P1's** —
+it does not go away until `rq`/`dq15` are register-resident.
+
 **P4 deserves its own paragraph, because the record currently treats it as
 settled.** `coef!` carries *"C hoists `rq[1] * step` and special-cases `m == 1`
 here. Measured in this image, that hoist is not a win — its two operands are

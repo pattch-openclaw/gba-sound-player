@@ -37,7 +37,7 @@ use core::fmt::Write as _;
 
 use uli_lite::format::M;
 use uli_lite::{Album, CodeTables};
-use uli_lite_gba::{GbaDecoder, HotState};
+use uli_lite_gba::{ClassTables, GbaDecoder, HotState};
 use uli_playback::fold::{FoldHow, Profile};
 use uli_playback::player::{Ledger, Player};
 use uli_playback::source::{Frame, PcmSource, SourceError, UliSource};
@@ -134,6 +134,11 @@ static mut TABLES: CodeTables = CodeTables::new();
 /// The decoder's hot transform/FFT/overlap buffers: IWRAM, as C places them.
 #[unsafe(link_section = ".iwram")]
 static mut HOT: HotState = HotState::new();
+
+/// The per-class decode tables (560 B), in IWRAM: `rq[m]` is read on every
+/// nonzero coefficient, and EWRAM charges 4 cycles a read against IWRAM's 1.
+#[unsafe(link_section = ".iwram")]
+static mut CLASS: ClassTables = ClassTables::new();
 
 /// The decoder's output frame (producer-private).
 static mut L8: [i8; M] = [0; M];
@@ -459,13 +464,14 @@ fn run(gba: &mut agb::Gba) -> Report {
         }
     };
     let tables = unsafe { &mut *core::ptr::addr_of_mut!(TABLES) };
+    let class = unsafe { &mut *core::ptr::addr_of_mut!(CLASS) };
     let hot = unsafe { &mut *core::ptr::addr_of_mut!(HOT) };
     let l8 = unsafe { &mut *core::ptr::addr_of_mut!(L8) };
     let r8 = unsafe { &mut *core::ptr::addr_of_mut!(R8) };
     let gl = unsafe { &mut *core::ptr::addr_of_mut!(GL) };
     let gr = unsafe { &mut *core::ptr::addr_of_mut!(GR) };
 
-    let dec = match GbaDecoder::new(album, tables, hot) {
+    let dec = match GbaDecoder::new(album, tables, class, hot) {
         Ok(d) => d,
         Err(e) => {
             agb::println!("[uli-player] FAIL tables: {:?}", e);

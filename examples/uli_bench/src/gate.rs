@@ -55,7 +55,7 @@ use agb::timer::{Divider, Timer};
 use gba_playback::playback::{Chunk, RingFeed};
 use uli_lite::format::M;
 use uli_lite::{Album, CodeTables};
-use uli_lite_gba::{GbaDecoder, HotState};
+use uli_lite_gba::{ClassTables, GbaDecoder, HotState};
 
 use super::{Counter, FrameCost, timed_irq};
 #[cfg(feature = "gate-hash")]
@@ -299,6 +299,7 @@ pub struct GateReport {
 pub fn gate_pass(
     album: Album<'_>,
     tables: &mut CodeTables,
+    class: &mut ClassTables,
     hot: &mut HotState,
     counter: &mut Counter<'_>,
     timer0: &mut Timer,
@@ -309,7 +310,7 @@ pub fn gate_pass(
 ) -> Result<GateReport, uli_lite::Error> {
     use uli_lite::Error;
 
-    let mut decoder = GbaDecoder::new(album, tables, hot)?;
+    let mut decoder = GbaDecoder::new(album, tables, class, hot)?;
     counter.soft_reset();
     let mut cost = FrameCost::new();
     let mut all8 = 2_166_136_261u32;

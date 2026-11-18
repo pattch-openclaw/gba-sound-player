@@ -76,7 +76,7 @@ use agb::timer::Divider;
 use uli_lite::format::{H, M};
 use uli_lite::{Album, CodeTables, Decoder, DecoderState, imdct};
 use uli_lite_gba as overlay;
-use uli_lite_gba::{GbaDecoder, HotState};
+use uli_lite_gba::{ClassTables, GbaDecoder, HotState};
 
 /// The committed Phase 0 corpus, byte-for-byte. It is the regression pin: the
 /// fixture is C-pinned on **both** outputs, and every product number in the plan
@@ -163,6 +163,14 @@ static mut PRODUCT_TABLES: CodeTables = CodeTables::new();
 /// once the superseded v1/v2 FFT kernels stopped consuming IWRAM.
 #[unsafe(link_section = ".iwram")]
 static mut PRODUCT_HOT: HotState = HotState::new();
+
+/// The per-class decode tables (560 B) — **also in IWRAM**. `rq[m]` is read on
+/// every nonzero coefficient (~1,232/frame), so EWRAM's 4 cycles against IWRAM's
+/// 1 was a per-coefficient tax; the reference keeps exactly this slice in
+/// `uli_g`. Measured −897 mean / −2,498 at the densest frame. The ~96 KiB of
+/// Huffman LUTs stay in `PRODUCT_TABLES` (EWRAM).
+#[unsafe(link_section = ".iwram")]
+static mut PRODUCT_CLASS: ClassTables = ClassTables::new();
 
 /// Shared output buffers for the measurement passes. Keeping them out of the
 /// stack matters: the product code and its 8 KiB hot state occupy most of
@@ -731,13 +739,14 @@ fn timed_pass<K: uli_lite::Kernels>(
 fn product_pass_s8(
     album: Album<'_>,
     tables: &mut CodeTables,
+    class: &mut ClassTables,
     hot: &mut HotState,
     counter: &mut Counter<'_>,
     overhead: u32,
     l8: &mut [i8; M],
     r8: &mut [i8; M],
 ) -> Result<(FrameCost, u32), uli_lite::Error> {
-    let mut decoder = GbaDecoder::new(album, tables, hot)?;
+    let mut decoder = GbaDecoder::new(album, tables, class, hot)?;
     // The 32-bit composite wraps every 256 s of emulated time; one
     // pass over the album corpus is ~217 s, so a pass must start from zero.
     counter.soft_reset();
@@ -764,6 +773,7 @@ fn product_pass_s8(
 fn product_pass(
     album: Album<'_>,
     tables: &mut CodeTables,
+    class: &mut ClassTables,
     hot: &mut HotState,
     counter: &mut Counter<'_>,
     overhead: u32,
@@ -772,7 +782,7 @@ fn product_pass(
     l16: &mut [i16; M],
     r16: &mut [i16; M],
 ) -> Result<(FrameCost, u32, u32), uli_lite::Error> {
-    let mut decoder = GbaDecoder::new(album, tables, hot)?;
+    let mut decoder = GbaDecoder::new(album, tables, class, hot)?;
     // The 32-bit composite wraps every 256 s of emulated time; one
     // pass over the album corpus is ~217 s, so a pass must start from zero.
     counter.soft_reset();
@@ -1096,11 +1106,13 @@ fn run(gba: &mut agb::Gba) -> bool {
     // reader, unchecked Huffman/dequant/M/S) with its tables in EWRAM and its
     // hot buffers in IWRAM.
     let product_tables = unsafe { &mut *core::ptr::addr_of_mut!(PRODUCT_TABLES) };
+    let product_class = unsafe { &mut *core::ptr::addr_of_mut!(PRODUCT_CLASS) };
     let product_hot = unsafe { &mut *core::ptr::addr_of_mut!(PRODUCT_HOT) };
     let (probe_lo, probe_hi) = stack_probe_fill();
     let (cost_prod, prod8, prod16) = match product_pass(
         album,
         product_tables,
+        product_class,
         product_hot,
         &mut counter,
         overhead,
@@ -1125,6 +1137,7 @@ fn run(gba: &mut agb::Gba) -> bool {
         match product_pass_s8(
             album,
             product_tables,
+            product_class,
             product_hot,
             &mut counter,
             overhead,
@@ -1169,6 +1182,7 @@ fn run(gba: &mut agb::Gba) -> bool {
         match gate::gate_pass(
             album,
             product_tables,
+            product_class,
             product_hot,
             &mut counter,
             &mut all_timers.timer0,
@@ -1773,6 +1787,7 @@ fn run(gba: &mut agb::Gba) -> bool {
     );
 
     let tables = unsafe { &mut *core::ptr::addr_of_mut!(PRODUCT_TABLES) };
+    let class = unsafe { &mut *core::ptr::addr_of_mut!(PRODUCT_CLASS) };
     let hot = unsafe { &mut *core::ptr::addr_of_mut!(PRODUCT_HOT) };
     let l8 = unsafe { &mut *core::ptr::addr_of_mut!(OUT8L) };
     let r8 = unsafe { &mut *core::ptr::addr_of_mut!(OUT8R) };
@@ -1795,6 +1810,7 @@ fn run(gba: &mut agb::Gba) -> bool {
     let ok = match gate::gate_pass(
         album,
         tables,
+        class,
         hot,
         &mut counter,
         &mut all_timers.timer0,
