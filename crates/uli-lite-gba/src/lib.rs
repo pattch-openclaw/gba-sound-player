@@ -56,7 +56,7 @@
 
 pub mod decoder;
 
-pub use decoder::{GbaDecoder, HotState, slow_hit_count};
+pub use decoder::{ClassTables, GbaDecoder, HotState, slow_hit_count};
 
 /// `HotState` is the decoder's hot working set — the transform buffers (`x`),
 /// the FFT scratch (`buf`) and the overlap state (`p`). It is the same 8,192 B
@@ -70,6 +70,18 @@ pub use decoder::{GbaDecoder, HotState, slow_hit_count};
 const _: () = assert!(
     core::mem::size_of::<HotState>() == 8192,
     "HotState size changed: redo the IWRAM budget (C-3)"
+);
+
+/// `ClassTables` is the 560 B of `CodeTables` that belongs in IWRAM: `rq` is read
+/// once per nonzero coefficient, so at WAITCNT 4/2 its EWRAM residency cost 4
+/// cycles a read against IWRAM's 1. Measured at **−897 mean / −2,498 at the
+/// densest frame** (2026-11-19) — the residual is P1's, not this type's.
+/// `HotState` keeps its own 8,192 B budget and
+/// its own `reset()` contract — these are per-album tables, not per-frame state —
+/// so they are a separate caller-owned object with the same placement rule.
+const _: () = assert!(
+    core::mem::size_of::<ClassTables>() == 560,
+    "ClassTables size changed: redo the IWRAM budget (P2)"
 );
 
 use uli_lite::format::{H, M};

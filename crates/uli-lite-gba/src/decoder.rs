@@ -62,6 +62,57 @@ impl HotState {
     }
 }
 
+/// The per-class decode tables, in the layout the coefficient loops want.
+///
+/// **This is the 560 B of `CodeTables` that belongs in IWRAM**, and it is kept
+/// separate from [`HotState`] on purpose: `HotState` holds per-frame buffers that
+/// [`HotState::reset`] clears, while these are per-album tables written once by
+/// [`GbaDecoder::new`] and never reset. Mixing them would make `reset()`'s
+/// contract ambiguous.
+///
+/// The reference splits the same way — `uli_g.ctype`, `rbits`, `esck` and
+/// `rq[16][16]` are copied into IWRAM while the ~96 KiB of Huffman LUTs stay in
+/// EWRAM — and the split measures **−897 mean / −2,498 at the densest frame**
+/// (2026-11-19). Nearly all of it is `rq[m]`, read once per **nonzero
+/// coefficient** (616 per channel, so ~1,232/frame), which costs 4 cycles from
+/// EWRAM against 1 from IWRAM at WAITCNT 4/2. It is less than the raw access
+/// count suggests because the read still sits behind a stack reload of the
+/// `rq` *pointer*: that half is register pressure, and it is P1's job, not this
+/// type's. `ctype`/`rbits`/`esck` are read once per *band* (~64/frame) and
+/// are carried only because they are the same table and the reference keeps them
+/// together.
+///
+/// Caller-owned, like `HotState`: the caller declares the placement.
+#[derive(Debug, Clone, Copy)]
+pub struct ClassTables {
+    pub ctype: [u8; MAXK],
+    pub rbits: [u8; MAXK],
+    pub esck: [u8; MAXK],
+    pub rq: [[i16; 16]; MAXK],
+}
+
+impl ClassTables {
+    pub const fn new() -> Self {
+        Self {
+            ctype: [0; MAXK],
+            rbits: [0; MAXK],
+            esck: [0; MAXK],
+            rq: [[0; 16]; MAXK],
+        }
+    }
+
+    /// Copy the four per-class arrays out of the (EWRAM) code tables.
+    ///
+    /// One `memcpy` per album, at construction: the whole point is that the
+    /// inner loops then read `rq`/`ctype`/`rbits`/`esck` from IWRAM instead.
+    pub fn fill(&mut self, tables: &CodeTables) {
+        self.ctype = tables.ctype;
+        self.rbits = tables.rbits;
+        self.esck = tables.esck;
+        self.rq = tables.rq;
+    }
+}
+
 /// Format-rule diagnostics: `xover` (a coefficient past the encoder's `|X|`
 /// bound) and `hfnz` (a nonzero coefficient at index >= `NCODED`).
 ///
@@ -697,6 +748,7 @@ unsafe fn zero16(p: *mut i32) {
 #[allow(unused_variables, clippy::too_many_arguments)]
 unsafe fn dec_chan(
     tables: &CodeTables,
+    class: &ClassTables,
     x: *mut i32,
     step: u32,
     br: BitReader,
@@ -961,7 +1013,7 @@ unsafe fn dec_chan(
         // SAFETY: b < NBANDS, so the cursor's 16 slots are inside the channel.
         let xp = xc;
         // SAFETY: c < MAXK == ctype.len().
-        let ct = unsafe { *tables.ctype.get_unchecked(c) };
+        let ct = unsafe { *class.ctype.get_unchecked(c) };
         if ct == CT_ZERO {
             // SAFETY: as above.
             unsafe {
@@ -975,11 +1027,11 @@ unsafe fn dec_chan(
         let cls = tables.class_table(c);
         let clut = cls.lut_ptr();
         // SAFETY: c < MAXK, and the parser validated every per-class table.
-        let rq = unsafe { tables.rq.get_unchecked(c) };
+        let rq = unsafe { class.rq.get_unchecked(c) };
         // SAFETY: `rq` has 16 entries.
         let dq15 = 16 * 15 - unsafe { *rq.get_unchecked(15) } as i32;
         // SAFETY: c < MAXK == esck.len().
-        let esck = unsafe { *tables.esck.get_unchecked(c) } as u32;
+        let esck = unsafe { *class.esck.get_unchecked(c) } as u32;
         let rqp = rq.as_ptr();
         // A cursor over this band's slots. `xf` is one past the end, so the
         // loops below compare pointers instead of carrying a coefficient
@@ -989,7 +1041,7 @@ unsafe fn dec_chan(
         let xf = unsafe { xp.add(BANDW) };
         if ct == CT_PAIR {
             // SAFETY: c < MAXK == rbits.len().
-            let r = unsafe { *tables.rbits.get_unchecked(c) } as u32;
+            let r = unsafe { *class.rbits.get_unchecked(c) } as u32;
             if r == 0 {
                 while sc < xf {
                     refill!();
@@ -1101,6 +1153,9 @@ unsafe fn dec_chan(
 pub struct GbaDecoder<'a, 's> {
     album: Album<'a>,
     tables: &'s CodeTables,
+    /// The IWRAM-resident per-class tables. Read on every nonzero coefficient,
+    /// so it is a separate object from `tables` for placement reasons only.
+    class: &'s ClassTables,
     hot: &'s mut HotState,
     bitpos: u32,
     frame: u32,
@@ -1126,12 +1181,14 @@ impl fmt::Debug for GbaDecoder<'_, '_> {
 }
 
 impl<'a, 's> GbaDecoder<'a, 's> {
-    /// Parse `album`'s tables into `tables`, reset `hot`, and position at frame
-    /// 0. The caller owns the storage: on the GBA, `tables` belongs in EWRAM
-    /// and `hot` in IWRAM.
+    /// Parse `album`'s tables into `tables`, copy the per-class slice into
+    /// `class`, reset `hot`, and position at frame 0. The caller owns the
+    /// storage: on the GBA, `tables` belongs in EWRAM and `class` + `hot` in
+    /// IWRAM.
     pub fn new(
         album: Album<'a>,
         tables: &'s mut CodeTables,
+        class: &'s mut ClassTables,
         hot: &'s mut HotState,
     ) -> Result<Self, Error> {
         // The bit reader loads the stream with aligned `u16` reads (one `ldrh`
@@ -1145,11 +1202,16 @@ impl<'a, 's> GbaDecoder<'a, 's> {
             return Err(Error::UnalignedStream);
         }
         tables.parse_into(album.tables())?;
+        // The hot per-class slice moves to IWRAM here: one copy per album, so
+        // the coefficient loops stop paying EWRAM wait states on `rq[m]`.
+        class.fill(tables);
         hot.reset();
         let tables: &'s CodeTables = tables;
+        let class: &'s ClassTables = class;
         Ok(Self {
             album,
             tables,
+            class,
             hot,
             bitpos: 0,
             frame: 0,
@@ -1303,6 +1365,7 @@ impl<'a, 's> GbaDecoder<'a, 's> {
         #[cfg(not(any(feature = "attrib-entropy", feature = "attrib-entropy-reader")))]
         let (nb0, nb1) = {
             let tables = self.tables;
+            let class = self.class;
             let hot = &mut *self.hot;
             // SAFETY: each row is M coefficients and `dec_chan` is band-bounded.
             // The reader goes in and comes back by value so the channel decode
@@ -1312,8 +1375,15 @@ impl<'a, 's> GbaDecoder<'a, 's> {
             unsafe {
                 #[cfg(feature = "attrib-entropy2")]
                 let br0 = br;
-                let (nb0, next) =
-                    dec_chan(tables, hot.x[0].as_mut_ptr(), step, br, &mut ops, &mut diag);
+                let (nb0, next) = dec_chan(
+                    tables,
+                    class,
+                    hot.x[0].as_mut_ptr(),
+                    step,
+                    br,
+                    &mut ops,
+                    &mut diag,
+                );
                 br = next;
                 // `attrib-entropy2`: replay the channel from the saved reader.
                 // `dec_chan` is a deterministic function of (tables, reader,
@@ -1326,6 +1396,7 @@ impl<'a, 's> GbaDecoder<'a, 's> {
                 {
                     let (_, next) = dec_chan(
                         tables,
+                        class,
                         hot.x[0].as_mut_ptr(),
                         step,
                         br0,
@@ -1336,13 +1407,21 @@ impl<'a, 's> GbaDecoder<'a, 's> {
                 }
                 #[cfg(feature = "attrib-entropy2")]
                 let br1 = br;
-                let (nb1, next) =
-                    dec_chan(tables, hot.x[1].as_mut_ptr(), step, br, &mut ops, &mut diag);
+                let (nb1, next) = dec_chan(
+                    tables,
+                    class,
+                    hot.x[1].as_mut_ptr(),
+                    step,
+                    br,
+                    &mut ops,
+                    &mut diag,
+                );
                 br = next;
                 #[cfg(feature = "attrib-entropy2")]
                 {
                     let (_, next) = dec_chan(
                         tables,
+                        class,
                         hot.x[1].as_mut_ptr(),
                         step,
                         br1,

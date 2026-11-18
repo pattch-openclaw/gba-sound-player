@@ -7,7 +7,7 @@
 
 use uli_lite::format::M;
 use uli_lite::{Album, CodeTables, Decoder, DecoderState, PortableKernels};
-use uli_lite_gba::{GbaDecoder, HotState};
+use uli_lite_gba::{ClassTables, GbaDecoder, HotState};
 
 static BLOB_STORAGE: uli_lite::Aligned<
     { include_bytes!("../../uli-lite/tests/fixtures/uli2_tiny.uli").len() },
@@ -42,8 +42,9 @@ fn product_decoder_matches_the_reference_frame_for_frame() {
     let mut ref_state = DecoderState::new();
     let mut reference = Decoder::<PortableKernels>::new(album, &mut ref_state).expect("reference");
     let mut tables = CodeTables::new();
+    let mut class = ClassTables::new();
     let mut hot = HotState::new();
-    let mut product = GbaDecoder::new(album, &mut tables, &mut hot).expect("product");
+    let mut product = GbaDecoder::new(album, &mut tables, &mut class, &mut hot).expect("product");
 
     let (mut a8l, mut a8r) = ([0i8; M], [0i8; M]);
     let (mut a16l, mut a16r) = ([0i16; M], [0i16; M]);
@@ -94,8 +95,10 @@ fn product_decoder_seeks_like_the_reference() {
         let mut reference =
             Decoder::<PortableKernels>::new(album, &mut ref_state).expect("reference");
         let mut tables = CodeTables::new();
+        let mut class = ClassTables::new();
         let mut hot = HotState::new();
-        let mut product = GbaDecoder::new(album, &mut tables, &mut hot).expect("product");
+        let mut product =
+            GbaDecoder::new(album, &mut tables, &mut class, &mut hot).expect("product");
 
         let a_skip = reference.seek_track(track).expect("reference seek");
         let b_skip = product.seek_track(track).expect("product seek");
@@ -133,8 +136,10 @@ fn product_decoder_seeks_like_the_reference() {
         let mut reference =
             Decoder::<PortableKernels>::new(album, &mut ref_state).expect("reference");
         let mut tables = CodeTables::new();
+        let mut class = ClassTables::new();
         let mut hot = HotState::new();
-        let mut product = GbaDecoder::new(album, &mut tables, &mut hot).expect("product");
+        let mut product =
+            GbaDecoder::new(album, &mut tables, &mut class, &mut hot).expect("product");
         reference.seek_entry(entry).expect("reference seek entry");
         product.seek_entry(entry).expect("product seek entry");
         assert_eq!(reference.state().bitpos(), product.bitpos());
@@ -149,8 +154,9 @@ fn product_decoder_seeks_like_the_reference() {
 fn product_build_compiles_the_diagnostics_out() {
     let album = Album::parse(BLOB).expect("fixture parses");
     let mut tables = CodeTables::new();
+    let mut class = ClassTables::new();
     let mut hot = HotState::new();
-    let mut product = GbaDecoder::new(album, &mut tables, &mut hot).expect("product");
+    let mut product = GbaDecoder::new(album, &mut tables, &mut class, &mut hot).expect("product");
     let (mut l8, mut r8) = ([0i8; M], [0i8; M]);
     let (mut l16, mut r16) = ([0i16; M], [0i16; M]);
     let info = product
@@ -187,9 +193,10 @@ fn product_decoder_rejects_an_unaligned_blob() {
     );
     let album = uli_lite::Album::parse(odd).expect("the album itself is intact");
     let mut tables = uli_lite::CodeTables::new();
+    let mut class = ClassTables::new();
     let mut hot = HotState::new();
     assert_eq!(
-        GbaDecoder::new(album, &mut tables, &mut hot).err(),
+        GbaDecoder::new(album, &mut tables, &mut class, &mut hot).err(),
         Some(uli_lite::Error::UnalignedStream)
     );
 }
