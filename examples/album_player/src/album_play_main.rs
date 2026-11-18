@@ -712,6 +712,14 @@ mod rom {
     /// *correct* cartridge — a red louder than its witness (R13). The bound is now measured by the
     /// run that is gated (the worst producer frame and the worst pass, both on the audio clock), so
     /// it moves with the machine instead of against it.
+    ///
+    /// **Gated to the replay arm, and that is not papering over a gap.** All three of its consumers are
+    /// `input-replay`: `pass_bound_cycles`, the `input:` bound row printed beside the cycles, and
+    /// `reaction_ok`'s FAIL text — the shipped arm has no scripted press to gate a pass against, so it
+    /// computes no pass bound. Left ungated it is a warning in `make album-player-rom`, the one build a
+    /// person sits in front of, and a warning they see every day is what hides the warning they needed.
+    /// One `cfg`, the same feature, beside the two functions that already carry it.
+    #[cfg(feature = "input-replay")]
     const PASS_MARGIN_CYCLES: u32 = VIDEO_PERIOD_CYCLES;
 
     /// The cycle ceiling a main-loop pass is gated against, from the run's own measured worst
