@@ -239,7 +239,16 @@ const fn make_q3() -> [u8; 81] {
     t
 }
 
-const Q3: [u8; 81] = make_q3();
+/// The quad-digit and escape-prefix lookup tables, **in IWRAM**.
+///
+/// `Q3` is read once per quad group (~496/frame for the pair) and `CLZ6` once
+/// per escape, so at WAITCNT 4/2 the cartridge's 4-cycle first access against
+/// IWRAM's 1 is worth ~1k cycles/frame. The reference keeps `uli_g_q3` in IWRAM
+/// for exactly this reason. Both are `static` (not `const`) so they are one
+/// object with an address rather than a value the compiler is free to re-emit
+/// into `.rodata` at each use.
+#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
+static Q3: [u8; 81] = make_q3();
 
 /// Leading zeros in the top six bits, 6 when none are set (PR C-3a's escape
 /// fast path).
@@ -257,7 +266,8 @@ const fn make_clz6() -> [u8; 64] {
     t
 }
 
-const CLZ6: [u8; 64] = make_clz6();
+#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
+static CLZ6: [u8; 64] = make_clz6();
 
 /// A 32-bit bit reader over the ULA2 halfword stream.
 ///
