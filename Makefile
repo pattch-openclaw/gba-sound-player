@@ -703,7 +703,7 @@ uli-bench: uli-bench-rom
 
 # --- PR E: the album-length corpus (a witness, never a gate input) -----------
 #
-# PLAN-OF-RECORD.md "PR E" needs a corpus large enough to be a worst-case
+# RECORD.md "PR E" needs a corpus large enough to be a worst-case
 # witness. It is the *tracked* reference master at the **product
 # configuration** — 32,768 Hz, hop 512, `--cap 74`, budget scaled to the
 # product's ~102 kbit/s — because density, not duration, is what the tail
@@ -826,7 +826,7 @@ uli-gate: uli-gate-rom
 	@grep -E '^\[uli-bench\] (corpus|decode frames|frame prod8 |frame gate |gate feeder|gate pin|calib)' $(ULI_GATE_LOG) || true
 	@echo "uli-gate done: $(ULI_GATE_LOG)"
 
-# --- PR D: the product player (ULI2.md Phase 2, PLAN-OF-RECORD.md "PR D") -----
+# --- PR D: the product player (ULI2.md Phase 2, RECORD.md "PR D") -----
 #
 # `examples/uli_player` is one paced decode-and-play loop over the
 # `uli-playback` seam: the 32,768 Hz timer/DMA/FIFO chain, a live text UI read
@@ -978,7 +978,7 @@ uli-player-two-track:
 	  || { echo "uli-player-two-track: not a pass — see uli-player-two-track.log"; exit 1; }
 	@grep -E '^\[uli-player\] (played frames|ui redraws|feeder)' uli-player-two-track.log || true
 
-# --- ULI2 by-difference attribution (PLAN-OF-RECORD.md, critical path Step 0) ---
+# --- ULI2 by-difference attribution (RECORD.md, critical path Step 0) ---
 #
 # Each arm rebuilds the bench with exactly one part of the product frame changed —
 # removed, or (the `*2` arms) called a second time — and dumps the per-frame window
