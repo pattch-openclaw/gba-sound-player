@@ -748,7 +748,7 @@ claims to be measured, not inherited from `gba-audio`.
 | **U1 — reference** | `uli-lite` remains a bit-exact, host-testable reference and oracle (no longer a portable-product claim). | `make uli-test`; committed corpus; thumbv4t `check` |
 | **U2 — bit-exact host** | The Rust core matches the C integer reference frame-for-frame on the committed corpus and rejects malformed frames without panic. | `make uli-test`; pinned hashes |
 | **U3 — bit-exact product** | The product kernel set (`ArmKernels`) decodes the corpus to the pinned int8/int16 frames, in the host full-frame twin and on the target. **Met (PR A).** | `make uli-bench` (both arms + on-target twin); `make uli-overlay-test` (host kernel + decoder twins) |
-| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Met on the album corpus (PR E, 2026-11-15): decode 220,062 = 83.94% worst; gate total 251,712 = 96.02% worst / 84.40% mean in the player model (the same arm verifying in-loop reads 98.33% and starves 12.06 s, which is the harness); ceiling written down as the 262,144-cycle period, 10,432 cycles of margin at the worst frame; no UI, mGBA only.** Ladder: 204% (PR B) -> 200% (split `huff`) -> 186% -> 175% -> 164% (asm FFT) -> 162% -> 157% (`iwram-tw`) -> 148% (`iwram-tables`) -> 138% (C-3d) -> **274,198 / 232,090 = 105% / 89%** (C-3). **Step 0 (2026-11-15) attributed the worst frame (f98) by difference in the product image: synthesis 162,987 (59%), entropy/dequant/M-S 110,741 (40%), wrapper 486 - i.e. 69% of the 92,286-cycle distance to the C worst-frame shape is the entropy path and 31% synthesis. Per channel the kernels are 1.10-1.33x C (pre 1.22x, fft 1.33x, post 1.10x, ola 1.11x), so the previous 'asm kernels first, ~194,000 prize' order is retired; the live order is in `crates/uli-lite/PLAN-OF-RECORD.md` ('Critical path to real time').** **Root-cause audit (2026-11-16) plus the loose-ends sweep (2026-11-16): the album decode wall is 210,787 worst (f16,204) / 179,226 mean = 80.41% / 68.37%, and the gate total is **RE-MEASURED** at 242,370 worst / 210,626 mean = 92.46% / 80.35% — 7.54 points of margin at the worst frame, zero starved periods over 16,552 — so the ceiling in use is still the period, not a playback claim on hardware (mGBA, no UI). The 129-frame iteration corpus reads 210,833 / f83 / 183,242 mean = 80.43% / 69.90%. Ratio to C: 1.16x worst, **1.03x mean**.** | `make uli-bench`; mGBA, then hardware |
+| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Met on the album corpus (PR E, 2026-11-15): decode 220,062 = 83.94% worst; gate total 251,712 = 96.02% worst / 84.40% mean in the player model (the same arm verifying in-loop reads 98.33% and starves 12.06 s, which is the harness); ceiling written down as the 262,144-cycle period, 10,432 cycles of margin at the worst frame; no UI, mGBA only.** Ladder: 204% (PR B) -> 200% (split `huff`) -> 186% -> 175% -> 164% (asm FFT) -> 162% -> 157% (`iwram-tw`) -> 148% (`iwram-tables`) -> 138% (C-3d) -> **274,198 / 232,090 = 105% / 89%** (C-3). **Step 0 (2026-11-15) attributed the worst frame (f98) by difference in the product image: synthesis 162,987 (59%), entropy/dequant/M-S 110,741 (40%), wrapper 486 - i.e. 69% of the 92,286-cycle distance to the C worst-frame shape is the entropy path and 31% synthesis. Per channel the kernels are 1.10-1.33x C (pre 1.22x, fft 1.33x, post 1.10x, ola 1.11x), so the previous 'asm kernels first, ~194,000 prize' order is retired; the live order is in `crates/uli-lite/PLAN-OF-RECORD.md` ('Critical path to real time').** **Root-cause audit (2026-11-16), the loose-ends sweep (2026-11-16) and the target-spec change (2026-11-17): the album decode wall is 209,162 worst (f16,204) / 178,341 mean = 79.79% / 68.03%, and the gate total is **240,705 worst / 209,721 mean = 91.82% / 80.00% — 8.18 points of margin at the worst frame, zero starved periods over 16,552** — so the ceiling in use is still the period, not a playback claim on hardware (mGBA, no UI). The 129-frame iteration corpus reads 208,854 / f83 / 182,119 mean = 79.67% / 69.47%. Ratio to C: 1.16x worst, **1.03x mean**. The last step is a checked-in target spec (`targets/thumbv4t-gba.json`, `frame-pointer: may-omit`), which is why the build target in `.cargo/config.toml` is not the built-in triple; `make target-spec-check` keeps it honest.** | `make uli-bench`; mGBA, then hardware |
 | **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | **Met on hardware (GBA SP, 2026-11-16) for the three player ROMs, two runs each, identical to the cycle**: headphone 94.52% worst / 81.39% mean, speaker 95.89% / 82.61%, two-track 94.56% / 80.92%, all with 0 underruns; the GBA 001 was unavailable. **With one open defect**: the 1 Hz text redraw delays the feeder past the DMA's grace on 104 of 16,553 periods (audible splices; `late`, not underruns), so the audio default is the end-only screen until the UI is made non-blocking. **Met in mGBA too.** `make uli-player` (headphone) and `make uli-player-speaker`: zero underruns, period audit closed (periods = served + 1 tail), ring full, three builds measured (2026-11-16). The hardware half is still owed — two units × two runs of *this* player; the manual listen that has happened is the PR E audio-only ROM, which carried no counted ledger. |
 | **U6 — memory** | IWRAM/EWRAM/stack stay inside the product budget with the UI and feeder linked. | linker map + runtime stack check |
 | **U7 — licensing/spec** | A public crate, if published, has a permissive license and a standalone format specification; otherwise it remains `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** |
@@ -847,6 +847,38 @@ product codec without pretending one codec covers both jobs.
 
 ## Decision log
 
+- **2026-11-17 — the frame pointer: the build target is now a checked-in spec.**
+  The last open audit item was the register the target spec spends on a frame
+  pointer in every Rust function. It is now taken, and the mechanism matters more
+  than the win: **`-Cforce-frame-pointers=no` is inert** (rebuilt from a clean
+  `target/` both ways, the ROMs are byte-identical), so the only lever was the
+  target spec itself. `targets/thumbv4t-gba.json` is the pinned toolchain's own
+  `--print target-spec-json` for `thumbv4t-none-eabi` with exactly one field
+  changed — `frame-pointer: "always"` → `"may-omit"` — and `.cargo/config.toml`
+  builds for it. Bit-exact (both album pins, `xover=0 hfnz=0`, `msasm=true` twin,
+  two runs identical to the cycle): **gate total 242,370 → 240,705 worst (92.46% →
+  91.82%) / 210,626 → 209,721 mean (80.35% → 80.00%)**, margin **7.54 → 8.18
+  points**; album decode wall **210,787 → 209,162** worst / 179,226 → 178,341 mean;
+  **13 → 0** of 210 functions set up a frame and `.iwram` code drops **896 B**.
+  r11 becomes an ordinary data register, which is what the four hand-written asm
+  kernels already did with it — the hardware register was never special, only the
+  ABI's reservation. **A second assumption died with it:** `frame-pointer:
+  "non-leaf"` — the plausible middle setting — would have helped **nothing**,
+  because `dec_chan` is non-leaf (ten `bl` sites to `huff_slow`/`eg_slow`); only
+  `may-omit` frees r11 there. And the pin's stated purpose does not apply on this
+  target at all: `panic-strategy` is `abort`, there is no unwinder and no
+  `RUST_BACKTRACE`, and mGBA debugs from the DWARF we emit. **Decision — the spec
+  is an instrument, so it is reviewed, documented and witnessed like the toolchain
+  pin**: `make target-spec-check` re-dumps the built-in spec from the pinned rustc
+  and fails on any difference other than `frame-pointer` (including a field
+  appearing on one side only), so a toolchain move cannot quietly change the ABI,
+  data layout or linker flavour underneath every number in this file. Recorded
+  with it: the one known cross-track consequence — `flac-spike`'s PR 3 verdict
+  moves from `measured 2/2` to `measured 0/2` because its calibration demands five
+  *identical* empty-window samples and now sees a 2-cycle first-sample difference.
+  Decode is untouched there and `make flac-test` passes; no `make` target gates
+  that verdict, and re-baselining it is the FLAC track's own change.
+
 - **2026-11-16 — the loose-ends sweep landed, and it re-measured the gate.** Two of
   the three open audit items are in: the bit reader's **single `ldrh`** and
   **`zero16` as four inline `stmia`** (it had been a `bl __aeabi_memclr4` call).
@@ -864,10 +896,22 @@ product codec without pretending one codec covers both jobs.
   one**, and Rust cannot emit ARM conditional instructions (no `it` on v4T) — a
   branchless clamped refill measured **+1,352 cycles/frame** because the load
   address then depends on `end`. So that category's ceiling is **~2,000**, not the
-  projected 3,500-5,500, and the same limit — predication, and the frame pointer
-  that costs a register in every Rust function — is what stands between the decode
-  wall and C's number. **On the mean we are now 1.03x C; the remaining gap is one
+  projected 3,500-5,500, and the same limit — predication plus the register the
+  target spec spends on a frame pointer — is what stands between the decode wall
+  and C's number. **On the mean we are now 1.03x C; the remaining gap is one
   worst-frame shape, not a systematic deficit.**
+  **The frame-pointer half of that limit then landed too (2026-11-17):** the GBA
+  build target is now a checked-in spec — `targets/thumbv4t-gba.json`, the pinned
+  toolchain's own `thumbv4t-none-eabi` spec with one field changed,
+  `frame-pointer: "may-omit"` — so r11 is no longer reserved in every Rust
+  function. Bit-exact, worth a further **−1,665 worst (−0.64 pts) / −905 mean
+  (−0.34 pts) on the gate total** and **−896 B of `.iwram` code**: the gate is now
+  **240,705 worst / 209,721 mean = 91.82% / 80.00% with 8.18 points of margin**,
+  and the album decode wall **209,162 / 178,341 = 79.79% / 68.03%**. Two things
+  had only been assumed and are now measured: `-Cforce-frame-pointers=no` is
+  **inert** (byte-identical ROM), and `frame-pointer: "non-leaf"` would have
+  helped **nothing** because `dec_chan` is non-leaf — only `may-omit` frees the
+  register where it matters. See [`targets/README.md`](targets/README.md).
 
 - **2026-11-16 — aggressive performance targeting, after a root-cause audit against
   the C decoder's code.** Six rounds of loop tuning had reached ~1% of the frame
