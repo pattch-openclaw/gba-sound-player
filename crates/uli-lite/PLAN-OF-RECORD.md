@@ -635,6 +635,185 @@ kernels, not the asm one.
 5. **M/S is closed** (9,844 at f98 vs C's ~4,400 for the pair-dense shape; the
    mean row moved with the frame mix, not with the loop).
 
+#### The entropy path against the C+ASM reference (2026-11-19 — examination only)
+
+**Status: nothing here is landed, and nothing here is a measurement of a change.**
+It is the comparison that decides what to do next, made by reading
+`uli_gba_dec.iwram.c` and our `dec_chan` line by line and disassembling the
+built product image.
+
+The FFT is now closed at 1.05x-1.09x C with its whole remainder worth ~5,200, so
+entropy/dequant is the only row left with a double-digit deficit. (That figure
+comes from the bit-exact `attrib-fft2` arm in the open `perf/uli2-fft-attribution`
+PR; this tree's kernel table still reads 1.14x until that lands.) This section is
+what the entropy deficit actually consists of.
+
+**Measured shape: a density gap, not a flat one.** The bit-exact
+`attrib-entropy2` arm (replays `dec_chan` from a saved `BitReader`; pins PASS)
+gives the entropy block for the pair on the 129-frame fixture:
+
+| | cycles/frame | of frame |
+|---|---:|---:|
+| mean | **41,973** | 23.4% |
+| median | 54,868 | — |
+| p90 / p99 | 63,456 / 63,963 | — |
+| f83 (the control's worst frame) | **61,750** | 30.0% |
+| f62 / f98 | 64,226 / 54,737 | 31.6% / — |
+
+The C record's own line is *"entropy decoding about 21–24k cycles per channel"*,
+i.e. 42–48k per frame. **On the mean we are already at C; on dense frames we are
+1.3–1.4x.** So this is not a fixed overhead to shave off — it is a per-symbol and
+per-nonzero-coefficient cost that only shows up on dense frames, which is exactly
+why the record's warning that per-part ratios cannot be read off single frames
+applies here as much as it did to the kernels.
+
+The sub-frame arms locate it (each removes one layer; `nolut` desynchronises the
+stream, so these order the work rather than grading the parts): full path 46,631 ·
+coefficient store 2,111 · dequant arithmetic 9,285 · **symbol resolution 27,036** ·
+reader mechanics 2,791 · residual (loops, escapes, sign bits, band control) 4,954.
+
+**Structural comparison.**
+
+| | C + ASM reference | Rust + ASM (ours) |
+|---|---|---|
+| reader state | `{w, n, p}` — **3 words** | `{base, next, end, hw, valid, bad}` — 6 |
+| refill | `if (n<16) { w \|= *p++ << (16-n); n += 16; }` — post-indexed, **no bounds test** | `valid<17` **plus a nested `valid<17`** second load, a `next+2 > end` test and a `bad` store |
+| refill contract | 16 bits, **refilled again before the raw bits** | **17 bits** up front |
+| symbol decode | returns packed `(sym << 5) \| len`, `SKIP` unconditional | `(u16, u32)` tuple; per-symbol `len == 0` branch into `bad` |
+| per-class arrays | `ctype`/`rbits`/`esck`/`rq[16][16]` **copied into IWRAM** (`uli_g`) | read from `PRODUCT_TABLES`, **`.ewram` @ 0x02000a00** |
+| `q3` table | `uli_g_q3[81]` in IWRAM | `const Q3` in `.rodata` = **cartridge ROM** (0x08038d5c) |
+| quad `m == 1` | hoists `r1 = rq[1] * step`, special-cases m == 1 | dropped — see below |
+| code | `dec_chan` compact inside ~22.6 KiB of IWRAM | `dec_chan` alone **5,000 B** (`0x1388`) |
+
+**Cause 1 — the reader's safety contract costs the registers the coefficient
+loop needs.** The product `dec_chan` opens with `push {r4-r11, lr}` and
+`sub sp, sp, #140` (**35 spill slots**), and contains **155 stack references in
+1,250 instructions**. The spills are exactly the hot data:
+
+```asm
+ldr   r1, [sp, #56]        @ Huffman LUT pointer — every symbol
+mvn   r0, #1
+and   r0, r0, r7, lsr #21  @ + add: 3 instructions to form the byte offset
+ldrh  r0, [r0]
+
+ldr   r4, [sp, #80]        @ rq pointer — every nonzero coefficient
+add   r3, r4, r3, lsl #1
+ldrsh r7, [r3]
+mul   r3, lr, r7
+
+ldr   r4, [sp, #76]        @ dq15 — every m >= 16 coefficient
+```
+
+and `step` lives at `[sp, #68]`, reloaded after every `bl huff_slow`
+(`ldr lr, [sp, #68]`).
+
+In the inner loops we hold `next`(r4), `end`(r5), `hw`(r7), `valid`(r8),
+`bad`(fp) and `step`(lr) — **six** — against C's `p`, `w`, `n`, `step` — four.
+The two extra are **`end` and `bad`**, i.e. the bounds check and the error flag,
+and those are precisely the registers `rq` and `dq15` would need.
+
+**This re-frames the item, and that matters for how it is sized.** The record
+graded this category as a *branch* problem — "almost every item here is a branch,
+ARM7TDMI charges 3 cycles for a taken one, remaining ceiling ~2,000" — and that
+is also why the two shapes built in the 2026-11-16 sweep failed: the branchless
+clamp kept `end` live *and* put it in the load-address chain (+1,352 measured),
+and `bad |= over` made `bad` longer-lived. **Neither freed a register.** Read as
+register allocation, the same item is worth several times the branch estimate.
+
+**Cause 2 — our per-class tables are in EWRAM and C's are in IWRAM.** At the
+bench's WAITCNT 4/2, EWRAM is 4 cycles against IWRAM's 1. The reference
+deliberately copies `ctype`, `rbits`, `esck` and `rq[16][16]` into `uli_g` and
+leaves only the ~96 KiB of LUTs in EWRAM. Ours reads `rq[m]` from EWRAM on
+**every nonzero coefficient** — 616/channel x 2 = 1,232 reads/frame, ~3,700
+cycles/frame of avoidable latency. The fix costs **560 B of IWRAM** (`rq` 512 B +
+three 16-byte arrays) against **3,876 B free** (`iwram_end` 0x0300673c to `sp`
+0x03007660). Same story, smaller: `Q3` (81 B) is in ROM, and the reference keeps
+`uli_g_q3` in IWRAM — ~500 cycles/frame across 496 quad groups.
+
+**Cause 3 — the 17-bit contract protects a path our own data never takes.**
+`refill!` demands 17 valid bits because a raw coefficient reads `r` bits *then* a
+sign bit. But `r` is only read on the `pair` path, and **on every corpus this
+tree owns, both pair classes have `rbits == 0`**:
+
+| corpus | frames | k | max `esck` | `rbits` over PAIR classes |
+|---|---:|---:|---:|---:|
+| fixture `uli2_tiny` | 129 | 14 | 2 | **0** |
+| `biomaster` (album) | 16,553 | 14 | 2 | **0** |
+| `biotwo` | 33,104 | 14 | 2 | **0** |
+| `adv` (adversarial) | 641 | 14 | 2 | **0** |
+| `cross` | 167,222 | 14 | 2 | **0** |
+
+Measured by parsing the blob through `CodeTables::parse_into`, per class:
+`0/0/0 1/0/0 1/0/0` then eleven `2/0..5/…` — one `ZERO`, two `PAIR` with
+`r == 0`, eleven `QUAD` (where `rbits` is never read). So the worst group is
+**4 bits of sign** (quad) or 2 (pair), not 17; a 16-bit contract carries 12 bits
+of margin, and the nested second load exists only for a branch that does not
+execute. `esck <= 2` likewise makes the escape guard dead: `t = 2z + 1 + k <= 13`,
+so both `t < 32` and `t <= valid` are unfalsifiable on our data.
+
+**The premise this project can actually rely on.** The product ROM is
+closed-world: we control the encoder, the container and the bake, so *"the
+stream is well formed" is an input assumption, not a runtime obligation.* It does
+not have to be proven during decode, and it does not have to be proven at open
+either — it can be **asserted before the ROM is baked**, in the host gate that
+already produces the album and its pins, and it is *free* there because that gate
+already decodes the whole album with the checked decoder and compares to the
+C-pinned hashes.
+
+This is not a new shape for this tree: it is the pattern already used for the
+synthesis kernels — `PortableKernels` (checked, host, the oracle) versus
+`ArmKernels` (product, unchecked, `unsafe`). The same split applied to the
+entropy reader makes the checked `uli_lite::frame` decoder **the oracle for a
+premise**, and the product `dec_chan` the unchecked realisation of it. The
+portable decoder keeps every guarantee it has (U2 still requires it to reject
+malformed frames without panicking on the host); the product build simply does
+not carry them.
+
+**Proposals.** Sizes are estimates until each lands as its own arm; every one of
+P1-P5 is bit-exact by construction, so the pins stay the witness.
+
+| # | change | expected | risk | prior art |
+|---|---|---|---|---|
+| **P1** | Closed-world reader in the product build: **no `end`, no `bad`, no bounds test**. Refill becomes `ldrh …, [next], #2` + shift/or. Frees 2 live registers so `rq`/`dq15` become register-resident and the ~1,300 per-frame stack reloads go | **6–10k/frame** (est.) | low *under the premise* — needs the bake gate to be the only entry point; the checked decoder stays as the oracle | C's structure exactly; the *branchless* and `bad \|=` shapes were falsified, this one was never tried |
+| **P2** | Copy `rq` + `ctype`/`rbits`/`esck` into IWRAM (560 B) | **~3.7k/frame**, near-certain | very low — placement only, bit-identical | C's `uli_g`; `iwram-tables` was the same move for the synthesis tables (−10.4%) |
+| **P3** | 16-bit contract everywhere (justified by pair `rbits == 0`): removes the nested second load, and is what makes P1's single-load refill correct | 1–2k/frame | very low — measured across all five corpora | C's 16-bit contract |
+| **P4** | Re-test C's `r1 = rq[1] * step` + `m == 1` fast path **after P1/P2** | unknown, 2–4k plausible | low — already written once and reverted | the existing note says it lost because *"its two operands are spilled"* |
+| **P5** | `Q3` (81 B) and `CLZ6` (64 B) to IWRAM | 0.5–1k/frame | trivial | `uli_g_q3` in IWRAM |
+
+**P4 deserves its own paragraph, because the record currently treats it as
+settled.** `coef!` carries *"C hoists `rq[1] * step` and special-cases `m == 1`
+here. Measured in this image, that hoist is not a win — its two operands are
+spilled."* That is a description of Cause 1, not a property of the change. The
+fixture is **248 quads and 0 pairs**, so `m == 1` is the most common digit in the
+stream and the hoist would remove both an **EWRAM** table read and a multiply
+from it. It must be re-measured once `rq` and `step` are register-resident.
+
+**What the premise re-opens.** Three items the 2026-11-16 sweep declined
+*for safety reasons* become free once the product build carries no error path:
+
+| item | why it was declined | under the premise |
+|---|---|---|
+| `huff_consume!` length test | "removing it needs a failure signal that is not a per-symbol branch" | no failure signal is needed — ~624 symbols/frame x the branch |
+| `esc` fast-path guard | "~2 compares per escape; the parser's `esck <= 24` bound makes `t < 32` live" | measured `esck <= 2`, so `t <= 13` and both compares are dead |
+| `huff_slow` "no match" return, band-level `if bad`, `k > MAXK` early-out, base-alignment check | each guards a premise | all become **bake assertions** |
+
+**How each would be falsified.** `attrib-entropy2` gives the clean per-frame
+total and every one of P1-P5 is bit-exact, so the pins PASS and the two-runs-to-
+the-cycle rule applies unchanged. P2/P5 are readable off the section table
+(`objdump -t | grep .iwram`) as well as off cycles. P1 needs a *positive* witness
+for its premise, which is the one genuinely new piece of work in the list: the
+bake gate must decode the whole album with the checked decoder and fail the
+build, not the frame, on any rejection — and the unchecked product build must
+still reproduce the pinned hashes.
+
+**Caveats.** C's 21–24k is measured on *their* corpus, ours on the fixture: the
+ratio is a diagnostic and the comparison of record is the structural table. The
+sub-frame arms are timing-only and `nolut` desynchronises the stream. The fixture
+has **zero pairs**, so two of the five inlined `coef!` expansions never execute
+there — `cross` should confirm before P3 is sized. And P1's premise is about
+*our* encoder: a third-party or re-encoded blob with different tables is not
+covered unless the bake assertions cover it.
+
 ### The order of work
 
 Every item is a projection until it lands as its own measured arm, with a
@@ -691,7 +870,10 @@ is five named items with a shape, not a block called "entropy".**
    entropy / 37% synthesis. The sub-frame arms already say the dequant is 13% of
    the path and the reader mechanics 5.5%, which bounds the arithmetic lever at
    ~2,000/frame on its own — take it last, and after item 6 has re-priced the
-   path.
+   path. **Re-priced 2026-11-19:** the 2026-11-19 examination in "The entropy
+   path against the C+ASM reference" replaces this estimate with P1-P5; the
+   lever is register pressure and table placement, not arithmetic, and it is
+   worth several times 2,000. Read that section instead of this item.
 
 **Maintenance, not optimisation:**
 

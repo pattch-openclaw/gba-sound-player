@@ -847,6 +847,27 @@ product codec without pretending one codec covers both jobs.
 
 ## Decision log
 
+- **2026-11-19 — the product ROM is closed-world: a well-formed stream is an
+  input assumption, not a runtime obligation.** We own the encoder, the container
+  and the bake, so the product decoder does not need to detect, reject or
+  survive a malformed stream — **and does not need to prove the stream bound at
+  runtime either**. Where such a proof is worth having, it belongs **before the
+  ROM is baked**, in the host gate that already decodes the whole album with the
+  checked decoder against the C-pinned hashes; a bad encode should fail the
+  build, not a frame at 03:00 on hardware. This does not weaken the portable
+  decoder: `uli_lite` keeps every guarantee it has, including U2's "rejects
+  malformed frames without panic", because it is now **the oracle for a premise**
+  rather than the product path — the split the tree already uses for the kernels
+  (`PortableKernels` checked/host versus `ArmKernels` unchecked/product). Two
+  consequences worth naming, because both were previously declined *for safety
+  reasons* and are now available: the product reader can drop its bounds test,
+  its error flag and its per-symbol length test, and the escape path's
+  `t < 32` / `t <= valid` guards are dead on our own tables (`esck <= 2`, and
+  `rbits == 0` on every PAIR class across all five corpora). The proposals this
+  unblocks, and their sizes, are in `crates/uli-lite/PLAN-OF-RECORD.md` → "The
+  entropy path against the C+ASM reference (2026-11-19)". **Nothing has been
+  implemented: this entry records the premise, not a change.**
+
 - **2026-11-18 — `post` as ARM asm: the product path is now all hand-written
   kernels, and the kernel table was re-derived with bit-exact arms.** `post` was
   the last Rust kernel in the decode path, and the only one whose excess was
