@@ -123,7 +123,12 @@ attrib-count = ["uli-lite-gba/attrib-count"]
 # `per-frame` (which implies `verify` and so measures a different build): the
 # attribution must be read from the product image, and a by-difference delta is
 # only like-for-like when compared frame-for-frame.
-attrib-dump = []
+# Every attribution image uses the **checked** reader: a by-difference arm
+# removes a stage, which desynchronises the bit stream, and `bad` is what lets
+# the arm resynchronise instead of reading past it. Wiring it here (rather than
+# per-arm) keeps the control image on the same reader as the arms it is
+# differenced against.
+attrib-dump = ["uli-lite-gba/checked-reader"]
 
 # The twiddle-table-in-`.iwram` placement A/B (`asmfft4iw`). Off by default:
 # `iwram-tables` already puts the shipped `TW` in `.iwram`, so the arm compares

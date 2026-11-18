@@ -887,6 +887,47 @@ real and density-shaped (−2,498 at the densest frame against −897 on the mea
 but it is a fifth of the projection, and the remaining `rq` cost is **P1's** —
 it does not go away until `rq`/`dq15` are register-resident.
 
+**P1 LANDED (2026-11-19), with P3 folded in — and this time the projection held.**
+The product bit reader is now **closed-world**: no `end`, no `bad`, no bounds test,
+no per-symbol `len == 0` test, and a **16-bit** refill contract instead of 17
+(P3, justified by the `rbits == 0` measurement above), which is what makes one
+load always sufficient. The checked reader survives behind `checked-reader`, and
+every attribution image now builds with it through `attrib-dump` — a by-difference
+arm desynchronises the stream and needs `bad` to resynchronise, and keeping the
+control image on the same reader keeps the deltas comparable to each other (their
+*absolutes* were never the product number).
+
+| | before | after | delta |
+|---|---:|---:|---:|
+| 129-frame product, worst / mean | 203,394 (f83) / 178,168 | **193,421 (f98) / 172,748** | −9,973 / −5,420 |
+| album decode wall, worst / mean | 203,913 / 174,532 | **195,439 / 169,851** | −8,474 / −4,681 |
+| gate total, worst / mean | 235,418 / 205,844 | **226,853 / 201,126** | −8,565 / −4,718 |
+| gate total, % of period | 89.80% / 78.53% | **86.54% / 76.72%** | −3.26 / −1.81 points |
+| margin at the worst frame | 10.20 pts | **13.46 pts** | +3.26 |
+| `dec_chan` code | 5,196 B | **3,820 B** | **−1,376 B** |
+
+`.iwram` *shrank* 1,376 B — the closed-world reader deletes more code than the
+registers it frees cost — so the P1 register story came with memory back.
+
+**The projected 6–10k was right, unlike P2's.** The worst frame lands at ~9,973
+and the mean at ~5,420: the win is again density-shaped, but this time the
+mechanism *was* the address chain and the spills, which is what the projection
+counted. `end`/`bad` are no longer live inside the coefficient loops, so
+`rq`/`dq15`/`step` are register-resident and the per-symbol `ldr [sp,#56]` /
+per-coefficient `ldr [sp,#80]` / `ldr [sp,#76]` reloads are gone.
+
+**Entropy/dequant is now at or below C, by subtraction.** The bit-exact arm reads
+41,076 on the *checked* reader and nothing but the reader changed, so the product
+block is **~35,656 mean** (41,076 − 5,420) against C's 42–48k. The mean is now
+ahead of the reference; what remains is the densest frames.
+
+**The premise is now an assertion, not a comment.** `crates/uli-lite-gba/tests/premise.rs`
+checks `rbits == 0` on every PAIR class and `esck <= 2` on every class, for the
+committed fixture and for all five generated corpora when present. That is the
+seed of the bake gate: it is a property of the **tables in the blob**, so it
+belongs wherever the shipped album is produced, and it must run before the ROM
+exists rather than in it.
+
 **P4 deserves its own paragraph, because the record currently treats it as
 settled.** `coef!` carries *"C hoists `rq[1] * step` and special-cases `m == 1`
 here. Measured in this image, that hoist is not a win — its two operands are
