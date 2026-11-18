@@ -355,9 +355,19 @@ pub fn fft(x: &mut [i32; 2 * H]) {
     }
 }
 
-/// Post-twiddle, ARM mode, unchecked addressing.
+/// Post-twiddle, ARM mode, unchecked addressing. The scalar reference for
+/// [`post_kernel`]'s asm realisation, and the kernel itself when `asm-post` is
+/// off.
+///
+/// Kept always-compiled and out of `.iwram` when the asm kernel is present, so
+/// the on-target twin compares the two in one image — the same arrangement
+/// `pre`, `ola` and `ms` use (and the 1e-i placement rule: a control that is not
+/// on the gate path does not spend the audio budget).
 #[cfg_attr(target_arch = "arm", instruction_set(arm::a32))]
-#[cfg_attr(target_arch = "arm", unsafe(link_section = ".iwram"))]
+#[cfg_attr(
+    all(target_arch = "arm", not(feature = "asm-post")),
+    unsafe(link_section = ".iwram")
+)]
 #[inline(never)]
 pub fn post(z: &[i32; 2 * H], y: &mut [i32; M]) {
     let zp = z.as_ptr();
@@ -800,6 +810,65 @@ pub unsafe fn ms_kernel(l: *mut i32, r: *mut i32, n: usize) {
     {
         // SAFETY: as above.
         unsafe { crate::ms(l, r, n) };
+    }
+}
+
+/// Hand-written ARM post-twiddle (`asm/post_arm.s`). Off unless `asm-post` is
+/// on; the Rust ARM-mode [`post`] stays the in-image control.
+///
+/// `post` was the **last Rust kernel on the product path**. The measured
+/// argument, from the bit-exact attribution arms rather than the old
+/// by-difference ones: **23,682 cycles at the gate frame / 23,458 mean = 11.3% /
+/// 12.9% of the frame**, against the C record's 21,800 — and it is the only
+/// kernel where the excess is *nameable in instructions* (18 per iteration
+/// against the reference's 14) rather than a function of frame density.
+///
+/// The four extra instructions were all addressing, each with a one-line
+/// reference idiom; see the kernel header.
+#[cfg(all(target_arch = "arm", feature = "asm-post"))]
+mod post_asm {
+    core::arch::global_asm!(include_str!("../asm/post_arm.s"));
+
+    // `(z, y, perm, post)` — pointers, so the asm never depends on a Rust
+    // symbol's mangled name and `iwram-tables` moves POST/PERM for free.
+    unsafe extern "C" {
+        fn uli_post_arm(z: *const i32, y: *mut i32, perm: *const u16, post: *const i32);
+    }
+
+    /// Post-twiddle via the reference's loop shape. Same contract as
+    /// [`crate::post`] and bit-exact with it.
+    #[inline]
+    pub fn post(z: &[i32; 2 * uli_lite::format::H], y: &mut [i32; uli_lite::format::M]) {
+        // SAFETY: `z` is 2H i32, `y` is M i32, PERM has H entries indexing a
+        // z pair each (`PERM[k] < H` is a parser invariant), and POST is the
+        // 2H-word twiddle table read exactly once, forward.
+        unsafe {
+            uli_post_arm(
+                z.as_ptr(),
+                y.as_mut_ptr(),
+                crate::tables::PERM.as_ptr(),
+                crate::tables::POST.as_ptr(),
+            );
+        }
+    }
+}
+
+#[cfg(all(target_arch = "arm", feature = "asm-post"))]
+pub use post_asm::post as post_asm_call;
+
+/// The post-twiddle the product decoder should call: the reference's
+/// hand-written loop when `asm-post` is on, otherwise the Rust ARM-mode
+/// [`post`]. Mirrors [`fft_kernel`]; the `#[cfg]` lives here so the hot path
+/// does not repeat it.
+#[inline]
+pub fn post_kernel(z: &[i32; 2 * H], y: &mut [i32; M]) {
+    #[cfg(all(target_arch = "arm", feature = "asm-post"))]
+    {
+        crate::post_asm_call(z, y);
+    }
+    #[cfg(not(all(target_arch = "arm", feature = "asm-post")))]
+    {
+        crate::post(z, y);
     }
 }
 

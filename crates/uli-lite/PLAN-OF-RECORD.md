@@ -207,16 +207,26 @@ above are history; this section is the live order of work.
 
 ### Where we are
 
-**The decode wall on the album corpus is 210,787 worst (f16,204) / 179,226
-mean = 80.41% / 68.37%**, and the **gate total (decode + convert + IRQ + DMA) is
-242,370 worst / 210,626 mean = 92.46% / 80.35%**, with **19,774 cycles (7.54
+**The decode wall on the album corpus is 206,101 worst (f16,204) / 175,280
+mean = 78.62% / 66.86%**, and the **gate total (decode + convert + IRQ + DMA) is
+237,646 worst / 206,637 mean = 90.65% / 78.83%**, with **24,498 cycles (9.35
 points) of margin at the worst frame** and zero starved periods over 16,552.
-Both are re-measured 2026-11-16 after the root-cause audit (two steps) and the
-loose-ends sweep (two steps). The 129-frame iteration corpus reads 210,833 / f83
-/ 183,242 mean = 80.43% / 69.90%.
+Re-measured 2026-11-18 after the asm `post` kernel (the last Rust kernel on the
+product path). The 129-frame iteration corpus reads 205,793 / f83 / 179,058 mean
+= 78.50% / 68.31%. **On the `cross` corpus — the sibling 12-track album, the one
+the C record's own numbers were measured on — the decode wall is 207,148 worst
+(f27,693) / 170,939 mean = 79.02% / 65.21%, against C's 181,928 / ~153,000, i.e.
+1.139x worst / 1.117x mean.**
 
-Against the C record (181,928 = 69.4%) the decode wall is **1.16x** on the worst
-frame and **1.03x** on the mean. `.iwram` headroom is ~2,196 B (27,3xx B of
+Against the C record (181,928 = 69.4% worst, ~153,000 = 58.4% mean) the decode
+wall is **1.15x** on the worst frame and **1.17x** on the mean. **CORRECTION
+2026-11-18:** an earlier revision of this paragraph read "1.03x on the mean" —
+that number was wrong: it came from dividing our *mean* by C's *worst*
+(178,341/181,928 = 0.98) and then mis-transcribing the quotient. The like-for-like
+mean ratio is 178,341/153,000 = **1.17x**. The gap is systematic (~15-17% across
+the distribution), not a single bad frame, and every "beat C" target should be
+sized from the corrected pair. (Both C figures remain a diagnostic: different
+corpus, different image — see "Caveats".) `.iwram` headroom is ~2,196 B (27,3xx B of
 30,320 B usable at the 844 B measured stack).
 
 Two different targets, not one:
@@ -225,9 +235,15 @@ Two different targets, not one:
   convert) and this tree's UI: target **<= ~85%**. **MET twice over (80.4%
   decode, 92.5% gate total).** The gate total is now measured, not assigned, and
   it leaves 7.54 points at the worst frame.
-- **to match C** — cut a further **~28,900** (worst) / **~2,700** (mean). Not a
-  requirement; C has 31% slack by design. **On the mean we are 1.03x C** — the
-  remaining gap is one worst-frame shape, not a systematic deficit.
+- **to match C** — cut a further **~25,200 worst / ~17,900 mean**, measured on the
+  matched `cross` corpus, where our mean and C's cover the *same* 167,222 frames
+  (so this is density-free). Not a requirement; C has 31% slack by design. We are
+  **1.139x worst / 1.117x mean**, and the gap is systematic rather than one bad
+  frame. Where it lives: `post` was the only *instruction-named* deficit and it is
+  now closed; `fft` (32.9% of the frame, but at instruction parity) and entropy
+  (29.6%, the predication-gated path) are what remain, and single-frame ratios
+  against C cannot rank them — only an all-frames per-part mean on the same
+  corpus can. See the measurement ledger's "kernel table, re-derived".
 
 **92.46% gate total is not "real time" either.** It is measured in mGBA with the
 shipping `RingFeed` and the real timebase, which does not model the cart prefetch
@@ -643,6 +659,16 @@ is five named items with a shape, not a block called "entropy".**
 5. ~~**The FFT multiply operands.**~~ **DONE (2026-11-16): −6,993 mean / −4,560
    worst.** Not on this list before the audit, and the largest single win since
    Step 1a. See "Root-cause audit", A.
+6. ~~**`post` asm.**~~ **DONE (2026-11-18): 18 → 14 instructions per iteration,
+   −3,061 cycles on *every* frame** (129-frame 208,854 → 205,793; gate total
+   240,705 → 237,646; `cross` 210,209 → 207,148, i.e. 1.139x / 1.117x C). The last
+   Rust kernel on the product path, and the only kernel whose excess was nameable
+   in instructions. See the measurement ledger.
+7. ~~**The kernel table, re-derived.**~~ **DONE (2026-11-18): bit-exact arms
+   (`attrib-pre2`/`-post2`/`-entropy2`) replace the contaminated removals.**
+   `pre`'s delta was 1.61x too large; the clean table has **`pre` at 1.00x C and
+   `ola` at 1.00x, both ahead of C on the mean**, and `post` was the only real
+   instruction deficit. Fresh table in the measurement ledger.
 
 **Open, in the order they should be taken:**
 
@@ -2313,6 +2339,110 @@ biased (see the audit's method note): removing an arm that changes `X` also
 changes the synthesis kernels' cost, which is data-dependent through `Rs`.
 Frame deltas of real changes are quoted above; per-kernel rows stay locators.
 
+### The kernel table, re-derived with bit-exact arms (2026-11-18, mGBA, WAITCNT 4/2)
+
+**Why the old table was replaced rather than adjusted.** Every by-difference arm
+worked by *removing* a stage, and every stage after it then multiplied different
+data — so each arm charged the downstream cost change to the part it removed.
+The 2026-11-18 `attrib-pre2` arm measured that bias directly: `pre`'s delta came
+out **1.61x** too large at the densest frame (31,150 vs a true 19,336), and the
+inflation tracked frame density exactly. Three bit-exact arms replace it —
+they **add a second, identical instance** of a stage instead of removing one, so
+every downstream stage sees the data it would have and the pins still PASS:
+
+| arm | how | bit-exact? |
+|---|---|---|
+| `attrib-pre2` | `pre` is a pure function of `x` into `z`; call it twice | **yes** |
+| `attrib-post2` | `post` reads `z`, writes `y`; call it twice | **yes** |
+| `attrib-entropy2` | `bitReader` is `Copy`; replay `dec_chan` from a saved reader | **yes** |
+| `attrib-ola` | removal; nothing runs downstream of `ola` | contaminated only via its own stale `p` |
+| `attrib-synth` | removes all 8 synthesis calls; no *other* stage changes | **yes** as a total |
+
+`fft` is in-place and `ola` mutates `p`, so neither can be double-called; `fft`
+is therefore the one **derived** row (`synth − pre − post − ola`), and it is
+flagged as such.
+
+**Clean attribution, 129-frame corpus, product image** (control f83 = 208,867,
+mean = 182,132):
+
+| part | at f83 | share | mean | share | source |
+|---|---:|---:|---:|---:|---|
+| `fft` | 68,694 | 32.9% | 66,079 | 36.3% | **derived** |
+| entropy + dequant | 61,751 | 29.6% | 41,972 | 23.0% | bit-exact |
+| `ola` | 30,521 | 14.6% | 30,120 | 16.5% | removal (clean) |
+| `post` | 23,682 | 11.3% | 23,458 | 12.9% | bit-exact |
+| `pre` | 19,336 | 9.3% | 17,669 | 9.7% | bit-exact |
+| ms + wrapper | 4,883 | 2.3% | 2,834 | 1.6% | residual |
+| synthesis total | 142,233 | 68.1% | 137,326 | 75.4% | removal (`synth`), exact |
+
+Closes exactly by construction. The previous table's per-kernel rows summed to
++5.9% over `synth`; this one to −2.4%, inside the file's own ±3% tolerance.
+
+**Three corrections this buys, against C's per-channel rows doubled:**
+
+| part | old claim | **now** |
+|---|---|---|
+| `pre` | "31,150 → 1.61x C, the worst ratio left" | **19,336 = 1.00x**; mean 17,669 = **0.91x, ahead of C** |
+| `ola` | "1.12x" | 30,521 = **1.00x**; mean 30,120 = **0.98x, ahead** |
+| ms | "1.20x" | mean 2,834 = **0.64x, ahead** |
+
+**And one methodological limit the numbers impose.** Because the audit put the
+*data* in `Rs` (so multiplies early-terminate), kernel cost now genuinely varies
+with frame content, and it varies by more than the gaps being adjudicated:
+
+| part | spread across our 129 frames (max/min) |
+|---|---:|
+| `pre` | 1.20x |
+| `post` | 1.15x |
+| `fft` | 1.13x |
+| `ola` | 1.08x |
+| entropy | 26x (2,478 → 64,227) |
+
+C's entropy row (42,600) sits at our **43rd percentile** — C's worst frame is
+synthesis-heavy and entropy-light, ours is the opposite. So a single-frame ratio
+against C cannot distinguish a deficit from a frame-mix difference; only an
+all-frames mean on the *same* corpus can, and that is why the `cross` row above
+is the number to trust.
+
+### `post` as ARM asm (2026-11-18, mGBA, WAITCNT 4/2)
+
+`post` was the **last Rust kernel on the product path** and the one kernel whose
+excess is nameable in instructions rather than density: **18 per iteration
+against the reference's 14**, all four extra being addressing (the `z` pair via
+`add`+`ldr` instead of one `ldmia`; the twiddles via two `ldr` instead of one
+`ldmia`; the backward `Y` store via a computed address instead of a
+post-indexed cursor). `asm/post_arm.s` is the reference's 14-instruction loop.
+
+| arm | worst (frame) | mean | of period |
+|---|---:|---:|---|
+| 129-frame, before | 208,854 (f83) | 182,119 | 79.67% / 69.47% |
+| 129-frame, **asm `post`** | **205,793 (f83)** | **179,058** | **78.50% / 68.31%** |
+| album, before | 209,162 (f16,204) | 178,341 | 79.79% / 68.03% |
+| album, **asm `post`** | **206,101 (f16,204)** | **175,280** | **78.62% / 66.86%** |
+| **gate total**, before | 240,705 | 209,721 | 91.82% / 80.00% |
+| **gate total**, **asm `post`** | **237,646** | **206,637** | **90.65% / 78.83%** |
+| `cross` (167,222), before | 210,209 (f27,693) | 174,009 | 80.19% / 66.38% |
+| `cross`, **asm `post`** | **207,148 (f27,693)** | **170,939** | **79.02% / 65.21%** |
+
+**−3,061 cycles on *every* frame, worst and mean alike.** That uniformity is the
+win's signature: `post` runs a fixed 256 iterations per channel regardless of
+content, so removing 4 of 18 instructions is a *content-independent* saving —
+unlike the multiply-bound kernels, whose cost tracks the data. Gate margin
+**8.18 → 9.35 points**; ratio to C on the matched corpus **1.155x → 1.139x worst,
+1.137x → 1.117x mean**.
+
+**Witnesses:** both album pins PASS on every corpus (`e6e87652`/`b3530978`
+fixture, `55e710af` album, `51fcf846` cross), `xover=0 hfnz=0`, the on-target
+kernel twin PASSes with **`postasm=true`** (`make uli-kernel-twin`),
+`make uli-test` and `make uli-overlay-test` green,
+`gate feeder ... starved_entries=0 frames_over_period=0`, and two runs identical
+to the cycle.
+
+**Multiply operand order is part of the contract**, and the kernel header says so:
+`smull r11,r4,r8,r6` puts the *twiddle* in `Rn` and the **data in `Rs`**, which is
+the only ordering the ARM7TDMI early-terminates on. The inversion of that cost
+the FFT 3.6% of the whole frame until the 2026-11-16 audit.
+
 ### Target spec: `frame-pointer: may-omit` (2026-11-17, mGBA, WAITCNT 4/2)
 
 The build target is now a checked-in spec, `targets/thumbv4t-gba.json` — the
@@ -3473,6 +3603,51 @@ counts above come from the host.
 ---
 
 ## Decision log
+
+- **2026-11-18 — `post` as ARM asm: the last Rust kernel on the product path is
+  now hand-written, for −3,061 cycles on every frame.** Fresh attribution with the
+  new **bit-exact** arms put `post` at 23,682 cycles at the gate frame / 23,458
+  mean (11.3% / 12.9% of the frame) against the C record's 21,800 — and it was the
+  one kernel whose excess was *nameable in instructions*: **18 per iteration
+  against the reference's 14**, every extra instruction addressing (the `z` pair
+  and the twiddles each cost an `add`+`ldr` or two `ldr` where the reference does
+  one `ldmia`; the backward `Y` store cost a computed address where the reference
+  post-indexes). `asm/post_arm.s` is that 14-instruction loop, landed as `asm-post`
+  (default on) with the Rust `post` kept as the in-image control and de-placed
+  from `.iwram` per the 1e-i rule. Measured, bit-exact (both album pins on every
+  corpus, `postasm=true` twin PASS, two runs identical to the cycle): **129-frame
+  208,854 → 205,793 worst / 182,119 → 179,058 mean**, **album 209,162 → 206,101 /
+  178,341 → 175,280**, **gate total 240,705 → 237,646 (91.82% → 90.65%) /
+  209,721 → 206,637 (80.00% → 78.83%)**, margin **8.18 → 9.35 points**, and on the
+  `cross` corpus — the one C's own record was measured on — **210,209 → 207,148
+  worst / 174,009 → 170,939 mean, i.e. 1.155x → 1.139x worst and 1.137x → 1.117x
+  mean against C**. The win is **−3,061 on every frame, worst and mean alike**,
+  and that uniformity is the point: `post` runs a fixed 512 iterations per frame
+  regardless of content, so this is a *content-independent* saving, unlike the
+  multiply-bound kernels whose cost tracks the data.
+- **2026-11-18 — the kernel table is re-derived with bit-exact arms, and three
+  "deficits" turn out to be measurement artifacts.** Every by-difference arm
+  worked by *removing* a stage, so every later stage multiplied different data and
+  the arm charged the downstream change to the part it removed. Measured directly:
+  `pre`'s delta was **1.61x too large at the densest frame** (31,150 vs a true
+  19,336), and the inflation tracked frame density exactly. Three arms now *add a
+  second identical instance* instead of removing one — `attrib-pre2` (idempotent),
+  `attrib-post2` (idempotent), `attrib-entropy2` (replay `dec_chan` from a saved
+  `BitReader`, which is `Copy`) — so downstream data is unperturbed and the pins
+  still PASS. Clean result at f83: **fft 68,694 (32.9%, derived) / entropy 61,751
+  (29.6%) / ola 30,521 (14.6%) / post 23,682 (11.3%) / pre 19,336 (9.3%) / ms+wrapper
+  4,883 (2.3%)**, closing to −2.4% of `synth` (the old table over-counted by
+  +5.9%). **Corrections: `pre` is 1.00x C at the gate frame and 0.91x on the mean;
+  `ola` is 1.00x / 0.98x; ms is 0.64x on the mean — three of six parts are at or
+  ahead of C.** Retired with it: the file's `pre 1.22x/1.23x/1.36x/1.61x` ladder
+  entries and the claim that `pre` was "the worst kernel ratio left". **A limit
+  the numbers impose, recorded so no one re-derives it the hard way:** because the
+  audit put the data in `Rs`, kernel cost now varies with content by *more* than
+  the gaps being judged (`pre` 1.20x, `post` 1.15x, `fft` 1.13x, `ola` 1.08x,
+  entropy 26x across our own frames; C's entropy row sits at our 43rd percentile).
+  Single-frame ratios cannot separate a deficit from a frame-mix difference — only
+  an all-frames mean on the same corpus can, which is why the `cross` row is the
+  one to quote.
 
 - **2026-11-17 — the frame pointer is gone: the GBA build target is now a
   checked-in spec, and it is worth 0.6 points of the frame.**
