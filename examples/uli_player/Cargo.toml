@@ -3,7 +3,7 @@ name = "uli-player"
 version = "0.1.0"
 edition = "2024"
 
-# ULI2's product player (PLAN-OF-RECORD.md, PR D): one paced decode-and-play loop
+# ULI2's product player (RECORD.md, PR D): one paced decode-and-play loop
 # over the `uli-playback` seam, the 32,768 Hz timer/DMA/FIFO chain, a live text UI
 # read from the ULA2 track table, and the underrun/period ledger U5 is gated on.
 #

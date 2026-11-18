@@ -79,7 +79,7 @@ asm-ola = []
 # ops and two `stmia` per **four** coefficients — 14 instructions per 4 against
 # the Rust scalar loop's 9 per 1. M/S was the last hot loop with no kernel at
 # all and the worst ratio in the decoder (9,861 cycles at the gate frame,
-# 2.24x the C record's ~4,400); see PLAN-OF-RECORD.md "Root-cause audit
+# 2.24x the C record's ~4,400); see RECORD.md "Root-cause audit
 # (2026-11-16)". On by default, with the Rust loop left in place as the
 # in-image control.
 #
@@ -97,7 +97,7 @@ asm-post = []
 
 # **Measurement-only: by-difference attribution arms.** Each flag removes exactly
 # one part of the product frame so `examples/uli_bench` can attribute the frame
-# by difference inside one source tree (PR C's method; see PLAN-OF-RECORD.md
+# by difference inside one source tree (PR C's method; see RECORD.md
 # "Critical path to real time", Step 0). They are **timing-only**: the removed
 # work changes the decoded samples, so the bench's pins fail by construction in
 # these builds and only the timed window is quoted. The flags are const-folded
