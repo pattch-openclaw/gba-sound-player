@@ -1310,12 +1310,47 @@ impl<'a, 's> GbaDecoder<'a, 's> {
             // it in memory, and the measured cost of that was a store of
             // `next`/`hw`/`valid`/`bad` on every refill and every skip.
             unsafe {
+                #[cfg(feature = "attrib-entropy2")]
+                let br0 = br;
                 let (nb0, next) =
                     dec_chan(tables, hot.x[0].as_mut_ptr(), step, br, &mut ops, &mut diag);
                 br = next;
+                // `attrib-entropy2`: replay the channel from the saved reader.
+                // `dec_chan` is a deterministic function of (tables, reader,
+                // step), so the replay writes byte-identical coefficients and
+                // returns the same cursor — bit-exact, and the delta is exactly
+                // one channel decode. (`Ops` counters double-count in this arm;
+                // they are product-build no-ops, and the arm is never built with
+                // `verify`.)
+                #[cfg(feature = "attrib-entropy2")]
+                {
+                    let (_, next) = dec_chan(
+                        tables,
+                        hot.x[0].as_mut_ptr(),
+                        step,
+                        br0,
+                        &mut ops,
+                        &mut diag,
+                    );
+                    br = next;
+                }
+                #[cfg(feature = "attrib-entropy2")]
+                let br1 = br;
                 let (nb1, next) =
                     dec_chan(tables, hot.x[1].as_mut_ptr(), step, br, &mut ops, &mut diag);
                 br = next;
+                #[cfg(feature = "attrib-entropy2")]
+                {
+                    let (_, next) = dec_chan(
+                        tables,
+                        hot.x[1].as_mut_ptr(),
+                        step,
+                        br1,
+                        &mut ops,
+                        &mut diag,
+                    );
+                    br = next;
+                }
                 (nb0, nb1)
             }
         };
@@ -1358,19 +1393,36 @@ impl<'a, 's> GbaDecoder<'a, 's> {
         // `cfg` folds away and this is exactly the product sequence.
         #[cfg(not(feature = "attrib-pre"))]
         crate::pre_kernel(&self.hot.x[0], &mut self.hot.buf);
+        // `attrib-pre2`: a *second* `pre` call. Idempotent, so `z` is unchanged
+        // and the FFT sees the same data — the delta is one real `pre`, with none
+        // of `attrib-pre`'s stale-`z` contamination. Bit-exact, so pins PASS.
+        #[cfg(feature = "attrib-pre2")]
+        crate::pre_kernel(&self.hot.x[0], &mut self.hot.buf);
         #[cfg(not(feature = "attrib-fft"))]
         crate::fft_kernel(&mut self.hot.buf);
         #[cfg(not(feature = "attrib-post"))]
-        crate::post(&self.hot.buf, &mut self.hot.x[0]);
+        crate::post_kernel(&self.hot.buf, &mut self.hot.x[0]);
+        // `attrib-post2`: `post` reads `z` and writes `y`, so a second call
+        // writes the same bytes and every later stage sees the data it would
+        // have. Delta = one real `post`; bit-exact.
+        #[cfg(feature = "attrib-post2")]
+        crate::post_kernel(&self.hot.buf, &mut self.hot.x[0]);
         #[cfg(not(feature = "attrib-ola"))]
         crate::ola_kernel(&self.hot.x[0], &mut self.hot.p[0], out8l, out16l);
 
         #[cfg(not(feature = "attrib-pre"))]
         crate::pre_kernel(&self.hot.x[1], &mut self.hot.buf);
+        #[cfg(feature = "attrib-pre2")]
+        crate::pre_kernel(&self.hot.x[1], &mut self.hot.buf);
         #[cfg(not(feature = "attrib-fft"))]
         crate::fft_kernel(&mut self.hot.buf);
         #[cfg(not(feature = "attrib-post"))]
-        crate::post(&self.hot.buf, &mut self.hot.x[1]);
+        crate::post_kernel(&self.hot.buf, &mut self.hot.x[1]);
+        // `attrib-post2`: `post` reads `z` and writes `y`, so a second call
+        // writes the same bytes and every later stage sees the data it would
+        // have. Delta = one real `post`; bit-exact.
+        #[cfg(feature = "attrib-post2")]
+        crate::post_kernel(&self.hot.buf, &mut self.hot.x[1]);
         #[cfg(not(feature = "attrib-ola"))]
         crate::ola_kernel(&self.hot.x[1], &mut self.hot.p[1], out8r, out16r);
 

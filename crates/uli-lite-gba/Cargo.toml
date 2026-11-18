@@ -24,7 +24,7 @@ uli-lite = { path = "../uli-lite", features = ["kernels", "product"] }
 # (`frame core`, and the isolated `kern`/`ovl` arms), so turning the fast path on
 # does not remove the comparison — it just stops the product being slow by
 # default. Use `--no-default-features` to get the pure-Rust-kernel build.
-default = ["asm-fft", "asm-pre", "asm-ola", "asm-ms", "iwram-tables"]
+default = ["asm-fft", "asm-pre", "asm-ola", "asm-post", "asm-ms", "iwram-tables"]
 
 # Operation counts (`Ops`) and format-rule diagnostics (`xover`/`hfnz`) on the
 # hot path. Off by default: they cost ~30,000 cycles on the measured worst frame
@@ -87,6 +87,14 @@ asm-ola = []
 # `Rs` early-termination question here: the only lever is the load/store shape.
 asm-ms = []
 
+# Hand-written ARM post-twiddle (`asm/post_arm.s`): the reference's 14-instruction
+# loop in place of LLVM's 18, which was the last Rust kernel on the product path.
+# Measured 23,682 cycles at the gate frame / 23,458 mean against the C record's
+# 21,800, and it is the one kernel whose excess is nameable in instructions
+# rather than frame density. On by default, with the Rust `post` left in place as
+# the in-image control.
+asm-post = []
+
 # **Measurement-only: by-difference attribution arms.** Each flag removes exactly
 # one part of the product frame so `examples/uli_bench` can attribute the frame
 # by difference inside one source tree (PR C's method; see PLAN-OF-RECORD.md
@@ -101,6 +109,27 @@ asm-ms = []
 # the run instead of measuring it. It is inert in the product build.
 attrib-timing = []
 attrib-pre = ["attrib-timing"]
+# **Measurement-only: the clean `pre` arm (2026-11-18).** `attrib-pre` *removes*
+# `pre`, which leaves a stale `z` for the FFT to multiply — and the FFT\'s cost is
+# data-dependent through `Rs`, so that delta is `pre` + a change in the FFT\'s
+# cost. `attrib-pre2` instead calls `pre` a **second time**: `pre` is idempotent
+# (deterministic function of `x` into `z`), so the second call writes the same
+# bytes and every downstream stage sees exactly the data it would have, while the
+# delta is one real `pre` call. This is the only attribution arm that is
+# **bit-exact**, so its pins PASS and the number is not confounded.
+attrib-pre2 = []
+# The clean `post` arm: `post(z, y)` writes `y` from `z` and touches nothing
+# else, so a second call is idempotent. Delta = one real `post`; bit-exact.
+attrib-post2 = []
+
+# **The clean entropy arm.** `attrib-entropy` *removes* `dec_chan`, which freezes
+# the bit cursor so every frame synthesises one stale spectrum — the delta then
+# contains the whole synthesis block's change, not the entropy path.
+# `attrib-entropy2` replays each channel from a **saved `BitReader`** (it is
+# `Copy`): the replay writes byte-identical coefficients and returns the same
+# cursor, so everything downstream is unperturbed and the delta is exactly one
+# channel decode. Bit-exact, so pins PASS.
+attrib-entropy2 = []
 attrib-fft = ["attrib-timing"]
 attrib-post = ["attrib-timing"]
 attrib-ola = ["attrib-timing"]

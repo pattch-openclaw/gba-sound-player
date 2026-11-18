@@ -91,6 +91,12 @@ iwram-tables = ["uli-lite-gba/iwram-tables"]
 # must never be quoted as a product number. The banner line `attrib mask=...`
 # makes every log self-describing.
 attrib-pre = ["uli-lite-gba/attrib-pre"]
+# The clean `pre` arm: calls `pre` twice (idempotent), so downstream data is
+# unperturbed and the pins still PASS. See uli-lite-gba/Cargo.toml.
+attrib-pre2 = ["uli-lite-gba/attrib-pre2"]
+attrib-post2 = ["uli-lite-gba/attrib-post2"]
+# The clean entropy arm (replay from a saved reader). See uli-lite-gba.
+attrib-entropy2 = ["uli-lite-gba/attrib-entropy2"]
 attrib-fft = ["uli-lite-gba/attrib-fft"]
 attrib-post = ["uli-lite-gba/attrib-post"]
 attrib-ola = ["uli-lite-gba/attrib-ola"]
@@ -135,6 +141,10 @@ asm-ola = ["uli-lite-gba/asm-ola"]
 # the on-target twin (`ovl twin ... msasm=true`) can be named explicitly in
 # `make uli-kernel-twin`, the way asm-fft/asm-pre/asm-ola are.
 asm-ms = ["uli-lite-gba/asm-ms"]
+#
+# The hand-written post-twiddle (uli-lite-gba/asm-post). On by default in the
+# crate; this passthrough exists so the on-target twin can be named explicitly.
+asm-post = ["uli-lite-gba/asm-post"]
 
 [dependencies]
 uli-lite = { path = "../../crates/uli-lite", features = ["kernels"] }

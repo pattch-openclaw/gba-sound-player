@@ -748,7 +748,7 @@ claims to be measured, not inherited from `gba-audio`.
 | **U1 — reference** | `uli-lite` remains a bit-exact, host-testable reference and oracle (no longer a portable-product claim). | `make uli-test`; committed corpus; thumbv4t `check` |
 | **U2 — bit-exact host** | The Rust core matches the C integer reference frame-for-frame on the committed corpus and rejects malformed frames without panic. | `make uli-test`; pinned hashes |
 | **U3 — bit-exact product** | The product kernel set (`ArmKernels`) decodes the corpus to the pinned int8/int16 frames, in the host full-frame twin and on the target. **Met (PR A).** | `make uli-bench` (both arms + on-target twin); `make uli-overlay-test` (host kernel + decoder twins) |
-| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Met on the album corpus (PR E, 2026-11-15): decode 220,062 = 83.94% worst; gate total 251,712 = 96.02% worst / 84.40% mean in the player model (the same arm verifying in-loop reads 98.33% and starves 12.06 s, which is the harness); ceiling written down as the 262,144-cycle period, 10,432 cycles of margin at the worst frame; no UI, mGBA only.** Ladder: 204% (PR B) -> 200% (split `huff`) -> 186% -> 175% -> 164% (asm FFT) -> 162% -> 157% (`iwram-tw`) -> 148% (`iwram-tables`) -> 138% (C-3d) -> **274,198 / 232,090 = 105% / 89%** (C-3). **Step 0 (2026-11-15) attributed the worst frame (f98) by difference in the product image: synthesis 162,987 (59%), entropy/dequant/M-S 110,741 (40%), wrapper 486 - i.e. 69% of the 92,286-cycle distance to the C worst-frame shape is the entropy path and 31% synthesis. Per channel the kernels are 1.10-1.33x C (pre 1.22x, fft 1.33x, post 1.10x, ola 1.11x), so the previous 'asm kernels first, ~194,000 prize' order is retired; the live order is in `crates/uli-lite/PLAN-OF-RECORD.md` ('Critical path to real time').** **Root-cause audit (2026-11-16), the loose-ends sweep (2026-11-16) and the target-spec change (2026-11-17): the album decode wall is 209,162 worst (f16,204) / 178,341 mean = 79.79% / 68.03%, and the gate total is **240,705 worst / 209,721 mean = 91.82% / 80.00% — 8.18 points of margin at the worst frame, zero starved periods over 16,552** — so the ceiling in use is still the period, not a playback claim on hardware (mGBA, no UI). The 129-frame iteration corpus reads 208,854 / f83 / 182,119 mean = 79.67% / 69.47%. Ratio to C: 1.16x worst, **1.03x mean**. The last step is a checked-in target spec (`targets/thumbv4t-gba.json`, `frame-pointer: may-omit`), which is why the build target in `.cargo/config.toml` is not the built-in triple; `make target-spec-check` keeps it honest.** | `make uli-bench`; mGBA, then hardware |
+| **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling. **Met on the album corpus (PR E, 2026-11-15): decode 220,062 = 83.94% worst; gate total 251,712 = 96.02% worst / 84.40% mean in the player model (the same arm verifying in-loop reads 98.33% and starves 12.06 s, which is the harness); ceiling written down as the 262,144-cycle period, 10,432 cycles of margin at the worst frame; no UI, mGBA only.** Ladder: 204% (PR B) -> 200% (split `huff`) -> 186% -> 175% -> 164% (asm FFT) -> 162% -> 157% (`iwram-tw`) -> 148% (`iwram-tables`) -> 138% (C-3d) -> **274,198 / 232,090 = 105% / 89%** (C-3). **Step 0 (2026-11-15) attributed the worst frame (f98) by difference in the product image: synthesis 162,987 (59%), entropy/dequant/M-S 110,741 (40%), wrapper 486 - i.e. 69% of the 92,286-cycle distance to the C worst-frame shape is the entropy path and 31% synthesis. Per channel the kernels are 1.10-1.33x C (pre 1.22x, fft 1.33x, post 1.10x, ola 1.11x), so the previous 'asm kernels first, ~194,000 prize' order is retired; the live order is in `crates/uli-lite/PLAN-OF-RECORD.md` ('Critical path to real time').** **Root-cause audit (2026-11-16), loose-ends sweep, target-spec change (2026-11-17) and the asm `post` kernel (2026-11-18): the album decode wall is 206,101 worst (f16,204) / 175,280 mean = 78.62% / 66.86%, and the gate total is **237,646 worst / 206,637 mean = 90.65% / 78.83% — 9.35 points of margin at the worst frame, zero starved periods over 16,552** — so the ceiling in use is still the period, not a playback claim on hardware (mGBA, no UI). On the `cross` corpus — the 12-track album the C record's own numbers were measured on — the decode wall is 207,148 worst (f27,693) / 170,939 mean = 79.02% / 65.21%, i.e. **1.139x worst / 1.117x mean against C**. The 129-frame iteration corpus reads 205,793 / f83 / 179,058 = 78.50% / 68.31%. The build target is a checked-in spec (`targets/thumbv4t-gba.json`, `frame-pointer: may-omit`) and **all five hot kernels on the product path (`pre`, `fft`, `post`, `ola`, M/S) are now hand-written ARM asm**, each twinned against the Rust reference on the ARM7TDMI.** | `make uli-bench`; mGBA, then hardware |
 | **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | **Met on hardware (GBA SP, 2026-11-16) for the three player ROMs, two runs each, identical to the cycle**: headphone 94.52% worst / 81.39% mean, speaker 95.89% / 82.61%, two-track 94.56% / 80.92%, all with 0 underruns; the GBA 001 was unavailable. **With one open defect**: the 1 Hz text redraw delays the feeder past the DMA's grace on 104 of 16,553 periods (audible splices; `late`, not underruns), so the audio default is the end-only screen until the UI is made non-blocking. **Met in mGBA too.** `make uli-player` (headphone) and `make uli-player-speaker`: zero underruns, period audit closed (periods = served + 1 tail), ring full, three builds measured (2026-11-16). The hardware half is still owed — two units × two runs of *this* player; the manual listen that has happened is the PR E audio-only ROM, which carried no counted ledger. |
 | **U6 — memory** | IWRAM/EWRAM/stack stay inside the product budget with the UI and feeder linked. | linker map + runtime stack check |
 | **U7 — licensing/spec** | A public crate, if published, has a permissive license and a standalone format specification; otherwise it remains `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** |
@@ -847,6 +847,41 @@ product codec without pretending one codec covers both jobs.
 
 ## Decision log
 
+- **2026-11-18 — `post` as ARM asm: the product path is now all hand-written
+  kernels, and the kernel table was re-derived with bit-exact arms.** `post` was
+  the last Rust kernel in the decode path, and the only one whose excess was
+  *nameable in instructions* rather than frame density: **18 per iteration against
+  the reference's 14**, every extra one addressing (the `z` pair and the twiddles
+  each cost an `add`+`ldr` or two `ldr` where the reference does one `ldmia`; the
+  backward `Y` store cost a computed address where the reference post-indexes).
+  `asm/post_arm.s` is that 14-instruction loop, and it is worth **−3,061 cycles on
+  *every* frame** — worst and mean alike, because `post` always runs 512
+  iterations regardless of content. Album decode wall **209,162 → 206,101 worst /
+  178,341 → 175,280 mean**; **gate total 240,705 → 237,646 (91.82% → 90.65%) /
+  209,721 → 206,637 (80.00% → 78.83%)**, margin **8.18 → 9.35 points**; and on the
+  matched `cross` corpus — the 12-track album C's own record was measured on —
+  **210,209 → 207,148 worst / 174,009 → 170,939 mean = 1.139x / 1.117x C**. Bit-
+  exact: both pins on every corpus, `postasm=true` kernel twin PASS, two runs
+  identical to the cycle. **The same day produced a correction that matters more
+  than the win.** The by-difference attribution arms worked by *removing* a
+  stage, so every later stage multiplied different data and the arm charged the
+  downstream change to the part it removed — measured at **1.61x inflation for
+  `pre` at the densest frame**. Three arms now *add a second identical instance*
+  instead (`attrib-pre2`, `-post2`, `-entropy2`, the last replaying `dec_chan`
+  from a saved `BitReader`, which is `Copy`); all three are **bit-exact**, so
+  their pins PASS and nothing is confounded. The clean table: **fft 32.9%,
+  entropy 29.6%, ola 14.6%, post 11.3%, pre 9.3%, ms+wrapper 2.3%**, closing to
+  −2.4% of `synth` where the old table over-counted by +5.9%. **Three parts the
+  record had called deficits are at or ahead of C: `pre` 1.00x worst / 0.91x mean,
+  `ola` 1.00x / 0.98x, M/S 0.64x mean** — and the file's `pre 1.22x/1.23x/1.36x`
+  ladder entries are artifacts. **Recorded limit:** because the audit put the data
+  in `Rs`, kernel cost now varies with content by more than the gaps being judged
+  (`pre` 1.20x, `post` 1.15x, `fft` 1.13x, `ola` 1.08x, entropy 26x; C's entropy
+  row sits at our 43rd percentile), so single-frame ratios cannot rank deficits —
+  only an all-frames per-part mean on the same corpus can. **Also corrected:** the
+  file's "1.03x on the mean" was a mis-transcription (our mean divided by C's
+  worst); the honest figure was 1.17x, now **1.117x**.
+
 - **2026-11-17 — the frame pointer: the build target is now a checked-in spec.**
   The last open audit item was the register the target spec spends on a frame
   pointer in every Rust function. It is now taken, and the mechanism matters more
@@ -898,8 +933,9 @@ product codec without pretending one codec covers both jobs.
   address then depends on `end`. So that category's ceiling is **~2,000**, not the
   projected 3,500-5,500, and the same limit — predication plus the register the
   target spec spends on a frame pointer — is what stands between the decode wall
-  and C's number. **On the mean we are now 1.03x C; the remaining gap is one
-  worst-frame shape, not a systematic deficit.**
+  and C's number. **On the mean we are 1.17x C, not 1.03x** — that earlier figure
+  was a mis-transcription (our mean divided by C's worst) corrected 2026-11-18, so
+  the remaining gap is systematic rather than one worst-frame shape.
   **The frame-pointer half of that limit then landed too (2026-11-17):** the GBA
   build target is now a checked-in spec — `targets/thumbv4t-gba.json`, the pinned
   toolchain's own `thumbv4t-none-eabi` spec with one field changed,
@@ -912,6 +948,20 @@ product codec without pretending one codec covers both jobs.
   **inert** (byte-identical ROM), and `frame-pointer: "non-leaf"` would have
   helped **nothing** because `dec_chan` is non-leaf — only `may-omit` frees the
   register where it matters. See [`targets/README.md`](targets/README.md).
+  **`post` then became the last Rust kernel to go (2026-11-18):** it was the one
+  kernel whose excess was nameable in instructions rather than frame density —
+  **18 per iteration against the reference's 14**, every extra one addressing — and
+  the reference's loop is worth **−3,061 cycles on *every* frame** (content-
+  independent, because `post` always runs 512 iterations). Album decode wall
+  **209,162 → 206,101 worst / 178,341 → 175,280 mean**; gate total **240,705 →
+  237,646 (91.82% → 90.65%) / 209,721 → 206,637 (80.00% → 78.83%)**, margin
+  **8.18 → 9.35 points**; and on the matched `cross` corpus **210,209 → 207,148
+  worst / 174,009 → 170,939 mean = 1.139x / 1.117x C**. The same day, the kernel
+  table was re-derived with **bit-exact** attribution arms (`attrib-pre2`,
+  `-post2`, `-entropy2`), which showed that three parts previously reported as
+  deficits are at or ahead of C: **`pre` 1.00x worst / 0.91x mean, `ola` 1.00x /
+  0.98x, M/S 0.64x mean**. The old by-difference arms were inflated by up to 1.61x
+  because removing a stage changed the data every later stage multiplied.
 
 - **2026-11-16 — aggressive performance targeting, after a root-cause audit against
   the C decoder's code.** Six rounds of loop tuning had reached ~1% of the frame
