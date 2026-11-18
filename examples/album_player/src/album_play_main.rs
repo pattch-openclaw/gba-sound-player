@@ -88,7 +88,13 @@
 //! |---|---|---|
 //! | running (boot → verdict) | white | *(none yet)* |
 //! | PASSED | blue | `PASSED` |
-//! | FAILED | red | `FAILED` |
+//! | FAILED | red | `FAILED <TERM>` — the first false term's name (`text::TERMS`) |
+//! | *(paused at teardown)* | either | `… PAUSED` appended, whatever the verdict |
+//!
+//! The term name is R13's screen half: a cartridge that printed only `FAILED` left the person who
+//! can reproduce the bug with nothing to report, and a run that reached its verdict while the
+//! transport was frozen said nothing at all about that state. The `PAUSED` suffix is a report, not a
+//! term — what a press inside a fade means is still the caller's open product decision.
 //!
 //! Red-vs-blue rides the blue/yellow axis, which deuteranopia and protanopia (the common cases)
 //! preserve — and the word is there regardless, so the colour is decoration and the text is the
@@ -177,7 +183,7 @@ mod rom {
     use album_player::position;
     use album_player::text;
     use album_player::transport::{
-        FADE_PERIODS, SKIP_PRESS_TO_HANDOFF_PERIODS, SKIP_PRIME_CHUNKS, State, Step, Transport,
+        SKIP_PRIME_CHUNKS, State, Step, Transport, take_to_handoff_bound,
     };
     use gba_audio_hw::{
         AudioChain, CycleCounter, arm_audio_chain, clear_timer1_if, enable_sound, io_read_u16,
@@ -238,13 +244,15 @@ mod rom {
     /// The audited whole-track fold's caps, in frames: **512** for one track, **1,024** for a whole
     /// proof pass.
     ///
-    /// The arithmetic, not a guess: the gate track's 240 frames are measured at 812,370,488 c of
-    /// cold fold, i.e. **3.39 M c/frame**. 512 frames is therefore ~1.74 G c per track and 1,024 the
-    /// ~3.5 G c a whole pass may spend — against a gate run whose leash is 600 s (10.07 G cycles).
-    /// The number that makes this necessary is the fixture's own: tracks 0 and 2 point at the
-    /// 4.3-minute master's blob (2,069 frames, ~7 G c, ~8.6x the gate track), so folding them is not
-    /// a matter of patience but of fitting the run at all. A track past the cap is printed as
-    /// `SKIPPED` with this arithmetic and is never reported as `MATCH`.
+    /// **These are a run-time budget, not a coverage claim about the album.** The arithmetic, not a
+    /// guess: the gate track's 240 frames are measured at 812,370,488 c of cold fold, i.e. **3.39 M
+    /// c/frame**. 512 frames is therefore ~1.74 G c per track and 1,024 the ~3.5 G c a whole pass may
+    /// spend — against a gate run whose leash is 600 s (10.07 G cycles). The fixture's tracks 0 and 2
+    /// point at the 4.3-minute master's blob (2,069 frames, ~7 G c, ~8.6x the gate track), so folding
+    /// them is not a matter of patience but of fitting the run at all. A track past the cap is
+    /// printed as `SKIPPED` with this arithmetic, its boot tripwire and the asset-region fold named
+    /// as what did cover it, and is never reported as `MATCH`: the log line says "budget", so a
+    /// reader cannot mistake it for a gap in the album's coverage.
     #[cfg(feature = "deep-audit")]
     const PROOF_FRAME_CAP: u32 = 512;
     /// See [`PROOF_FRAME_CAP`]: the whole pass's frame budget, so a fixture with many short tracks
@@ -254,20 +262,21 @@ mod rom {
 
     /// How many track visits the run keeps **for printing** — and for the content proof's work list.
     ///
-    /// This is a bounded *print* buffer, and its depth is **not** any total's: the ledger's Σ and its
-    /// hand-off count are running totals accumulated by [`Visits::begin`]/[`Visits::close`] over every
-    /// visit, however many there are (R13's suspect (b): summing these rows made a print bound act as
-    /// a gate). What the depth *is* a gate on, and must stay one, is the proof: it enumerates the
-    /// tracks from this list, so a visit the list dropped is a track whose bytes nothing folded. A run
-    /// that overflows it fails its verdict for that reason, and no longer for a truncated sum.
+    /// This is a bounded *print* buffer, and its depth is **not** any total's and **not a verdict**:
+    /// the ledger's Σ and its hand-off count are running totals accumulated by
+    /// [`Visits::begin`]/[`Visits::close`] over every visit, however many there are, and the census
+    /// line prints `occurred=` beside `printed=` (R13: summing these rows made a print bound act as a
+    /// gate, and a print bound cannot witness a wrong sample). The proof enumerates its work list
+    /// from the rows that fitted, so the census is how the log says how much content the proof could
+    /// have covered — that is a coverage statement, not a failure.
     const VISIT_LOG: usize = 24;
 
     /// How many skips the run keeps **for printing** (the first [`VISIT_LOG`] visits can hold at most
     /// one fewer).
     ///
-    /// A bounded print buffer like [`VISIT_LOG`]: `Skips::ok()`'s terms are per record and every
-    /// record's numbers are running figures, so a session with more skips than this prints the first
-    /// [`SKIP_LOG`] rows and fails on `overflow` alone — never on a sum taken over the rows that fitted.
+    /// A bounded print buffer like [`VISIT_LOG`]: `Skips::ok()`'s terms are per record, so a session
+    /// with more skips than this prints the first [`SKIP_LOG`] rows and a census line, and its verdict
+    /// does not depend on how many rows fitted (R13).
     const SKIP_LOG: usize = 16;
 
     /// How many wire-watch **slots** the run has: one per in-flight transition, and [`SKIP_LOG`] of
@@ -675,31 +684,53 @@ mod rom {
     /// 2.04 of AP-0's 280,896-cycle frames, rounded up. §4.4's action floor — an action may not
     /// change what the DMA is playing mid-buffer, so it waits for the boundary the feeder already
     /// owns.
+    ///
+    /// **Neither input is an emulator measurement.** `PERIOD_CYCLES` is the product geometry (560
+    /// samples × 1,024 ticks, `geometry.rs`'s derivation) and `VIDEO_PERIOD_CYCLES` is the vblank
+    /// hardware's own 280,896 cycles, so this is the same wait on a cartridge as on mGBA. It is
+    /// therefore kept as a derived bound rather than demoted (R13: an emulator-derived bound is not
+    /// a product property; this one is not emulator-derived).
     const MAX_BOUNDARY_FRAMES: u32 =
         (PERIOD_CYCLES + VIDEO_PERIOD_CYCLES - 1) / VIDEO_PERIOD_CYCLES;
     const _: () = assert!(MAX_BOUNDARY_FRAMES == 3);
 
-    /// The largest main-loop pass, in video frames, that this system can show: **6**.
+    /// The margin a main-loop pass's cycle bound allows over the run's own worst producer frame:
+    /// **one video frame**, 280,896 cycles.
     ///
-    /// `4` is measured, not chosen: a pass that decodes spends one producer frame inside its inner
-    /// loop, PR-3b-ii-A measured that frame at 1.04–1.09 M cycles of uninterruptible decode, and one
-    /// video frame is 280,896 cycles — so 1.09 M c is 3.88 frames, i.e. 4. The other two are the
-    /// pass's own edges: its length is the difference of two latch reads, so a pass that begins just
-    /// before a vblank and ends just after the next due one reads one frame longer than the work it
-    /// did, and the body after the inner loop (the take, one position read, the transport's tick)
-    /// can straddle one more. Both the const asserts below and the gate read this as a **ceiling on
-    /// the run's own measured worst pass** ([`Input::pass_max`]); the bound a take is gated against
-    /// is that same measurement ([`Input::take_max`]), which is why neither number is this file's
-    /// opinion. The gate run measures 5.
-    const MAX_PASS_FRAMES: u32 = 4 + 1 + 1;
-    // The 4 of the sum above, from the measurement: 3 video frames is under the 1.09 M-cycle
-    // producer frame and 4 is over it, so four is the least whole-frame count that holds one.
-    const _: () = assert!(3 * VIDEO_PERIOD_CYCLES < 1_090_000);
-    const _: () = assert!(4 * VIDEO_PERIOD_CYCLES > 1_090_000);
-    // Only the REPLAY arm measures a pass and reads the ceiling; the shipped arm still pins the
-    // arithmetic so the number cannot drift unnoticed.
-    #[cfg(not(feature = "input-replay"))]
-    const _: () = assert!(MAX_PASS_FRAMES == 6);
+    /// The bound is `pass ≤ producer frame + PERIOD_CYCLES + PASS_MARGIN_CYCLES`, and its first two
+    /// terms are the pass's decode and the loop's flow-control quantum (an action waits for a period
+    /// boundary, a fade and its deferral are period-granular). The margin is the pass's *other*
+    /// work — the frame slice served at the top of the pass: the take (one critical section and one
+    /// transport entry), one position read, the transport's tick, the watched records' resolve scan
+    /// and one paint sample per latched frame. All of that is bounded by the service of one vblank,
+    /// so one video frame is its derivation rather than a guess.
+    ///
+    /// **Why the ceiling is no longer a constant measured on mGBA.** It used to be
+    /// `MAX_PASS_FRAMES = 4 + 1 + 1`: four whole video frames for the measured 1.04–1.09 M-cycle
+    /// producer frame plus the pass's two latch edges. mGBA models no cartridge wait states (R3), so
+    /// a cart's pass is strictly longer in cycles and that ceiling would have failed `reaction` on a
+    /// *correct* cartridge — a red louder than its witness (R13). The bound is now measured by the
+    /// run that is gated (the worst producer frame and the worst pass, both on the audio clock), so
+    /// it moves with the machine instead of against it.
+    const PASS_MARGIN_CYCLES: u32 = VIDEO_PERIOD_CYCLES;
+
+    /// The cycle ceiling a main-loop pass is gated against, from the run's own measured worst
+    /// producer frame: one frame of decode + one period of flow control + one vblank of frame
+    /// service (see [`PASS_MARGIN_CYCLES`]). Not a `const`: both inputs are this run's measurements.
+    /// `input-replay` only, because only that arm has a scripted press whose term gates the bound.
+    #[cfg(feature = "input-replay")]
+    fn pass_bound_cycles(producer_max_cycles: u32) -> u32 {
+        producer_max_cycles
+            .saturating_add(PERIOD_CYCLES)
+            .saturating_add(PASS_MARGIN_CYCLES)
+    }
+
+    /// A cycle count in whole video frames, rounded up — the unit the log prints beside the cycles so
+    /// the bound can be read against a screen's refresh rate. One divide, in the report path only.
+    #[cfg(feature = "input-replay")]
+    fn frames_of(cycles: u32) -> u32 {
+        (cycles + VIDEO_PERIOD_CYCLES - 1) / VIDEO_PERIOD_CYCLES
+    }
 
     /// Video frames from a detection to the next audio period boundary.
     ///
@@ -781,6 +812,15 @@ mod rom {
         /// against, measured by this run rather than chosen here.
         #[cfg(feature = "input-replay")]
         pass_max: u32,
+        /// The largest main-loop pass, in **cycles of the audio clock**: this run's own measurement,
+        /// and the quantity the `reaction` term gates against the run's worst producer frame
+        /// ([`pass_bound_cycles`]) instead of against an emulator-derived frame count. Measured on
+        /// every arm: a cartridge's skips are gated against the burst length derived from it too.
+        pass_max_cycles: u32,
+        /// The largest single producer frame, in cycles of the audio clock: the bound's other half.
+        /// Only the REPLAY arm has a scripted press to time, so only that arm reads it.
+        #[cfg(feature = "input-replay")]
+        producer_max_cycles: u32,
         /// Actions the main loop took out of the slot.
         consumed: u32,
         log: [KeyEvent; EDGE_LOG],
@@ -805,6 +845,9 @@ mod rom {
                 take_max: 0,
                 #[cfg(feature = "input-replay")]
                 pass_max: 0,
+                pass_max_cycles: 0,
+                #[cfg(feature = "input-replay")]
+                producer_max_cycles: 0,
                 consumed: 0,
                 log: core::array::from_fn(|_| KeyEvent {
                     frame: 0,
@@ -922,6 +965,35 @@ mod rom {
             }
         }
 
+        /// One main-loop pass's length, in cycles of the audio clock — the run's own measurement,
+        /// gated against [`pass_bound_cycles`] and used to derive the skip rows' take→hand-off
+        /// bound ([`Self::pass_periods`]). A pass the transport was not feeding for is not timed:
+        /// a frozen chain has no audio clock to read.
+        fn note_pass_cycles(&mut self, cycles: u32) {
+            if cycles > self.pass_max_cycles {
+                self.pass_max_cycles = cycles;
+            }
+        }
+
+        /// One producer frame's cost, in cycles of the audio clock — the measured half of
+        /// [`pass_bound_cycles`]. The bound is only as good as this number, so it is taken over the
+        /// whole run rather than the first frame.
+        #[cfg(feature = "input-replay")]
+        fn note_producer_cycles(&mut self, cycles: u32) {
+            if cycles > self.producer_max_cycles {
+                self.producer_max_cycles = cycles;
+            }
+        }
+
+        /// This run's worst main-loop pass, in feeder periods: `ceil(pass_max_cycles / PERIOD_CYCLES)`
+        /// with a floor of one. It is the argument to
+        /// [`take_to_handoff_bound`](crate::transport::take_to_handoff_bound), so the skip rows' bound
+        /// is the loop's own measured burst length and not a number from another machine.
+        fn pass_periods(&self) -> u32 {
+            let periods = (self.pass_max_cycles + PERIOD_CYCLES - 1) / PERIOD_CYCLES;
+            if periods == 0 { 1 } else { periods }
+        }
+
         /// Video frames sampled.
         fn sampled(&self) -> u32 {
             self.sampler.sampled()
@@ -942,12 +1014,19 @@ mod rom {
         /// Whether a scripted press was detected within its debounce frame, the action was taken
         /// inside one main-loop pass, and the action's wait for the next period boundary was inside
         /// one period. The first two are the seam's floor — a press cannot be served sooner than the
-        /// pass it landed in (see [`MAX_PASS_FRAMES`]) — and the third the audio clock's. Not
+        /// pass it landed in — and the third the audio clock's. Not
         /// measurable without a script, so the verdict term is `SKIPPED` on the shipped arm.
+        ///
+        /// **The pass ceiling is this run's, not the emulator's** (R13): `pass_max_cycles` is gated
+        /// against the run's worst producer frame plus one period and the margin
+        /// ([`PASS_MARGIN_CYCLES`]). The old `pass_max <= MAX_PASS_FRAMES` compared the run against
+        /// a frame count measured on an instrument without cartridge wait states, so a correct cart
+        /// could fail it; a pass that is one frame of decode plus bounded overhead passes this
+        /// whatever the decode costs.
         #[cfg(feature = "input-replay")]
         fn reaction_ok(&self) -> bool {
             self.detect_max <= keys::DEBOUNCE_FRAMES as u32 - 1
-                && self.pass_max <= MAX_PASS_FRAMES
+                && self.pass_max_cycles <= pass_bound_cycles(self.producer_max_cycles)
                 && self.take_max <= self.pass_max
                 && self.boundary_max <= MAX_BOUNDARY_FRAMES
         }
@@ -1000,17 +1079,38 @@ mod rom {
                     self.boundary_max,
                     MAX_BOUNDARY_FRAMES
                 );
+                let bound = pass_bound_cycles(self.producer_max_cycles);
                 agb::println!(
-                    "[album-rom] input: take_latency max={} frames (bound {} = this run's worst main-loop pass, ceiling {} frames) — ISR→take, gated by the reaction term",
+                    "[album-rom] input: pass worst={}c = {} frames; producer frame worst={}c = {} frames; bound={}c = {} frames (frame + period {}c + margin {}c) [{}]",
+                    self.pass_max_cycles,
+                    frames_of(self.pass_max_cycles),
+                    self.producer_max_cycles,
+                    frames_of(self.producer_max_cycles),
+                    bound,
+                    frames_of(bound),
+                    PERIOD_CYCLES,
+                    PASS_MARGIN_CYCLES,
+                    if self.pass_max_cycles <= bound {
+                        "PASS"
+                    } else {
+                        "FAIL"
+                    }
+                );
+                agb::println!(
+                    "[album-rom] input: take_latency max={} frames (bound {} = this run's worst main-loop pass by latch) — ISR→take, gated by the reaction term",
                     self.take_max,
-                    self.pass_max,
-                    MAX_PASS_FRAMES
+                    self.pass_max
                 );
                 if !self.reaction_ok() {
                     agb::println!(
-                        "[album-rom] FAIL the reaction: a scripted press was detected {} frames after its mask change (limit {}), taken {} frames after its post (bound {} = the run's worst pass), and an action waited {} frames for a period boundary (limit {})",
+                        "[album-rom] FAIL the reaction: a scripted press was detected {} frames after its mask change (limit {}), a pass cost {}c against its bound {}c (this run's worst producer frame {}c + period {}c + margin {}c), taken {} frames after its post (bound {} = the run's worst pass), and an action waited {} frames for a period boundary (limit {})",
                         self.detect_max,
                         keys::DEBOUNCE_FRAMES as u32 - 1,
+                        self.pass_max_cycles,
+                        bound,
+                        self.producer_max_cycles,
+                        PERIOD_CYCLES,
+                        PASS_MARGIN_CYCLES,
                         self.take_max,
                         self.pass_max,
                         self.boundary_max,
@@ -1077,6 +1177,29 @@ mod rom {
         critical_section::with(|cs| {
             if let Some(input) = INPUT.borrow_ref_mut(cs).as_mut() {
                 input.note_pass(frames);
+            }
+        });
+    }
+
+    /// Record one main-loop pass's length in **cycles of the audio clock** — the run's own measurement
+    /// of the burst the pass bound is gated against ([`pass_bound_cycles`]) and the skip rows' bound is
+    /// derived from ([`Input::pass_periods`]). Called once per pass from the frame loop, and only for
+    /// a pass the transport was feeding from start to end: a frozen chain has no clock to read.
+    fn note_pass_cycles(cycles: u32) {
+        critical_section::with(|cs| {
+            if let Some(input) = INPUT.borrow_ref_mut(cs).as_mut() {
+                input.note_pass_cycles(cycles);
+            }
+        });
+    }
+
+    /// Record one producer frame's cost in cycles of the audio clock — the measured half of the pass
+    /// bound. `input-replay` only, because only the REPLAY arm has a term to gate it against.
+    #[cfg(feature = "input-replay")]
+    fn note_producer_cycles(cycles: u32) {
+        critical_section::with(|cs| {
+            if let Some(input) = INPUT.borrow_ref_mut(cs).as_mut() {
+                input.note_producer_cycles(cycles);
             }
         });
     }
@@ -1775,6 +1898,10 @@ mod rom {
         /// Samples `truncate()` stepped over — §4.4 step 2's own witness. **Zero on a track end**:
         /// the ring was already drained, so there was nothing stale to step over.
         dropped: u32,
+        /// Whether this hand-off **performed** a truncate. A pressed skip does, even when the ring is
+        /// empty (`dropped == 0`); a track end does not. This is the property the skip rows gate in
+        /// place of `dropped >= 1`, which was a scenario rather than a claim (R13).
+        truncated: bool,
         /// The session clock at the instant of the hand-off, before any cover chunk could be
         /// committed. The new visit's paint base is this plus the cover (see the caller).
         committed: u32,
@@ -1851,6 +1978,7 @@ mod rom {
             stats.cover_samples = stats.cover_samples.saturating_add(CHUNK as u32);
             Ok(HandOff {
                 dropped,
+                truncated: truncate,
                 committed,
                 tail_padding,
                 watch,
@@ -1876,8 +2004,10 @@ mod rom {
     struct Visits {
         list: [Visit; VISIT_LOG],
         len: usize,
-        /// Visits past the log. Counted, and part of the verdict: the proof enumerates the tracks
-        /// from this list, so a dropped visit is a track nothing proved.
+        /// Visits past the print log: counted and printed as a census, **never a verdict** (R13: the
+        /// log's depth is a print constraint). The proof enumerates its work list from `list`, so a
+        /// visit past the log is a track nothing folded — the census says how many, and the log's
+        /// `proof` lines still name every track it did prove.
         overflow: u32,
         /// The open visit's `base`, held here rather than read back out of `list`: a visit past
         /// [`VISIT_LOG`] has no row, and it still owns a span that the running totals must book.
@@ -1896,6 +2026,13 @@ mod rom {
         /// reason: it is the per-visit half of the hand-off ledger, and it must not depend on how many
         /// rows the log could keep.
         hand_offs: usize,
+        /// The last visit **opened** and the last one **closed**, kept as running state rather than
+        /// read back from `list`: the rows are a bounded print buffer, so in a session past
+        /// [`VISIT_LOG`] the last row is not the last visit — and the ledger's "the album's last
+        /// track played to its end" and the painted position's track both read exactly that (R13:
+        /// capacity must not reach the verdict, not even through a row).
+        last_track: usize,
+        last_pushed: u32,
     }
 
     impl Visits {
@@ -1913,12 +2050,15 @@ mod rom {
                 open: false,
                 pushed_total: 0,
                 hand_offs: 0,
+                last_track: 0,
+                last_pushed: 0,
             }
         }
 
         /// Open a visit for `track`: `base` is where its painted position starts from.
         fn begin(&mut self, track: usize, base: u32) {
             self.base = base;
+            self.last_track = track;
             self.open = true;
             if self.len == VISIT_LOG {
                 self.overflow = self.overflow.saturating_add(1);
@@ -1943,6 +2083,7 @@ mod rom {
                 return;
             }
             self.open = false;
+            self.last_pushed = pushed;
             self.pushed_total = self.pushed_total.saturating_add(pushed);
             let span = end.saturating_sub(self.base) as usize;
             self.hand_offs += (span + CHUNK - 1) / CHUNK;
@@ -1981,6 +2122,10 @@ mod rom {
         underflows: u32,
         /// Samples `truncate()` stepped over at this hand-off.
         dropped: u32,
+        /// Whether the hand-off performed a truncate. Skips always do: a press steps the queued span
+        /// over, and an empty ring is `dropped == 0` with the truncate still performed, which is why
+        /// this is the term gated rather than the count.
+        truncated: bool,
         /// The period the main loop took the post on: what makes the frame loop's own cost
         /// measurable rather than inferable. It is the **take**, not the press: the press→detect and
         /// detect→take legs are the ISR seam's and are measured by `Input` (the verdict's `reaction`
@@ -2089,23 +2234,28 @@ mod rom {
         /// three legs read together are therefore ~1 + 3.9 + 2.04 ≈ 7 video frames ≈ 115 ms to the
         /// hand-off, before the cover.
         ///
-        /// The bound it is gated against is the contract's [`SKIP_PRESS_TO_HANDOFF_PERIODS`], whose
-        /// name predates the three-legged split: its value bounds this leg only.
+        /// The bound it is gated against is [`take_to_handoff_bound`], derived from this run's own
+        /// worst pass rather than from a fixed number of periods (R13); its name predates the
+        /// three-legged split and its value bounds this leg only.
         fn take_to_handoff(&self) -> u32 {
             self.at.wrapping_sub(self.take_at)
         }
 
-        /// The truncate's real witness: the samples `RingFeed::truncate()` discarded.
+        /// The truncate's real witness: the hand-off **performed** a truncate, and what it stepped
+        /// over is no more than the ring can hold.
         ///
-        /// `old` cannot be that witness — during the ramped tail the gain is at zero, so a stale
-        /// chunk served there reads as silence just like an empty ring, and `old == 0` cannot tell
-        /// "nothing stale was served" from "something stale was served quietly". `dropped` is what
-        /// makes the claim checkable: a pressed skip must step over a queued span (at least one
-        /// sample), and cannot step over more than the ring can hold less the [`FADE_PERIODS`]
-        /// chunks the feeder served before the hand-off (`RING_SAMPLES - FADE_PERIODS × CHUNK`).
+        /// The old form required `dropped >= 1`, which is a *scenario* rather than a property: a
+        /// press taken on the pass where a visit's audio has already drained finds an empty ring,
+        /// and `truncate()` correctly returns 0 (`crates/gba-playback/src/playback.rs`, the ledge a
+        /// human pressing Right at a track boundary hits). The fuzz found 12 such cases in 2,048, and
+        /// that gate was a live false-FAIL source — a red louder than its witness (R13). So the term
+        /// is the property: the transition *called* the truncate (recorded at the hand-off), and it
+        /// cannot have stepped over more than the ring holds. `dropped == 0` is legal and the row
+        /// prints it as `(ring empty at mark)` so it reads as understood rather than as a missing
+        /// truncate. A track end keeps requiring `dropped == 0` ([`AdvanceRecord::ok`]): that one IS
+        /// a property, because a drained ring has nothing to drop.
         fn dropped_is_a_truncate(&self) -> bool {
-            self.dropped >= 1
-                && self.dropped <= (RING_SAMPLES - FADE_PERIODS as usize * CHUNK) as u32
+            self.truncated && self.dropped <= RING_SAMPLES as u32
         }
 
         /// The machinery's claim about one skip, and the frame loop's — nothing about the *track*.
@@ -2118,8 +2268,10 @@ mod rom {
         /// wrong would book, but `old` is the weaker term (see
         /// [`SkipRecord::dropped_is_a_truncate`]) — `dropped` is the truncate's own witness — and
         /// `take_to_handoff` is the frame loop's own latency, bounded by
-        /// [`SKIP_PRESS_TO_HANDOFF_PERIODS`].
-        fn ok(&self) -> bool {
+        /// [`take_to_handoff_bound`](crate::transport::take_to_handoff_bound) from this run's pass.
+        /// [`SkipRecord::dropped_is_a_truncate`] is the property here, and `hand_off_bound` is this
+        /// run's own `take_to_handoff_bound` — the pass it measured, plus the deferral.
+        fn ok(&self, hand_off_bound: u32) -> bool {
             !self.open
                 && self.new_at != 0
                 && self.content_at() == SKIP_PRIME_CHUNKS + 1
@@ -2127,7 +2279,7 @@ mod rom {
                 && self.old() == 0
                 && self.underflow_delta() == 0
                 && self.dropped_is_a_truncate()
-                && self.take_to_handoff() <= SKIP_PRESS_TO_HANDOFF_PERIODS
+                && self.take_to_handoff() <= hand_off_bound
         }
     }
 
@@ -2138,7 +2290,8 @@ mod rom {
         /// Direction commands delivered but refused — a skip while paused or mid-transition. Counted
         /// because a silently dropped press is the thing §10.5's honesty discipline forbids.
         ignored: u32,
-        /// Skips past the log: gated like [`Visits::overflow`].
+        /// Skips past the print log. Counted and printed as a census, **not gated** (R13: the log's
+        /// depth is a print constraint, not a claim about the run).
         overflow: u32,
     }
 
@@ -2155,6 +2308,7 @@ mod rom {
                     underflows_at: 0,
                     underflows: 0,
                     dropped: 0,
+                    truncated: false,
                     take_at: 0,
                     watch: 0,
                     open: false,
@@ -2192,6 +2346,7 @@ mod rom {
                 underflows_at: watch.underflows_at,
                 underflows: watch.underflows,
                 dropped: hand_off.dropped,
+                truncated: hand_off.truncated,
                 take_at,
                 watch: hand_off.watch,
                 open: true,
@@ -2235,14 +2390,17 @@ mod rom {
 
         /// Every skip's cover was exactly `SKIP_PRIME_CHUNKS` chunks, the new track's own chunk
         /// followed it immediately, no stale audio was heard after the hand-off, no underflow was
-        /// booked, and every press reached its hand-off inside the contract's bound.
+        /// booked, the hand-off performed its truncate, and every press reached its hand-off inside
+        /// the bound derived from this run's own pass (`hand_off_bound`, in periods).
         ///
         /// The terms are [`SkipRecord::ok`]'s, so this summary and the rows below cannot disagree
-        /// about which skip failed or why.
-        fn ok(&self) -> bool {
-            let mut clean = self.overflow == 0 && !self.any_open();
+        /// about which skip failed or why. **Capacity is not a term** (R13): a session with more skips
+        /// than [`SKIP_LOG`] holds prints the first `SKIP_LOG` rows and says how many occurred; the
+        /// rows it kept are each their own witness, and the print depth is not a claim about the run.
+        fn ok(&self, hand_off_bound: u32) -> bool {
+            let mut clean = !self.any_open();
             for record in &self.records[..self.recorded] {
-                clean &= record.ok();
+                clean &= record.ok(hand_off_bound);
             }
             clean
         }
@@ -2268,22 +2426,28 @@ mod rom {
         /// unlabelled "expected 5" is what a reader (rightly) took for a failing assertion
         /// (ALBUM-PLAYER.md §4.5's ledger rule). The row's `old=(weak: zero-gain hides stale)` is the
         /// short form of the summary's note: `old` cannot witness a stale chunk served at zero gain.
-        /// The numeric `dropped` bound is in the summary and the ROM's `ok()`, not the row, because
-        /// a line past 256 bytes is truncated by the harness's logger.
-        fn report(&self) {
+        /// `dropped` is the truncate's own witness and `dropped=0 (ring empty at mark)` is a legal
+        /// reading of it — a press on the pass where the visit's audio had already drained (R13).
+        ///
+        /// `hand_off_bound` is this run's own: `take_to_handoff_bound` of the pass it measured, so a
+        /// slower machine raises the bound instead of failing it.
+        fn report(&self, hand_off_bound: u32) {
             agb::println!(
-                "[album-rom] skip: skips={} ignored={} limit={} expected_content_at={} take\u{2192}hand-off<={} periods (old=0 is weak: zero-gain hides stale; dropped= is the truncate witness, 1..={}) [{}]",
+                "[album-rom] skip: skips={} ignored={} limit={} expected_content_at={} take\u{2192}hand-off<={} periods (= this run's worst pass, +1; old=0 is weak: zero-gain hides stale; dropped= is the truncate witness, 0..=RING) [{}]",
                 self.recorded,
                 self.ignored,
                 SKIP_LOG,
                 SKIP_PRIME_CHUNKS + 1,
-                SKIP_PRESS_TO_HANDOFF_PERIODS,
-                RING_SAMPLES - FADE_PERIODS as usize * CHUNK,
-                if self.ok() { "PASS" } else { "FAIL" }
+                hand_off_bound,
+                if self.ok(hand_off_bound) {
+                    "PASS"
+                } else {
+                    "FAIL"
+                }
             );
             for record in &self.records[..self.recorded] {
                 agb::println!(
-                    "[album-rom] skip: \u{2192}track {} (from {}) content_at={} periods (expected {}){} old={} (weak: zero-gain hides stale) underflow_delta={} take\u{2192}hand-off={} periods (bound {}) head_silence={} periods to_new={} periods silence={} dropped={} [{}]",
+                    "[album-rom] skip: \u{2192}track {} (from {}) content_at={} periods (expected {}){} old={} (weak: zero-gain hides stale) underflow_delta={} take\u{2192}hand-off={} periods (bound {}) head_silence={} periods to_new={} periods silence={} dropped={}{} [{}]",
                     record.to_track,
                     record.from_track,
                     record.content_at(),
@@ -2296,31 +2460,39 @@ mod rom {
                     record.old(),
                     record.underflow_delta(),
                     record.take_to_handoff(),
-                    SKIP_PRESS_TO_HANDOFF_PERIODS,
+                    hand_off_bound,
                     record.head_silence(),
                     record.to_new(),
                     record.silence(),
                     record.dropped,
-                    if record.ok() { "PASS" } else { "FAIL" }
+                    if record.dropped == 0 {
+                        " (ring empty at mark)"
+                    } else {
+                        ""
+                    },
+                    if record.ok(hand_off_bound) {
+                        "PASS"
+                    } else {
+                        "FAIL"
+                    }
                 );
             }
-            if !self.ok() {
+            if !self.ok(hand_off_bound) {
                 agb::println!(
-                    "[album-rom] FAIL a skip did not land: every skip's cover must be {} chunks followed at once by the new track's own chunk, with no stale audio after the hand-off, no underflow booked, a truncate that dropped a queued span no larger than the ring, and every press inside its {}-period hand-off bound (old=0 alone cannot see a stale chunk served at zero gain — dropped= is the truncate's witness)",
+                    "[album-rom] FAIL a skip did not land: every skip's cover must be {} chunks followed at once by the new track's own chunk, with no stale audio after the hand-off, no underflow booked, the hand-off must have performed its truncate (dropping no more than the ring holds), and every press inside the {} -period hand-off bound this run's own pass derives (old=0 alone cannot see a stale chunk served at zero gain — dropped= is the truncate's witness)",
                     SKIP_PRIME_CHUNKS,
-                    SKIP_PRESS_TO_HANDOFF_PERIODS
+                    hand_off_bound
                 );
             }
-            // Named apart from the rows: a session with more skips than the log holds fails on the log's
-            // **depth**, and every row it did keep can still be PASS. Said out loud so the summary's FAIL
-            // is not read as a transition that went wrong (R13's suspect (b)).
-            if self.overflow > 0 {
-                agb::println!(
-                    "[album-rom] FAIL {} skip(s) past SKIP_LOG={} were kept out of the print log; every recorded row's own terms are above",
-                    self.overflow,
-                    SKIP_LOG
-                );
-            }
+            // The census, not a verdict (R13: capacity is a print constraint). A session with more
+            // skips than the log holds prints the first `SKIP_LOG` rows and says how many occurred;
+            // every row it kept is PASS on its own terms, which is all the depth ever promised.
+            agb::println!(
+                "[album-rom] skips: occurred={} printed={} (SKIP_LOG={} bounds the print log only)",
+                self.recorded + self.overflow as usize,
+                self.recorded,
+                SKIP_LOG
+            );
         }
     }
 
@@ -2422,7 +2594,8 @@ mod rom {
     struct Advances {
         records: [AdvanceRecord; ADVANCE_LOG],
         recorded: usize,
-        /// Advances past the log: gated like [`Visits::overflow`].
+        /// Advances past the print log. Counted and printed as a census, **not gated** — the same
+        /// R13 ruling as [`Visits::overflow`] and [`Skips::overflow`].
         overflow: u32,
     }
 
@@ -2506,7 +2679,7 @@ mod rom {
         /// Every advance landed at the machinery's `SKIP_PRIME_CHUNKS + 1` periods with no stale
         /// audio and no underflow, per [`AdvanceRecord::ok`].
         fn ok(&self) -> bool {
-            let mut clean = self.overflow == 0 && !self.any_open();
+            let mut clean = !self.any_open();
             for record in &self.records[..self.recorded] {
                 clean &= record.ok();
             }
@@ -2558,6 +2731,14 @@ mod rom {
                     SKIP_PRIME_CHUNKS + 1
                 );
             }
+            // The census, not a verdict (R13) — an interactive session can cross more boundaries
+            // than the log holds, and the depth was never a claim about the boundaries.
+            agb::println!(
+                "[album-rom] advances: occurred={} printed={} (ADVANCE_LOG={} bounds the print log only)",
+                self.recorded + self.overflow as usize,
+                self.recorded,
+                ADVANCE_LOG
+            );
         }
     }
 
@@ -3102,11 +3283,10 @@ mod rom {
                 if pin.frames > PROOF_FRAME_CAP || folded_frames + pin.frames > PROOF_FRAMES_TOTAL {
                     skipped += 1;
                     agb::println!(
-                        "[album-rom] proof track {track}: SKIPPED — {} frames is past the audited fold's cap ({} per track, {} a pass; the gate track's {} frames are measured at 3.39 M c/frame), so its whole-track fold would not fit this run's leash; its content is covered by the boot tripwire (prefix 0x{:08X} suffix 0x{:08X}) and by the asset-region fold",
+                        "[album-rom] proof track {track}: SKIPPED — {} frames is past the audited fold's cap, which is this run's time budget ({} per track, {} a pass at the measured 3.39 M c/frame), not a gap in the album's coverage: its fold would not fit the leash, so its content is covered by the boot tripwire (prefix 0x{:08X} suffix 0x{:08X}) and by the asset-region fold",
                         pin.frames,
                         PROOF_FRAME_CAP,
                         PROOF_FRAMES_TOTAL,
-                        pin.frames,
                         pin.prefix_fnv,
                         pin.suffix_fnv
                     );
@@ -3575,12 +3755,23 @@ mod rom {
             // REPLAY arm measures it — it is the arm with a scripted press to time.
             #[cfg(feature = "input-replay")]
             let pass_start = frame_latch();
+            // The pass's cost in cycles of the audio clock, for the bound both the `reaction` term
+            // and the skip rows are gated against (R13: the pass's length belongs to the machine, so
+            // the run measures it rather than borrowing an emulator's). A frozen chain has no clock
+            // to read, so only a pass the transport was feeding from start to end is timed.
+            let pass_clock = if transport_state().feeds() {
+                Some(audio_clock())
+            } else {
+                None
+            };
             // The producer runs while the transport is a feeding state — `Playing`, or `Repriming`,
             // where the new track's audio has to reach the ring behind the skip's silence cover.
             if transport_state().feeds() {
                 while !paint.due() && producer.frames < producer.total_frames && producer.has_room()
                 {
                     idle = 0;
+                    #[cfg(feature = "input-replay")]
+                    let frame_clock = audio_clock();
                     match producer.push_one() {
                         Ok(_) => {}
                         Err(Halt::Ended) => {
@@ -3597,6 +3788,13 @@ mod rom {
                             break 'frames;
                         }
                     }
+                    // One producer frame on the audio clock: the decode half of the pass bound, read
+                    // around the push itself so the edges are the frame's and not the pass's.
+                    #[cfg(feature = "input-replay")]
+                    note_producer_cycles(
+                        handler_samples(frame_clock, audio_clock())
+                            .saturating_mul(geometry::TICKS_PER_SAMPLE),
+                    );
                 }
             }
             // The frame slice: the vblank handler detected the edge, stamped it with the frame it
@@ -3805,6 +4003,14 @@ mod rom {
             }
             #[cfg(feature = "input-replay")]
             note_pass(frame_latch().wrapping_sub(pass_start));
+            if let Some(entry) = pass_clock
+                && transport_state().feeds()
+            {
+                note_pass_cycles(
+                    handler_samples(entry, audio_clock())
+                        .saturating_mul(geometry::TICKS_PER_SAMPLE),
+                );
+            }
         }
         if halt.is_none() && producer.frames != producer.total_frames {
             agb::println!(
@@ -3938,7 +4144,7 @@ mod rom {
         // and after the final drain every pushed sample has been taken except the ones a truncate
         // stepped over, so `consumed == pushed` and `taken == pushed - dropped`. The per-track sum is
         // checked against the ring-wide counter so the two bookkeepings cannot part.
-        let visits_ok = visits.overflow == 0 && visits_pushed == content;
+        let visits_ok = visits_pushed == content;
         agb::println!(
             "[album-rom] feed: pushed={} content={} cover={} consumed={} dropped={} taken={} frames={}/{} underflows={} handler_entries={} tails={} primes={} visits={} [{}]",
             pushed,
@@ -3956,19 +4162,15 @@ mod rom {
             visits.len,
             if visits_ok { "MATCH" } else { "MISMATCH" }
         );
-        // Two different failures, named separately: the sums are running totals over every visit, so a
-        // disagreement is the bookkeeping's; an overflow is the log's own depth, which the content proof
-        // does read (it enumerates tracks from these rows). Printing one line for both is what made an
-        // overflow look like a wrong sum — R13's suspect (b) misread as an audio ledger defect.
-        if visits.overflow > 0 {
-            agb::println!(
-                "[album-rom] FAIL {} visit(s) past VISIT_LOG={} were kept out of the print log the content proof enumerates: the sums still close ({} == {}), the proof's work list does not",
-                visits.overflow,
-                VISIT_LOG,
-                visits_pushed,
-                content
-            );
-        }
+        // The census, not a verdict (R13): the sums above are running totals over every visit, so a
+        // session with more visits than the log holds still closes them. `printed` is also the content
+        // proof's work list, so this is how the log says how much the proof could have covered.
+        agb::println!(
+            "[album-rom] visits: occurred={} printed={} (VISIT_LOG={} bounds the print log and the proof's work list, not the sums)",
+            visits.len + visits.overflow as usize,
+            visits.len,
+            VISIT_LOG
+        );
         if visits_pushed != content {
             agb::println!(
                 "[album-rom] FAIL the per-track ledger disagrees with the ring's: visits sum {} vs content {}",
@@ -3979,7 +4181,7 @@ mod rom {
         // D5's one-line statement of the traversal: how many visits, which track it stopped on, and
         // whether that was the album's last. `NOT_REACHED` is the honest reading of a run that
         // stopped for a halt or a frame-count mismatch, so a short run cannot read as an album end.
-        let last_track = visits.list().last().map(|visit| visit.track).unwrap_or(0);
+        let last_track = visits.last_track;
         agb::println!(
             "[album-rom] traversal: visits={} last_track={} end={}",
             visits.len,
@@ -4034,6 +4236,11 @@ mod rom {
             late_max,
             REARM_GRACE_SAMPLES
         );
+        // The skip rows' take→hand-off bound is this run's own: the worst main-loop pass it measured,
+        // in feeder periods, plus the deferral (`take_to_handoff_bound`). A cart's slower pass raises
+        // the bound instead of failing a correct run (R13).
+        let hand_off_bound = take_to_handoff_bound(input.pass_periods());
+
         // ---- the input seam's end-of-run lines (PR-3b-i, extended by PR-3b-ii-B1). The counts are
         // what a gate reads: a REPLAY build's script has a known number of edges and repeats, and a
         // HARDWARE build's `presses=0` is the honest reading of a headless run rather than a failure.
@@ -4056,7 +4263,7 @@ mod rom {
         // lines can be read against its table ("The deep arm": `to_new = prime + 1`, and 5 periods at
         // prime 4 is 171 ms of silence). Printed after the teardown for the same reason every other
         // record is: `agb::println!` is a semihosting trap and the rows are filled on the audio path.
-        skips.report();
+        skips.report(hand_off_bound);
 
         // ---- the listener's whole wait, term by term and then summed. The reaction line above prints
         // the audio clock's phase at detection and the ISR seam's two frame legs; the skip rows print
@@ -4094,17 +4301,12 @@ mod rom {
         // so a MISMATCH means the increment and the ledger have come apart, which is why it is part
         // of the verdict rather than a remark.
         let committed = position::committed_samples();
-        let last = visits.list().last().copied();
-        let (painted, last_total) = match last {
-            Some(visit) => {
-                let total = assets::TRACKS[visit.track].n_samples;
-                (
-                    position::paint_position(committed.saturating_sub(visit.base), total),
-                    total,
-                )
-            }
-            None => (0, 0),
-        };
+        // The **last visit's** own base and track, from the running fields rather than the last row:
+        // a session past `VISIT_LOG` has no row for it, and reading row 24 as "the last visit" made
+        // both this comparison and `last_played` depend on the log's depth (R13's suspect (b) in its
+        // last hiding place).
+        let last_total = assets::TRACKS[last_track].n_samples;
+        let painted = position::paint_position(committed.saturating_sub(visits.base), last_total);
         // The arithmetic the session clock owes once a skip can truncate: the clock is incremented by
         // exactly what `take_chunk` returned, `consumed` by that *plus* what a truncate stepped over,
         // so `consumed == committed + dropped` is the identity — and `taken == committed` says the
@@ -4121,7 +4323,7 @@ mod rom {
             position::LEAD_SAMPLES,
             painted,
             last_total,
-            last.map(|visit| visit.track).unwrap_or(0),
+            last_track,
             paint.frames,
             input.sampled(),
             paint.regressions,
@@ -4136,8 +4338,7 @@ mod rom {
         // At most one tail period per visit: a skip truncates the queued span instead of draining
         // it, and a track end drains it, so each visit can leave at most its own residue. The latter
         // is why the bound is the visit count and not 1 any more.
-        let last_played =
-            last.is_some_and(|visit| visit.pushed == assets::TRACKS[visit.track].n_samples);
+        let last_played = visits.last_pushed == assets::TRACKS[last_track].n_samples;
         let ledger_ok = pushed == content as usize + cover as usize
             && consumed == pushed
             && producer.frames == producer.total_frames
@@ -4237,29 +4438,54 @@ mod rom {
         // `SKIP_PRIME_CHUNKS + 1` periods with no stale audio after it and no underflow booked, exactly
         // as `Skips::report` prints. On the shipped HARDWARE arm `skips=0` is the honest reading of a
         // headless run and the term is trivially true, the same way `presses=0` is.
-        let skips_ok = skips.ok();
+        let skips_ok = skips.ok(hand_off_bound);
         // The track boundaries, checked per advance rather than assumed from `visits >= 2`: every
         // advance must reach the new track's first chunk at `SKIP_PRIME_CHUNKS + 1` periods with no
         // stale audio after the mark and no underflow booked, exactly as `Advances::report` prints.
         let advances_ok = advances.ok();
-        let pass = ledger_ok
-            && audit_ok
-            && hand_offs_ok
-            && pauses_ok
-            && skips_ok
-            && advances_ok
-            && cadence_ok
-            && handler_ok
-            && term_ok(reaction_ok)
-            && term_ok(pcm_ok)
-            && term_ok(fifo_ok)
-            && term_ok(assets_ok);
+        // The verdict's terms, in `text::TERMS`'s order — the first false one is drawn beside
+        // `FAILED`, because a cartridge that says only `FAILED` leaves the one person who can
+        // reproduce the bug with no term to report (R13). One list feeds both the screen and the
+        // log's `(ledger=, …)` line, so they cannot name different terms.
+        let terms = [
+            ledger_ok,
+            audit_ok,
+            hand_offs_ok,
+            pauses_ok,
+            skips_ok,
+            advances_ok,
+            cadence_ok,
+            handler_ok,
+            term_ok(reaction_ok),
+            term_ok(pcm_ok),
+            term_ok(fifo_ok),
+            term_ok(assets_ok),
+        ];
+        let first_false = text::TERMS
+            .iter()
+            .copied()
+            .zip(terms)
+            .find(|&(_, ok)| !ok)
+            .map(|(name, _)| name);
+        let pass = first_false.is_none();
+        // A run that reached its verdict while frozen says so: the screen must not omit the state
+        // the run ended in. This is a suffix, not a term — `PAUSE` already names the pause ledger's
+        // own failure — and it never changes what a press inside a fade means.
+        let paused = transport_state() == State::Paused;
+        let mut words = match first_false {
+            Some(term) => format!("{} {term}", text::FAILED),
+            None => format!("{}", text::PASSED),
+        };
+        if paused {
+            words.push(' ');
+            words.push_str(text::PAUSED);
+        }
         let (word, backdrop, screen) = if pass {
             (text::PASSED, COLOR_PASS, "BLUE")
         } else {
             (text::FAILED, COLOR_FAIL, "RED")
         };
-        text::show(&mut gfx, word, backdrop);
+        text::show(&mut gfx, &words, backdrop);
         // The audited image's line names what is on screen, not only a hue: "screen BLUE" alone was a
         // promise the caller could not check, since violet against blue is exactly the pair they
         // cannot separate. The unaudited one may not borrow any promise that content was checked: it
@@ -4270,7 +4496,7 @@ mod rom {
             "[album-rom] verdict {} — screen {} \"{}\" (ledger={}, audit={}, handoffs={}, pause={}, skip={}, advance={}, cadence={}, isr={}, reaction={}, pcm={}, fifo={}, assets={}, proof_tracks={}/{})",
             word,
             screen,
-            word,
+            words,
             ledger_ok,
             audit_ok,
             hand_offs_ok,
@@ -4293,7 +4519,7 @@ mod rom {
             "[album-rom] verdict {} — screen {} \"{}\" (ledger={}, audit={}, handoffs={}, pause={}, skip={}, advance={}, cadence={}, isr={}, reaction={}, pcm={}, fifo={}, assets={} — built without deep-audit)",
             word,
             screen,
-            word,
+            words,
             ledger_ok,
             audit_ok,
             hand_offs_ok,

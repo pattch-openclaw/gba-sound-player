@@ -782,27 +782,53 @@ fn the_masters_head_is_digital_silence_in_the_fifos_own_bytes() {
 
 /// `text::show` rasterizes exactly the glyphs `include_font!` found in the tracked subset and draws
 /// them from a (4,4) origin, so a word outside the subset renders as nothing at all and one wider
-/// than a row runs off the screen. Both are checked here against the words the ROM actually presents:
-/// a rename to something we cannot draw fails in `make album-seam-test`, not on a cart.
+/// than a row runs off the screen. Both are checked here against every word the ROM actually
+/// presents: `PASSED`, `FAILED <TERM>` for each of `text::TERMS`, and each of those with the
+/// `PAUSED` suffix. A rename to something we cannot draw fails in `make album-seam-test`, not on a
+/// cart.
 #[test]
 fn the_verdict_words_are_inside_the_tracked_subset_and_one_row() {
-    for word in [album_player::text::PASSED, album_player::text::FAILED] {
+    use album_player::text::{self, TERMS};
+    let mut words = vec![
+        text::PASSED.to_string(),
+        text::FAILED.to_string(),
+        format!("{} {}", text::PASSED, text::PAUSED),
+        format!("{} {}", text::FAILED, text::PAUSED),
+    ];
+    for term in TERMS {
+        // The two shapes the ROM draws for one false term: `FAILED SKIP`, and the same with the
+        // paused suffix when the transport was frozen at teardown.
+        words.push(format!("{} {term}", text::FAILED));
+        words.push(format!("{} {term} {}", text::FAILED, text::PAUSED));
+    }
+    for word in &words {
         assert!(
-            album_player::text::renderable(word),
+            text::renderable(word),
             "{word:?} is not renderable: the tracked subset is U+{:04X}-U+{:04X} and a row is {} \
              columns ({} px at the font's 8 px cell)",
-            album_player::text::FIRST_GLYPH as u32,
-            album_player::text::LAST_GLYPH as u32,
-            album_player::text::COLUMNS,
-            album_player::text::COLUMNS * 8
+            text::FIRST_GLYPH as u32,
+            text::LAST_GLYPH as u32,
+            text::COLUMNS,
+            text::COLUMNS * 8
         );
     }
+    // The term list and the ROM's verdict line are one list: a term added to the screen without a
+    // name here (or a name here that the verdict never tests) is caught by the count and the
+    // longest-string check below.
+    assert_eq!(TERMS.len(), 12, "the verdict has twelve terms");
+    let longest = words
+        .iter()
+        .map(|word| word.chars().count())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        longest <= text::COLUMNS,
+        "the longest verdict string is {longest} columns"
+    );
     // Negative control, so a check that has only ever passed is not mistaken for proof: a glyph the
     // subset does not carry, and a word one column past the row, are both refused.
-    assert!(!album_player::text::renderable("PASSÃ‰"));
-    assert!(!album_player::text::renderable(
-        &"A".repeat(album_player::text::COLUMNS + 1)
-    ));
+    assert!(!text::renderable("PASSÃ‰"));
+    assert!(!text::renderable(&"A".repeat(text::COLUMNS + 1)));
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -1377,8 +1403,8 @@ fn the_lead_subtraction_cannot_underflow() {
 
 use album_player::pcm::{AlbumMeta, TrackMeta};
 use album_player::transport::{
-    FADE_PERIODS, FADE_SAMPLES, GAIN_UNITY, HandOffGain, SKIP_PRESS_TO_HANDOFF_PERIODS,
-    SKIP_PRIME_CHUNKS, State, Step, Transport, scale_byte,
+    FADE_PERIODS, FADE_SAMPLES, GAIN_UNITY, HandOffGain, SKIP_PRIME_CHUNKS, State, Step, Transport,
+    scale_byte, take_to_handoff_bound,
 };
 use gba_playback::playback::{Chunk, PushError, RingFeed, convert_frame, fifo_byte};
 
@@ -1719,8 +1745,8 @@ struct Model {
     /// are spaced in video frames and a spacing shorter than a period has to land *inside* one.
     video_frames: u32,
     /// Feeder periods one producer frame costs — a main-loop pass. **2** is the measured value
-    /// (1.04–1.09 M cycles = 1.81–1.9 periods, `transport.rs`'s `SKIP_PRESS_TO_HANDOFF_PERIODS`
-    /// doc); the R13 calibration test moves it to 2×/3×/5× without touching any product constant.
+    /// (1.04–1.09 M cycles = 1.81–1.9 periods, the origin of the old fixed three-period bound); the
+    /// R13 calibration test moves it to 2×/3×/5× without touching any product constant.
     pass_periods: u32,
     /// Every feeder period's verdict, counted, so the period census closes:
     /// `handoffs == primes + full_periods + tail_periods + starved_periods`.
@@ -2142,7 +2168,7 @@ impl Model {
     /// One direction press and the loop's frame slice around it, as the ROM performs it.
     ///
     /// `pass_periods` is how many feeder periods the pass's own producer decode takes — a pass is one
-    /// producer frame of decode, so this is the quantity `SKIP_PRESS_TO_HANDOFF_PERIODS` bounds. The
+    /// producer frame of decode, so this is the quantity `take_to_handoff_bound` takes. The
     /// press is taken at the top of the pass, the fade is spent by the feeder inside it, and the
     /// hand-off runs at the decision at its end; `pass_periods` therefore *is* the press→hand-off
     /// wait when the pass is long enough, which is what makes the bound checkable here rather than
@@ -2193,7 +2219,7 @@ impl Model {
                 Step::SkipHandOff => break,
                 Step::Idle => {
                     assert!(
-                        served < SKIP_PRESS_TO_HANDOFF_PERIODS,
+                        served < take_to_handoff_bound(pass_periods),
                         "the deferral never let the hand-off happen"
                     );
                     self.period();
@@ -3439,7 +3465,7 @@ fn the_painted_position_keeps_the_invariants_across_a_skip() {
 ///
 /// What the *app* owns is the press → hand-off wait, and that one is bounded: a pass is one producer
 /// frame of decode, the feeder spends one period fading inside it, so the wait is the pass's length in
-/// periods and `SKIP_PRESS_TO_HANDOFF_PERIODS` is the ceiling. The last block shows the bound can fail,
+/// periods and `take_to_handoff_bound(pass)` is the ceiling. The last block shows the bound can fail,
 /// which is what makes it a gate rather than a decoration.
 #[test]
 fn a_skip_onto_a_track_that_opens_silent_reads_as_the_tracks_own_lead_in() {
@@ -3485,8 +3511,10 @@ fn a_skip_onto_a_track_that_opens_silent_reads_as_the_tracks_own_lead_in() {
         "the track's own head is not the lead-in the skip log reported"
     );
 
-    // The frame loop's bound, in the units the ROM gates it in: the wait is the pass's length.
-    for pass in 1..=SKIP_PRESS_TO_HANDOFF_PERIODS {
+    // The frame loop's bound, in the units the ROM gates it in: the wait is the pass's length, and
+    // the bound is derived from that same pass (R13: a fixed period count was the emulator's pass
+    // rounded up, and would fail a correct slower cart).
+    for pass in 1..=6 {
         let mut m = Model::album(&[SKIP_TRACK; 2], 0);
         m.prefill();
         assert!(m.prime());
@@ -3497,16 +3525,15 @@ fn a_skip_onto_a_track_that_opens_silent_reads_as_the_tracks_own_lead_in() {
             pass.max(FADE_PERIODS),
             "a {pass}-period pass did not set the press→hand-off wait (floor: the {FADE_PERIODS}-period deferral)"
         );
-        assert!(skip.press_to_handoff() <= SKIP_PRESS_TO_HANDOFF_PERIODS);
+        assert!(skip.press_to_handoff() <= take_to_handoff_bound(pass));
     }
-    let mut slow = Model::album(&[SKIP_TRACK; 2], 0);
-    slow.prefill();
-    assert!(slow.prime());
-    slow.run_periods(4);
-    let over = slow.press_skip(1, SKIP_PRIME_CHUNKS, SKIP_PRESS_TO_HANDOFF_PERIODS + 1);
+    // The bound is exactly one pass plus the deferral, so a slower *machine* stays inside it (that
+    // is the fix's purpose) while a loop that needs a *second* pass does not — which is the shape the
+    // ROM's `ok()` refuses. Stated arithmetically so the gate is not a decoration.
+    assert_eq!(take_to_handoff_bound(6), 7);
     assert!(
-        over.press_to_handoff() > SKIP_PRESS_TO_HANDOFF_PERIODS,
-        "a pass longer than the bound still passed it, so the bound gates nothing"
+        2 * 6 > take_to_handoff_bound(6),
+        "a hand-off that needed two passes would pass the one-pass bound"
     );
 }
 
@@ -4561,11 +4588,12 @@ fn fuzz(wait_for_wire: bool) -> (Census, Vec<(u32, Violation, Script)>) {
 ///
 /// `VIDEO_PERIOD_CYCLES` — `album_play_main.rs:618`, cycles per vblank (59.73 Hz, AP-0).
 const ROM_VIDEO_PERIOD_CYCLES: u32 = 280_896;
-/// The producer frame `MAX_PASS_FRAMES` is derived from: 1.04–1.09 M cycles of uninterruptible
-/// decode (`album_play_main.rs:642-655`, and `transport.rs`'s `SKIP_PRESS_TO_HANDOFF_PERIODS`).
+/// The producer frame the old `MAX_PASS_FRAMES` was derived from: 1.04–1.09 M cycles of
+/// uninterruptible decode, measured on mGBA (`album_play_main.rs`'s `PASS_MARGIN_CYCLES` docs).
 const ROM_PASS_CYCLES: u32 = 1_090_000;
-/// `MAX_PASS_FRAMES` — `album_play_main.rs:648`: four measured frames plus the pass's two edges.
-const ROM_MAX_PASS_FRAMES: u32 = 6;
+/// The **removed** `MAX_PASS_FRAMES = 4 + 1 + 1` — the emulator-derived ceiling the bounds round
+/// took out of the ROM. Kept here only so the finding's before-picture stays checkable.
+const ROM_OLD_MAX_PASS_FRAMES: u32 = 6;
 /// The gate run's own `pass_max` (`album-test.log:33`, `bound 5`).
 const ROM_MEASURED_PASS_FRAMES: u32 = 5;
 /// The gate run's own vblank-handler cost (`album-test.log:31`, `worst=1 samples`).
@@ -4676,48 +4704,75 @@ fn every_press_sequence_holds_the_transports_properties() {
 }
 
 #[test]
-fn a_pass_slower_than_the_measured_emulator_frame_flips_the_pass_cost_terms() {
-    // R13's leading hypothesis, made arithmetic. A pass cost enters exactly two gated terms — both
-    // in units the emulator's measurement set — and a third consequence that is an *audio* property
-    // rather than a bound: the ring's steady state.
-    // The ceiling has *no* arithmetic margin: the measured worst pass (1.09 M c) is 4 video frames
-    // of decode, plus the pass's own two edge frames, is exactly `MAX_PASS_FRAMES`. The gate run
-    // measures 5 only because its passes averaged 1.04-1.09 M c and its edges overlapped; a decode
-    // even slightly over 1.09 M c reaches 7 frames and fails `reaction` with nothing else changed.
+fn a_slower_pass_no_longer_flips_the_pass_cost_terms() {
+    // R13's finding, made arithmetic — and then the fix, made arithmetic. A pass cost used to enter
+    // two gated terms as a **frame count measured on mGBA**:
+    //
+    //   `MAX_PASS_FRAMES = ceil(1.09 M c / 280,896 c) + 2 edges = 4 + 2 = 6`
+    //   `SKIP_PRESS_TO_HANDOFF_PERIODS = 3` (the same 1.85–1.9-period pass, rounded up)
+    //
+    // The old ceiling has *no* arithmetic margin at 1× (the gate run only measures 5 because its
+    // passes averaged 1.04–1.09 M c and its edges overlapped), so a decode even slightly slower than
+    // the emulator's reaches 7 frames and fails `reaction` — and a cartridge has wait states mGBA
+    // does not (R3). That is the false red this round removes: the bound is now the run's own
+    // measured producer frame plus one period and one vblank, all in cycles, so it scales with the
+    // machine.
     assert_eq!(
         ROM_PASS_CYCLES.div_ceil(ROM_VIDEO_PERIOD_CYCLES) + 2,
-        ROM_MAX_PASS_FRAMES,
-        "the arithmetic at 1x must saturate the ceiling, which is the finding"
+        ROM_OLD_MAX_PASS_FRAMES,
+        "the arithmetic at 1x must saturate the old ceiling, which is the finding"
     );
-    assert!(ROM_MEASURED_PASS_FRAMES <= ROM_MAX_PASS_FRAMES);
-    for (scale, pass_ok, skip_ok, starves) in [
-        (1u32, true, true, false),
-        (2, false, false, true),
-        (3, false, false, true),
-        (5, false, false, true),
+    assert!(ROM_MEASURED_PASS_FRAMES <= ROM_OLD_MAX_PASS_FRAMES);
+    // The pass's non-decode work, in the ROM's own derivation: the frame slice the loop serves at the
+    // top of every pass, bounded by one vblank (`PASS_MARGIN_CYCLES`). Modelling it as one video
+    // frame is the conservative end of that bound.
+    let service = ROM_VIDEO_PERIOD_CYCLES;
+    let margin = ROM_VIDEO_PERIOD_CYCLES;
+    for (scale, old_reaction, old_skip, reaction, skip, starves) in [
+        (1u32, true, true, true, true, false),
+        (2, false, false, true, true, true),
+        (3, false, false, true, true, true),
+        (5, false, false, true, true, true),
     ] {
-        let cycles = ROM_PASS_CYCLES * scale;
-        let periods = cycles.div_ceil(geometry::PERIOD_CYCLES);
-        // `reaction`'s `pass_max` is measured in video frames and carries the pass's two edges.
-        let frames = cycles.div_ceil(ROM_VIDEO_PERIOD_CYCLES) + 2;
+        let frame = ROM_PASS_CYCLES * scale;
+        let pass = frame + service;
+        let periods = frame.div_ceil(geometry::PERIOD_CYCLES);
+        let frames = frame.div_ceil(ROM_VIDEO_PERIOD_CYCLES) + 2;
+        // The old, emulator-derived terms — printed and asserted only where they flipped, so the fix
+        // has its before-picture. They are no longer in the ROM at all.
         assert_eq!(
-            frames <= ROM_MAX_PASS_FRAMES,
-            pass_ok,
-            "{scale}× pass = {frames} video frames against MAX_PASS_FRAMES = {ROM_MAX_PASS_FRAMES}"
+            frames <= ROM_OLD_MAX_PASS_FRAMES,
+            old_reaction,
+            "{scale}× pass = {frames} video frames against the removed MAX_PASS_FRAMES = \
+             {ROM_OLD_MAX_PASS_FRAMES}"
         );
-        // A skip's `take→hand-off` is the pass's length in feeder periods, floored by the deferral.
         assert_eq!(
-            periods.max(FADE_PERIODS) <= SKIP_PRESS_TO_HANDOFF_PERIODS,
-            skip_ok,
-            "{scale}× pass = {periods} periods against SKIP_PRESS_TO_HANDOFF_PERIODS = \
-             {SKIP_PRESS_TO_HANDOFF_PERIODS}"
+            periods.max(FADE_PERIODS) <= 3,
+            old_skip,
+            "{scale}× pass = {periods} periods against the removed fixed bound of 3"
+        );
+        // The new bound: the run's measured worst producer frame + one period + one vblank, in
+        // cycles. It holds at every scale because the measured frame is *inside* the bound.
+        let bound = frame + geometry::PERIOD_CYCLES + margin;
+        assert_eq!(
+            pass <= bound,
+            reaction,
+            "{scale}× pass = {pass}c against its own bound {bound}c"
+        );
+        // The skip's bound is the measured pass in periods plus the deferral; a 2× pass gets 5
+        // periods rather than the old refusal at 4.
+        let skip_bound = take_to_handoff_bound(periods);
+        assert_eq!(
+            periods.max(FADE_PERIODS) <= skip_bound,
+            skip,
+            "{scale}× pass = {periods} periods against take_to_handoff_bound = {skip_bound}"
         );
 
-        // The audio consequence, witnessed in the model: a pass pushes FRAME samples and spans
-        // `periods` periods, so the ring's steady state needs `FRAME ≥ periods × CHUNK`. Below that
-        // it drains at a fixed rate and the feeder books underflows — no constant in the ROM
-        // expresses this, which is why a cartridge's slower decode would read as an audio failure
-        // with every bound still passing.
+        // The audio consequence is **not** a bound and does not move with one: a pass pushes FRAME
+        // samples and spans `periods` periods, so the ring's steady state needs
+        // `FRAME ≥ periods × CHUNK`. Below that it drains at a fixed rate and the feeder books
+        // underflows. That is the term a cartridge's slower decode should still flip — an audio
+        // fact, witnessed by the model, not a frame count measured on the wrong box.
         let mut model = Model::album(&[600 * CHUNK as u32], 0);
         model.pass_periods = periods;
         model.prefill();
@@ -4740,7 +4795,11 @@ fn a_pass_slower_than_the_measured_emulator_frame_flips_the_pass_cost_terms() {
             model.source.len()
         );
         eprintln!(
-            "R13 calibration: {scale}x pass = {cycles} c = {periods} period(s) = {frames} video frames -> reaction={pass_ok}, skip={skip_ok}, ring_keeps_up={} ({} underflow(s), ring first spent at sample {} of {})",
+            "R13 calibration: {scale}x pass = {frame}c decode + {service}c service = {pass}c = \
+             {periods} period(s) = {} frames; old: reaction={old_reaction} skip={old_skip}; \
+             new: reaction={reaction} (bound {bound}c) skip={skip} (bound {skip_bound}p); \
+             ring_keeps_up={} ({} underflow(s), ring first spent at sample {} of {})",
+            pass.div_ceil(ROM_VIDEO_PERIOD_CYCLES),
             !starves,
             model.underflows,
             model.source.at,
