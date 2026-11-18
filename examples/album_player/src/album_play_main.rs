@@ -252,16 +252,35 @@ mod rom {
     #[cfg(feature = "deep-audit")]
     const PROOF_FRAMES_TOTAL: u32 = 1_024;
 
-    /// How many track visits the run keeps for its per-track ledger and its content proof.
+    /// How many track visits the run keeps **for printing** — and for the content proof's work list.
     ///
-    /// Bounded like every other record in this file, and **gated** rather than quietly truncated: the
-    /// proof enumerates the tracks from this list, so a visit the list dropped would be a track whose
-    /// bytes nothing folded. A run that overflows it fails its verdict.
+    /// This is a bounded *print* buffer, and its depth is **not** any total's: the ledger's Σ and its
+    /// hand-off count are running totals accumulated by [`Visits::begin`]/[`Visits::close`] over every
+    /// visit, however many there are (R13's suspect (b): summing these rows made a print bound act as
+    /// a gate). What the depth *is* a gate on, and must stay one, is the proof: it enumerates the
+    /// tracks from this list, so a visit the list dropped is a track whose bytes nothing folded. A run
+    /// that overflows it fails its verdict for that reason, and no longer for a truncated sum.
     const VISIT_LOG: usize = 24;
 
-    /// How many skips the run keeps for its end-of-run log (the first [`VISIT_LOG`] visits can hold
-    /// at most one fewer, and a script with more skips than this is not a gate).
+    /// How many skips the run keeps **for printing** (the first [`VISIT_LOG`] visits can hold at most
+    /// one fewer).
+    ///
+    /// A bounded print buffer like [`VISIT_LOG`]: `Skips::ok()`'s terms are per record and every
+    /// record's numbers are running figures, so a session with more skips than this prints the first
+    /// [`SKIP_LOG`] rows and fails on `overflow` alone — never on a sum taken over the rows that fitted.
     const SKIP_LOG: usize = 16;
+
+    /// How many wire-watch **slots** the run has: one per in-flight transition, and [`SKIP_LOG`] of
+    /// them so every transition that can own a log row owns its own latch.
+    ///
+    /// The depth is the fidelity claim, not a budget. A hand-off is at least `FADE_PERIODS +
+    /// SKIP_PRIME_CHUNKS` periods after the one before it (the transport will not start a second
+    /// transition while the first ramp is in flight), and a latch resolves `SKIP_PRIME_CHUNKS + 1`
+    /// periods after its mark on a track that opens audibly, plus the track's own `head_silence` — so
+    /// a correct run has two or three armed at once, and this pool is several times that. Exhausting
+    /// it is a **named refusal** from `transition_hand_off`, never a silent overwrite: that overwrite
+    /// is exactly R13's second defect.
+    const WATCH_SLOTS: usize = SKIP_LOG;
 
     /// The cover's zeros: one whole chunk, pushed as real ring data (§4.4 step 4).
     const ZEROS: [u8; CHUNK] = [0u8; CHUNK];
@@ -305,6 +324,48 @@ mod rom {
                 next: 0,
             }
         }
+    }
+
+    /// One in-flight transition's wire watch: the stamps `SkipRecord`/`AdvanceRecord` read, held by the
+    /// **slot** that transition's hand-off armed rather than by a single global latch.
+    ///
+    /// A slot is armed by [`transition_hand_off`] (which takes the mark inside the hand-off's critical
+    /// section) and freed by the record that owns it, through `watch_disarm`, when its own new track
+    /// reaches the wire. The `armed` bit is [`Stats::watch_armed`]'s, not a field here: one place that
+    /// says whether a slot is live, so the pool cannot disagree with itself.
+    #[derive(Clone, Copy)]
+    struct WatchSlot {
+        /// The period (a `handler_entries` value) the hand-off's mark was taken at.
+        at: u32,
+        /// The first all-silent period after `at`; `0` = not seen yet (the same sentinel the probe uses,
+        /// and why its raw `old_periods` had a floor of one).
+        silent_at: u32,
+        /// The first non-silent period after `silent_at`; `0` = not seen yet.
+        new_at: u32,
+        /// The period of the first chunk handed over **after** the cover countdown — the new track's own
+        /// first chunk, by the machinery. `0` = not seen yet.
+        ///
+        /// This is the second half of a skip's measurement, and it exists because the wire cannot answer
+        /// the first half alone: a track whose own head is digital silence (this fixture's master: its
+        /// first non-zero sample is at 0.4539 s) is byte-identical to the cover, so "the first non-silent
+        /// chunk" lags the transition by however long the track starts quiet. The feeder reads this off
+        /// the hand-off gain's cover countdown, so it witnesses that the cover was exactly
+        /// `SKIP_PRIME_CHUNKS` chunks and that the ramp started on the track's own first chunk rather than
+        /// on a cover chunk.
+        content_at: u32,
+        /// `underflows` when the mark was taken: each record's delta is the whole claim.
+        underflows_at: u32,
+    }
+
+    impl WatchSlot {
+        /// A free slot. Arming overwrites it wholesale, so a stale stamp can never be read as a new one.
+        const FREE: Self = Self {
+            at: 0,
+            silent_at: 0,
+            new_at: 0,
+            content_at: 0,
+            underflows_at: 0,
+        };
     }
 
     /// `RingFeed::new()` is `const` precisely so a consumer with no allocator in an interrupt can
@@ -373,35 +434,21 @@ mod rom {
         /// The worst of those latenesses, in samples — timer1 cascades from the sample clock, so its
         /// counter is a sample counter.
         max_delay_samples: u32,
-        // --- the skip's wire watch (§4.4's "measured at AP-1, not asserted", PR-3b-ii-B2b) ----
+        // --- the transitions' wire watch (§4.4's "measured at AP-1, not asserted", PR-3b-ii-B2b) ----
         //
         // The probe's idea, re-implemented in app source: latch the first all-silent chunk handed to
-        // the DMA after the hand-off, and the first non-silent one after that, so `to_new` is read
-        // off the bytes the DMA was given rather than off the producer's intentions. The scan costs
-        // a pass over both slots, so it runs only while a skip is unresolved — an ordinary period
-        // pays one compare.
-        /// A skip's hand-off has happened and the watch has not resolved yet.
-        watch_armed: bool,
-        /// The period (a `handler_entries` value) the hand-off's mark was taken at.
-        watch_at: u32,
-        /// The first all-silent period after `watch_at`; `0` = not seen yet (the same sentinel the
-        /// probe uses, and why its raw `old_periods` had a floor of one).
-        watch_silent_at: u32,
-        /// The first non-silent period after `watch_silent_at`; `0` = not seen yet.
-        watch_new_at: u32,
-        /// The period of the first chunk handed over **after** the skip's cover countdown — the new
-        /// track's first chunk, by the machinery. `0` = not seen yet.
-        ///
-        /// This is the second half of the skip's measurement, and it exists because the wire cannot
-        /// answer the first half alone: a track whose own head is digital silence (this fixture's
-        /// master: its first non-zero sample is at 0.4539 s) is byte-identical to the cover, so "the
-        /// first non-silent chunk" lags the transition by however long the track starts quiet. The
-        /// feeder reads this off the hand-off gain's cover countdown, so it witnesses that the cover
-        /// was exactly `SKIP_PRIME_CHUNKS` chunks and that the ramp started on the track's own first
-        /// chunk rather than on a cover chunk.
-        watch_content_at: u32,
-        /// `underflows` when the mark was taken: each skip's delta is the whole claim.
-        watch_underflows_at: u32,
+        // the DMA after a hand-off, and the first non-silent one after that, so `to_new` is read off the
+        // bytes the DMA was given rather than off the producer's intentions. **One slot per in-flight
+        // record**, because a single global latch is what made R13's second defect: a second hand-off
+        // re-armed the watch and left the first record `open` with `content_at = 0`. The scan costs a
+        // pass over both DMA slots, so it runs only while some slot is armed — an ordinary period pays
+        // one mask compare.
+        /// The wire watches, one per in-flight transition, as [`WatchSlot`] describes.
+        watch: [WatchSlot; WATCH_SLOTS],
+        /// Which of those slots are armed, as a bitmask: bit `i` is `watch[i]`. A `u16` because
+        /// [`WATCH_SLOTS`] is [`SKIP_LOG`] = 16; the feeder walks the set bits, so a period with one
+        /// armed slot costs one iteration rather than sixteen.
+        watch_armed: u16,
         /// Samples `RingFeed::truncate()` has stepped over in this run. The session clock does not
         /// see them (`consumed` moves, `commit` does not), so this is the term that keeps
         /// `consumed == committed + dropped` exact with skips in the run.
@@ -427,12 +474,8 @@ mod rom {
         coalesced: 0,
         late_servicings: 0,
         max_delay_samples: 0,
-        watch_armed: false,
-        watch_at: 0,
-        watch_silent_at: 0,
-        watch_new_at: 0,
-        watch_content_at: 0,
-        watch_underflows_at: 0,
+        watch: [WatchSlot::FREE; WATCH_SLOTS],
+        watch_armed: 0,
         dropped_samples: 0,
         cover_samples: 0,
         content_pushed: 0,
@@ -1482,8 +1525,22 @@ mod rom {
         // countdown of one means this is the last cover chunk, so the next period is the new track's
         // own first chunk. `handler_entries` is incremented in the audit below (the reference's
         // order), so this entry's own index is `+ 1` and the next one is `+ 2`.
-        if stats.watch_armed && stats.watch_content_at == 0 && transport.gain().held_chunks() == 1 {
-            stats.watch_content_at = stats.handler_entries.wrapping_add(2);
+        //
+        // Only the slot whose cover is counting can be waiting for this stamp, and at most one can be:
+        // a second transition needs the first ramp back, which spends the countdown. Each armed slot
+        // still waiting takes it, and no slot can steal another's.
+        let armed = stats.watch_armed;
+        if armed != 0 && transport.gain().held_chunks() == 1 {
+            let content_at = stats.handler_entries.wrapping_add(2);
+            let mut waiting = armed;
+            while waiting != 0 {
+                let index = waiting.trailing_zeros() as usize;
+                waiting &= waiting - 1;
+                let slot = &mut stats.watch[index];
+                if slot.content_at == 0 {
+                    slot.content_at = content_at;
+                }
+            }
         }
 
         let gap = periods.wrapping_sub(stats.last_period);
@@ -1505,19 +1562,31 @@ mod rom {
         stats.handler_entries += 1;
 
         let finished = stats.finished;
-        let scan = stats.watch_armed && stats.watch_new_at == 0;
+        let scan = stats.watch_armed != 0;
         let (verdict, lp, rp, silent) =
             take_into_slot(&mut *bufs, &mut *feed, finished, &mut transport, scan);
-        // The wire watch (D4's "measured at AP-1, not asserted"): the first all-silent period after
-        // the hand-off's mark, then the first non-silent one after that. `handler_entries` is the
-        // period clock — it was just incremented, so this entry's index is the value latched.
+        // The wire watch (D4's "measured at AP-1, not asserted"): the first all-silent period after the
+        // hand-off's mark, then the first non-silent one after that. `handler_entries` is the period
+        // clock — it was just incremented, so this entry's index is the value latched. **Per slot**: each
+        // armed record waits for its own stamps, so a later hand-off cannot move an earlier one's. The
+        // mask walk costs one iteration per armed slot and one compare when none is.
         if scan {
-            if stats.watch_silent_at == 0 {
-                if silent {
-                    stats.watch_silent_at = stats.handler_entries;
+            let entry = stats.handler_entries;
+            let mut armed = stats.watch_armed;
+            while armed != 0 {
+                let index = armed.trailing_zeros() as usize;
+                armed &= armed - 1;
+                let slot = &mut stats.watch[index];
+                if slot.new_at != 0 {
+                    continue;
                 }
-            } else if !silent && stats.watch_new_at == 0 {
-                stats.watch_new_at = stats.handler_entries;
+                if slot.silent_at == 0 {
+                    if silent {
+                        slot.silent_at = entry;
+                    }
+                } else if !silent {
+                    slot.new_at = entry;
+                }
             }
         }
         // The session clock (§10.4, ruled option A). It counts what this period actually
@@ -1596,6 +1665,10 @@ mod rom {
     // ----------------------------------------------------- §4.4's skip, from both sides
 
     /// The wire watch's state and the counters around it, read in one instant.
+    ///
+    /// One of these is **one record's** latch (`slot`'s stamps, plus the counters live at the moment it
+    /// is read), which is what makes "every transition resolves from its own latch" true: the stamps and
+    /// the underflow mark a record's delta is taken from are its slot's, not a shared watch's.
     struct Watch {
         /// The period the hand-off's mark was taken at.
         at: u32,
@@ -1617,26 +1690,65 @@ mod rom {
         starved_at: u32,
     }
 
-    /// What the wire watch has seen so far (D4's "measured at AP-1, not asserted").
-    fn watch_state() -> Watch {
+    /// What one armed slot's wire watch has seen so far (D4's "measured at AP-1, not asserted").
+    fn watch_state(slot: u8) -> Watch {
         critical_section::with(|cs| {
             let stats = STATS.borrow_ref(cs);
+            let seen = stats.watch[slot as usize];
             Watch {
-                at: stats.watch_at,
-                silent_at: stats.watch_silent_at,
-                new_at: stats.watch_new_at,
-                content_at: stats.watch_content_at,
+                at: seen.at,
+                silent_at: seen.silent_at,
+                new_at: seen.new_at,
+                content_at: seen.content_at,
                 underflows: stats.underflows,
-                underflows_at: stats.watch_underflows_at,
+                underflows_at: seen.underflows_at,
                 starved: stats.starved_periods,
                 starved_at: stats.advance_starved_at,
             }
         })
     }
 
-    /// Stop the watch's scan. The next arm re-zeros it, so a resolved skip costs nothing until then.
-    fn watch_disarm() {
-        critical_section::with(|cs| STATS.borrow_ref_mut(cs).watch_armed = false);
+    /// Free one wire-watch slot: the record that armed it has resolved, or never opened (its row
+    /// overflowed the log, which is already that run's gated failure). The next arm re-zeroes the slot,
+    /// so a resolved transition costs the feeder nothing after this.
+    fn watch_disarm(slot: u8) {
+        critical_section::with(|cs| {
+            let mut stats = STATS.borrow_ref_mut(cs);
+            let bit = 1u16 << slot;
+            if stats.watch_armed & bit != 0 {
+                stats.watch_armed &= !bit;
+                stats.watch[slot as usize] = WatchSlot::FREE;
+            }
+        });
+    }
+
+    /// Arm one free wire-watch slot for a hand-off and return its index: the record that hand-off opens
+    /// owns the slot until its own new track reaches the wire.
+    ///
+    /// Called inside [`transition_hand_off`]'s critical section, so the mark and the transition cannot
+    /// be interleaved by a feeder entry. **All slots armed is a named refusal**, never a reuse: reusing
+    /// one is the shared latch that was R13's second defect, and a refusal is a FAIL line a reader can
+    /// act on while a silent overwrite is a wrong number in someone else's row.
+    fn watch_arm(stats: &mut Stats) -> Result<u8, &'static str> {
+        let armed = stats.watch_armed;
+        let at = stats.handler_entries;
+        let underflows_at = stats.underflows;
+        for (index, slot) in stats.watch.iter_mut().enumerate() {
+            let bit = 1u16 << index;
+            if armed & bit != 0 {
+                continue;
+            }
+            *slot = WatchSlot {
+                at,
+                silent_at: 0,
+                new_at: 0,
+                content_at: 0,
+                underflows_at,
+            };
+            stats.watch_armed |= bit;
+            return Ok(index as u8);
+        }
+        Err("every wire-watch slot was armed: a hand-off would have had no latch of its own")
     }
 
     /// One whole chunk of zeros as real ring data — §4.4 step 4's cover.
@@ -1671,6 +1783,9 @@ mod rom {
         /// cannot clear it. Zero when the visit ended on a full chunk. This is the sub-period term of
         /// a track boundary's gap (PR-3b-iii-B).
         tail_padding: u32,
+        /// The wire-watch slot this hand-off armed. The record opened for the hand-off owns it, and only
+        /// that record's own readings ever come out of it.
+        watch: u8,
     }
 
     /// §4.4's steps 2, 4 (its first chunk) and 5's arming — in **one** critical section.
@@ -1722,17 +1837,12 @@ mod rom {
                 // zero by construction rather than by measurement.
                 0
             };
-            // The wire watch is armed for **both** kinds of hand-off (PR-3b-iii-B). A press's row
-            // uses it to say no stale audio followed the truncate; a track end's uses the same latch
-            // to say the same of a drained ring, and to put a number on the boundary's
-            // silence. A press adds its own press-to-hand-off wait; a drain has none, because the
-            // trigger is the drain itself.
-            stats.watch_armed = true;
-            stats.watch_at = stats.handler_entries;
-            stats.watch_silent_at = 0;
-            stats.watch_new_at = 0;
-            stats.watch_content_at = 0;
-            stats.watch_underflows_at = stats.underflows;
+            // The wire watch is armed for **both** kinds of hand-off (PR-3b-iii-B), one slot per
+            // in-flight transition. A press's row uses it to say no stale audio followed the truncate;
+            // a track end's uses the same latch to say the same of a drained ring, and to put a number
+            // on the boundary's silence. A press adds its own press-to-hand-off wait; a drain has none,
+            // because the trigger is the drain itself.
+            let watch = watch_arm(&mut stats)?;
             let tail_padding = stats.tail_padding;
             stats.finished = false;
             let committed = position::committed_samples();
@@ -1743,6 +1853,7 @@ mod rom {
                 dropped,
                 committed,
                 tail_padding,
+                watch,
             })
         })
     }
@@ -1768,6 +1879,23 @@ mod rom {
         /// Visits past the log. Counted, and part of the verdict: the proof enumerates the tracks
         /// from this list, so a dropped visit is a track nothing proved.
         overflow: u32,
+        /// The open visit's `base`, held here rather than read back out of `list`: a visit past
+        /// [`VISIT_LOG`] has no row, and it still owns a span that the running totals must book.
+        base: u32,
+        /// Whether a visit is open — what makes `close` idempotent, as the ledger's callers assume.
+        open: bool,
+        /// Σ of every visit's content pushes, accumulated as the run goes.
+        ///
+        /// The figure `Stats::content_pushed` is checked against, so the two bookkeepings cannot part.
+        /// It is a **running total and not a sum over [`Visits::list`]**: the list is a bounded print
+        /// buffer, so summing it made the *print* depth the ledger's total and a session with more
+        /// than `VISIT_LOG` visits reported a ledger disagreement beside the real overflow (R13's
+        /// suspect (b)).
+        pushed_total: u32,
+        /// Σ of `ceil((end − base) / CHUNK)` over every visit, on the same rule and for the same
+        /// reason: it is the per-visit half of the hand-off ledger, and it must not depend on how many
+        /// rows the log could keep.
+        hand_offs: usize,
     }
 
     impl Visits {
@@ -1781,11 +1909,17 @@ mod rom {
                 }),
                 len: 0,
                 overflow: 0,
+                base: 0,
+                open: false,
+                pushed_total: 0,
+                hand_offs: 0,
             }
         }
 
         /// Open a visit for `track`: `base` is where its painted position starts from.
         fn begin(&mut self, track: usize, base: u32) {
+            self.base = base;
+            self.open = true;
             if self.len == VISIT_LOG {
                 self.overflow = self.overflow.saturating_add(1);
                 return;
@@ -1800,7 +1934,18 @@ mod rom {
         }
 
         /// Close the open visit: how much of the track reached the ring, and where the clock stood.
+        ///
+        /// The running totals are booked here **whether or not the visit fitted in the log**, and the
+        /// row is written only if it did. One divide per visit, at a hand-off or the run's end, and
+        /// never on the audio path.
         fn close(&mut self, pushed: u32, end: u32) {
+            if !self.open {
+                return;
+            }
+            self.open = false;
+            self.pushed_total = self.pushed_total.saturating_add(pushed);
+            let span = end.saturating_sub(self.base) as usize;
+            self.hand_offs += (span + CHUNK - 1) / CHUNK;
             if self.len == 0 {
                 return;
             }
@@ -1813,14 +1958,9 @@ mod rom {
             &self.list[..self.len]
         }
 
-        /// Σ of every visit's content pushes — the figure `Stats::content_pushed` is checked against,
-        /// so the two bookkeepings cannot part.
+        /// Σ of every visit's content pushes, over **every** visit — see [`Visits::pushed_total`].
         fn pushed_total(&self) -> u32 {
-            let mut total = 0u32;
-            for visit in self.list() {
-                total = total.saturating_add(visit.pushed);
-            }
-            total
+            self.pushed_total
         }
     }
 
@@ -1847,6 +1987,9 @@ mod rom {
         /// term), so this field's row starts where the main loop woke up. See
         /// [`SkipRecord::take_to_handoff`].
         take_at: u32,
+        /// The wire-watch slot this record's hand-off armed: every stamp read below is **this** slot's,
+        /// which is what keeps a second, later transition from retiring this row's reading.
+        watch: u8,
         /// The watch has not resolved yet.
         open: bool,
     }
@@ -1894,8 +2037,12 @@ mod rom {
 
         /// Periods from the hand-off to the first chunk handed over after the cover countdown: the
         /// machinery's transition, which is `SKIP_PRIME_CHUNKS + 1` and nothing else.
+        ///
+        /// `saturating_sub`, not `wrapping_sub`: an unresolved latch reads `0` — which the row prints as
+        /// `UNRESOLVED` and which fails the content-point term as a number — rather than `0 − at`
+        /// wrapped to four billion in a log line (R13's second defect, from the reading side).
         fn content_at(&self) -> u32 {
-            self.content_at.wrapping_sub(self.at)
+            self.content_at.saturating_sub(self.at)
         }
 
         /// Periods of the new track's own silence that follow the cover — `to_new - content_at`.
@@ -2009,6 +2156,7 @@ mod rom {
                     underflows: 0,
                     dropped: 0,
                     take_at: 0,
+                    watch: 0,
                     open: false,
                 }),
                 recorded: 0,
@@ -2027,6 +2175,10 @@ mod rom {
             watch: &Watch,
         ) {
             if self.recorded == SKIP_LOG {
+                // The hand-off armed its own slot, and no row will read it: free it. `overflow` is
+                // already this run's gated failure, and a slot nobody reads would keep the feeder
+                // scanning for a record that does not exist.
+                watch_disarm(hand_off.watch);
                 self.overflow = self.overflow.saturating_add(1);
                 return;
             }
@@ -2041,31 +2193,44 @@ mod rom {
                 underflows: watch.underflows,
                 dropped: hand_off.dropped,
                 take_at,
+                watch: hand_off.watch,
                 open: true,
             };
             self.recorded += 1;
         }
 
-        /// Whether a skip is still waiting for the new track to reach the wire.
-        fn open(&self) -> bool {
-            self.recorded > 0 && self.records[self.recorded - 1].open
+        /// Whether any skip is still waiting for its own new track to reach the wire.
+        fn any_open(&self) -> bool {
+            self.records[..self.recorded]
+                .iter()
+                .any(|record| record.open)
         }
 
-        /// Take the watch's reading for the open skip, if it has resolved.
-        fn resolve(&mut self, watch: &Watch) -> bool {
-            if !self.open() {
-                return false;
+        /// Take **every** open record's own watch reading, and close the ones whose latch has resolved.
+        ///
+        /// Every open record is read, not just the newest: a second hand-off can be behind the first
+        /// one (`head_silence` periods of a track that opens on digital silence), and each record's
+        /// readings come from the slot its own hand-off armed. That is the whole fix for R13's second
+        /// defect — one global watch, re-armed per hand-off, left the earlier record `open` with
+        /// `content_at = 0`.
+        fn resolve(&mut self) {
+            for index in 0..self.recorded {
+                if !self.records[index].open {
+                    continue;
+                }
+                let slot = self.records[index].watch;
+                let watch = watch_state(slot);
+                let record = &mut self.records[index];
+                record.underflows = watch.underflows;
+                if watch.new_at == 0 {
+                    continue;
+                }
+                record.silent_at = watch.silent_at;
+                record.new_at = watch.new_at;
+                record.content_at = watch.content_at;
+                record.open = false;
+                watch_disarm(slot);
             }
-            let record = &mut self.records[self.recorded - 1];
-            record.underflows = watch.underflows;
-            if watch.new_at == 0 {
-                return false;
-            }
-            record.silent_at = watch.silent_at;
-            record.new_at = watch.new_at;
-            record.content_at = watch.content_at;
-            record.open = false;
-            true
         }
 
         /// Every skip's cover was exactly `SKIP_PRIME_CHUNKS` chunks, the new track's own chunk
@@ -2075,7 +2240,7 @@ mod rom {
         /// The terms are [`SkipRecord::ok`]'s, so this summary and the rows below cannot disagree
         /// about which skip failed or why.
         fn ok(&self) -> bool {
-            let mut clean = self.overflow == 0 && !self.open();
+            let mut clean = self.overflow == 0 && !self.any_open();
             for record in &self.records[..self.recorded] {
                 clean &= record.ok();
             }
@@ -2118,11 +2283,16 @@ mod rom {
             );
             for record in &self.records[..self.recorded] {
                 agb::println!(
-                    "[album-rom] skip: \u{2192}track {} (from {}) content_at={} periods (expected {}) old={} (weak: zero-gain hides stale) underflow_delta={} take\u{2192}hand-off={} periods (bound {}) head_silence={} periods to_new={} periods silence={} dropped={} [{}]",
+                    "[album-rom] skip: \u{2192}track {} (from {}) content_at={} periods (expected {}){} old={} (weak: zero-gain hides stale) underflow_delta={} take\u{2192}hand-off={} periods (bound {}) head_silence={} periods to_new={} periods silence={} dropped={} [{}]",
                     record.to_track,
                     record.from_track,
                     record.content_at(),
                     SKIP_PRIME_CHUNKS + 1,
+                    if record.content_at == 0 {
+                        " UNRESOLVED (its own latch never reached the wire)"
+                    } else {
+                        ""
+                    },
                     record.old(),
                     record.underflow_delta(),
                     record.take_to_handoff(),
@@ -2139,6 +2309,16 @@ mod rom {
                     "[album-rom] FAIL a skip did not land: every skip's cover must be {} chunks followed at once by the new track's own chunk, with no stale audio after the hand-off, no underflow booked, a truncate that dropped a queued span no larger than the ring, and every press inside its {}-period hand-off bound (old=0 alone cannot see a stale chunk served at zero gain — dropped= is the truncate's witness)",
                     SKIP_PRIME_CHUNKS,
                     SKIP_PRESS_TO_HANDOFF_PERIODS
+                );
+            }
+            // Named apart from the rows: a session with more skips than the log holds fails on the log's
+            // **depth**, and every row it did keep can still be PASS. Said out loud so the summary's FAIL
+            // is not read as a transition that went wrong (R13's suspect (b)).
+            if self.overflow > 0 {
+                agb::println!(
+                    "[album-rom] FAIL {} skip(s) past SKIP_LOG={} were kept out of the print log; every recorded row's own terms are above",
+                    self.overflow,
+                    SKIP_LOG
                 );
             }
         }
@@ -2180,6 +2360,9 @@ mod rom {
         /// and gated so the track-end row's claim is the same shape as a press's, not an unstated
         /// omission.
         dropped: u32,
+        /// The wire-watch slot this advance's hand-off armed, on the skip row's rule: the record owns its
+        /// own latch.
+        watch: u8,
         open: bool,
     }
 
@@ -2196,9 +2379,10 @@ mod rom {
         }
 
         /// Periods from the hand-off to the first chunk handed over after the cover countdown: the
-        /// machinery's transition, `SKIP_PRIME_CHUNKS + 1` and nothing else.
+        /// machinery's transition, `SKIP_PRIME_CHUNKS + 1` and nothing else. `saturating_sub` for the
+        /// skip row's reason: an unresolved latch reads `0`, which the row prints as `UNRESOLVED`.
         fn content_at(&self) -> u32 {
-            self.content_at.wrapping_sub(self.at)
+            self.content_at.saturating_sub(self.at)
         }
 
         /// Samples of silence between the outgoing visit's last real sample and the incoming
@@ -2257,6 +2441,7 @@ mod rom {
                     starved: 0,
                     tail_padding: 0,
                     dropped: 0,
+                    watch: 0,
                     open: false,
                 }),
                 recorded: 0,
@@ -2267,6 +2452,7 @@ mod rom {
         /// Record an advance's hand-off. The watch fields stay zero until it resolves.
         fn begin(&mut self, from: usize, to: usize, hand_off: &HandOff, watch: &Watch) {
             if self.recorded == ADVANCE_LOG {
+                watch_disarm(hand_off.watch);
                 self.overflow = self.overflow.saturating_add(1);
                 return;
             }
@@ -2282,37 +2468,45 @@ mod rom {
                 starved: watch.starved.saturating_sub(watch.starved_at),
                 tail_padding: hand_off.tail_padding,
                 dropped: hand_off.dropped,
+                watch: hand_off.watch,
                 open: true,
             };
             self.recorded += 1;
         }
 
-        /// Whether an advance is still waiting for the new track to reach the wire.
-        fn open(&self) -> bool {
-            self.recorded > 0 && self.records[self.recorded - 1].open
+        /// Whether any advance is still waiting for its own new track to reach the wire.
+        fn any_open(&self) -> bool {
+            self.records[..self.recorded]
+                .iter()
+                .any(|record| record.open)
         }
 
-        /// Take the watch's reading for the open advance, if it has resolved.
-        fn resolve(&mut self, watch: &Watch) -> bool {
-            if !self.open() {
-                return false;
+        /// Take every open record's own watch reading, and close the ones whose latch has resolved —
+        /// [`Skips::resolve`]'s rule, for the same reason.
+        fn resolve(&mut self) {
+            for index in 0..self.recorded {
+                if !self.records[index].open {
+                    continue;
+                }
+                let slot = self.records[index].watch;
+                let watch = watch_state(slot);
+                let record = &mut self.records[index];
+                record.underflows = watch.underflows;
+                if watch.new_at == 0 {
+                    continue;
+                }
+                record.silent_at = watch.silent_at;
+                record.new_at = watch.new_at;
+                record.content_at = watch.content_at;
+                record.open = false;
+                watch_disarm(slot);
             }
-            let record = &mut self.records[self.recorded - 1];
-            record.underflows = watch.underflows;
-            if watch.new_at == 0 {
-                return false;
-            }
-            record.silent_at = watch.silent_at;
-            record.new_at = watch.new_at;
-            record.content_at = watch.content_at;
-            record.open = false;
-            true
         }
 
         /// Every advance landed at the machinery's `SKIP_PRIME_CHUNKS + 1` periods with no stale
         /// audio and no underflow, per [`AdvanceRecord::ok`].
         fn ok(&self) -> bool {
-            let mut clean = self.overflow == 0 && !self.open();
+            let mut clean = self.overflow == 0 && !self.any_open();
             for record in &self.records[..self.recorded] {
                 clean &= record.ok();
             }
@@ -2337,10 +2531,15 @@ mod rom {
                 let tenths = (gap * 10 + CHUNK as u32 / 2) / CHUNK as u32;
                 let ms = u64::from(gap) * 1_000 / u64::from(geometry::RATE_HZ);
                 agb::println!(
-                    "[album-rom] advance: \u{2192}track {} (from {}) content_at={} periods old={} (weak: zero-gain hides stale) underflow_delta={} starved={} dropped={} (a drained ring has nothing to drop) gap={}.{} periods ({} samples = {} ms at {} Hz) [{}]",
+                    "[album-rom] advance: \u{2192}track {} (from {}) content_at={} periods{} old={} (weak: zero-gain hides stale) underflow_delta={} starved={} dropped={} (a drained ring has nothing to drop) gap={}.{} periods ({} samples = {} ms at {} Hz) [{}]",
                     record.to_track,
                     record.from_track,
                     record.content_at(),
+                    if record.content_at == 0 {
+                        " UNRESOLVED (its own latch never reached the wire)"
+                    } else {
+                        ""
+                    },
                     record.old(),
                     record.underflow_delta(),
                     record.starved,
@@ -3469,20 +3668,13 @@ mod rom {
                 paint.sample();
                 idle = 0;
             }
-            // A skip's or an advance's measurement closes as soon as the wire has carried the new
-            // track: the watch is read and disarmed here so the scan stops costing the feeder its
-            // pass over the slots.
-            if skips.open() {
-                let watch = watch_state();
-                if skips.resolve(&watch) {
-                    watch_disarm();
-                }
-            } else if advances.open() {
-                let watch = watch_state();
-                if advances.resolve(&watch) {
-                    watch_disarm();
-                }
-            }
+            // A skip's or an advance's measurement closes as soon as the wire has carried **its own** new
+            // track: every open record's own slot is read here, and each resolved one frees its slot, so
+            // the scan stops costing the feeder its pass over the DMA slots once nothing is armed. The
+            // newest record is not special: a second hand-off can be behind the first (R13's second
+            // defect, where resolving only the newest left the earlier one open with `content_at = 0`).
+            skips.resolve();
+            advances.resolve();
             // One main-loop pass's transport decision, independent of commands: has the fade
             // finished (freeze the chain), is a skip ready to hand off, or has the ramp back returned
             // (Playing again)?
@@ -3532,11 +3724,10 @@ mod rom {
                     }
                     let from = producer.track;
                     visits.close(producer.pushed as u32, hand_off.committed);
+                    let watch = watch_state(hand_off.watch);
                     if !auto {
-                        let watch = watch_state();
                         skips.begin(from, next, pending_at, &hand_off, &watch);
                     } else {
-                        let watch = watch_state();
                         advances.begin(from, next, &hand_off, &watch);
                     }
                     // Step 3: the seam call. Its cost is a container parse plus the first frame's
@@ -3623,19 +3814,10 @@ mod rom {
             );
             halt = Some("frame count");
         }
-        // Take the last skip's (or advance's) reading before the drain: the wire watch resolves on
-        // the new track's first chunk, long before the ring empties, so this is not the drain's
-        // business.
-        if skips.open() {
-            let watch = watch_state();
-            skips.resolve(&watch);
-            watch_disarm();
-        }
-        if advances.open() {
-            let watch = watch_state();
-            advances.resolve(&watch);
-            watch_disarm();
-        }
+        // Take the last skip's (or advance's) reading before the drain: the wire watch resolves on the
+        // new track's first chunk, long before the ring empties, so this is not the drain's business.
+        skips.resolve();
+        advances.resolve();
 
         // Belt and braces: `push_one` already sets this in the same critical section as the final
         // push; this covers a producer that stopped on an error path and is idempotent otherwise.
@@ -3774,9 +3956,22 @@ mod rom {
             visits.len,
             if visits_ok { "MATCH" } else { "MISMATCH" }
         );
-        if !visits_ok {
+        // Two different failures, named separately: the sums are running totals over every visit, so a
+        // disagreement is the bookkeeping's; an overflow is the log's own depth, which the content proof
+        // does read (it enumerates tracks from these rows). Printing one line for both is what made an
+        // overflow look like a wrong sum — R13's suspect (b) misread as an audio ledger defect.
+        if visits.overflow > 0 {
             agb::println!(
-                "[album-rom] FAIL the per-track ledger disagrees with the ring's: visits sum {} vs content {} (a visit was dropped from the log its own proof reads)",
+                "[album-rom] FAIL {} visit(s) past VISIT_LOG={} were kept out of the print log the content proof enumerates: the sums still close ({} == {}), the proof's work list does not",
+                visits.overflow,
+                VISIT_LOG,
+                visits_pushed,
+                content
+            );
+        }
+        if visits_pushed != content {
+            agb::println!(
+                "[album-rom] FAIL the per-track ledger disagrees with the ring's: visits sum {} vs content {}",
                 visits_pushed,
                 content
             );
@@ -3806,13 +4001,10 @@ mod rom {
         // was re-armed on). `handler_entries` alone would look short by one per resume and long by
         // one per truncated queue, which is the shape of a dishonest comparison.
         //
-        // One divide per visit, computed once here and never on the audio path.
-        let mut expected_hand_offs = cover as usize / CHUNK;
-        for visit in visits.list() {
-            let consumed = visit.end.saturating_sub(visit.base) as usize;
-            expected_hand_offs += (consumed + CHUNK - 1) / CHUNK;
-        }
-        expected_hand_offs += starved as usize;
+        // The per-visit half of it is the running total `Visits::close` keeps, not a sum over the rows
+        // the log could hold: a visit past `VISIT_LOG` still hands its chunks over. One divide per
+        // visit, computed at its close and never on the audio path.
+        let expected_hand_offs = cover as usize / CHUNK + visits.hand_offs + starved as usize;
         let hand_offs = handler_entries as usize + primes as usize;
         let hand_offs_ok = hand_offs == expected_hand_offs;
         agb::println!(
