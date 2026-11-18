@@ -600,26 +600,56 @@ three 16-byte arrays) against **3,876 B free** (`iwram_end` 0x0300673c to `sp`
 0x03007660). Same story, smaller: `Q3` (81 B) is in ROM, and the reference keeps
 `uli_g_q3` in IWRAM — ~500 cycles/frame across 496 quad groups.
 
-**Cause 3 — the 17-bit contract protects a path our own data never takes.**
-`refill!` demands 17 valid bits because a raw coefficient reads `r` bits *then* a
-sign bit. But `r` is only read on the `pair` path, and **on every corpus this
-tree owns, both pair classes have `rbits == 0`**:
+**Cause 3 — the 17-bit contract paid for a run that cannot exceed 16.**
+`refill!` demanded 17 valid bits because a raw coefficient reads `r` bits *then*
+a sign bit, and 16 + 1 would underflow a 16-bit window. But `r` is only read on
+the `pair` path, and **on every corpus this tree owns the PAIR classes have
+`rbits <= 5`**:
 
 | corpus | frames | k | max `esck` | `rbits` over PAIR classes |
 |---|---:|---:|---:|---:|
-| fixture `uli2_tiny` | 129 | 14 | 2 | **0** |
-| `biomaster` (album) | 16,553 | 14 | 2 | **0** |
-| `biotwo` | 33,104 | 14 | 2 | **0** |
-| `adv` (adversarial) | 641 | 14 | 2 | **0** |
-| `cross` | 167,222 | 14 | 2 | **0** |
+| fixture `uli2_tiny` | 129 | 14 | 2 | 0,0,0,0,0,0,1,2,3,4,5 → **max 5** |
+| `biomaster` (album) | 16,553 | 14 | 2 | **max 5** |
+| `biotwo` | 33,104 | 14 | 2 | **max 5** |
+| `adv` (adversarial) | 641 | 14 | 2 | **max 5** |
+| `cross` | 167,222 | 14 | 2 | **max 5** |
 
-Measured by parsing the blob through `CodeTables::parse_into`, per class:
-`0/0/0 1/0/0 1/0/0` then eleven `2/0..5/…` — one `ZERO`, two `PAIR` with
-`r == 0`, eleven `QUAD` (where `rbits` is never read). So the worst group is
-**4 bits of sign** (quad) or 2 (pair), not 17; a 16-bit contract carries 12 bits
-of margin, and the nested second load exists only for a branch that does not
-execute. `esck <= 2` likewise makes the escape guard dead: `t = 2z + 1 + k <= 13`,
-so both `t < 32` and `t <= valid` are unfalsifiable on our data.
+Measured by parsing the blob through `CodeTables::parse_into`, per class as
+`ctype/rbits/esck`: `0/0/0 1/0/0 1/0/0` then eleven `2/0..5/…` — one `ZERO`, **two
+`QUAD`** with `r == 0` (where `rbits` is never read), **eleven `PAIR`** with
+`r = 0,0,0,0,0,0,1,2,3,4,5`. **All five corpora carry byte-identical table
+sets.**
+
+> **Corrected 2026-11-19.** This block previously read "both pair classes have
+> `rbits == 0`" and named the two `1/0/0` classes PAIR and the eleven `2/…`
+> classes QUAD — the two class names were transposed, and the counts with them.
+> The citation was `tests/premise.rs`, which asserted `rbits == 0` on "every PAIR
+> class" and passed, because it compared against a local `const CT_PAIR: u8 = 1`
+> — which is `CT_QUAD`. The raw path *is* taken (up to 5 raw bits + a sign), so
+> the claim was false; the conclusion was not, because the raw pair arm refills
+> between the two coefficients of the group (its second `refill!`, `decoder.rs`),
+> so no read run exceeds 16 bits. The 16-bit contract stands on that refill, not
+> on `r == 0`. The test now imports the format's real constants, asserts
+> `rbits <= 5`, carries a negative control that fails if the class id and the
+> bound's subject ever part company again, and (a second, unrelated fix) actually
+> reads the four generated corpora, whose paths had an off-by-one `../` and
+> resolved outside the repository.
+
+The right frame is not "what does a group cost" but **what is the longest run of
+reads between two `refill!`s**, since one halfword load always restores exactly
+16 valid bits: a band or coefficient symbol is `len <= 16` (LUT 1..=10,
+`huff_slow` 11..=16); an escape field is `t = 2z + 1 + esck <= 13` with `z <= 5`
+(`CLZ6`'s fast path) — and `esc!` refills after taking it, so the raw digit that
+follows is measured from a fresh window at `r + 1 <= 6`. Every run fits 16, the
+nested second load exists only for a run that does not occur, and `esck <= 2` is
+likewise what makes the escape guard dead: both `t < 32` and `t <= valid` are
+unfalsifiable on our data.
+
+Worth naming, because it is the reason E-R4 must live in an encoder: the window
+arithmetic alone would tolerate `rbits <= 15` and `esck <= 5`, and the table
+parser accepts `rbits <= 16`/`esck <= 24` — **one bit looser than the product
+contract at `rbits == 16`**. The parser is not the guard; only the blob's author
+is.
 
 **The premise this project can actually rely on.** The product ROM is
 closed-world: we control the encoder, the container and the bake, so *"the
@@ -646,7 +676,7 @@ P1-P5 is bit-exact by construction, so the pins stay the witness.
 |---|---|---|---|---|
 | **P1** | Closed-world reader in the product build: **no `end`, no `bad`, no bounds test**. Refill becomes `ldrh …, [next], #2` + shift/or. Frees 2 live registers so `rq`/`dq15` become register-resident and the ~1,300 per-frame stack reloads go | **6–10k/frame** (est.) | low *under the premise* — needs the bake gate to be the only entry point; the checked decoder stays as the oracle | C's structure exactly; the *branchless* and `bad \|=` shapes were falsified, this one was never tried |
 | **P2** | Copy `rq` + `ctype`/`rbits`/`esck` into IWRAM (560 B) | **~3.7k/frame**, near-certain | very low — placement only, bit-identical | C's `uli_g`; `iwram-tables` was the same move for the synthesis tables (−10.4%) |
-| **P3** | 16-bit contract everywhere (justified by pair `rbits == 0`): removes the nested second load, and is what makes P1's single-load refill correct | 1–2k/frame | very low — measured across all five corpora | C's 16-bit contract |
+| **P3** | 16-bit contract everywhere (justified by pair `rbits <= 5` plus the raw arm's mid-group refill, which caps every read run at 16 bits): removes the nested second load, and is what makes P1's single-load refill correct | 1–2k/frame | very low — measured across all five corpora | C's 16-bit contract |
 | **P4** | Re-test C's `r1 = rq[1] * step` + `m == 1` fast path **after P1/P2** | **FALSIFIED 2026-11-19: +2,310 mean worse** | — | the old note blamed spilling; P1 fixed the spilling and it *still* lost — see below |
 | **P5** | `Q3` (81 B) and `CLZ6` (64 B) to IWRAM | **LANDED 2026-11-19: −570 mean / −104 worst** | trivial, +148 B IWRAM | `uli_g_q3` in IWRAM |
 
@@ -682,8 +712,9 @@ it does not go away until `rq`/`dq15` are register-resident.
 **P1 LANDED (2026-11-19), with P3 folded in — and this time the projection held.**
 The product bit reader is now **closed-world**: no `end`, no `bad`, no bounds test,
 no per-symbol `len == 0` test, and a **16-bit** refill contract instead of 17
-(P3, justified by the `rbits == 0` measurement above), which is what makes one
-load always sufficient. The checked reader survives behind `checked-reader`, and
+(P3, justified by the `rbits <= 5` measurement above together with the raw arm's
+mid-group refill), which is what makes one load always sufficient. The checked
+reader survives behind `checked-reader`, and
 every attribution image now builds with it through `attrib-dump` — a by-difference
 arm desynchronises the stream and needs `bad` to resynchronise, and keeping the
 control image on the same reader keeps the deltas comparable to each other (their
@@ -714,11 +745,14 @@ block is **~35,656 mean** (41,076 − 5,420) against C's 42–48k. The mean is n
 ahead of the reference; what remains is the densest frames.
 
 **The premise is now an assertion, not a comment.** `crates/uli-lite-gba/tests/premise.rs`
-checks `rbits == 0` on every PAIR class and `esck <= 2` on every class, for the
-committed fixture and for all five generated corpora when present. That is the
-seed of the bake gate: it is a property of the **tables in the blob**, so it
-belongs wherever the shipped album is produced, and it must run before the ROM
-exists rather than in it.
+checks `rbits <= 5` on every PAIR class and `esck <= 2` on every class, for the
+committed fixture and for all five generated corpora when present — all of them
+measuring `max rbits == 5`, `max esck == 2`, with identical table sets. It also
+witnesses itself: a negative control rejects a PAIR class at `rbits == 6`, so the
+green cannot come back from checking nothing (it had, once — see the correction
+under Cause 3). That is the seed of the bake gate: it is a property of the
+**tables in the blob**, so it belongs wherever the shipped album is produced, and
+it must run before the ROM exists rather than in it.
 
 **P4 is FALSIFIED (2026-11-19) — and the falsification is the interesting
 result.** The change was built exactly as the reference has it: `r1 = rq[1] *
@@ -842,11 +876,24 @@ still reproduce the pinned hashes.
 
 **Caveats.** C's 21–24k is measured on *their* corpus, ours on the fixture: the
 ratio is a diagnostic and the comparison of record is the structural table. The
-sub-frame arms are timing-only and `nolut` desynchronises the stream. The fixture
-has **zero pairs**, so two of the five inlined `coef!` expansions never execute
-there — `cross` should confirm before P3 is sized. And P1's premise is about
-*our* encoder: a third-party or re-encoded blob with different tables is not
-covered unless the bake assertions cover it.
+sub-frame arms are timing-only and `nolut` desynchronises the stream. And P1's
+premise is about *our* encoder: a third-party or re-encoded blob with different
+tables is not covered unless the bake assertions cover it.
+
+> **One caveat withdrawn (2026-11-19).** This paragraph also said "the fixture has
+> **zero pairs**, so two of the five inlined `coef!` expansions never execute
+> there — `cross` should confirm before P3 is sized." It is false, and it is the
+> same class-name transposition wearing a different hat: believing the only PAIR
+> classes were the two with `r == 0` implies the raw pair arm is dead code on our
+> data, and therefore that two of the five `coef!` expansions never run. `make
+> uli-frame-ops` on the fixture counts **15,984 pair groups and 10,480 raw-field
+> reads** over its 129 frames (`adv`: 78,104 / 8,016; `biomaster`: 1,626,832 /
+> 670,464 — frame counts match the Cause 3 table, so these are the same corpora).
+> Both pair arms and the quad arm execute on the fixture, so all five expansions
+> are covered there and P3 needed no confirmation from `cross`. The product path
+> executes the same symbols as the portable decoder that produced these counts —
+> that is what `make uli-overlay-test`'s full-corpus bit-exact differential
+> witnesses.
 
 ## The encoder — the last missing piece (plan, 2026-11-19)
 
@@ -883,7 +930,7 @@ the encoder writes the Huffman codebooks into the blob.
 | **E-R1** | In-repo **Rust**, host-only, no C, no `gba-audio` dependency at build or encode time | the standing rule; and a C oracle we cannot ship is not an encoder |
 | **E-R2** | Arbitrary **WAV** in: PCM 8/16/24/32-bit, mono or stereo, any rate → 32,768 Hz stereo | "encode arbitrary WAVs into ROMs" is the user-facing job. Compressed containers stay a Python/`ffmpeg` concern — the format rule forbids C, not external tools |
 | **E-R3** | Writes exactly the ULA2 container `uli-lite`/`GbaDecoder` parse: one blob, ≤32 tracks, per-track title/artist/preroll/bitpos, seek table every `SEEK_INTERVAL` frames, strings, tables blob | anything else is a second format |
-| **E-R4** | **The encoder owns the closed-world premise: `rbits ≤ 5` on every PAIR class and `esck ≤ 2`.** Refuse to emit otherwise | the product reader has a 16-bit refill contract and no error path; a raw pair coefficient costs `r+1` bits, so `r ≤ 5` keeps 10 bits of margin. The *parser* allows `rbits ≤ 16`/`esck ≤ 24`; only the encoder can make the product's premise true |
+| **E-R4** | **The encoder owns the closed-world premise: `rbits ≤ 5` on every PAIR class and `esck ≤ 2`.** Refuse to emit otherwise | the product reader has a 16-bit refill contract and no error path; a raw pair coefficient costs `r+1` bits after the group's refill, so `r ≤ 5` keeps 10 bits of margin. `esck ≤ 2` caps the escape field at `t = 2z+1+esck ≤ 13`. Both are **tighter than the window needs** (`r ≤ 15`, `esck ≤ 5`) and far tighter than the *parser* allows (`rbits ≤ 16`/`esck ≤ 24` — note 16 is already one bit past the contract); only the encoder can make the product's premise true. Measured maxima on all five corpora: `r = 5`, `esck = 2` (`tests/premise.rs`) |
 | **E-R5** | **Deterministic**: identical input → byte-identical blob, no threading-dependent output | pins are the whole verification story |
 | **E-R6** | Rate control: `--budget BYTES --cap PCT`; **refuse** rather than overrun | a cartridge overflow is a bake failure, not a warning |
 | **E-R7** | Quality parity with the reference on identical PCM: codec-only SNR within a stated tolerance of **32.29 mean / 25.78 worst dB** at cap 74 | otherwise the format's own record stops describing our encoder |
