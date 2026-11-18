@@ -1404,7 +1404,7 @@ fn the_lead_subtraction_cannot_underflow() {
 use album_player::pcm::{AlbumMeta, TrackMeta};
 use album_player::transport::{
     FADE_PERIODS, FADE_SAMPLES, GAIN_UNITY, HandOffGain, SKIP_PRIME_CHUNKS, State, Step, Transport,
-    scale_byte, take_to_handoff_bound,
+    pause_to_freeze_bound, scale_byte, take_to_handoff_bound,
 };
 use gba_playback::playback::{Chunk, PushError, RingFeed, convert_frame, fifo_byte};
 
@@ -2058,13 +2058,25 @@ impl Model {
     /// freeze. Split from [`Self::press_pause`] so the fuzz can take the transport's own verdict on
     /// a press and then run the same continuation.
     fn fade_to_freeze(&mut self, committed_at_toggle: u32) -> Pause {
+        // The same expression the ROM gates its pause rows against, from this model's own pass
+        // parameter — so no pause test in this file runs against a cap copied out of an emulator. The
+        // loop here takes its turn every period, which is the shortest pass a machine can have; the
+        // case where a pass spans several periods is `a_pause_freezes_inside_the_bound_its_own_pass_
+        // length_supports`, which drives `tick()` at that cadence instead.
+        let bound = pause_to_freeze_bound(self.pass_periods);
         let mut fade_periods = 0;
         loop {
             self.period();
             fade_periods += 1;
             match self.transport.tick() {
                 Step::Freeze => break,
-                Step::Idle => assert!(fade_periods < 4, "the fade never reached silence"),
+                Step::Idle => assert!(
+                    fade_periods <= bound,
+                    "the fade never reached silence: {} periods against a bound of {} for a {}-period pass",
+                    fade_periods,
+                    bound,
+                    self.pass_periods
+                ),
                 other => panic!("unexpected step {other:?}"),
             }
         }
@@ -2076,6 +2088,13 @@ impl Model {
             resumed_from: 0,
             frozen_frames: 0,
         };
+        assert!(
+            pause.fade_periods <= bound,
+            "the freeze took {} feeder periods; this model's bound is {} (a {}-period pass)",
+            pause.fade_periods,
+            bound,
+            self.pass_periods
+        );
         self.pauses.push(pause);
         self.pauses.last().cloned().expect("just pushed")
     }
@@ -2943,6 +2962,100 @@ fn a_pause_freezes_the_clock_and_the_ring_head_so_resume_drops_no_sample() {
     let before = paint_position(model.committed, TOTAL);
     model.run_periods(4);
     assert!(paint_position(model.committed, TOTAL) >= before);
+}
+
+/// **The pause's own leg gets a bound of the run's own making, and the pass length is in it.**
+///
+/// Every other leg of §4.4's D2 chain carries a bound; the pause's was recorded — the ROM's
+/// `PauseRecord::fade_periods` is the feeder's entry count at the freeze minus its entry count at the
+/// toggle — and compared to nothing, so `pause=true` meant `gain == 0 && dropped == 0`, which the
+/// gate's own summary already called "both arms of a clock-delta tautology". This drives the pause at
+/// four pass lengths and holds the observed leg inside `pause_to_freeze_bound(pass)`.
+///
+/// **The loop is taken once per pass, on purpose.** `Step::Freeze` is only observable from `tick()`,
+/// and `tick()` only ever runs inside a main-loop pass — which is the whole difference between this
+/// leg and a skip's hand-off, performed by the period ISR on its own cadence. So a machine whose
+/// producer frame spans `pass` feeder periods cannot *freeze* any sooner than its next turn, however
+/// fast the ramp ran: the leg is the later of the deferral's floor and the loop's cadence, and the
+/// readings below say exactly that (`max(pass, FADE_PERIODS)`), which is what makes the pass term in
+/// the bound a measured quantity rather than slack. A run that lost the `served_silent` latch, or a
+/// ramp that never reached silence, breaks the equality; a loop that stopped calling `tick()` breaks
+/// the inequality.
+#[test]
+fn a_pause_freezes_inside_the_bound_its_own_pass_length_supports() {
+    for pass in [1u32, 2, 3, 8] {
+        let mut model = Model::new(TOTAL);
+        model.pass_periods = pass;
+        model.prefill();
+        assert!(model.prime());
+        model.run_periods(6);
+
+        let bound = pause_to_freeze_bound(pass);
+        assert_eq!(
+            model.transport.toggle(true),
+            Step::FadeOut,
+            "a pause from Playing must fade out (pass {pass})"
+        );
+
+        let mut periods = 0;
+        loop {
+            // The chain keeps running while `Pausing` — the ramp plays out on the audio clock — but
+            // the main loop's turn, and so the only observable `tick()`, comes once per pass.
+            for _ in 0..pass {
+                model.period();
+                periods += 1;
+            }
+            match model.transport.tick() {
+                Step::Freeze => break,
+                Step::Idle => assert!(
+                    periods < bound,
+                    "a {pass}-period pass took {periods} periods to freeze; the bound is {bound}"
+                ),
+                other => panic!("unexpected step {other:?} for a pause (pass {pass})"),
+            }
+        }
+        assert_eq!(
+            model.transport.state(),
+            State::Paused,
+            "the freeze must move the state (pass {pass})"
+        );
+        assert_eq!(
+            periods,
+            pass.max(FADE_PERIODS),
+            "the leg must be the later of the deferral's floor and the loop's cadence, not a third number (pass {pass})"
+        );
+        assert!(
+            periods <= bound,
+            "a {pass}-period pass froze in {periods} periods against a bound of {bound}"
+        );
+    }
+}
+
+/// The bound is a function of a measurement, never a number copied out of this emulator (R13).
+///
+/// Pinned so the shape cannot rot back into a constant: it grows one period per period of pass, it
+/// floors at the deferral's own period count plus the alignment period, and it can never sit below
+/// `take_to_handoff_bound` — a pause's leg contains the same ramp and the same "the ramped chunk must
+/// be served" condition, and adds the loop's turn on top. For reference, at the pass this repo measures
+/// on mGBA (3 periods) the value is 6 where the literal that once guarded the model's own continuation
+/// was 4: the same class of error, wearing an integer instead of a threshold.
+#[test]
+fn the_pause_bound_moves_with_the_machine_it_is_measured_on() {
+    assert_eq!(pause_to_freeze_bound(0), FADE_PERIODS + 1);
+    for pass in 1..=12u32 {
+        assert_eq!(
+            pause_to_freeze_bound(pass),
+            pause_to_freeze_bound(pass - 1) + 1,
+            "the bound must move one period per period of pass, because the loop's turn is one pass"
+        );
+        assert!(
+            pause_to_freeze_bound(pass) >= take_to_handoff_bound(pass),
+            "a pause's leg carries the same deferral as a skip's hand-off, so it cannot be bounded tighter"
+        );
+    }
+    // A pass measured at 2 periods here and at 4 periods on a real cart both stay inside their own
+    // bound; the old literal could not tell those machines apart, which is why it was not a bound.
+    assert!(pause_to_freeze_bound(2) < pause_to_freeze_bound(4));
 }
 
 // ---------------------------------------------------------------------------------------------

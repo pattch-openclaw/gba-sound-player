@@ -208,6 +208,46 @@ pub const fn take_to_handoff_bound(pass_periods: u32) -> u32 {
     }
 }
 
+/// The bound on a pause's **action → freeze** leg, in feeder periods, for a run whose worst main-loop
+/// pass measured `pass_periods`: **[`FADE_PERIODS`] + 1 period of boundary alignment + one pass**.
+///
+/// **This is the leg §4.4 never bounded.** The plan's D2 chain bounds a skip's `taken → hand-off`
+/// (`take_to_handoff_bound`) and bounds the press legs against the run's own worst pass, and the ROM
+/// has always *recorded* the pause equivalent — `PauseRecord::fade_periods`, the feeder's entry count
+/// at the toggle subtracted from its entry count at the freeze, in the audio clock's own unit, the
+/// machine-independent one (`audio_clock.md`) — and compared it to nothing. So the pause rows in the
+/// gate passed on `gain == 0 && dropped == 0`: both arms of a clock-delta tautology, as the gate's own
+/// summary says. A run that took ten periods to reach `Step::Freeze` would have printed the same
+/// `[PASS]`, and the only witness that the pause is *instant* was a human reading `fade_periods=2` off a
+/// log. That is this repository's own "a green that names nothing is not a green" with the polarity
+/// reversed: the number *was* printed, and nothing read it. A leg that is recorded and never bounded is a
+/// leg that can only fail loudly enough for a person to happen to be looking.
+///
+/// **The derivation, term by term.** The front half is the same deferral the skip's bound names, and
+/// for the same reason: the ramp is confined to one chunk (`FADE_SAMPLES` < `CHUNK_SAMPLES`), so one
+/// period hands over the chunk carrying it and [`FADE_PERIODS`] is the period count at which the
+/// deferral's latch (`Transport::served_silent_tail`) is allowed to open; +1 is the same boundary
+/// alignment the sibling allows itself, since the latch opens on a period edge and the leg is measured
+/// from a toggle that lands anywhere inside one. The back half is what makes this bound *not* the
+/// sibling's value: **the pause's transition is performed by the main loop, and the skip's is
+/// performed by the period ISR.** `Step::Freeze` is only ever observed from `tick()` inside a pass, so
+/// the loop's next turn is inside this leg — and one pass is exactly what bounds that turn. The skip's
+/// hand-off needs no such term because the hand-off runs on the ISR's own cadence.
+///
+/// At this repo's measured pass (3 periods) the value is **6**; the legs measured **2** — the
+/// mechanism's floor, because a pass during `Pausing` is cheap (`State::feeds()` is false, so the
+/// producer is not decoding and the loop's turn comes quickly). The headroom is stated rather than
+/// hidden: this bound turns an *unbounded* leg into a bounded one, and it fails a ramp that never
+/// reaches silence, a lost `served_silent` latch, or a loop that stopped calling `tick()`; it does not
+/// by itself claim a pause is instantaneous. Raising a threshold is not a bound, so nothing here is a
+/// `const` except the two numbers the mechanism itself owns (`FADE_PERIODS` and the alignment period),
+/// and the pass term is the same measurement `take_to_handoff_bound` takes — the ROM's
+/// `Input::pass_periods`, the host model's `pass_periods` parameter — never this emulator's history.
+#[must_use]
+pub const fn pause_to_freeze_bound(pass_periods: u32) -> u32 {
+    FADE_PERIODS + 1 + pass_periods
+}
+
 /// One FIFO byte in the form [`fifo_byte`](gba_playback::playback::fifo_byte) produces, scaled by
 /// `k / 256`.
 ///

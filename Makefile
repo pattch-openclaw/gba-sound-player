@@ -1112,6 +1112,13 @@ album-pack-check: toolchain-check
 # verdict-words leg covers every string the screen can draw (`PASSED`, `FAILED <TERM>` for each of
 # `text::TERMS`, and each with the `PAUSED` suffix).
 #
+# The #160 review round adds **§4.4's pause leg**, which had been recorded and never bounded: the model's
+# own pause continuation is now held to `pause_to_freeze_bound` rather than to the literal 4 it capped itself
+# with, and a second witness drives `tick()` at the cadence of a 1/2/3/8-period pass and reads the leg as
+# `max(pass, FADE_PERIODS)` — the later of the deferral's floor and the main loop's turn — inside that bound.
+# The pass term is the measured quantity, so the bound moves with the machine instead of against it (R13), and
+# the equality test is what shows that term is load-bearing rather than slack.
+#
 # Same shape as `album-pack-check`: neutral cwd, explicit host target, a log, and a collected-test
 # floor — a green that names nothing is not a green. The second leg is the stub-only build, which is
 # what makes "a stub image links no codec at all" an observed fact rather than a claim about one test
@@ -1127,7 +1134,7 @@ album-seam-test: toolchain-check
 	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_SEAM_GATE_LOG)) \
 	    || { echo "album-seam-test: the host suite did not pass — see $(ALBUM_SEAM_GATE_LOG)"; exit 1; }; \
 	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_SEAM_GATE_LOG))); \
-	  [ -n "$$n" ] && [ "$$n" -ge 58 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 58 — a green that names nothing is not a green"; exit 1; }
+	  [ -n "$$n" ] && [ "$$n" -ge 60 ] || { echo "album-seam-test: collected '$$n' tests, needs >= 60 — a green that names nothing is not a green"; exit 1; }
 	@cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) build --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) \
 	    --no-default-features --features backend-stub >> $(abspath $(ALBUM_SEAM_GATE_LOG)) 2>&1 \
@@ -1287,7 +1294,7 @@ album-test: toolchain-check album-bake
 	  prow=$$(grep -c '^\[album-rom\] pause [0-9]' $(ALBUM_TEST_LOG) || true); \
 	  [ "$$prow" -eq "$$pairs" ] \
 	    || { echo "album-test: $$prow pause row(s) for pairs=$$pairs — a pair printed no row, or a row is not a pair"; exit 1; }; \
-	  bad=$$(grep '^\[album-rom\] pause [0-9]' $(ALBUM_TEST_LOG) | grep -Evc 'fade_periods=[0-9][0-9]* gain=0 committed=[0-9][0-9]* ; resume@frame=[0-9][0-9]* committed=[0-9][0-9]* dropped=0 \[PASS\]$$' || true); \
+	  bad=$$(grep '^\[album-rom\] pause [0-9]' $(ALBUM_TEST_LOG) | grep -Evc 'action→freeze=[0-9][0-9]* periods \(bound [0-9][0-9]*\) gain=0 committed=[0-9][0-9]* ; resume@frame=[0-9][0-9]* committed=[0-9][0-9]* dropped=0 \[PASS\]$$' || true); \
 	  [ "$$bad" -eq 0 ] \
 	    || { echo "album-test: $$bad pause row(s) did not reach gain=0 before the freeze or booked dropped!=0 across the pause — the row, not only the summary, is read here"; exit 1; }; \
 	  detect=$$(sed -n 's/.*detect_latency max=\([0-9][0-9]*\) frames.*/\1/p' $(ALBUM_TEST_LOG)); \
@@ -1364,12 +1371,16 @@ album-test: toolchain-check album-bake
 	@echo "  with the ring-empty annotation), every track-end advance at SKIP_PRIME_CHUNKS+1 with old=0, dropped=0 and"
 	@echo "  underflow_delta=0, every content proof MATCH (the only"
 	@echo "  SKIPPED leg is the track-2 fold cap, named in the gate), and the proof's track set equal to the visited set."
-	@echo "  Every pause ROW is read, not only its summary: gain=0 at the freeze and dropped=0 across the pause — both"
-	@echo "  arms of a clock-delta tautology, so they show the chain stopped, not that no sample was lost at the wire."
+	@echo "  Every pause ROW is read, not only its summary: gain=0 at the freeze, dropped=0 across the pause, and the"
+	@echo "  action->freeze leg inside pause_to_freeze_bound — the deferral's own periods, one period of boundary"
+	@echo "  alignment, and one main-loop pass, because a pause is frozen by the loop rather than by the period ISR."
+	@echo "  The first two were arms of a clock-delta tautology: they showed the chain had stopped, not that no sample"
+	@echo "  was lost at the wire, and the leg they left with no bound at all is bounded by this run's own measurement."
 	@echo "  Every latency leg is read and inside its bound: press->detect <= 1 frame, detect->take <= the run's own"
 	@echo "  worst main-loop pass (by latch), action@next-period <= 3 frames, the pass bound = this run's measured"
 	@echo "  producer frame + one period + one vblank, a skip's take->hand-off <= this run's measured pass + 1 period,"
-	@echo "  and the ISR bracket < 16 samples of the audio clock. Printed-row counts are checked against the census"
+	@echo "  a pause's action->freeze <= that bound + FADE_PERIODS, and the ISR bracket < 16 samples of the audio"
+	@echo "  clock. Printed-row counts are checked against the census"
 	@echo "  lines' printed=, not against occurred= — the log's depth is not a verdict (R13). The advance rows"
 	@echo "  above carry the derived track-boundary gap (4 of its periods are the SKIP_PRIME_CHUNKS constant; the rest is"
 	@echo "  counted). Verdict: $(ALBUM_TEST_LOG)"

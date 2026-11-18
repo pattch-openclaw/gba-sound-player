@@ -183,7 +183,7 @@ mod rom {
     use album_player::position;
     use album_player::text;
     use album_player::transport::{
-        SKIP_PRIME_CHUNKS, State, Step, Transport, take_to_handoff_bound,
+        SKIP_PRIME_CHUNKS, State, Step, Transport, pause_to_freeze_bound, take_to_handoff_bound,
     };
     use gba_audio_hw::{
         AudioChain, CycleCounter, arm_audio_chain, clear_timer1_if, enable_sound, io_read_u16,
@@ -2928,51 +2928,68 @@ mod rom {
                 .saturating_sub(record.frozen_committed)
         }
 
-        /// Every pair kept the position exactly, every fade reached silence before the chain stopped,
-        /// and every toggle is accounted for.
-        fn ok(&self) -> bool {
+        /// The one-line check the rows print and [`Pauses::ok`] reuses, so a verdict term can never be
+        /// true over a row that printed `FAIL` (R0). `freeze_bound` is this run's own, from
+        /// [`pause_to_freeze_bound`]: the ledger's exactness, the fade having reached silence, and that
+        /// leg lying inside the bound this run's measurements support.
+        fn record_ok(record: &PauseRecord, freeze_bound: u32) -> bool {
+            record.frozen_gain == 0
+                && Self::dropped(record) == 0
+                && record.fade_periods <= freeze_bound
+        }
+
+        /// Every pair kept the position exactly, every fade reached silence before the chain stopped
+        /// and did so inside this run's own bound on that leg, and every toggle is accounted for.
+        fn ok(&self, freeze_bound: u32) -> bool {
             let mut clean = self.recorded > 0 || self.pairs == 0;
             for record in &self.records[..self.recorded] {
-                clean &= record.frozen_gain == 0
-                    && Self::dropped(record) == 0
+                clean &= Self::record_ok(record, freeze_bound)
                     && record.frozen_frame >= record.action_frame
                     && record.resumed_frame >= record.frozen_frame;
             }
             clean && self.pairs * 2 + self.ignored == self.toggles
         }
 
-        /// The end-of-run lines: one summary, then one line per pair (the first [`PAUSE_LOG`]).
-        fn report(&self) {
+        /// The end-of-run lines: one summary, then one line per pair (the first [`PAUSE_LOG`]). The
+        /// bound travels with the rows, because a row that prints a leg and no bound asks a human to
+        /// judge that number by eye.
+        fn report(&self, freeze_bound: u32) {
             agb::println!(
-                "[album-rom] pause: pairs={} toggles={} ignored={} limit={} [{}]",
+                "[album-rom] pause: pairs={} toggles={} ignored={} limit={} bound={} [{}]",
                 self.pairs,
                 self.toggles,
                 self.ignored,
                 PAUSE_LOG,
-                if self.ok() { "PASS" } else { "FAIL" }
+                freeze_bound,
+                if self.ok(freeze_bound) {
+                    "PASS"
+                } else {
+                    "FAIL"
+                }
             );
             for (index, record) in self.records[..self.recorded].iter().enumerate() {
                 agb::println!(
-                    "[album-rom] pause {}: action@frame={} frozen@frame={} fade_periods={} gain={} committed={} ; resume@frame={} committed={} dropped={} [{}]",
+                    "[album-rom] pause {}: action@frame={} frozen@frame={} action→freeze={} periods (bound {}) gain={} committed={} ; resume@frame={} committed={} dropped={} [{}]",
                     index + 1,
                     record.action_frame,
                     record.frozen_frame,
                     record.fade_periods,
+                    freeze_bound,
                     record.frozen_gain,
                     record.frozen_committed,
                     record.resumed_frame,
                     record.resumed_committed,
                     Self::dropped(record),
-                    if record.frozen_gain == 0 && Self::dropped(record) == 0 {
+                    if Self::record_ok(record, freeze_bound) {
                         "PASS"
                     } else {
                         "FAIL"
                     }
                 );
             }
-            if !self.ok() {
+            if !self.ok(freeze_bound) {
                 agb::println!(
-                    "[album-rom] FAIL a pause did not hold: every pair must freeze at gain 0, resume on the sample it stopped on (dropped=0), and account for its toggles"
+                    "[album-rom] FAIL a pause did not hold: every pair must freeze at gain 0 within this run's bound ({freeze_bound} periods), resume on the sample it stopped on (dropped=0), and account for its toggles"
                 );
             }
         }
@@ -4240,6 +4257,12 @@ mod rom {
         // in feeder periods, plus the deferral (`take_to_handoff_bound`). A cart's slower pass raises
         // the bound instead of failing a correct run (R13).
         let hand_off_bound = take_to_handoff_bound(input.pass_periods());
+        // The pause rows' action→freeze bound is the same run's measurement (`pause_to_freeze_bound`):
+        // the deferral's own period count, one period of boundary alignment, and one more pass — a
+        // pause's transition is performed by the main loop rather than by the period ISR, so the loop's
+        // next turn lies inside this leg. The ROM has recorded `fade_periods` since PR-3b-ii-B2a and
+        // compared it to nothing: §4.4's fourth leg, and the one left unbounded.
+        let pause_freeze_bound = pause_to_freeze_bound(input.pass_periods());
 
         // ---- the input seam's end-of-run lines (PR-3b-i, extended by PR-3b-ii-B1). The counts are
         // what a gate reads: a REPLAY build's script has a known number of edges and repeats, and a
@@ -4257,7 +4280,7 @@ mod rom {
         // ---- §4.4's pause ledger (PR-3b-ii-B2a): the pairs, and the one line each that says the
         // position did not move. Printed here, after the teardown, for the reason the key edges are:
         // `agb::println!` is a semihosting trap and the record is filled on the audio path.
-        pauses.report();
+        pauses.report(pause_freeze_bound);
 
         // ---- §4.4's skip ledger (PR-3b-ii-B2b): one row per skip, in the probe's own units, so these
         // lines can be read against its table ("The deep arm": `to_new = prime + 1`, and 5 periods at
@@ -4429,11 +4452,12 @@ mod rom {
         let assets_ok: Option<bool> = None;
 
         // A pause is part of the verdict on every arm, not a remark: every pair must have frozen at
-        // gain 0 and resumed on the sample it stopped on, and the hand-off ledger must add up
+        // gain 0 and resumed on the sample it stopped on, its fade must have reached silence inside the
+        // bound this run's own pass measurement supports, and the hand-off ledger must add up
         // (`handler_entries + primes`). On the HARDWARE arm `pairs=0` is the honest reading of a
         // headless run — nothing pressed a key — and the term is trivially true, exactly as
         // `presses=0` is.
-        let pauses_ok = pauses.ok();
+        let pauses_ok = pauses.ok(pause_freeze_bound);
         // §4.4's skip, measured per skip rather than asserted: every skip must reach its new track in
         // `SKIP_PRIME_CHUNKS + 1` periods with no stale audio after it and no underflow booked, exactly
         // as `Skips::report` prints. On the shipped HARDWARE arm `skips=0` is the honest reading of a

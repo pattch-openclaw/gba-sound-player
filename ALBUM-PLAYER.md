@@ -530,7 +530,8 @@ runs at video rate, and the observable is restated as a floor with two named ter
 |---|---|---|
 | press → edge detected | ≤ 1 video frame (16.7 ms) | the keypad is sampled once per frame in the vblank ISR; measured `detect_latency max=1` |
 | detected → action taken | **3 frames measured** (was claimed ≤ 2) | the action is taken at the top of a main-loop pass, and a pass is bounded by a producer frame of 3.7–3.9 video frames — **a transition cannot straddle a decode frame**, so this leg has a floor set by the codec's own unit of work; measured `take_latency max=3`, gated against the run's own worst pass |
-| taken → hand-off | ≤ 3 periods (bound), 2 measured | the ramp must be **served** before the freeze/truncate — the deferral below |
+| taken → hand-off (a skip) | ≤ `take_to_handoff_bound(pass)` = pass + 1 periods — **4 at this run's measured 3-period pass**, 2 measured | the ramp must be **served** before the truncate — the deferral below. Corrected 2026-11-19 from "≤ 3 periods (bound), 2 measured": the 3 was mGBA's measured decode rounded up to a period count, so it was a threshold wearing a bound, and a real cart's longer pass would have failed a correct run (R13) |
+| taken → freeze (**a pause's arm — not part of the total below**) | ≤ `pause_to_freeze_bound(pass)` = `FADE_PERIODS` + one alignment period + one pass — **6 at this run's measured 3-period pass**, 2 measured | the same deferral, plus the loop's next turn: `Step::Freeze` is observable only from `tick()`, and `tick()` runs only inside a main-loop pass — where a skip's hand-off is performed by the period ISR on its own cadence. Host-side, the same expression bounds the model's own pause continuation, which until now ran against a literal `4` |
 | hand-off → the new track's first sample | `SKIP_PRIME_CHUNKS + 1` = 5 periods | D2, unchanged |
 | **total, press → audible** | **18 frames ≈ 306 ms** | the legs summed, printed as the ROM's `latency:` line and gated **per leg**, not as one number |
 
@@ -560,6 +561,24 @@ paused clock cannot tick. Rejected, reasons in the code: *truncate-and-re-decode
 the **track start** — ~77 s of CPU minutes in, since the seam has no seek, Q5) and *keep-feeding-silence*
 (the queued 1.23 s plays out before any fade begins, and `committed` keeps advancing so the displayed time
 runs while "paused").
+
+**The pause's leg is bounded now (2026-11-19).** Every row of the chain above was gated and this one was
+only printed. The ROM has recorded `fade_periods` since PR-3b-ii-B2a — the feeder's entry count at the
+freeze minus its count at the toggle, in the audio clock's machine-independent unit (`audio_clock.md`) —
+and printed it under that name on every row, but compared it to nothing: `pause=true` was `gain=0 &&
+dropped=0`, which this gate's own summary already called "both arms of a clock-delta tautology". A run
+that took ten periods to reach `Step::Freeze` would have printed the same `[PASS]`, and the only witness
+that a pause is *instant* was a person reading a `2` off a log — this gate's own floor wording, "a green
+that names nothing is not a green", with the polarity reversed: the number was printed, and nothing read
+it. `pause_to_freeze_bound` (the row above) closes it from the same measurement the skip's bound uses —
+this run's worst main-loop pass — because a pause, unlike a hand-off, is performed by the main loop.
+Each row now prints the leg as `action→freeze=N periods (bound M)`, the shape the skip rows already
+used, and the gate reads that row independently of the term. At this repo's measured pass the bound is 6
+periods and the legs read **2**: the mechanism's floor, because `State::feeds()` is false while
+`Pausing` and so the loop's next turn comes quickly. The headroom is stated rather than hidden — what
+this closes is an *unbounded* leg, not a claim that a pause is instantaneous, and the host model is held
+to the same expression (its own pause continuation was capped by a literal `4` — the same class of thing
+R13 removed from the ROM's bounds one commit earlier).
 
 **The inter-track gap is a number now, not an admission**: **214 / 229 ms** (6.3 / 6.7 periods) at a
 track-end boundary, printed on each `advance:` row with its decomposition — tail padding, two starved
