@@ -43,6 +43,33 @@
 //!   then Start over three frames delivers L's edge before the chord exists. Suppressing that would
 //!   need a time window, which the row above forbids.
 //!
+//! ## The map above is placeholder behaviour, not the design (2026-11-18, PR-3b review)
+//!
+//! Four actions that reach the transport directly — next, previous, restart — are what the *now
+//! playing* screen needs and all that Phase 1 can witness without a single screen drawn. They are a
+//! stand-in. The replacement is foreseeable, and it is not a bigger enum: once §5.2's screens exist
+//! (Phase 2's A11 track list and A12 menus), the D-pad navigates **those**, and "Right" stops
+//! meaning *next track* and starts meaning *whatever the focused screen does with Right* — cursor
+//! down in a list, page down in a menu, nothing at all on a title card. Different screens will want
+//! different verbs, and the same button will mean different things in different contexts.
+//!
+//! So the layer that decides that belongs **above** this module, owning the focused screen and
+//! dispatching a context-dependent action. Two consequences for this module, cheap now and expensive
+//! to retrofit:
+//!
+//! - **Do not add a variant per screen.** [`Action`] is the now-playing map. A UI layer defines its
+//!   own action type and composes with this one; growing this enum to cover menus would put every
+//!   screen's vocabulary in the one module that has to stay platform-free and testable with no
+//!   screen in it — and would make the ISR's job depend on which screen is up.
+//! - **Keep the halves separable.** What that layer needs from here is already here: per-frame
+//!   edges, repeat, debounce, and a mask. Nothing in [`Keys`] or [`Sampler`] may learn what a screen
+//!   is; this module keeping its ignorance is what lets a menu's key map be a table rather than a
+//!   new branch in the vblank handler.
+//!
+//! Deliberately **not** built here, because nothing in these PRs consumes it: a context/action-map
+//! trait, a notion of a focused screen, or a key→action table per screen. That layer should land
+//! with A11/A12 against a real screen, not as an interface with no implementor.
+//!
 //! ## The two sources, and the one the gate can witness
 //!
 //! [`KeySource`] supplies one mask per video frame. [`HARDWARE`](Hardware) reads `REG_KEYINPUT`
@@ -127,6 +154,12 @@ const _: () = assert!(BUTTON_MASK & SOFT_RESET_CHORD == SOFT_RESET_CHORD);
 
 /// What a *press* means while a track is playing (§5.3's "Now playing" column). Menus are Phase 2
 /// and get [`Cursor`] instead; the plumbing is here, the screens are not.
+///
+/// **Placeholder behaviour, not the design.** These four variants act on the transport directly
+/// because there is no screen here to act on. This is not a UI action vocabulary and must not grow
+/// into one: when §5.2's screens exist, a focused-screen layer *above* this module decides what a
+/// D-pad press means in that context, and this enum stays exactly what it is — the now-playing map.
+/// See the module's "The map above is placeholder behaviour" section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Start or A: pause ⇄ resume. The faded pause/resume itself is §4.4's and lands in PR-3b-ii.
