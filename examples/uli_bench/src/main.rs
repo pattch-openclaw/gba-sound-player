@@ -278,7 +278,14 @@ const ATTRIB_MASK: u32 = cfg!(feature = "attrib-pre") as u32
     | (cfg!(feature = "attrib-entropy-nolut") as u32) << 7
     | (cfg!(feature = "attrib-entropy-nodequant") as u32) << 8
     | (cfg!(feature = "attrib-entropy-nowrite") as u32) << 9
-    | (cfg!(feature = "attrib-entropy-reader") as u32) << 10;
+    | (cfg!(feature = "attrib-entropy-reader") as u32) << 10
+    // The bit-exact ("second call") arms. They are NOT failures of the pins, so
+    // without their own bits a `-fft2` image would print `mask=0x0` and be
+    // indistinguishable from the control in its own log.
+    | (cfg!(feature = "attrib-pre2") as u32) << 11
+    | (cfg!(feature = "attrib-fft2") as u32) << 12
+    | (cfg!(feature = "attrib-post2") as u32) << 13
+    | (cfg!(feature = "attrib-entropy2") as u32) << 14;
 
 /// The sub-frame arm this image carries, named so a log is self-describing.
 const SUBFRAME_ARM_NAME: &str = if cfg!(feature = "attrib-entropy-reader") {
@@ -876,7 +883,7 @@ fn run(gba: &mut agb::Gba) -> bool {
         FRAME_BUDGET_CYCLES
     );
     agb::println!(
-        "[uli-bench] attrib mask=0x{:x} pre={} fft={} post={} ola={} synth={} entropy={} ms={} {}",
+        "[uli-bench] attrib mask=0x{:x} pre={} fft={} post={} ola={} synth={} entropy={} ms={} pre2={} fft2={} post2={} entropy2={} {}",
         ATTRIB_MASK,
         cfg!(feature = "attrib-pre"),
         cfg!(feature = "attrib-fft"),
@@ -885,6 +892,10 @@ fn run(gba: &mut agb::Gba) -> bool {
         cfg!(feature = "attrib-synth"),
         cfg!(feature = "attrib-entropy"),
         cfg!(feature = "attrib-ms"),
+        cfg!(feature = "attrib-pre2"),
+        cfg!(feature = "attrib-fft2"),
+        cfg!(feature = "attrib-post2"),
+        cfg!(feature = "attrib-entropy2"),
         SUBFRAME_ARM_NAME
     );
     if ATTRIB_MASK != 0 {

@@ -115,8 +115,8 @@ attrib-pre = ["attrib-timing"]
 # cost. `attrib-pre2` instead calls `pre` a **second time**: `pre` is idempotent
 # (deterministic function of `x` into `z`), so the second call writes the same
 # bytes and every downstream stage sees exactly the data it would have, while the
-# delta is one real `pre` call. This is the only attribution arm that is
-# **bit-exact**, so its pins PASS and the number is not confounded.
+# delta is one real `pre` call. One of the **bit-exact** arms (`-pre2`/`-fft2`/
+# `-post2`/`-entropy2`), so its pins PASS and the number is not confounded.
 attrib-pre2 = []
 # The clean `post` arm: `post(z, y)` writes `y` from `z` and touches nothing
 # else, so a second call is idempotent. Delta = one real `post`; bit-exact.
@@ -130,6 +130,21 @@ attrib-post2 = []
 # cursor, so everything downstream is unperturbed and the delta is exactly one
 # channel decode. Bit-exact, so pins PASS.
 attrib-entropy2 = []
+# **The clean `fft` arm (2026-11-19).** `fft` is in place on `z` (`buf`), so unlike
+# `pre`/`post`/`dec_chan` it cannot simply be called twice: the second call would
+# transform already-transformed data and every later stage would see a different
+# spectrum. `attrib-fft2` therefore *restores* the input first — it calls `pre`
+# again (idempotent), then `fft` again — which puts `z` back to exactly the bytes
+# the first `fft` saw. Pins PASS, so the arm is bit-exact.
+#
+# **Its delta is `pre` + `fft`, not `fft`.** Subtract `attrib-pre2`'s delta, which
+# is exactly one `pre` call on the same data, to get the FFT alone:
+#   `fft = delta(attrib-fft2) - delta(attrib-pre2)`
+# Both images are bit-exact and both pass the pins, so neither term is confounded
+# by a desynchronised bit stream (which is what makes the existing removal arm
+# `attrib-fft` unusable for this: `fft` is the one row in the kernel table that is
+# *derived* rather than measured, because it is in place).
+attrib-fft2 = []
 attrib-fft = ["attrib-timing"]
 attrib-post = ["attrib-timing"]
 attrib-ola = ["attrib-timing"]

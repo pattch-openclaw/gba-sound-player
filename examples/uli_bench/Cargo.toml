@@ -97,6 +97,10 @@ attrib-pre2 = ["uli-lite-gba/attrib-pre2"]
 attrib-post2 = ["uli-lite-gba/attrib-post2"]
 # The clean entropy arm (replay from a saved reader). See uli-lite-gba.
 attrib-entropy2 = ["uli-lite-gba/attrib-entropy2"]
+# The clean `fft` arm: `pre` (to restore `z`) then `fft` again. Its delta is
+# `pre` + `fft`; subtract `attrib-pre2`'s delta to isolate the FFT. Bit-exact, so
+# the pins PASS. See uli-lite-gba/Cargo.toml.
+attrib-fft2 = ["uli-lite-gba/attrib-fft2"]
 attrib-fft = ["uli-lite-gba/attrib-fft"]
 attrib-post = ["uli-lite-gba/attrib-post"]
 attrib-ola = ["uli-lite-gba/attrib-ola"]

@@ -1400,6 +1400,17 @@ impl<'a, 's> GbaDecoder<'a, 's> {
         crate::pre_kernel(&self.hot.x[0], &mut self.hot.buf);
         #[cfg(not(feature = "attrib-fft"))]
         crate::fft_kernel(&mut self.hot.buf);
+        // `attrib-fft2`: `fft` is in place, so the second call needs its input put
+        // back. `pre` is idempotent into `z`, so calling it again rewrites exactly
+        // the bytes the first `fft` consumed; the second `fft` then produces
+        // identical output and every later stage sees the data it would have.
+        // Bit-exact, so pins PASS — but the delta is one `pre` **plus** one `fft`;
+        // subtract `attrib-pre2`'s delta to read the FFT alone.
+        #[cfg(feature = "attrib-fft2")]
+        {
+            crate::pre_kernel(&self.hot.x[0], &mut self.hot.buf);
+            crate::fft_kernel(&mut self.hot.buf);
+        }
         #[cfg(not(feature = "attrib-post"))]
         crate::post_kernel(&self.hot.buf, &mut self.hot.x[0]);
         // `attrib-post2`: `post` reads `z` and writes `y`, so a second call
@@ -1416,6 +1427,12 @@ impl<'a, 's> GbaDecoder<'a, 's> {
         crate::pre_kernel(&self.hot.x[1], &mut self.hot.buf);
         #[cfg(not(feature = "attrib-fft"))]
         crate::fft_kernel(&mut self.hot.buf);
+        // `attrib-fft2`, channel 1: same restore-then-repeat as channel 0 above.
+        #[cfg(feature = "attrib-fft2")]
+        {
+            crate::pre_kernel(&self.hot.x[1], &mut self.hot.buf);
+            crate::fft_kernel(&mut self.hot.buf);
+        }
         #[cfg(not(feature = "attrib-post"))]
         crate::post_kernel(&self.hot.buf, &mut self.hot.x[1]);
         // `attrib-post2`: `post` reads `z` and writes `y`, so a second call
