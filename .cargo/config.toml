@@ -1,15 +1,35 @@
 [unstable]
 build-std = ["core", "alloc"]
 build-std-features = ["compiler-builtins-mem"]
+# Accept a `.json` target spec from `[build] target` without a `-Z
+# json-target-spec` flag on every cargo invocation. The GBA target is a
+# checked-in spec — see `targets/README.md` for why, and for the rule that
+# governs editing it.
+json-target-spec = true
 
 [build]
-target = "thumbv4t-none-eabi"
+# **The GBA target is a checked-in target spec, not the built-in triple.**
+#
+# `targets/thumbv4t-gba.json` is `rustc --print target-spec-json` for the
+# built-in `thumbv4t-none-eabi` with exactly one field changed:
+# `"frame-pointer": "always"` -> `"may-omit"`. That frees r11 (fp) in every Rust
+# function, which the built-in spec pins whether or not a frame is needed; it is
+# worth ~0.6 points of the frame period and ~900 B of `.iwram` code, measured
+# bit-exact. `targets/README.md` has the numbers, the provenance and the
+# `make target-spec-check` witness that keeps this file honest.
+#
+# Naming: cargo derives the output directory from the spec's file stem, so every
+# build lands in `target/thumbv4t-gba/`. `TARGET` in the Makefile is that stem.
+target = "targets/thumbv4t-gba.json"
 
-[target.thumbv4t-none-eabi]
+# Rustflags are keyed by the *target name*, which for a `.json` spec is its file
+# stem — so this table is `thumbv4t-gba`, not `thumbv4t-none-eabi`. Nothing here
+# forces a frame pointer: that is the spec's job now, and a rustflag cannot
+# override it (measured: byte-identical ROM either way).
+[target.thumbv4t-gba]
 rustflags = [
     "-Clink-arg=-Tgba.ld",
     "-Ctarget-cpu=arm7tdmi",
-    "-Cforce-frame-pointers=yes",
 ]
 
-runner = ["echo", "no emulator available; ROM produced at target/thumbv4t-none-eabi/release/gba-sound-player.elf"]
+runner = ["echo", "no emulator available; ROM produced at target/thumbv4t-gba/release/gba-sound-player.elf"]

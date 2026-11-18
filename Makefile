@@ -13,7 +13,7 @@
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
         album-bake album-pack-check album-seam-test album-rom album-player-rom \
-        uli-spike-rom clean clean-cache check help toolchain-check
+        uli-spike-rom clean clean-cache check help toolchain-check target-spec-check
 
 # ===========================================================================
 # Build settings
@@ -85,16 +85,30 @@ CARGO ?= cargo
 RUSTC ?= rustc
 endif
 
-TARGET := thumbv4t-none-eabi
+# The build target is a **checked-in target spec**, not a built-in triple
+# (2026-11-17). `targets/thumbv4t-gba.json` is `rustc --print target-spec-json`
+# for `thumbv4t-none-eabi` with exactly one field changed — `frame-pointer`
+# `may-omit` instead of `always` — which frees r11 in every Rust function. See
+# `targets/README.md` for the provenance, the measured effect and the
+# `make target-spec-check` witness.
+#
+# `TARGET` is the spec's **file stem**, which is what cargo names the output
+# directory after: builds land in `target/$(TARGET)/`. `TARGET_SPEC` is the path
+# actually passed to `--target`, because cargo only resolves a bare name to
+# `<name>.json` in the current directory, and most recipes `cd` first.
+TARGET := thumbv4t-gba
+TARGET_SPEC := $(abspath targets/$(TARGET).json)
 # Second bare-metal triple for the core's portability witness (a build fact, no
-# performance claim attached). Override with `SECOND_TARGET=<triple>`.
+# performance claim attached). Override with `SECOND_TARGET=<triple>`. This one
+# stays a *built-in* triple on purpose: the witness is that the core builds for
+# a target we do not ship, so it must not depend on a spec of ours.
 SECOND_TARGET ?= thumbv7em-none-eabi
-# Cargo's runner env var is the target triple upper-cased with `-` → `_`:
-# CARGO_TARGET_THUMBV4T_NONE_EABI_RUNNER.
+# Cargo's runner env var is the target name upper-cased with `-` -> `_`:
+# CARGO_TARGET_THUMBV4T_GBA_RUNNER.
 TARGET_ENV := $(shell echo $(TARGET) | tr 'a-z-' 'A-Z_')
 GBA_TEST_RUNNER ?= mgba-test-runner
 
-# Host triple, used to defeat the inherited `target = thumbv4t-none-eabi` when a
+# Host triple, used to defeat the inherited GBA `[build] target` when a
 # host gate runs. Queried through the SAME toolchain the gate builds with, so a
 # stray rustc elsewhere on PATH cannot hand us the wrong triple.
 HOST_TRIPLE := $(shell $(RUSTC) -vV 2>/dev/null | sed -n 's|host: ||p')
@@ -312,7 +326,7 @@ format:
 endif
 
 build: format
-	$(CARGO) build --release --target $(TARGET)
+	$(CARGO) build --release --target $(TARGET_SPEC)
 
 # Link + fix the baseline ROM. Needs agb-gbafix on PATH (the image installs it;
 # natively `cargo install agb-gbafix --version 0.25.0 --locked` — pinned because
@@ -343,7 +357,7 @@ rom: build
 # `gafp-check` is a prerequisite: no product image is built over a blob that no
 # longer matches its generator.
 flac-rom: gafp-check format
-	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
+	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC)
 	agb-gbafix $(FLAC_CRATE_BIN) -o $(FLAC_ROM)
 	@echo "FLAC ROM built: $(FLAC_ROM) (manifest facade + ArmRiceKernel; decode-only)"
 
@@ -353,7 +367,7 @@ flac-rom: gafp-check format
 # pins, and prints a verdict to the log AND the screen. The image is not gated by
 # `make test`: build it, then run it by hand.
 product-play-rom: gafp-check format
-	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin product-play
+	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --bin product-play
 	agb-gbafix $(PRODUCT_PLAY_BIN) -o $(PRODUCT_PLAY_ROM)
 	@echo "product-play ROM built: $(PRODUCT_PLAY_ROM)"
 	@echo "  run: timeout -k 5 120 $(GBA_TEST_RUNNER) $(PRODUCT_PLAY_ROM)   and read the [pp-rom] log"
@@ -374,7 +388,7 @@ master-pack: toolchain-check
 # The same product-play binary built against that master asset. This is the image
 # C2 was accepted on (flac-docs/history.md): real audio, 16,384 Hz, both units.
 master-play-rom: master-pack format
-	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin product-play --features master-asset
+	cd $(FLAC_CRATE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --bin product-play --features master-asset
 	agb-gbafix $(PRODUCT_PLAY_BIN) -o $(MASTER_PLAY_ROM)
 	@echo "master-play ROM built: $(MASTER_PLAY_ROM)"
 	@echo "  run: timeout -k 5 120 $(GBA_TEST_RUNNER) $(MASTER_PLAY_ROM)   (exit 124 = pass)"
@@ -396,7 +410,7 @@ master-play-rom: master-pack format
 # them plus the combination arms in one command; anything touching
 # crates/flac-lite owes it.
 
-# Gate 1 is `cargo check --target $(TARGET) -Zbuild-std=core,alloc` run IN-TREE,
+# Gate 1 is `cargo check --target $(TARGET_SPEC) -Zbuild-std=core,alloc` run IN-TREE,
 # where inheriting the root config is the whole point: it is the gate symphonia
 # could never pass, because it keeps `std` out. Gate 2 is the host suite run from
 # $(GATE_NEUTRAL_CWD) with --manifest-path, so the root's GBA `target` AND
@@ -405,7 +419,7 @@ master-play-rom: master-pack format
 # same shape; copy it, do not re-derive it.
 flac-test: toolchain-check
 	cd crates/flac-lite && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc
+	  $(CARGO) check --release --target $(TARGET_SPEC) -Zbuild-std=core,alloc
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features instrument
@@ -418,7 +432,7 @@ flac-test: toolchain-check
 # greens earned by the same arithmetic.
 flac-test-wide: toolchain-check
 	cd crates/flac-lite && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --no-default-features
+	  $(CARGO) check --release --target $(TARGET_SPEC) -Zbuild-std=core,alloc --no-default-features
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --no-default-features
@@ -429,7 +443,7 @@ flac-test-wide: toolchain-check
 # default honest about the ON arm.
 flac-test-crc: toolchain-check
 	cd crates/flac-lite && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check
+	  $(CARGO) check --release --target $(TARGET_SPEC) -Zbuild-std=core,alloc --features crc-check
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features crc-check
@@ -439,7 +453,7 @@ flac-test-crc: toolchain-check
 # is the walk's thumbv4t compile plus its layout suite.
 flac-test-scan: toolchain-check
 	cd crates/flac-lite && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features scan
+	  $(CARGO) check --release --target $(TARGET_SPEC) -Zbuild-std=core,alloc --features scan
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features scan,instrument
@@ -450,7 +464,7 @@ flac-test-scan: toolchain-check
 # the on-target reading declined the flip: +42.6 c/sample against the incumbent.
 flac-test-rice: toolchain-check
 	cd crates/flac-lite && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features rice-hybrid
+	  $(CARGO) check --release --target $(TARGET_SPEC) -Zbuild-std=core,alloc --features rice-hybrid
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features rice-hybrid
@@ -506,12 +520,12 @@ gafp-pack-check: toolchain-check
 # Not parallel-safe by design — `make -j flac-gates` interleaves output.
 flac-gates: flac-test flac-test-wide flac-test-crc flac-test-scan flac-test-rice flac-portable-check gafp-check gafp-pack-check
 	cd crates/flac-lite && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check,scan
+	  $(CARGO) check --release --target $(TARGET_SPEC) -Zbuild-std=core,alloc --features crc-check,scan
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features crc-check,scan
 	cd crates/flac-lite && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features crc-check,scan,rice-hybrid
+	  $(CARGO) check --release --target $(TARGET_SPEC) -Zbuild-std=core,alloc --features crc-check,scan,rice-hybrid
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(FLAC_CRATE_DIR_MANIFEST) --target $(HOST_TRIPLE) --features crc-check,scan,rice-hybrid
 	@echo "flac-gates passed: every flac-lite configuration is green (default, wide, crc, scan, rice, both, all three, the second target, and both gafp legs)"
@@ -550,12 +564,12 @@ product-play-test:
 # configuration, `flac-rom`).
 overlay-check: toolchain-check
 	cd $(OVERLAY_CRATE_DIR) && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc
+	  $(CARGO) check --release --target $(TARGET_SPEC) -Zbuild-std=core,alloc
 	@echo "overlay-check passed: the overlay AND the core it depends on both type-check for $(TARGET)"
 
 overlay-check-arm: toolchain-check
 	cd $(OVERLAY_CRATE_DIR) && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features rice-arm
+	  $(CARGO) check --release --target $(TARGET_SPEC) -Zbuild-std=core,alloc --features rice-arm
 	@echo "overlay-check-arm passed: rice-arm type-checks for $(TARGET) — asm assembled, FFI and KernelAbi declared"
 
 # Host witnesses. `overlay-test-arm` runs the boundary differential (q = 31, the
@@ -570,7 +584,7 @@ overlay-test: toolchain-check
 
 overlay-test-arm: toolchain-check
 	cd $(OVERLAY_CRATE_DIR) && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc --features rice-arm
+	  $(CARGO) check --release --target $(TARGET_SPEC) -Zbuild-std=core,alloc --features rice-arm
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(OVERLAY_CRATE_MANIFEST) --target $(HOST_TRIPLE) --features rice-arm
@@ -589,7 +603,7 @@ overlay-objdump: toolchain-check
 # overflow checks and the model's debug_assert domain guard are part of what is
 # being witnessed. This is a correctness gate, not a timing one.
 overlay-kernel-rom: format
-	cd $(OVERLAY_ROM_DIR) && $(CARGO) build --release --target $(TARGET)
+	cd $(OVERLAY_ROM_DIR) && $(CARGO) build --release --target $(TARGET_SPEC)
 	agb-gbafix $(OVERLAY_ROM_DIR)/$(OVERLAY_ROM_BIN) -o $(OVERLAY_ROM)
 	sh scripts/check_arm_kernel_objdump.sh $(OVERLAY_ROM_DIR)/$(OVERLAY_ROM_BIN)
 	@echo "Kernel-check ROM built: $(OVERLAY_ROM) (its own test asserts the tables' .iwram addresses at runtime)"
@@ -597,7 +611,7 @@ overlay-kernel-rom: format
 overlay-kernel-test: toolchain-check
 	cd $(OVERLAY_ROM_DIR) && \
 	  CARGO_TARGET_$(TARGET_ENV)_RUNNER=$(GBA_TEST_RUNNER) \
-	  $(CARGO) test --target $(TARGET)
+	  $(CARGO) test --target $(TARGET_SPEC)
 	@echo "overlay-kernel-test passed: the assembled ARM kernel, the model and the core's incumbent agree on the committed corpus and the synthesized boundaries, on mGBA's ARM7TDMI"
 
 # One command for the kernel the product links.
@@ -637,7 +651,7 @@ playback-test: toolchain-check
 	@echo "playback-test passed: FIFO conversion, ring accounting, truncate()'s ledger, both FNV folds, and §6's one-divide census"
 
 spike-rom: format
-	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
+	cd $(SPIKE_CRATE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC)
 	agb-gbafix $(SPIKE_CRATE_BIN) -o $(SPIKE_ROM)
 	@echo "Spike ROM built: $(SPIKE_ROM)"
 	@echo "  run: timeout -k 5 280 $(GBA_TEST_RUNNER) $(SPIKE_ROM) | grep -E 'stats:|budget:|verdict'"
@@ -647,7 +661,7 @@ spike-rom: format
 # ===========================================================================
 
 opus-rom: format
-	cd $(OPUS_CRATE_DIR) && $(CARGO) build --release --target $(TARGET)
+	cd $(OPUS_CRATE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC)
 	agb-gbafix $(OPUS_CRATE_DIR)/target/$(TARGET)/release/opus-spike -o $(OPUS_ROM)
 	agb-gbafix $(OPUS_CRATE_DIR)/target/$(TARGET)/release/ctor-probe -o $(OPUS_PROBE_ROM)
 	@echo "Opus spike ROM built: $(OPUS_ROM) (+ constructor probe $(OPUS_PROBE_ROM))"
@@ -661,7 +675,7 @@ opus-test: toolchain-check
 
 uli-test: toolchain-check
 	cd crates/uli-lite && \
-	  $(CARGO) check --release --target $(TARGET) -Zbuild-std=core,alloc
+	  $(CARGO) check --release --target $(TARGET_SPEC) -Zbuild-std=core,alloc
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE)
@@ -674,12 +688,12 @@ uli-check: toolchain-check
 
 # Phase 1 decode-only ROM: a correctness image, not a player and not a cycle record.
 uli-spike-rom: format
-	cd $(ULI_SPIKE_DIR) && $(CARGO) build --release --target $(TARGET)
+	cd $(ULI_SPIKE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC)
 	agb-gbafix $(ULI_SPIKE_BIN) -o $(ULI_SPIKE_ROM)
 	@echo "ULI2 spike ROM built: $(ULI_SPIKE_ROM)"
 
 uli-bench-rom: format
-	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET)
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET_SPEC)
 	agb-gbafix $(ULI_BENCH_BIN) -o $(ULI_BENCH_ROM)
 	@echo "ULI2 bench ROM built: $(ULI_BENCH_ROM)"
 
@@ -747,7 +761,7 @@ uli-album-asset:
 	@echo "uli-album-asset: $(ULI_ALBUM_BLOB) and $(ULI_ALBUM_PIN) (both gitignored)"
 
 uli-album-bench-rom: format
-	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features $(ULI_CORPUS_FEATURE)
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --features $(ULI_CORPUS_FEATURE)
 	agb-gbafix $(ULI_BENCH_BIN) -o $(ULI_ALBUM_BENCH_ROM)
 	@echo "ULI2 album-corpus bench ROM built: $(ULI_ALBUM_BENCH_ROM)"
 
@@ -777,7 +791,7 @@ uli-album-bench: uli-album-bench-rom
 ULI_GATE_ROM := uli-gate.gba
 ULI_GATE_LOG ?= uli-gate.log
 uli-gate-rom: format
-	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features gate,$(ULI_CORPUS_FEATURE)
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --features gate,$(ULI_CORPUS_FEATURE)
 	agb-gbafix $(ULI_BENCH_BIN) -o $(ULI_GATE_ROM)
 	@echo "ULI2 gate-total ROM built: $(ULI_GATE_ROM)"
 
@@ -793,14 +807,14 @@ uli-gate-rom: format
 # listen; every number still comes from `uli-gate`.
 ULI_PLAY_ROM := uli-play.gba
 uli-play-rom: format
-	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features play-only
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --features play-only
 	agb-gbafix $(ULI_BENCH_BIN) -o $(ULI_PLAY_ROM)
 	@echo "ULI2 audio-only ROM built: $(ULI_PLAY_ROM)"
 	@stat -c '  %s bytes' $(ULI_PLAY_ROM)
 
 ULI_GATE_FIXTURE_ROM := uli-gate-fixture.gba
 uli-gate-fixture-rom: format
-	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features gate
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --features gate
 	agb-gbafix $(ULI_BENCH_BIN) -o $(ULI_GATE_FIXTURE_ROM)
 	@echo "ULI2 gate-total ROM (fixture corpus) built: $(ULI_GATE_FIXTURE_ROM)"
 
@@ -832,12 +846,12 @@ ULI_PLAYER_LOG ?= uli-player.log
 ULI_PLAYER_SPK_LOG ?= uli-player-speaker.log
 
 uli-player-rom: format
-	cd $(ULI_PLAYER_DIR) && $(CARGO) build --release --target $(TARGET)
+	cd $(ULI_PLAYER_DIR) && $(CARGO) build --release --target $(TARGET_SPEC)
 	agb-gbafix $(ULI_PLAYER_BIN) -o $(ULI_PLAYER_ROM)
 	@echo "ULI2 player ROM (headphone profile) built: $(ULI_PLAYER_ROM)"
 
 uli-player-speaker-rom: format
-	cd $(ULI_PLAYER_DIR) && $(CARGO) build --release --target $(TARGET) --features speaker
+	cd $(ULI_PLAYER_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --features speaker
 	agb-gbafix $(ULI_PLAYER_BIN) -o $(ULI_PLAYER_SPK_ROM)
 	@echo "ULI2 player ROM (speaker profile, folded) built: $(ULI_PLAYER_SPK_ROM)"
 
@@ -948,7 +962,7 @@ uli-playback-track-pin:
 # headroom — and it is meant to be run once on hardware, read off the final
 # screen (frames, worst/mean, periods, underruns, tails).
 uli-player-cross-rom: format
-	cd $(ULI_PLAYER_DIR) && $(CARGO) build --release --target $(TARGET) --features cross-corpus
+	cd $(ULI_PLAYER_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --features cross-corpus
 	agb-gbafix $(ULI_PLAYER_BIN) -o uli-player-cross.gba
 	@echo "ULI2 player ROM (full-length album) built: uli-player-cross.gba"
 	@stat -c '  %s bytes of a 33554432-byte cart' uli-player-cross.gba
@@ -962,7 +976,7 @@ uli-player-cross: uli-player-cross-rom
 # The player exercising a real track change: two tracks, and a deterministic skip
 # partway through track 1 (the runner has no input script).
 uli-player-two-track:
-	cd $(ULI_PLAYER_DIR) && $(CARGO) build --release --target $(TARGET) --features two-track,autoskip
+	cd $(ULI_PLAYER_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --features two-track,autoskip
 	agb-gbafix $(ULI_PLAYER_BIN) -o uli-player-two-track.gba
 	timeout -k 5 900 $(GBA_TEST_RUNNER) uli-player-two-track.gba > uli-player-two-track.log 2>&1 || true
 	@grep -q '^\[uli-player\] PASS' uli-player-two-track.log \
@@ -999,7 +1013,7 @@ uli-attrib-subframe: toolchain-check
 	    *) feats="attrib-dump,attrib-synth,attrib-entropy-$${arm#s-}" ;; \
 	  esac; \
 	  echo "uli-attrib-subframe: $$arm ($$feats)"; \
-	  ( cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features "$$feats" ) || exit 1; \
+	  ( cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --features "$$feats" ) || exit 1; \
 	  agb-gbafix $(ULI_BENCH_BIN) -o uli-subframe-$$arm.gba || exit 1; \
 	  timeout -k 5 300 $(GBA_TEST_RUNNER) uli-subframe-$$arm.gba > uli-subframe-$$arm.log 2>&1 || true; \
 	  grep -E '^\[uli-bench\] frame prod8' uli-subframe-$$arm.log || exit 1; \
@@ -1015,7 +1029,7 @@ uli-attrib: toolchain-check
 	    *) feats="attrib-dump,attrib-$$arm" ;; \
 	  esac; \
 	  echo "uli-attrib: $$arm ($$feats)"; \
-	  ( cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features "$$feats" ) || exit 1; \
+	  ( cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --features "$$feats" ) || exit 1; \
 	  agb-gbafix $(ULI_BENCH_BIN) -o uli-attrib-$$arm.gba || exit 1; \
 	  timeout -k 5 300 $(GBA_TEST_RUNNER) uli-attrib-$$arm.gba > uli-attrib-$$arm.log 2>&1 || true; \
 	  grep -E '^\[uli-bench\] frame prod8' uli-attrib-$$arm.log || exit 1; \
@@ -1035,7 +1049,7 @@ uli-attrib: toolchain-check
 # 30,320 B region and had no room for the 828 B stack.
 ULI_FFT_TWIN_LOG := uli-kernel-twin.log
 uli-kernel-twin: toolchain-check
-	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET) --features asm-fft,asm-pre,asm-ola,asm-ms
+	cd $(ULI_BENCH_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --features asm-fft,asm-pre,asm-ola,asm-ms
 	agb-gbafix $(ULI_BENCH_BIN) -o uli-kernel-twin.gba
 	timeout -k 5 300 $(GBA_TEST_RUNNER) uli-kernel-twin.gba > $(ULI_FFT_TWIN_LOG) 2>&1 || true
 	@grep -E '^\[uli-bench\] asmfft5 ' $(ULI_FFT_TWIN_LOG) || { echo "uli-fft-twin: no asmfft5 arm in the log"; exit 1; }
@@ -1129,7 +1143,7 @@ album-probe-test: toolchain-check
 # printed because AP-0 has to record .text/.iwram/.bss for each probe, not estimate
 # them.
 album-probe-rom: format
-	cd $(ALBUM_PROBE_DIR) && $(CARGO) build --release --target $(TARGET) --features probe-roms
+	cd $(ALBUM_PROBE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --features probe-roms
 	agb-gbafix $(ALBUM_PROBE_TARGET_DIR)/ui-probe -o album-probe-ui.gba
 	agb-gbafix $(ALBUM_PROBE_TARGET_DIR)/art-probe -o album-probe-art.gba
 	agb-gbafix $(ALBUM_PROBE_TARGET_DIR)/skip-probe -o album-probe-skip.gba
@@ -1280,7 +1294,7 @@ album-seam-test: toolchain-check
 # ~75 s of CPU. That is the price of a gate artifact. `make album-player-rom` drops the flag when
 # what you want is something to sit in front of, and its verdict line says the terms were SKIPPED.
 album-rom: album-bake
-	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin album-play
+	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --bin album-play
 	agb-gbafix $(ALBUM_ROM_BIN) -o $(ALBUM_ROM)
 	@ls -l $(ALBUM_ROM)
 	@size -A $(ALBUM_ROM_BIN) | grep -E '^(File|\.text|\.iwram|\.bss)'
@@ -1296,7 +1310,7 @@ album-rom: album-bake
 # boot, and `pcm=SKIPPED, fifo=SKIPPED, assets=SKIPPED — built without deep-audit` in the verdict.
 # `album-bake` stays a prerequisite for the same R11 reason as `album-rom`.
 album-player-rom: album-bake
-	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET) --bin album-play \
+	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --bin album-play \
 	  --no-default-features --features "backend-flac arm-kernel"
 	agb-gbafix $(ALBUM_ROM_BIN) -o $(ALBUM_FAST_ROM)
 	@ls -l $(ALBUM_FAST_ROM)
@@ -1314,7 +1328,7 @@ album-player-rom: album-bake
 # suite with assertions in it is `make overlay-kernel-test`.)
 test-rom: toolchain-check
 	CARGO_TARGET_$(TARGET_ENV)_RUNNER=$(GBA_TEST_RUNNER) \
-	  $(CARGO) test --target $(TARGET)
+	  $(CARGO) test --target $(TARGET_SPEC)
 
 test: test-rom flac-test uli-test uli-overlay-test
 	@echo "test passed: ROM suite + flac-lite isolation gates + uli-lite host corpus + uli-lite-gba twin"
@@ -1427,6 +1441,28 @@ check:
 	CARGO='$(CARGO)' sh scripts/fmt_with_generated_stub.sh $(FLAC_CRATE_DIR) --check
 	CARGO='$(CARGO)' GENERATED='$(abspath $(ALBUM_ASSETS_RS))' sh scripts/fmt_with_generated_stub.sh $(ALBUM_CRATE_DIR) --check
 	@echo "check: all workspaces rustfmt-clean"
+
+# The target spec is an *instrument*, so it gets a witness like the toolchain pin
+# does. `targets/$(TARGET).json` must stay a byte-for-byte copy of the pinned
+# toolchain's own `--print target-spec-json` output for `thumbv4t-none-eabi`
+# except for the fields listed here; anything else drifting means a toolchain
+# move changed the ABI, the data layout or the linker flavour underneath us and
+# the spec is now lying about the target it claims to be.
+#
+# This does NOT run as a build pre-step: it costs a rustc invocation, and a
+# stale-but-consistent spec still builds a consistent (if unintended) target.
+# Run it when the pin moves — `make check` covers formatting, this covers the
+# target. See `targets/README.md`.
+SPEC_ALLOWED_DIFFS := frame-pointer
+TARGET_SPEC_CHECK := scripts/check_target_spec.py
+target-spec-check: toolchain-check
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	@$(RUSTC) --print target-spec-json -Z unstable-options --target thumbv4t-none-eabi \
+	  > $(GATE_NEUTRAL_CWD)/builtin-$(TARGET).json 2>/dev/null \
+	  || { echo "target-spec-check: the pinned rustc cannot dump the built-in spec"; exit 1; }
+	python3 $(TARGET_SPEC_CHECK) $(GATE_NEUTRAL_CWD)/builtin-$(TARGET).json \
+	  targets/$(TARGET).json --allow-diff $(SPEC_ALLOWED_DIFFS)
+	@echo "target-spec-check passed: targets/$(TARGET).json differs from the pinned built-in spec only in [$(SPEC_ALLOWED_DIFFS)]"
 
 # Fail early and legibly when the pinned toolchain is not reachable, instead of
 # half-running a gate (e.g. `--target ''` when the host triple cannot be probed).

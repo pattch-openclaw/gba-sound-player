@@ -330,7 +330,7 @@ count. The measured frame delta is smaller (-2,289 mean) because the by-differen
 kernels multiply, and those multiplies are data-dependent (**see the method note
 below**).
 
-#### C — the target pins a frame pointer in every Rust function (**open, needs a decision**)
+#### C — the target pinned a frame pointer in every Rust function (**LANDED 2026-11-17**)
 
 `rustc --print target-spec-json --target thumbv4t-none-eabi` reports
 `"frame-pointer": "always"`. That is why the FLAC E7 probe and PR C's
@@ -372,6 +372,57 @@ consideration, not another micro-step:
   it moves every Rust function at once, and it is not attributable by difference.
 
 Recorded as **U6-adjacent and open**, not as a ceiling accepted.
+
+**LANDED 2026-11-17 — the frame pointer is gone, and the lever is now a
+checked-in target spec.** `targets/thumbv4t-gba.json` is the pinned toolchain's
+own `--print target-spec-json` for `thumbv4t-none-eabi` with exactly one field
+changed, `frame-pointer: "may-omit"`; `.cargo/config.toml` builds for it and
+`make target-spec-check` fails if anything else drifts. Measured, bit-exact (both
+album pins PASS, `xover=0 hfnz=0`, `msasm=true` twin PASS, two runs identical to
+the cycle):
+
+| | built-in (`always`) | `may-omit` | delta |
+|---|---:|---:|---:|
+| 129-frame worst | 210,833 = 80.43% | **208,854 = 79.67%** | −1,979 (−0.75 pts) |
+| 129-frame mean | 183,241 = 69.90% | **182,119 = 69.47%** | −1,122 (−0.43 pts) |
+| album worst (f16,204) | 210,787 = 80.41% | **209,162 = 79.79%** | −1,625 (−0.62 pts) |
+| album mean | 179,226 = 68.37% | **178,341 = 68.03%** | −885 (−0.34 pts) |
+| **gate total worst** | 242,370 = 92.46% | **240,705 = 91.82%** | −1,665 (−0.64 pts) |
+| **gate total mean** | 210,626 = 80.35% | **209,721 = 80.00%** | −905 (−0.34 pts) |
+| margin at worst frame | 7.54 pts | **8.18 pts (21,439 cyc)** | +0.64 pts |
+| `.iwram` code | 27,308 B | **26,412 B** | −896 B |
+| functions setting up a frame | 13 of 210 | **0** | — |
+
+Three things this settles, each of which had to be measured rather than reasoned:
+
+1. **The rustflag was never the lever.** `-Cforce-frame-pointers=no` rebuilt from
+   a clean `target/` produces a **byte-identical ROM**
+   (`579fe24dc345aaa13c7f522bc964246a` both ways). Cargo does not invalidate on
+   config-content changes, which is why the earlier probes needed the clean
+   rebuild to be meaningful. The target spec's value wins, so the spec is where
+   the change had to happen.
+2. **`non-leaf` would not have helped.** `dec_chan` has ten `bl` sites to
+   `huff_slow`/`eg_slow`, so `frame-pointer: "non-leaf"` — the plausible middle
+   setting — keeps the frame in exactly the function we most wanted it out of.
+   Only `may-omit` frees r11 there. This is not visible from the flag name and it
+   is the difference between a ~0.5-point win and nothing.
+3. **The stated reason for the pin does not apply here.** The target is
+   `panic-strategy: "abort"` — no unwinder, no `core::backtrace`, no
+   `RUST_BACKTRACE` — so what remains is debugger walkability, and mGBA debugs
+   from the DWARF we already emit. That is the justification; it is recorded
+   because a future reader will otherwise assume the pin was load-bearing.
+
+`dec_chan` keeps `fp` in its push list, but as an ordinary **data** register now
+(`fp_uses` 40 → 59, stack references 165 → 155, instructions 1,258 → 1,250) —
+which is the whole point: the four hand-written kernels already used r11 as data,
+so the register was never special, only the Rust ABI's reservation of it.
+
+Maintenance: the spec must stay the built-in one plus that single field.
+`make target-spec-check` re-dumps the built-in spec from the *pinned* rustc and
+fails on any other difference, including a field appearing on one side only.
+`targets/README.md` has the provenance, the regeneration recipe, the two plumbing
+traps (rustflags are keyed by the spec's file stem; `[target.*.rustflags]` is not
+inherited by `--target <path>`) and the one known cross-track consequence.
 
 #### D — the bit reader loads halfwords as two bytes (**open, planned**)
 
@@ -2262,6 +2313,55 @@ biased (see the audit's method note): removing an arm that changes `X` also
 changes the synthesis kernels' cost, which is data-dependent through `Rs`.
 Frame deltas of real changes are quoted above; per-kernel rows stay locators.
 
+### Target spec: `frame-pointer: may-omit` (2026-11-17, mGBA, WAITCNT 4/2)
+
+The build target is now a checked-in spec, `targets/thumbv4t-gba.json` — the
+pinned toolchain's built-in `thumbv4t-none-eabi` spec with **one** field changed,
+`frame-pointer: "always"` → `"may-omit"` — and `.cargo/config.toml` builds for it.
+Control and variant are the same tree with the same compiler; only the spec
+differs.
+
+| arm | worst (frame) | mean | of period |
+|---|---:|---:|---|
+| 129-frame, built-in `always` | 210,833 (f83) | 183,241 | 80.43% / 69.90% |
+| 129-frame, `may-omit` | **208,854 (f83)** | **182,119** | **79.67% / 69.47%** |
+| album, built-in | 210,787 (f16,204) | 179,226 | 80.41% / 68.37% |
+| album, `may-omit` | **209,162 (f16,204)** | **178,341** | **79.79% / 68.03%** |
+| gate total, built-in | 242,370 | 210,626 | 92.46% / 80.35% |
+| **gate total, `may-omit`** | **240,705** | **209,721** | **91.82% / 80.00%** |
+
+`gate feeder ... starved_entries=0 pushed=8475136 consumed=8475136
+frames_over_period=0 worst_over=0`; margin at the worst gate frame **7.54 → 8.18
+points (21,439 cycles)**.
+
+Code shape: **13 → 0** of 210 functions set up a frame; `.iwram` code 27,308 →
+**26,412 B** (−896 B); `dec_chan` 1,258 → 1,250 instructions, stack/frame
+references 165 → 155, `fp` uses 40 → 59 (r11 becomes data). Stack high-water
+844 → 932 B.
+
+**Witnesses:** both album pins PASS (`e6e87652`/`b3530978` fixture, `55e710af`
+album), `xover=0 hfnz=0`, `msasm=true` twin PASS, `make uli-test` /
+`uli-overlay-test` / `uli-kernel-twin` green, two runs identical to the cycle.
+
+**Two negative results, recorded so they are not repeated:**
+
+- `-Cforce-frame-pointers=no` is **inert**: rebuilt from a clean `target/` both
+  ways, the ROMs are **byte-identical** (`579fe24d…`). Cargo does not invalidate
+  on config-content changes, so a naive rebuild of the variant is a no-op that
+  looks like a null result.
+- `frame-pointer: "non-leaf"` — the plausible middle setting — would have helped
+  **nothing**, because `dec_chan` is non-leaf (ten `bl` sites to
+  `huff_slow`/`eg_slow`). Only `may-omit` frees r11 in the hot function.
+
+**Known cross-track consequence (not a regression):** `flac-spike.gba`'s PR 3
+verdict goes from `measured 2/2` to `measured 0/2` because its timing-window
+calibration requires five *identical* empty-window samples and now reads
+`raw = 20,22,22,22,22` instead of `22,22,22,22,22`. Decode is unchanged
+(`pcm fnv ... [MATCH]`, `decode proof PASSED`); the rejected spread is 2 cycles of
+net overhead. Not gated by any `make` target (`spike-rom` only builds), and
+`make flac-test` passes. Re-baselining that instrument belongs to the FLAC track —
+see `targets/README.md`.
+
 ### Loose-ends sweep (2026-11-16, mGBA, WAITCNT 4/2)
 
 Audit items D and E: the single `ldrh` behind a new `uli_lite::Aligned`
@@ -3373,6 +3473,37 @@ counts above come from the host.
 ---
 
 ## Decision log
+
+- **2026-11-17 — the frame pointer is gone: the GBA build target is now a
+  checked-in spec, and it is worth 0.6 points of the frame.**
+  `targets/thumbv4t-gba.json` is the pinned toolchain's own
+  `--print target-spec-json` for
+  `thumbv4t-none-eabi` with exactly one field changed, `frame-pointer` `always` →
+  `may-omit`; `.cargo/config.toml` builds for it, `make target-spec-check` fails
+  if any other field drifts (including a field appearing on one side only), and
+  `targets/README.md` carries the provenance, the regeneration recipe and the
+  plumbing traps. Measured bit-exact: **gate total 242,370 → 240,705 worst
+  (92.46% → 91.82%) / 210,626 → 209,721 mean (80.35% → 80.00%), margin 7.54 →
+  8.18 points**; album decode wall **210,787 → 209,162** worst and 179,226 →
+  178,341 mean; 129-frame 210,833 → 208,854 / 183,241 → 182,119. **13 → 0** of 210
+  functions set up a frame and `.iwram` code drops 896 B; r11 becomes an ordinary
+  data register (the four asm kernels always used it as one). **Decision — the
+  spec is the instrument, so it is reviewed and witnessed like the toolchain
+  pin**, not flipped by a flag: `-Cforce-frame-pointers=no` is **inert**
+  (byte-identical ROM rebuilt from a clean `target/` both ways), which is why the
+  change could not be a flag in the first place. Two negative results recorded:
+  the rustflag does nothing, and `frame-pointer: "non-leaf"` — the plausible
+  middle setting — would have helped **nothing** because `dec_chan` is non-leaf
+  (ten `bl` sites), so only `may-omit` frees r11 where it matters. The pin's
+  stated purpose does not apply on this target (`panic-strategy: abort`, no
+  unwinder, no `RUST_BACKTRACE`; mGBA debugs from DWARF), which is the
+  justification and is now written down. **Known cross-track consequence, recorded
+  not hidden:** `flac-spike`'s PR 3 verdict moves from `measured 2/2` to
+  `measured 0/2` because its calibration witness demands five *identical*
+  empty-window samples and now sees a 2-cycle first-sample difference
+  (`22,22,22,22,22` → `20,22,22,22,22`). Decode is untouched and `make flac-test`
+  passes; no `make` target gates that verdict. Re-baselining it is the FLAC
+  track's own change.
 
 - **2026-11-16 — loose-ends sweep landed (audit D + E): the gate total is now
   92.46% worst / 80.35% mean, and the category's ceiling is lower than projected.**
