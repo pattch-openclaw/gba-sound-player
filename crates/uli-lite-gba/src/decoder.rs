@@ -773,9 +773,46 @@ unsafe fn dec_chan(
     // SAFETY: NCODED <= M, so this is inside the channel.
     let xn = unsafe { x.add(NCODED) };
 
-    /// Ensure at least 17 valid bits (or set `bad`): one halfword, and a second
-    /// only when the window was empty. 17 and not 16 because a group reads
-    /// `rbits` raw bits and then a sign bit.
+    /// Ensure the window holds a whole Huffman code (or, in a checked build, set
+    /// `bad`).
+    ///
+    /// **Two shapes, selected by `checked-reader`.** The product build (the
+    /// default) is *closed-world*: we own the encoder, the container and the
+    /// bake, and the bake gate decodes the whole album with the **checked**
+    /// portable decoder against the C-pinned hashes before the ROM exists, so a
+    /// malformed stream fails the build instead of reaching this loop. The
+    /// product therefore carries **no bounds test and no error flag**, which is
+    /// what keeps `end` and `bad` out of the inner loops — and those two words
+    /// are exactly the registers `rq`/`dq15` need. (P2 moved `rq` to IWRAM and
+    /// still had to reload its *pointer* from the stack, for want of them.)
+    ///
+    /// **The contract is 16 bits, not 17.** A raw pair digit reads `r` bits and
+    /// then a sign bit, which is why the old shape demanded 17; but on every
+    /// corpus this tree owns both PAIR classes have `rbits == 0` (asserted by
+    /// `tests/premise.rs` and printed by the bench as `class premise`). 16 also
+    /// makes **one load always sufficient** (`valid < 16` implies
+    /// `valid + 16 >= 16`), so the nested second load disappears with it.
+    #[cfg(not(feature = "checked-reader"))]
+    macro_rules! refill {
+        () => {{
+            if valid < 16 {
+                // SAFETY (closed world): `valid < 16` and the stream is
+                // well-formed and halfword-padded, so `next` has a readable
+                // halfword. A malformed stream would read past the buffer; that
+                // is accepted by policy, because the boundary that guarantees
+                // well-formedness is the bake gate, not the decoder.
+                let h = unsafe { BitReader::load(next) };
+                next = next.wrapping_add(2);
+                hw |= h << (16 - valid);
+                valid += 16;
+            }
+        }};
+    }
+
+    /// The checked refill: 17 valid bits, a bounds test on every load and `bad`
+    /// on truncation. Used by the attribution arms (which *desynchronise* the
+    /// stream by removing a stage and need `bad` to resynchronise) and by
+    /// `checked-reader` builds.
     ///
     /// **The bounds check stays, and it was measured.** Three shapes were tried
     /// here in the 2026-11-16 sweep and this is the fastest:
@@ -789,6 +826,7 @@ unsafe fn dec_chan(
     ///    loop. Measured worse again, for the register pressure.
     /// 3. this one. The check is a compare and a branch, and the branch is
     ///    taken on the common path — but the address chain stays 1 instruction.
+    #[cfg(feature = "checked-reader")]
     macro_rules! refill {
         () => {{
             if valid < 17 {
@@ -842,7 +880,16 @@ unsafe fn dec_chan(
             let k = $k;
             let z = CLZ6[(hw >> 26) as usize] as u32;
             let t = 2 * z + 1 + k;
-            if z < 6 && t < 32 && t <= valid {
+            // Closed world: `esck <= 2` on every corpus this tree owns (see
+            // `tests/premise.rs`), so `t <= 2*5 + 1 + 2 = 13` and both `t < 32`
+            // and `t <= valid` are unfalsifiable — the leading `refill!` has
+            // already put 16 bits in the window. The product drops the two
+            // compares; the checked build keeps them.
+            #[cfg(not(feature = "checked-reader"))]
+            let fast = z < 6;
+            #[cfg(feature = "checked-reader")]
+            let fast = z < 6 && t < 32 && t <= valid;
+            if fast {
                 let f = top!(t);
                 take!(t);
                 refill!();
@@ -872,10 +919,20 @@ unsafe fn dec_chan(
     macro_rules! huff_consume {
         ($decode:expr) => {{
             let (e, len) = $decode;
-            if len == 0 {
-                bad = true;
-            } else {
-                take!(len);
+            // Closed world: `len` is a LUT entry's length (1..=10) or a
+            // `huff_slow` match (11..=16). It is 0 only when a symbol matched no
+            // canonical code, which the bake gate rules out before the ROM
+            // exists — so the product pays no per-symbol test and the checked
+            // build keeps one.
+            #[cfg(not(feature = "checked-reader"))]
+            take!(len);
+            #[cfg(feature = "checked-reader")]
+            {
+                if len == 0 {
+                    bad = true;
+                } else {
+                    take!(len);
+                }
             }
             e
         }};

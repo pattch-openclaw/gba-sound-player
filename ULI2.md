@@ -865,8 +865,13 @@ product codec without pretending one codec covers both jobs.
   `t < 32` / `t <= valid` guards are dead on our own tables (`esck <= 2`, and
   `rbits == 0` on every PAIR class across all five corpora). The proposals this
   unblocks, and their sizes, are in `crates/uli-lite/PLAN-OF-RECORD.md` → "The
-  entropy path against the C+ASM reference (2026-11-19)". **Nothing has been
-  implemented: this entry records the premise, not a change.**
+  entropy path against the C+ASM reference (2026-11-19)". **Landed the same day:**
+  P2 (`ClassTables` to IWRAM, −897 mean) and P1 + P3 (the closed-world reader,
+  −5,420 mean / −9,973 worst), taking the **gate total to 226,853 worst / 201,126
+  mean = 86.54% / 76.72%, 13.46 points of margin** with 0 starved periods, and
+  the product `dec_chan` down 1,376 B. The premise is no longer only a comment:
+  `tests/premise.rs` asserts `rbits == 0` on every PAIR class and `esck <= 2` for
+  the fixture and every generated corpus, as the seed of the bake gate.
 
 - **2026-11-18 — `post` as ARM asm: the product path is now all hand-written
   kernels, and the kernel table was re-derived with bit-exact arms.** `post` was

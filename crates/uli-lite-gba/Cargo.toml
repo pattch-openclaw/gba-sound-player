@@ -130,6 +130,20 @@ attrib-post2 = []
 # cursor, so everything downstream is unperturbed and the delta is exactly one
 # channel decode. Bit-exact, so pins PASS.
 attrib-entropy2 = []
+# **The checked bit reader.** Off by default: the product build reads the stream
+# closed-world — no bounds test, no error flag, a 16-bit refill contract — because
+# the bake gate decodes the whole album with the checked *portable* decoder
+# against the C-pinned hashes before the ROM exists (`PLAN-OF-RECORD.md`, "the
+# entropy path against the C+ASM reference", P1). Turning this on restores
+# `end`/`bad`, the per-load bounds test, the 17-bit contract and the per-symbol
+# and per-escape guards.
+#
+# **The attribution arms require it**, and get it through `attrib-dump` in
+# `examples/uli_bench`: a by-difference arm removes a stage, which desynchronises
+# the bit stream, and `bad` is what lets the arm resynchronise instead of reading
+# past the end of the stream. Keeping every attribution image on the checked
+# reader also keeps their deltas comparable to each other.
+checked-reader = []
 # **The clean `fft` arm (2026-11-19).** `fft` is in place on `z` (`buf`), so unlike
 # `pre`/`post`/`dec_chan` it cannot simply be called twice: the second call would
 # transform already-transformed data and every later stage would see a different
