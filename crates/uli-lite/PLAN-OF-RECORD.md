@@ -661,6 +661,20 @@ only place to get one is the reference's register-offset stores
 (`str r12,[r0,r1]`), which would release `lr` for the end pointer — that is the
 one structural change left in this kernel, and it is worth ~2-4%, not 14%.
 
+**And the register-offset route does not survive cycle accounting either**
+(2026-11-19, before writing it). The k-loop names `r0`-`r12`, `lr` and `sp`: all
+fifteen are live, so `lr` cannot simply be reassigned — PR #155's freed register
+went to **Rust** codegen (`r11`/`sl` in `dec_chan`), and hand-written asm never
+had a frame pointer to omit. The reference gets its store addresses from the
+**`smull` low word** (dead after the multiply) and pays for it with
+register-offset addressing. That is the trade, and on this part it is a wash:
+`ldr rd,[rn,rm]`/`str rd,[rn,rm]` each cost **one cycle more** than the
+immediate-offset form on ARM7TDMI, and freeing `lr` takes three such stores per
+butterfly (+3) to remove one `ldr` at the loop head (-3). **Net zero, with
+bit-exactness risk attached.** So the residual 8% against C is multiply and
+memory cost on the same instruction sequence, not loop control, and this kernel
+is correctly called **done**.
+
 **What this re-prices.** Restating f98 with the honest `fft` row moves the
 synthesis block from 147,074 to **143,123, i.e. 1.09x C -> 1.063x**, and leaves
 every kernel on the product path at or within 9% of C. Entropy/dequant is then the
