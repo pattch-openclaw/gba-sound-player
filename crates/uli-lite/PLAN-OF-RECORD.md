@@ -610,10 +610,88 @@ order of work below is about size-per-risk rather than about a dominant block.
 Part of the entropy row is frame density, not a slow loop: M/S is 9,861 here
 against C's ~4,400 because the gate frame transforms more coefficients.
 
+#### The `fft` row is now bit-exact, and it was **5.5% too high** (2026-11-19)
+
+The re-derived table above left **one** row *derived*: `fft` is in place on `z`, so
+the `*2` trick that made `pre`/`post`/`dec_chan` bit-exact does not apply — a
+second call would transform already-transformed data. It is now measured, with a
+new arm rather than a new method: **`attrib-fft2` restores the input first** (a
+second `pre`, which is idempotent into `z`) and then calls `fft` again, so every
+later stage sees the bytes it would have. Its delta is `pre` + `fft`;
+**`fft = delta(attrib-fft2) - delta(attrib-pre2)`**, and both terms come from
+bit-exact images whose pins PASS. `make uli-attrib` now builds `pre2`/`fft2`/
+`post2`/`entropy2` alongside the removal arms, and the `*2` arms now set their own
+`mask` bits — without that a `-fft2` image printed `mask=0x0` and was
+indistinguishable from the control in its own log, which is the same shape of
+vacuity as the old `fftasm=true` line.
+
+| | fixture (129) | album (16,553) |
+|---|---:|---:|
+| `fft` pair, mean | **66,068** | **67,995** |
+| min / max | 61,013 (f35) / 68,744 (f70) | 60,983 (f15) / 69,019 (f7,301) |
+| at the corpus's worst frame | 67,569 (f98) | 68,375 (f16,204) |
+| vs C's 62,800 shape | **1.076x** | **1.083x** (1.089x at f16,204) |
+
+**Two consequences, in order of size.**
+
+1. **The removal arm charged `fft` 71,520 at f98; the honest number is 67,569 —
+   a 5.5% overstatement**, and it is the last contaminated row in the table. The
+   mechanism is the one the audit named for `pre`: `attrib-fft` leaves an
+   *untransformed* `z` for `post` to read, and `post`'s cost is data-dependent
+   (1.15x across our own frames), so part of what the arm removed was a change in
+   `post`. Pins PASS on both `fft2` and `pre2`, so nothing here is confounded.
+2. **The FFT is 1.05x-1.09x C, not 1.14x.** The whole remaining prize to C
+   parity is therefore **5,195 on the album mean / 5,575 at f16,204** — about 3%
+   of the frame, not the ~8,700 the old ratio implied, and a quarter of the
+   ~18,200 the record projected for this block two revisions ago.
+
+**Why instruction work will not close it.** Both loops were counted: ours is ~60
+instructions per radix-4 butterfly against the reference's ~61, i.e. genuine
+parity (`LOAD_T`+`FORM_Y_P`+three `cmul`s is the same budget we spend on loads,
+sum formation and three multiply pairs). At N = 256 complex, 4 radix-4 stages = 256
+butterflies per call, and 34,000 cycles per call over 60-instruction butterflies is
+**~133 cycles per butterfly** — so the residual is data and memory cycles, not
+instructions. The two that are identifiable are loop control: `G_END` is reloaded
+from the stack on every butterfly (every general-purpose register is spoken for),
+and the k-loop pays a taken `b` at the bottom *in addition to* its head test.
+Together that is ~5 cycles x 256 ≈ 4% of the call. **Loop rotation alone was
+costed and rejected: it recovers ~256 cycles/call, a tenth of the frame, below
+the instrument's noise.** Removing the `G_END` reload needs a register, and the
+only place to get one is the reference's register-offset stores
+(`str r12,[r0,r1]`), which would release `lr` for the end pointer — that is the
+one structural change left in this kernel, and it is worth ~2-4%, not 14%.
+
+**And the register-offset route does not survive cycle accounting either**
+(2026-11-19, before writing it). The k-loop names `r0`-`r12`, `lr` and `sp`: all
+fifteen are live, so `lr` cannot simply be reassigned — PR #155's freed register
+went to **Rust** codegen (`r11`/`sl` in `dec_chan`), and hand-written asm never
+had a frame pointer to omit. The reference gets its store addresses from the
+**`smull` low word** (dead after the multiply) and pays for it with
+register-offset addressing. That is the trade, and on this part it is a wash:
+`ldr rd,[rn,rm]`/`str rd,[rn,rm]` each cost **one cycle more** than the
+immediate-offset form on ARM7TDMI, and freeing `lr` takes three such stores per
+butterfly (+3) to remove one `ldr` at the loop head (-3). **Net zero, with
+bit-exactness risk attached.** So the residual 8% against C is multiply and
+memory cost on the same instruction sequence, not loop control, and this kernel
+is correctly called **done**.
+
+**What this re-prices.** Restating f98 with the honest `fft` row moves the
+synthesis block from 147,074 to **143,123, i.e. 1.09x C -> 1.063x**, and leaves
+every kernel on the product path at or within 9% of C. Entropy/dequant is then the
+only row with a double-digit deficit, and it is worth ~19,000 — roughly four times
+the FFT's entire remainder. **The order for "meet or beat C" is entropy first; the
+FFT is a 5k item and it is nearly done.**
+
 The FFT is the story of the kernel ratio: **1.33x → 1.29x → 1.14x** C across
 Steps 0, 1 and 1b, on a `pre` that is 1.36x and an `ola` at 1.12x. The remaining
 synthesis gap is now mostly `pre` (7,058) and `ola` (3,786), i.e. two Rust
 kernels, not the asm one.
+
+> **Superseded (2026-11-19).** The paragraph above is the Step 1b-era reading and
+> three of its claims are now retired: the ladder ends at **1.08x** (the 1.14x was
+> a contaminated row), `pre` and `ola` both measure **1.00x** C in the clean table,
+> and neither is a Rust kernel any more. Kept for the record of what the sequence
+> of measurements said at the time.
 
 **What it corrects, in order of consequence:**
 

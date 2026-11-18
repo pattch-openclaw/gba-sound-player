@@ -985,15 +985,24 @@ uli-player-two-track:
 
 # --- ULI2 by-difference attribution (PLAN-OF-RECORD.md, critical path Step 0) ---
 #
-# Each arm rebuilds the bench with exactly one part of the product frame removed
-# and dumps the per-frame window (`--features attrib-dump`), so the frame can be
-# attributed by difference at a *given* frame index rather than only in the mean.
-# These are TIMING-ONLY builds: the album pins fail by construction in every arm,
-# so this target does NOT gate on the log's PASS. Read the `frame prod8` line and
-# the `pfc` rows, never the pin verdict. `attrib-dump` costs a constant +16
-# cycles per window in this image (control 274,214 vs the product 274,198) —
-# deltas are unaffected; quote absolutes from the product arm.
-ULI_ATTRIB_ARMS := control synth pre fft post ola ms entropy synth-entropy
+# Each arm rebuilds the bench with exactly one part of the product frame changed —
+# removed, or (the `*2` arms) called a second time — and dumps the per-frame window
+# (`--features attrib-dump`), so the frame can be attributed by difference at a
+# *given* frame index rather than only in the mean.
+# The REMOVAL arms are TIMING-ONLY: the album pins fail by construction in every
+# one of them, so this target does NOT gate on the log's PASS. Read the `frame
+# prod8` line and the `pfc` rows, never the pin verdict. `attrib-dump` costs a
+# constant +16 cycles per window in this image (control 274,214 vs the product
+# 274,198) — deltas are unaffected; quote absolutes from the product arm.
+#
+# The `*2` arms are the exception and are strictly better: they call a stage a
+# **second time** instead of removing it, so they are BIT-EXACT and their pins
+# PASS. `pre2`, `post2` and `entropy2` are one call each; `fft2` is `pre`+`fft`,
+# because a second `fft` needs its input restored (`fft` is in place). So read
+# `fft = delta(fft2) - delta(pre2)`. These are the arms the kernel table is built
+# from — the removal arms are contaminated by the downstream data change, measured
+# at 1.61x for `pre` at the densest frame.
+ULI_ATTRIB_ARMS := control synth pre pre2 fft fft2 post post2 ola ms entropy entropy2 synth-entropy
 
 # --- Sub-frame entropy attribution (Step 0b) --------------------------------
 #
