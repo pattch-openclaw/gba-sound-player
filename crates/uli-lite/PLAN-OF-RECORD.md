@@ -848,6 +848,92 @@ there — `cross` should confirm before P3 is sized. And P1's premise is about
 *our* encoder: a third-party or re-encoded blob with different tables is not
 covered unless the bake assertions cover it.
 
+## The encoder — the last missing piece (plan, 2026-11-19)
+
+**Why it blocks the album player.** Everything downstream of the decoder is
+ready: `uli-playback` already implements the app's `PcmSource` seam
+(`UliSource<'a, D: FrameDecoder>`), `ALBUM-PLAYER.md` §4.2b already specifies
+`src/backend/uli2.rs` under `make album-rom BACKEND=flac|uli2`, and the ULA2
+container already carries tracks, titles, artists and a seek table. What is
+missing is the ability to **make** a `.uli` blob from our own audio: today that
+requires the C encoder in `gba-audio`, which the project's rule forbids depending
+on. Until an in-repo encoder exists, ULI2 cannot be used as the album player's
+codec — the assets would come from a build we do not own.
+
+**What the reference is.** ~890 lines of C plus two Python tools, and the shape
+matters more than the size:
+
+| piece | what it does |
+|---|---|
+| `enc_core.c` | the codec: `tables_default`/`tables_derive`/`tables_from_stats` (Huffman lengths trained from counts, with a floor), the bit writer (`bw_put`, `bw_put_eg`, zigzag), the forward MDCT (`mdct_frame`, orthonormal, hop 512, coefficients ≥500 zeroed), and `frame_code` — an **RD-optimised** per-frame search over the global step `g` and the M/S flag, cost `D + kappa·bits + mu·decoder_cycles` |
+| `uli_enc.c` | the CLI and album assembly: `--budget`/`--cap %` sizing, two-pass table training, per-frame parallelism, ULA2 container write |
+| `prep.py` | `ffmpeg` decode, resample to 32,768 Hz, mono→stereo, gapless track join, `tracks.tsv` with ASCII-folded titles |
+| `gen_tables.py` | regenerates the format's default tables |
+
+Two of those deserve emphasis because they are not obvious from the format:
+`mu` makes the encoder **cost the decoder's cycles in the RD objective**, so it
+can trade a little distortion for decode speed — a knob this project values more
+than a general-purpose codec would; and the tables are **trained per album**, so
+the encoder writes the Huffman codebooks into the blob.
+
+### Requirements
+
+| # | requirement | why |
+|---|---|---|
+| **E-R1** | In-repo **Rust**, host-only, no C, no `gba-audio` dependency at build or encode time | the standing rule; and a C oracle we cannot ship is not an encoder |
+| **E-R2** | Arbitrary **WAV** in: PCM 8/16/24/32-bit, mono or stereo, any rate → 32,768 Hz stereo | "encode arbitrary WAVs into ROMs" is the user-facing job. Compressed containers stay a Python/`ffmpeg` concern — the format rule forbids C, not external tools |
+| **E-R3** | Writes exactly the ULA2 container `uli-lite`/`GbaDecoder` parse: one blob, ≤32 tracks, per-track title/artist/preroll/bitpos, seek table every `SEEK_INTERVAL` frames, strings, tables blob | anything else is a second format |
+| **E-R4** | **The encoder owns the closed-world premise: `rbits ≤ 5` on every PAIR class and `esck ≤ 2`.** Refuse to emit otherwise | the product reader has a 16-bit refill contract and no error path; a raw pair coefficient costs `r+1` bits, so `r ≤ 5` keeps 10 bits of margin. The *parser* allows `rbits ≤ 16`/`esck ≤ 24`; only the encoder can make the product's premise true |
+| **E-R5** | **Deterministic**: identical input → byte-identical blob, no threading-dependent output | pins are the whole verification story |
+| **E-R6** | Rate control: `--budget BYTES --cap PCT`; **refuse** rather than overrun | a cartridge overflow is a bake failure, not a warning |
+| **E-R7** | Quality parity with the reference on identical PCM: codec-only SNR within a stated tolerance of **32.29 mean / 25.78 worst dB** at cap 74 | otherwise the format's own record stops describing our encoder |
+| **E-R8** | The RD search carries the decoder-cycle term (`mu`), at least as an option | it is the project's distinguishing knob and it feeds the playback-loop budget |
+| **E-R9** | A 43-minute album encodes in **minutes**: frame-parallel, but with deterministic output (E-R5) | the bake is in the edit loop |
+
+### Where it lives
+
+`crates/uli-enc` — host-only, `publish = false`, depending on `uli-lite` for
+`format` and the `Huffman`/`CodeTables` types so the bitstream is defined
+**once** and the encoder cannot disagree with the decoder about it. A `uli-enc`
+binary is the CLI. Python remains for orchestration only (source decode,
+resample, track metadata), which is what `ULI2.md` already says: the rule is
+"no C tooling", not "no Python". The one thing that must not happen is a second
+copy of the format constants — that is exactly how these docs drifted.
+
+### Slices, each with an exit gate
+
+| # | slice | exit gate |
+|---|---|---|
+| **E1** | Skeleton: WAV reader, resampler to 32,768 Hz, container/bit-writer, `tables_default`. Encode silence and DC | blob parses (`uli_lite::Album::parse` + `CodeTables::parse_into`); decodes; premise bounds asserted by the encoder itself |
+| **E2** | Forward MDCT + fixed-step quantisation with default tables | decodes bit-exactly; SNR sane; rate reported |
+| **E3** | RD search: `g`, `ms`, `kappa`; per-frame bit accounting | rate/quality on the fixture vs the reference's curve (E-R7) |
+| **E4** | Two-pass table training (`tables_from_stats`, length floor) | output byte-stable across runs; trained tables still inside E-R4 |
+| **E5** | Album assembly: tracks, titles, seek table, `--budget/--cap`, refusals | a 43-minute album fits 32 MiB at cap ≤ 74; every track decodes; hashes pinned |
+| **E6** | `mu` (decoder-cycle-aware) search, optional | a knob that demonstrably trades SNR for decode cycles, measured on the bench |
+
+### The acceptance question, answered
+
+**Target gate: given the same PCM, the Rust encoder reproduces the C encoder's
+blob byte-for-byte.** That is a strong gate and it is worth insisting on, because
+it (a) proves the port rather than approximating it, (b) lets the committed
+corpora be regenerated from our own tree so the fixture stops being an artefact
+of a build we cannot reproduce, and (c) keeps every existing number — the
+C-comparison, the kernel table, the pins — comparable without a re-pin.
+
+If byte-exactness proves infeasible (the reference's doubles, its table training
+order, or `ffmpeg`'s resampler), the fallback gate is: **same rate and quality
+within tolerance, all E-R4 bounds held, and a bit-exact decode** — with the
+C-produced blobs frozen as the reference corpus and the Rust encoder's output
+pinned separately. The resampler is out of scope for byte-equality either way: it
+is compared by SNR, not by bytes.
+
+### What it does not have to do
+
+Not a general-purpose codec; not portable (host only); no encoder-side seeking or
+streaming; no obligation to accept non-WAV input directly; and it does not
+validate its own output — `uli-lite` is the oracle, in the same round-trip test
+that already exists for the decoder.
+
 ## Gate verdicts (the claims live in ULI2.md §Gates)
 
 **One owner per topic:** the gate *claims* are stated in
