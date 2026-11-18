@@ -968,6 +968,60 @@ Album **194,695 / 169,354** (was 195,439 / 169,851); gate **226,152 / 200,624 =
 86.27%**, margin **13.73 points**. Cost: **+148 B of IWRAM** (145 B of table).
 The projection (0.5–1k) held.
 
+**The sub-frame partition, re-run (2026-11-19, in PR #165).** Mean cycles/frame
+on the 129-frame fixture, each arm removing one layer from the full path:
+
+| layer | pre-P2/P5 | **re-run** | share |
+|---|---:|---:|---:|
+| symbol resolution | 27,036 | **26,175** | 58% |
+| loops, escapes, sign bits, band control | 16,350 | **16,035** | — |
+| dequant | 9,285 | **8,774** | — |
+| residual | 4,954 | **5,187** | — |
+| reader mechanics | 2,791 | **2,793** | — |
+| coefficient store | 2,111 | **2,003** | — |
+| **full path** | 46,631 | **45,381** | 100% |
+
+**The shape is unchanged — symbol resolution is still ~58% of the entropy path —
+and the absolute moved only 1,250** (P2's −897 and P5's −570 on this reader).
+Two caveats come with that, and the second is the important one:
+
+1. **This is the *checked* reader.** `attrib-dump` now implies `checked-reader`,
+   because the `nolut` and `reader` arms desynchronise the stream and need `bad`
+   to resynchronise. So these are not the product's numbers: the product's
+   entropy block is ~35,656, and the ~9,700 difference is exactly what P1
+   removed — the per-symbol LUT-pointer reload and the per-coefficient
+   `rq`/`dq15` reloads, which every arm here still pays.
+2. **Only two of the six arms desync.** `nolut` and `reader` substitute or remove
+   the symbol decode, so the bit cursor diverges and what follows is a different
+   workload. **`nodequant` and `nowrite` do not touch the reader at all** — they
+   remove the dequant arithmetic and the store — so they are sound on any reader.
+
+**So the next instrument step is not another optimisation.** It is to decouple
+`attrib-dump` from `checked-reader` so `nodequant`/`nowrite` can be built against
+the **product** reader, and to add a symbol-resolution arm that does not desync
+(the 10-bit LUT covers every code on this corpus — `slow_hits=0` — so a
+length-preserving substitution exists: read the same number of bits, return a
+fixed symbol). Until then "symbol resolution is 58%" is a statement about a
+reader the product does not ship, and sizing work from it would repeat P2's
+mistake in the other direction.
+
+**Where this leaves the gate against C.** The reference's own record gives
+comparable figures — decode wall **69.43%** and gate total **73.63%** at 4/2 — so
+the two halves can be compared for the first time:
+
+| | C + ASM | ours (after P5) | delta |
+|---|---:|---:|---:|
+| decode wall, worst | 182,007 (69.43%) | **194,695 (74.27%)** | **1.070x**, +4.84 pts |
+| gate total, worst | 193,017 (73.63%) | **226,152 (86.27%)** | 1.172x, +12.64 pts |
+| **non-decode half** (gate − decode) | **11,010 (4.20 pts)** | **31,457 (12.00 pts)** | **2.86x** |
+
+**The decoder is no longer where the gate gap lives.** Of the 12.64 points we are
+behind C on the gate, 4.84 are decode and **7.80 are the convert/IRQ/DMA path**,
+which costs ~2.9x C's. C's figure also errs *high* (their doc notes the DMA share
+is counted twice in the gate total), so the true gap is at least as large. That
+makes the player's output half — not the codec — the largest remaining single
+difference from the reference, and it is where the next measurement should go.
+
 **P4 deserves its own paragraph, because the record currently treats it as
 settled.** `coef!` carries *"C hoists `rq[1] * step` and special-cases `m == 1`
 here. Measured in this image, that hoist is not a win — its two operands are
