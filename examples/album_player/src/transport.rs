@@ -59,7 +59,7 @@
 //! (≤ 1 video frame); *detection → the post being taken* is the frame loop's and is **one producer
 //! frame**, 3.7–3.9 video frames of uninterruptible decode (measured 3 on the gate run) — the leg a
 //! log that only printed the audio clock's phase at detection could not see; *take → hand-off* is
-//! [`SKIP_PRESS_TO_HANDOFF_PERIODS`] periods, whose name predates the four-legged split and whose
+//! [`take_to_handoff_bound`] periods, whose name predates the four-legged split and whose
 //! value bounds only this leg (measured 2 periods); *hand-off → the new track's first chunk* is the
 //! cover's ([`SKIP_PRIME_CHUNKS`] + 1 = 5 periods, and that is §4.4 step 5's claim); and anything
 //! beyond that is the **track's own head** — a chunk of digital silence at the top of a track is
@@ -166,39 +166,47 @@ pub const GAIN_UNITY: i32 = 256;
 /// test, and this fixture's clips start in the master's quietest 50 ms window.
 ///
 /// 171 ms is this cover alone, and it is **not** the whole wait a listener feels: add
-/// [`SKIP_PRESS_TO_HANDOFF_PERIODS`] on the front and the new track's own `head_silence` on the back.
+/// [`take_to_handoff_bound`] on the front and the new track's own `head_silence` on the back.
 pub const SKIP_PRIME_CHUNKS: u32 = 4;
 
-/// The bound on a skip's **take → hand-off** latency, in feeder periods: **3**.
+/// The bound on a skip's **take → hand-off** latency, in feeder periods, for a run whose worst
+/// main-loop pass measured `pass_periods` periods: **the pass's own length plus one, floored at the
+/// deferral**.
 ///
 /// The name predates the three-legged split; the value bounds only the leg the frame loop owns, from
 /// the main loop taking the post to the hand-off's critical section — the press→detect and
 /// detect→take legs are in front of it and are the ROM's `reaction` term.
 ///
-/// The wait a listener can put a number on is `press → take → hand-off → content → audible`, and
-/// three different parties own the four terms (the track's own lead-in included). This one is the
-/// frame loop's, and since PR-3b-fix1 it carries the deferral: the post is taken at the top of a pass, the
-/// feeder spends one period fading (§4.4 step 1 — `FADE_SAMPLES` < `CHUNK_SAMPLES`, so it completes
-/// inside that one chunk), and the transition then waits one more period so that chunk is played out
-/// before the hand-off ([`FADE_PERIODS`]). So the term is the number of period boundaries one pass
-/// crosses, plus the deferral: a pass is one producer frame of decode, measured at 1.04–1.09 M cycles
-/// = **1.85–1.9 periods** (that figure is the one `keys.rs` states for why the keypad sample could
-/// not stay in this loop), so two boundaries is enough and three is the bound on a pass up to ~1.6×
-/// the measured decode cost. It still fails a loop that stopped serving the deferral latch or needed
-/// two extra passes to hand off.
+/// **The derivation, and why this is a function and not the constant it replaced.** The post is
+/// taken at the top of a pass, the feeder spends one period fading (§4.4 step 1 — `FADE_SAMPLES` <
+/// `CHUNK_SAMPLES`, so it completes inside that one chunk), and the transition then waits one more
+/// period so that chunk is played out before the hand-off ([`FADE_PERIODS`]). So the wait is the
+/// number of period boundaries the pass crossed, plus that deferral — and nothing else, because the
+/// decision is taken at the pass's end. A pass is one producer frame of decode plus the pass's own
+/// work, and *how many cycles a frame costs belongs to the machine*: mGBA models no cartridge wait
+/// states (R3), so the old fixed `3` was 1.85–1.9 periods of emulator-measured decode rounded up,
+/// and a real cart's longer pass would fail a correct run (R13 — a red must not be louder than its
+/// witness). The caller therefore measures the pass itself — the ROM times every pass on the audio
+/// clock and takes the worst (`Input::pass_periods`), the host model takes it as a parameter — and
+/// this bound moves with the machine instead of against it.
 ///
-/// Measured on the REPLAY arm's skips (`input-replay`, `make album-rom`'s image): **2 periods on
-/// every one of the nine** in the current script, so the gate is 1.5× the observed value. The other
-/// two terms are not this one's: the cover is [`SKIP_PRIME_CHUNKS`] + 1 = 5 periods (`content_at`), and the track's own
-/// lead-in is `head_silence` — 8 periods on both full-master tracks in the gate fixture, 0 on its
-/// clips. Worst case observed end to end is therefore 2 + 13 = **15 periods = 513 ms** for a skip
-/// onto a track that opens with digital silence, plus the seam's two legs (≤ 1 video frame for the
-/// debounce + 3 frames = 50 ms for the take, 67 ms together): **~580 ms**. Onto a track that opens
-/// audibly it is 2 + 5 = 7 periods = 239 ms + 67 ms = **306 ms**, which is the ROM's own `latency:`
-/// line (`press→audible 18 frames = 306 ms`). The first is still inside §4.4's ≤ ~0.6 s observable,
-/// where the pre-fix numbers were 14 periods = 479 ms and 6 periods = 205 ms — and neither of those,
-/// nor D2's 171 ms for the machinery alone, counted the two seam legs or the track's own head.
-pub const SKIP_PRESS_TO_HANDOFF_PERIODS: u32 = 3;
+/// At the emulator's measured 2-period pass the value is the historical **3**, so the gate keeps the
+/// same headroom where it was measured, and a 2× pass (4 periods) yields 5 rather than failing. It
+/// still fails a loop that stopped serving the deferral latch or needed two extra passes to hand
+/// off: those add whole passes to the wait and no measured pass length explains them.
+///
+/// The other two terms of the listener's wait are not this one's: the cover is [`SKIP_PRIME_CHUNKS`]
+/// + 1 = 5 periods (`content_at`), and the track's own lead-in is `head_silence` — 8 periods on both
+/// full-master tracks in the gate fixture, 0 on its clips.
+#[must_use]
+pub const fn take_to_handoff_bound(pass_periods: u32) -> u32 {
+    let crossed = pass_periods + 1;
+    if crossed < FADE_PERIODS {
+        FADE_PERIODS
+    } else {
+        crossed
+    }
+}
 
 /// One FIFO byte in the form [`fifo_byte`](gba_playback::playback::fifo_byte) produces, scaled by
 /// `k / 256`.
