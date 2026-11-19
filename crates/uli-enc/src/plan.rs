@@ -406,6 +406,15 @@ impl Content {
         }
     }
 
+    /// A finished plan: step states plus the coded bands that go with them.
+    pub fn coded(plan: GPlan, coded: Vec<[crate::quant::Chan; 2]>) -> Self {
+        debug_assert_eq!(plan.len(), coded.len(), "one content per planned frame");
+        Self {
+            plan,
+            coded: Some(coded),
+        }
+    }
+
     /// A step plan with no coded content yet: for tests of the bound itself.
     pub fn from_plan(plan: GPlan) -> Self {
         Self { plan, coded: None }

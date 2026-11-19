@@ -29,6 +29,7 @@ pub mod mdct_tables;
 pub mod pcm;
 pub mod plan;
 pub mod quant;
+pub mod rd;
 pub mod tables_default;
 
 use std::fmt;
@@ -44,6 +45,7 @@ pub use plan::{
     Content, DEFAULT_BUDGET, DEFAULT_CAP_PCT, GPlan, GPlanViolation, GPlanViolationKind, Plan,
     Refusal, chunks, frame_count,
 };
+pub use rd::{Curves, DEFAULT_KAPPA, G_MAX, G_MIN, cap_cycles, measure, weights};
 pub use tables_default::{Codes, DefaultTables};
 
 /// Everything the CLI passes; the library reads no environment.
@@ -53,18 +55,25 @@ pub struct Args {
     pub tracks: PathBuf,
     /// Whole-blob byte budget, never a cart size (E-R10).
     pub budget: u64,
-    /// Percent of the 262,144-cycle frame period; validated, with no RD search to
-    /// spend it on yet (that is S3).
+    /// Percent of the 262,144-cycle frame period. S3 gives it something to
+    /// constrain: candidates whose reader cycle model exceeds it are not offered.
     pub cap_pct: f64,
     /// The fixed global step index, or `None` for S1's album of silence. S2's only
     /// content knob: it chooses the step, and therefore the distortion, and the
     /// rate falls out of it. S3 replaces it with the RD search over `g`.
     pub g: Option<i32>,
+    /// Search `g` per frame against the bit budget (S3). Needs `g` unset: either a
+    /// fixed step or a search, not both.
+    pub rd: bool,
+    /// The search's Lagrangian distortion-to-bits scale, the reference's `--kappa`.
+    pub kappa: f64,
+    /// Candidate spacing across `GMIN..=GMAX`, in step indices.
+    pub stride: i32,
     pub threads: usize,
 }
 
 /// What the encoder measured while producing the blob.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Report {
     pub overhead_bytes: usize,
     pub target_bits: i64,
@@ -76,6 +85,8 @@ pub struct Report {
     pub est_mean_cycles: u32,
     /// The fixed step the album was coded at, for the report line.
     pub g: Option<i32>,
+    /// Every frame's chosen step, when the search picked them (S3).
+    pub g_chosen: Option<Vec<i32>>,
     /// Bits the stream actually used, from the decoder's own per-frame counts.
     pub stream_bits: u64,
     /// Codec-only SNR of the decoded int16 output against the input, in dB.
@@ -140,6 +151,7 @@ pub fn encode(args: &Args) -> Result<Output, Error> {
 /// use [`encode`].
 pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output, Error> {
     let pcm = Pcm::open(&args.album, &args.tracks)?;
+    let mut report_g: Option<Vec<i32>> = None;
 
     // The premise is a property of the *final* tables, so serialise and re-parse
     // them first: a bound checked against the in-memory model would not prove
@@ -257,6 +269,7 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
             workers_used: coded.len(),
             est_max_cycles: verify.max_cycles,
             g: args.g,
+            g_chosen: report_g,
             est_mean_cycles: verify.mean_cycles,
             stream_bits: verify.bits,
             snr_db: verify.snr_db,
