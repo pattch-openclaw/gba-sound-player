@@ -838,11 +838,13 @@ shown** and everything above them is a swappable **scene**.
 │   art · track list · title card ·      │       │ the A11 list, the A12 card: exactly
 │    later: visualiser, a game           │       │ ONE is drawn, and it is given this
 │                                        │       │ rectangle and nothing else.
-├────────────────────────────────────────┤ 136   ┘  (128 in B)
-│ 03 · Shellbound      ▓▓▓▓▓▓▓▓▒░░░░░░   │ 8 px   TITLE BAND — one line, elided, with
-├────────────────────────────────────────┤        the bar sharing the SAME tile row at the right
-│  ◀◀    ▶︎/❚❚    ▶▶   ·  1:47 / 3:12      │ 16 px  CHROME — drawn by the surface, always
-└────────────────────────────────────────┘ 160    shown; controls are art, never glyphs
+├────────────────────────────────────────┤ 136   ┘  (128 in B) — variant A: 17 rows × 8 px
+│ 03 · Shellbound      ▓▓▓▓▓▓▓▓▒░░░░░░   │        TITLE BAND — one line, elided, 8 px tall
+├────────────────────────────────────────┤ 144   ← the bar shares the tile row above it; the
+│  ◀◀    ▶︎/❚❚    ▶▶   ·  1:47 / 3:12     │        band is 2 rows, so 16 px here
+└────────────────────────────────────────┘ 160    CHROME — drawn by the surface, always shown,
+                                               and never moved by a scene. Controls are art,
+                                               never glyphs.
 ```
 
 - **Chrome** (2 rows): the transport controls, and the clock beside them — **elapsed /
@@ -1164,15 +1166,19 @@ force silently.
 **One line, elided — not wrapped (ruled 2026-11-20).** The title band is one row (§5.0), so
 the rule is a truncation rule: measure, and if it does not fit, cut at the last whole glyph
 that fits plus an ellipsis; **the track number is never cut**, because `NN ·` is the part a
-listener uses to ask for the song. `text.rs`'s own docstring defers this today — "the
-verdict text is short and fixed, so wrapping is Phase 2's rule, not this one" — which is
-the only place in the tree where the choice was deferred rather than made, and 2a makes it
-in `measure`/`fit`, host-tested.
+listener uses to ask for the song. `text.rs`'s own docstring defers the whole of this today,
+verbatim: *“There is no `measure`, no wrapping, no ellipsis, no palette bank beyond 0/1 and no
+dynamic tiles; ALBUM-PLAYER.md §4.1 names that layout engine as Phase 2's A5, so growing it here
+would pre-empt it”* — and the test-side comment at `text.rs:119` says the same thing shorter:
+*“a verdict is one row, so there is nothing to wrap and nothing to measure.”* That is the only
+place in the tree where the choice was deferred rather than made, and 2a makes it in
+`measure`/`fit`, host-tested — which also means 2a owns the thing that sentence lists as missing:
+measure, wrapping-then-eliding, and the palette banks beyond 0/1 that §5.4 declares per element.
 
 **The fit box is derived, and it lives in one place, not three (ruled 2026-11-20).**
 Today the same number sits in three places with no sync between them: this section's old
 prose ("a 28-character worst case"), a Rust host-test guard, and `TITLE_BOX_MAX = 28` in
-`scripts/album_prep.py:47`. That duplication is recorded as §11's **D9**; this PR removes the
+`scripts/album_prep.py:48`. That duplication is recorded as §11's **D9**; this PR removes the
 copy this file owns (the prose above), and 2a removes the two in code: every text element's fit
 box comes from the variant's declared *span*
 (a pixel width — §5.0) and the face's real metrics, and the bake tool still prints any title
@@ -1320,7 +1326,7 @@ right of the title band can still be 18 cells of 4 px rather than 9 of 8 — at 
 **One invariant that has to be written down because it joins geometry to audio arithmetic.**
 The reciprocals are computed *per track at bake time* from the cell count —
 `scripts/album_bake.py` does `recip = ((1 << 32) * BAR_CELLS) // n_samples`, with
-`BAR_CELLS = 32` at `album_bake.py:60` today. So a variant that declares a different count
+`BAR_CELLS = 32` at `album_bake.py:76` today. So a variant that declares a different count
 must feed that same constant into the bake, or a ROM would draw a bar out of reciprocals
 computed for a different grid: **the declared `bar_cells`, `ALBM1`'s reciprocals and
 `layout.rs` must agree, and `album-layout-test` asserts that they do.** That is the
@@ -1642,11 +1648,12 @@ them layout refusals and all of them checkable before any Rust is compiled (§5.
 unknown `[layout] variant`; an `[art] box` the selected variant does not derive; a variant
 whose bands do not tile exactly 20 rows, or whose declared `image_tiles` cannot coexist
 with the glyph/chrome tiles in one character block (§5.1); a `bar_cells` that disagrees with
-the reciprocals already generated into `ALBM1` (§6); and **a scene whose own minimum the
-variant cannot provide** — §5.2's scene table carries that minimum per scene, because it is not
-a global number: the list refuses a region under ~4 rows ("where a list has stopped being a
-list"), the art scene refuses a box outside its own region, and the `blank` scene refuses
-nothing, which is what makes it 2a's.** Refusing is correct
+the reciprocals already generated into `ALBM1` (§6); and a scene whose own minimum the
+variant cannot provide.** That last minimum is not a global number — §5.2's scene table
+carries it per scene, because the list refuses a region under ~4 rows ("where a list has
+stopped being a list"), the art scene refuses a box outside its own region, and the `blank`
+scene refuses nothing, which is what makes it 2a's.
+Refusing is correct
 behaviour until then: the app must not silently wrap the clock it measures itself
 against. It
 re-reads everything it wrote through the shipping parsers, and a second run on the
@@ -2105,10 +2112,10 @@ gate (§13 AP-3), not a doc edit. Three copies of the same number, with nothing 
    the copy of the number that has the most authority is the one whose explanation points at a
    section that no longer defines it. That is the drift, in one line, and it is why the number
    may not live in three places;
-3. **`TITLE_BOX_MAX = 28` in `scripts/album_prep.py:47`**, which decides what the *bake*
+3. **`TITLE_BOX_MAX = 28` in `scripts/album_prep.py:48`**, which decides what the *bake*
    refuses and is the one that reaches a user's album.
 
-A fourth copy exists in different form: **`BAR_CELLS = 32` at `scripts/album_bake.py:60`**, which
+A fourth copy exists in different form: **`BAR_CELLS = 32` at `scripts/album_bake.py:76`**, which
 feeds each track's `recip` in `ALBM1` — geometry that has already reached the audio arithmetic
 (§6). And `src/layout.rs`, which §4.1's tree has always listed as "every geometry constant in
 the tree", **does not exist**: geometry today lives inside `examples/album_player/src/text.rs`
@@ -2398,7 +2405,7 @@ the rule that a gate touching a non-default configuration runs as its own target
 | **AP-1** | **the ROM under test was built by `make album-rom ALBUM=examples/album_player/album.toml` from a fresh clone, with no untracked input and nothing fetched (§2.3)**; ≥2 tracks play to the end of the album, pause/resume and next/prev work **from a scripted key log replayed at the keys layer**, `underflows = 0`, `old = 0` and `dropped > 0` on every pressed skip and `dropped = 0` on every track-end advance, a skip's cover is `SKIP_PRIME_CHUNKS + 1` periods, the boundary gap is printed with its decomposition (§4.4), and **audio begins within 1.5 s of boot** (measured 578–580 ms on the 4-track fixture; ~36 KiB per track of that, so a 32-track album needs the tripwire windows shrunk) | `make album-test` (**landed PR-3b**): the REPLAY arm (`--features "input-replay deep-audit"`) run headless, every assertion read off the **log** with a named refusal per failed term; exit 124 is the pass path, ~2m27s, deterministic (two runs' logs `cmp` byte-identical), and 21 doctored logs tried against it — 19 refused by name. **Two of this row's original promises are not deliverable by this harness, and are re-stated rather than quietly dropped:** *(i)* "scripted button presses" cannot mean the emulator's input layer — `mgba-test-runner` exposes no key-log, stdin, env or socket path (verified on the installed binary) — so the script is replayed through `keys.rs` via `update_with_state`, the ROM prints which source it used, and **a green here is never evidence that a physical press reaches a cartridge** (that leg is AP-7a); *(ii)* "a captured-audio comparison against a reference decode" has **no tool** — the runner records no audio — so the witness is on-ROM and in the model: per-track `pcm`/`fifo` folds against **each visit's own** pins, the whole-region `assets` fold, the ring ledger, and a host model that records the **post-gain bytes handed to `rearm_dma`** and asserts contiguity across a pause (§4.4). The folds are a *decoder* witness only — they were cited as a transport one, wrongly, and that claim is retracted here as well as in the code. **What AP-1 still cannot claim: that a transition is click-free to an ear, or that a real press works.** Until AP-7a listens, this gate is green on the emulator's terms only. **Also runs here, because the packer does: two consecutive packs → byte-identical blobs, and `ALBM1` re-read through the shipping `meta.rs` agrees with `album.toml` field by field** |
 | **AP-1 status** | **PASSING — and it was closed on the instrument that opened it (2026-11-19; the row read MIXED from 2026-11-17).** `make album-test` is green and deterministic headless, and a property fuzz over 2,048 randomised interactive sessions finds no transport or ledger violation. What made it MIXED was the caller's cartridge run: heavy Left/Right/pause use ended `FAILED` while calm playthroughs passed, and the emulator never reproduced it. That run has now been repeated on a build carrying R13's fixes — `album-player-fast.gba` sha256 `76bfbba6…31755`, built by `make album-player-rom` from a throwaway merge of `main` (`e952a1c`) at this PR's head (`1676608`), the same target that found it — and the caller **cycled hard between tracks, played and paused repeatedly, then let the final track run to the end: no failure, the run passes** (AP-7a (4)). | **What that closes and what it does not.** It closes R13's observed instance, and it is why this row's discipline was worth keeping rather than softening a bound: all three mechanisms found were *verdict* bugs (ledgers summed over capped print arrays; `dropped >= 1` demanded of a press that legitimately drops nothing; a pass bound saturated exactly at mGBA's own 3-period measurement, which guaranteed a cart would fail what a cart got right), each fixed and proven in the model, and the durable part is that every bound now derives from the run's own measurement rather than from an instrument's frame count or a hand-picked constant. **It is not a claim of hardware correctness**: one unit, one session, no map-file memory report, and the emulator still does not reproduce the symptom — so this closure rests on the caller's report, which is exactly why the row stays. AP-7 (both units, two runs each, the `none`/`bar`/`skyline`/`game` arms, the memory report, a verdict legible without colour vision) remains open, as does AP-1's captured-audio promise, which still has no tool |
 | **AP-2** | mm:ss elapsed + **total** match the durations **the same build's pack step printed** to ≤1 s (§6; the tool is Phase 1's as of §9.0, so this differential exists from the first album build rather than waiting for Phase 3); bar and time never disagree by more than one cell and never move backwards; no `__aeabi_*div*` in the playback/UI path | host twin on `position.rs`/`layout.rs` + objdump/symbol fact on the linked `.gba` + the bake's printed track table. **(Claim text amended 2026-11-20 from "elapsed + remaining" — §6's display re-rule. The witness is unchanged and does not need re-running: it compared against the pack table's printed *durations*, which is what "total" is, so the only thing that was ever "remaining" was the label on the screen. `layout.rs` in this row's witness is 2a's, not today's — D9 records where the fit guard actually lives now.)** |
-| **AP-3** | **Every declared layout variant** composes to the expected host snapshot from the same generated `src/layout.rs` — 2a: the chrome bands, the clock/bar/title elements and the `blank` scene; 2b adds the list, title-card and art scenes — **and every string fits the box that variant declares for it**, `Fit` measured from the face's real advance widths rather than a cell count (§5.5). Three records it owes, all in cycles: the **per-element** redraw costs (§10.2's element rows), the **scene switch** with scenes resident against a partial map rewrite (§5.1), and a **character-block audit per variant** (region canvas + glyph + chrome tiles against one 16 KiB / 512-tile block, §5.1). Five refusals before a line of Rust compiles: an unknown variant; a variant whose bands do not tile 20 rows; an `[art] box` the variant does not derive (§7); a `bar_cells` that disagrees with `ALBM1`'s reciprocals (§6); a title that will not fit its declared span with §5.5's one-line elision (§9) | `make album-layout-test` (**2a** — a name this file proposes rather than one §9.1 planned; §9.1 carries the row). Host snapshot + fit tests over **every** variant in `layout_spec.toml`, built on `examples/flac_integration/src/text.rs:65`'s `measure(text) -> Fit` precedent, plus `make album-preview`'s **1×** composite — which is a *human* leg, not a machine one: a matching snapshot says the layout is what the spec says, and says nothing about whether anyone can read it (§5.6). The ROM's boot line prints `layout=<id>`, so every later hardware report is attributable to a geometry (AP-7a legs inherit that requirement) |
+| **AP-3** | **Every declared layout variant** composes to the expected host snapshot from the same generated `src/layout.rs` — 2a: the chrome bands, the clock/bar/title elements and the `blank` scene; 2b adds the list, title-card and art scenes — **and every string fits the box that variant declares for it**, `Fit` measured from the face's real advance widths rather than a cell count (§5.5). Three records it owes, all in cycles: the **per-element** redraw costs (§10.2's element rows), the **scene switch** with scenes resident against a partial map rewrite (§5.1), and a **character-block audit per variant** (region canvas + glyph + chrome tiles against one 16 KiB / 512-tile block, §5.1). The five layout refusals §9 carries fire here, before a line of Rust compiles: an unknown variant; a variant whose bands do not tile exactly 20 rows, or whose declared `image_tiles` cannot coexist with the glyph/chrome tiles in one character block (§5.1); an `[art] box` the variant does not derive (§7); a `bar_cells` that disagrees with `ALBM1`'s reciprocals (§6); and a scene whose own minimum the variant cannot provide (§5.2). **The title leg is a test, not a sixth refusal:** the bake has refused an overflowing title since Phase 1, and 2a's version measures against the derived span with §5.5's one-line elision applied first — so an album is still *fixed at bake time*, and what the host test proves is that the elision itself fits | `make album-layout-test` (**2a** — a name this file proposes rather than one §9.1 planned; §9.1 carries the row). Host snapshot + fit tests over **every** variant in `layout_spec.toml`, built on `examples/flac_integration/src/text.rs:65`'s `measure(text) -> Fit` precedent, plus `make album-preview`'s **1×** composite — which is a *human* leg, not a machine one: a matching snapshot says the layout is what the spec says, and says nothing about whether anyone can read it (§5.6). The ROM's boot line prints `layout=<id>`, so every later hardware report is attributable to a geometry (AP-7a legs inherit that requirement) |
 | **AP-4** | `ART1` is reproducible byte-for-byte from the source PNG, re-reads through the shipping parser, never exceeds its tile/palette allocation (linker map + VRAM audit — **naming the `bleed=true` arm, which spends a second character block, §5.1**), and refuses an off-palette source image. From **2b** it carries two more fixtures: **control art** (every declared icon slot has authored pixel art in it, and Play/Pause are distinguishable by shape alone with colour removed, §5.3, §5.6) and the **occlusion report** for full-bleed (which rows sit under the bands, what fraction of the pixels are never seen, and a refusal if a declared safe area is cut, §7) | `make album-art-check` (**2b**). `make album-preview`'s **4×** image for tile/dither inspection, with its **1×** image as the legibility leg (§5.6); the 8bpp alternative judged side-by-side on a real screen, not a diagram (§7) |
 | **AP-5** | `album.toml` + WAVs → ROM end to end; two runs → identical bytes; every refusal in §9 fires with its message — **the Phase 3 set; the four §9.0 refusals that land in Phase 1 are witnessed by AP-1** | `make album-bake-check` |
 | **AP-6** | Each viz, alone and paired with art, holds `underflows = 0`, stays inside its §10.2 line, and leaves the audio cost breakdown unchanged vs the `none` control arm | `make album-viz-test` + on-target timing, `none` as control |
