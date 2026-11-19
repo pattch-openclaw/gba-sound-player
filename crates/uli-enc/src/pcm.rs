@@ -186,6 +186,66 @@ impl Pcm {
     }
 }
 
+/// The album's sample values: interleaved stereo `f32` at PCM16 scale.
+///
+/// S1 never needed them — its frames are content-independent — and S2 does. The
+/// buffer is the whole album because the analysis window straddles hops in both
+/// directions and a frame near the end reads samples a streaming reader would
+/// already have dropped; the reference `mmap`s the same bytes.
+#[derive(Clone)]
+pub struct Samples {
+    data: Vec<f32>,
+}
+
+impl std::fmt::Debug for Samples {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Samples")
+            .field("n_samples", &(self.data.len() / 2))
+            .finish_non_exhaustive()
+    }
+}
+
+impl Samples {
+    /// Read `n_samples` interleaved stereo frames from `path`.
+    ///
+    /// The length is asserted rather than trusted: `Pcm::open` already tied the
+    /// file to the track table, and a caller that hands a stale count would
+    /// otherwise read a window of the wrong size in silence.
+    pub fn open(path: &Path, n_samples: usize) -> Result<Self, Error> {
+        let bytes = std::fs::read(path).map_err(|e| Error::Pcm(format!("{path:?}: {e}")))?;
+        if bytes.len() != n_samples * 8 {
+            return Err(Error::Pcm(format!(
+                "{path:?}: {} bytes is not {n_samples} interleaved stereo f32 frames ({} bytes)",
+                bytes.len(),
+                n_samples * 8
+            )));
+        }
+        let mut data = Vec::with_capacity(n_samples * 2);
+        for chunk in bytes.chunks_exact(4) {
+            data.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        Ok(Self { data })
+    }
+
+    /// The sample at time `t` on channel `ch` (0 = left, 1 = right).
+    #[inline]
+    pub fn at(&self, t: usize, ch: usize) -> f32 {
+        self.data[2 * t + ch]
+    }
+
+    /// A frame's worth of one channel, zero-filled where the album does not reach.
+    pub fn channel_range(&self, from: i64, len: usize, ch: usize, out: &mut [f32]) {
+        for (i, o) in out[..len].iter_mut().enumerate() {
+            let t = from + i as i64;
+            *o = if t >= 0 && (t as usize) * 2 + ch < self.data.len() {
+                self.at(t as usize, ch)
+            } else {
+                0.0
+            };
+        }
+    }
+}
+
 fn parse_field(tracks: &Path, lineno: usize, what: &str, text: &str) -> Result<u32, Error> {
     text.trim().parse().map_err(|_| {
         Error::Tracks(format!(

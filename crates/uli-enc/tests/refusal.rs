@@ -10,7 +10,8 @@ mod common;
 use common::{TempDir, silence_album, single_track};
 use std::process::Command;
 use uli_enc::{
-    Args, DEFAULT_CAP_PCT, DefaultTables, Error, GPlan, Pcm, Plan, Refusal, encode, frame_count,
+    Args, Content, DEFAULT_CAP_PCT, DefaultTables, Error, GPlan, Pcm, Plan, Refusal, encode,
+    frame_count,
 };
 use uli_lite::format::M;
 
@@ -31,7 +32,7 @@ fn a_budget_below_overhead_plus_the_stream_refuses_and_cites_both_numbers() {
     // The overhead is what the plan itself computes; the encoded stream then has
     // to fit above it. S1's content is silence, so the plan's walk over it is the
     // same uniform size the emit loop will produce.
-    let content = GPlan::silence(frame_count(pcm.n_samples));
+    let content = Content::silence(frame_count(pcm.n_samples));
     let planned = Plan::new(&pcm, &tables, &content, 1 << 30, DEFAULT_CAP_PCT).expect("plans");
     let budget = planned.overhead_bytes as u64;
 
@@ -40,6 +41,7 @@ fn a_budget_below_overhead_plus_the_stream_refuses_and_cites_both_numbers() {
         tracks,
         budget,
         cap_pct: DEFAULT_CAP_PCT,
+        g: None,
         threads: 1,
     })
     .expect_err("the stream does not fit in the overhead alone");
@@ -72,6 +74,7 @@ fn a_budget_below_the_container_overhead_refuses() {
         tracks,
         budget: 88,
         cap_pct: DEFAULT_CAP_PCT,
+        g: None,
         threads: 1,
     })
     .expect_err("88 bytes cannot hold the header, tables, track and stream");

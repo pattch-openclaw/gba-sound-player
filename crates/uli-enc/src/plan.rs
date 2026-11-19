@@ -9,9 +9,10 @@
 use std::fmt;
 use std::ops::Range;
 
-use crate::frame::{FrameKind, frame_bits};
+use crate::frame::FrameKind;
 use crate::tables_default::DefaultTables;
 use crate::{Error, Pcm};
+
 use uli_lite::format::{
     ALBUM_HEADER_BYTES, M, NSTEP, SEEK_ENTRY_BYTES, SEEK_INTERVAL, TRACK_ENTRY_BYTES,
 };
@@ -85,8 +86,8 @@ impl std::error::Error for GPlanViolation {}
 
 /// The per-frame content plan: `g` and the M/S flag for every frame.
 ///
-/// This is where The step-index bound lives here, and this is where S1 refuses. `g` reaches three places — the frame header's
-/// Exp-Golomb delta, the container's `u16` `g_prev` in the seek table and the
+/// This is where the step-index bound lives, and where S1 refuses. `g` reaches three
+/// places — the frame header's Exp-Golomb delta, the container's `u16` `g_prev` in the seek table and the
 /// track entries, and the reader's `STEP[geff]` lookup — and before this type
 /// existed, nothing bounded it on the way out. `frame::write_frame` would encode
 /// any `i32`, the container would truncate it with `as u16`, and the failure
@@ -246,11 +247,11 @@ impl Plan {
     pub fn new(
         pcm: &Pcm,
         tables: &DefaultTables,
-        content: &GPlan,
+        content: &Content,
         budget: u64,
         cap_pct: f64,
     ) -> Result<Self, Error> {
-        // S1 has no RD search, so the cap has no allocation to constrain yet; it
+        // S2 has no RD search, so the cap has no allocation to constrain yet; it
         // is still an input and a nonsense value is a usage error, not silence.
         if !(cap_pct > 0.0 && cap_pct <= 100.0) {
             return Err(Error::Plan(format!(
@@ -326,18 +327,12 @@ impl Plan {
         }
         content.validate().map_err(Error::GPlan)?;
 
-        // S1's frames are all silence, but the size is taken from the plan one
+        // The size is taken from the content one
         // frame at a time rather than assumed uniform: `g` is exactly what makes
-        // frames differ in size, and E2 fills this same vector from the RD search.
+        // frames differ in size, and S3 fills this from the RD search.
         let mut stream_bits = 0u64;
         for f in 0..n_frames {
-            stream_bits += frame_bits(
-                tables,
-                content.g_prev(f),
-                content.g(f),
-                content.ms(f),
-                FrameKind::Silence,
-            );
+            stream_bits += content.frame_bits(tables, f);
         }
         let stream_halfwords = crate::bitwriter::padded_halfwords(stream_bits);
         let needed = overhead_bytes as u64 + (stream_halfwords * 2) as u64;
@@ -382,4 +377,145 @@ pub fn chunks(nf: usize, threads: usize) -> Vec<Range<usize>> {
         start += len;
     }
     out
+}
+
+/// What every frame will contain: the step plan, and from S2 the coded bands.
+///
+/// `GPlan` alone was enough for S1, whose frames were all silence. Once real
+/// content exists the two cannot be decided apart: `g` fixes the step, the step
+/// fixes the magnitudes, and the magnitudes fix how many bits each frame costs —
+/// and E-R6 needs the frame sizes before a byte is written. So this is what
+/// `Plan::new` takes, and `GPlan` is the half of it that S1 could check.
+///
+/// A `Content` with `coded == None` is S1's album: every frame silence, sized as
+/// such. That is not a placeholder to be ashamed of — it is what keeps the
+/// budget arithmetic honest while there is nothing to count, and
+/// `tests/gplan.rs` depends on being able to build one.
+#[derive(Clone, Debug)]
+pub struct Content {
+    plan: GPlan,
+    coded: Option<Vec<[crate::quant::Chan; 2]>>,
+}
+
+impl Content {
+    /// The album of silence S1 shipped, and the shape `Plan` still accepts.
+    pub fn silence(n_frames: usize) -> Self {
+        Self {
+            plan: GPlan::silence(n_frames),
+            coded: None,
+        }
+    }
+
+    /// A step plan with no coded content yet: for tests of the bound itself.
+    pub fn from_plan(plan: GPlan) -> Self {
+        Self { plan, coded: None }
+    }
+
+    /// Quantise the whole album at a fixed step. This is the S2 encoder's only
+    /// pass over the samples, and it happens before the container is sized.
+    ///
+    /// Frames are independent once `g` is fixed (that is decision 1's payoff), so
+    /// this is where S5's parallelism will go; it is sequential here because the
+    /// result must be identical either way and R5a is easier to see in one loop.
+    pub fn quantise(
+        samples: &crate::pcm::Samples,
+        n_samples: usize,
+        tables: &DefaultTables,
+        g: i32,
+        n_frames: usize,
+    ) -> Result<Self, Error> {
+        if !GPlan::legal(g, false) {
+            return Err(Error::GPlan(GPlanViolation {
+                frame: 0,
+                g,
+                ms: false,
+                geff: GPlan::step_index(g, false),
+                kind: GPlanViolationKind::StepIndex,
+            }));
+        }
+        let mut frames = Vec::with_capacity(n_frames);
+        let mut coef = [0f32; 2 * M];
+        for f in 0..n_frames {
+            crate::mdct::mdct_frame(samples, f, n_samples, &mut coef);
+            let ms = false;
+            let (l, _) = crate::quant::quantise_chan(&coef[..M], tables, g, ms);
+            let (r, _) = crate::quant::quantise_chan(&coef[M..], tables, g, ms);
+            frames.push([l, r]);
+        }
+        Ok(Self {
+            plan: GPlan::new(vec![g; n_frames], vec![false; n_frames]),
+            coded: Some(frames),
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.plan.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.plan.is_empty()
+    }
+
+    pub fn validate(&self) -> Result<(), GPlanViolation> {
+        self.plan.validate()
+    }
+
+    pub fn g(&self, frame: usize) -> i32 {
+        self.plan.g(frame)
+    }
+
+    pub fn ms(&self, frame: usize) -> u32 {
+        self.plan.ms(frame)
+    }
+
+    pub fn g_prev(&self, frame: usize) -> i32 {
+        self.plan.g_prev(frame)
+    }
+
+    /// What `write_frame` should emit for this frame.
+    pub fn kind(&self, frame: usize) -> crate::frame::FrameKind<'_> {
+        match &self.coded {
+            None => crate::frame::FrameKind::Silence,
+            Some(frames) => crate::frame::FrameKind::Coded(&frames[frame]),
+        }
+    }
+
+    /// The exact bits this frame will occupy.
+    pub fn frame_bits(&self, tables: &DefaultTables, frame: usize) -> u64 {
+        crate::frame::frame_bits(
+            tables,
+            self.g_prev(frame),
+            self.g(frame),
+            self.ms(frame),
+            self.kind(frame),
+        )
+    }
+
+    /// Coded bands across the album, for the report. `None` while nothing is coded.
+    pub fn coded_frames(&self) -> Option<&[[crate::quant::Chan; 2]]> {
+        self.coded.as_deref()
+    }
+
+    /// Coefficients that actually carry a nonzero magnitude, both channels.
+    pub fn nonzero_coeffs(&self) -> usize {
+        self.coded
+            .as_ref()
+            .map(|frames| {
+                frames
+                    .iter()
+                    .map(|chs| {
+                        chs.iter()
+                            .map(|c| {
+                                c.bands
+                                    .iter()
+                                    .filter(|b| !b.is_zero_class())
+                                    .map(|b| b.m.iter().filter(|&&m| m != 0).count())
+                                    .sum::<usize>()
+                            })
+                            .sum::<usize>()
+                    })
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
 }

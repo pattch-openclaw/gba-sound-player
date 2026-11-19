@@ -24,8 +24,11 @@
 pub mod bitwriter;
 pub mod container;
 pub mod frame;
+pub mod mdct;
+pub mod mdct_tables;
 pub mod pcm;
 pub mod plan;
+pub mod quant;
 pub mod tables_default;
 
 use std::fmt;
@@ -35,11 +38,11 @@ use uli_lite::format::M;
 use uli_lite::{Album, CodeTables, Decoder, DecoderState, PremiseViolation};
 
 pub use container::FramePos;
-pub use frame::{DC_G, FrameKind, frame_bits, write_frame};
-pub use pcm::{Pcm, TrackInput};
+pub use frame::{DC_G, FrameKind, chan_bits, frame_bits, write_chan, write_frame};
+pub use pcm::{Pcm, Samples, TrackInput};
 pub use plan::{
-    DEFAULT_BUDGET, DEFAULT_CAP_PCT, GPlan, GPlanViolation, GPlanViolationKind, Plan, Refusal,
-    chunks, frame_count,
+    Content, DEFAULT_BUDGET, DEFAULT_CAP_PCT, GPlan, GPlanViolation, GPlanViolationKind, Plan,
+    Refusal, chunks, frame_count,
 };
 pub use tables_default::{Codes, DefaultTables};
 
@@ -50,9 +53,13 @@ pub struct Args {
     pub tracks: PathBuf,
     /// Whole-blob byte budget, never a cart size (E-R10).
     pub budget: u64,
-    /// Percent of the 262,144-cycle frame period; S1 validates it and has no RD
-    /// search to spend it on.
+    /// Percent of the 262,144-cycle frame period; validated, with no RD search to
+    /// spend it on yet (that is S3).
     pub cap_pct: f64,
+    /// The fixed global step index, or `None` for S1's album of silence. S2's only
+    /// content knob: it chooses the step, and therefore the distortion, and the
+    /// rate falls out of it. S3 replaces it with the RD search over `g`.
+    pub g: Option<i32>,
     pub threads: usize,
 }
 
@@ -67,6 +74,21 @@ pub struct Report {
     pub workers_used: usize,
     pub est_max_cycles: u32,
     pub est_mean_cycles: u32,
+    /// The fixed step the album was coded at, for the report line.
+    pub g: Option<i32>,
+    /// Bits the stream actually used, from the decoder's own per-frame counts.
+    pub stream_bits: u64,
+    /// Codec-only SNR of the decoded int16 output against the input, in dB.
+    /// `None` when the album was silence, where it has no meaning.
+    pub snr_db: Option<f64>,
+    /// `|X| >= 2^28` coefficients the reader counted: the encoder's `mmax` should
+    /// make this impossible, and it is the number that says whether it did.
+    pub xover: u32,
+    /// Nonzero coefficients at index >= `NCODED`: likewise a format rule, not a
+    /// quality knob.
+    pub hfnz: u32,
+    /// Coefficients that coded a nonzero magnitude, both channels.
+    pub nonzero_coeffs: usize,
 }
 
 /// The finished blob and its report.
@@ -119,14 +141,6 @@ pub fn encode(args: &Args) -> Result<Output, Error> {
 pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output, Error> {
     let pcm = Pcm::open(&args.album, &args.tracks)?;
 
-    // S1's content, fixed before anything else is decided: silence at g = 0 in
-    // every frame, never M/S. It is a real plan rather than a constant in the emit
-    // loop because the seek table, the track entries and the byte budget are all
-    // derived from it, and because E2 fills it from the RD search without changing
-    // anything below this line. `Plan::new` is what refuses a `g` the reader
-    // would reject.
-    let g_plan = GPlan::silence(frame_count(pcm.n_samples));
-
     // The premise is a property of the *final* tables, so serialise and re-parse
     // them first: a bound checked against the in-memory model would not prove
     // what the blob says, and this also catches a wrong blob layout before any
@@ -136,25 +150,47 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
     parsed.parse_into(&blob).map_err(Error::Tables)?;
     parsed.premise().map_err(Error::Premise)?;
 
-    let plan = Plan::new(&pcm, tables, &g_plan, args.budget, args.cap_pct)?;
+    // S2's fork: a fixed step means real content, no step means S1's album of
+    // silence. The silence path is kept because half the suite is about the
+    // container and the refusals, and they should not depend on the codec.
+    let (content, samples) = match args.g {
+        None => (Content::silence(frame_count(pcm.n_samples)), None),
+        Some(g) => {
+            let s = Samples::open(&args.album, pcm.n_samples as usize)?;
+            let c = Content::quantise(
+                &s,
+                pcm.n_samples as usize,
+                tables,
+                g,
+                frame_count(pcm.n_samples),
+            )?;
+            (c, Some(s))
+        }
+    };
+
+    let plan = Plan::new(&pcm, tables, &content, args.budget, args.cap_pct)?;
 
     let ranges = chunks(plan.n_frames, args.threads.max(1));
 
     let coded: Vec<(bitwriter::BitWriter, Vec<u64>)> = std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(ranges.len());
         for range in &ranges {
-            let tables = tables;
-            let g_plan = &g_plan;
+            // Borrow, do not move. `Content` is not `Copy` and every worker needs
+            // it, so each closure captures a shared reference; without this line
+            // the first `move` closure takes the album's content out of the loop.
+            let content = &content;
             handles.push(scope.spawn(move || {
                 let mut bw = bitwriter::BitWriter::new();
                 let mut lens = Vec::with_capacity(range.len());
-                // Entering state for this chunk's first frame: the previous
-                // frame's g, which is 0 before frame 0.
-                let mut g_prev = g_plan.g_prev(range.start);
+                // Entering state for this chunk's first frame. `write_frame`
+                // advances it from the plan, and the assert below is what proves
+                // the running state and the container's recorded state never
+                // drift apart mid-chunk.
+                let mut g_prev = content.g_prev(range.start);
                 for f in range.clone() {
                     debug_assert_eq!(
                         g_prev,
-                        g_plan.g_prev(f),
+                        content.g_prev(f),
                         "the running g state disagrees with the plan at frame {f}: a seek \
                          into this chunk would then land on a different frame than the \
                          linear decode walks"
@@ -164,9 +200,9 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
                         &mut bw,
                         tables,
                         &mut g_prev,
-                        g_plan.g(f),
-                        g_plan.ms(f),
-                        FrameKind::Silence,
+                        content.g(f),
+                        content.ms(f),
+                        content.kind(f),
                     );
                     lens.push(bw.pos() - start);
                 }
@@ -189,7 +225,7 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
             let f = range.start + i;
             fpos.push(FramePos {
                 bitpos: stream.pos(),
-                g_prev: g_plan.g_prev(f),
+                g_prev: content.g_prev(f),
             });
             stream.append_bits(bw.halfwords(), off, len);
             off += len;
@@ -199,8 +235,8 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
 
     let mut bytes = container::emit(&plan, tables, &fpos, &stream_bytes);
 
-    let (est_max, est_mean) = self_verify(&bytes, plan.n_frames)?;
-    container::patch_cycles(&mut bytes, est_max, est_mean);
+    let verify = self_verify(&bytes, plan.n_frames, samples.as_ref(), &pcm)?;
+    container::patch_cycles(&mut bytes, verify.max_cycles, verify.mean_cycles);
 
     // Re-parse the *patched* blob: the cycle fields are the last bytes written,
     // and a reader that only sees the pre-patch bytes has not seen the output.
@@ -219,20 +255,49 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
             bits_per_frame: plan.bits_per_frame,
             n_frames: plan.n_frames,
             workers_used: coded.len(),
-            est_max_cycles: est_max,
-            est_mean_cycles: est_mean,
+            est_max_cycles: verify.max_cycles,
+            g: args.g,
+            est_mean_cycles: verify.mean_cycles,
+            stream_bits: verify.bits,
+            snr_db: verify.snr_db,
+            xover: verify.xover,
+            hfnz: verify.hfnz,
+            nonzero_coeffs: content.nonzero_coeffs(),
         },
     })
 }
 
-/// Decode the finished stream with the portable decoder and return the cycle
-/// model's `(max, mean)`. This is a *validity* pass, not a content check: S1's
-/// content is silence, and the round-trip tests assert the samples.
+/// What a verification decode of the finished blob measured.
+#[derive(Clone, Copy, Debug)]
+pub struct Verify {
+    pub max_cycles: u32,
+    pub mean_cycles: u32,
+    pub bits: u64,
+    /// Codec-only SNR against the input, or `None` if there were no samples to
+    /// compare against (S1's silence path never loads them).
+    pub snr_db: Option<f64>,
+    pub xover: u32,
+    pub hfnz: u32,
+}
+
+/// Decode the finished stream with the portable decoder: the cycle model, the
+/// stream's real bit count, the reader's own format-rule diagnostics, and the
+/// SNR of what came back out.
 ///
-/// It decodes every frame, so its cost is the album's decode cost — acceptable
-/// for S1's test-sized inputs, and the place to revisit when the bake starts
-/// feeding 43-minute albums through it.
-fn self_verify(bytes: &[u8], n_frames: usize) -> Result<(u32, u32), Error> {
+/// This is a *validity* pass plus the two numbers S2 exists to report. It decodes
+/// every frame, so its cost is the album's decode cost — acceptable at S2's sizes,
+/// and the place to revisit when the bake starts feeding 43-minute albums through
+/// it (decision 4 names the second pass this implies).
+///
+/// The sample alignment is the reference's own, `p = (f - 1) * M + i`: frame 0 is
+/// the preroll and contributes nothing, and the frame's *output* is the block of
+/// input it was analysed from, not the block its window started on.
+fn self_verify(
+    bytes: &[u8],
+    n_frames: usize,
+    samples: Option<&Samples>,
+    pcm: &Pcm,
+) -> Result<Verify, Error> {
     let album = Album::parse(bytes).map_err(Error::Decode)?;
     let mut state = DecoderState::new();
     let mut dec = Decoder::new(album, &mut state).map_err(Error::Decode)?;
@@ -243,12 +308,42 @@ fn self_verify(bytes: &[u8], n_frames: usize) -> Result<(u32, u32), Error> {
     let mut out16r = [0i16; M];
     let mut max_cycles = 0u32;
     let mut sum_cycles = 0u64;
-    for _ in 0..n_frames {
+    let mut bits = 0u64;
+    let mut xover = 0u32;
+    let mut hfnz = 0u32;
+    // Squared error and signal energy, accumulated in frame order (R5b: a sum that
+    // feeds a reported number is reduced by index, never by completion order).
+    let mut se = 0f64;
+    let mut sx = 0f64;
+    let n_samples = pcm.n_samples as usize;
+
+    for f in 0..n_frames {
         let info = dec
             .decode_frame(&mut out8l, &mut out8r, Some(&mut out16l), Some(&mut out16r))
             .map_err(Error::Decode)?;
         max_cycles = max_cycles.max(info.cycles);
         sum_cycles += info.cycles as u64;
+        bits += info.bits as u64;
+        xover += info.xover;
+        hfnz += info.hfnz;
+
+        if let Some(s) = samples {
+            let base = f as i64 * M as i64 - M as i64;
+            for i in 0..M {
+                let p = base + i as i64;
+                if p < 0 || p as usize >= n_samples {
+                    continue;
+                }
+                let p = p as usize;
+                for ch in 0..2 {
+                    let x = f64::from(s.at(p, ch));
+                    let y = f64::from(if ch == 0 { out16l[i] } else { out16r[i] });
+                    let d = x - y;
+                    se += d * d;
+                    sx += x * x;
+                }
+            }
+        }
     }
 
     let after = dec.decode_frame(&mut out8l, &mut out8r, None, None);
@@ -261,5 +356,21 @@ fn self_verify(bytes: &[u8], n_frames: usize) -> Result<(u32, u32), Error> {
     // The reference's mean is the integer mean over frames (`csum / NF`), and an
     // album always has at least the preroll frame.
     let mean = (sum_cycles / n_frames as u64) as u32;
-    Ok((max_cycles, mean))
+    // A silent input has no energy to compare against; the reference would print
+    // `nan`, and `None` says the same thing without a float in the API.
+    let snr_db = if samples.is_some() && sx > 0.0 && se > 0.0 {
+        Some(10.0 * (sx / se).log10())
+    } else if samples.is_some() {
+        Some(f64::INFINITY)
+    } else {
+        None
+    };
+    Ok(Verify {
+        max_cycles,
+        mean_cycles: mean,
+        bits,
+        snr_db,
+        xover,
+        hfnz,
+    })
 }

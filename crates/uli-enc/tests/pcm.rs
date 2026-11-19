@@ -127,7 +127,7 @@ fn a_gap_between_tracks_is_allowed_and_the_last_row_defines_the_length() {
 
     // And the gap is real album: it costs frames, so the plan sees NF from 1536.
     // ceil(1536/512) + 1 = 4.
-    let content = uli_enc::GPlan::silence(uli_enc::frame_count(pcm.n_samples));
+    let content = uli_enc::Content::silence(uli_enc::frame_count(pcm.n_samples));
     assert_eq!(
         uli_enc::Plan::new(
             &pcm,
@@ -171,6 +171,7 @@ fn a_length_mismatch_refuses_before_any_frame_is_planned() {
         // be the error reported, and the length bug would hide behind it.
         budget: 1,
         cap_pct: DEFAULT_CAP_PCT,
+        g: None,
         threads: 1,
     })
     .expect_err("a mismatched pair cannot encode");

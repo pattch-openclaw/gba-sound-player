@@ -22,6 +22,7 @@ fn args(album: std::path::PathBuf, tracks: std::path::PathBuf, budget: u64) -> A
         tracks,
         budget,
         cap_pct: DEFAULT_CAP_PCT,
+        g: None,
         threads: 1,
     }
 }

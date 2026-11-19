@@ -16,8 +16,8 @@ mod common;
 
 use common::{TempDir, silence_album, single_track};
 use uli_enc::{
-    Args, DEFAULT_BUDGET, DEFAULT_CAP_PCT, DefaultTables, FrameKind, FramePos, GPlan, Pcm, Plan,
-    bitwriter::BitWriter, container, frame_count, write_frame,
+    Args, Content, DEFAULT_BUDGET, DEFAULT_CAP_PCT, DefaultTables, FrameKind, FramePos, GPlan, Pcm,
+    Plan, bitwriter::BitWriter, container, frame_count, write_frame,
 };
 use uli_lite::format::{M, NSTEP};
 use uli_lite::{Album, Decoder, DecoderState, Error as DecodeError};
@@ -35,7 +35,7 @@ fn plan_built(album_frames: usize, g: &[i32], ms: &[bool]) -> Result<Plan, uli_e
     Plan::new(
         &pcm,
         &tables,
-        &GPlan::new(g.to_vec(), ms.to_vec()),
+        &Content::from_plan(GPlan::new(g.to_vec(), ms.to_vec())),
         DEFAULT_BUDGET,
         DEFAULT_CAP_PCT,
     )
@@ -160,7 +160,7 @@ fn an_out_of_range_g_decodes_as_badframe_not_as_wrong_audio() {
     let plan = Plan::new(
         &pcm,
         &tables,
-        &GPlan::silence(n_frames),
+        &Content::silence(n_frames),
         DEFAULT_BUDGET,
         DEFAULT_CAP_PCT,
     )
@@ -212,6 +212,7 @@ fn e1s_own_content_is_legal() {
         tracks,
         budget: DEFAULT_BUDGET,
         cap_pct: DEFAULT_CAP_PCT,
+        g: None,
         threads: 2,
     })
     .expect("S1 still encodes");

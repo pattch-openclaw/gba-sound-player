@@ -7,7 +7,12 @@ description = "Host-only ULI2 encoder skeleton: PCM in, ULA2 container out"
 publish = false
 
 [dependencies]
-uli-lite = { path = "../uli-lite" }
+# `kernels` is the feature that makes `uli-lite`'s `tables_data` public, and the
+# only thing `uli-enc` takes from it is `STEP`, the step table the reader looks up.
+# Copying those 192 numbers into the encoder would be the second copy of a format
+# constant this repository has already been bitten by: the decoder owns them, so
+# the encoder reads them.
+uli-lite = { path = "../uli-lite", features = ["kernels"] }
 
 [lib]
 name = "uli_enc"

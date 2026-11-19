@@ -5,7 +5,7 @@
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
-        uli-default-tables \
+        uli-default-tables uli-mdct-fixture \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-playback-test uli-player uli-player-rom uli-player-speaker uli-player-speaker-rom \
@@ -705,6 +705,12 @@ uli-test: toolchain-check
 # and let `uli-test` be the thing that decides whether the new bytes are right.
 uli-default-tables:
 	GBA_AUDIO=$(GBA_AUDIO) scripts/gen_uli_default_tables.sh
+
+# The forward-MDCT golden: the reference's `mdct_frame` coefficients for the
+# committed test album. Same posture as `uli-default-tables` — oracle off-tree,
+# bytes in the tree, no gate builds C.
+uli-mdct-fixture:
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/gen_uli_mdct_fixture.py
 	@echo "now: cd $(GATE_NEUTRAL_CWD) && $(CARGO) test --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE)"
 
 uli-check: toolchain-check
@@ -1811,6 +1817,7 @@ help:
 	@echo "      uli-test             the core is bit-exact on the host corpus (U2), and"
 	@echo "                           uli-enc's blob round-trips through it"
 	@echo "      uli-default-tables   regenerate the reference default-tables golden"
+	@echo "      uli-mdct-fixture     regenerate the reference forward-MDCT coefficients"
 	@echo "      uli-overlay-test     product path vs the portable reference, both builds, + premise"
 	@echo "      uli-fixture          regenerate the committed expected-vector file"
 	@echo "      uli-bench            build + run + read PASS: 129-frame cycle/witness image"
