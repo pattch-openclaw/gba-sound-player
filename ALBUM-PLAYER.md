@@ -1172,8 +1172,9 @@ in `measure`/`fit`, host-tested.
 **The fit box is derived, and it lives in one place, not three (ruled 2026-11-20).**
 Today the same number sits in three places with no sync between them: this section's old
 prose ("a 28-character worst case"), a Rust host-test guard, and `TITLE_BOX_MAX = 28` in
-`scripts/album_prep.py:47`. That duplication is recorded as §11's **D9**, and 2a deletes two
-of the three copies: every text element's fit box comes from the variant's declared *span*
+`scripts/album_prep.py:47`. That duplication is recorded as §11's **D9**; this PR removes the
+copy this file owns (the prose above), and 2a removes the two in code: every text element's fit
+box comes from the variant's declared *span*
 (a pixel width — §5.0) and the face's real metrics, and the bake tool still prints any title
 that will not fit its box, so an album can still be *fixed at bake time*. The 8-row/30-cell
 framing this section used is also dropped: a 30-cell line was never the budget, because the
@@ -2087,15 +2088,23 @@ tracks alias one blob, the index→content claim therefore rests on `ALBM1`'s
 what PR-3a's boot gate does, and why a stale or swapped blob is a named `FAIL` and not a
 plausible-sounding track.
 
-**D9: geometry is stated three times in the tree today, and 2a is what removes two of them
-(2026-11-20).** This is a deviation the spec did not name, found while re-ruling §5 — recorded
-here rather than fixed silently, because the fix is a work item with a gate (§13 AP-3), not an
-doc edit. Three copies of the same number, with nothing between them:
+**D9: geometry is stated three times in the tree today. This PR deletes the copy it owns; 2a is
+what removes the other two (2026-11-20).** This is a deviation the spec did not name, found while
+re-ruling §5 — recorded here rather than fixed silently, because the fix is a work item with a
+gate (§13 AP-3), not a doc edit. Three copies of the same number, with nothing between them:
 
 1. **this file's prose** — §5's old "28-character worst case", and §5.5's old 8-row/30-cell
-   framing;
-2. **a Rust host-test guard** in `examples/album_player/tests/`, which is the only one of the
-   three that actually fails a build;
+   framing. **This is the only copy this file could remove by itself, and it has**: §5.5 now
+   names both numbers as history instead of stating them as rules. The two that remain are in
+   code, and they are 2a's to remove;
+2. **a Rust host-test guard**, `examples/album_player/tests/album_pack_host.rs:241`
+   (`assert!(title.chars().count() <= 28, …)`), which is the only one of the three that
+   actually fails a build — and note its failure message: *“{title:?} overflows §5.2's box,
+   and the fixture has no business doing that.”* After this PR's re-rule, **§5.2 no longer
+   states a 28-character box at all**; the fit box is derived from a variant (§5.0, §5.5). So
+   the copy of the number that has the most authority is the one whose explanation points at a
+   section that no longer defines it. That is the drift, in one line, and it is why the number
+   may not live in three places;
 3. **`TITLE_BOX_MAX = 28` in `scripts/album_prep.py:47`**, which decides what the *bake*
    refuses and is the one that reaches a user's album.
 
@@ -2108,7 +2117,9 @@ the tracked `layout_spec.toml` owns the numbers, `src/layout.rs` is generated ou
 bake tool and the host tests *read* both instead of holding their own. `album-layout-test`
 then asserts the agreement across the three artifacts (§6's `bar_cells` ↔ reciprocals guard is
 the first of them), which is cheaper than the alternative — a build that is green while the
-tool, the ROM and the test each believe a different width.
+tool, the ROM and the test each believe a different width. **What 2a is not doing: arguing about
+28.** That number is not wrong for the fixture, and no part of this deviation is about its value;
+it is about the fact that three artifacts hold it independently.
 
 **(D9 is a 2026-11-20 record and is the last deviation note; the ones below are the phase's
 own history and are unchanged.)**
