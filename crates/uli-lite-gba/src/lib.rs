@@ -30,7 +30,7 @@
 //! measured ladder is v1 (88,205 c/call, spill-heavy, *slower* than Rust) →
 //! v2 (73,363, spill/reload traffic removed) → **v3 (71,635, `ldmia`/`stmia`
 //! block transfers)** against the Rust ARM kernel's 85,065; see
-//! `../../crates/uli-lite/PLAN-OF-RECORD.md` → "PR C-1". `ArmKernels::fft`
+//! `../../crates/uli-lite/RECORD.md` → "PR C-1". `ArmKernels::fft`
 //! uses the best variant (v3) when the feature is on. v1 and v2 are kept as
 //! measured comparison arms, not shipping kernels.
 //!
@@ -62,7 +62,7 @@ pub use decoder::{ClassTables, GbaDecoder, HotState, slow_hit_count};
 /// the FFT scratch (`buf`) and the overlap state (`p`). It is the same 8,192 B
 /// the C reference keeps in IWRAM (`uli_g_X` 4,096 + `uli_g_buf` 2,048 +
 /// `uli_g_P` 2,048), and **it belongs in IWRAM**: in EWRAM every coefficient
-/// write and the M/S pass pay 16-bit wait states (`PLAN-OF-RECORD.md` C-3).
+/// write and the M/S pass pay 16-bit wait states (`RECORD.md` C-3).
 ///
 /// It is caller-owned, so the *caller* declares the placement:
 /// `#[unsafe(link_section = ".iwram")] static mut HOT: HotState = HotState::new();`.
@@ -220,7 +220,7 @@ pub fn pre_kernel(x: &[i32; M], z: &mut [i32; 2 * H]) {
 /// [`ms_kernel`]`s asm realisation, and the kernel itself when `asm-ms` is off.
 ///
 /// This was **the last hot loop in the decoder with no hand-written kernel**, and
-/// the worst ratio in it (PLAN-OF-RECORD.md "Root-cause audit (2026-11-16)").
+/// the worst ratio in it (RECORD.md "Root-cause audit (2026-11-16)").
 /// Kept always-compiled, and out of `.iwram` when the asm kernel is present, so
 /// the on-target twin can compare the two in one image — the same arrangement
 /// `pre` and `ola` use.

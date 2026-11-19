@@ -30,7 +30,7 @@
 //!    arms can be differenced at the same frame index, not only in the mean.
 //!    These builds fail their pins by construction and are never quoted as the
 //!    product number. Reproduce the whole set with `make uli-attrib`; the method
-//!    and results are in `crates/uli-lite/PLAN-OF-RECORD.md` ("Step 0").
+//!    and results are in `crates/uli-lite/RECORD.md` ("Step 0").
 //!
 //! **Known defect: the `verify` arm does not run on target.** With
 //! `--features verify` (which `per-frame` implies) the `ovl` pin fails
@@ -198,7 +198,7 @@ static mut OUT16R: [i16; M] = [0; M];
 /// code, which leaves only ~3.6 KiB genuinely free — less headroom than any
 /// single block below needs. EWRAM is the correct home for all of them, and
 /// the real IWRAM win is the product's `HotState`/coefficient buffers
-/// (PLAN-OF-RECORD.md C-3), which is blocked on the same stack.
+/// (RECORD.md C-3), which is blocked on the same stack.
 #[unsafe(link_section = ".ewram")]
 static mut KX: [i32; M] = [0; M];
 #[unsafe(link_section = ".ewram")]

@@ -108,7 +108,7 @@ attrib-synth = ["uli-lite-gba/attrib-synth"]
 attrib-entropy = ["uli-lite-gba/attrib-entropy"]
 attrib-ms = ["uli-lite-gba/attrib-ms"]
 
-# Sub-frame entropy attribution (PLAN-OF-RECORD.md, Step 0b): one layer inside
+# Sub-frame entropy attribution (RECORD.md, Step 0b): one layer inside
 # `dec_chan` removed per arm, so the ~101,000 cycles the entropy/dequant path
 # owns at the worst frame can be partitioned. Timing-only, same rules.
 attrib-entropy-nolut = ["uli-lite-gba/attrib-entropy-nolut"]

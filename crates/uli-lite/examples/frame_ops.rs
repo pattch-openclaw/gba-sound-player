@@ -2,7 +2,7 @@
 //! decoder.
 //!
 //! This is the instrument for attributing the *entropy* half of a frame
-//! (PLAN-OF-RECORD.md, "Step 0b — entropy pre-analysis"): symbol counts are a
+//! (RECORD.md, "Step 0b — entropy pre-analysis"): symbol counts are a
 //! property of the bitstream, not of the image that decodes it, so they are
 //! read here on the host rather than from a `verify` emulator build. Do not
 //! derive cycles from this tool — it counts operations, not time; pair its rows

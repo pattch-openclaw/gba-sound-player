@@ -983,7 +983,7 @@ unsafe fn dec_chan(
                 // EWRAM `rq` load it avoids (mean 219,747 with vs 220,757
                 // without, but worst frame 250,945 with vs 249,835 without, and
                 // the gate reads the worst frame). Not taken; see
-                // PLAN-OF-RECORD.md "Step 1".
+                // RECORD.md "Step 1".
                 #[cfg(feature = "attrib-entropy-nodequant")]
                 let mag = {
                     let _ = ($rqp, $dq15, $step);
