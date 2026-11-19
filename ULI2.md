@@ -35,7 +35,7 @@ falsification — is the ledger, not this file; see "Where things live" below.
 | the current measured state | [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md), top |
 | the plan, the phases, and the order of work | [`crates/uli-lite/RECORD.md`](crates/uli-lite/RECORD.md) |
 | the measurement record: arms, falsifications, the landing log | [`crates/uli-lite/RECORD.md`](crates/uli-lite/RECORD.md) |
-| architecture, memory layout, the measurement *method*, the kernel table | [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) |
+| architecture, memory layout, the measurement *method*, the kernel table, **the encoder plan** | [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) |
 | the product path's architecture and its gates | [`crates/uli-lite-gba/README.md`](crates/uli-lite-gba/README.md) |
 | the reference/oracle crate's API and scope | [`crates/uli-lite/README.md`](crates/uli-lite/README.md) |
 | how to run the measurement vehicle | [`examples/uli_bench/README.md`](examples/uli_bench/README.md) |
@@ -363,9 +363,15 @@ committed expected-vector file remains the frozen C-pinned reference; the Rust
 tool is a maintenance/snapshot generator, not an independent oracle, so a
 failing decoder test must not be "fixed" by regenerating it.
 
-This is a separate milestone after the decoder/playback path. It is not required
-for the first product ROM, and it does not change the decoder work. Until it
-lands, the `gba-audio` C encoder remains the encoder of record.
+**Status (2026-11-19): scheduled, and it is now the last missing piece.** The
+decoder and the playback path are done (1.070x the reference on the decode wall),
+so this milestone is what stands between ULI2 and being the album player's codec:
+without it the assets would come from a build we do not own. The requirements
+(notably that the encoder must emit `rbits <= 5` on PAIR classes and `esck <= 2`
+to make the product's closed-world reader sound), the six slices and the exit
+gates are in [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md)
+-> "The encoder — the last missing piece". Until it lands, the `gba-audio` C
+encoder remains the encoder of record for existing assets.
 
 ### Suggested public API
 
@@ -752,9 +758,11 @@ product codec without pretending one codec covers both jobs.
    v1 the encoder of record is used **off-tree** to produce assets; this project
    builds nothing from it and vendors no C source. That keeps the repo free of
    C while the decoder work proceeds, and it means ULI2 is still not the
-   public-reuse answer: packaging a codec needs an in-repo encoder. The Rust
-   encoder milestone stays deferred, with the same rule — no C source, no
-   dependency, every artefact in this repository.
+   public-reuse answer: packaging a codec needs an in-repo encoder. **The Rust
+   encoder milestone is scheduled as of 2026-11-19** — it is the last missing
+   piece before ULI2 can be the album player's codec — under the same rule: no C
+   source, no dependency, every artefact in this repository. Requirements, slices
+   and acceptance gates: `crates/uli-lite/PLAN-OF-RECORD.md` → "The encoder".
 7. **Rate flexibility — v1 fixed (2026-11-14).** 32,768 Hz, hop 512, stereo, no
    long-block. Higher rates (65,536 Hz) would be a format/encoder change and are
    explicitly out of scope; the v1 target is matching the C project's fidelity

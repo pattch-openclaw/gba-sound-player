@@ -32,7 +32,7 @@ product is no longer required to be safe, portable or platform-free.
 | Bit-exactness against the C-pinned corpus | **kept** | The correctness witness; every optimization is twin-tested. |
 | A live reference implementation | **kept** | The oracle is what keeps a fast unsafe decoder honest. |
 | Licensing / `publish = false` | **kept** | Unresolved; unchanged by this decision. |
-| Rust encoder later | **kept** | Separate milestone; the C encoder remains of record. |
+| Rust encoder later | **kept**, *scheduled 2026-11-19* | Separate milestone; the C encoder remains of record until it lands. Now the last missing piece — see [`PLAN-OF-RECORD.md`](PLAN-OF-RECORD.md) → "The encoder — the last missing piece". |
 
 ---
 
@@ -3172,6 +3172,10 @@ behind five kernels and it would be expensive to re-derive.
    artefact in this repo.** The Rust encoder is deferred, and v1's format is
    fixed (32,768 Hz, hop 512, stereo, no long-block) by decision 2026-11-14:
    the goal is matching the C project's fidelity here, not adding rates.
+   **Superseded in part (2026-11-19):** the encoder is *scheduled*, not deferred —
+   it is the last missing piece before ULI2 can be the album player's codec. The
+   no-C/no-dependency rule and the fixed v1 format both stand, unchanged; see
+   [`PLAN-OF-RECORD.md`](PLAN-OF-RECORD.md) → "The encoder — the last missing piece".
 6. **Playback is not implied by decode.** A fast decoder is not a player;
    U4 must pass with margin before Phase D starts, and U5/U6 are separate.
 7. **The C comparison is not yet like-for-like.** Step 0 narrowed the two
@@ -3706,6 +3710,9 @@ authoritative and this one carries the numbers.
   - **Format scope.** v1 is fixed (32,768 Hz, hop 512, stereo, no long-block);
     the target is matching the C project's fidelity here, not new rates. The
     Rust encoder stays deferred with the same no-C/no-dependency rule.
+    **Superseded in part (2026-11-19):** the encoder is *scheduled*; the fixed v1
+    format and the no-C/no-dependency rule stand. See
+    [`PLAN-OF-RECORD.md`](PLAN-OF-RECORD.md) → "The encoder — the last missing piece".
 
 - **2026-11-14 — stereo is the product target (mono risk closed).** The decoder
   and the playback path are stereo, aimed at the headphone output; fidelity is
