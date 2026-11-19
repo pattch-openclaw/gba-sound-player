@@ -617,8 +617,30 @@ the `pair` path, and **on every corpus this tree owns the PAIR classes have
 Measured by parsing the blob through `CodeTables::parse_into`, per class as
 `ctype/rbits/esck`: `0/0/0 1/0/0 1/0/0` then eleven `2/0..5/…` — one `ZERO`, **two
 `QUAD`** with `r == 0` (where `rbits` is never read), **eleven `PAIR`** with
-`r = 0,0,0,0,0,0,1,2,3,4,5`. **All five corpora carry byte-identical table
-sets.**
+`r = 0,0,0,0,0,0,1,2,3,4,5`.
+
+That census sits on top of the reference's own `tables_default` (`enc_core.c`) with
+**one deviation**:
+
+| field | `tables_default` | every corpus | verdict |
+|---|---|---|---|
+| `ctype` | `0,1,1,2,2,2,2,2,2,2,2,2,2,2` | identical | the class structure ships unchanged |
+| `rbits` | `0,0,0,0,0,0,0,0,0,1,2,3,4,5` | identical | so **E-R4's `rbits ≤ 5` is the format's designed maximum**, not a margin chosen after the fact |
+| `esck` | `0,0,**2**,2,2,2,2,2,2,1,1,1,1,1` | `0,0,**0**,2,2,2,2,2,2,1,1,1,1,1` | **class 2 escapes in the default and does not escape in the blob** — training tightened it, in the safe direction |
+
+Two things follow, and both are load-bearing for the encoder. First, `esck` is
+**derived**, not copied: the row that reaches the blob is not the row in
+`tables_default`, so the encoder must validate its **final, trained** tables against
+E-R4 and may not assume the defaults already satisfy it. Second, the bound itself
+is the format's own: `max esck = 2` is what the default ships and what training
+kept, and `rbits ≤ 5` is unchanged from the default in all five corpora — E-R4 is
+the design, stated as a rule.
+
+What genuinely differs per album is the Huffman **length rows**: the tables region
+is 5,212 bytes in all five corpora under five different hashes (fixture
+`0f5e1b96…`, `biomaster` `89c4eb31…`, `biotwo` `10ac765c…`, `adv` `64809502…`,
+`cross` `93ef18f5…`), which is the "trained per album" property showing up exactly
+where the plan says it should.
 
 > **Corrected 2026-11-19.** This block previously read "both pair classes have
 > `rbits == 0`" and named the two `1/0/0` classes PAIR and the eleven `2/…`
@@ -747,8 +769,10 @@ ahead of the reference; what remains is the densest frames.
 **The premise is now an assertion, not a comment.** `crates/uli-lite-gba/tests/premise.rs`
 checks `rbits <= 5` on every PAIR class and `esck <= 2` on every class, for the
 committed fixture and for all five generated corpora when present — all of them
-measuring `max rbits == 5`, `max esck == 2`, with identical table sets. It also
-witnesses itself: a negative control rejects a PAIR class at `rbits == 6`, so the
+measuring `max rbits == 5`, `max esck == 2` on all of them (the class structure is
+`tables_default`'s apart from one trained tightening; the length rows differ, as
+they must). It also witnesses itself: a negative control rejects a PAIR class at
+`rbits == 6`, so the
 green cannot come back from checking nothing (it had, once — see the correction
 under Cause 3). That is the seed of the bake gate: it is a property of the
 **tables in the blob**, so it belongs wherever the shipped album is produced, and
@@ -915,7 +939,7 @@ matters more than the size:
 | `enc_core.c` | the codec: `tables_default`/`tables_derive`/`tables_from_stats` (Huffman lengths trained from counts, with a floor), the bit writer (`bw_put`, `bw_put_eg`, zigzag), the forward MDCT (`mdct_frame`, orthonormal, hop 512, coefficients ≥500 zeroed), and `frame_code` — an **RD-optimised** per-frame search over the global step `g` and the M/S flag, cost `D + kappa·bits + mu·decoder_cycles` |
 | `uli_enc.c` | the CLI and album assembly: `--budget`/`--cap %` sizing, two-pass table training, per-frame parallelism, ULA2 container write |
 | `prep.py` | `ffmpeg` decode, resample to 32,768 Hz, mono→stereo, gapless track join, `tracks.tsv` with ASCII-folded titles |
-| `gen_tables.py` | regenerates the format's default tables |
+| `gen_tables.py` | regenerates `src/uli/uli_tables.c` — the **synthesis** constants (PERM/PRE/POST/TW/WIN, variant P, N = 1024 / M = 512) and the step table `uli_step[g] = round(2^(g/8))`. **It does not emit the code tables**: the default `ctype`/`rbits`/`esck`/`mu` rows are C literals in `enc_core.c:tables_default`, and the default lengths come from a geometric model through `huff_lengths(·, 0.5)` |
 
 Two of those deserve emphasis because they are not obvious from the format:
 `mu` makes the encoder **cost the decoder's cycles in the RD objective**, so it
@@ -928,14 +952,71 @@ the encoder writes the Huffman codebooks into the blob.
 | # | requirement | why |
 |---|---|---|
 | **E-R1** | In-repo **Rust**, host-only, no C, no `gba-audio` dependency at build or encode time | the standing rule; and a C oracle we cannot ship is not an encoder |
-| **E-R2** | Arbitrary **WAV** in: PCM 8/16/24/32-bit, mono or stereo, any rate → 32,768 Hz stereo | "encode arbitrary WAVs into ROMs" is the user-facing job. Compressed containers stay a Python/`ffmpeg` concern — the format rule forbids C, not external tools |
+| **E-R2** | **The contract boundary is PCM**: `album.f32` + `tracks.tsv` in, one blob out. `album.f32` is float32 **interleaved stereo at PCM16 scale** (samples × 32768), tracks joined gaplessly at 32,768 Hz; `tracks.tsv` is `n start len title artist` in 32,768 Hz samples. A WAV front end (PCM 8/16/24/32, mono or stereo, any rate) is a convenience layer on top, and the resample inside it is **not** held to byte-equality | the reference's own CLI takes exactly this pair, `uli-album-asset` already feeds it, and a source already at 32,768 Hz needs no resampling at all (`gen_fixture.py` emits the fixture straight into this form). Holding byte-exactness at the PCM boundary makes it testable; holding it at the WAV boundary would make it depend on which resampling library answered — see "The acceptance question" |
 | **E-R3** | Writes exactly the ULA2 container `uli-lite`/`GbaDecoder` parse: one blob, ≤32 tracks, per-track title/artist/preroll/bitpos, seek table every `SEEK_INTERVAL` frames, strings, tables blob | anything else is a second format |
 | **E-R4** | **The encoder owns the closed-world premise: `rbits ≤ 5` on every PAIR class and `esck ≤ 2`.** Refuse to emit otherwise | the product reader has a 16-bit refill contract and no error path; a raw pair coefficient costs `r+1` bits after the group's refill, so `r ≤ 5` keeps 10 bits of margin. `esck ≤ 2` caps the escape field at `t = 2z+1+esck ≤ 13`. Both are **tighter than the window needs** (`r ≤ 15`, `esck ≤ 5`) and far tighter than the *parser* allows (`rbits ≤ 16`/`esck ≤ 24` — note 16 is already one bit past the contract); only the encoder can make the product's premise true. Measured maxima on all five corpora: `r = 5`, `esck = 2` (`tests/premise.rs`) |
-| **E-R5** | **Deterministic**: identical input → byte-identical blob, no threading-dependent output | pins are the whole verification story |
-| **E-R6** | Rate control: `--budget BYTES --cap PCT`; **refuse** rather than overrun | a cartridge overflow is a bake failure, not a warning |
-| **E-R7** | Quality parity with the reference on identical PCM: codec-only SNR within a stated tolerance of **32.29 mean / 25.78 worst dB** at cap 74 | otherwise the format's own record stops describing our encoder |
+| **E-R5** | **Deterministic**: identical input + identical flags → byte-identical blob, at any `--threads` and on any host, by the four rules in decision 2 below | pins are the whole verification story, and byte-exactness (the acceptance gate) is unreachable without it |
+| **E-R6** | **Size is an argument, not a fact about the cartridge**: `--budget BYTES` (default `33_292_288` = 32 MiB − 256 KiB, the reference's own default) and `--cap PCT` (default **74**, i.e. % of the 262,144-cycle period). Compute the container's fixed overhead and the resulting bits/frame target, and **refuse before encoding any frame** if the settings cannot fit — whole album, exit nonzero, both numbers cited | the ROM holds code, art, `viz` streams and more than one asset producer, so no encoder can know the cart layout; and per `ALBUM-PLAYER.md` §10.1 **art and reaction data are carved out of the audio budget, never the other way round**, which is exactly why the audio budget has to be an input |
+| **E-R7** | Quality parity with the reference on identical PCM: codec-only SNR within a stated tolerance of **32.29 mean / 25.78 worst dB** at cap 74 | otherwise the format's own record stops describing our encoder. Note the metric is **codec-only**: the reference CLI's own `verify:` line prints a different thing (full-band time-domain SNR of the decoded album against the resampled input, at pcm16 and int8 — e.g. `31.78/30.80` for `biomaster`), so the two numbers are not comparable and must not be quoted against each other |
 | **E-R8** | The RD search carries the decoder-cycle term (`mu`), at least as an option | it is the project's distinguishing knob and it feeds the playback-loop budget |
-| **E-R9** | A 43-minute album encodes in **minutes**: frame-parallel, but with deterministic output (E-R5) | the bake is in the edit loop |
+| **E-R9** | A 43-minute album encodes in **minutes**: frame-parallel (parallel compute, ordered emit — decision 1) | the bake is in the edit loop |
+| **E-R10** | **Never writes a ROM, and never learns that one exists.** Its output is a file, sized against `--budget`; the aggregation into a cartridge belongs to `scripts/album_bake.py`, which owns `cart_bytes` (§9) and will call several independent asset producers | the tools are independently configurable precisely because the set of assets per ROM is not fixed |
+
+### Three decisions, settled 2026-11-19
+
+The three questions the plan left open (writer shape, determinism mechanism,
+refusal semantics), each cheap **only** if taken before the code exists. Two
+placements they imply — where the write side lives, and where the E-R4 bounds
+live — are under "Where it lives"; the boundary at which quality and
+byte-exactness are judged is under "The acceptance question".
+
+**1. The writer plans, then emits — and the byte target is an argument.**
+One dependency has to be settled at E1 because it is not obvious: **the default
+code tables are not in this repository.** `tables_data.rs` carries the synthesis
+constants only, and the default `ctype`/`rbits`/`esck`/`mu` rows are C literals in
+`enc_core.c`, which may not be vendored as C source. The precedented route is the
+one `tables_data.rs` already takes — transcribe the integers into a Rust module with
+a provenance line naming the source, under `publish = false` — and the committed
+fixture then *witnesses* the transcription, since its parsed class structure must
+equal it (`mu`'s own row, `{0, .12, .45, .8, 1.3, 2, 3, 4.5, 6.5, 10, 20, 40, 80,
+160}`, is data of the same kind and is needed to regenerate the default lengths).
+
+The shape of the writer itself:
+Two shapes were on the table: *stream as you go* (encode frame 0, append; encode
+frame 1, append) or *plan then emit* (fix tables and the per-frame `g` plan, size
+every frame, then write frames in index order). **Plan then emit.** Note that the
+streaming shape was never actually available: every `SEEK_INTERVAL`-th frame needs
+a container entry carrying that frame's bit position and its `g`, and `g` is
+differentially coded across frames (`g = g_prev + zigzag(z)`, `frame.rs`), so the
+encoder must know every frame's size and every frame's `g` before it can write the
+header. What the decision really fixes is *where that requirement gets designed
+in* — at E1, where the writer is new, rather than at E5, under tests, measurements
+and pinned hashes. It also settles the parallel shape: because the `g` plan comes
+from the allocation stage, the frame bodies are mutually independent once it is
+fixed, which is what the reference itself does ("final encode (parallel chunks,
+concatenated)").
+
+**2. Determinism, stated as four rules** (the mechanism behind E-R5):
+
+| # | rule | cost |
+|---|---|---|
+| R5a | threads **compute**, never **order**: any work may be parallel, assembly walks frames by index | none — forced by decision 1 |
+| R5b | every sum that feeds a decision is reduced in **frame-index order**, never in completion order | a few percent in one loop (IEEE addition is not associative, so an unordered float reduction can flip a near-tie and change every byte after it) |
+| R5c | transform constants come from **checked-in integer tables**, not from libm at encode time | one generator script + a checked-in file; the precedent is `uli-lite/src/tables_data.rs` |
+| R5d | every tie names its winner (lower `g`; then L/R over M/S) | none |
+
+The witness is cheap and belongs to E1: encode the same input at `--threads 1`
+and `--threads N` and assert the same SHA-256.
+
+**3. Refusal is early, whole-album, and arithmetic.** Compute overhead → derive the
+bits/frame target → check the plan → *then* encode, which is the order the
+reference uses (`container overhead 5880 bytes; stream target 26304896 bits =
+1589.1 bits/frame`). If the chosen `--cap`/`--budget` cannot fit, refuse the whole
+album with a nonzero exit citing needed and allowed, in the style of the bake's
+other refusals ("with a cited number") — **not** by trimming quality on some
+tracks until it squeaks in, since a silent squeeze both varies by input and breaks
+E-R5. And `--budget` means **blob bytes**, never cart bytes: the bake is what
+subtracts code reserve, art and `viz` from `cart_bytes` and passes the remainder in.
 
 ### Where it lives
 
@@ -947,39 +1028,106 @@ resample, track metadata), which is what `ULI2.md` already says: the rule is
 "no C tooling", not "no Python". The one thing that must not happen is a second
 copy of the format constants — that is exactly how these docs drifted.
 
+**`uli-lite` stays read-only, and that is intentional.** It is the codec as the
+GBA needs it: parse, decode, no writing. So the *write* side of the format lives
+in `uli-enc` and nothing is added to `uli-lite` to support it. One consequence is
+worth stating rather than discovering later: the tables-blob geometry is not
+named constants today, it is arithmetic inside `CodeTables::parse_into` —
+`1 + 3k + (k+1)² + k·(81+256+16)` bytes, with class-row offsets `lq = p` and
+`lp = lq + 81k` — so `uli-enc` reproduces a layout it is not handed. That
+duplication is **tolerated** because it is self-witnessing — get an offset wrong
+and `parse_into` rejects the blob — unlike
+the bounds and defaults, which drift silently. The residue that a round-trip does
+*not* catch is a blob that parses cleanly but differs from the reference's bytes
+(row order, padding), and that is caught only by the acceptance gate below.
+
+**The E-R4 bounds get one home, not three.** They currently exist as a private
+helper inside `crates/uli-lite-gba/tests/premise.rs`, where the encoder cannot
+reach them; repeating `5` and `2` a second time in `uli-enc` is the failure mode
+this file has already documented. Promote the predicate to `uli-lite` as
+validation of *already-parsed* tables — `format::ENC_PAIR_RBITS_MAX` /
+`ENC_ESCK_MAX` plus a `CodeTables::premise()` returning an allocation-free
+`Result<Census, Violation>` (`uli-lite` is `no_std`; the host callers format) — and
+have the test, the encoder and the bake gate all call it. Validation is read-side,
+so this does not reopen the paragraph above.
+
 ### Slices, each with an exit gate
 
 | # | slice | exit gate |
 |---|---|---|
-| **E1** | Skeleton: WAV reader, resampler to 32,768 Hz, container/bit-writer, `tables_default`. Encode silence and DC | blob parses (`uli_lite::Album::parse` + `CodeTables::parse_into`); decodes; premise bounds asserted by the encoder itself |
+| **E1** | Skeleton: PCM (`album.f32` + `tracks.tsv`) reader, container/bit-writer written **plan-then-emit** (decision 1), `tables_default`, the overhead/budget arithmetic of decision 3 even while nothing can yet overflow it. Encode silence and DC | blob parses (`uli_lite::Album::parse` + `CodeTables::parse_into`); decodes; the shared E-R4 check (see "Where it lives") is called by the encoder itself; `--threads 1` and `--threads N` give the same SHA-256 (R5a/R5d) |
 | **E2** | Forward MDCT + fixed-step quantisation with default tables | decodes bit-exactly; SNR sane; rate reported |
 | **E3** | RD search: `g`, `ms`, `kappa`; per-frame bit accounting | rate/quality on the fixture vs the reference's curve (E-R7) |
 | **E4** | Two-pass table training (`tables_from_stats`, length floor) | output byte-stable across runs; trained tables still inside E-R4 |
-| **E5** | Album assembly: tracks, titles, seek table, `--budget/--cap`, refusals | a 43-minute album fits 32 MiB at cap ≤ 74; every track decodes; hashes pinned |
+| **E5** | Album assembly: tracks, titles, seek table, `--budget`/`--cap` wired to real sizes, the pre-flight refusal, and the **WAV/resample front end** that E1 leaves out (E-R2's convenience layer, held to SNR only) | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes; hashes pinned; a budget chosen too small refuses **before** the first frame is encoded, citing both numbers; an arbitrary WAV reaches the same blob as its pre-resampled PCM would not, but its SNR is quoted |
 | **E6** | `mu` (decoder-cycle-aware) search, optional | a knob that demonstrably trades SNR for decode cycles, measured on the bench |
 
-### The acceptance question, answered
+### The acceptance question, answered (revised 2026-11-19 — it is measurable, and it was measured)
 
-**Target gate: given the same PCM, the Rust encoder reproduces the C encoder's
-blob byte-for-byte.** That is a strong gate and it is worth insisting on, because
-it (a) proves the port rather than approximating it, (b) lets the committed
-corpora be regenerated from our own tree so the fixture stops being an artefact
-of a build we cannot reproduce, and (c) keeps every existing number — the
-C-comparison, the kernel table, the pins — comparable without a re-pin.
+**Target gate: given the same PCM and the same flags, the Rust encoder reproduces
+the C encoder's blob byte-for-byte.** The plan first treated this as a hope with a
+documented fallback; it is now a gate that runs today. Re-encoding off-tree with
+the reference at `gba-audio/encoder` reproduced two committed corpora **exactly** —
+the 129-frame fixture and the 16,553-frame `biomaster` album — and `--threads 1`
+agreed with `--threads 8` byte for byte. The dated entry, with commands and
+hashes, is in [`RECORD.md`](RECORD.md) → "the reference encoder reproduces its own
+corpora".
 
-If byte-exactness proves infeasible (the reference's doubles, its table training
-order, or `ffmpeg`'s resampler), the fallback gate is: **same rate and quality
-within tolerance, all E-R4 bounds held, and a bit-exact decode** — with the
-C-produced blobs frozen as the reference corpus and the Rust encoder's output
-pinned separately. The resampler is out of scope for byte-equality either way: it
-is compared by SNR, not by bytes.
+So the gate stands, with three refinements:
+
+- **Measured at the PCM boundary** (`album.f32` + `tracks.tsv` → blob), not at the
+  WAV boundary. The earlier reason for exempting the resampler was the wrong
+  reason: it is not that `ffmpeg`'s filter is unmatchable, it is that the
+  reference's own PCM preparation is **library-dispatched** — `prep.py` calls
+  `gba_dac_model.resample`, which takes its FFT path when the rate ratio's
+  denominator fits in 2¹⁶ and otherwise falls through to `soxr` *if installed*,
+  then to `scipy.resample_poly`. The same flags can therefore yield different
+  bytes on two machines depending on which library answers, which is not a
+  property worth pinning a codec gate to. A source already at 32,768 Hz bypasses
+  the resampler entirely — which is why the fixture has no resampler in its path.
+- **The proof is a matrix, not an exhaustive sweep.** Fixture at `--threads 1`;
+  `biomaster` at its build settings (`--budget 3294000 --cap 74 --threads 8`);
+  one point from `adv` or `cross`; **plus one deliberately off-default sweep**
+  (say `--cap 60`, budget halved). Without that last cell both encoders could
+  agree by sharing a lucky path and the gate would pass for nothing.
+- **It is host-qualified.** The reference builds with `-O2 -march=native`, so
+  "byte-identical" means byte-identical *on the reference host* (this machine,
+  where both reproductions above ran). Fine for a dev gate; worth naming so nobody
+  reads it as a cross-platform guarantee — which is also why R5c keeps libm out of
+  our own path.
+
+**Standing on this gate does not break E-R1, and this needs saying.** E-R1 forbids
+a *build, link or vendoring* dependency on `gba-audio`; it has never forbidden
+running the reference as an oracle, which is what `uli-album-asset` already does
+when it shells out to `$(GBA_AUDIO)/build/uli_enc` to make a corpus. So the
+byte-exactness gate is a host target that builds nothing of ours from C source,
+calls the off-tree binary, and compares SHA-256s — the same posture the project
+took for the decoder's C-pinned hashes, with the oracle one notch further out.
+
+If exactness nevertheless proves unreachable on some input, the fallback gate is
+unchanged in shape: **same rate and quality within tolerance, all E-R4 bounds
+held, and a bit-exact decode** — with the C-produced blobs frozen as the reference
+corpus and the Rust encoder's output pinned separately. But it is now a fallback
+for a *cell* of the matrix, not for the gate: the reproductions above show the
+reference is reachable on both a synthetic fixture and a real album.
+
+Two aids fall out of the same experiment, and taking them makes a future mismatch
+localise instead of becoming a bisect: the reference prints its intermediates
+(`bits/frame`, λ per training iteration, the `retrain … (±x%)` delta, `g range
+89..135`, `M/S frames 87.1%`, `verify: decoded N frames OK`, SNR), so `uli-enc`
+should print the same columns; and `musearch` showed **no activity** on either
+reproduced corpus, so E6 stays off the byte-exactness critical path *for these
+two* — re-test on `adv`/`cross`, which are denser, before calling it optional for
+albums.
 
 ### What it does not have to do
 
 Not a general-purpose codec; not portable (host only); no encoder-side seeking or
-streaming; no obligation to accept non-WAV input directly; and it does not
-validate its own output — `uli-lite` is the oracle, in the same round-trip test
-that already exists for the decoder.
+streaming; no obligation to accept non-WAV input directly; it does not validate
+its own output — `uli-lite` is the oracle, in the same round-trip test that
+already exists for the decoder. And, per decision 3 and **E-R10**: it does not
+write ROMs, does not know `cart_bytes`, and does not decide what else shares the
+cartridge. It is one asset producer among several, and the bake aggregates them.
 
 ## Gate verdicts (the claims live in ULI2.md §Gates)
 
