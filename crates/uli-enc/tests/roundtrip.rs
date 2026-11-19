@@ -24,6 +24,9 @@ fn args(album: std::path::PathBuf, tracks: std::path::PathBuf, threads: usize) -
         budget: DEFAULT_BUDGET,
         cap_pct: DEFAULT_CAP_PCT,
         g: None,
+        rd: false,
+        kappa: 0.13,
+        stride: 8,
         threads,
     }
 }

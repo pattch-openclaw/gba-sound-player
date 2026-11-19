@@ -278,6 +278,9 @@ fn rate_and_snr_move_the_right_way_with_the_step() {
             budget: DEFAULT_BUDGET,
             cap_pct: DEFAULT_CAP_PCT,
             g: Some(g),
+            rd: false,
+            kappa: 0.13,
+            stride: 8,
             threads: 1,
         })
         .unwrap_or_else(|e| panic!("g={g}: {e}"));
@@ -309,5 +312,54 @@ fn rate_and_snr_move_the_right_way_with_the_step() {
         snrs[0] > 10.0 && snrs[0] < 90.0,
         "the finest step should be usable but not impossible: {:.2} dB",
         snrs[0]
+    );
+}
+
+/// S3's plumbing test, and the reason it exists: the first version of `--rd` did
+/// not reach `encode()` at all, the crate still built (the flag was a valid field
+/// nobody read), all 45 tests stayed green, and the encoder emitted silence.
+/// Silence and "the search collapsed" cost the same ~8 bits per frame here, so the
+/// rate could not tell them apart — only this assertion can, because it compares
+/// the search's output against both of the things it must not be.
+#[test]
+fn the_search_actually_runs_and_changes_the_album() {
+    let dir = TempDir::new("rd-plumbing");
+    let album = materialise(dir.path(), "album.f32", IN);
+    let tracks = write_tracks(dir.path(), &format!("1\t0\t{N_SAMPLES}\tDense\tS3\n"));
+    let base = |rd: bool, g: Option<i32>| {
+        encode(&Args {
+            album: album.clone(),
+            tracks: tracks.clone(),
+            budget: 4_000_000,
+            cap_pct: DEFAULT_CAP_PCT,
+            g,
+            rd,
+            kappa: 0.13,
+            stride: 8,
+            threads: 1,
+        })
+        .expect("encodes")
+    };
+    let silence = base(false, None);
+    let searched = base(true, None);
+
+    assert!(
+        searched.report.g_chosen.is_some() && silence.report.g_chosen.is_none(),
+        "the search must report the steps it chose; a missing g range means --rd did \
+         not reach the encoder, which is the bug this test was written for"
+    );
+    assert!(
+        searched.report.stream_bits > silence.report.stream_bits,
+        "the search coded {} bits and silence codes {} — the album was not searched",
+        searched.report.stream_bits,
+        silence.report.stream_bits
+    );
+    assert!(
+        searched.report.nonzero_coeffs > 0,
+        "the searched album coded no coefficients at all"
+    );
+    assert_ne!(
+        searched.bytes, silence.bytes,
+        "the searched blob is byte-identical to the silence blob"
     );
 }

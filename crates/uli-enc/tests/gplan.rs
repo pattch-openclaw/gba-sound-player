@@ -213,6 +213,9 @@ fn e1s_own_content_is_legal() {
         budget: DEFAULT_BUDGET,
         cap_pct: DEFAULT_CAP_PCT,
         g: None,
+        rd: false,
+        kappa: 0.13,
+        stride: 8,
         threads: 2,
     })
     .expect("S1 still encodes");

@@ -172,6 +172,9 @@ fn a_length_mismatch_refuses_before_any_frame_is_planned() {
         budget: 1,
         cap_pct: DEFAULT_CAP_PCT,
         g: None,
+        rd: false,
+        kappa: 0.13,
+        stride: 8,
         threads: 1,
     })
     .expect_err("a mismatched pair cannot encode");

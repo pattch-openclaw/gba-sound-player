@@ -185,7 +185,13 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
         // the tables blob, the seek count and the strings — none of which frame
         // content can change — so the target is taken from a silence-sized plan and
         // the real plan is then checked against the real stream, as below.
-        let sizing = Plan::new(&pcm, tables, &Content::silence(nf), args.budget, args.cap_pct)?;
+        let sizing = Plan::new(
+            &pcm,
+            tables,
+            &Content::silence(nf),
+            args.budget,
+            args.cap_pct,
+        )?;
         let s = samples.as_ref().expect("--rd loads the album above");
         let curves = Curves::compute(s, pcm.n_samples as usize, tables, nf, args.stride)?;
         let mut coef = [0f32; 2 * M];

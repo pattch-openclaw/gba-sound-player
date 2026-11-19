@@ -34,9 +34,9 @@
 //! reduced in frame-index order, and ties break to the lower `g` because the
 //! candidates are visited in ascending `g` and the comparison is strict.
 
-use uli_lite::format::{BANDW, CT_PAIR, M, NCODED, NBANDS};
-use uli_lite::tables_data::STEP;
 use uli_lite::Ops;
+use uli_lite::format::{BANDW, CT_PAIR, M, NBANDS, NCODED};
+use uli_lite::tables_data::STEP;
 
 use crate::pcm::{Pcm, Samples};
 use crate::plan::{Content, GPlan};
@@ -142,11 +142,7 @@ fn candidate_distortion(coef: &[f32], tables: &DefaultTables, g: i32, chan: &Cha
                 0.0
             } else {
                 let v = (16.0 * a as f64 - dq[a.min(15) as usize] as f64) * step / 256.0;
-                if band.m[i] < 0 {
-                    -v
-                } else {
-                    v
-                }
+                if band.m[i] < 0 { -v } else { v }
             };
             let e = f64::from(coef[k]) - rec;
             total += e * e;
@@ -171,7 +167,6 @@ pub fn frame_ops(tables: &DefaultTables, chans: &[Chan; 2]) -> Ops {
     let mut ops = Ops::ZERO;
     ops.ms = 0;
     for chan in chans {
-
         let full = chan.bands.len() >= NBANDS;
         for band in &chan.bands {
             ops.bandsyms += 1;
@@ -182,7 +177,7 @@ pub fn frame_ops(tables: &DefaultTables, chans: &[Chan; 2]) -> Ops {
             let r = tables.rbits[band.class];
             let pair = tables.ctype[band.class] == CT_PAIR;
             for group in band.m.chunks_exact(if pair { 2 } else { 4 }) {
-            let per = group.len();
+                let per = group.len();
                 let heads: Vec<u32> = group
                     .iter()
                     .map(|m| {
@@ -227,7 +222,6 @@ pub fn frame_ops(tables: &DefaultTables, chans: &[Chan; 2]) -> Ops {
                     }
                 }
             }
-
         }
         if !full {
             ops.bandsyms += 1;
@@ -245,7 +239,8 @@ pub fn weights(pcm: &Pcm, energy: &[f64]) -> Vec<f64> {
     {
         let mut t = 0usize;
         for f in 0..n_frames {
-            while t + 1 < pcm.tracks.len() && (pcm.tracks[t + 1].start_sample as u64) <= (f as u64 * M as u64)
+            while t + 1 < pcm.tracks.len()
+                && (pcm.tracks[t + 1].start_sample as u64) <= (f as u64 * M as u64)
             {
                 t += 1;
             }
@@ -261,7 +256,11 @@ pub fn weights(pcm: &Pcm, energy: &[f64]) -> Vec<f64> {
     }
     let mean: Vec<f64> = (0..n_tracks)
         .map(|t| {
-            let m = if count[t] > 0.0 { sum[t] / count[t] } else { 0.0 };
+            let m = if count[t] > 0.0 {
+                sum[t] / count[t]
+            } else {
+                0.0
+            };
             // The `+ 1.0` is the reference's: it keeps a silent track's weight
             // finite, and a track of digital silence is exactly what a real album's
             // gap between songs looks like.
@@ -358,12 +357,7 @@ impl Curves {
     /// `hi` is the side that fits, so the answer is taken from `hi`, not from the
     /// midpoint: a λ slightly too generous overshoots the budget, and E-R6 makes
     /// overshooting a refusal rather than a rounding error.
-    pub fn allocate(
-        &self,
-        w: &[f64],
-        target: f64,
-        cap: u32,
-    ) -> Result<(f64, Vec<usize>), Error> {
+    pub fn allocate(&self, w: &[f64], target: f64, cap: u32) -> Result<(f64, Vec<usize>), Error> {
         // Header allowance: the `g` delta plus the M/S bit, which no single
         // candidate owns. See the module doc; the reference uses the same number.
         let target = target - 3.5 * self.per_frame.len() as f64;
@@ -372,13 +366,13 @@ impl Curves {
         for _ in 0..LAMBDA_ITERS {
             let mid = 0.5 * (lo + hi);
             let lambda = mid.exp();
-            let picks = self
-                .pick(w, lambda, cap)
-                .ok_or_else(|| Error::Plan(format!(
+            let picks = self.pick(w, lambda, cap).ok_or_else(|| {
+                Error::Plan(format!(
                     "no candidate frame meets a cap of {cap} cycles ({:.1}% of {CYCLE_PERIOD}); \
                      --cap is a hard constraint here, and refusing is the honest answer",
                     100.0 * cap as f64 / CYCLE_PERIOD as f64
-                )))?;
+                ))
+            })?;
             let total: f64 = picks
                 .iter()
                 .enumerate()
@@ -424,7 +418,10 @@ impl Curves {
             }
             chans.push(frame_chans);
         }
-        Ok(Content::coded(GPlan::new(g_by_frame, vec![false; n_frames]), chans))
+        Ok(Content::coded(
+            GPlan::new(g_by_frame, vec![false; n_frames]),
+            chans,
+        ))
     }
 
     /// The chosen steps, for the report.

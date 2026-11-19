@@ -68,7 +68,9 @@ fn run() -> Result<(), ExitCode> {
         stride,
     };
     if rd && g.is_some() {
-        return Err(usage("--rd searches for g, so it cannot also be given one".into()));
+        return Err(usage(
+            "--rd searches for g, so it cannot also be given one".into(),
+        ));
     }
     let encoded = encode(&args).map_err(|e| {
         eprintln!("uli-enc: {e}");
@@ -105,10 +107,7 @@ fn run() -> Result<(), ExitCode> {
             report.stream_bits as f64 / (report.n_frames as f64 * 512.0 / 32768.0) / 1000.0,
             report.nonzero_coeffs,
         );
-        println!(
-            "g {}; xover {} hfnz {}",
-            gline, report.xover, report.hfnz
-        );
+        println!("g {}; xover {} hfnz {}", gline, report.xover, report.hfnz);
         if let Some(snr) = report.snr_db {
             println!(
                 "verify: decoded {} frames OK; codec SNR {:.2} dB",
