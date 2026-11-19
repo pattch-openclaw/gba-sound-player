@@ -51,8 +51,10 @@ IWRAM (`ClassTables`, 560 B) beside `HotState`.
 bake, so the product build carries **no bounds test, no error flag and a 16-bit
 refill contract**; a malformed stream is meant to fail the build, not a frame.
 The guarantees that makes sound are properties of the *tables in the blob* and
-are asserted before the ROM exists — `tests/premise.rs` checks `rbits == 0` on
-every PAIR class and `esck <= 2`, and `uli_lite` remains the checked oracle. See
+are asserted before the ROM exists — `tests/premise.rs` checks **`rbits <= 5` on
+every PAIR class** (measured `0,0,0,0,0,0,1,2,3,4,5` on all five corpora; the raw
+digit costs `rbits + 1` bits after the group's refill) and **`esck <= 2`** (escape
+field `t = 2z + 1 + esck <= 13`), and `uli_lite` remains the checked oracle. See
 `ULI2.md`'s decision log (2026-11-19) and `PLAN-OF-RECORD.md` → "The entropy path
 against the C+ASM reference".
 

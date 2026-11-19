@@ -796,15 +796,34 @@ entry is kept for the decision and its reasoning, not for its numbers.**
   reasons* and are now available: the product reader can drop its bounds test,
   its error flag and its per-symbol length test, and the escape path's
   `t < 32` / `t <= valid` guards are dead on our own tables (`esck <= 2`, and
-  `rbits == 0` on every PAIR class across all five corpora). The proposals this
+  `rbits <= 5` on every PAIR class across all five corpora). The proposals this
   unblocks, and their sizes, are in `crates/uli-lite/PLAN-OF-RECORD.md` → "The
   entropy path against the C+ASM reference (2026-11-19)". **Landed the same day:**
   P2 (`ClassTables` to IWRAM, −897 mean) and P1 + P3 (the closed-world reader,
   −5,420 mean / −9,973 worst), taking the **gate total to 226,853 worst / 201,126
   mean = 86.54% / 76.72%, 13.46 points of margin** with 0 starved periods, and
   the product `dec_chan` down 1,376 B. The premise is no longer only a comment:
-  `tests/premise.rs` asserts `rbits == 0` on every PAIR class and `esck <= 2` for
+  `tests/premise.rs` asserts `rbits <= 5` on every PAIR class and `esck <= 2` for
   the fixture and every generated corpus, as the seed of the bake gate.
+
+  **Correction to this entry (2026-11-19).** It first read "`rbits == 0` on every
+  PAIR class", and the test it cited passed that assertion while checking nothing
+  of the kind: the test compared against a local `const CT_PAIR: u8 = 1`, which is
+  `CT_QUAD`, so the bound ran over the two QUAD classes where `rbits` is never
+  read, and the eleven classes that do carry a raw field (`r` =
+  `0,0,0,0,0,0,1,2,3,4,5`) went unexamined. The same shadowed constant also transposed the class
+  names in `PLAN-OF-RECORD.md`'s Cause 3 ("two `PAIR` … eleven `QUAD`"), and a
+  second bug in that test — one `../` too many in the generated-corpus paths —
+  meant the four generated corpora were never opened, so the claim "across all
+  five corpora" rested on the fixture alone. **Nothing measured was unsound:** the
+  16-bit contract holds because the raw pair arm refills between the two
+  coefficients of a group, capping every read run at 16 bits (`r + 1 <= 6` for the
+  worst raw digit), and the P1/P3 cycle figures are unaffected — they are timing
+  measurements, not consequences of the bound. What changed is the justification
+  and the coverage: the test now imports the format's real constants, asserts
+  `rbits <= 5` (the measured maximum, and requirement E-R4), rejects a PAIR class
+  at `rbits == 6` as a self-witness, and reads all five corpora — which now agree:
+  identical table sets everywhere, `max rbits == 5`, `max esck == 2`.
 
 - **2026-11-18 — `post` as ARM asm: the product path is now all hand-written
   kernels, and the kernel table was re-derived with bit-exact arms.** `post` was

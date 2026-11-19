@@ -797,9 +797,12 @@ unsafe fn dec_chan(
     /// still had to reload its *pointer* from the stack, for want of them.)
     ///
     /// **The contract is 16 bits, not 17.** A raw pair digit reads `r` bits and
-    /// then a sign bit, which is why the old shape demanded 17; but on every
-    /// corpus this tree owns both PAIR classes have `rbits == 0` (asserted by
-    /// `tests/premise.rs` and printed by the bench as `class premise`). 16 also
+    /// then a sign bit, which is why the old shape demanded 17; but the raw arm
+    /// refills again between the two coefficients of the group (see the pair loop
+    /// below), so each digit's `r + 1` is measured from its own window, and on
+    /// every corpus this tree owns the eleven PAIR classes have `rbits <= 5`
+    /// (`0,0,0,0,0,0,1,2,3,4,5` — `tests/premise.rs` asserts the bound and prints
+    /// the census; `esck <= 2` keeps the escape field at `t <= 13`). 16 also
     /// makes **one load always sufficient** (`valid < 16` implies
     /// `valid + 16 >= 16`), so the nested second load disappears with it.
     #[cfg(not(feature = "checked-reader"))]
