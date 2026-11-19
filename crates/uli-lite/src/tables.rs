@@ -9,7 +9,9 @@ use core::fmt;
 
 use crate::Error;
 use crate::bitstream::BitReader;
-use crate::format::{CT_PAIR, CT_QUAD, CT_ZERO, LUTB, MAXK, MAXLEN};
+use crate::format::{
+    CT_PAIR, CT_QUAD, CT_ZERO, ENC_ESCK_MAX, ENC_PAIR_RBITS_MAX, LUTB, MAXK, MAXLEN,
+};
 use crate::frame::Ops;
 
 /// One canonical Huffman table.
@@ -165,6 +167,72 @@ impl Huffman {
     }
 }
 
+/// What [`CodeTables::premise`] counted, so a caller can require the check had a
+/// subject instead of trusting a loop that may have run over no class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PremiseCensus {
+    pub zero: usize,
+    pub pair: usize,
+    pub quad: usize,
+    pub max_pair_rbits: u8,
+    pub max_esck: u8,
+}
+
+/// Which part of the closed-world premise a class failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PremiseViolationKind {
+    /// The tables declare more classes than [`MAXK`].
+    KTooLarge,
+    /// A `ctype` that is none of ZERO / QUAD / PAIR — an error, not a skip.
+    Ctype,
+    /// `rbits` above [`ENC_PAIR_RBITS_MAX`] on a PAIR class.
+    PairRbits,
+    /// `esck` above [`ENC_ESCK_MAX`].
+    Esck,
+}
+
+/// The first class that fails the encoder's closed-world premise (E-R4).
+///
+/// `uli-lite` is `no_std` and allocation-free, so the host caller formats this
+/// rather than receiving a message; [`fmt::Display`] still renders it verbatim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PremiseViolation {
+    pub class: usize,
+    pub kind: PremiseViolationKind,
+    pub value: u8,
+}
+
+impl fmt::Display for PremiseViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.kind {
+            PremiseViolationKind::KTooLarge => {
+                write!(f, "class count k={} exceeds MAXK={MAXK}", self.value)
+            }
+            PremiseViolationKind::Ctype => write!(
+                f,
+                "class {} has ctype={}, which is not ZERO({CT_ZERO}) / QUAD({CT_QUAD}) / \
+                 PAIR({CT_PAIR})",
+                self.class, self.value
+            ),
+            PremiseViolationKind::PairRbits => write!(
+                f,
+                "class {} is PAIR with rbits={} > {ENC_PAIR_RBITS_MAX}: a raw pair digit \
+                 costs rbits + 1 bits after the group's refill, so the encoder must refuse \
+                 it (the 16-bit window itself only breaks at rbits > 15, and the table \
+                 parser accepts 16 — E-R4 is the tighter bound by choice)",
+                self.class, self.value
+            ),
+            PremiseViolationKind::Esck => write!(
+                f,
+                "class {} has esck={} > {ENC_ESCK_MAX}: the escape field is \
+                 t = 2z + 1 + esck with z <= 5, so the 16-bit window's own limit is \
+                 esck <= 5 — E-R4 is the tighter bound by choice",
+                self.class, self.value
+            ),
+        }
+    }
+}
+
 /// Parsed per-album code tables.
 #[derive(Clone)]
 pub struct CodeTables {
@@ -273,6 +341,73 @@ impl CodeTables {
             self.dq15[c] = self.dq[c][15];
         }
         Ok(())
+    }
+
+    /// Check the tables against the encoder's **closed-world premise** (E-R4):
+    /// `rbits <= ENC_PAIR_RBITS_MAX` on every PAIR class and
+    /// `esck <= ENC_ESCK_MAX` on every class, ZERO included (stricter than the
+    /// decoder needs, and cheap).
+    ///
+    /// The parser is deliberately looser (`rbits <= 16`, `esck <= 24`) because it
+    /// also reads other producers' blobs; nothing downstream of the encoder
+    /// rejects a table that breaks the product reader, so the encoder owns the
+    /// bound and calls this before emitting a byte. Read-side validation only:
+    /// this adds no write path to the decoder.
+    pub fn premise(&self) -> Result<PremiseCensus, PremiseViolation> {
+        if self.k > MAXK {
+            return Err(PremiseViolation {
+                class: self.k,
+                kind: PremiseViolationKind::KTooLarge,
+                value: self.k.min(u8::MAX as usize) as u8,
+            });
+        }
+
+        let mut census = PremiseCensus {
+            zero: 0,
+            pair: 0,
+            quad: 0,
+            max_pair_rbits: 0,
+            max_esck: 0,
+        };
+
+        for i in 0..self.k {
+            match self.ctype[i] {
+                CT_ZERO => census.zero += 1,
+                CT_QUAD => census.quad += 1,
+                CT_PAIR => {
+                    census.pair += 1;
+                    // The raw digit is read only on PAIR, which is exactly why
+                    // the class id has to be the real one.
+                    if self.rbits[i] > ENC_PAIR_RBITS_MAX {
+                        return Err(PremiseViolation {
+                            class: i,
+                            kind: PremiseViolationKind::PairRbits,
+                            value: self.rbits[i],
+                        });
+                    }
+                    census.max_pair_rbits = census.max_pair_rbits.max(self.rbits[i]);
+                }
+                other => {
+                    return Err(PremiseViolation {
+                        class: i,
+                        kind: PremiseViolationKind::Ctype,
+                        value: other,
+                    });
+                }
+            }
+            // A ZERO class never escapes, but binding esck everywhere is the
+            // cheap half of E-R4 and keeps the rule one sentence long.
+            if self.esck[i] > ENC_ESCK_MAX {
+                return Err(PremiseViolation {
+                    class: i,
+                    kind: PremiseViolationKind::Esck,
+                    value: self.esck[i],
+                });
+            }
+            census.max_esck = census.max_esck.max(self.esck[i]);
+        }
+
+        Ok(census)
     }
 
     pub fn class_table(&self, class: usize) -> &Huffman {

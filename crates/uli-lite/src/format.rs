@@ -43,3 +43,18 @@ pub const CT_ZERO: u8 = 0;
 pub const CT_QUAD: u8 = 1;
 /// Band class PAIR: two coefficients per Huffman symbol.
 pub const CT_PAIR: u8 = 2;
+
+/// **E-R4**, the encoder's raw-field bound: `rbits` on every PAIR class.
+///
+/// A raw pair digit costs `rbits + 1` bits after the group's refill, so the
+/// product reader's 16-bit window itself only breaks above 15 and the table
+/// parser accepts 16. 5 is what every committed corpus measures and what the
+/// encoder is required to hold — the tighter bound is a choice, and this is its
+/// one home (`PLAN-OF-RECORD.md` → "The encoder", E-R4).
+pub const ENC_PAIR_RBITS_MAX: u8 = 5;
+
+/// **E-R4**, the encoder's escape bound: `esck` on every class.
+///
+/// The escape field is `t = 2z + 1 + esck` with `z <= 5`, so the window would
+/// allow 5; 2 is the measured maximum and the required bound.
+pub const ENC_ESCK_MAX: u8 = 2;
