@@ -154,7 +154,27 @@ pub fn encode(args: &Args) -> Result<Output, Error> {
 /// can only observe if it can hand the encoder such a table. Production callers
 /// use [`encode`].
 pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output, Error> {
-    let pcm = Pcm::open(&args.album, &args.tracks)?;
+    // Destructure exhaustively, on purpose. `--rd` once parsed into a field that
+    // nothing read: the crate built, the suite stayed green, and the encoder emitted
+    // silence. A binding pattern with no `..` makes that a compile error — adding a
+    // field to `Args` without deciding what `encode` does with it no longer survives
+    // to become a test result, let alone a shipped album.
+    let Args {
+        album,
+        tracks,
+        budget,
+        cap_pct,
+        g,
+        rd,
+        kappa,
+        stride,
+        threads,
+    } = args;
+    let (album, tracks) = (album.as_path(), tracks.as_path());
+    let (budget, cap_pct, g, rd, kappa, stride, threads) =
+        (*budget, *cap_pct, *g, *rd, *kappa, *stride, *threads);
+    let _ = kappa; // S3's remaining substance: the per-coefficient RD it should scale.
+    let pcm = Pcm::open(album, tracks)?;
     let mut report_g: Option<Vec<i32>> = None;
     let mut report_lambda: Option<f64> = None;
 
@@ -175,7 +195,7 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
     // `--rd` is S3's search.
     let nf = frame_count(pcm.n_samples);
     let samples = if args.g.is_some() || args.rd {
-        Some(Samples::open(&args.album, pcm.n_samples as usize)?)
+        Some(Samples::open(album, pcm.n_samples as usize)?)
     } else {
         None
     };
@@ -193,7 +213,7 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
             args.cap_pct,
         )?;
         let s = samples.as_ref().expect("--rd loads the album above");
-        let curves = Curves::compute(s, pcm.n_samples as usize, tables, nf, args.stride)?;
+        let curves = Curves::compute(s, pcm.n_samples as usize, tables, nf, stride)?;
         let mut coef = [0f32; 2 * M];
         let energy: Vec<f64> = (0..nf)
             .map(|f| {
@@ -203,7 +223,7 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
             .collect();
         let w = rd::weights(&pcm, &energy);
         let target = sizing.target_bits as f64;
-        let cap = rd::cap_cycles(args.cap_pct);
+        let cap = rd::cap_cycles(cap_pct);
         let (lambda, picks) = curves.allocate(&w, target, cap)?;
         let chosen = curves.chosen_g(&picks);
         report_g = Some(chosen);
@@ -221,9 +241,9 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
         Content::silence(nf)
     };
 
-    let plan = Plan::new(&pcm, tables, &content, args.budget, args.cap_pct)?;
+    let plan = Plan::new(&pcm, tables, &content, budget, cap_pct)?;
 
-    let ranges = chunks(plan.n_frames, args.threads.max(1));
+    let ranges = chunks(plan.n_frames, threads.max(1));
 
     let coded: Vec<(bitwriter::BitWriter, Vec<u64>)> = std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(ranges.len());
@@ -309,7 +329,7 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
             n_frames: plan.n_frames,
             workers_used: coded.len(),
             est_max_cycles: verify.max_cycles,
-            g: args.g,
+            g,
             g_chosen: report_g,
             lambda: report_lambda,
             est_mean_cycles: verify.mean_cycles,

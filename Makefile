@@ -247,6 +247,12 @@ ULI_OVERLAY_MANIFEST := $(abspath crates/uli-lite-gba/Cargo.toml)
 # it. Its gate is a round-trip through `uli-lite`: the decoder, not the encoder,
 # says whether the blob is real.
 ULI_ENC_MANIFEST := $(abspath crates/uli-enc/Cargo.toml)
+# How many `uli-enc` tests must run for the gate to count as having run anything.
+# Raise it when tests are added; the gate refuses to pass below it, so a suite that
+# fails to compile, is renamed out of `tests/`, or is filtered away cannot quietly
+# vanish from the run. A count, not a per-suite shape check: the binary target and
+# the doc-tests legitimately report zero.
+ULI_ENC_MIN_TESTS := 46
 # The ULI2 measurement vehicle (examples/uli_bench/): prove the corpus pins on the
 # measured image, then time full frames through both kernel sets. An mGBA
 # measurement; no playback or hardware claim. ULI2's plan, not FLAC's.
@@ -693,8 +699,25 @@ uli-test: toolchain-check
 	# is its own cargo workspace, but cargo discovers the root `.cargo/config.toml`
 	# from the *cwd*, so building in place inherits the GBA target and `build-std`
 	# and fails with ~150 errors that say nothing about the code.
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE)
+	# Count the suites that actually reported a result, and refuse to pass below the
+	# expected number. A `cargo test` whose test binaries fail to *build* can still
+	# read as green through a pipe or a grep, which is how a broken S3 suite looked
+	# fine twice: the difference between "nothing failed" and "something ran" has to
+	# be asserted, not inferred from silence.
+	@out=$$(cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE) 2>&1); \
+	status=$$?; \
+	printf '%s\n' "$$out" | grep -E 'test result|^error' | sed 's/^/  /'; \
+	if [ $$status -ne 0 ]; then echo "uli-enc test run failed (exit $$status)"; exit 1; fi; \
+	suites=$$(printf '%s\n' "$$out" | grep -c 'test result: ok'); \
+	failed=$$(printf '%s\n' "$$out" | grep -c 'test result: FAILED'); \
+	if [ "$$failed" != 0 ]; then echo "uli-enc: $$failed suite(s) FAILED"; exit 1; fi; \
+	total=$$(printf '%s\n' "$$out" | sed -n 's/.*test result: ok\. \([0-9]*\) passed.*/\1/p' | awk '{t+=$$1} END {print t+0}'); \
+	total=$${total:-0}; \
+	if [ "$$total" -lt $(ULI_ENC_MIN_TESTS) ]; then \
+	  echo "uli-enc: $$total tests ran, expected >= $(ULI_ENC_MIN_TESTS)"; \
+	  echo "  a suite that fails to compile reports nothing, and nothing is not green"; exit 1; fi; \
+	echo "  uli-enc: $$suites suites, $$total tests, all passing"
 	@echo "uli-test passed: uli-lite compiles for $(TARGET) and is bit-exact on the host corpus; uli-enc round-trips through it"
 
 # Regenerate the reference's default tables blob — the byte-exactness witness the
