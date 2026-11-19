@@ -782,27 +782,53 @@ fn the_masters_head_is_digital_silence_in_the_fifos_own_bytes() {
 
 /// `text::show` rasterizes exactly the glyphs `include_font!` found in the tracked subset and draws
 /// them from a (4,4) origin, so a word outside the subset renders as nothing at all and one wider
-/// than a row runs off the screen. Both are checked here against the words the ROM actually presents:
-/// a rename to something we cannot draw fails in `make album-seam-test`, not on a cart.
+/// than a row runs off the screen. Both are checked here against every word the ROM actually
+/// presents: `PASSED`, `FAILED <TERM>` for each of `text::TERMS`, and each of those with the
+/// `PAUSED` suffix. A rename to something we cannot draw fails in `make album-seam-test`, not on a
+/// cart.
 #[test]
 fn the_verdict_words_are_inside_the_tracked_subset_and_one_row() {
-    for word in [album_player::text::PASSED, album_player::text::FAILED] {
+    use album_player::text::{self, TERMS};
+    let mut words = vec![
+        text::PASSED.to_string(),
+        text::FAILED.to_string(),
+        format!("{} {}", text::PASSED, text::PAUSED),
+        format!("{} {}", text::FAILED, text::PAUSED),
+    ];
+    for term in TERMS {
+        // The two shapes the ROM draws for one false term: `FAILED SKIP`, and the same with the
+        // paused suffix when the transport was frozen at teardown.
+        words.push(format!("{} {term}", text::FAILED));
+        words.push(format!("{} {term} {}", text::FAILED, text::PAUSED));
+    }
+    for word in &words {
         assert!(
-            album_player::text::renderable(word),
+            text::renderable(word),
             "{word:?} is not renderable: the tracked subset is U+{:04X}-U+{:04X} and a row is {} \
              columns ({} px at the font's 8 px cell)",
-            album_player::text::FIRST_GLYPH as u32,
-            album_player::text::LAST_GLYPH as u32,
-            album_player::text::COLUMNS,
-            album_player::text::COLUMNS * 8
+            text::FIRST_GLYPH as u32,
+            text::LAST_GLYPH as u32,
+            text::COLUMNS,
+            text::COLUMNS * 8
         );
     }
+    // The term list and the ROM's verdict line are one list: a term added to the screen without a
+    // name here (or a name here that the verdict never tests) is caught by the count and the
+    // longest-string check below.
+    assert_eq!(TERMS.len(), 12, "the verdict has twelve terms");
+    let longest = words
+        .iter()
+        .map(|word| word.chars().count())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        longest <= text::COLUMNS,
+        "the longest verdict string is {longest} columns"
+    );
     // Negative control, so a check that has only ever passed is not mistaken for proof: a glyph the
     // subset does not carry, and a word one column past the row, are both refused.
-    assert!(!album_player::text::renderable("PASSÃ‰"));
-    assert!(!album_player::text::renderable(
-        &"A".repeat(album_player::text::COLUMNS + 1)
-    ));
+    assert!(!text::renderable("PASSÃ‰"));
+    assert!(!text::renderable(&"A".repeat(text::COLUMNS + 1)));
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -1377,8 +1403,8 @@ fn the_lead_subtraction_cannot_underflow() {
 
 use album_player::pcm::{AlbumMeta, TrackMeta};
 use album_player::transport::{
-    FADE_PERIODS, FADE_SAMPLES, GAIN_UNITY, HandOffGain, SKIP_PRESS_TO_HANDOFF_PERIODS,
-    SKIP_PRIME_CHUNKS, State, Step, Transport, scale_byte,
+    FADE_PERIODS, FADE_SAMPLES, GAIN_UNITY, HandOffGain, SKIP_PRIME_CHUNKS, State, Step, Transport,
+    pause_to_freeze_bound, scale_byte, take_to_handoff_bound,
 };
 use gba_playback::playback::{Chunk, PushError, RingFeed, convert_frame, fifo_byte};
 
@@ -1538,6 +1564,12 @@ impl Pause {
 
 /// One skip, measured the way the ROM's wire watch measures it: the same stamps, the same
 /// subtractions, so these numbers and the ROM's `skip:` rows are one arithmetic rather than two.
+///
+/// **The latch is per record.** `silent_at`/`new_at`/`content_at` are stamped on this record by the
+/// feeder scan while `open` is set, so a second hand-off cannot retire, overwrite or orphan the first
+/// one's reading — the defect R13's second regression test drives (one global watch re-armed by every
+/// hand-off left the first record `open` with `content_at = 0`, and `content_at()` then read
+/// `0 − at`). The ROM's fix is the same shape: one wire-watch slot per in-flight record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Skip {
     from: usize,
@@ -1551,11 +1583,13 @@ struct Skip {
     content_at: u32,
     underflows_at: u32,
     underflows: u32,
-    /// Samples `truncate()` stepped over.
+    /// Samples `truncate()` stepped over, and samples the ring held when it ran: a skip that dropped
+    /// nothing is a fact about this depth (`ready() < CHUNK`), not a missing truncate.
     dropped: u32,
+    queued: u32,
     /// The period the main loop took the post on.
     press_at: u32,
-    /// The new track has not reached the wire yet.
+    /// The new track has not reached the wire yet: this record's own latch is still armed.
     open: bool,
 }
 
@@ -1581,8 +1615,11 @@ impl Skip {
     }
 
     /// Periods from the hand-off to the first chunk handed over after the cover countdown.
+    ///
+    /// `saturating_sub`, mirroring the ROM: an unresolved latch reads `0`, which fails the
+    /// content-point term as a number rather than wrapping to 4,294,966,995 in a log line.
     fn content_at(&self) -> u32 {
-        self.content_at.wrapping_sub(self.at)
+        self.content_at.saturating_sub(self.at)
     }
 
     /// Periods of the new track's own digital silence that follow the cover.
@@ -1686,16 +1723,65 @@ struct Model {
     /// Feeder periods served — the ROM's `handler_entries`, so a skip's stamps are its own arithmetic
     /// rather than a second convention.
     periods: u32,
-    /// The armed wire watch: the skip whose hand-off has happened and whose new track has not reached
-    /// the wire yet. `Some` is exactly the ROM's `watch_armed`.
-    watch: Option<Skip>,
-    /// Every skip this run measured, resolved or not.
+    /// Every transition whose hand-off has happened, resolved or not — each record carrying its own
+    /// wire latch, which is the ROM's per-record watch slot. A record with `open` set is one whose
+    /// latch is still armed, so the feeder scans *these*, not one global watch.
     skips: Vec<Skip>,
+    /// The most records that were ever armed at once: the ROM's pool is fixed ([`ROM_WATCH_SLOTS`]), so
+    /// a sequence that overlaps more transitions than that would be a named refusal on a cart rather
+    /// than a silent overwrite. The model keeps them all, so this is the parity check.
+    max_open: usize,
+    /// Whether a press waits for the wire watch to resolve before the next press is due
+    /// (`skip_after_fade`'s `until_wire`). The ROM's frame loop cannot wait: it takes a press as soon
+    /// as the transport is `Playing` again, which is `head_silence` periods before the watch resolves,
+    /// so `false` is the regime R13's hardware session was in and the fuzz's second pass drives it.
+    wait_for_wire: bool,
     /// §4.4's painted position, sampled once per period (§8d).
     paint: PaintModel,
     /// Σ samples every `truncate()` in this run stepped over: the ring's ledger minus the clock.
     dropped: u32,
+    /// The model's video clock, in frames: every feeder period spans [`PERIOD_FRAMES`] of them, and
+    /// a producer pass is [`Self::pass_periods`] periods. It exists because R13's press sequences
+    /// are spaced in video frames and a spacing shorter than a period has to land *inside* one.
+    video_frames: u32,
+    /// Feeder periods one producer frame costs — a main-loop pass. **2** is the measured value
+    /// (1.04–1.09 M cycles = 1.81–1.9 periods, the origin of the old fixed three-period bound); the
+    /// R13 calibration test moves it to 2×/3×/5× without touching any product constant.
+    pass_periods: u32,
+    /// Every feeder period's verdict, counted, so the period census closes:
+    /// `handoffs == primes + full_periods + tail_periods + starved_periods`.
+    full_periods: u32,
+    tail_periods: u32,
+    starved_periods: u32,
+    /// Σ samples the producer pushed, and Σ the cover pushed: the ring's `pushed = content + cover`.
+    content: u32,
+    cover: u32,
+    /// The run's visits, opened and closed where the ROM opens and closes one (`visits.begin` /
+    /// `visits.close`, `album_play_main.rs:3535-3557`), so the fuzz reads a per-visit ledger instead
+    /// of inferring one from the clock.
+    visits: Vec<VisitMark>,
+    /// Whether the last visit is still open: the ROM's `visits.close` is called once per visit, after
+    /// its drain or at the hand-off that ends it, and never twice.
+    visit_open: bool,
 }
+
+/// One visit, in the units the ROM's `Visit` records it in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VisitMark {
+    track: usize,
+    /// Where this visit's painted timeline starts: the hand-off's clock plus the cover.
+    base: u32,
+    /// The producer's frontier when the visit closed, in samples pulled for this visit.
+    pushed: u32,
+    /// The session clock at the close — the hand-off's instant, before the cover.
+    end: u32,
+}
+
+/// How many video frames one feeder period spans: `PERIOD_CYCLES / VIDEO_PERIOD_CYCLES` =
+/// 573,440 / 280,896 = 2.04, floored to **2** so every scripted spacing is an integer frame count.
+/// The rounding is the model's and is stated rather than hidden: it makes a spacing of 5 frames
+/// land just inside a period plus its boundary, which is the regime the fuzz is for.
+const PERIOD_FRAMES: u32 = 2;
 
 impl Model {
     fn new(total: u32) -> Self {
@@ -1724,11 +1810,48 @@ impl Model {
             gains: Vec::new(),
             pauses: Vec::new(),
             periods: 0,
-            watch: None,
             skips: Vec::new(),
+            max_open: 0,
+            wait_for_wire: true,
             paint: PaintModel::new(),
             dropped: 0,
+            video_frames: 0,
+            pass_periods: 2,
+            full_periods: 0,
+            tail_periods: 0,
+            starved_periods: 0,
+            content: 0,
+            cover: 0,
+            visits: Vec::new(),
+            visit_open: false,
         }
+    }
+
+    /// Open a visit: the track's length and the session clock its own timeline starts from — the
+    /// ROM's `paint.start` + `visits.begin`, which it performs together at every hand-off.
+    fn open_visit(&mut self, base: u32) {
+        self.paint.start(self.source.len(), base);
+        self.visits.push(VisitMark {
+            track: self.source.track,
+            base,
+            pushed: 0,
+            end: base,
+        });
+        self.visit_open = true;
+    }
+
+    /// Close the open visit at `end`, with the producer's frontier at that instant — the ROM's
+    /// `visits.close(producer.pushed as u32, hand_off.committed)`. A second call for the same visit is
+    /// a no-op, which is what makes "close it at the stop, whichever stop that was" safe.
+    fn close_visit(&mut self, end: u32) {
+        if !self.visit_open {
+            return;
+        }
+        if let Some(visit) = self.visits.last_mut() {
+            visit.pushed = self.source.at;
+            visit.end = end;
+        }
+        self.visit_open = false;
     }
 
     /// The boot prefill: fill the ring with no consumer (`Producer::prefill`).
@@ -1778,6 +1901,7 @@ impl Model {
             offset = end;
         }
         self.frames += 1;
+        self.content += n as u32;
         // The ROM sets `finished` in the same critical section as the final push, so the last short
         // chunk is a classified tail rather than an underflow. A track's own end is not the stream's:
         // only the last track's does that, which is what keeps a skip's old track from ending the run.
@@ -1822,8 +1946,13 @@ impl Model {
         );
         // Read *before* the gain spends this chunk's cover count, exactly as the ROM's feeder does: a
         // countdown of one means this is the cover's last chunk, so the next period is the new
-        // track's own first.
-        let last_cover = self.watch.is_some_and(|w| w.content_at == 0)
+        // track's own first. `content_at == 0` is the per-record "waiting for its content point"
+        // sentinel: only an armed record that has not been stamped asks, and at most one hand-off's
+        // cover can be counting at a time (a second one needs the ramp back, which spends it).
+        let last_cover = self
+            .skips
+            .iter()
+            .any(|skip| skip.open && skip.content_at == 0)
             && self.transport.gain().held_chunks() == 1;
         let (mut l, mut r) = ([0u8; CHUNK], [0u8; CHUNK]);
         let verdict = self.feed.take_chunk(&mut l, &mut r, CHUNK, self.finished);
@@ -1834,15 +1963,23 @@ impl Model {
         self.handoffs += 1;
         self.gains.push(self.transport.gain().gain());
         match verdict {
-            Chunk::Full => self.committed += CHUNK as u32,
-            Chunk::Tail { real } => self.committed += real as u32,
+            Chunk::Full => {
+                self.full_periods += 1;
+                self.committed += CHUNK as u32;
+            }
+            Chunk::Tail { real } => {
+                self.tail_periods += 1;
+                self.committed += real as u32;
+            }
             Chunk::Starved => {
+                self.starved_periods += 1;
                 if !self.finished {
                     self.underflows += 1;
                 }
             }
         }
         self.periods += 1;
+        self.video_frames += PERIOD_FRAMES;
         // The wire, after the gain: `0x00` in every byte is the FIFO's own silence verdict, and
         // `take_chunk` zero-fills what a `Starved`/`Tail` chunk did not fill.
         let silent = l.iter().all(|&b| b == 0) && r.iter().all(|&b| b == 0);
@@ -1852,32 +1989,34 @@ impl Model {
         verdict
     }
 
-    /// One reading of the ROM's wire watch (`SkipRecord`'s two stamps), then close the skip if the
-    /// new track has reached the wire.
+    /// One reading of the ROM's wire watch (`SkipRecord`'s two stamps) for **every** armed record,
+    /// then close each record whose own new track has reached the wire.
+    ///
+    /// Every armed record is scanned, not just the newest: that is the whole of the fix. A record's
+    /// stamps are its own, so a later hand-off's latch has nothing to overwrite.
     fn watch_update(&mut self, last_cover: bool, silent: bool) {
-        let Some(watch) = self.watch.as_mut() else {
-            return;
-        };
-        if last_cover {
-            // The entry after the one that spent the last cover count: the ROM computes the same
-            // index from `handler_entries + 2` inside a feeder entry whose counter has not yet been
-            // incremented, and both are the *schedule's* content point, not the wire's.
-            watch.content_at = self.periods + 1;
-        }
-        if watch.new_at == 0 {
-            if watch.silent_at == 0 {
-                if silent {
-                    watch.silent_at = self.periods;
-                }
-            } else if !silent {
-                watch.new_at = self.periods;
+        let now = self.periods;
+        let underflows = self.underflows;
+        for skip in self.skips.iter_mut().filter(|skip| skip.open) {
+            if last_cover && skip.content_at == 0 {
+                // The entry after the one that spent the last cover count: the ROM computes the same
+                // index from `handler_entries + 2` inside a feeder entry whose counter has not yet
+                // been incremented, and both are the *schedule's* content point, not the wire's.
+                skip.content_at = now + 1;
             }
-        }
-        watch.underflows = self.underflows;
-        if watch.new_at != 0 {
-            let mut resolved = self.watch.take().expect("just borrowed");
-            resolved.open = false;
-            *self.skips.last_mut().expect("armed by press_skip") = resolved;
+            if skip.new_at == 0 {
+                if skip.silent_at == 0 {
+                    if silent {
+                        skip.silent_at = now;
+                    }
+                } else if !silent {
+                    skip.new_at = now;
+                }
+            }
+            skip.underflows = underflows;
+            if skip.new_at != 0 {
+                skip.open = false;
+            }
         }
     }
 
@@ -1911,13 +2050,33 @@ impl Model {
             "a pause from Playing must fade out"
         );
         let committed_at_toggle = self.committed;
+        self.fade_to_freeze(committed_at_toggle)
+    }
+
+    /// The feeder periods after a pause's `toggle` returned [`Step::FadeOut`]: serve until the gain
+    /// has reached silence and the chunk carrying the ramp has been played out, then record the
+    /// freeze. Split from [`Self::press_pause`] so the fuzz can take the transport's own verdict on
+    /// a press and then run the same continuation.
+    fn fade_to_freeze(&mut self, committed_at_toggle: u32) -> Pause {
+        // The same expression the ROM gates its pause rows against, from this model's own pass
+        // parameter — so no pause test in this file runs against a cap copied out of an emulator. The
+        // loop here takes its turn every period, which is the shortest pass a machine can have; the
+        // case where a pass spans several periods is `a_pause_freezes_inside_the_bound_its_own_pass_
+        // length_supports`, which drives `tick()` at that cadence instead.
+        let bound = pause_to_freeze_bound(self.pass_periods);
         let mut fade_periods = 0;
         loop {
             self.period();
             fade_periods += 1;
             match self.transport.tick() {
                 Step::Freeze => break,
-                Step::Idle => assert!(fade_periods < 4, "the fade never reached silence"),
+                Step::Idle => assert!(
+                    fade_periods <= bound,
+                    "the fade never reached silence: {} periods against a bound of {} for a {}-period pass",
+                    fade_periods,
+                    bound,
+                    self.pass_periods
+                ),
                 other => panic!("unexpected step {other:?}"),
             }
         }
@@ -1929,6 +2088,13 @@ impl Model {
             resumed_from: 0,
             frozen_frames: 0,
         };
+        assert!(
+            pause.fade_periods <= bound,
+            "the freeze took {} feeder periods; this model's bound is {} (a {}-period pass)",
+            pause.fade_periods,
+            bound,
+            self.pass_periods
+        );
         self.pauses.push(pause);
         self.pauses.last().cloned().expect("just pushed")
     }
@@ -1943,11 +2109,16 @@ impl Model {
             Step::Prime,
             "a toggle from Paused must ask for the re-prime"
         );
+        self.prime_resume(from, paused_frames);
+    }
+
+    /// The prime after a resume's `toggle` returned [`Step::Prime`]: the primed chunk is the ramp's
+    /// first chunk, and 256 < 560 completes the ramp inside it.
+    fn prime_resume(&mut self, from: u32, paused_frames: u32) {
         assert!(
             self.prime(),
             "the ring's head must supply the prime's chunk"
         );
-        // The primed chunk is the ramp's first chunk, and 256 < 560 completes the ramp inside it.
         assert_eq!(self.transport.tick(), Step::Idle);
         assert_eq!(
             self.transport.state(),
@@ -2010,12 +2181,13 @@ impl Model {
             0,
             "the ring holds a partial chunk after a cover push"
         );
+        self.cover += CHUNK as u32;
     }
 
     /// One direction press and the loop's frame slice around it, as the ROM performs it.
     ///
     /// `pass_periods` is how many feeder periods the pass's own producer decode takes — a pass is one
-    /// producer frame of decode, so this is the quantity `SKIP_PRESS_TO_HANDOFF_PERIODS` bounds. The
+    /// producer frame of decode, so this is the quantity `take_to_handoff_bound` takes. The
     /// press is taken at the top of the pass, the fade is spent by the feeder inside it, and the
     /// hand-off runs at the decision at its end; `pass_periods` therefore *is* the press→hand-off
     /// wait when the pass is long enough, which is what makes the bound checkable here rather than
@@ -2029,13 +2201,33 @@ impl Model {
     /// Returns the resolved skip, so a caller asserts on numbers rather than on side effects.
     fn press_skip(&mut self, to: usize, primed_chunks: u32, pass_periods: u32) -> Skip {
         assert!(pass_periods >= 1, "a pass with no decode cannot fade");
-        let from = self.source.track;
-        let press_at = self.periods;
         assert_eq!(
             self.transport.skip(),
             Step::FadeOut,
             "a skip from Playing must fade out"
         );
+        self.skip_after_fade(to, primed_chunks, pass_periods, true)
+    }
+
+    /// A skip's fade, hand-off and settle, for a press whose `skip()` call has already returned
+    /// [`Step::FadeOut`] — split from [`Self::press_skip`] so a caller can take the transport's own
+    /// verdict on a press and then run the same continuation.
+    ///
+    /// `until_wire` says where the transition ends. `true` is a press at a human cadence: the model
+    /// waits for the wire watch to resolve, which is what makes every number it reports a reading
+    /// rather than a prediction. `false` stops as soon as the transport is [`State::Playing`] again
+    /// — where the ROM's frame loop is free to take the *next* press — and that is the window R13's
+    /// second regression test drives, because a track whose own head is digital silence keeps the
+    /// wire watch open for `head_silence` periods after the ramp back has completed.
+    fn skip_after_fade(
+        &mut self,
+        to: usize,
+        primed_chunks: u32,
+        pass_periods: u32,
+        until_wire: bool,
+    ) -> Skip {
+        let from = self.source.track;
+        let press_at = self.periods;
         let mut served = 0;
         for _ in 0..pass_periods {
             self.period();
@@ -2046,7 +2238,7 @@ impl Model {
                 Step::SkipHandOff => break,
                 Step::Idle => {
                     assert!(
-                        served < SKIP_PRESS_TO_HANDOFF_PERIODS,
+                        served < take_to_handoff_bound(pass_periods),
                         "the deferral never let the hand-off happen"
                     );
                     self.period();
@@ -2065,8 +2257,14 @@ impl Model {
             self.transport.begin_reprime(primed_chunks),
             "the transport was not in its fade"
         );
+        let queued = self.feed.ready() as u32;
         let dropped = self.truncate();
         let committed = self.committed;
+        // `transition_hand_off` clears `finished` in this same section (`album_play_main.rs:1737`): it
+        // marked the *old* visit's last push, and leaving it set would classify the new track's first
+        // starved period as a `Tail` and hide it from the underflow count.
+        self.finished = false;
+        self.close_visit(committed);
         self.push_cover();
         for _ in 1..primed_chunks {
             self.push_cover();
@@ -2080,9 +2278,11 @@ impl Model {
         );
 
         // The mark is taken **here**, inside the hand-off's section — the same instant the ROM stamps
-        // `watch_at` — so the fade-out and the stale-but-silent periods it cost are behind it.
+        // `watch_at` — so the fade-out and the stale-but-silent periods it cost are behind it. The
+        // record this arms is the only one these stamps belong to: the latch is per record.
         let at = self.periods;
-        self.watch = Some(Skip {
+        let index = self.skips.len();
+        self.skips.push(Skip {
             from,
             to,
             at,
@@ -2092,25 +2292,38 @@ impl Model {
             underflows_at: self.underflows,
             underflows: self.underflows,
             dropped,
+            queued,
             press_at,
             open: true,
         });
-        self.skips.push(self.watch.expect("just armed"));
+        self.max_open = self
+            .max_open
+            .max(self.skips.iter().filter(|skip| skip.open).count());
 
         // Step 3: the seam call, spent behind the cover, and the new visit's timeline starts after it.
         self.source
             .start_track(to)
             .expect("the skip's target track exists");
         let base = committed + primed_chunks * CHUNK as u32;
-        self.paint.start(self.source.len(), base);
+        self.open_visit(base);
 
-        // The wire has to resolve it: the caller reads the numbers, not a promise. The loop is the
-        // ROM's — produce while a whole frame fits, serve a period, then the pass's transport decision
-        // — because a re-prime that is not fed would starve and book an underflow that belongs to the
-        // model, and a transport left in `Repriming` would refuse the next press.
-        while self.watch.is_some() || self.transport.state() != State::Playing {
+        self.settle(if until_wire { Some(index) } else { None });
+        self.skips[index]
+    }
+
+    /// Run a transition's tail: produce while a whole frame fits, serve a period, then take the
+    /// pass's transport decision.
+    ///
+    /// A re-prime that is not fed would starve and book an underflow that belongs to the model, and a
+    /// transport left in `Repriming` would refuse the next press — so the loop always feeds.
+    /// `wait_for` is the record whose own latch the caller must see resolved (`None` for a caller that
+    /// only needs the transport playing again, which is where the ROM's frame loop can take a press).
+    fn settle(&mut self, wait_for: Option<usize>) {
+        while wait_for.is_some_and(|index| self.skips[index].open)
+            || self.transport.state() != State::Playing
+        {
             if self.feed.free_samples() >= FRAME {
-                self.produce();
+                assert!(self.produce(), "the new track ended inside the transition");
             } else {
                 self.period();
             }
@@ -2120,7 +2333,6 @@ impl Model {
                 "an unexpected step while the ramp back was completing"
             );
         }
-        self.skips.last().copied().expect("resolved above")
     }
 
     /// `RingFeed::truncate()`, with the run's own Σ of what it stepped over: the term the ledger and the
@@ -2174,6 +2386,9 @@ impl Model {
         let from = self.source.track;
         let next = from + 1;
         if next >= self.source.tracks.len() {
+            // The ROM closes the visit after its drain, before the verdict — the album's last visit
+            // is no exception (`album_play_main.rs:3696`).
+            self.close_visit(self.committed);
             return VisitEnd::AlbumEnd;
         }
 
@@ -2206,14 +2421,17 @@ impl Model {
             "the transport was not in its transition"
         );
         let committed = self.committed;
+        self.close_visit(committed);
         self.push_cover();
         for _ in 1..SKIP_PRIME_CHUNKS {
             self.push_cover();
         }
         // The watch is the skip ledger's, reused here to answer the one question a track end
-        // raises about the wire: is anything of the old track heard after the hand-off?
+        // raises about the wire: is anything of the old track heard after the hand-off? Its latch is
+        // this record's own, on the same rule as a press's (see [`Skip`]).
         let at = self.periods;
-        self.watch = Some(Skip {
+        let index = self.skips.len();
+        self.skips.push(Skip {
             from,
             to: next,
             at,
@@ -2223,30 +2441,22 @@ impl Model {
             underflows_at: self.underflows,
             underflows: self.underflows,
             dropped: 0,
+            queued: 0,
             press_at,
             open: true,
         });
-        self.skips.push(self.watch.expect("just armed"));
+        self.max_open = self
+            .max_open
+            .max(self.skips.iter().filter(|skip| skip.open).count());
         self.finished = false;
         self.source
             .start_track(next)
             .expect("the advance's target track exists");
         let base = committed + SKIP_PRIME_CHUNKS * CHUNK as u32;
-        self.paint.start(self.source.len(), base);
+        self.open_visit(base);
 
-        while self.watch.is_some() || self.transport.state() != State::Playing {
-            if self.feed.free_samples() >= FRAME {
-                assert!(self.produce(), "the next track ended inside the transition");
-            } else {
-                self.period();
-            }
-            assert_eq!(
-                self.transport.tick(),
-                Step::Idle,
-                "an unexpected step while the advance's ramp back was completing"
-            );
-        }
-        VisitEnd::Advance(self.skips.last().copied().expect("resolved above"))
+        self.settle(Some(index));
+        VisitEnd::Advance(self.skips[index])
     }
 }
 
@@ -2752,6 +2962,100 @@ fn a_pause_freezes_the_clock_and_the_ring_head_so_resume_drops_no_sample() {
     let before = paint_position(model.committed, TOTAL);
     model.run_periods(4);
     assert!(paint_position(model.committed, TOTAL) >= before);
+}
+
+/// **The pause's own leg gets a bound of the run's own making, and the pass length is in it.**
+///
+/// Every other leg of §4.4's D2 chain carries a bound; the pause's was recorded — the ROM's
+/// `PauseRecord::fade_periods` is the feeder's entry count at the freeze minus its entry count at the
+/// toggle — and compared to nothing, so `pause=true` meant `gain == 0 && dropped == 0`, which the
+/// gate's own summary already called "both arms of a clock-delta tautology". This drives the pause at
+/// four pass lengths and holds the observed leg inside `pause_to_freeze_bound(pass)`.
+///
+/// **The loop is taken once per pass, on purpose.** `Step::Freeze` is only observable from `tick()`,
+/// and `tick()` only ever runs inside a main-loop pass — which is the whole difference between this
+/// leg and a skip's hand-off, performed by the period ISR on its own cadence. So a machine whose
+/// producer frame spans `pass` feeder periods cannot *freeze* any sooner than its next turn, however
+/// fast the ramp ran: the leg is the later of the deferral's floor and the loop's cadence, and the
+/// readings below say exactly that (`max(pass, FADE_PERIODS)`), which is what makes the pass term in
+/// the bound a measured quantity rather than slack. A run that lost the `served_silent` latch, or a
+/// ramp that never reached silence, breaks the equality; a loop that stopped calling `tick()` breaks
+/// the inequality.
+#[test]
+fn a_pause_freezes_inside_the_bound_its_own_pass_length_supports() {
+    for pass in [1u32, 2, 3, 8] {
+        let mut model = Model::new(TOTAL);
+        model.pass_periods = pass;
+        model.prefill();
+        assert!(model.prime());
+        model.run_periods(6);
+
+        let bound = pause_to_freeze_bound(pass);
+        assert_eq!(
+            model.transport.toggle(true),
+            Step::FadeOut,
+            "a pause from Playing must fade out (pass {pass})"
+        );
+
+        let mut periods = 0;
+        loop {
+            // The chain keeps running while `Pausing` — the ramp plays out on the audio clock — but
+            // the main loop's turn, and so the only observable `tick()`, comes once per pass.
+            for _ in 0..pass {
+                model.period();
+                periods += 1;
+            }
+            match model.transport.tick() {
+                Step::Freeze => break,
+                Step::Idle => assert!(
+                    periods < bound,
+                    "a {pass}-period pass took {periods} periods to freeze; the bound is {bound}"
+                ),
+                other => panic!("unexpected step {other:?} for a pause (pass {pass})"),
+            }
+        }
+        assert_eq!(
+            model.transport.state(),
+            State::Paused,
+            "the freeze must move the state (pass {pass})"
+        );
+        assert_eq!(
+            periods,
+            pass.max(FADE_PERIODS),
+            "the leg must be the later of the deferral's floor and the loop's cadence, not a third number (pass {pass})"
+        );
+        assert!(
+            periods <= bound,
+            "a {pass}-period pass froze in {periods} periods against a bound of {bound}"
+        );
+    }
+}
+
+/// The bound is a function of a measurement, never a number copied out of this emulator (R13).
+///
+/// Pinned so the shape cannot rot back into a constant: it grows one period per period of pass, it
+/// floors at the deferral's own period count plus the alignment period, and it can never sit below
+/// `take_to_handoff_bound` — a pause's leg contains the same ramp and the same "the ramped chunk must
+/// be served" condition, and adds the loop's turn on top. For reference, at the pass this repo measures
+/// on mGBA (3 periods) the value is 6 where the literal that once guarded the model's own continuation
+/// was 4: the same class of error, wearing an integer instead of a threshold.
+#[test]
+fn the_pause_bound_moves_with_the_machine_it_is_measured_on() {
+    assert_eq!(pause_to_freeze_bound(0), FADE_PERIODS + 1);
+    for pass in 1..=12u32 {
+        assert_eq!(
+            pause_to_freeze_bound(pass),
+            pause_to_freeze_bound(pass - 1) + 1,
+            "the bound must move one period per period of pass, because the loop's turn is one pass"
+        );
+        assert!(
+            pause_to_freeze_bound(pass) >= take_to_handoff_bound(pass),
+            "a pause's leg carries the same deferral as a skip's hand-off, so it cannot be bounded tighter"
+        );
+    }
+    // A pass measured at 2 periods here and at 4 periods on a real cart both stay inside their own
+    // bound; the old literal could not tell those machines apart, which is why it was not a bound.
+    assert!(pause_to_freeze_bound(2) < pause_to_freeze_bound(4));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3274,7 +3578,7 @@ fn the_painted_position_keeps_the_invariants_across_a_skip() {
 ///
 /// What the *app* owns is the press → hand-off wait, and that one is bounded: a pass is one producer
 /// frame of decode, the feeder spends one period fading inside it, so the wait is the pass's length in
-/// periods and `SKIP_PRESS_TO_HANDOFF_PERIODS` is the ceiling. The last block shows the bound can fail,
+/// periods and `take_to_handoff_bound(pass)` is the ceiling. The last block shows the bound can fail,
 /// which is what makes it a gate rather than a decoration.
 #[test]
 fn a_skip_onto_a_track_that_opens_silent_reads_as_the_tracks_own_lead_in() {
@@ -3320,8 +3624,10 @@ fn a_skip_onto_a_track_that_opens_silent_reads_as_the_tracks_own_lead_in() {
         "the track's own head is not the lead-in the skip log reported"
     );
 
-    // The frame loop's bound, in the units the ROM gates it in: the wait is the pass's length.
-    for pass in 1..=SKIP_PRESS_TO_HANDOFF_PERIODS {
+    // The frame loop's bound, in the units the ROM gates it in: the wait is the pass's length, and
+    // the bound is derived from that same pass (R13: a fixed period count was the emulator's pass
+    // rounded up, and would fail a correct slower cart).
+    for pass in 1..=6 {
         let mut m = Model::album(&[SKIP_TRACK; 2], 0);
         m.prefill();
         assert!(m.prime());
@@ -3332,16 +3638,15 @@ fn a_skip_onto_a_track_that_opens_silent_reads_as_the_tracks_own_lead_in() {
             pass.max(FADE_PERIODS),
             "a {pass}-period pass did not set the press→hand-off wait (floor: the {FADE_PERIODS}-period deferral)"
         );
-        assert!(skip.press_to_handoff() <= SKIP_PRESS_TO_HANDOFF_PERIODS);
+        assert!(skip.press_to_handoff() <= take_to_handoff_bound(pass));
     }
-    let mut slow = Model::album(&[SKIP_TRACK; 2], 0);
-    slow.prefill();
-    assert!(slow.prime());
-    slow.run_periods(4);
-    let over = slow.press_skip(1, SKIP_PRIME_CHUNKS, SKIP_PRESS_TO_HANDOFF_PERIODS + 1);
+    // The bound is exactly one pass plus the deferral, so a slower *machine* stays inside it (that
+    // is the fix's purpose) while a loop that needs a *second* pass does not — which is the shape the
+    // ROM's `ok()` refuses. Stated arithmetically so the gate is not a decoration.
+    assert_eq!(take_to_handoff_bound(6), 7);
     assert!(
-        over.press_to_handoff() > SKIP_PRESS_TO_HANDOFF_PERIODS,
-        "a pass longer than the bound still passed it, so the bound gates nothing"
+        2 * 6 > take_to_handoff_bound(6),
+        "a hand-off that needed two passes would pass the one-pass bound"
     );
 }
 
@@ -3475,5 +3780,1315 @@ fn the_albums_last_track_end_posts_album_end_and_restarts_nothing() {
     assert_eq!(
         model.paint.regressions, 0,
         "the painted position ran backwards at the album's end"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// 8f. R13's property fuzz: any press sequence, any spacing (ALBUM-PLAYER.md §14 R13)
+// ---------------------------------------------------------------------------------------------
+//
+// The three scripted scenarios (§8d, §8e and the ROM's REPLAY scripts) each answer a question that
+// was already known when the script was written. R13 is the opposite: a human pressed keys in a
+// pattern nobody scripted and the cart ended in `FAILED`. So this section drives the same model with
+// random press sequences and asserts the properties that must hold for *any* of them — never a
+// scenario's numbers. A fuzz over `limit=16` would only re-find the caps §14 already names; the
+// properties below are the audio and ledger claims.
+//
+// A failure here means a transport/ledger property that some press sequence breaks, shrunk to the
+// minimal prefix that still fails and printed with the seed that draws it. It is **not** a claim
+// about the cartridge: §10.5/R3's discipline is that a green here is a headless green, and AP-7
+// owns hardware. What the fuzz cannot reach is stated where it matters — see the note on
+// `skip_after_fade`'s `until_wire`, and the two `#[ignore]`d regressions at the end of this section,
+// which cover the two defects R13's investigation already proved.
+
+/// `VISIT_LOG` and `SKIP_LOG` (`album_play_main.rs:260,264`): the two bounded logs R13's suspect
+/// (b) is about, copied because the ROM's ledger lives in a bin that a host gate cannot link. The
+/// next round lifts the ledger into the library, and then these literals go.
+const ROM_VISIT_LOG: usize = 24;
+const ROM_SKIP_LOG: usize = 16;
+
+/// `WATCH_SLOTS` — the ROM's wire-watch pool, one slot per in-flight transition, and the same depth as
+/// `SKIP_LOG` so every transition that can own a row owns its own latch.
+const ROM_WATCH_SLOTS: usize = ROM_SKIP_LOG;
+
+/// The fuzz's album: four tracks, two of them not a whole number of chunks so a visit's last period
+/// is a classified `Tail` rather than a full chunk. Its length is chosen so a case's script ends at
+/// the album's own end (or at [`CASE_FRAMES`]) inside the gate's time budget.
+const FUZZ_TRACKS: [u32; 4] = [
+    120 * CHUNK as u32,
+    96 * CHUNK as u32 + 240,
+    132 * CHUNK as u32,
+    108 * CHUNK as u32 + 400,
+];
+
+/// The video-frame budget one case may spend: the album is sized to end inside it, so a script is
+/// clamped rather than cut mid-transition.
+const CASE_FRAMES: u32 = 1_200;
+
+/// The widest inter-press gap the script asks for, in video frames — 600 frames ≈ 10 s, six times a
+/// track of this album, so a gap that wide straddles a track's end.
+const MAX_SPACING: u32 = 600;
+
+/// The step cap: a case that has not stopped by here is wedged, which is a violation, not a budget.
+const CASE_STEPS: u32 = 20_000;
+
+/// The fuzz's seeds, and the cases per seed — 8 × 256 = **2,048** cases per run. A failure prints
+/// its case's seed and its script, and `XorShift32::new(seed)` draws that script again on any
+/// machine: the generator's state is the whole of its state.
+const FUZZ_SEEDS: [u32; 8] = [
+    0x5EED_0001,
+    0x5EED_7A3B,
+    0x1BAD_B002,
+    0xC0DE_2222,
+    0x0FF1_CE03,
+    0xD15C_0004,
+    0xB0A7_0005,
+    0xF00D_0006,
+];
+const CASES_PER_SEED: u32 = 256;
+
+/// The fuzz's PRNG: xorshift32, host-only, no dependency. §6's no-divide rule is about the ROM's
+/// measured paths; this multiplies nothing and divides only here.
+struct XorShift32(u32);
+
+impl XorShift32 {
+    /// A stream from `seed`. Zero is xorshift's fixed point, so it is remapped rather than rejected
+    /// — every seed of [`FUZZ_SEEDS`] (and every per-case seed derived from one) is usable.
+    const fn new(seed: u32) -> Self {
+        Self(if seed == 0 { 0x9E37_79B9 } else { seed })
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.0 = x;
+        x
+    }
+
+    /// A value in `0..n`.
+    fn below(&mut self, n: u32) -> u32 {
+        assert!(n > 0, "an empty range has no draw");
+        self.next_u32() % n
+    }
+}
+
+/// The four presses §5.3 maps to a now-playing action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Press {
+    Next,
+    Prev,
+    Restart,
+    Pause,
+}
+
+impl Press {
+    fn draw(rng: &mut XorShift32) -> Self {
+        match rng.below(4) {
+            0 => Press::Next,
+            1 => Press::Prev,
+            2 => Press::Restart,
+            _ => Press::Pause,
+        }
+    }
+}
+
+/// One case: the presses and the video-frame gap before each. `seed` is carried so a violation can
+/// print the reproduction without a second argument.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Script {
+    seed: u32,
+    presses: Vec<Press>,
+    spacings: Vec<u32>,
+}
+
+impl Script {
+    /// Draw a case: 1..=40 presses, and each gap drawn uniformly over 5..=cap where `cap` is the
+    /// case budget shared out over the presses (clamped to [`MAX_SPACING`]).
+    ///
+    /// The sharing is the one compromise this fuzz makes and it is stated rather than hidden: a
+    /// 40-press script with 600-frame gaps spans four minutes of audio and would not fit the gate's
+    /// 30 s, so a long script gets short gaps (down to 5 frames — shorter than a producer pass and
+    /// shorter than a fade) and a short script gets the whole 5..=600 range. Both regimes matter for
+    /// R13 and both are covered on every run; which one a given case is in is a property of its
+    /// press count, not of chance.
+    fn draw(seed: u32) -> Self {
+        let mut rng = XorShift32::new(seed);
+        let n = 1 + rng.below(40);
+        let cap = (CASE_FRAMES / n).clamp(8, MAX_SPACING);
+        let mut presses = Vec::with_capacity(n as usize);
+        let mut spacings = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            presses.push(Press::draw(&mut rng));
+            spacings.push(5 + rng.below(cap - 4));
+        }
+        Self {
+            seed,
+            presses,
+            spacings,
+        }
+    }
+
+    /// The first `n` presses, with their gaps.
+    fn prefix(&self, n: usize) -> Self {
+        Self {
+            seed: self.seed,
+            presses: self.presses[..n].to_vec(),
+            spacings: self.spacings[..n].to_vec(),
+        }
+    }
+}
+
+/// One property that did not hold, with the numbers that show it.
+struct Violation {
+    property: &'static str,
+    detail: String,
+}
+
+/// What the drive loop must decide after a step — the ROM's frame loop's own two branches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Drive {
+    /// A pass or a period was served.
+    Stepped,
+    /// The visit's producer finished and its ring drained: the loop's end-of-visit decision.
+    VisitEnd,
+}
+
+/// How a case stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stop {
+    AlbumEnd,
+    /// The case's frame budget, with the script or the album unfinished.
+    Budget,
+    /// The step cap. A wedge is a violation, not a budget.
+    Wedge,
+}
+
+/// The transport's verdict on one press, as the ROM's two entries give it.
+enum Pressed {
+    /// A direction press the transport took: the hand-off it measured.
+    Skip(Skip),
+    /// A pause: the toggle's `FadeOut`, taken through to the freeze.
+    Freeze,
+    /// A resume: the toggle's `Prime`, taken through to the re-armed chain.
+    Resume,
+    /// The transport refused it (`Step::Ignored`): counted, never dropped in silence.
+    Refused,
+}
+
+/// One case's findings and the counts R13's classification reads.
+struct CaseReport {
+    violations: Vec<Violation>,
+    presses: u32,
+    accepted: u32,
+    refused: u32,
+    freeze_presses: u32,
+    resume_presses: u32,
+    skip_presses: u32,
+    advances: u32,
+    /// Pressed skips that legitimately dropped nothing (`truncate()` of a drained ring) — R13's
+    /// suspect (c): the ROM gates `dropped` at `1..=19040`, so a correct skip can fail that gate.
+    /// Each is kept with the ring depth it found, which is the fact that decides the question.
+    dropped_zero: u32,
+    dropped_zero_rows: Vec<DroppedZero>,
+    /// Skip records whose own latch the wire never resolved: the ROM reads `content_at = 0 − at` for
+    /// one, so a non-zero count here is the defect R13's second regression test pins.
+    unresolved: u32,
+    visits: usize,
+    skips: usize,
+    /// The run's visit rows, and the producer's frontier: what the ROM's `Visits` totals are summed
+    /// from, so a test can apply the ROM's own arithmetic to this run's numbers.
+    marks: Vec<VisitMark>,
+    content_pushed: u32,
+    /// The three figures the hand-off ledger is a sum of: the cover's chunks, the starved periods, and
+    /// every hand-off the run made. A test applies the ROM's `expected_hand_offs` to these.
+    cover: u32,
+    starved: u32,
+    hand_offs: u32,
+    /// The most transitions that were armed at once — the ROM's wire-watch pool's depth requirement.
+    max_open: usize,
+}
+
+/// One pressed skip that stepped over no samples, with the ring depth it found. `dropped >= 1` is
+/// `SkipRecord::dropped_is_a_truncate`'s claim (`album_play_main.rs:1990`); a skip whose `queued` is
+/// under one chunk cannot satisfy it, so these rows are what tells a property from a bound that
+/// encodes the gate's own press spacing.
+struct DroppedZero {
+    seed: u32,
+    /// The press's index in its script, and the gap the script gave it, in video frames.
+    press: usize,
+    gap: u32,
+    /// Feeder periods between this hand-off's mark and the previous record's: how deep the ring could
+    /// be, given the transition cadence.
+    hand_off_gap: u32,
+    /// Samples the ring held when the truncate ran.
+    queued: u32,
+}
+
+impl CaseReport {
+    fn new() -> Self {
+        Self {
+            violations: Vec::new(),
+            presses: 0,
+            accepted: 0,
+            refused: 0,
+            freeze_presses: 0,
+            resume_presses: 0,
+            skip_presses: 0,
+            advances: 0,
+            dropped_zero: 0,
+            dropped_zero_rows: Vec::new(),
+            unresolved: 0,
+            visits: 0,
+            skips: 0,
+            marks: Vec::new(),
+            content_pushed: 0,
+            cover: 0,
+            starved: 0,
+            hand_offs: 0,
+            max_open: 0,
+        }
+    }
+
+    fn violate(&mut self, property: &'static str, detail: String) {
+        self.violations.push(Violation { property, detail });
+    }
+}
+
+impl Model {
+    /// One iteration of the ROM's §4.5 frame loop, at the granularity the video clock gives it.
+    ///
+    /// A producer pass is one frame of decode (one `produce`) plus the feeder periods that elapse
+    /// while it runs — [`Self::pass_periods`] of them, which is what makes a pass's cost a parameter
+    /// rather than an assumption (R13's calibration question). Every other step is one period, and a
+    /// frozen chain costs video frames and nothing else. The gates are the ROM's: the producer runs
+    /// only in a feeding state with room for a whole frame, and a drained visit is the loop's own
+    /// decision, returned rather than taken so the caller can check the visit's last painted value.
+    fn drive_step(&mut self) -> Drive {
+        if self.transport.state() == State::Paused {
+            self.video_frames += 1;
+            return Drive::Stepped;
+        }
+        if self.source.at == self.source.len()
+            && self.feed.ready() == 0
+            && self.finished
+            && self.transport.state() == State::Playing
+        {
+            return Drive::VisitEnd;
+        }
+        if self.transport.state().feeds() && !self.finished && self.feed.free_samples() >= FRAME {
+            // The source ending on this pull is the visit's end, not an error: `produce` sets
+            // `finished` on the zero-length pull, exactly where the ROM sets it in the last push's
+            // own critical section.
+            self.produce();
+            for _ in 0..self.pass_periods {
+                self.period();
+            }
+        } else {
+            self.period();
+        }
+        Drive::Stepped
+    }
+
+    /// Take one press at the top of a pass, and return the transport's own verdict on it.
+    ///
+    /// The verdict is the transport's, not the driver's: `toggle` and `skip` are the two entries the
+    /// ROM has, and their `Ignored` arm is the count of refused presses (§10.5: a silently dropped
+    /// press is what the honesty discipline forbids). A direction press is taken as one pass's worth
+    /// of decode ([`Self::pass_periods`]) — the ROM's press is at the top of a pass, so that is its
+    /// press→hand-off wait.
+    fn drive_press(&mut self, press: Press) -> Pressed {
+        let wait_for_wire = self.wait_for_wire;
+        match press {
+            Press::Pause => {
+                let at = self.committed;
+                match self.transport.toggle(true) {
+                    Step::FadeOut => {
+                        self.fade_to_freeze(at);
+                        Pressed::Freeze
+                    }
+                    Step::Prime => {
+                        self.prime_resume(at, 0);
+                        Pressed::Resume
+                    }
+                    Step::Ignored => Pressed::Refused,
+                    other => panic!("a toggle answered {other:?}"),
+                }
+            }
+            _ => {
+                if self.transport.skip() != Step::FadeOut {
+                    return Pressed::Refused;
+                }
+                let n = self.source.tracks.len();
+                let to = match press {
+                    Press::Next => (self.source.track + 1) % n,
+                    Press::Prev => (self.source.track + n - 1) % n,
+                    Press::Restart => self.source.track,
+                    Press::Pause => unreachable!("handled above"),
+                };
+                Pressed::Skip(self.skip_after_fade(
+                    to,
+                    SKIP_PRIME_CHUNKS,
+                    self.pass_periods,
+                    wait_for_wire,
+                ))
+            }
+        }
+    }
+}
+
+/// Run one script through the model and check every property. Never panics on a property: the
+/// violations are collected so the caller can shrink and report them.
+///
+/// The properties are the §4.4 audio and ledger claims, stated against any sequence: no period
+/// starves while the producer owes data, the ring's ledger closes in all three forms, the painted
+/// position is monotone and starts at 0 with `n_samples` at a clean end, every press is either taken
+/// as exactly one transition or counted as refused, every skip's hand-off lands at the machinery's
+/// content point with no wrapped subtraction, and no transition leaves the transport mid-flight.
+///
+/// One parity question this model *cannot* answer is the ROM's own: it issues exactly one command
+/// per press, so "a press that reached the ISR vanished in the slot before the loop took it"
+/// (§5.3's seam, `Input::take`) is unreachable here. The model's parity is the other side of it —
+/// one press, one record, no press counted twice — and it is checked against the records left
+/// behind.
+/// `wait_for_wire` is the regime: `true` lets every press wait for its own wire watch, which is what a
+/// human's cadence does; `false` lets the next press land as soon as the transport is `Playing` again,
+/// which is what the ROM's frame loop actually does and is the window a single global watch could not
+/// survive (R13's second defect).
+fn run_case(script: &Script, wait_for_wire: bool) -> CaseReport {
+    let mut report = CaseReport::new();
+    // Half the seeds give every track a silent head, so a skip lands on a track whose own digital
+    // silence is indistinguishable from the cover on the wire (`Skip::head_silence`).
+    let lead = if script.seed & 1 == 0 {
+        0
+    } else {
+        3 * CHUNK as u32
+    };
+    let mut model = Model::album(&FUZZ_TRACKS, lead);
+    model.wait_for_wire = wait_for_wire;
+    model.prefill();
+    assert!(model.prime());
+    model.open_visit(0);
+
+    // Press `i` is due at the sum of the gaps before it — an absolute frame, so a gap shorter than
+    // the transition that precedes it makes the next press land as soon as the transport is settled.
+    let mut due = Vec::with_capacity(script.spacings.len());
+    let mut at = 0u32;
+    for spacing in &script.spacings {
+        at += spacing;
+        due.push(at);
+    }
+
+    let mut next = 0usize;
+    let mut stop = None;
+    let mut steps = 0u32;
+    while stop.is_none() {
+        steps += 1;
+        if steps > CASE_STEPS {
+            report.violate(
+                "wedge",
+                format!("the run took more than {CASE_STEPS} steps without stopping"),
+            );
+            stop = Some(Stop::Wedge);
+            break;
+        }
+        if next < script.presses.len() && model.video_frames >= due[next] {
+            let press = script.presses[next];
+            next += 1;
+            report.presses += 1;
+            let before = model.transport.state();
+            let visits_before = model.visits.len();
+            let verdict = model.drive_press(press);
+            let after = model.transport.state();
+            match verdict {
+                Pressed::Refused => {
+                    report.refused += 1;
+                    if after != before {
+                        report.violate(
+                            "press-parity",
+                            format!("a refused {press:?} moved the transport {before:?}→{after:?}"),
+                        );
+                    }
+                }
+                Pressed::Freeze => {
+                    report.accepted += 1;
+                    report.freeze_presses += 1;
+                    if after != State::Paused {
+                        report.violate(
+                            "transition-state",
+                            format!("a pause from {before:?} left {after:?}, not Paused"),
+                        );
+                    }
+                }
+                Pressed::Resume => {
+                    report.accepted += 1;
+                    report.resume_presses += 1;
+                    if after != State::Playing {
+                        report.violate(
+                            "transition-state",
+                            format!("a resume from {before:?} left {after:?}, not Playing"),
+                        );
+                    }
+                }
+                Pressed::Skip(skip) => {
+                    report.accepted += 1;
+                    report.skip_presses += 1;
+                    if after != State::Playing {
+                        report.violate(
+                            "transition-state",
+                            format!("a skip left the transport {after:?}, not Playing"),
+                        );
+                    }
+                    if model.visits.len() == visits_before {
+                        report.violate(
+                            "position-start",
+                            "an accepted skip opened no visit".to_string(),
+                        );
+                    } else if model.paint.position(model.paint.base) != 0 {
+                        report.violate(
+                            "position-start",
+                            format!(
+                                "a visit started at {} instead of 0",
+                                model.paint.position(model.paint.base)
+                            ),
+                        );
+                    }
+                    if skip.dropped as usize > RING - FADE_PERIODS as usize * CHUNK {
+                        report.violate(
+                            "skip-dropped",
+                            format!("dropped {} of a {RING}-sample ring", skip.dropped),
+                        );
+                    }
+                    if skip.dropped == 0 {
+                        // R13's suspect (c), kept as a row rather than a count: the ROM gates
+                        // `dropped >= 1` (`dropped_is_a_truncate`), and a skip pressed onto a ring
+                        // shallower than one chunk cannot satisfy that. The depth is the fact that
+                        // decides whether the gate is a property or the gate script's own spacing.
+                        report.dropped_zero += 1;
+                        let previous = model.skips.len().checked_sub(2);
+                        report.dropped_zero_rows.push(DroppedZero {
+                            seed: script.seed,
+                            press: next - 1,
+                            gap: script.spacings[next - 1],
+                            hand_off_gap: previous
+                                .map_or(0, |index| skip.at.saturating_sub(model.skips[index].at)),
+                            queued: skip.queued,
+                        });
+                    }
+                }
+            }
+        } else if next == script.presses.len() && model.video_frames >= CASE_FRAMES {
+            stop = Some(Stop::Budget);
+        } else {
+            match model.drive_step() {
+                Drive::Stepped => {}
+                Drive::VisitEnd => {
+                    // §4.4's end clamp, at the one moment it is a claim about the whole visit: a
+                    // drained visit paints its track's total, not a sample short of it.
+                    let total = model.source.len();
+                    let painted = model.paint.position(model.committed);
+                    if painted != total {
+                        report.violate(
+                            "position-end",
+                            format!("a drained visit painted {painted} of {total}"),
+                        );
+                    }
+                    match model.end_of_visit() {
+                        VisitEnd::Advance(skip) => {
+                            report.advances += 1;
+                            if skip.dropped != 0 {
+                                report.violate(
+                                    "advance-dropped",
+                                    format!("an advance truncated {} samples", skip.dropped),
+                                );
+                            }
+                        }
+                        VisitEnd::AlbumEnd => stop = Some(Stop::AlbumEnd),
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- the properties, read off the finished run
+    //
+    // A case that stopped on its budget is still mid-visit: the ROM closes the visit after the drain
+    // that a verdict follows, so the ledger is closed here for every stop rather than only for an
+    // album end.
+    model.close_visit(model.committed);
+    //
+    // Every period's three-verdict census closes, and no starved period was unaccounted: `period`
+    // books an underflow for every starve the producer still owed data for, so `underflows == 0`
+    // is the statement that every silence was a classified `Tail` padding or a track end's fade.
+    if model.underflows != 0 {
+        report.violate(
+            "underflow",
+            format!(
+                "{} period(s) starved while the producer had work",
+                model.underflows
+            ),
+        );
+    }
+    if model.periods != model.full_periods + model.tail_periods + model.starved_periods {
+        report.violate(
+            "period-census",
+            format!(
+                "{} periods, but {} full + {} tail + {} starved",
+                model.periods, model.full_periods, model.tail_periods, model.starved_periods
+            ),
+        );
+    }
+    if model.handoffs as u32 != model.primes + model.periods {
+        report.violate(
+            "hand-off-census",
+            format!(
+                "{} hand-offs, but {} primes + {} periods",
+                model.handoffs, model.primes, model.periods
+            ),
+        );
+    }
+    // The ring's ledger closes in all three of its forms. (`period` and `prime` already assert
+    // `committed + dropped == consumed` every hand-off — the model's `ledger()` — so that identity
+    // is checked 1,000 times a case rather than once.)
+    if model.feed.pushed() as u32 != model.content + model.cover {
+        report.violate(
+            "ring-ledger-content",
+            format!(
+                "pushed {}, but content {} + cover {}",
+                model.feed.pushed(),
+                model.content,
+                model.cover
+            ),
+        );
+    }
+    if model.feed.pushed() != model.feed.consumed() + model.feed.ready() {
+        report.violate(
+            "ring-ledger-ready",
+            format!(
+                "pushed {}, but consumed {} + ready {}",
+                model.feed.pushed(),
+                model.feed.consumed(),
+                model.feed.ready()
+            ),
+        );
+    }
+    if stop == Some(Stop::AlbumEnd) && model.feed.ready() != 0 {
+        report.violate(
+            "album-end-ring",
+            format!("the album ended with {} samples queued", model.feed.ready()),
+        );
+    }
+    // The per-visit ledger sums to the producer's frontier, over *every* visit — the property the
+    // ROM's bounded log has to preserve rather than the truncated sum it computes today.
+    let visit_pushed: u32 = model.visits.iter().map(|visit| visit.pushed).sum();
+    if visit_pushed != model.content {
+        report.violate(
+            "visit-ledger",
+            format!(
+                "visits sum {visit_pushed}, but the producer pushed {}",
+                model.content
+            ),
+        );
+    }
+    if model.paint.regressions != 0 {
+        report.violate(
+            "position-monotone",
+            format!("{} painted-position regression(s)", model.paint.regressions),
+        );
+    }
+    // The per-visit rows are the ROM's `feed:` ledger: each visit's span is the subtraction
+    // `end − base` (`album_play_main.rs:3961`) and its `pushed` is compared against the track's own
+    // length (`:3712`, `OVER-PUSHED`). Neither may wrap or overrun.
+    for (index, visit) in model.visits.iter().enumerate() {
+        if visit.end < visit.base {
+            report.violate(
+                "visit-wrap",
+                format!("visit {index}: base={} end={}", visit.base, visit.end),
+            );
+        }
+        if visit.pushed > FUZZ_TRACKS[visit.track] {
+            report.violate(
+                "visit-over-pushed",
+                format!(
+                    "visit {index} pushed {} of track {}'s {} samples",
+                    visit.pushed, visit.track, FUZZ_TRACKS[visit.track]
+                ),
+            );
+        }
+    }
+    // "Stopped while audio is still expected" in its one reachable sense: the album reached its end,
+    // so the chain must not be left frozen or mid-transition. A `Paused` state is only ever the
+    // listener's, and `Model::period` asserts that no frozen chain is served.
+    if stop == Some(Stop::AlbumEnd) && model.transport.state() != State::Playing {
+        report.violate(
+            "album-end-state",
+            format!(
+                "the album ended with the transport {:?}",
+                model.transport.state()
+            ),
+        );
+    }
+    // The ROM's wire-watch pool is `WATCH_SLOTS` slots deep, one per in-flight transition. The model
+    // keeps every record, so this is the parity check that the pool is deep enough for any sequence the
+    // corpus reaches: a deeper overlap would be a named refusal on a cart (`transition_hand_off`), not
+    // a silent overwrite, and this is what says that refusal is unreachable in practice.
+    if model.max_open > ROM_WATCH_SLOTS {
+        report.violate(
+            "watch-pool",
+            format!(
+                "{} transitions were in flight at once, past the ROM's {ROM_WATCH_SLOTS} wire-watch \
+                 slots",
+                model.max_open
+            ),
+        );
+    }
+    // Every skip's measurement is a subtraction the ROM performs with `saturating_sub`, so each is
+    // checked in the form that cannot hide a wrap: the raw fields must be ordered.
+    //
+    // A record still waiting when the case stopped is expected — the run was cut inside a transition,
+    // before the new track's audio could reach the wire — and it is counted rather than failed. A
+    // record left waiting **while a later one resolved** is the defect: the scan is shared, so audio
+    // reaching the wire after a later mark would have resolved the earlier record too. That is the
+    // signature of one latch re-armed by every hand-off (R13's second defect).
+    for (index, skip) in model.skips.iter().enumerate() {
+        if skip.open {
+            report.unresolved += 1;
+            if model.skips[index + 1..].iter().any(|later| !later.open) {
+                report.violate(
+                    "skip-unresolved",
+                    format!(
+                        "skip {index} ({}→{}) was still waiting for the wire while a later record \
+                         had resolved: its own latch was orphaned, and `content_at()` would read \
+                         `0 − {}`",
+                        skip.from, skip.to, skip.at
+                    ),
+                );
+            }
+            continue;
+        }
+        if skip.silent_at < skip.at || skip.new_at < skip.silent_at || skip.content_at < skip.at {
+            report.violate(
+                "skip-wrap",
+                format!(
+                    "skip {index}: at={} silent_at={} new_at={} content_at={} is not ordered",
+                    skip.at, skip.silent_at, skip.new_at, skip.content_at
+                ),
+            );
+        }
+        if skip.content_at() != SKIP_PRIME_CHUNKS + 1 {
+            report.violate(
+                "skip-content-point",
+                format!(
+                    "skip {index}: content_at() = {} periods, not {}",
+                    skip.content_at(),
+                    SKIP_PRIME_CHUNKS + 1
+                ),
+            );
+        }
+        if skip.underflow_delta() != 0 {
+            report.violate(
+                "skip-underflow",
+                format!(
+                    "skip {index} booked {} underflow(s)",
+                    skip.underflow_delta()
+                ),
+            );
+        }
+    }
+    // Parity, counted from the other side: every accepted press left exactly one record and no
+    // accepted press left two. (The model issues exactly one command per press, so a press vanishing
+    // in the ISR slot — the ROM's own parity question — is not reachable from here; see `run_case`'s
+    // doc.)
+    if model.pauses.len() as u32 != report.freeze_presses {
+        report.violate(
+            "press-parity",
+            format!(
+                "{} freeze(s), {} pause pair(s)",
+                report.freeze_presses,
+                model.pauses.len()
+            ),
+        );
+    }
+    // Every freeze is resumed except at most the one the run may end in: no pause vanishes, and
+    // none is counted twice.
+    let resumed = report.freeze_presses - u32::from(model.transport.state() == State::Paused);
+    if report.resume_presses != resumed {
+        report.violate(
+            "press-parity",
+            format!(
+                "{} freeze(s), {} resume(s), ending {:?}",
+                report.freeze_presses,
+                report.resume_presses,
+                model.transport.state()
+            ),
+        );
+    }
+    let skip_rows = model.skips.len() - report.advances as usize;
+    if skip_rows as u32 != report.skip_presses {
+        report.violate(
+            "press-parity",
+            format!(
+                "{} skip press(es), {skip_rows} skip row(s)",
+                report.skip_presses
+            ),
+        );
+    }
+    report.visits = model.visits.len();
+    report.skips = model.skips.len();
+    report.marks = model.visits.clone();
+    report.content_pushed = model.content;
+    report.cover = model.cover;
+    report.starved = model.starved_periods;
+    report.hand_offs = model.handoffs;
+    report.max_open = model.max_open;
+    report
+}
+
+/// `run_case`, with a model assertion turned into a violation rather than a panic: a failed
+/// `assert!` inside the model is a finding too, and it must carry its seed like any other.
+fn run_case_or_panic(script: &Script, wait_for_wire: bool) -> CaseReport {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_case(script, wait_for_wire)
+    })) {
+        Ok(report) => report,
+        Err(payload) => {
+            let mut report = CaseReport::new();
+            report.violate("model-panic", panic_message(&*payload));
+            report
+        }
+    }
+}
+
+/// A caught panic's message, in the form `panic!` was given it.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "<a panic payload that is not a string>".to_string()
+    }
+}
+
+/// The minimal prefix of `script` that still fails: presses dropped from the end while the prefix
+/// still fails, then each spacing pulled back to the script's floor. `fails` is supplied so the
+/// shrinker itself is testable against a predicate whose answer is known.
+fn shrink(script: &Script, fails: &dyn Fn(&Script) -> bool) -> Script {
+    let mut best = script.clone();
+    loop {
+        let mut reduced = false;
+        while best.presses.len() > 1 {
+            let shorter = best.prefix(best.presses.len() - 1);
+            if fails(&shorter) {
+                best = shorter;
+                reduced = true;
+            } else {
+                break;
+            }
+        }
+        for index in 0..best.spacings.len() {
+            if best.spacings[index] == 5 {
+                continue;
+            }
+            let mut tighter = best.clone();
+            tighter.spacings[index] = 5;
+            if fails(&tighter) {
+                best = tighter;
+                reduced = true;
+            }
+        }
+        if !reduced {
+            return best;
+        }
+    }
+}
+
+/// R13's classification, aggregated over the run: how many cases would trip a *measurement* (b) or
+/// a *scenario-encoded bound* (c) rather than the audio property (a) the fuzz asserts. Nothing here
+/// fails the test — it is the census that says whether the two non-audio suspects are reachable at
+/// all, which is what separates "a transport defect" from "a verdict that outran its witness".
+#[derive(Default)]
+struct Census {
+    cases: u32,
+    presses: u32,
+    accepted: u32,
+    refused: u32,
+    max_visits: usize,
+    max_skips: usize,
+    visit_overflow: u32,
+    skip_overflow: u32,
+    dropped_zero: u32,
+    /// Every one of those, with the ring depth and the spacing the press had: the rows that tell a
+    /// property (`dropped >= 1`) from a bound shaped by the gate script's cadence.
+    dropped_zero_rows: Vec<DroppedZero>,
+    /// Records still waiting for their own latch when the case stopped: legitimate (a case can be cut
+    /// inside a transition), so this is reported and not asserted — `skip-unresolved` asserts the
+    /// defect, which is an earlier record orphaned while a later one resolved.
+    unresolved: u32,
+    /// The deepest overlap any case reached: the wire-watch pool's depth requirement, in slots.
+    max_open: usize,
+}
+
+impl Census {
+    fn observe(&mut self, report: &CaseReport) {
+        self.cases += 1;
+        self.presses += report.presses;
+        self.accepted += report.accepted;
+        self.refused += report.refused;
+        self.max_visits = self.max_visits.max(report.visits);
+        self.max_skips = self.max_skips.max(report.skips);
+        if report.visits > ROM_VISIT_LOG {
+            self.visit_overflow += 1;
+        }
+        if report.skips > ROM_SKIP_LOG {
+            self.skip_overflow += 1;
+        }
+        self.dropped_zero += report.dropped_zero;
+        self.dropped_zero_rows
+            .extend(report.dropped_zero_rows.iter().map(|row| DroppedZero {
+                seed: row.seed,
+                press: row.press,
+                gap: row.gap,
+                hand_off_gap: row.hand_off_gap,
+                queued: row.queued,
+            }));
+        self.unresolved += report.unresolved;
+        self.max_open = self.max_open.max(report.max_open);
+    }
+}
+
+/// One pass over the whole corpus at one press regime: the census, and every finding shrunk to the
+/// minimal prefix that still fails.
+///
+/// The corpus does not depend on the regime — the same `FUZZ_SEEDS`/`CASES_PER_SEED` scripts are
+/// replayed both ways — so a finding is comparable across the two passes and a printed seed names one
+/// script, not one script per mode.
+fn fuzz(wait_for_wire: bool) -> (Census, Vec<(u32, Violation, Script)>) {
+    let mut census = Census::default();
+    let mut failures: Vec<(u32, Violation, Script)> = Vec::new();
+    for seed in FUZZ_SEEDS {
+        for case in 0..CASES_PER_SEED {
+            // A per-case seed in the table's own family, so a printed seed is one of a bounded set
+            // of streams rather than a value the run invented.
+            let case_seed = seed.wrapping_add(case.wrapping_mul(0x9E37_79B9));
+            let script = Script::draw(case_seed);
+            let report = run_case_or_panic(&script, wait_for_wire);
+            census.observe(&report);
+            if let Some(violation) = report.violations.into_iter().next() {
+                // A panic is reported where it stands: shrinking it would re-panic once per
+                // candidate and bury the finding in the hook's output.
+                let shrunk = if violation.property == "model-panic" {
+                    script.clone()
+                } else {
+                    shrink(&script, &|candidate| {
+                        !run_case_or_panic(candidate, wait_for_wire)
+                            .violations
+                            .is_empty()
+                    })
+                };
+                failures.push((case_seed, violation, shrunk));
+            }
+        }
+    }
+    (census, failures)
+}
+
+/// Emulator-measured timing, named with the line that declares it and the unit it is expressed in.
+/// These are the figures a cartridge can legitimately differ on: each one is a *measurement*, not a
+/// product constant (§10.5: every timing figure in cycles; R3: an emulator figure is not a hardware
+/// claim). Nothing here changes any of them — the test only says what flips if they are wrong.
+///
+/// `VIDEO_PERIOD_CYCLES` — `album_play_main.rs:618`, cycles per vblank (59.73 Hz, AP-0).
+const ROM_VIDEO_PERIOD_CYCLES: u32 = 280_896;
+/// The producer frame the old `MAX_PASS_FRAMES` was derived from: 1.04–1.09 M cycles of
+/// uninterruptible decode, measured on mGBA (`album_play_main.rs`'s `PASS_MARGIN_CYCLES` docs).
+const ROM_PASS_CYCLES: u32 = 1_090_000;
+/// The **removed** `MAX_PASS_FRAMES = 4 + 1 + 1` — the emulator-derived ceiling the bounds round
+/// took out of the ROM. Kept here only so the finding's before-picture stays checkable.
+const ROM_OLD_MAX_PASS_FRAMES: u32 = 6;
+/// The gate run's own `pass_max` (`album-test.log:33`, `bound 5`).
+const ROM_MEASURED_PASS_FRAMES: u32 = 5;
+/// The gate run's own vblank-handler cost (`album-test.log:31`, `worst=1 samples`).
+const ROM_MEASURED_HANDLER_SAMPLES: u32 = 1;
+
+#[test]
+fn every_press_sequence_holds_the_transports_properties() {
+    // The PRNG's reproducibility, which is what makes a printed seed a reproduction: the same seed
+    // draws the same script, and different seeds draw different ones.
+    assert_eq!(Script::draw(0x5EED_0001), Script::draw(0x5EED_0001));
+    assert_ne!(Script::draw(0x5EED_0001), Script::draw(0x5EED_0002));
+
+    // The shrinker, against a predicate whose answer is known: when only the press count matters,
+    // the minimal script is the first three presses at the gap floor.
+    let long = Script {
+        seed: 0,
+        presses: vec![Press::Next; 6],
+        spacings: vec![40, 41, 42, 43, 44, 45],
+    };
+    let minimal = shrink(&long, &|candidate| candidate.presses.len() >= 3);
+    assert_eq!(minimal.presses.len(), 3);
+    assert!(minimal.spacings.iter().all(|&gap| gap == 5));
+
+    // Two regimes over the same corpus, because R13's hardware session was in the second one and the
+    // first cannot reach it. `true` is a human cadence: every press waits for its own wire watch to
+    // resolve, which is what makes every number a reading rather than a prediction. `false` is the
+    // ROM's frame loop: the next press lands as soon as the transport is `Playing` again, which is
+    // `head_silence` periods *before* that watch resolves — the window a single global watch could
+    // not survive (R13's second proven defect), and the one this fuzz previously could not enter.
+    for (wait_for_wire, regime) in [
+        (true, "press waits for the wire"),
+        (false, "press on the transport, no wire wait"),
+    ] {
+        let (census, failures) = fuzz(wait_for_wire);
+        assert_eq!(
+            census.cases,
+            (FUZZ_SEEDS.len() as u32) * CASES_PER_SEED,
+            "the fuzz must run every case it claims [{regime}]"
+        );
+        assert!(census.cases >= 2_000);
+
+        // The census is the finding, not the assertion: (a) is the property set, and these counts
+        // are R13's (b) a measurement overflowing and (c) a bound that encodes the script.
+        eprintln!(
+            "R13 fuzz [{regime}]: {} cases, {} presses ({} accepted, {} refused); visits max {}, \
+             skips max {}; past VISIT_LOG={ROM_VISIT_LOG}: {} case(s); past SKIP_LOG={ROM_SKIP_LOG}: \
+             {} case(s); pressed skips that dropped 0: {}; skip rows still waiting at the stop: {}; \
+             most transitions in flight at once: {} of {ROM_WATCH_SLOTS} slot(s)",
+            census.cases,
+            census.presses,
+            census.accepted,
+            census.refused,
+            census.max_visits,
+            census.max_skips,
+            census.visit_overflow,
+            census.skip_overflow,
+            census.dropped_zero,
+            census.unresolved,
+            census.max_open
+        );
+        // Every pressed skip that stepped over nothing, with the ring depth it found. R13's suspect
+        // (c) is the bounds round's question — `dropped >= 1` is a bound, so these rows are printed
+        // rather than asserted on here.
+        for row in &census.dropped_zero_rows {
+            eprintln!(
+                "R13 fuzz [{regime}] dropped=0: seed {:#010X} press {} gap {} frames, {} period(s) \
+                 after the previous hand-off; the ring held {} whole chunk(s) + {} sample(s)",
+                row.seed,
+                row.press,
+                row.gap,
+                row.hand_off_gap,
+                row.queued / CHUNK as u32,
+                row.queued % CHUNK as u32
+            );
+        }
+        // If no case reached the caps, this run says nothing about suspect (b) — the census would be
+        // blind rather than clean, and that is worth failing over.
+        assert!(
+            census.visit_overflow > 0 && census.skip_overflow > 0,
+            "no case in {} exceeded VISIT_LOG={ROM_VISIT_LOG}/SKIP_LOG={ROM_SKIP_LOG}, so the census \
+             is blind [{regime}]: visits max {}, skips max {}",
+            census.cases,
+            census.max_visits,
+            census.max_skips
+        );
+        // The property R13's second defect broke is `skip-unresolved` in the set above: a record
+        // orphaned behind a later, resolved one. A record still waiting at the stop is *not* a
+        // finding — a case can be cut inside a transition — so `census.unresolved` is printed with
+        // the rows and not asserted on.
+
+        let mut message = String::new();
+        for (seed, violation, shrunk) in &failures {
+            message.push_str(&format!(
+                "\nseed {seed:#010X} property {}: {}\n  shrunk to {} press(es) {:?} at gaps {:?}",
+                violation.property,
+                violation.detail,
+                shrunk.presses.len(),
+                shrunk.presses,
+                shrunk.spacings
+            ));
+        }
+        assert!(
+            failures.is_empty(),
+            "{} case(s) broke a property [{regime}]:{message}",
+            failures.len()
+        );
+    }
+}
+
+#[test]
+fn a_slower_pass_no_longer_flips_the_pass_cost_terms() {
+    // R13's finding, made arithmetic — and then the fix, made arithmetic. A pass cost used to enter
+    // two gated terms as a **frame count measured on mGBA**:
+    //
+    //   `MAX_PASS_FRAMES = ceil(1.09 M c / 280,896 c) + 2 edges = 4 + 2 = 6`
+    //   `SKIP_PRESS_TO_HANDOFF_PERIODS = 3` (the same 1.85–1.9-period pass, rounded up)
+    //
+    // The old ceiling has *no* arithmetic margin at 1× (the gate run only measures 5 because its
+    // passes averaged 1.04–1.09 M c and its edges overlapped), so a decode even slightly slower than
+    // the emulator's reaches 7 frames and fails `reaction` — and a cartridge has wait states mGBA
+    // does not (R3). That is the false red this round removes: the bound is now the run's own
+    // measured producer frame plus one period and one vblank, all in cycles, so it scales with the
+    // machine.
+    assert_eq!(
+        ROM_PASS_CYCLES.div_ceil(ROM_VIDEO_PERIOD_CYCLES) + 2,
+        ROM_OLD_MAX_PASS_FRAMES,
+        "the arithmetic at 1x must saturate the old ceiling, which is the finding"
+    );
+    assert!(ROM_MEASURED_PASS_FRAMES <= ROM_OLD_MAX_PASS_FRAMES);
+    // The pass's non-decode work, in the ROM's own derivation: the frame slice the loop serves at the
+    // top of every pass, bounded by one vblank (`PASS_MARGIN_CYCLES`). Modelling it as one video
+    // frame is the conservative end of that bound.
+    let service = ROM_VIDEO_PERIOD_CYCLES;
+    let margin = ROM_VIDEO_PERIOD_CYCLES;
+    for (scale, old_reaction, old_skip, reaction, skip, starves) in [
+        (1u32, true, true, true, true, false),
+        (2, false, false, true, true, true),
+        (3, false, false, true, true, true),
+        (5, false, false, true, true, true),
+    ] {
+        let frame = ROM_PASS_CYCLES * scale;
+        let pass = frame + service;
+        let periods = frame.div_ceil(geometry::PERIOD_CYCLES);
+        let frames = frame.div_ceil(ROM_VIDEO_PERIOD_CYCLES) + 2;
+        // The old, emulator-derived terms — printed and asserted only where they flipped, so the fix
+        // has its before-picture. They are no longer in the ROM at all.
+        assert_eq!(
+            frames <= ROM_OLD_MAX_PASS_FRAMES,
+            old_reaction,
+            "{scale}× pass = {frames} video frames against the removed MAX_PASS_FRAMES = \
+             {ROM_OLD_MAX_PASS_FRAMES}"
+        );
+        assert_eq!(
+            periods.max(FADE_PERIODS) <= 3,
+            old_skip,
+            "{scale}× pass = {periods} periods against the removed fixed bound of 3"
+        );
+        // The new bound: the run's measured worst producer frame + one period + one vblank, in
+        // cycles. It holds at every scale because the measured frame is *inside* the bound.
+        let bound = frame + geometry::PERIOD_CYCLES + margin;
+        assert_eq!(
+            pass <= bound,
+            reaction,
+            "{scale}× pass = {pass}c against its own bound {bound}c"
+        );
+        // The skip's bound is the measured pass in periods plus the deferral; a 2× pass gets 5
+        // periods rather than the old refusal at 4.
+        let skip_bound = take_to_handoff_bound(periods);
+        assert_eq!(
+            periods.max(FADE_PERIODS) <= skip_bound,
+            skip,
+            "{scale}× pass = {periods} periods against take_to_handoff_bound = {skip_bound}"
+        );
+
+        // The audio consequence is **not** a bound and does not move with one: a pass pushes FRAME
+        // samples and spans `periods` periods, so the ring's steady state needs
+        // `FRAME ≥ periods × CHUNK`. Below that it drains at a fixed rate and the feeder books
+        // underflows. That is the term a cartridge's slower decode should still flip — an audio
+        // fact, witnessed by the model, not a frame count measured on the wrong box.
+        let mut model = Model::album(&[600 * CHUNK as u32], 0);
+        model.pass_periods = periods;
+        model.prefill();
+        assert!(model.prime());
+        model.open_visit(0);
+        let mut drained = false;
+        while !drained && model.underflows == 0 {
+            match model.drive_step() {
+                Drive::Stepped => {}
+                Drive::VisitEnd => drained = true,
+            }
+        }
+        assert_eq!(
+            model.underflows > 0,
+            starves,
+            "{scale}× pass: {} underflow(s) after {} passes over {} of {} samples",
+            model.underflows,
+            model.frames,
+            model.source.at,
+            model.source.len()
+        );
+        eprintln!(
+            "R13 calibration: {scale}x pass = {frame}c decode + {service}c service = {pass}c = \
+             {periods} period(s) = {} frames; old: reaction={old_reaction} skip={old_skip}; \
+             new: reaction={reaction} (bound {bound}c) skip={skip} (bound {skip_bound}p); \
+             ring_keeps_up={} ({} underflow(s), ring first spent at sample {} of {})",
+            pass.div_ceil(ROM_VIDEO_PERIOD_CYCLES),
+            !starves,
+            model.underflows,
+            model.source.at,
+            model.source.len()
+        );
+    }
+
+    // The two terms a pass does **not** touch, stated so the next round does not confuse them. The
+    // sample is the vblank ISR's, so `cadence` sees one frame per vblank whatever the decode does;
+    // and `isr` is the handler's own cost in samples of the audio clock, measured at 1 of the FIFO's
+    // 16 — sixteen times its headroom, not two.
+    assert_eq!(ROM_MEASURED_HANDLER_SAMPLES, 1);
+    assert!(16 * ROM_MEASURED_HANDLER_SAMPLES <= geometry::REARM_GRACE_SAMPLES);
+    // The audit's two terms belong to the *period service*, in samples: `late` past the 16-sample
+    // grace and `coalesced` past a whole 560-sample period. Against the section's own ~1% estimate
+    // of a period, 2× and 3× stay inside the grace; 5× crosses it — so `audit`, not `reaction`, is
+    // what a slower *feeder* would flip.
+    let estimate = geometry::CHUNK_SAMPLES / 100;
+    assert!(3 * estimate <= geometry::REARM_GRACE_SAMPLES);
+    assert!(5 * estimate > geometry::REARM_GRACE_SAMPLES);
+    assert!(5 * estimate < geometry::CHUNK_SAMPLES);
+}
+
+/// **R13's first proven defect: the bounded log's totals.**
+///
+/// `Visits::pushed_total()` used to sum `self.list()`, i.e. only the rows that fitted in
+/// `VISIT_LOG` = 24; `Visits::begin` counted the overflow and returned, and `Visits::close` wrote the
+/// totals into the newest row only. The verdict compared that truncated sum against the ring's own
+/// counter (`visits_ok`) and summed `expected_hand_offs` the same way, so a session with more than 24
+/// visits reported *two* failures where the audio was intact — exactly R13's suspect (b).
+///
+/// The fix is on the ROM side: `Visits::begin`/`close` accumulate running totals over every visit and
+/// the two verdict terms read those, so the log's depth is a print bound and nothing else. This test
+/// applies the ROM's arithmetic to a session of 32 visits and 30 skips, and asserts the half that was
+/// red — the truncated sums — is what it used to be, while the running totals close.
+///
+/// The run is sound: `run_case` asserts every audio and ledger property, so a failure here is the
+/// ledger's arithmetic and nothing else.
+#[test]
+fn a_session_past_the_logs_totals_like_the_verdict_expects() {
+    // 30 Next presses at a 12-frame cadence: more visits than VISIT_LOG and more skips than
+    // SKIP_LOG, on an album whose tracks are long enough that no visit drains on its own.
+    let script = Script {
+        seed: 0,
+        presses: vec![Press::Next; 30],
+        spacings: vec![12; 30],
+    };
+    let report = run_case(&script, true);
+    assert!(
+        report.violations.is_empty(),
+        "the session itself is not sound, so this test would not be about the log: {:?}",
+        report
+            .violations
+            .iter()
+            .map(|violation| (violation.property, violation.detail.as_str()))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        report.marks.len() > ROM_VISIT_LOG && report.skips > ROM_SKIP_LOG,
+        "the session made {} visit(s) and {} skip row(s); the test needs more than \
+         {ROM_VISIT_LOG}/{ROM_SKIP_LOG}",
+        report.marks.len(),
+        report.skips
+    );
+
+    // The ROM's arithmetic on this run's own rows, both halves of it. The truncated sums are the
+    // pre-fix behaviour, kept as the red half: they must *not* close, or this test would not be about
+    // the log's depth at all.
+    let spans = |rows: &[VisitMark]| -> u32 {
+        rows.iter()
+            .map(|visit| (visit.end - visit.base).div_ceil(CHUNK as u32))
+            .sum()
+    };
+    let kept: u32 = report.marks[..ROM_VISIT_LOG]
+        .iter()
+        .map(|mark| mark.pushed)
+        .sum();
+    let running: u32 = report.marks.iter().map(|mark| mark.pushed).sum();
+    let kept_hand_offs =
+        report.cover / CHUNK as u32 + spans(&report.marks[..ROM_VISIT_LOG]) + report.starved;
+    let running_hand_offs = report.cover / CHUNK as u32 + spans(&report.marks) + report.starved;
+    assert_ne!(
+        kept,
+        running,
+        "the session of {} visits must push more past VISIT_LOG={ROM_VISIT_LOG} than inside it, or \
+         the two sums coincide and this test witnesses nothing",
+        report.marks.len()
+    );
+    // The running total `Visits::close` accumulates: `visits_ok`'s left-hand side.
+    assert_eq!(
+        running, report.content_pushed,
+        "the per-track ledger's running total is {running}, but the producer pushed {} — the sum \
+         must be over every visit, not over the {ROM_VISIT_LOG} rows that fit in VISIT_LOG (which \
+         reads {kept})",
+        report.content_pushed
+    );
+    // And the hand-off ledger's per-visit half, the same way: `expected_hand_offs` adds
+    // `ceil(span / CHUNK)` for every visit, including the ones the log could not keep.
+    assert_ne!(
+        kept_hand_offs, running_hand_offs,
+        "the truncated hand-off sum must differ from the running one"
+    );
+    assert_eq!(
+        running_hand_offs,
+        report.hand_offs,
+        "the hand-off ledger's per-visit sum over every visit is {running_hand_offs}, but the run \
+         made {} hand-off(s): cover {} + visits {} + starved {} (the log's own rows alone read \
+         {kept_hand_offs})",
+        report.hand_offs,
+        report.cover / CHUNK as u32,
+        spans(&report.marks),
+        report.starved
+    );
+}
+
+/// **R13's second proven defect: a skip record whose own watch was overwritten.**
+///
+/// The ROM kept **one** wire watch (`stats.watch_*`), re-armed by every hand-off, and `Skips::resolve`
+/// wrote that watch's reading into `records[recorded - 1]` — the newest open record. The transport is
+/// `Playing` again as soon as the ramp back completes, but the watch cannot resolve until the new
+/// track's own audio reaches the wire. On a track that opens on digital silence (three chunks here;
+/// eight periods on the gate fixture's full-master tracks) those are different moments, so a second
+/// press inside that window re-armed the watch and the first record stayed `open` with
+/// `content_at = 0` — and `content_at()` was `0.wrapping_sub(at)`, the huge figure in the ROM log.
+/// `Skips::ok()` requires `!self.open()`, so the run failed with no audio wrong.
+///
+/// The fix is one wire-watch slot **per in-flight record** (the ROM) and one latch per record (this
+/// model): every recorded transition resolves from its own latch, and `content_at()` saturates rather
+/// than wrapping, so a future ordering mistake reads as `0` — printed as `unresolved` — and never as
+/// 4,294,966,995. The second `skip_after_fade(…, false)` below stops exactly where the ROM's frame
+/// loop is free to take the next press.
+#[test]
+fn a_second_skip_keeps_the_first_hand_offs_own_content_point() {
+    let lead = 3 * CHUNK as u32;
+    let mut model = Model::album(&FUZZ_TRACKS, lead);
+    model.prefill();
+    assert!(model.prime());
+    model.open_visit(0);
+
+    // Skip 1, to the point where the transport is Playing and the wire has not settled.
+    assert_eq!(
+        model.transport.skip(),
+        Step::FadeOut,
+        "a skip from Playing must fade out"
+    );
+    let first = model.skip_after_fade(1, SKIP_PRIME_CHUNKS, 2, false);
+    assert!(
+        first.open,
+        "the first watch resolved before the window opened, so this test's premise is wrong"
+    );
+    assert_eq!(
+        model.transport.state(),
+        State::Playing,
+        "a second press needs the transport Playing, as the ROM's loop sees it"
+    );
+
+    // Skip 2, inside the window: the second hand-off re-arms the one watch.
+    assert_eq!(model.transport.skip(), Step::FadeOut);
+    model.skip_after_fade(2, SKIP_PRIME_CHUNKS, 2, true);
+
+    assert_eq!(model.skips.len(), 2);
+    let second = model.skips[1];
+    assert!(!second.open, "the second skip never resolved");
+    assert_eq!(
+        second.content_at(),
+        SKIP_PRIME_CHUNKS + 1,
+        "the second skip's own content point is not the machinery's"
+    );
+
+    let first = model.skips[0];
+    assert!(
+        !first.open && first.new_at != 0,
+        "the first skip's record never resolved: content_at={}, so content_at() would read 0 − {} \
+         and `Skips::ok()` would be false for a run whose audio is intact — a later hand-off must not \
+         retire or orphan an earlier record's own latch",
+        first.content_at,
+        first.at
     );
 }
