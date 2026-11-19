@@ -50,7 +50,7 @@ mod tables_data;
 
 pub use album::{Album, AlbumHeader, SeekEntry, TrackEntry};
 pub use frame::{Decoder, DecoderState, FrameInfo, Kernels, Ops, PortableKernels};
-pub use tables::CodeTables;
+pub use tables::{CodeTables, PremiseCensus, PremiseViolation, PremiseViolationKind};
 #[cfg(feature = "product")]
 pub use tables::{Huffman, HuffmanParts};
 

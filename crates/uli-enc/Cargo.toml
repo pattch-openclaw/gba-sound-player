@@ -1,0 +1,32 @@
+[package]
+name = "uli-enc"
+version = "0.1.0"
+edition = "2024"
+description = "Host-only ULI2 encoder skeleton: PCM in, ULA2 container out"
+# Licensing of the ULI2 format/reference is unresolved; see ../../ULI2.md.
+publish = false
+
+[dependencies]
+uli-lite = { path = "../uli-lite" }
+
+[lib]
+name = "uli_enc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "uli-enc"
+path = "src/bin/uli-enc.rs"
+
+# Standalone workspace, like crates/uli-lite: the root ROM crate's dependency
+# graph and features must not mix with the encoder's host-side ones.
+#
+# What this does NOT do is keep the root's *target* config out. Cargo discovers
+# `.cargo/config.toml` by walking up from the **current directory**, not from the
+# workspace, so `cd crates/uli-enc && cargo test` still inherits `build-std` and
+# `target = targets/thumbv4t-gba.json` from the repository root and dies with ~150
+# errors (`cannot find type Vec`, `#[panic_handler] required`) that say nothing
+# about this code. A neutral cwd is mandatory either way:
+#   make uli-test                                        (uses GATE_NEUTRAL_CWD)
+#   cd /tmp && cargo test --manifest-path <repo>/crates/uli-enc/Cargo.toml \
+#        --target <host triple>
+[workspace]

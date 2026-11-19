@@ -784,7 +784,7 @@ entry is kept for the decision and its reasoning, not for its numbers.**
   then-emit, four determinism rules, a byte budget that is an argument, and exactness
   measured at the PCM boundary.** The encoder plan (`crates/uli-lite/PLAN-OF-RECORD.md`
   → "The encoder — the last missing piece") left four questions open; they are
-  ruled here in five parts, and the reason to rule them now rather than during E1
+  ruled here in five parts, and the reason to rule them now rather than during S1
   is that each is a structure, not a feature — retrofitting any of them means
   rewriting a component that already has tests, measurements and pins under it.
 

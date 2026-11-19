@@ -5,6 +5,7 @@
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
+        uli-default-tables \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-playback-test uli-player uli-player-rom uli-player-speaker uli-player-speaker-rom \
@@ -241,6 +242,11 @@ PLAYBACK_MANIFEST := $(abspath crates/gba-playback/Cargo.toml)
 # --- other codec tracks (their own entry points; not FLAC) --------------------
 ULI_CRATE_MANIFEST := $(abspath crates/uli-lite/Cargo.toml)
 ULI_OVERLAY_MANIFEST := $(abspath crates/uli-lite-gba/Cargo.toml)
+# The host-side encoder (crates/uli-enc/). Its own cargo workspace, and a host
+# build either way — it never compiles for the GBA, and the GBA never depends on
+# it. Its gate is a round-trip through `uli-lite`: the decoder, not the encoder,
+# says whether the blob is real.
+ULI_ENC_MANIFEST := $(abspath crates/uli-enc/Cargo.toml)
 # The ULI2 measurement vehicle (examples/uli_bench/): prove the corpus pins on the
 # measured image, then time full frames through both kernel sets. An mGBA
 # measurement; no playback or hardware claim. ULI2's plan, not FLAC's.
@@ -680,11 +686,31 @@ uli-test: toolchain-check
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE)
-	@echo "uli-test passed: uli-lite compiles for $(TARGET) and is bit-exact on the host corpus"
+	# The encoder's own suite, which S1's exit gate requires (PLAN-OF-RECORD.md).
+	# It was added to `uli-check`'s fmt list and to nothing else, so the round-trip
+	# — the one thing S1 exists to provide — ran only when someone remembered to.
+	# Same neutral-cwd shape as every host-only workspace above: `crates/uli-enc`
+	# is its own cargo workspace, but cargo discovers the root `.cargo/config.toml`
+	# from the *cwd*, so building in place inherits the GBA target and `build-std`
+	# and fails with ~150 errors that say nothing about the code.
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE)
+	@echo "uli-test passed: uli-lite compiles for $(TARGET) and is bit-exact on the host corpus; uli-enc round-trips through it"
+
+# Regenerate the reference's default tables blob — the byte-exactness witness the
+# encoder's `to_blob` is pinned to. Off-tree by design: this is the only ULI2
+# target that compiles anything from `gba-audio`, it is never a prerequisite of a
+# gate, and E-R1's prohibition is on the dependency, not on the oracle (the same
+# posture as `uli-album-asset`). Run it when the length model moves, read the diff,
+# and let `uli-test` be the thing that decides whether the new bytes are right.
+uli-default-tables:
+	GBA_AUDIO=$(GBA_AUDIO) scripts/gen_uli_default_tables.sh
+	@echo "now: cd $(GATE_NEUTRAL_CWD) && $(CARGO) test --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE)"
 
 uli-check: toolchain-check
 	cd crates/uli-lite && $(CARGO) fmt --check
 	cd crates/uli-lite-gba && $(CARGO) fmt --check
+	cd crates/uli-enc && $(CARGO) fmt --check
 	cd $(ULI_BENCH_DIR) && $(CARGO) fmt --check
 
 uli-bench-rom: format
@@ -1781,8 +1807,10 @@ help:
 	@echo ""
 	@echo "  Other tracks:"
 	@echo "    ULI2 (ULI2.md — the repository's product codec). CI-shaped gates, cheapest first:"
-	@echo "      uli-check            rustfmt on the three ULI2 workspaces"
-	@echo "      uli-test             the core is bit-exact on the host corpus (U2)"
+	@echo "      uli-check            rustfmt on the four ULI2 workspaces"
+	@echo "      uli-test             the core is bit-exact on the host corpus (U2), and"
+	@echo "                           uli-enc's blob round-trips through it"
+	@echo "      uli-default-tables   regenerate the reference default-tables golden"
 	@echo "      uli-overlay-test     product path vs the portable reference, both builds, + premise"
 	@echo "      uli-fixture          regenerate the committed expected-vector file"
 	@echo "      uli-bench            build + run + read PASS: 129-frame cycle/witness image"

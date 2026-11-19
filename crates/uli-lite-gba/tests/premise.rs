@@ -43,6 +43,13 @@
 //! [`PLAN-OF-RECORD.md`](../uli-lite/PLAN-OF-RECORD.md) → "The encoder — the last
 //! missing piece", and the numbers below are the numbers E-R4 states.
 //!
+//! Since 2026-11-19 (later, decision 2) the bound and its census have **one
+//! home**: `uli_lite::CodeTables::premise()`, bounded by
+//! `format::ENC_PAIR_RBITS_MAX` / `format::ENC_ESCK_MAX`, called by the encoder
+//! before it emits a byte. This file is that checker's witness — every corpus
+//! below is run through the promoted function, and the negative controls are
+//! kept here because a checker is only as good as its red test.
+//!
 //! ## The measured census, and the correction this file carries
 //!
 //! Measured 2026-11-19 by parsing each corpus through `CodeTables::parse_into`,
@@ -91,7 +98,7 @@
 //! corpus that exists is the same failure mode as a bound that tests nothing,
 //! the test fails if the assets directory holds `.uli` files it did not read.
 
-use uli_lite::format::{CT_PAIR, CT_QUAD, CT_ZERO, MAXK};
+use uli_lite::format::{CT_PAIR, CT_QUAD, CT_ZERO, ENC_ESCK_MAX, ENC_PAIR_RBITS_MAX};
 use uli_lite::{Album, CodeTables};
 
 static FIXTURE_STORAGE: uli_lite::Aligned<
@@ -124,92 +131,13 @@ fn repo_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-/// **E-R4**, the raw-field bound. `r + 1` bits follow a refill, so the window
-/// itself would allow 15; 5 is what every corpus this tree owns measures and
-/// what the encoder is required to hold, leaving 10 bits of margin.
-const PAIR_RBITS_MAX: u8 = 5;
-
-/// **E-R4**, the escape bound. `t = 2z + 1 + esck <= 11 + esck`, so the window
-/// would allow 5; 2 is the measured maximum and the required bound.
-const ESCK_MAX: u8 = 2;
-
-/// What one corpus's tables look like, kept so the tests can assert the check
-/// actually covered something instead of trusting a loop that may have run over
-/// no class at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Census {
-    zero: usize,
-    pair: usize,
-    quad: usize,
-    max_pair_rbits: u8,
-    max_esck: u8,
-}
-
-/// Check `tables` against E-R4 and return what was seen. `Err` names the first
-/// violation; it returns a `Result` rather than panicking so the negative-control
-/// tests below can assert on the rejection itself.
-fn premise_check(tables: &CodeTables) -> Result<Census, String> {
-    let k = tables.k;
-    if k > MAXK {
-        return Err(format!("k={k} exceeds MAXK={MAXK}"));
-    }
-
-    let mut c = Census {
-        zero: 0,
-        pair: 0,
-        quad: 0,
-        max_pair_rbits: 0,
-        max_esck: 0,
-    };
-
-    for i in 0..k {
-        match tables.ctype[i] {
-            CT_ZERO => c.zero += 1,
-            CT_QUAD => c.quad += 1,
-            CT_PAIR => {
-                c.pair += 1;
-                // The raw digit is read only here, which is exactly why the
-                // class id has to be the real one.
-                if tables.rbits[i] > PAIR_RBITS_MAX {
-                    return Err(format!(
-                        "class {i} is PAIR with rbits={} > {PAIR_RBITS_MAX}: a raw pair \
-                         digit costs rbits + 1 bits after the group's refill, so the \
-                         encoder must refuse it (the 16-bit window itself only breaks at \
-                         rbits > 15, and the table parser accepts 16 — E-R4 is the \
-                         tighter bound by choice)",
-                        tables.rbits[i]
-                    ));
-                }
-                c.max_pair_rbits = c.max_pair_rbits.max(tables.rbits[i]);
-            }
-            other => {
-                return Err(format!(
-                    "class {i} has ctype={other}, which is not ZERO({CT_ZERO}) / \
-                     QUAD({CT_QUAD}) / PAIR({CT_PAIR})"
-                ));
-            }
-        }
-        // esck is read on PAIR and QUAD alike (both can escape), so it is bound
-        // on every class, ZERO included — stricter than needed, and cheap.
-        if tables.esck[i] > ESCK_MAX {
-            return Err(format!(
-                "class {i} has esck={} > {ESCK_MAX}: the escape field is \
-                 t = 2z + 1 + esck with z <= 5, so t <= {} — E-R4 holds 3 bits of \
-                 margin over the 16-bit window's own limit of esck <= 5",
-                tables.esck[i],
-                11 + tables.esck[i] as u16
-            ));
-        }
-        c.max_esck = c.max_esck.max(tables.esck[i]);
-    }
-
-    Ok(c)
-}
-
-/// Assert E-R4 over a blob's tables, and assert that the raw-field half of the
-/// check had a subject: a blob with **no PAIR class at all** would satisfy
-/// `rbits <= 5` without the bound being tested, which is how this file's
-/// predecessor stayed green for no reason.
+/// Assert E-R4 over a blob's tables with the **promoted** checker — the bound
+/// and its census live in `uli_lite::CodeTables::premise()` (2026-11-19 later,
+/// decision 2: one home, no third copy of `5` and `2`), and this file is its
+/// witness. It also asserts that the raw-field half of the check had a subject:
+/// a blob with **no PAIR class at all** would satisfy `rbits <= 5` without the
+/// bound being tested, which is how this file's predecessor stayed green for no
+/// reason.
 fn assert_premise(label: &str, blob: &[u8]) {
     let album = Album::parse(blob).unwrap_or_else(|e| panic!("{label}: album: {e:?}"));
     let mut tables = CodeTables::new();
@@ -217,7 +145,9 @@ fn assert_premise(label: &str, blob: &[u8]) {
         .parse_into(album.tables())
         .unwrap_or_else(|e| panic!("{label}: tables: {e:?}"));
 
-    let c = premise_check(&tables).unwrap_or_else(|why| panic!("{label}: {why}"));
+    let c = tables
+        .premise()
+        .unwrap_or_else(|why| panic!("{label}: {why}"));
     assert!(
         c.pair >= 1,
         "{label}: the tables hold no PAIR class, so the rbits bound checked nothing — \
@@ -226,7 +156,14 @@ fn assert_premise(label: &str, blob: &[u8]) {
 
     eprintln!(
         "{label}: k={} pair={} quad={} zero={} max rbits(PAIR)={}/{} max esck={}/{}",
-        tables.k, c.pair, c.quad, c.zero, c.max_pair_rbits, PAIR_RBITS_MAX, c.max_esck, ESCK_MAX
+        tables.k,
+        c.pair,
+        c.quad,
+        c.zero,
+        c.max_pair_rbits,
+        ENC_PAIR_RBITS_MAX,
+        c.max_esck,
+        ENC_ESCK_MAX
     );
 }
 
@@ -301,8 +238,11 @@ fn the_class_ids_are_the_ones_the_bound_is_stated_against() {
 /// be declared unread, and the checker would pass it.
 #[test]
 fn the_checker_names_a_pair_class_that_breaks_the_bound() {
-    let over = one_class(CT_PAIR, PAIR_RBITS_MAX + 1, 0);
-    let why = premise_check(&over).expect_err("rbits 6 on a PAIR class must be rejected");
+    let over = one_class(CT_PAIR, ENC_PAIR_RBITS_MAX + 1, 0);
+    let why = over
+        .premise()
+        .expect_err("rbits 6 on a PAIR class must be rejected")
+        .to_string();
     assert!(
         why.contains("class 0 is PAIR with rbits=6"),
         "rejection did not name the class, its type or its rbits: {why}"
@@ -310,22 +250,24 @@ fn the_checker_names_a_pair_class_that_breaks_the_bound() {
 
     // And the same table one bit past the window's own limit, which is where the
     // product reader genuinely breaks rather than merely losing margin.
-    assert!(premise_check(&one_class(CT_PAIR, 16, 0)).is_err());
+    assert!(one_class(CT_PAIR, 16, 0).premise().is_err());
 
     // A QUAD class carries no raw field at all, so rbits is not a violation
     // there — asserted so nobody "fixes" the bound by applying it to every class
     // and re-creates the coverage illusion from the other direction.
     assert!(
-        premise_check(&one_class(CT_QUAD, 99, 0)).is_ok(),
+        one_class(CT_QUAD, 99, 0).premise().is_ok(),
         "rbits is never read on QUAD; rejecting it here would misstate the contract"
     );
 
     // esck is bound on every class, ZERO included.
-    assert!(premise_check(&one_class(CT_ZERO, 0, ESCK_MAX)).is_ok());
-    let esc = premise_check(&one_class(CT_QUAD, 0, ESCK_MAX + 1))
-        .expect_err("esck 3 must be rejected under E-R4");
+    assert!(one_class(CT_ZERO, 0, ENC_ESCK_MAX).premise().is_ok());
+    let esc = one_class(CT_QUAD, 0, ENC_ESCK_MAX + 1)
+        .premise()
+        .expect_err("esck 3 must be rejected under E-R4")
+        .to_string();
     assert!(esc.contains("esck=3"), "{esc}");
 
     // An unknown ctype is an error, not a skip.
-    assert!(premise_check(&one_class(3, 0, 0)).is_err());
+    assert!(one_class(3, 0, 0).premise().is_err());
 }
