@@ -26,7 +26,7 @@ libraries that other GBA ROMs can build on top of.
 
    | Track | Entry point | Status |
    |---|---|---|
-   | **ULI2** | **[ULI2.md](ULI2.md)** + **[crates/uli-lite/RECORD.md](crates/uli-lite/RECORD.md)** | **accepted 2026-11-13 as the product codec; GBA-first since 2026-11-14.** Phase 0/1 are bit-exact; Phase 1b measured the portable decoder; **PR A (2026-11-14)** wired the product kernel set into `Decoder` and measured a full frame at **698% worst / 505% mean**; **PR B (2026-11-14)** moved the entropy/bit-reader/dequant/M/S hot path into `uli-lite-gba` and measured **204% worst / 177% mean**; **PR C (2026-11-14)** attributed the frame — **63% synthesis kernels / 33% entropy / 4% M/S + wrapper** — and reached **200% / 174%** with a split-`huff` fast path. **U4 is not met** and playback has not started; the remainder is scoped as two rewrites (asm kernels, entropy), not tuning. The live plan and ledger are the plan of record; `ULI2.md` is the decision record. |
+   | **ULI2** | **[ULI2.md](ULI2.md)** (decision record) · [crates/uli-lite/PLAN-OF-RECORD.md](crates/uli-lite/PLAN-OF-RECORD.md) (live plan) · [crates/uli-lite/RECORD.md](crates/uli-lite/RECORD.md) (ledger) | **the product codec** (accepted 2026-11-13), **in real time on the GBA since 2026-11-19.** At the fixed product rate of **32,768 Hz** a real album costs **86.27% of one audio period at the worst frame** — 74.27% decoding, the rest convert + IRQ + DMA — so **~13.7 points of headroom and no starved frames**, measured over 16,553 frames with the screen off. At ~**102 kbit/s** a 32 MiB cartridge holds **~43 minutes** of album audio, about **3.5×** what the lossless backend fits on the same card. Still owed: an **in-tree encoder**, and proof that a UI fits inside that 13.7. Gates, hardware runs and memory figures live in those entry points, not in this table. |
    | **FLAC** | **[FLAC.md](FLAC.md)** | the lossless library: **done and accepted**. `no_std`, bit-exact against `flac -d`, and playing real audio at 16,384 Hz on two GBA units with zero underruns. Governs `crates/flac-lite`, `crates/flac-lite-gba`, `examples/flac_integration` and the `GAFP` asset, and nothing outside them. Detail in **[flac-docs/](flac-docs/)** — architecture, format notes, the measurements/method ledger, the ARM kernel, and the rulings and history. |
    | **ULC** | **[ULC.md](ULC.md)** | scope and intent recorded; **not currently planned**. |
    | **Opus** | **[OPUS.md](OPUS.md)** | an evaluation opened 2026-09-27 while the FLAC perf gate was failing; not a build plan. |
@@ -35,6 +35,10 @@ libraries that other GBA ROMs can build on top of.
    `product-play.gba` image and its asset). Read that as track-local: the repo's product-codec
    choice is recorded in **[ULI2.md](ULI2.md)**, and the two tracks share ground only where a
    file says so (the ring/FIFO feeder, the geometry, the measurement method).
+
+   Every number in that table is a **summary, not a gate record** — the authority is each track's
+   own ledger. The ULI2 row read "**U4 is not met** and playback has not started" until it was
+   corrected on 2026-11-19, the day real time was met with margin.
 
 5. **Upstream higher sample rates.** Add support for higher sample rates (like 65kHz) to the upstream `agb` library to push past the current 32kHz software mixer limit.
 
@@ -45,13 +49,19 @@ ROMs built on the shared libraries could include:
 
 - **The Album Player** — one cartridge, one album: a title card, the whole record
   playable with pause/skip/track-list, cover art and a progress bar, on either
-  backend through one codec seam. [`ALBUM-PLAYER.md`](ALBUM-PLAYER.md) is the plan;
-  Phase 0 (AP-0) has landed as the probe ROMs and measurements in
-  [`examples/album_probe/`](examples/album_probe/README.md) (`make album-probe`).
-  Phase 1 builds the album from a **tracked track list** (`album.toml`) whose blobs are
-  **generated at build time** by the same `gafp_pack.py --emit-pin` path `master-pack`
-  already uses — one per track, addressed by an application manifest, and none of them
-  committed, because they belong to whichever album was built (ALBUM-PLAYER.md §2.3).
+  backend through one codec seam. [`ALBUM-PLAYER.md`](ALBUM-PLAYER.md) is the plan; it has landed in part.
+  Phase 0 (AP-0) landed as the probe ROMs and measurements in
+  [`examples/album_probe/`](examples/album_probe/README.md) (`make album-probe`), and **Phase 1
+  has landed through PR-3c** — the pack step, the `PcmSource` seam, the first ROM that plays a
+  track, the transport and keys, the resume refill — with **AP-1 passing headless** and four
+  hardware legs recorded at AP-7a. The album is built from a **tracked track list** (`album.toml`)
+  whose blobs are **generated at build time** by the same `gafp_pack.py --emit-pin` path
+  `master-pack` already uses — one per track, addressed by an application manifest, and none of
+  them committed, because they belong to whichever album was built (ALBUM-PLAYER.md §2.3).
+  **The next unclaimed work is Phase 2, the shell** — screens, layout, cover art (`AP-3`, `AP-4`);
+  §11's phase log and §13's gate rows are the record of what is done, and the lossy backend's
+  real-time gate is **met** (§ above), so an album on that backend is now waiting on this
+  application's adapter and an asset path, not on a decoder.
 - **A high-fidelity song player** — play a full arrangement using as much of the
   APU's capability as the real-time budget allows.
 - **A playable instrument** — accept MIDI (or similar) input over a cable and
@@ -266,8 +276,12 @@ fixed set of note assets may sensibly commit them.
 | `make native-rom` | Build + link + fix `gba-sound-player.gba` with the host toolchain | no virtualization needed |
 | `make podman-rom` | Build the `gba-builder` image and run the same ROM build inside it; `CONTAINER=docker` works | needs podman/docker |
 | `make master-pack INPUT=track.wav` → `make master-play-rom INPUT=track.wav` | **the FLAC happy path**: resample/encode a real master to the product profile, pack the `GAFP` asset and its pins, then build `master-play.gba` — the image that *plays* it at 16,384 Hz | native (needs `ffmpeg` if the input must be resampled, `flac` to encode) |
-| `make album-bake` (defaults to `ALBUM=examples/album_player/album.toml`) | **the master path generalised to N tracks** (`ALBUM-PLAYER.md` §9.0, A3a): reads the tracked `album.toml` → per distinct source, `gafp_pack.py --master --emit-pin` → the album's `ALBM1` manifest + generated `src/assets.rs`. Phase 1 packs only; nothing plays audio yet. The generated files are gitignored — the config is the tracked artifact | native (needs `flac`, `metaflac`, `ffmpeg`) |
+| `make album-bake` (defaults to `ALBUM=examples/album_player/album.toml`) | **the master path generalised to N tracks** (`ALBUM-PLAYER.md` §9.0, A3a): reads the tracked `album.toml` → per distinct source, `gafp_pack.py --master --emit-pin` → the album's `ALBM1` manifest + generated `src/assets.rs`. The generated files are gitignored — the config is the tracked artifact | native (needs `flac`, `metaflac`, `ffmpeg`) |
 | `make album-pack-check` | the Phase-1 pack gate: bakes twice and `cmp`s every generated byte (determinism), runs `scripts/album_bake.py --self-test` (all four §9.0 refusals), then the `examples/album_player` host suite, which parses the baked `ALBM1` through the shipping `meta.rs` and refuses a green that collected < 20 tests | native (same tools; a real pack of the tracked master) |
+| `make album-seam-test` | the album's **codec seam, host half** (AP-2/AP-9): the derived geometry checked against the shipped figures, every track's `ALBM1` against its generated pins, the pack's declared refusals, `PcmSource` on both backend arms, and the shipped track folded to its **FIFO pins on the host** — plus a stub-only build that must link no decoder at all; neutral cwd, a log, and a collected-test floor | native |
+| `make album-rom ALBUM=examples/album_player/album.toml` | **one command to a playable album**: `album-bake` → cargo → `agb-gbafix` → `album-player.gba`, the **audited** gate artifact (default features include `deep-audit` — a cold re-decode of every track plus the asset-region fold, ~75 s of CPU). Judge it by the log's `[album-rom] verdict` line, never by the exit status: a PASS loops, so the timeout's exit 124 *is* the passing result | native (mGBA to run it) |
+| `make album-player-rom` | the same binary **without** `deep-audit` → `album-player-fast.gba`: a player for a cart a human is watching. Keeps the `ALBM1` structure fold, the per-track tripwires, the pin cross-check, the boot gate and the live period audit; says `pcm=SKIPPED, fifo=SKIPPED, assets=SKIPPED — built without deep-audit` rather than looking like a gate pass | native |
+| `make album-test` | **AP-1/AP-2**: the scripted-key playback ROM (`album-player-replay.gba`) in headless mGBA — pause and resume, skips, track-end advances, the skip-truncate ledger (`dropped > 0` on a press; `dropped=0 (ring empty at mark)` is a pass, a bare `dropped=0` is not; a plain `dropped=0` is required on an advance), with every bound checked against **this run's measured pass** rather than an emulator constant. Exits 124 on a PASS | native (needs `mgba-test-runner`) |
 | `make native-flac-rom` | `flac-integration.gba`: links the core + overlay, embeds the committed asset, decodes every frame through the facade, checks the pinned PCM, then times a second pass. No sound. Also the real **link** witness for the core (what `overlay-check`, an rlib, cannot be) | native or container |
 | `make product-play-rom` / `native-product-play-rom` | `product-play.gba`: the same crate's second binary on the committed asset — decode → 8-bit FIFO convert → ring → sound DMA at 16,384 Hz, counting its own underflows, gating its period audit and its played-form FIFO pins, verdict to log **and** screen. Not gated: run it by hand, and a **pass ends in `loop {}`, so the timeout's exit 124 is expected** — read the log | native |
 | `make product-play-test` | the product geometry's **host model**: the ROM's own `RingFeed` and `geometry` constants replayed against a credit-per-period clock, where flow control, the tolerances and the ring sizing are justified rather than asserted | native |
