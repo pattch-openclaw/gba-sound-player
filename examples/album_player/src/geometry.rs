@@ -206,6 +206,23 @@ pub const PREFILL_CHUNKS: u32 = FLAC.prefill_chunks;
 /// Prefill depth in samples per channel: 16 × 560 = 8,960.
 pub const PREFILL_SAMPLES: u32 = FLAC.prefill_samples;
 
+/// The producer frames it costs to fill an empty ring to [`PREFILL_SAMPLES`]:
+/// `ceil(8,960 / 2,048)` = **5**.
+///
+/// Neither place that pays it chose the count. The boot prefill loops until the target is reached
+/// (`album_play_main.rs`'s `Producer::prefill`, whose own log line says `prefilled 10240 samples in
+/// 5 frames` and whose cost §10.2 measures at 5,241,344 c = 312 ms on the fast arm), and a starved
+/// resume's refill ([`transport`](crate::transport)'s `State::Buffering`, PR-3c) fills to the *same*
+/// target for the *same* reason: §4.2b's invariant is that the lead depth exists before audio starts,
+/// so a resume that finds none of it re-creates the one depth the plan already requires rather than
+/// inventing a second, smaller number to argue about.
+///
+/// It is derived, and it is **exact rather than an upper bound**: a refill is entered only when the
+/// ring holds less than one whole chunk that `take_chunk` could hand over, so the shortfall it covers
+/// is in `[…, PREFILL_SAMPLES]` and the count below is the same for every reachable entry — pinned by
+/// the assertions at the end of this block instead of by prose.
+pub const PREFILL_FRAMES: u32 = (PREFILL_SAMPLES + FRAME_SAMPLES - 1) / FRAME_SAMPLES;
+
 /// Cycles for a frame of `n` samples at [`RATE_HZ`].
 pub const fn frame_cycles(n: u32) -> u32 {
     FLAC.frame_cycles(n)
@@ -261,6 +278,18 @@ const _: () = assert!(PREFILL_SAMPLES == 8_960);
 // ready >= chunk).
 const _: () = assert!(RING_SAMPLES > PREFILL_SAMPLES + FRAME_SAMPLES);
 const _: () = assert!(RING_SAMPLES >= FRAME_SAMPLES + CHUNK_SAMPLES);
+// The burst of `PREFILL_FRAMES` frames always fits the ring in one go — which is what lets a refill
+// run without the producer's room gate ever refusing it, and what lets `transport` price the wait by
+// a frame count at all.
+const _: () = assert!(PREFILL_FRAMES * FRAME_SAMPLES <= RING_SAMPLES);
+// …and the count is exact at both ends of the range a refill can be entered from: an empty ring, and
+// a ring one sample short of the chunk `take_chunk` would have taken. Anything else and the bound
+// `transport::resume_to_audio_bound` builds from this count would be priced off a guess.
+const _: () = assert!(
+    (PREFILL_SAMPLES + FRAME_SAMPLES - 1) / FRAME_SAMPLES == PREFILL_FRAMES
+        && (PREFILL_SAMPLES - (CHUNK_SAMPLES - 1) + FRAME_SAMPLES - 1) / FRAME_SAMPLES
+            == PREFILL_FRAMES
+);
 // The identity rate resolves to itself, and only to itself.
 const _: () = assert!(matches!(
     playback_rate_for_stream(RATE_HZ),

@@ -1404,7 +1404,7 @@ fn the_lead_subtraction_cannot_underflow() {
 use album_player::pcm::{AlbumMeta, TrackMeta};
 use album_player::transport::{
     FADE_PERIODS, FADE_SAMPLES, GAIN_UNITY, HandOffGain, SKIP_PRIME_CHUNKS, State, Step, Transport,
-    pause_to_freeze_bound, scale_byte, take_to_handoff_bound,
+    pause_to_freeze_bound, resume_to_audio_bound, scale_byte, take_to_handoff_bound,
 };
 use gba_playback::playback::{Chunk, PushError, RingFeed, convert_frame, fifo_byte};
 
@@ -1553,6 +1553,13 @@ struct Pause {
     resumed_from: u32,
     /// Video frames the chain spent frozen.
     frozen_frames: u32,
+    /// **PR-3c.** Whether the ring could not give the prime's chunk, so the resume took the refill route
+    /// instead of the direct prime. The claim of this whole PR is that both routes keep the position:
+    /// `dropped()` is zero either way, and this says which of the two paths got there.
+    refilled: bool,
+    /// Producer frames (one per main-loop pass) the refill spent reaching the prefill's depth. Zero on
+    /// the direct route, which is the point: a ring that can prime costs nothing extra.
+    refill_passes: u32,
 }
 
 impl Pause {
@@ -1763,6 +1770,20 @@ struct Model {
     /// Whether the last visit is still open: the ROM's `visits.close` is called once per visit, after
     /// its drain or at the hand-off that ends it, and never twice.
     visit_open: bool,
+    /// A resume press the ring routed to PR-3c's refill: the head it was taken on (the no-seek witness)
+    /// and the passes spent so far. The frame driver carries it across steps because the burst runs one
+    /// frame per pass, in the loop's hands rather than the press's; [`Model::press_resume`] does not need
+    /// it because it runs the burst in one call.
+    resume_open: Option<ResumeTake>,
+}
+
+/// The take of a starved resume, as the frame driver holds it between passes.
+#[derive(Clone, Copy, Debug)]
+struct ResumeTake {
+    /// The session clock at the take — the sample the arm must deliver, and the pair's `dropped()` half.
+    head: u32,
+    /// Producer frames spent so far, for the record's `refill_passes`.
+    passes: u32,
 }
 
 /// One visit, in the units the ROM's `Visit` records it in.
@@ -1824,6 +1845,7 @@ impl Model {
             cover: 0,
             visits: Vec::new(),
             visit_open: false,
+            resume_open: None,
         }
     }
 
@@ -1944,6 +1966,11 @@ impl Model {
             State::Paused,
             "a period was served with the chain frozen"
         );
+        assert_ne!(
+            self.transport.state(),
+            State::Buffering,
+            "a period was served while a starved resume was refilling: the chain is frozen in that state, so it has no audio clock to serve"
+        );
         // Read *before* the gain spends this chunk's cover count, exactly as the ROM's feeder does: a
         // countdown of one means this is the cover's last chunk, so the next period is the new
         // track's own first. `content_at == 0` is the per-record "waiting for its content point"
@@ -2044,8 +2071,9 @@ impl Model {
     /// The main loop's frame slice for a pause press: the toggle, then feeder periods until the
     /// transport says the gain has reached silence, then the freeze.
     fn press_pause(&mut self) -> Pause {
+        let primable = self.ring_primable();
         assert_eq!(
-            self.transport.toggle(true),
+            self.transport.toggle(true, primable),
             Step::FadeOut,
             "a pause from Playing must fade out"
         );
@@ -2087,6 +2115,8 @@ impl Model {
             fade_periods,
             resumed_from: 0,
             frozen_frames: 0,
+            refilled: false,
+            refill_passes: 0,
         };
         assert!(
             pause.fade_periods <= bound,
@@ -2099,17 +2129,99 @@ impl Model {
         self.pauses.last().cloned().expect("just pushed")
     }
 
-    /// The main loop's frame slice for a resume press: the toggle asks for the re-prime, the prime
-    /// takes the ring's head (applying the ramp to that chunk), and the chain is re-armed.
+    /// The ROM's `ring_primable`, asked in the ROM's order — the ring first, then the state machine,
+    /// because PR-3c routes a resume by the answer (Q18's ruling: a product must not stop).
+    ///
+    /// The two clauses are `take_chunk`'s own two answers: a ring below `CHUNK` hands a feeder
+    /// `Chunk::Starved`, and a finished stream's short tail is a `Chunk::Tail` at any `ready() > 0` —
+    /// the same distinction the ROM's `finished` argument selects. `resume_never_routes_a_ring_that_a_prime_would_take`
+    /// sweeps `ready()` and compares this to what `take_chunk` actually answers, so the model's
+    /// classification cannot drift from the ring's.
+    fn ring_primable(&self) -> bool {
+        self.feed.ready() >= CHUNK || (self.finished && self.feed.ready() > 0)
+    }
+
+    /// The main loop's frame slice for a resume press: the toggle is **routed by the ring** (PR-3c), and
+    /// both routes end at the same arm — the prime of the ring's head and the re-arm.
     fn press_resume(&mut self, paused_frames: u32) {
         assert_eq!(self.transport.state(), State::Paused);
         let from = self.committed;
-        assert_eq!(
-            self.transport.toggle(true),
-            Step::Prime,
-            "a toggle from Paused must ask for the re-prime"
+        let primable = self.ring_primable();
+        match self.transport.toggle(true, primable) {
+            Step::Prime => self.prime_resume(from, paused_frames),
+            Step::Buffer => {
+                // The ring cannot give the prime's chunk. §4.4's no-seek invariant with a burst inside
+                // the pause is these three assertions: the frozen chain serves no period, hands nothing
+                // to the DMA, and its clock does not move — so the arm below takes the very head the
+                // freeze stopped on, and `dropped()` stays zero for a reason stronger than arithmetic.
+                let periods = self.periods;
+                let handoffs = self.handoffs;
+                let passes = self.refill_to_target();
+                assert_eq!(
+                    self.periods, periods,
+                    "a starved resume served a period: the chain was not frozen"
+                );
+                assert_eq!(
+                    self.handoffs, handoffs,
+                    "a starved resume handed a chunk to the DMA"
+                );
+                assert_eq!(
+                    self.committed, from,
+                    "a refill moved the session clock — that is a seek, and §4.4 forbids it"
+                );
+                let last = self.pauses.last_mut().expect("a resume follows a pause");
+                last.refilled = true;
+                last.refill_passes = passes;
+                self.prime_resume(from, paused_frames);
+            }
+            other => panic!("a resume toggle answered {other:?}"),
+        }
+    }
+
+    /// PR-3c's burst at the loop's cadence: **one producer frame per main-loop pass**, no periods, until
+    /// the ring holds `PREFILL` again — the boot prefill's own target and §4.2b's figure, which is the
+    /// whole point (no second, smaller number to argue about). Returns the passes it took.
+    ///
+    /// `end_buffer` is asked on every pass, which is what the transport's own doc allows ("the caller
+    /// asks when the ring reaches the target and may ask on every pass afterwards"): the caller owns the
+    /// ring's depth, the state machine owns the state and the ramp. The video clock moves by a pass's
+    /// wall time — the decode is real work and takes the same time whether or not any period ran — which
+    /// is what makes the frame leg in `the_refill_awaits_no_more_than_the_run_own_pass_price_allows`
+    /// a price rather than a count of frames nobody spent.
+    fn refill_to_target(&mut self) -> u32 {
+        assert_eq!(self.transport.state(), State::Buffering);
+        assert!(
+            !self.finished,
+            "a refill was entered with the stream finished, so its target can never be reached — which is exactly why a finished visit's short tail takes the direct route"
         );
-        self.prime_resume(from, paused_frames);
+        let mut passes = 0;
+        loop {
+            if self.feed.ready() >= PREFILL {
+                assert_eq!(
+                    self.transport.end_buffer(),
+                    Step::Prime,
+                    "the refill reached its target and did not ask for the prime"
+                );
+                assert_eq!(
+                    self.transport.state(),
+                    State::Resuming,
+                    "the arm must be asked for, never assumed"
+                );
+                return passes;
+            }
+            assert!(
+                passes <= geometry::PREFILL_FRAMES,
+                "the refill has spent {passes} frames and is at {}; the boot prefill reaches the same target in {}",
+                self.feed.ready(),
+                geometry::PREFILL_FRAMES
+            );
+            assert!(
+                self.produce(),
+                "a refill's producer stopped before its target: the stream ended without the ring reaching the prefill"
+            );
+            passes += 1;
+            self.video_frames += self.pass_periods * PERIOD_FRAMES;
+        }
     }
 
     /// The prime after a resume's `toggle` returned [`Step::Prime`]: the primed chunk is the ramp's
@@ -2696,7 +2808,12 @@ fn the_deferral_serves_the_ramped_chunk_before_the_freeze_so_the_fade_reaches_th
 
     let before = model.dma_l.len();
     let consumed_before = model.feed.consumed();
-    assert_eq!(model.transport.toggle(true), Step::FadeOut);
+    let primable = model.ring_primable();
+    assert_eq!(
+        model.transport.toggle(true, primable),
+        Step::FadeOut,
+        "a pause from Playing must fade out"
+    );
 
     // Period 1: the ramp is applied to the slot the DMA is about to start playing. The gain is
     // silent at the end of it, but the chunk carrying the silence has only just begun.
@@ -2991,8 +3108,9 @@ fn a_pause_freezes_inside_the_bound_its_own_pass_length_supports() {
         model.run_periods(6);
 
         let bound = pause_to_freeze_bound(pass);
+        let primable = model.ring_primable();
         assert_eq!(
-            model.transport.toggle(true),
+            model.transport.toggle(true, primable),
             Step::FadeOut,
             "a pause from Playing must fade out (pass {pass})"
         );
@@ -3056,6 +3174,416 @@ fn the_pause_bound_moves_with_the_machine_it_is_measured_on() {
     // A pass measured at 2 periods here and at 4 periods on a real cart both stay inside their own
     // bound; the old literal could not tell those machines apart, which is why it was not a bound.
     assert!(pause_to_freeze_bound(2) < pause_to_freeze_bound(4));
+}
+
+// --------------------------------------------------------------------------------=============
+// 8c-bis. PR-3c: a resume the ring cannot prime (§4.4's no-seek invariant across a refill)
+// ---------------------------------------------------------------------------------------------
+//
+// Q18's ruling (§15): a product whose ring is too short to hand the prime's chunk **does not stop**;
+// the listener expects audio to resume. `Transport` now routes that press by what the ring answers —
+// `toggle(true, primable)` returns `Step::Buffer` and the chain stays frozen while the producer brings
+// the ring back to `PREFILL_SAMPLES`, one frame per main-loop pass — and §4.4's invariant is what
+// separates that from a seek: the ring's head, and so the session clock, does not move.
+//
+// Why this section exists in the host suite at all: on every ROM arm this repo has measured, the ring
+// still held `PREFILL_SAMPLES` when the resume was pressed, so the ROM's row prints `refills=0` and no
+// hardware witness exists for the branch. The model is currently the only place it is reachable. That is
+// a fact about the fixtures, not a reason to leave the branch untested — and it is why the row prints
+// the count even when it is zero.
+
+/// The boundary allowance the ROM gives any leg that ends at an audio period: `calc_boundary_frames` at
+/// the video period, the same expression `album_play_main.rs` pins to `MAX_BOUNDARY_FRAMES == 3`, and
+/// the figure the pause and hand-off bounds use (§10.3's worst-case alignment, R13's rule that a bound
+/// is priced off a measured period rather than off an assumption about which main-loop pass notices).
+const RESUME_BOUNDARY_FRAMES: u32 =
+    (geometry::PERIOD_CYCLES + ROM_VIDEO_PERIOD_CYCLES - 1) / ROM_VIDEO_PERIOD_CYCLES;
+
+/// PR-3c's headline: the press that cannot prime is **not** a stop and **not** a seek.
+///
+/// The fixture is the case the ROM's own runs never reach, built so nothing else in the run is unusual:
+/// the ring is drained to 160 samples by *full* periods (every one of them had a whole chunk to take,
+/// so `underflows` stays zero), and the pause's fade takes two more whole chunks before it freezes. At
+/// the resume the ring holds 160 samples — less than the prime's chunk — so the transport refuses the
+/// prime and asks for a refill instead.
+///
+/// What is then claimed is the whole of §11 PR-3c's item 4, in the units the repo already keeps:
+///
+/// * **the wait ends, in frames the run already pays for** — the burst is `PREFILL_FRAMES` producer
+///   frames, which is the boot prefill's own cost and geometry.rs's pinned constant, not a new number;
+/// * **no sample is lost or replayed** — `dropped()` is zero, as it is for a direct resume;
+/// * **the position never jumps** — asserted inside [`Model::press_resume`] where it is a panic on the
+///   model itself: the burst serves no period, hands nothing to the DMA, and moves no clock, so the arm
+///   takes the same head the freeze stopped on;
+/// * **the stream is continuous** — every byte the ring ever handed the gain is still the source's, in
+///   order: the same closed-form comparison §8c's scripted-pause run makes, which is the only form of
+///   "no seek" a stream can prove rather than assert.
+#[test]
+fn a_resume_the_ring_cannot_prime_refills_the_ring_and_delivers_the_same_stream() {
+    let mut model = Model::new(TOTAL);
+    model.prefill();
+    assert!(model.prime());
+    // 15 full periods: the ring comes to rest at 1,280 samples — two chunks and a bit — with every
+    // hand-off full, which is what lets this test read `underflows == 0` at the end instead of a count
+    // it would have to explain.
+    model.run_periods(15);
+    assert_eq!(model.feed.ready(), 1_280);
+    assert_eq!(model.underflows, 0, "the fixture starved before the pause");
+
+    let pause = model.press_pause();
+    assert_eq!(pause.fade_periods, FADE_PERIODS);
+    // The ring the resume is pressed onto: too short for a prime, and the stream is nothing near its
+    // end, so a `Tail` chunk is not on offer either. This is the pair of conditions `Step::Buffer` is
+    // for, and both are asserted here rather than left to the transport's answer alone.
+    assert_eq!(model.feed.ready(), 160);
+    assert!(
+        !model.finished,
+        "a finished stream's short ring is a tail, not a starvation"
+    );
+    assert!(!model.ring_primable());
+
+    let frames_before = model.video_frames;
+    model.press_resume(0);
+    let pause = model
+        .pauses
+        .last()
+        .copied()
+        .expect("the pause was recorded");
+
+    // The route, stated as a count rather than as a state nobody can see afterwards.
+    assert!(pause.refilled, "the resume took the direct prime anyway");
+    assert_eq!(
+        pause.refill_passes,
+        geometry::PREFILL_FRAMES,
+        "the refill cost {} frames; the boot prefill reaches this same target in {}",
+        pause.refill_passes,
+        geometry::PREFILL_FRAMES
+    );
+    assert_eq!(
+        model.transport.state(),
+        State::Playing,
+        "a starved resume did not hand the chain back to the audio clock"
+    );
+    // The chain was frozen for the whole burst, so the only video the burst spent is the decode's: the
+    // pass price the bound test reads. `pass_periods` is the model's parameter (2 here), one decode per
+    // pass — so the leg is `PREFILL_FRAMES` passes of that price, and no period was served to hide it.
+    assert_eq!(
+        model.video_frames - frames_before,
+        geometry::PREFILL_FRAMES * model.pass_periods * PERIOD_FRAMES,
+        "the refill's video cost is not the pass price the model was told to use"
+    );
+
+    // Nothing was lost or gained: the clock the resume saw is the clock the freeze stopped on.
+    assert_eq!(
+        pause.dropped(),
+        0,
+        "a starved resume dropped or replayed samples"
+    );
+    assert_eq!(pause.resumed_from, pause.frozen_committed);
+    assert_eq!(pause.gain_at_freeze, 0);
+
+    // And the run continues to its end with the ring fed, so the stream comparison below covers the
+    // refill itself: the frames the burst pushed are in the same order the source made them.
+    model.run_periods(4);
+    model.produce_to_end();
+    model.drain();
+
+    assert_eq!(model.underflows, 0, "a starved resume booked an underflow");
+    assert_eq!(model.feed.pushed() as u32, TOTAL);
+    assert_eq!(model.feed.consumed() as u32, TOTAL);
+    assert_eq!(model.committed, TOTAL);
+    let mut expected: Vec<u8> = (0..TOTAL).map(|i| fifo_byte(pattern_sample(i))).collect();
+    expected.resize(model.ring_l.len(), 0);
+    assert_eq!(
+        model.ring_l, expected,
+        "the ring's stream diverged across a refill"
+    );
+}
+
+/// The other half of the branch: a ring that can prime still primes, and the refill is not entered.
+///
+/// PR-3c must not cost the common case anything. Both fixtures below differ only in how many periods
+/// were played before the pause, so the two rows differ in one condition — the depth the resume finds.
+#[test]
+fn a_resume_the_ring_can_prime_never_enters_the_refill() {
+    for (periods, expect_refilled) in [(15u32, true), (14, false)] {
+        let mut model = Model::new(TOTAL);
+        model.prefill();
+        assert!(model.prime());
+        model.run_periods(periods);
+        let ready_at_press = model.feed.ready();
+        model.press_pause();
+        let ready_at_resume = model.feed.ready();
+        assert_eq!(
+            ready_at_resume,
+            ready_at_press - FADE_PERIODS as usize * CHUNK,
+            "the fade took something other than whole chunks (pass {periods})"
+        );
+        assert_eq!(
+            model.ring_primable(),
+            !expect_refilled,
+            "a ring holding {ready_at_resume} samples at the resume is routed to {}",
+            if expect_refilled {
+                "a refill"
+            } else {
+                "a prime"
+            }
+        );
+        model.press_resume(0);
+        let pause = model
+            .pauses
+            .last()
+            .copied()
+            .expect("the pause was recorded");
+        assert_eq!(pause.refilled, expect_refilled);
+        assert_eq!(
+            pause.refill_passes,
+            u32::from(expect_refilled) * geometry::PREFILL_FRAMES,
+            "a resume that needed no refill spent frames anyway, and one that did spent the wrong count"
+        );
+        assert_eq!(pause.dropped(), 0, "a resume lost samples (pass {periods})");
+    }
+}
+
+/// The `primable` the ROM passes is the ring's own verdict, not a guess about the future (§14 R13).
+///
+/// So it is checked against the answer it is meant to predict: for every depth at the boundary, and for
+/// both values of `finished`, the expression the ROM's `ring_primable()` and the model's
+/// [`Model::ring_primable`] share is compared with what `RingFeed::take_chunk` actually replies. A
+/// `Starved` reply and a `false` must agree exactly — a `true` that the ring then refuses is the
+/// half-empty prime the doc names as the bug this PR is not, and a `false` that the ring would have
+/// served is a product that needlessly waited.
+#[test]
+fn resume_routes_by_what_the_ring_answers_not_by_what_the_state_hopes() {
+    // The shared expression, written out so this test is about its two clauses rather than about the
+    // two places that use it: the second clause is `take_chunk`'s `finished` argument, which turns a
+    // short ring at the end of a stream into a `Tail` instead of a `Starved`.
+    let primable = |ready: usize, finished: bool| ready >= CHUNK || (finished && ready > 0);
+
+    // Every depth within a chunk of the boundary, and the two depths that matter beyond it: a full
+    // chunk, a chunk plus one, and the whole ring.
+    let mut depths = vec![0usize, 1, 279, CHUNK - 1, CHUNK, CHUNK + 1, 2 * CHUNK, RING];
+    depths.dedup();
+    for ready in depths {
+        for finished in [false, true] {
+            let mut model = Model::new(TOTAL);
+            let zeros = vec![0u8; ready];
+            model
+                .feed
+                .push_bytes(&zeros, &zeros)
+                .expect("the depth fits the ring");
+            assert_eq!(model.feed.ready(), ready, "the fixture depth is wrong");
+            let (mut l, mut r) = ([0u8; CHUNK], [0u8; CHUNK]);
+            let verdict = model.feed.take_chunk(&mut l, &mut r, CHUNK, finished);
+            let took = match verdict {
+                // The reply the ROM must not receive after a `true`: the prime would hand the ramp a
+                // short chunk and the chain would start with silence inside it.
+                Chunk::Starved => false,
+                Chunk::Full => true,
+                // A `Tail` is the prime a finished visit asks for — §4.2b's short chunk, not an error.
+                Chunk::Tail { .. } => true,
+            };
+            assert_eq!(
+                primable(ready, finished),
+                took,
+                "a ring holding {ready} with finished={finished} answers {} while the routing expression says {}",
+                if took { "a chunk" } else { "Starved" },
+                primable(ready, finished)
+            );
+        }
+    }
+}
+
+/// The refill's target and its cost are the boot prefill's, and the room gate never refuses a pass.
+///
+/// Two claims in one, both of which the design rests on:
+///
+/// * **no new number.** From every depth that can start a burst (`ready() < CHUNK`), reaching
+///   `PREFILL_SAMPLES` takes exactly `PREFILL_FRAMES` frames — the constant geometry.rs already pins as
+///   a compile-time fact, here checked against the real ring rather than against arithmetic on constants.
+///   A burst that stopped one frame short would be a second, smaller target; one that ran past it is a
+///   refill that never decided to end.
+/// * **the wait always ends.** `produce()` asserts the ROM's flow-control gate (`free_samples() >=
+///   FRAME`) on every pass, so if a burst could ever start with too little free ring for one frame, the
+///   model would panic instead of quietly spinning. It never does: the entry depths that can start a
+///   burst are the shortest rings the stream can be holding.
+#[test]
+fn a_refill_reaches_the_prefill_target_in_the_boot_prefill_s_own_frame_count() {
+    for ready in [0usize, 1, 160, 279, CHUNK - 1] {
+        let mut model = Model::new(TOTAL);
+        let zeros = vec![0u8; ready];
+        model
+            .feed
+            .push_bytes(&zeros, &zeros)
+            .expect("the depth fits the ring");
+        let mut passed = 0;
+        while model.feed.ready() < PREFILL {
+            assert!(
+                passed < geometry::PREFILL_FRAMES,
+                "a burst from {ready} has spent {passed} frames and is at {}; the target is reached in {}",
+                model.feed.ready(),
+                geometry::PREFILL_FRAMES
+            );
+            assert!(
+                model.produce(),
+                "a burst's producer stopped at {} with the target at {PREFILL}",
+                model.feed.ready()
+            );
+            passed += 1;
+        }
+        assert_eq!(
+            passed,
+            geometry::PREFILL_FRAMES,
+            "a burst from {ready} reached the target in {passed} frames"
+        );
+        // One frame less would have left the ring below the target — i.e. the burst ended on the
+        // target, not on a count.
+        assert!(model.feed.ready() - FRAME < PREFILL);
+    }
+}
+
+/// PR-3c's caller decision, priced the way R13 requires: the bound is a function of the run's own
+/// measured pass length, and the leg is what the model actually spent.
+///
+/// `resume_to_audio_bound` asks for the worst producer pass **in video frames** and the boundary
+/// allowance the ROM gives any leg that ends at an audio period. It is deliberately the same two
+/// quantities the take and pause bounds use — the leg this one bounds is the same decode, seen from the
+/// other side of a pause. Four pass lengths are swept so the point is visible in the numbers: at every
+/// length the observed wait holds inside the bound, the bound moves with the machine, and the wait is
+/// zero when the ring could prime, which is the only case in which a bound of zero is honest.
+#[test]
+fn the_refill_awaits_no_more_than_the_run_own_pass_price_allows() {
+    // The shape, pinned so the bound cannot quietly become a constant: the frames the prefill's own
+    // decode needs, at the pass length this machine pays, plus the alignment allowance — and nothing
+    // else. `resume_to_audio_bound(0, …)` is the floor: the press-to-arm wait of a ring that needed no
+    // refill, which is the alignment alone.
+    assert_eq!(
+        resume_to_audio_bound(0, RESUME_BOUNDARY_FRAMES),
+        RESUME_BOUNDARY_FRAMES
+    );
+    for pass in [1u32, 2, 4, 8] {
+        let pass_frames = pass * PERIOD_FRAMES;
+        assert_eq!(
+            resume_to_audio_bound(pass_frames, RESUME_BOUNDARY_FRAMES),
+            geometry::PREFILL_FRAMES * pass_frames + RESUME_BOUNDARY_FRAMES,
+            "the bound must move with the pass length it is priced at (pass {pass} = {pass_frames} frames)"
+        );
+        assert!(
+            resume_to_audio_bound(pass_frames + PERIOD_FRAMES, RESUME_BOUNDARY_FRAMES)
+                > resume_to_audio_bound(pass_frames, RESUME_BOUNDARY_FRAMES),
+            "a slower machine may not inherit a faster one's bound"
+        );
+    }
+
+    // The leg, measured. One fixture per pass length, at the depth the headline test uses, with the
+    // model's pass parameter varied — the same sweep `a_pause_leg_holds_inside_its_bound` makes for the
+    // pause's leg.
+    for pass in [1u32, 2, 4, 8] {
+        let mut model = Model::new(TOTAL);
+        model.pass_periods = pass;
+        model.prefill();
+        assert!(model.prime());
+        model.run_periods(15);
+        model.press_pause();
+        assert_eq!(model.feed.ready(), 160, "the fixture starved (pass {pass})");
+
+        let frames_before = model.video_frames;
+        model.press_resume(0);
+        let pause = model
+            .pauses
+            .last()
+            .copied()
+            .expect("a resume follows a pause");
+        assert!(pause.refilled);
+        let leg = model.video_frames - frames_before;
+        let bound = resume_to_audio_bound(pass * PERIOD_FRAMES, RESUME_BOUNDARY_FRAMES);
+        assert!(
+            leg <= bound,
+            "a resume on a 160-sample ring took {leg} video frames at a {pass}-period pass; the bound is {bound}"
+        );
+        // The bound is not slack it happens to cover: the wait is the prefill's own frame count, and
+        // the boundary term is the only headroom, exactly as it is for the take and pause legs.
+        assert_eq!(leg, geometry::PREFILL_FRAMES * pass * PERIOD_FRAMES);
+        assert!(
+            bound - leg <= RESUME_BOUNDARY_FRAMES,
+            "the leg left {} frames of headroom, more than the {RESUME_BOUNDARY_FRAMES}-frame alignment allowance the bound is priced with",
+            bound - leg
+        );
+    }
+}
+
+/// `Buffering` feeds the ring and times no pass: the two questions the main loop asks a state are kept
+/// apart, and this is where the difference lives.
+///
+/// `feeds()` is the producer's gate — a state whose ring is not being consumed may still be filled, and
+/// `Buffering` is that state. `pass_timeable()` is the *timer* question: a pass may only be measured
+/// against an audio counter that is running. Conflating them does not misplace a frame: it makes every
+/// refill pass a false underflow, and the row's `underflows` figure stops meaning "a period asked and
+/// the ring refused".
+///
+/// The two sets are the same except here, and the table is asserted for all four states the pause path
+/// walks through, so the exception is visible rather than implied: `Playing` (the loop's normal pass, a
+/// real decode against a running counter) is both; `Paused` is neither; `Buffering` is one only; and
+/// `Resuming` — the arm's own pass, which would read a delta straight across a timer restart, and the
+/// ramp's passes, which contain no decode at all — is neither again.
+#[test]
+fn buffering_feeds_the_ring_and_times_no_pass() {
+    let mut model = Model::new(TOTAL);
+    model.prefill();
+    assert!(model.prime());
+    model.run_periods(15);
+    assert!(
+        model.transport.state().feeds() && model.transport.state().pass_timeable(),
+        "the loop's ordinary pass both feeds and times: that is the baseline the other rows are read against"
+    );
+    model.press_pause();
+    assert_eq!(model.transport.state(), State::Paused);
+    assert!(
+        !(model.transport.state().feeds() || model.transport.state().pass_timeable()),
+        "a paused chain neither decodes nor runs a counter"
+    );
+
+    let primable = model.ring_primable();
+    assert_eq!(
+        model.transport.toggle(true, primable),
+        Step::Buffer,
+        "a 160-sample ring cannot give the prime its first chunk"
+    );
+    assert_eq!(model.transport.state(), State::Buffering);
+    assert!(
+        model.transport.state().feeds(),
+        "the refill is a feeding state: the producer is the only thing that can end this wait"
+    );
+    assert!(
+        !model.transport.state().pass_timeable(),
+        "a frozen chain has no audio counter to measure a pass against"
+    );
+    // The burst at the loop's own cadence: one frame of decode per pass, and the pass's decision call
+    // answers nothing — a `tick()` that acted here would be a timeout, and Q18 ruled that the wait ends
+    // when the ring is full, not when a clock says so.
+    for frame in 0..geometry::PREFILL_FRAMES {
+        assert!(
+            model.produce(),
+            "the refill's producer stopped at frame {frame}"
+        );
+        assert_eq!(
+            model.transport.tick(),
+            Step::Idle,
+            "the refill's tick acted"
+        );
+        assert_eq!(
+            model.transport.state(),
+            State::Buffering,
+            "the refill ended on a tick, at frame {frame}"
+        );
+    }
+    assert!(model.feed.ready() >= PREFILL);
+    assert_eq!(model.transport.end_buffer(), Step::Prime);
+    assert_eq!(model.transport.state(), State::Resuming);
+    assert!(
+        !(model.transport.state().feeds() || model.transport.state().pass_timeable()),
+        "the arm's own pass would read a delta straight across a timer restart, and the ramp's passes hold no decode: `Resuming` belongs to neither gate"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3973,6 +4501,11 @@ enum Pressed {
     Freeze,
     /// A resume: the toggle's `Prime`, taken through to the re-armed chain.
     Resume,
+    /// **PR-3c.** A resume the ring routed to the refill: taken, and the chain is still frozen in
+    /// `Buffering`. Its own variant rather than `Resume`, because the property that reads the state after
+    /// a taken resume would otherwise be told the chain is running when it is not — and because a run
+    /// that met this branch has to say so in a count, not in an absence.
+    Refill,
     /// The transport refused it (`Step::Ignored`): counted, never dropped in silence.
     Refused,
 }
@@ -3985,6 +4518,9 @@ struct CaseReport {
     refused: u32,
     freeze_presses: u32,
     resume_presses: u32,
+    /// **PR-3c.** Resume presses the ring routed to the refill. Counted apart from `resume_presses`
+    /// because a green that cannot tell the two routes apart is not evidence that the new one ran.
+    refills: u32,
     skip_presses: u32,
     advances: u32,
     /// Pressed skips that legitimately dropped nothing (`truncate()` of a drained ring) — R13's
@@ -4035,6 +4571,7 @@ impl CaseReport {
             refused: 0,
             freeze_presses: 0,
             resume_presses: 0,
+            refills: 0,
             skip_presses: 0,
             advances: 0,
             dropped_zero: 0,
@@ -4070,6 +4607,51 @@ impl Model {
             self.video_frames += 1;
             return Drive::Stepped;
         }
+        // PR-3c: a starved resume's refill at the loop's real cadence — one producer frame per pass, no
+        // periods at all (the chain is frozen), and the arm taken by the pass that reaches the target.
+        // This lives in the driver and not inline in the press so the fuzz walks the multi-pass shape,
+        // including a press landing in the middle of a burst.
+        if self.transport.state() == State::Buffering {
+            self.video_frames += self.pass_periods * PERIOD_FRAMES;
+            if self.feed.ready() >= PREFILL {
+                let take = self
+                    .resume_open
+                    .take()
+                    .expect("a refill has a take that its press recorded");
+                // §4.4's no-seek invariant, at the moment the arm takes it: the burst changed the ring's
+                // depth and nothing else. The clock the ROM would print at the arm is the one the press
+                // latched, or the resume has seeked.
+                assert_eq!(
+                    self.committed, take.head,
+                    "a refill moved the session clock {}→{} — that is a seek",
+                    take.head, self.committed
+                );
+                assert_eq!(
+                    self.transport.end_buffer(),
+                    Step::Prime,
+                    "a refill reached its target and was not armed"
+                );
+                self.prime_resume(take.head, 0);
+                let last = self.pauses.last_mut().expect("a refill follows a pause");
+                last.refilled = true;
+                last.refill_passes = take.passes;
+            } else {
+                assert!(
+                    !self.finished,
+                    "a refill entered with the stream finished, so its target can never be reached"
+                );
+                assert!(
+                    self.produce(),
+                    "a refill's producer stopped before its target"
+                );
+                let open = self
+                    .resume_open
+                    .as_mut()
+                    .expect("a refill has a take that its press recorded");
+                open.passes += 1;
+            }
+            return Drive::Stepped;
+        }
         if self.source.at == self.source.len()
             && self.feed.ready() == 0
             && self.finished
@@ -4103,7 +4685,8 @@ impl Model {
         match press {
             Press::Pause => {
                 let at = self.committed;
-                match self.transport.toggle(true) {
+                let primable = self.ring_primable();
+                match self.transport.toggle(true, primable) {
                     Step::FadeOut => {
                         self.fade_to_freeze(at);
                         Pressed::Freeze
@@ -4111,6 +4694,24 @@ impl Model {
                     Step::Prime => {
                         self.prime_resume(at, 0);
                         Pressed::Resume
+                    }
+                    Step::Buffer => {
+                        // Taken, not refused — the pause's record is the place the difference is kept,
+                        // and the head latched here is what the arm is later compared against.
+                        //
+                        // One case is modelled differently here, on purpose and on the record: with the
+                        // stream finished and the ring empty, this model keeps the run in `Buffering` (its
+                        // pass budget ends and the press is counted unresolved, which the parity rule
+                        // allows), where the ROM ends the album at the press — nothing is left to decode,
+                        // so that is §15 Q13's truly-empty case rather than PR-3c's shallow ring, and
+                        // §11's PR-3c item keeps it out of scope. `refill_to_target`'s `!finished`
+                        // assertion is the same claim one level in: this harness asserts that combination
+                        // instead of driving it.
+                        self.resume_open = Some(ResumeTake {
+                            head: at,
+                            passes: 0,
+                        });
+                        Pressed::Refill
                     }
                     Step::Ignored => Pressed::Refused,
                     other => panic!("a toggle answered {other:?}"),
@@ -4228,6 +4829,18 @@ fn run_case(script: &Script, wait_for_wire: bool) -> CaseReport {
                         report.violate(
                             "transition-state",
                             format!("a resume from {before:?} left {after:?}, not Playing"),
+                        );
+                    }
+                }
+                Pressed::Refill => {
+                    report.accepted += 1;
+                    report.refills += 1;
+                    if after != State::Buffering {
+                        report.violate(
+                            "transition-state",
+                            format!(
+                                "a starved resume from {before:?} left {after:?}, not Buffering — the whole point of PR-3c is that the chain stays frozen and the ring is refilled"
+                            ),
                         );
                     }
                 }
@@ -4511,15 +5124,21 @@ fn run_case(script: &Script, wait_for_wire: bool) -> CaseReport {
         );
     }
     // Every freeze is resumed except at most the one the run may end in: no pause vanishes, and
-    // none is counted twice.
-    let resumed = report.freeze_presses - u32::from(model.transport.state() == State::Paused);
-    if report.resume_presses != resumed {
+    // none is counted twice. PR-3c adds a second route to the same end, so a take that the ring sent to
+    // the refill counts towards the same total — and a run that ends inside a burst leaves one open in
+    // `Buffering`, exactly as one that ends paused leaves one open in `Paused`.
+    let unresolved = u32::from(matches!(
+        model.transport.state(),
+        State::Paused | State::Buffering
+    ));
+    if report.resume_presses + report.refills != report.freeze_presses - unresolved {
         report.violate(
             "press-parity",
             format!(
-                "{} freeze(s), {} resume(s), ending {:?}",
+                "{} freeze(s), {} resume(s) + {} refill(s), ending {:?}",
                 report.freeze_presses,
                 report.resume_presses,
+                report.refills,
                 model.transport.state()
             ),
         );
