@@ -87,6 +87,10 @@ pub struct Report {
     pub g: Option<i32>,
     /// Every frame's chosen step, when the search picked them (S3).
     pub g_chosen: Option<Vec<i32>>,
+    /// The Lagrangian multiplier the bisection converged on, and the bit target it
+    /// was solving for. Both are printed: a rate that looks wrong is undiagnosable
+    /// without them, as S3's first attempt proved.
+    pub lambda: Option<f64>,
     /// Bits the stream actually used, from the decoder's own per-frame counts.
     pub stream_bits: u64,
     /// Codec-only SNR of the decoded int16 output against the input, in dB.
@@ -152,6 +156,7 @@ pub fn encode(args: &Args) -> Result<Output, Error> {
 pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output, Error> {
     let pcm = Pcm::open(&args.album, &args.tracks)?;
     let mut report_g: Option<Vec<i32>> = None;
+    let mut report_lambda: Option<f64> = None;
 
     // The premise is a property of the *final* tables, so serialise and re-parse
     // them first: a bound checked against the in-memory model would not prove
@@ -165,19 +170,49 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
     // S2's fork: a fixed step means real content, no step means S1's album of
     // silence. The silence path is kept because half the suite is about the
     // container and the refusals, and they should not depend on the codec.
-    let (content, samples) = match args.g {
-        None => (Content::silence(frame_count(pcm.n_samples)), None),
-        Some(g) => {
-            let s = Samples::open(&args.album, pcm.n_samples as usize)?;
-            let c = Content::quantise(
-                &s,
-                pcm.n_samples as usize,
-                tables,
-                g,
-                frame_count(pcm.n_samples),
-            )?;
-            (c, Some(s))
-        }
+    // Three contents, one knob: no `--g`/`--rd` is S1's silence (so the container
+    // and the refusals never depend on the codec), `--g N` is S2's fixed step, and
+    // `--rd` is S3's search.
+    let nf = frame_count(pcm.n_samples);
+    let samples = if args.g.is_some() || args.rd {
+        Some(Samples::open(&args.album, pcm.n_samples as usize)?)
+    } else {
+        None
+    };
+    let content = if args.rd {
+        // S3's chicken-and-egg: the search needs the bit target, the bit target
+        // needs the container overhead. Overhead is a function of the track table,
+        // the tables blob, the seek count and the strings — none of which frame
+        // content can change — so the target is taken from a silence-sized plan and
+        // the real plan is then checked against the real stream, as below.
+        let sizing = Plan::new(&pcm, tables, &Content::silence(nf), args.budget, args.cap_pct)?;
+        let s = samples.as_ref().expect("--rd loads the album above");
+        let curves = Curves::compute(s, pcm.n_samples as usize, tables, nf, args.stride)?;
+        let mut coef = [0f32; 2 * M];
+        let energy: Vec<f64> = (0..nf)
+            .map(|f| {
+                mdct::mdct_frame(s, f, pcm.n_samples as usize, &mut coef);
+                rd::frame_energy(&coef)
+            })
+            .collect();
+        let w = rd::weights(&pcm, &energy);
+        let target = sizing.target_bits as f64;
+        let cap = rd::cap_cycles(args.cap_pct);
+        let (lambda, picks) = curves.allocate(&w, target, cap)?;
+        let chosen = curves.chosen_g(&picks);
+        report_g = Some(chosen);
+        report_lambda = Some(lambda);
+        curves.to_content(&picks, s, pcm.n_samples as usize, tables)?
+    } else if let Some(g) = args.g {
+        Content::quantise(
+            samples.as_ref().expect("--g loads the album above"),
+            pcm.n_samples as usize,
+            tables,
+            g,
+            nf,
+        )?
+    } else {
+        Content::silence(nf)
     };
 
     let plan = Plan::new(&pcm, tables, &content, args.budget, args.cap_pct)?;
@@ -270,6 +305,7 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
             est_max_cycles: verify.max_cycles,
             g: args.g,
             g_chosen: report_g,
+            lambda: report_lambda,
             est_mean_cycles: verify.mean_cycles,
             stream_bits: verify.bits,
             snr_db: verify.snr_db,

@@ -1380,3 +1380,35 @@ one of them moved on a measurement.
 | U7 — licensing/spec | deferred by decision: `publish = false`, no license work | 2026-11-14 |
 
 ---
+### Two lessons from S3's first attempt (2026-11-19), kept because both were expensive
+
+**1. A rate cannot distinguish "the search failed" from "the search never ran".**
+S3's first attempt reported 0.512 kbit/s and I diagnosed it twice — first as the
+cycle cap doing real work, then as a λ-scale mismatch between `w·D` and `λ·R`. Both
+stories were wrong, and both were refuted by the same fact: the cause was that the
+`--rd` flag never reached `encode()` at all, so the encoder emitted **S1 silence**.
+Silence costs 8 bits/frame; `G_MAX` on this album costs about the same; the numbers
+were indistinguishable by design. The field that *would* have separated them — the
+chosen `g` range, which I added to the report for exactly this reason — was in the
+output and I filtered it away with my own grep before reading it.
+
+So: the report prints the step and the λ unconditionally, on one line, and the
+`g` range is never again an optional field. Generalised, the rule is that when a
+number is consistent with two explanations, the diagnosis is not a diagnosis, and
+the fix is the discriminating measurement rather than a cleverer story.
+
+**2. `target_bits − 3.5·NF` in the reference is the frame header, not slack.**
+I read that constant as the reference papering over loose accounting and wrote so in
+this file. It is not: a candidate's measured cost necessarily omits the differentially
+coded `g` delta and the M/S bit, because those belong to the *sequence* rather than to
+any one candidate, and with `g` varying they cost ~5 bits/frame. Without the allowance
+the search overshoots the budget and trips its own E-R6 refusal — which is how it
+presented once the plumbing was fixed. The allowance is taken here now that its reason
+is known, and the residue (44–88 bytes at three budgets) is stream padding plus the
+bisection solving on curve-measured bits instead of the real stream. The reference
+closes that with a retry loop — `tgt -= (size - budget) * 8 * 1.02 + 2000`, its
+"final encode attempt N" — and S3's next step is that loop, not a tuned constant.
+
+Corollary for the harness: `assert` that `--rd` *changed* the album. A test that only
+checks the output parses and decodes passes happily on silence, which is how this
+survived a full green suite.

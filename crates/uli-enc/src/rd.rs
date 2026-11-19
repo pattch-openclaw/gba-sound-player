@@ -15,9 +15,14 @@
 //!   across the whole `GMIN..=GMAX` window once. Cheaper to reason about and it
 //!   makes the curves λ-independent, at the cost of resolution: the chosen `g` can
 //!   sit up to `stride - 1` away from the reference's.
-//! - The reference's target is `target_bits − 3.5·NF`, an allowance for side info
-//!   its own accounting measures loosely. Here the bit cost of a candidate is the
-//!   *actual* coded length, so no allowance is taken.
+//! - The reference's target is `target_bits − 3.5·NF`. That allowance is *not*
+//!   slack for loose accounting, as this file first assumed: it is the frame
+//!   header. A candidate's measured cost omits the `g` delta and the M/S bit
+//!   because those depend on the previous frame's `g` and so cannot be attributed
+//!   to one candidate — and with `g` varying across the album they really cost
+//!   ~5 bits/frame, so a search that ignores them overshoots the budget and trips
+//!   its own E-R6 refusal. The same allowance is taken here, now for a known
+//!   reason, and the final plan still checks the real stream.
 //! - M/S is **not in the candidate set**. The reference rotates the coefficients by
 //!   `1/√2` and quantises with `D = step·√2/16` while the reader combines the two
 //!   channels with a plain integer add/subtract; that √2 needs a derivation of its
@@ -359,6 +364,9 @@ impl Curves {
         target: f64,
         cap: u32,
     ) -> Result<(f64, Vec<usize>), Error> {
+        // Header allowance: the `g` delta plus the M/S bit, which no single
+        // candidate owns. See the module doc; the reference uses the same number.
+        let target = target - 3.5 * self.per_frame.len() as f64;
         let mut lo = LAMBDA_LO;
         let mut hi = LAMBDA_HI;
         for _ in 0..LAMBDA_ITERS {
