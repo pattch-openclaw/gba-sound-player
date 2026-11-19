@@ -63,7 +63,7 @@ Phase 0 is complete, and the Phase 1 decode-only ROM passes in mGBA:
   both int8 and int16 outputs, including per-frame operation counts and the
   cycle model;
 - track/seek paths and malformed-album/output-size cases are covered;
-- `examples/uli_spike` decodes the corpus on the target and matches the
+- `examples/uli_bench` decodes the corpus on the target and matches the
   album-wide int8/int16 pins (`e6e87652` / `b3530978`), with `xover=0 hfnz=0`.
 
 That ROM is a correctness witness, not a player. The cycle record is
@@ -97,9 +97,10 @@ from a neutral directory with `--manifest-path`, because the repository's
 
 Not in this crate (and not supposed to be):
 
-- the product hot path: entropy, bit reader, dequant and M/S move to
-  `uli-lite-gba` in PR B;
-- hand-written asm kernels (PR C, scoped by PR B);
+- the product hot path: entropy, bit reader, dequant and M/S live in
+  `uli-lite-gba` (`GbaDecoder`), which is what ships;
+- hand-written asm kernels and the `.iwram` placement — all five are asm in
+  `uli-lite-gba`;
 - a product ROM or playback integration;
 - a public license/publish decision (the crate remains `publish = false`).
 

@@ -1,10 +1,51 @@
 # ULI2 plan of record
 
-Status: **live since 2026-11-14; U4 open, decode wall under the frame period
-since Step 1 (2026-11-15).** This is the working
-plan for the ULI2 product codec. [`../../ULI2.md`](../../ULI2.md) remains the decision record
-(why ULI2, what it is, the licensing and encoder risks); this file owns the
-phases, gates, measurement ledger and the order of work.
+[`../../ULI2.md`](../../ULI2.md) is the decision record (why ULI2, what it is,
+the licensing and encoder risks). **This file owns the phases, gates, the
+measurement ledger and the order of work.**
+
+## Current state (2026-11-19)
+
+mGBA, WAITCNT 4/2, 262,144-cycle period, no UI. Both corpora pinned
+(`xover=0 hfnz=0`), two runs per image identical to the cycle.
+
+| | worst | mean | of period |
+|---|---:|---:|---:|
+| 129-frame fixture decode | 193,317 (f98) | 172,109 | 73.75% / 65.66% |
+| album decode wall (16,553 frames) | **194,695** (f4,998) | **169,354** | **74.27% / 64.60%** |
+| gate total (decode + convert + IRQ + DMA) | **226,152** | **200,624** | **86.27% / 76.53%** |
+
+- **U2, U3 and U4 are met.** U4's ceiling stays the period: **13.73 points of
+  margin at the worst frame, 0 starved periods over 16,552**.
+- **1.070x the C + ASM reference on the decode wall** (C: decode 69.43%, gate
+  73.63%). Of the 12.6-point gate gap, 4.84 points are decode and **7.80 are the
+  convert/IRQ/DMA half at ~2.9x C's cost** — the output path, not the codec, is
+  now the largest remaining difference.
+- **All five hot kernels are hand-written asm**, each twinned bit-exactly on the
+  ARM7TDMI (`make uli-kernel-twin`): `pre` 1.00x C, `fft` 1.05–1.09x, `post`
+  ~1.03x, `ola` 1.00x, M/S 0.64x (mean).
+- **Entropy/dequant is ~35,656 mean, at or below C's 42–48k.** The product
+  reader is **closed-world** — no bounds test, no error flag, 16-bit contract —
+  with `crates/uli-lite-gba/tests/premise.rs` asserting the premise and
+  `uli_lite` remaining the checked oracle.
+- **Placement:** `.iwram` 26,496 B of 32,768 (code + `HotState` 8,192 +
+  `ClassTables` 560 + `q3`/`clz6` 148); stack high-water 948 B (fixture) / 1,988 B
+  (gate); code tables in `.ewram`.
+- **Open:** the non-decode gate half; the dense-frame tail of entropy (the
+  sub-frame partition needs re-measuring on the product reader first — see "The
+  entropy path against the C+ASM reference"); a licensing/publish decision.
+
+**Everything below this line is the ledger that produced those numbers, in
+chronological order, and it is kept deliberately: this project's method is that
+a claim is worthless without its measured arm and a falsification is worth more
+than a projection.** Several intermediate figures are therefore superseded by
+the table above — where a passage was contradicted outright it is marked
+*Superseded* in place. Read the current state from this block; read the reasoning
+from the ledger. Two exceptions worth knowing: the kernel table's `fft` row and
+the `pre`/`ola`/M/S ratios were re-derived with bit-exact arms (2026-11-18), and
+`post` was the only instruction-named deficit and is closed.
+
+---
 
 **PR C-2 (as C-3a, with C-3c) landed 2026-11-14** — 523,267 → **488,685 worst /
 429,339 mean (200% → 186%)**, a measured 35,000 where 90,000 was projected.
@@ -2696,17 +2737,23 @@ equivalence, not bitstream equivalence — which is what the hardware claim need
 
 ---
 
-## Gates ledger
+## Gate verdicts (the claims live in ULI2.md §Gates)
 
-| Gate | Claim | Status |
+**One owner per topic:** the gate *claims* are stated in
+[`../../ULI2.md`](../../ULI2.md) §Gates, which is the acceptance record. This is
+the dated history of their *verdicts*, which belongs to the ledger because every
+one of them moved on a measurement.
+
+| gate | verdict | when |
 |---|---|---|
-| **U1 — reference** | `uli-lite` remains a bit-exact, host-testable reference (no longer a portable-product claim). | Met (Phase 0/1); redefined 2026-11-14. |
-| **U2 — bit-exact host** | The reference matches the C-pinned corpus, frame for frame, on **valid** streams. Malformed input only has to be rejected safely — no arithmetic-exactness promise (decided 2026-11-14). | Met. |
-| **U3 — bit-exact product** | The product kernel set produces the pinned int8/int16 frames, on target and in the host twin. | **Met for the full hot path (PR B).** `tests/product_twin.rs` (host, frame-for-frame) + `make uli-bench` on-target pins. |
-| **U4 — real-time decode** | Worst full frame inside the **real-time budget** at WAITCNT 4/2: the decode wall must leave room for the gate total (convert + IRQ + DMA) and this tree's UI. **Not a "match C" target** (2026-11-15): C+asm proves the budget is reachable on this hardware, so Rust+asm is expected to reach it too; the C percentage is an existence proof and a diagnostic, not an acceptance criterion. **The ceiling itself is measured, not assigned** (2026-11-14): it is written down at the first near-real-time arm, from the measured gate total plus this tree's non-audio cost. Its worst-frame witness is PR E, not the 129-frame corpus. | **Not met.** PR B measured 204% worst / 177% mean; PR C added the attribution and a split-`huff` win to **200% worst / 174% mean** (523,267 / 456,187) and scoped the remainder as two rewrites (C-1 asm kernels 63%, C-2 entropy 33%). C-1 + C-2 projected to ~91%. **C-3a/C-3c then measured 488,685 / 429,339 (186% / 164%)**, and **C-3b measured 457,863 / 410,912 (175% / 157%)**, and **PR C-1 landed a bit-exact hand-written FFT that, wired into the product decoder, took the full frame to 430,997 / 384,046 (164% / 147%)**, then its trivial-butterfly follow-up (**v4**) to **425,795 / 378,845 (162% / 145%)** — see the ledger's “PR C-1 landed” section.  The rest of the ladder: `iwram-tw` (157%) and `iwram-tables` (148%) were placement arms, **C-3d** made the timed frame int8-only (**138%**), and **C-3** moved `HotState` to IWRAM (**−87,040**) to **274,198 / 232,090 (105% / 89%)**. **Step 0 (2026-11-15) then attributed that frame by difference in the product image:** at the worst frame (f98) synthesis is 162,987 (59%) and entropy/dequant/M/S 110,741 (40%, wrapper 486), so **69% of the 92,286-cycle distance to the C worst-frame shape is the entropy path** and 31% synthesis; per channel the kernels are 1.10–1.33x C, with the already-asm FFT (41,671) the largest kernel item and `pre`+`post`+`ola` worth 9,817/frame together. The previous "C-1 kernel prize ~194,000, the largest single item" is retired. **Step 1 (2026-11-15) then did the entropy/dequant item: the sub-frame instrument (5 arms) plus a rewrite of the reader contract, the long-code search and the per-band live set.** The entropy path fell **111,227 → 86,826 at f98 (−22%)** and the product frame **274,198 / 232,090 → 249,835 / 220,757 = 95.3% / 84.2%** (pins unchanged, both twins bit-exact), taking **the decode wall under the period for the first time**. **Step 1a (2026-11-15)** then put the bit window into `let mut` scalars with the `refill`/`take`/`esc`/`coef` bodies as macros over them — the reference's `REFILL`/`SKIP` shape — for another **−12,583 / −9,686**, to **237,252 / 211,071 = 90.5% / 80.5%**, **Step 1b (2026-11-15)** took the FFT to v5 (absolute byte cursor, register-held twiddle pointer, the reference's destructive sum formation) for **−9,516 / −9,517**, **Step 1c (2026-11-15)** took `pre` to the reference's four-cursor shape for **−2,568 / −2,562**, and **Step 1d (2026-11-15)** took `ola` to the reference's six-cursor shape and its 3-instruction `sat16` clamp idiom for **−3,836 / −3,838** — **the <=85% headroom target met** — and **Step 1e (2026-11-15)** banked `.iwram` (−1,352 B, control kernels to the cartridge plus a cursor rewrite in `dec_chan`) for **−2,081 / −665**: **219,251 / 194,489 = 83.6% / 74.2%**, **1.21x** the C record and **−54,947 (−20.0%)** off the worst frame across the six steps. All four kernels are 1.00x-1.23x C. That is still not the gate: convert + IRQ + DMA and this tree's UI are not in it, so U4 stays open and playback does not start; the <=~85% headroom target is **met** (83.6%, 2,940 cycles of margin), and what remains is the measured gate total (U4) and the album (PR E). **What remains is ordered in "Critical path to real time": PR E first — the gate total and the full album, because the budget's spare 16.4% of the frame and 2,196 B of IWRAM are unverified against what they reserve margin for — then M/S (9,861 at f98, the last hot loop never disassembled) and the rest of entropy (the deficit is now 62% entropy / 37% synthesis).** See the ledger's "Step 0 attribution" and "Step 1" through "Step 1e". |
-| **U5 — product playback** | 32,768 Hz path, zero underruns, clean period audit. | Not started (gated by U4). |
-| **U6 — memory** | IWRAM/EWRAM/stack inside the product budget with UI and feeder. | **Open.** ~~The product path needs ≈15.0 KiB of stack.~~ **Corrected 2026-11-15: the measured stack high-water is 768 B** (sentinel probe in `examples/uli_bench`); the ≈15.0 KiB figure was an artifact of stack-local twin buffers and is withdrawn. That reverses this row's conclusion: `iwram-tables` (all synthesis tables in IWRAM, C's own layout) **now runs** — `.iwram` 25,548 B, 6,964 B free, 768 B stack used, **6,196 B headroom** — and measures the product frame at **148%** (387,879 / 340,929). See "Memory layout — mirrored from the C reference". Remaining placement item is C-3 (`HotState` → IWRAM, 8,192 B), which fits once the superseded v1/v2 kernels are dropped (1,520 B). Historical note (superseded): the row previously concluded IWRAM tables were blocked because a stale ≈15.0 KiB stack left no room and `iwram-tables` crashed. **Priority decided 2026-11-14 and still in force: audio first** — IWRAM budget goes to code, hot state and stack; UI affordances are the slack and may be dropped to buy audio headroom. Full `huff` inlining was rejected on this row: +4,252 B for 2.7%, vs +896 B for 1.6% with the split. |
-| **U7 — licensing/spec** | Permissive license + standalone format spec before publishing; otherwise `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** Revisit only if a publish decision is taken; the license and `FORMAT.md` remain prerequisites for it. |
+| U1 — reference | met; redefined to "oracle, not portable product" | 2026-11-14 |
+| U2 — bit-exact host | met from Phase 0 | 2026-11-13 |
+| U3 — bit-exact product | met for the kernel set | 2026-11-14 (PR A) |
+| U4 — real-time decode | met — decode wall under the period | 2026-11-15 (Step 1) |
+| | met with the gate total and 13.73 pts of margin | 2026-11-19 |
+| U5 — product playback | met on hardware (GBA SP), three ROMs, 0 underruns; one open defect (104 late re-arms from the 1 Hz redraw) | 2026-11-16 |
+| U6 — memory | **corrected, then met**: the "≈15.0 KiB stack" figure was an artifact of stack-local twin buffers and is withdrawn; the measured high-water is 948 B (bench) / 1,988 B (gate), `.iwram` 26,496 of 32,768 B | 2026-11-15, 2026-11-19 |
+| U7 — licensing/spec | deferred by decision: `publish = false`, no license work | 2026-11-14 |
 
 ---
 
@@ -3174,7 +3221,8 @@ confirm the projection.** A complete hand-written radix-4 DIF FFT
 (`crates/uli-lite-gba/asm/fft_arm.s`, ARM mode, `.iwram`, `global_asm!`) was
 written against our own oracle, twinned bit-exactly, and measured in isolation
 against the Rust ARM-mode `fft` in the same image. Instrument:
-`examples/uli_asm_probe` (on-target twin) and the bench's `asmfft` arm
+`examples/uli_asm_probe` (on-target twin; **since retired** — `make uli-kernel-twin`
+is the current witness) and the bench's `asmfft` arm
 (`make uli-bench` with `--features asm-fft`).
 
 | arm | cycles / FFT call | vs Rust | vs C record (~31,400) |
@@ -3294,7 +3342,7 @@ remaining genuine A..D loads / output stores / twiddle loads, and that record
 was measured on a different corpus and image, so `2.28×` is not a like-for-like
 statement — it is the honest gap to the number of record.
 
-Instruments: `examples/uli_asm_probe` (all three kernels twinned on the
+Instruments (**since retired**; `make uli-kernel-twin` replaces it): `examples/uli_asm_probe` (all three kernels twinned on the
 ARM7TDMI) and the bench's `asmfft`/`asmfft2`/`asmfft3` arms + `fftasm` twin.
 Note for future arms: the twin's scratch buffers had to move from `run()`'s
 stack to EWRAM statics — three 512-word kernels plus the ~15 KiB product-path
@@ -3924,7 +3972,12 @@ counts above come from the host.
 
 ---
 
-## Risks and open questions
+## Risks as recorded during the port (historical)
+
+**The risks that still stand live in [`../../ULI2.md`](../../ULI2.md) §Risks.**
+What is kept here is the reasoning that *drove* the work — chiefly the
+codegen diagnosis that justified hand-written asm — because it is the argument
+behind five kernels and it would be expensive to re-derive.
 
 1. **LLVM's ARM7TDMI codegen vs gcc — now diagnosed, and it is register
    allocation.** PR C measured that the codegen is *not* missing instructions:
@@ -4026,7 +4079,13 @@ counts above come from the host.
 
 ---
 
-## Decision log
+## Landing log (measurement milestones)
+
+**Decisions live in [`../../ULI2.md`](../../ULI2.md) §Decision log** — that file is
+the decision record. This is the ledger's own chronological index of what landed
+and what it measured, at a finer grain than the decisions (one entry per step,
+not one per decision). Where the two overlap, the decision record's wording is
+authoritative and this one carries the numbers.
 
 - **2026-11-18 — `post` as ARM asm: the last Rust kernel on the product path is
   now hand-written, for −3,061 cycles on every frame.** Fresh attribution with the

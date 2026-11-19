@@ -1,94 +1,95 @@
 # `uli-lite-gba`
 
-The product decoder's first realisation: the four `uli-lite` reference
-kernels (`pre`, `fft`, `post`, `ola`) rewritten with **ARM-mode codegen** and
-**unchecked addressing**, with their code placed in `.iwram`, plus
-[`ArmKernels`] — the `uli_lite::Kernels` implementation that lets
-`Decoder::<ArmKernels>` decode a full frame through them.
+The **product decoder**: the `uli-lite` reference realised for the GBA — every
+hot kernel hand-written as ARM asm in `.iwram`, the entropy/dequant path in
+ARM-mode Rust with a closed-world bit reader, and `GbaDecoder`, the full-frame
+decoder the player ROMs call.
 
-Since **2026-11-14** ULI2 is GBA-first: this crate is the product path, not a
-portable overlay. The live plan is
+ULI2 is **GBA-first**: `crates/uli-lite` is the bit-exact reference and oracle
+(host, checked), and this crate is what ships. The plan, gates and the full
+measurement ledger live in
 [`../uli-lite/PLAN-OF-RECORD.md`](../uli-lite/PLAN-OF-RECORD.md).
 
+## Current state (2026-11-19)
+
+mGBA at WAITCNT 4/2, no UI, 262,144-cycle period. Both corpora pinned; the
+numbers below are the ones the gates assert.
+
+| | worst | mean | of period |
+|---|---:|---:|---:|
+| 129-frame fixture decode | **193,317** (f98) | **172,109** | 73.75% / 65.66% |
+| album decode wall (16,553 frames) | **194,695** (f4,998) | **169,354** | 74.27% / 64.60% |
+| **gate total** (decode + convert + IRQ + DMA) | **226,152** | **200,624** | **86.27% / 76.53%** |
+
+**13.73 points of margin at the worst frame, zero starved periods over 16,552.**
+Against the C + ASM reference's own record (decode 69.43%, gate 73.63%) that is
+**1.070x C on the decode wall**. Of the remaining gate gap, only 4.84 points are
+decode — 7.80 points are the convert/IRQ/DMA half, which costs ~2.9x C's.
+
+`.iwram`: 26,496 B of 32,768 used; stack high-water 948 B (fixture) / 1,988 B
+(gate). Bit-exactness is asserted on every arm (`xover=0 hfnz=0`), and the host
+twin compares frame-for-frame against `uli_lite`.
+
+## How it is built
+
+**Kernels — hand-written ARM asm**, each twinned bit-exactly against
+`uli_lite::imdct` on the ARM7TDMI (`make uli-kernel-twin`):
+
+| kernel | file | vs C |
+|---|---|---|
+| pre-twiddle | `asm/pre_arm.s` | 1.00x |
+| FFT (radix-4, v5) | `asm/fft_arm_v5.s` | 1.05–1.09x |
+| post-twiddle | `asm/post_arm.s` | ~1.03x |
+| window + overlap-add | `asm/ola_arm.s` | 1.00x |
+| mid/side | `asm/ms_arm.s` | 0.64x (mean) |
+
+**Entropy/dequant — ARM-mode Rust** (`src/decoder.rs`), with the data in `Rs` so
+the ARM7TDMI multiplier early-terminates, and the per-class tables resident in
+IWRAM (`ClassTables`, 560 B) beside `HotState`.
+
+**The bit reader is closed-world.** We own the encoder, the container and the
+bake, so the product build carries **no bounds test, no error flag and a 16-bit
+refill contract**; a malformed stream is meant to fail the build, not a frame.
+The guarantees that makes sound are properties of the *tables in the blob* and
+are asserted before the ROM exists — `tests/premise.rs` checks `rbits == 0` on
+every PAIR class and `esck <= 2`, and `uli_lite` remains the checked oracle. See
+`ULI2.md`'s decision log (2026-11-19) and `PLAN-OF-RECORD.md` → "The entropy path
+against the C+ASM reference".
+
+## Using it
+
 ```rust
-use uli_lite::format::{H, M};
-let mut x = [0i32; M];
-let mut z = [0i32; 2 * H];
-uli_lite_gba::pre(&x, &mut z);
-uli_lite_gba::fft(&mut z);
+// Caller-owned storage: `CodeTables` belongs in EWRAM, `HotState` +
+// `ClassTables` in IWRAM.
+let mut dec = GbaDecoder::new(album, &mut tables, &mut class, &mut hot)?;
+dec.decode_frame(&mut l8, &mut r8, Some(&mut l16), Some(&mut r16))?;
 ```
 
-The arithmetic is a line-for-line transcription of `uli_lite::imdct`; only the
-addressing (`unsafe`, with the index bounds written down in `src/lib.rs`) and
-the instruction set change. `tests/twin.rs` proves the kernels bit-exact on the
-host; `tests/decoder_twin.rs` proves a **full corpus decode** through
-`Decoder::<ArmKernels>` matches the reference frame for frame; and
-`examples/uli_bench` proves both again on the target, while timing them.
-
-## Why it exists
-
-Phase 1b (`ULI2.md`) measured the portable core at 25.3x the frame period.
-Two separate causes were found and separated:
-
-- Thumb-1 has no 64-bit multiply, so the reference's `(a as i64) * (b as i64)`
-  compiled to `__aeabi_lmul` (44 call sites, zero `SMULL`). ARM mode fixes
-  that: 2.2x on the frame.
-- Cartridge instruction fetch at WAITCNT 4/2/no-prefetch dominates ARM code.
-  Moving the same kernels to `.iwram` is another 2.5x. Unchecked addressing
-  adds 8% on top.
-
-The feature `iwram-tables` additionally copies the 8,672 B synthesis tables
-into `.iwram`; it is off by default because it bought only 6.3% in the
-measured arm.
-
-## Measured result (PR A, 2026-11-14)
-
-Full frame through `Decoder::<ArmKernels>` on the committed corpus, mGBA,
-WAITCNT 4/2, 262,144-cycle period:
-
-| arm | worst | mean |
-|---|---:|---:|
-| core kernels (same-image control) | 2,676,986 (1021%) | 2,171,620 (828%) |
-| `ArmKernels` | **1,829,247 (698%)** | **1,322,800 (505%)** |
-
-Both arms pinned; the overlay frame equals `core_rest + 2 × overlay_seq`
-within 0.02%. Kernel sequence per channel: 243,619 vs the core's 667,264.
-
-## Measured result (PR B, 2026-11-14)
-
-`GbaDecoder` (`src/decoder.rs`) now carries the entropy/bit-reader/dequant/M/S
-hot path in ARM mode with the 32-bit cached bit window. Full frame:
-
-| arm | worst | mean |
-|---|---:|---:|
-| core kernels (same-image control) | 2,681,000 (1023%) | 2,175,635 (830%) |
-| `ArmKernels` | 1,677,608 (640%) | 1,171,161 (447%) |
-| **`GbaDecoder` (full product path)** | **533,605 (204%)** | **463,660 (177%)** |
-
-All pinned, `xover=0 hfnz=0`, on-target twin passed. `HotState` is placed in
-EWRAM in the bench: an 8 KiB `.iwram` placement left less stack than the
-≈15.0 KiB the product path needs and overflowed on target. Synthesis is now
-63% of the frame; the kernels are PR C's target.
+`Decoder::<ArmKernels>` is still available when a caller wants the kernel
+overlay without the GBA-first hot path; `GbaDecoder` is the product decoder.
 
 ## What it is not
 
-- Not yet the complete product decoder: `GbaDecoder` (PR B) covers the bit
-  reader, Huffman, dequant, M/S and synthesis for the measured path, but
-  playback, the UI and the feeder are PR D.
-- Not asm. It is Rust code with ARM-mode codegen and placement; hand-written
-  kernels (PR C) are a later, measured decision.
-- Not portable: `.iwram`, ARM state and unchecked addressing are deliberate
-  GBA choices. The host build exists for the twin tests only.
+- **Not portable.** `.iwram`, ARM state, unchecked addressing and the
+  closed-world reader are deliberate GBA choices. The host build exists for the
+  twin tests.
+- **Not defended against malformed input** — by policy (see above). A
+  third-party or re-encoded blob must pass `tests/premise.rs` first.
+- **Not a playback claim.** The gate total is measured in mGBA; the hardware
+  witness for the player ROMs is separate (`ULI2.md` → U5).
 
 ## Gates
 
-- `make uli-overlay-test` — host differentials: the four kernels against
-  `uli_lite::imdct` (full i32 range, int8/int16 OLA, overlap state), and a
-  full-corpus decode through `Decoder::<ArmKernels>` against the reference
-  decoder, frame for frame, including seek paths.
-- `make uli-bench` — on-target twin, both full-frame arms, and per-kernel and
-  sequence timings. The numbers and caveats live in
-  [`../uli-lite/PLAN-OF-RECORD.md`](../uli-lite/PLAN-OF-RECORD.md).
+- `make uli-test` — the core is bit-exact on the host corpus, and compiles for
+  the target.
+- `make uli-overlay-test` — host differentials: kernels vs `uli_lite::imdct`,
+  a full-corpus decode through the product path vs the reference, both builds,
+  plus the closed-world premise.
+- `make uli-bench` — on-target: pins, the full product frame, the per-kernel
+  and sequence timings, and the kernel twin.
+- `make uli-kernel-twin` — the asm kernels bit-exact on the ARM7TDMI.
+- `make uli-gate` — the gate total (decode + convert + IRQ + DMA) on the album,
+  with the period audit and the starvation count.
 
 Licensing is unresolved with the format/reference; the crate is
 `publish = false`.

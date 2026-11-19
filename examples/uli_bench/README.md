@@ -27,10 +27,10 @@ make uli-bench-rom   # build + fix uli-bench.gba
 make uli-bench       # run headless in mGBA, write uli-bench.log
 ```
 
-PR B uses this image as its before/after control: the core arm and the
+The image is its own control: the core arm and the
 overlay arm share the bitstream/dequant/M/S/frame code, so a change there
 moves both; a kernel-only change moves only the overlay arm. The product arm
-(`GbaDecoder`, the full PR B hot path) is timed in the same image.
+(`GbaDecoder`, the product hot path) is timed in the same image.
 
 The ROM prints `PASS`/`FAIL` and then the `mgba-test-runner` exit sentinel, so
 the run ends immediately instead of waiting for a timeout. It is an mGBA
@@ -46,18 +46,24 @@ cd examples/uli_bench && cargo build --release --target thumbv4t-none-eabi \
 
 ## Measured arms
 
-Full frame, mGBA, WAITCNT 4/2, 129-frame corpus, 262,144-cycle period:
+Full frame, mGBA, WAITCNT 4/2, 129-frame corpus, 262,144-cycle period. **Current
+(2026-11-19):**
 
 | arm | worst | mean |
 |---|---:|---:|
-| core kernels (control) | 2,681,000 (1023%) | 2,175,635 (830%) |
-| `ArmKernels` | 1,677,608 (640%) | 1,171,161 (447%) |
-| **`GbaDecoder` (PR B product path)** | **533,605 (204%)** | **463,660 (177%)** |
+| **`GbaDecoder` (the product path)** | **193,317 (73.75%)** | **172,109 (65.66%)** |
 
-The overlay frame equals `core_rest + 2 × overlay_seq` within 0.1%, which is
-why the per-kernel arms are kept. For the product arm, `rest = frame − 2 ×
-overlay_seq` = 195,484 cycles/frame (837,092 at PR A), so synthesis is 63% of
-the frame. Absolute frame numbers are image-specific at
+The album decode wall and the gate total come from `make uli-gate`:
+**194,695 / 169,354** (74.27% / 64.60%) and **226,152 / 200,624** (86.27% /
+76.53%) over 16,553 frames, with 13.73 points of margin and 0 starved periods.
+
+The `kern` and `ovl` lines in the log are **same-image controls**, not product
+numbers: `kern` is the portable reference kernel set and `ovl` the `ArmKernels`
+overlay, both several times the product's cost, kept so a kernel regression shows
+up as a delta inside one image. The per-kernel sums (`pre`/`fft`/`post`/`ola`,
+10 calls each) are what the kernel work is judged on.
+
+Absolute frame numbers are image-specific at
 this fetch-dominated scale (the core control moved ~8% from the Phase 1b image
 with an unchanged kernel sequence); compare arms **within one image**. The
 numbers, the caveats and the plan consequences are in
