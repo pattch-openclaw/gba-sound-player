@@ -41,6 +41,14 @@ product is no longer required to be safe, portable or platform-free.
 **This is the first thing to read if the question is "what next".** Status lines
 above are history; this section is the live order of work.
 
+> **Superseded as "what next" (2026-11-19).** Real time was met (U4 with 13.73
+> points of margin), so the live order of work is no longer this critical path but
+> the remaining milestone: [`PLAN-OF-RECORD.md`](PLAN-OF-RECORD.md) → "The encoder
+> — the last missing piece", whose phases, gates and decisions this file's header
+> already assigns to that file. What follows stays the record of how the decode
+> wall was brought under the period, arm by arm — history, and the provenance of
+> the numbers quoted elsewhere.
+
 ### Where we are
 
 **The decode wall on the album corpus is 206,101 worst (f16,204) / 175,280
@@ -3246,6 +3254,65 @@ the decision record. This is the ledger's own chronological index of what landed
 and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
+
+- **2026-11-19 — the reference encoder reproduces its own corpora, so the
+  encoder's acceptance gate is a measurement and not a hope.** Before sizing E1,
+  the off-tree reference at `gba-audio/encoder` was built and pointed at the two
+  corpora whose bytes this tree already depends on. Both came back **identical**.
+
+  | corpus | command (off-tree) | result |
+  |---|---|---|
+  | fixture `uli2_tiny` (129 frames, 39,308 B) | `gen_fixture.py` → `uli_enc --album tiny.f32 --tracks tiny.tsv --budget 300000 --threads 1` | `68dca43a…756d` = committed SHA-256 |
+  | `biomaster` (16,553 frames, 3,293,048 B) | `uli_enc --album album.f32 --tracks tracks.tsv --budget 3294000 --cap 74 --threads 8` | `990da225…8a73` = committed SHA-256 |
+
+  Both inputs (`tiny.f32`/`tiny.tsv`, and the 67 MB `album.f32` + `tracks.tsv` the
+  bake produced on 2026-11-15) were already on disk, so the reproduction needed no
+  new tooling — and the second line re-encodes a **real album**, not a fixture:
+  16,553 frames, `g range 89..135`, M/S on 87.1% of frames, est. cycles mean 67.9%
+  / max 74.0%, 952 bytes of the 3,294,000 budget unused. Its retrain delta was
+  −0.03%, against the fixture's −8.05% — the fixture is 2 s of synthetic content,
+  so its first-pass tables are far from the trained ones, and a number quoted from
+  one corpus does not transfer to the other.
+
+  **Three findings that size the work, in order of usefulness.**
+  1. *The gate is reachable.* Byte-for-byte reproduction of the reference on the
+     PCM→blob boundary is now an executable check on both a synthetic and a real
+     corpus, which is why the fallback in `PLAN-OF-RECORD.md` was demoted from
+     "gate" to "a cell of the matrix".
+  2. *The reference is thread-stable where we most feared it.* `--threads 1` and
+     `--threads 8` produced byte-identical blobs on the fixture, despite the
+     reference's `schedule(dynamic, 64)` and a `reduction(+:tot)` over doubles.
+     One corpus is not a proof — an unordered float reduction flips only on a
+     near-tie, and dense albums have more of those — but it does say R5b is
+     insurance, not a rewrite. **Re-run on `adv`/`cross` before trusting it.**
+  3. *Two things the earlier plan had wrong.* `musearch` printed no activity on
+     either corpus (est. cycles mean 67.9% / max 74.0%, i.e. the `g` allocation
+     alone met the cap), so E6 is off the byte-exactness critical path for these
+     two — not for albums in general. And the resampler exemption in the plan was
+     justified by the wrong mechanism: `prep.py` does not use `ffmpeg`'s resampler
+     but `gba_dac_model.resample`, which dispatches on FFT / `soxr`-if-installed /
+     `scipy`, so byte-exactness across machines depends on which library answers.
+     Hence the gate now sits at the PCM boundary, where it was measured.
+
+  **Measured in passing, and it corrects a claim made earlier today.** Comparing
+  the whole tables region across the five corpora: it is **5,212 bytes in every
+  one**, with **five different hashes** (FNV-1a `0f5e1b96…` fixture, `89c4eb31…`
+  biomaster, `10ac765c…` biotwo, `64809502…` adv, `93ef18f5…` cross). So
+  "identical tables across corpora" — phrased that way in `premise.rs`'s header and
+  in PLAN-OF-RECORD before this entry — is wrong: what is identical is the **class
+  structure**, and what differs is the trained length rows. Against the reference's
+  `tables_default` the structure matches on `ctype` and `rbits` in all 14 classes,
+  and differs in **one cell**: `esck[2]` is `2` in the default and `0` in every
+  blob, i.e. training removed an escape the default declared. That is the safe
+  direction, and it is the evidence for a rule the encoder needs: `esck` is
+  **derived**, so E-R4 must be checked against the final trained tables rather than
+  assumed satisfied because the defaults obey it.
+
+  **Caveat, stated once here so it does not have to be repeated:** the reference
+  compiles with `-O2 -march=native`, so these hashes are host-qualified — they are
+  reproducible *on this machine*, which is the machine that made them and the one
+  the gate runs on. It is not a cross-platform claim about the C encoder, and the
+  Rust encoder keeps libm out of its own path for exactly that reason (R5c).
 
 - **2026-11-18 — `post` as ARM asm: the last Rust kernel on the product path is
   now hand-written, for −3,061 cycles on every frame.** Fresh attribution with the

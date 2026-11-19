@@ -46,7 +46,7 @@
 //! ## The measured census, and the correction this file carries
 //!
 //! Measured 2026-11-19 by parsing each corpus through `CodeTables::parse_into`,
-//! per class as `ctype/rbits/esck` — **byte-identical table sets in all five**:
+//! per class as `ctype/rbits/esck` — **the same class structure in all five**:
 //!
 //! ```text
 //! 0/0/0  1/0/0  1/0/0  2/0/2 2/0/2 2/0/2 2/0/2 2/0/2 2/0/2  2/1/1 2/2/1 2/3/1 2/4/1 2/5/1
@@ -55,6 +55,14 @@
 //! one `ZERO`, **two `QUAD`** (`ctype == 1`, `rbits` never read), **eleven
 //! `PAIR`** (`ctype == 2`) with `rbits = 0,0,0,0,0,0,1,2,3,4,5` — so
 //! **`max rbits == 5`, not 0** — and `max esck == 2`.
+//!
+//! "Same class structure" is as far as the identity goes, and the distinction
+//! matters: the 5,212-byte tables region differs per corpus (FNV-1a `0f5e1b96…`
+//! for the fixture against `89c4eb31…` `biomaster`, `10ac765c…` `biotwo`,
+//! `64809502…` `adv`, `93ef18f5…` `cross`), because the Huffman **code lengths
+//! are trained per album** while the `ctype`/`rbits`/`esck` rows are the format's
+//! fixed defaults. This test reads only the three fixed fields, which is exactly
+//! the set E-R4 bounds.
 //!
 //! Until 2026-11-19 this file asserted `rbits == 0` on every PAIR class, and it
 //! *passed* — because it compared against a local `const CT_PAIR: u8 = 1`, which

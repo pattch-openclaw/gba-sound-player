@@ -33,7 +33,7 @@ falsification — is the ledger, not this file; see "Where things live" below.
 | the acceptance gates (U1–U7) and their verdicts | **this file**, §Gates |
 | the risks that survive, and the decisions taken | **this file**, §Risks / §Decision log |
 | the current measured state | [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md), top |
-| the plan, the phases, and the order of work | [`crates/uli-lite/RECORD.md`](crates/uli-lite/RECORD.md) |
+| the plan, the phases, and the order of work | [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) |
 | the measurement record: arms, falsifications, the landing log | [`crates/uli-lite/RECORD.md`](crates/uli-lite/RECORD.md) |
 | architecture, memory layout, the measurement *method*, the kernel table, **the encoder plan** | [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) |
 | the product path's architecture and its gates | [`crates/uli-lite-gba/README.md`](crates/uli-lite-gba/README.md) |
@@ -780,6 +780,60 @@ numbers *of that day* and are superseded by the current state at the top of
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md); each
 entry is kept for the decision and its reasoning, not for its numbers.**
 
+- **2026-11-19 (later) — the encoder's shape is settled before it is written: plan-
+  then-emit, four determinism rules, a byte budget that is an argument, and exactness
+  measured at the PCM boundary.** The encoder plan (`crates/uli-lite/PLAN-OF-RECORD.md`
+  → "The encoder — the last missing piece") left four questions open; they are
+  ruled here in five parts, and the reason to rule them now rather than during E1
+  is that each is a structure, not a feature — retrofitting any of them means
+  rewriting a component that already has tests, measurements and pins under it.
+
+  1. **`uli-lite` stays read-only; the write side lives in `uli-enc`.** The core is
+     the codec as the GBA needs it — parse, decode, nothing else. So nothing is
+     added to it to make writing possible, including no "helpful" table serialiser.
+     The consequence is accepted knowingly: the blob *geometry* is arithmetic inside
+     `CodeTables::parse_into`, so `uli-enc` reproduces a layout it is not handed —
+     tolerated because a wrong offset fails the parse, unlike a wrong bound, which
+     fails silently (which is exactly the bug class PR #171 just fixed).
+  2. **The E-R4 bounds get one home.** They are promoted into `uli-lite` as a
+     validation over already-parsed tables (allocation-free, since the crate is
+     `no_std`), called by the encoder, the existing test and eventually the bake
+     gate. Validation is read-side, so (1) is not breached; a third copy of `5`
+     and `2` would have been the drift this file keeps documenting.
+  3. **Plan, then emit.** The encoder fixes its tables and its per-frame `g` plan,
+     sizes every frame, and only then writes frames in index order. This was never
+     optional in practice — the seek table needs each 256th frame's bit position and
+     `g`, and `g` is coded differentially against the previous frame — but ruling it
+     early also settles the parallel shape: once the `g` plan exists, frame bodies
+     are independent, which is how the reference itself parallelises.
+     Determinism is then four named rules (R5a–d: threads compute but never order;
+     fixed-order float reductions; transform constants checked in rather than
+     computed by libm at encode time; every tie names a winner), witnessed by one
+     cheap check — same input at 1 and N threads, same SHA-256.
+  4. **Refuse early, refuse the whole album, and take the size as an argument.**
+     `--budget BYTES` (default 32 MiB − 256 KiB, the reference's own) is the
+     encoder's only knowledge of size, checked against the container overhead
+     *before* the first frame is encoded; a too-small budget exits nonzero citing
+     needed and allowed, rather than quietly trimming tracks to squeeze in.
+     **The encoder writes no ROM and never sees `cart_bytes`**, because the ROM
+     holds code, art, `viz` and more than one asset producer, and by
+     `ALBUM-PLAYER.md` §10.1 art is carved out of the audio budget, never the
+     reverse — so the audio budget must arrive as an input from the bake, which
+     already owns "refuse, with a cited number".
+  5. **Byte-exactness against the C encoder is the gate, and it is measured at the
+     PCM boundary** (`album.f32` + `tracks.tsv` → blob), because that is where it
+     holds: both the fixture and a real 16,553-frame album were re-encoded by the
+     reference to their committed SHA-256 (measurements in
+     [`crates/uli-lite/RECORD.md`](crates/uli-lite/RECORD.md) → "the reference
+     encoder reproduces its own corpora"). The resampler is out of the byte
+     contract for a better reason than the one previously given — the reference's
+     own resampling step dispatches across libraries, so identical settings do not
+     guarantee identical bytes on two machines. The proof is a small matrix rather
+     than a sweep, and must include one deliberately off-default cell so agreement
+     cannot come from a shared lucky path. Running the reference as an oracle does
+     not breach the no-C rule: E-R1 forbids build/link/vendoring dependencies, and
+     `uli-album-asset` already shells out to the same binary.
+
 - **2026-11-19 — the product ROM is closed-world: a well-formed stream is an
   input assumption, not a runtime obligation.** We own the encoder, the container
   and the bake, so the product decoder does not need to detect, reject or
@@ -823,7 +877,8 @@ entry is kept for the decision and its reasoning, not for its numbers.**
   and the coverage: the test now imports the format's real constants, asserts
   `rbits <= 5` (the measured maximum, and requirement E-R4), rejects a PAIR class
   at `rbits == 6` as a self-witness, and reads all five corpora — which now agree:
-  identical table sets everywhere, `max rbits == 5`, `max esck == 2`.
+  identical class structure everywhere (`ctype`/`rbits`/`esck`), `max rbits == 5`,
+  `max esck == 2` — with the trained length rows differing per album, as they should.
 
 - **2026-11-18 — `post` as ARM asm: the product path is now all hand-written
   kernels, and the kernel table was re-derived with bit-exact arms.** `post` was
