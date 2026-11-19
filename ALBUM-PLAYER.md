@@ -2042,9 +2042,11 @@ asset path for it (Phase 5, R7) — with every target number in §10 replaced by
   Phase 1's default album material (Q15). Beside it sits
   `bioluminescent-32768hz-8bit-stereo.wav`, the same performance rendered at `pcm_u8` /
   32,768 Hz / stereo, kept as an instrument and named for its measured format (Q17).
-- [`README.md`](README.md) — "Project ideas (top-level ROMs)" lists this as an
-  idea; this file is where that idea stops being one. The README should gain a
-  pointer to this document when Phase 0 lands.
+- [`README.md`](README.md) — "Project ideas (top-level ROMs)" carries this as a one-bullet
+  summary with a pointer here, added 2026-11-15 (`6cd09f0`); the line below this bullet once said
+  the pointer "should gain" itself when Phase 0 landed, and it had already. *(corrected 2026-11-19)*
+  This file stays the only place the plan, the phases and the measured numbers live; the README
+  bullet is a signpost and nothing more.
 - [`examples/album_probe/README.md`](examples/album_probe/README.md) — **AP-0, the
   Phase 0 measurement record** (landed 2026-11-14): the probe ROMs' tables, §10's
   target→measured annotations, the deep-queue drain/drop sweep behind §4.4's ruling
