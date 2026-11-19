@@ -855,8 +855,8 @@ P1-P5 is bit-exact by construction, so the pins stay the witness.
 | **P1** | Closed-world reader in the product build: **no `end`, no `bad`, no bounds test**. Refill becomes `ldrh …, [next], #2` + shift/or. Frees 2 live registers so `rq`/`dq15` become register-resident and the ~1,300 per-frame stack reloads go | **6–10k/frame** (est.) | low *under the premise* — needs the bake gate to be the only entry point; the checked decoder stays as the oracle | C's structure exactly; the *branchless* and `bad \|=` shapes were falsified, this one was never tried |
 | **P2** | Copy `rq` + `ctype`/`rbits`/`esck` into IWRAM (560 B) | **~3.7k/frame**, near-certain | very low — placement only, bit-identical | C's `uli_g`; `iwram-tables` was the same move for the synthesis tables (−10.4%) |
 | **P3** | 16-bit contract everywhere (justified by pair `rbits == 0`): removes the nested second load, and is what makes P1's single-load refill correct | 1–2k/frame | very low — measured across all five corpora | C's 16-bit contract |
-| **P4** | Re-test C's `r1 = rq[1] * step` + `m == 1` fast path **after P1/P2** | unknown, 2–4k plausible | low — already written once and reverted | the existing note says it lost because *"its two operands are spilled"* |
-| **P5** | `Q3` (81 B) and `CLZ6` (64 B) to IWRAM | 0.5–1k/frame | trivial | `uli_g_q3` in IWRAM |
+| **P4** | Re-test C's `r1 = rq[1] * step` + `m == 1` fast path **after P1/P2** | **FALSIFIED 2026-11-19: +2,310 mean worse** | — | the old note blamed spilling; P1 fixed the spilling and it *still* lost — see below |
+| **P5** | `Q3` (81 B) and `CLZ6` (64 B) to IWRAM | **LANDED 2026-11-19: −570 mean / −104 worst** | trivial, +148 B IWRAM | `uli_g_q3` in IWRAM |
 
 **P2 LANDED (2026-11-19) — and the estimate above was 4x too high.** Shipped as
 `ClassTables`: a 560 B caller-owned IWRAM object (`ctype`/`rbits`/`esck`/`rq`)
@@ -927,6 +927,100 @@ committed fixture and for all five generated corpora when present. That is the
 seed of the bake gate: it is a property of the **tables in the blob**, so it
 belongs wherever the shipped album is produced, and it must run before the ROM
 exists rather than in it.
+
+**P4 is FALSIFIED (2026-11-19) — and the falsification is the interesting
+result.** The change was built exactly as the reference has it: `r1 = rq[1] *
+step` hoisted out of the quad group loop, and digit 1 decoded as a sign bit and
+nothing else. Bit-exact, pins PASS, and **slower on both corpora**:
+
+| | baseline (P1) | with P4 | delta |
+|---|---:|---:|---:|
+| 129-frame, worst / mean | 193,421 / 172,748 | 199,121 / 175,077 | +5,700 / **+2,329** |
+| album decode wall, worst / mean | 195,439 / 169,851 | 199,532 / 172,161 | +4,093 / **+2,310** |
+| gate total, worst / mean | 226,853 / 201,126 | 230,976 / 203,506 | +4,123 / **+2,380** |
+
+Two shapes were measured, because the first one was suspected of being the
+problem rather than the idea: the fast path *nested inside* `if mm != 0`
+(+2,106 mean) and *tested first*, making C's own two-branch chain `if (m == 1) …
+else if (m)` (+2,329). Both lost, so it is not the branch nesting.
+
+**Why the old rejection was right for a reason that had already stopped being
+true, and then became true again the other way round.** The note said the hoist
+lost because *"its two operands are spilled"* — a symptom of the reader's
+register pressure. P1 removed that, so the item deserved the re-test. But P1 and
+P2 also **removed the cost the fast path exists to avoid**: `rq[1]` is now an
+IWRAM read in a register (1 cycle, not a 4-cycle EWRAM load behind a stack
+reload) and the multiply's `Rs` is the small dequant value (1–2 cycles). What is
+left is smaller than the price of skipping it — ARM7TDMI charges 3 cycles for a
+taken branch and has no predication, and the digit is data-dependent so it
+predicts poorly. **P4's value was consumed by the two PRs that unblocked it.**
+
+That is the same lesson the 2026-11-16 loose-ends sweep learned from the other
+direction (there: *"almost every item is a branch"*; here: an item that looks
+like arithmetic is really a branch once the arithmetic gets cheap), and it is
+why an item must be re-sized **after** the changes that alter its inputs, not
+before.
+
+**P5 LANDED (2026-11-19): −570 mean / −104 worst** — `Q3` and `CLZ6` moved from
+`.rodata` (cartridge) to `.iwram`, as `static` rather than `const` so each is one
+object with an address instead of a value the compiler may re-emit at every use.
+Album **194,695 / 169,354** (was 195,439 / 169,851); gate **226,152 / 200,624 =
+86.27%**, margin **13.73 points**. Cost: **+148 B of IWRAM** (145 B of table).
+The projection (0.5–1k) held.
+
+**The sub-frame partition, re-run (2026-11-19, in PR #165).** Mean cycles/frame
+on the 129-frame fixture, each arm removing one layer from the full path:
+
+| layer | pre-P2/P5 | **re-run** | share |
+|---|---:|---:|---:|
+| symbol resolution | 27,036 | **26,175** | 58% |
+| loops, escapes, sign bits, band control | 16,350 | **16,035** | — |
+| dequant | 9,285 | **8,774** | — |
+| residual | 4,954 | **5,187** | — |
+| reader mechanics | 2,791 | **2,793** | — |
+| coefficient store | 2,111 | **2,003** | — |
+| **full path** | 46,631 | **45,381** | 100% |
+
+**The shape is unchanged — symbol resolution is still ~58% of the entropy path —
+and the absolute moved only 1,250** (P2's −897 and P5's −570 on this reader).
+Two caveats come with that, and the second is the important one:
+
+1. **This is the *checked* reader.** `attrib-dump` now implies `checked-reader`,
+   because the `nolut` and `reader` arms desynchronise the stream and need `bad`
+   to resynchronise. So these are not the product's numbers: the product's
+   entropy block is ~35,656, and the ~9,700 difference is exactly what P1
+   removed — the per-symbol LUT-pointer reload and the per-coefficient
+   `rq`/`dq15` reloads, which every arm here still pays.
+2. **Only two of the six arms desync.** `nolut` and `reader` substitute or remove
+   the symbol decode, so the bit cursor diverges and what follows is a different
+   workload. **`nodequant` and `nowrite` do not touch the reader at all** — they
+   remove the dequant arithmetic and the store — so they are sound on any reader.
+
+**So the next instrument step is not another optimisation.** It is to decouple
+`attrib-dump` from `checked-reader` so `nodequant`/`nowrite` can be built against
+the **product** reader, and to add a symbol-resolution arm that does not desync
+(the 10-bit LUT covers every code on this corpus — `slow_hits=0` — so a
+length-preserving substitution exists: read the same number of bits, return a
+fixed symbol). Until then "symbol resolution is 58%" is a statement about a
+reader the product does not ship, and sizing work from it would repeat P2's
+mistake in the other direction.
+
+**Where this leaves the gate against C.** The reference's own record gives
+comparable figures — decode wall **69.43%** and gate total **73.63%** at 4/2 — so
+the two halves can be compared for the first time:
+
+| | C + ASM | ours (after P5) | delta |
+|---|---:|---:|---:|
+| decode wall, worst | 182,007 (69.43%) | **194,695 (74.27%)** | **1.070x**, +4.84 pts |
+| gate total, worst | 193,017 (73.63%) | **226,152 (86.27%)** | 1.172x, +12.64 pts |
+| **non-decode half** (gate − decode) | **11,010 (4.20 pts)** | **31,457 (12.00 pts)** | **2.86x** |
+
+**The decoder is no longer where the gate gap lives.** Of the 12.64 points we are
+behind C on the gate, 4.84 are decode and **7.80 are the convert/IRQ/DMA path**,
+which costs ~2.9x C's. C's figure also errs *high* (their doc notes the DMA share
+is counted twice in the gate total), so the true gap is at least as large. That
+makes the player's output half — not the codec — the largest remaining single
+difference from the reference, and it is where the next measurement should go.
 
 **P4 deserves its own paragraph, because the record currently treats it as
 settled.** `coef!` carries *"C hoists `rq[1] * step` and special-cases `m == 1`
