@@ -52,8 +52,9 @@ pub fn single_track(dir: &Path, n_samples: u32) -> PathBuf {
     write_tracks(
         dir,
         &format!(
-            "# n start len title artist (32768 Hz samples)\n\
-             1\t0\t{n_samples}\tSilence\tuli-enc test\n"
+            "# n start len title artist ({} Hz samples)\n\
+             1\t0\t{n_samples}\tSilence\tuli-enc test\n",
+            uli_lite::format::RATE
         ),
     )
 }

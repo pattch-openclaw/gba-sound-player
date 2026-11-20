@@ -25,8 +25,10 @@
 
 use crate::Error;
 
-/// The one rate the format plays at (`uli_lite::format::RATE`).
-pub const RATE: u32 = 32_768;
+/// The one rate the format plays at: re-exported, never a second copy of the
+/// number. `wav`/`assemble` and the tests use this name; the value is
+/// `uli_lite::format::RATE`'s.
+pub use uli_lite::format::RATE;
 
 /// Half-width of the sinc, in source samples per side. 16 zero crossings each way
 /// is 32 taps per phase: ~90 dB of stopband with this window, at a cost that is

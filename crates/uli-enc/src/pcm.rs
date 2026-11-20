@@ -28,7 +28,7 @@
 use std::path::Path;
 
 use crate::Error;
-use uli_lite::format::MAX_TRACKS;
+use uli_lite::format::{MAX_TRACKS, RATE};
 
 /// One track as the container will carry it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -202,7 +202,7 @@ impl Pcm {
     /// [`Self::open`] by construction: one tab-separated row per track, numbered
     /// from 1, with no empty field.
     pub fn write_tracks(&self, path: &Path) -> Result<(), Error> {
-        let mut text = String::from("# n\tstart\tlen\ttitle\tartist (32768 Hz samples)\n");
+        let mut text = format!("# n\tstart\tlen\ttitle\tartist ({RATE} Hz samples)\n");
         for (i, t) in self.tracks.iter().enumerate() {
             text.push_str(&format!(
                 "{}\t{}\t{}\t{}\t{}\n",

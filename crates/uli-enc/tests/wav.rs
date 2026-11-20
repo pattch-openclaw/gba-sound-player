@@ -18,6 +18,7 @@
 mod common;
 
 use common::{TempDir, WavSpec, wav_bytes, wav_bytes_f32};
+use uli_enc::resample::RATE;
 use uli_enc::{
     Args, DEFAULT_BUDGET, DEFAULT_CAP_PCT, Error, Input, Pcm, Samples, assemble, encode, wav,
 };
@@ -54,7 +55,7 @@ fn every_pcm_depth_lands_on_the_pcm16_scale() {
         (32, &[196_608, -196_608], &[3.0, -3.0]),
     ];
     for (bits, raw, expected) in cases {
-        let bytes = wav_bytes(&WavSpec::pcm(1, 32768, bits), raw);
+        let bytes = wav_bytes(&WavSpec::pcm(1, RATE, bits), raw);
         let w = wav::parse(&bytes).unwrap_or_else(|e| panic!("{bits}-bit: {e}"));
         assert_eq!(w.bits, bits);
         assert_eq!(w.samples, expected, "{bits}-bit samples");
@@ -66,7 +67,7 @@ fn a_16_bit_source_is_unchanged_which_is_why_the_blob_matches() {
     // The scale rule in one line: a 16-bit WAV's samples *are* PCM16-scale samples,
     // so the front end has nothing to undo and nothing to round.
     let raw: Vec<i32> = (0..512).map(|i| ((i * 37) % 4001) - 2000).collect();
-    let bytes = wav_bytes(&WavSpec::pcm(2, 32768, 16), &raw);
+    let bytes = wav_bytes(&WavSpec::pcm(2, RATE, 16), &raw);
     let w = wav::parse(&bytes).expect("parses");
     let expected: Vec<f32> = raw.iter().map(|&s| s as f32).collect();
     assert_eq!(w.samples, expected);
@@ -77,7 +78,7 @@ fn float32_is_scaled_and_a_nan_is_refused() {
     let spec = WavSpec {
         tag: 3,
         bits: 32,
-        ..WavSpec::pcm(1, 32768, 32)
+        ..WavSpec::pcm(1, RATE, 32)
     };
     let bytes = wav_bytes_f32(&spec, &[0.5, -0.25]);
     let w = wav::parse(&bytes).expect("float32 parses");
@@ -104,7 +105,7 @@ fn extensible_pcm_is_read_by_its_subformat() {
 
 #[test]
 fn a_truncated_data_chunk_is_a_refusal_not_a_short_album() {
-    let mut bytes = wav_bytes(&WavSpec::pcm(1, 32768, 16), &[1, 2, 3, 4]);
+    let mut bytes = wav_bytes(&WavSpec::pcm(1, RATE, 16), &[1, 2, 3, 4]);
     // Declare four more bytes than the file holds. Clamping would silently drop the
     // last two samples, which is exactly the "invented tail" rule in reverse.
     let data_len_at = bytes.len() - 12;
@@ -116,18 +117,18 @@ fn a_truncated_data_chunk_is_a_refusal_not_a_short_album() {
 #[test]
 fn unsupported_shapes_are_refused_with_the_reason() {
     let cases: [(WavSpec, &str); 3] = [
-        (WavSpec::pcm(3, 32768, 16), "channels"),
+        (WavSpec::pcm(3, RATE, 16), "channels"),
         (
             WavSpec {
                 tag: 6,
-                ..WavSpec::pcm(1, 32768, 16)
+                ..WavSpec::pcm(1, RATE, 16)
             },
             "not PCM",
         ),
         (
             WavSpec {
                 tag: 3,
-                ..WavSpec::pcm(1, 32768, 16)
+                ..WavSpec::pcm(1, RATE, 16)
             },
             "only 32-bit float",
         ),
@@ -143,7 +144,7 @@ fn unsupported_shapes_are_refused_with_the_reason() {
 
     // A depth the builder cannot encode but the header can declare: 64-bit PCM.
     // The `bits` field is the seventh u16 of the fmt body, which starts at 20.
-    let mut bytes = wav_bytes(&WavSpec::pcm(2, 32768, 32), &[0; 8]);
+    let mut bytes = wav_bytes(&WavSpec::pcm(2, RATE, 32), &[0; 8]);
     bytes[34..36].copy_from_slice(&64u16.to_le_bytes());
     let err = wav::parse(&bytes).expect_err("64-bit PCM is not read");
     assert!(err.to_string().contains("8/16/24/32"), "{err}");
@@ -156,8 +157,8 @@ fn tracks_are_joined_gaplessly_and_the_table_partitions_the_album() {
     let dir = TempDir::new("wav-assemble");
     let a = dir.path().join("a.wav");
     let b = dir.path().join("b.wav");
-    std::fs::write(&a, wav_bytes(&WavSpec::pcm(2, 32768, 16), &[1; 200])).unwrap();
-    std::fs::write(&b, wav_bytes(&WavSpec::pcm(2, 32768, 16), &[2; 100])).unwrap();
+    std::fs::write(&a, wav_bytes(&WavSpec::pcm(2, RATE, 16), &[1; 200])).unwrap();
+    std::fs::write(&b, wav_bytes(&WavSpec::pcm(2, RATE, 16), &[2; 100])).unwrap();
 
     let (pcm, samples) = assemble::assemble(&[a, b]).expect("assembly succeeds");
 
@@ -187,7 +188,7 @@ fn mono_is_duplicated_and_tags_are_carried_verbatim() {
     let spec = WavSpec {
         title: Some("Synthetic — Öffnung (Mix)"),
         artist: Some("Sömebödy"),
-        ..WavSpec::pcm(1, 32768, 16)
+        ..WavSpec::pcm(1, RATE, 16)
     };
     std::fs::write(&path, wav_bytes(&spec, &[1000, 2000])).expect("write");
     let (pcm, samples) = assemble::assemble(&[path]).expect("assembly succeeds");
@@ -205,7 +206,7 @@ fn mono_is_duplicated_and_tags_are_carried_verbatim() {
 fn a_missing_artist_and_title_fall_back_like_the_reference() {
     let dir = TempDir::new("wav-fallback");
     let path = dir.path().join("Track One.wav");
-    std::fs::write(&path, wav_bytes(&WavSpec::pcm(2, 32768, 16), &[0, 0])).unwrap();
+    std::fs::write(&path, wav_bytes(&WavSpec::pcm(2, RATE, 16), &[0, 0])).unwrap();
     let (pcm, _) = assemble::assemble(&[path]).expect("assembly succeeds");
     assert_eq!(pcm.tracks[0].title, "Track One");
     assert_eq!(
@@ -218,7 +219,7 @@ fn a_missing_artist_and_title_fall_back_like_the_reference() {
 fn an_empty_source_is_refused() {
     let dir = TempDir::new("wav-empty");
     let path = dir.path().join("empty.wav");
-    std::fs::write(&path, wav_bytes(&WavSpec::pcm(2, 32768, 16), &[])).unwrap();
+    std::fs::write(&path, wav_bytes(&WavSpec::pcm(2, RATE, 16), &[])).unwrap();
     let err = assemble::assemble(&[path]).expect_err("an empty track cannot be an album");
     assert!(err.to_string().contains("0 samples"), "{err}");
 }
@@ -260,7 +261,7 @@ fn a_32768_hz_stereo_wav_reaches_the_pcm_blobs_exact_bytes() {
     let spec = WavSpec {
         title: Some("Pattern"),
         artist: Some("uli-enc test"),
-        ..WavSpec::pcm(2, 32768, 16)
+        ..WavSpec::pcm(2, RATE, 16)
     };
     std::fs::write(&wav_path, wav_bytes(&spec, &raw)).unwrap();
 
@@ -334,7 +335,7 @@ fn a_resampled_wav_is_held_to_snr_not_to_bytes() {
 fn a_wav_with_no_codec_knob_is_refused_rather_than_written_as_silence() {
     let dir = TempDir::new("wav-no-knob");
     let path = dir.path().join("tone.wav");
-    std::fs::write(&path, wav_bytes(&WavSpec::pcm(2, 32768, 16), &[1000; 64])).unwrap();
+    std::fs::write(&path, wav_bytes(&WavSpec::pcm(2, RATE, 16), &[1000; 64])).unwrap();
     let err = encode(&args(Input::Wav(vec![path]), None, false))
         .expect_err("a WAV with neither --rd nor --g would be silence");
     match err {
@@ -348,8 +349,8 @@ fn the_cli_assembles_wavs_and_dumps_the_pair_it_encoded() {
     let dir = TempDir::new("wav-cli");
     let a = dir.path().join("a.wav");
     let b = dir.path().join("b.wav");
-    std::fs::write(&a, wav_bytes(&WavSpec::pcm(2, 32768, 16), &[500; 128])).unwrap();
-    std::fs::write(&b, wav_bytes(&WavSpec::pcm(2, 32768, 16), &[-500; 64])).unwrap();
+    std::fs::write(&a, wav_bytes(&WavSpec::pcm(2, RATE, 16), &[500; 128])).unwrap();
+    std::fs::write(&b, wav_bytes(&WavSpec::pcm(2, RATE, 16), &[-500; 64])).unwrap();
     let out = dir.path().join("album.uli");
     let dump = dir.path().join("pcm");
 
@@ -397,7 +398,7 @@ fn the_cli_assembles_wavs_and_dumps_the_pair_it_encoded() {
 fn the_cli_refuses_two_input_shapes_and_emit_pcm_without_wavs() {
     let dir = TempDir::new("wav-cli-refusals");
     let a = dir.path().join("a.wav");
-    std::fs::write(&a, wav_bytes(&WavSpec::pcm(2, 32768, 16), &[1; 16])).unwrap();
+    std::fs::write(&a, wav_bytes(&WavSpec::pcm(2, RATE, 16), &[1; 16])).unwrap();
     let album = common::silence_album(dir.path(), 8);
     let tracks = common::single_track(dir.path(), 8);
     let out = dir.path().join("album.uli");

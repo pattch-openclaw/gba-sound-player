@@ -28,7 +28,7 @@ use std::process::ExitCode;
 
 use uli_enc::rd::CYCLE_PERIOD;
 use uli_enc::{Args, DEFAULT_BUDGET, DEFAULT_CAP_PCT, Input, encode};
-use uli_lite::format::NCODED;
+use uli_lite::format::{M, NCODED, RATE};
 
 const USAGE: &str = "usage: uli-enc {--album F --tracks TSV | --wav F [--wav F ...]} --out U \
                      [--budget BYTES] [--cap PCT] [--threads N] [--g N] [--rd] [--no-train] \
@@ -185,11 +185,13 @@ fn run() -> Result<(), ExitCode> {
             },
         };
         println!(
-            "stream {} bits = {:.1} bits/frame ({:.3} kbit/s at 32768 Hz); {} nonzero \
+            "stream {} bits = {:.1} bits/frame ({:.3} kbit/s at {RATE} Hz); {} nonzero \
              coefficients; tables {}",
             report.stream_bits,
             report.stream_bits as f64 / report.n_frames as f64,
-            report.stream_bits as f64 / (report.n_frames as f64 * 512.0 / 32768.0) / 1000.0,
+            report.stream_bits as f64
+                / (report.n_frames as f64 * M as f64 / f64::from(RATE))
+                / 1000.0,
             report.nonzero_coeffs,
             if report.trained {
                 "trained"
@@ -271,7 +273,7 @@ fn run() -> Result<(), ExitCode> {
         encoded.bytes.len(),
         budget,
         unused,
-        report.stream_bits as f64 / (f64::from(report.n_samples) / 32768.0) / 1000.0
+        report.stream_bits as f64 / (f64::from(report.n_samples) / f64::from(RATE)) / 1000.0
     );
     Ok(())
 }

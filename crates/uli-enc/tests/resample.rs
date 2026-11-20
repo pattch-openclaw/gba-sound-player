@@ -19,8 +19,8 @@ fn sine(rate: u32, freq: f64, n_frames: usize) -> Vec<f32> {
 
 #[test]
 fn the_product_rate_is_an_unfiltered_copy() {
-    let x = sine(32768, 1000.0, 1000);
-    let y = resample_stereo(&x, 32768).expect("copies");
+    let x = sine(RATE, 1000.0, 1000);
+    let y = resample_stereo(&x, RATE).expect("copies");
     assert_eq!(x, y, "a natively 32,768 Hz source must not be touched");
     assert_eq!(
         x.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),

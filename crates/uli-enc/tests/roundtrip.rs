@@ -104,8 +104,11 @@ fn a_dc_impulse_frame_decodes_as_one_coded_band_per_channel() {
     // carry that frame's bitpos and the `g` state entering it (DC_G, not 0).
     let tracks = common::write_tracks(
         dir.path(),
-        "# n start len title artist (32768 Hz samples)\n\
-         1\t1024\t512\tDC\tuli-enc test\n",
+        &format!(
+            "# n start len title artist ({} Hz samples)\n\
+             1\t1024\t512\tDC\tuli-enc test\n",
+            uli_lite::format::RATE
+        ),
     );
 
     let tables = DefaultTables::build();

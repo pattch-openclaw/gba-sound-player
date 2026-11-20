@@ -19,9 +19,12 @@ fn a_good_input_pair_reads_the_length_and_both_tracks() {
     let album = silence_album(dir.path(), 1024);
     let tracks = write_tracks(
         dir.path(),
-        "# n start len title artist (32768 Hz samples)\n\
-         1\t0\t512\tFirst\tArtist A\n\
-         2\t512\t512\tSecond\tArtist B\n",
+        &format!(
+            "# n start len title artist ({} Hz samples)\n\
+             1\t0\t512\tFirst\tArtist A\n\
+             2\t512\t512\tSecond\tArtist B\n",
+            uli_lite::format::RATE
+        ),
     );
 
     let pcm = Pcm::open(&album, &tracks).expect("the input pair is valid");

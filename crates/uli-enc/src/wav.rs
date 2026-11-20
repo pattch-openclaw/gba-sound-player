@@ -27,6 +27,10 @@ use std::path::Path;
 
 use crate::Error;
 
+/// `1 << 15`: a float WAV's ±1.0 is this many PCM16 units. Not the sample rate —
+/// the scale — which is why it is named apart from `resample::RATE`.
+const FULL_SCALE: f32 = 32_768.0;
+
 /// The two tags the container carries, as the file states them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Tags {
@@ -262,7 +266,7 @@ fn decode(data: &[u8], fmt: &Fmt) -> Result<Vec<f32>, Error> {
                 if !v.is_finite() {
                     non_finite += 1;
                 }
-                out.push(v * 32768.0);
+                out.push(v * FULL_SCALE);
             }
         }
         (f, b) => {
