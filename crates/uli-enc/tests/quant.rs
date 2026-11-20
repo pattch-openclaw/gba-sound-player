@@ -11,10 +11,10 @@
 //! the kind S1's silence path could not expose (it always codes zero bands), and
 //! it was found by real audio, not by a test.
 //!
-//! **The magnitudes must be the reference's, not the nearest ones.** `enc_core.c`
+//! **The magnitudes come from a fixed candidate set, not from the nearest level.**
 //! offers `{0, floor t, floor t + 1}` and takes the first minimum; because every
 //! reconstruction is shifted down by `dq/16`, the closest level is sometimes
-//! `floor t - 1`, which the reference does not consider. Reproducing the candidate
+//! `floor t - 1`, which the set does not offer. Reproducing the candidate
 //! *set* is what keeps S7's byte-exactness reachable, so it is asserted against an
 //! independent restatement of the rule rather than against this crate's own code.
 //!
@@ -186,9 +186,9 @@ fn the_terminator_is_owed_only_by_a_channel_that_stops_short() {
     );
 }
 
-/// An independent restatement of `make_cand` from `enc_core.c`, written from the C
-/// rather than from this crate, so the comparison means something.
-fn reference_magnitude(ax: f64, step: f64, dq: &[i8; 16], mmax: i32) -> i32 {
+/// An independent restatement of the candidate rule, written from the specification
+/// rather than from this crate, so that comparing against it means something.
+fn accepted_magnitude(ax: f64, step: f64, dq: &[i8; 16], mmax: i32) -> i32 {
     let d = step / 16.0;
     let inv = 1.0 / d;
     if mmax <= 0 || ax == 0.0 {
@@ -230,7 +230,7 @@ fn reference_magnitude(ax: f64, step: f64, dq: &[i8; 16], mmax: i32) -> i32 {
 /// freedom is exactly what closed the rate gap. Comparing an RD plan against the
 /// nearest rule would only assert that RD had done nothing.
 #[test]
-fn at_lam_zero_the_magnitudes_are_the_references_candidates() {
+fn at_lam_zero_the_magnitudes_follow_the_candidate_rule() {
     let (_d, _pcm, samples, tables, _, nf) = coded(100);
     let step = quant::step_of(100, false) as f64;
     let d = step / 16.0;
@@ -263,13 +263,13 @@ fn at_lam_zero_the_magnitudes_are_the_references_candidates() {
                 .expect("the default tables code every symbol, so no tuple can fail");
                 for i in 0..ncod {
                     let ax = f64::from(coef[base + b * BANDW + i]).abs();
-                    let want = reference_magnitude(ax, step, dq, mmax);
+                    let want = accepted_magnitude(ax, step, dq, mmax);
                     let got = rd.m[i];
                     if want.max(got) <= head {
                         assert_eq!(
                             got, want,
                             "frame {f} ch{ci} band {b} coeff {i}: lam=0 chose m={got}, the \
-                             reference's candidate rule gives {want} for |coef| {ax}"
+                             candidate rule gives {want} for |coef| {ax}"
                         );
                     }
                     checked += 1;
@@ -391,15 +391,15 @@ fn the_search_actually_runs_and_changes_the_album() {
 /// every class was offered *no* coded class and fell through to `class 0` — silence.
 /// On the test album that turned the loudest band (energy 1.5e11) into nothing, and
 /// because the class symbol is cheaper than the coefficients the frame still looked
-/// *better* on a rate-only comparison: 0.80× the reference's bits. Only distortion
-/// exposed it, six orders of magnitude above the reference's.
+/// *better* on a rate-only comparison: 0.80× the oracle's bits. Only distortion
+/// exposed it, six orders of magnitude above the oracle's.
 #[test]
 fn a_band_louder_than_every_class_headroom_is_still_coded() {
     let tables = DefaultTables::build();
     // A magnitude of 800 quantised levels: past the widest class's headroom (479), so
     // escapes must carry it — but comfortably inside `mmax`, which is the *other*
     // limit and a different one. (At a step fine enough for `mmax` to bind, no encoder
-    // can represent the band: the reference clamps to 65535 identically, and picking
+    // can represent the band: the oracle clamps to 65535 identically, and picking
     // a coarser step is the search's job, not the quantiser's.)
     // Only at steps where `mmax` is above the widest headroom can this case exist at
     // all: past g≈124 the format's own |X| limit is tighter than the class ladder, and
@@ -433,7 +433,7 @@ fn a_band_louder_than_every_class_headroom_is_still_coded() {
     }
 }
 
-/// `kappa` is what makes the reference's rate reachable, and the mechanism is that a
+/// `kappa` is what makes the target rate reachable, and the mechanism is that a
 /// coefficient which is cheap to lose is dropped instead of coded. With `kappa = 0`
 /// the quantiser is S2's and keeps everything; a bigger `kappa` must never cost more
 /// bits at the same step.
@@ -534,7 +534,7 @@ fn an_ms_frame_costs_exactly_three_hundred_twelve_cycles_more() {
 ///
 /// Inert with the default tables — `huff_lengths` gives every symbol a code — but S4's
 /// *trained* tables leave never-seen symbols at length 0, and a price list that treats
-/// "no code" as "zero bits" makes the uncodeable symbol look **free**. The reference
+/// "no code" as "zero bits" makes the uncodeable symbol look **free**. The oracle
 /// guards with `if (!l) continue;` and propagates failure as `BIG`; here it is `None`.
 #[test]
 fn a_symbol_with_no_code_is_never_chosen() {
@@ -571,7 +571,7 @@ fn a_symbol_with_no_code_is_never_chosen() {
     );
 }
 
-/// `band_rdo`, differentially against the C reference on 2,400 frozen cases.
+/// `band_rdo`, differentially against the frozen oracle on 2,400 cases.
 ///
 /// The fixture (`tests/fixtures/band_rdo.txt`, `make uli-band-rdo-fixture`) covers all
 /// 13 classes across 180 steps and five magnitude regimes: all-zero, entirely below one
@@ -584,7 +584,7 @@ fn a_symbol_with_no_code_is_never_chosen() {
 /// the instrument that found the tables-blob row leak and proved the MDCT bit-exact —
 /// freeze the oracle's answers, assert ours match.
 #[test]
-fn band_rdo_matches_the_reference_on_every_frozen_case() {
+fn band_rdo_matches_every_frozen_case() {
     let tables = DefaultTables::build();
     let raw = include_str!("fixtures/band_rdo.txt");
     let mut cases = 0usize;
@@ -616,19 +616,19 @@ fn band_rdo_matches_the_reference_on_every_frozen_case() {
             got.m.to_vec(),
             want_m,
             "line {}: class {class} g={g} ncod={ncod} — magnitudes differ from the \
-             reference's. x = {:?}",
+             golden's. x = {:?}",
             lineno + 1,
             &x[..8]
         );
         assert_eq!(
             got.bits,
             want_bits,
-            "line {}: class {class} g={g} — {} bits against the reference's {want_bits}",
+            "line {}: class {class} g={g} — {} bits against the golden's {want_bits}",
             lineno + 1,
             got.bits
         );
         // Distortion is compared relatively, not bitwise, and the distinction is
-        // deliberate: the reference sums the 16 squared errors sequentially and this
+        // deliberate: the oracle sums the 16 squared errors sequentially and this
         // implementation sums per tuple then across tuples, so the two differ by
         // rounding — 1 ULP at 4e11, measured. The *decisions* above are compared
         // exactly, which is where a real divergence would show; the tolerance here is
@@ -637,7 +637,7 @@ fn band_rdo_matches_the_reference_on_every_frozen_case() {
         let rel = (got.dist - want_dist).abs() / want_dist.abs().max(1e-300);
         assert!(
             rel < 1e-12,
-            "line {}: class {class} g={g} — distortion {:.12e} against the reference's \
+            "line {}: class {class} g={g} — distortion {:.12e} against the oracle's \
              {want_dist:.12e} (relative {rel:.3e})",
             lineno + 1,
             got.dist
@@ -660,7 +660,7 @@ fn band_rdo_matches_the_reference_on_every_frozen_case() {
 }
 
 /// The class-symbol counterpart of [`a_symbol_with_no_code_is_never_chosen`], and the
-/// third place the reference carries an `if (!l) continue;`.
+/// third place the oracle carries an `if (!l) continue;`.
 ///
 /// `quantise_chan_rd` prices a band's class with the context table's length. A class
 /// whose symbol has no code would cost zero bits and therefore win every comparison —
@@ -835,7 +835,7 @@ fn an_ms_album_decodes_to_sane_audio_and_beats_lr_on_correlated_stereo() {
     // The comparison is a *scaling* check, not a quality claim, and the distinction
     // matters: at the same `g` an M/S frame is **coarser**, because it spends 4 step
     // indices and quantises at √2 times the unit. So M/S cannot be expected to win at
-    // fixed `g` — that is precisely why the reference lets the search weigh the two under
+    // fixed `g` — that is precisely why the oracle lets the search weigh the two under
     // `J` at each `g` instead of picking a domain up front. What must hold is that M/S is
     // in the same league: a misplaced √2 scales the output and lands near 3 dB.
     let lr = run(None, g);

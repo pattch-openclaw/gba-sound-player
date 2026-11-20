@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """Regenerate `crates/uli-enc/src/mdct_tables.rs`.
 
-The encoder's forward MDCT needs the same six tables the C reference builds in
-`mdct_init()` (`gba-audio/encoder/enc_core.c:141-151`) — but as **checked-in
-constants**, not as libm calls at encode time. That is E-R5's rule R5c: "transform
-constants come from checked-in tables, not from libm at encode time", and the
-precedent is `uli-lite/src/tables_data.rs`. It matters twice over here: a codec
-whose constants depend on which libm answered cannot honour E-R5's any-host half,
-and the reference's own values are these exact expressions in `double`.
+The encoder's forward MDCT needs six tables of transcendental constants — the FFT
+twiddles, the DCT-IV pre- and post-twiddles, the sine window and the output scale —
+but as **checked-in values**, not as libm calls at encode time. That is E-R5's rule
+R5c: "transform constants come from checked-in tables, not from libm at encode time",
+and the precedent is `uli-lite/src/tables_data.rs`. A codec whose constants depend on
+which libm answered cannot honour E-R5's any-host half.
 
-Python's `math.cos`/`math.sin`/`math.sqrt` call the same libm the reference links
-against, and `repr(float)` prints the shortest string that round-trips — which
-Rust's correctly-rounded `f64` parser reads back to the identical bits. So these
-are the reference's constants, not approximations of them. `mdct.rs`'s test
-`the_tables_are_the_reference_own` proves it against a C dump.
+The values are the exact expressions the transform is defined by — `cos(-2*pi*k/256)`,
+`sin(-pi*(4k+1)/(4M))`, `sqrt(2/M)` — evaluated in `double`. Python's
+`math.cos`/`math.sin`/`math.sqrt` are correctly rounded, and `repr(float)` prints the
+shortest decimal string that round-trips, which Rust's correctly-rounded `f64` parser
+reads back to identical bits. So a regeneration produces the same numbers anywhere the
+libm is faithful, and `crates/uli-enc/tests/mdct.rs` pins the resulting coefficients
+bit for bit against a frozen golden.
 
 Only half of `win` is stored: `WIN[i] = sin(pi*(i+0.5)/2M)` is symmetric about
 `i = M`, `WIN[2M-1-i] == WIN[i]`, so `mdct.rs` mirrors the index. Everything else
-is stored at full length and in the reference's own order.
+is stored at full length, in index order.
 
 Usage:  scripts/gen_uli_mdct_tables.py [--check]
 """
@@ -63,18 +64,21 @@ def main() -> int:
         "//! Checked-in constants for the encoder's forward MDCT (E-R5, rule R5c).",
         "//!",
         "//! Regenerate with `scripts/gen_uli_mdct_tables.py`; the generator owns this",
-        "//! file and the comments below are its comments. These are the doubles the C",
-        "//! reference computes in `mdct_init()` (`gba-audio/encoder/enc_core.c`), stored",
-        "//! rather than called for, so the encode path touches no libm and the values do",
-        "//! not depend on which math library answers. They are `f64` rather than the",
-        "//! decoder's Q31 `i32` on purpose: the analysis side is host-side and the",
-        "//! reference is `double` — matching its arithmetic is what keeps S7's",
-        "//! byte-exactness reachable, and none of this ships in a ROM.",
+        "//! file and the comments below are its comments. These are the exact values of the",
+        "//! twiddle and window expressions — `cos(-2*pi*k/256)`, `sin(-pi*(4k+1)/4M)`,",
+        "//! `sqrt(2/M)` and so on — computed once and stored rather than called for, so the",
+        "//! encode path touches no libm and the output cannot depend on which math library",
+        "//! answered. That is E-R5 rule R5c, and it is the difference between a blob that",
+        "//! reproduces anywhere and one that reproduces on the machine that made it.",
+        "//!",
+        "//! They are `f64` rather than the decoder's Q31 `i32` on purpose: the analysis side",
+        "//! is host-side, needs more than 32 bits of headroom over a 2M-sample window, and",
+        "//! none of this ships in a ROM.",
         "//!",
         "//! Some entries land exactly on `cos(-2*pi*64/256)` = 1/sqrt(2), so clippy's",
         "//! `approx_constant` fires on generated data. Substituting the crate constant",
-        "//! would make them depend on libm's rounding of it instead of on the",
-        "//! reference's own `cos`, which is the one thing this file exists to avoid.",
+        "//! would make them depend on libm's rounding of it instead of on the value",
+        "//! of libm, which is the one thing this file exists to avoid.",
         "#![allow(clippy::approx_constant)]",
         "",
     ]

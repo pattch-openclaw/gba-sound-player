@@ -135,7 +135,7 @@ fn the_cli_writes_the_blob_and_prints_the_target_line() {
     let stdout = String::from_utf8_lossy(&result.stdout);
     assert!(
         stdout.contains("container overhead") && stdout.contains("bits/frame"),
-        "missing the reference's sizing line: {stdout}"
+        "missing the oracle's sizing line: {stdout}"
     );
     let bytes = std::fs::read(&out).expect("--out was written");
     assert!(

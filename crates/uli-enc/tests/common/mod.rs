@@ -1,4 +1,4 @@
-//! Shared test scaffolding: temp dirs and the reference's two input files.
+//! Shared test scaffolding: temp dirs, the two input files, and the repo root.
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};

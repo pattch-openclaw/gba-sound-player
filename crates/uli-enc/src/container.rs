@@ -1,10 +1,10 @@
 //! The ULA2 container writer.
 //!
-//! Field order and endianness are `uli_lite::album::Album::parse`'s (the parser
-//! is the authority; `album.rs:109-131`), and the section offsets are the ones
-//! the header advertises — no section is found by arithmetic at read time. The
-//! layout is the reference's: header, track entries, tables, seek table,
-//! strings, frame stream.
+//! Field order and endianness are `uli_lite::album::Album::parse`'s — the parser is the
+//! authority — and every section offset is the one the header advertises, so nothing is
+//! found by arithmetic at read time. The layout is header, track entries, tables, seek
+//! table, strings, then the frame stream: fixed-size regions first, so a reader can seek
+//! into any of them from the header alone, and the one variable-length region last.
 //!
 //! The cycle estimates are the one field filled in later: they come from the
 //! self-verify decode of the finished stream, so [`emit`] leaves them zero and

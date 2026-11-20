@@ -7,7 +7,7 @@
 //! encoder-side check passed, and the frame rejected on hardware as `BadFrame`.
 //!
 //! The bound is the **decoder's own** (`uli_lite::format::NSTEP`, applied in
-//! `decode_frame`), not the reference's `GMIN 8..GMAX 187`: that window is its RD
+//! `decode_frame`), not the search's `GMIN..GMAX`: that window is its RD
 //! search's policy, which is E3's business and would refuse legal albums if it were
 //! copied here. The last test below is the reason the rule is worth having at all —
 //! it shows the decoder really does reject what an unvalidated plan produces.
@@ -129,7 +129,7 @@ fn a_content_plan_of_the_wrong_length_is_refused() {
 
 /// `g_prev` is the state a seek has to reproduce, and frame 0 is special: it is 0
 /// no matter what frame 0's own `g` is, because there is no previous delta. This is
-/// the reference's `e.g_prev = (uint16_t)(e.preroll_frame ? g[e.preroll_frame-1] : 0)`
+/// the oracle's `e.g_prev = (uint16_t)(e.preroll_frame ? g[e.preroll_frame-1] : 0)`
 /// and it now has exactly one Rust definition, which every caller reads.
 #[test]
 fn the_state_entering_a_frame_has_one_definition() {

@@ -1,19 +1,18 @@
-//! The default tables blob, compared **byte for byte against the C reference's**.
+//! The default tables blob, compared **byte for byte against a pinned golden**.
 //!
 //! This is S1's answer to the row leak (`PLAN-OF-RECORD.md` → "S1 — what the review found").
 //! Nothing else in the tree could catch it: `parse_into` picks a class's
 //! coefficient row by `ctype` and never reads the other one, and every round-trip
 //! test hands `uli-lite` the *same* `DefaultTables` object the writer used, so the
 //! bytes sitting in the unused row were invisible to a green suite. A blob that
-//! parses and decodes but differs from the reference's is exactly the residue a
+//! parses and decodes but differs from the golden is exactly the residue a
 //! round-trip is blind to, and it is the whole of the E6 gate.
 //!
-//! The golden is `tables_blob(tables_default)` from `$GBA_AUDIO/encoder/enc_core.c`
-//! — the reference's own bytes, frozen here by `scripts/gen_uli_default_tables.sh`
-//! so that no gate builds C (E-R1). Regenerate it when the length model moves, and
-//! read the diff before accepting it: the failure message below localises by
-//! section, because that localisation is what turned a 1,053-byte surprise into a
-//! three-line fix.
+//! The golden is the tables region of a blob produced by an independent encoder and
+//! frozen here by `scripts/gen_uli_default_tables.sh`, so that no gate depends on building
+//! it (E-R1). Regenerate it when the length model moves, and read the diff before accepting
+//! it: the failure message below localises by section, because that localisation is what
+//! turned a 1,053-byte surprise into a three-line fix.
 
 mod common;
 
@@ -21,7 +20,7 @@ use uli_enc::DefaultTables;
 use uli_lite::Album;
 use uli_lite::format::{CT_PAIR, CT_QUAD};
 
-/// The reference's `tables_blob(tables_default)`, 5,212 bytes. Included rather
+/// The oracle's `tables_blob(tables_default)`, 5,212 bytes. Included rather
 /// than read so a missing golden is a compile error, not a skipped test.
 static REF: &[u8] = include_bytes!("fixtures/uli2_default_tables.bin");
 
@@ -88,7 +87,7 @@ impl Sections {
 }
 
 #[test]
-fn the_default_tables_blob_is_the_reference_blob() {
+fn the_default_tables_blob_is_the_pinned_golden() {
     let mine = DefaultTables::build().to_blob();
     assert_eq!(mine.len(), REF.len(), "the blob length moved");
     assert_eq!(mine[0], REF[0], "the class count moved");
@@ -101,7 +100,7 @@ fn the_default_tables_blob_is_the_reference_blob() {
     let mut detail = String::new();
     for &d in diffs.iter().take(8) {
         detail.push_str(&format!(
-            "\n  byte {d:5}: ours {:3} reference {:3}   [{}]",
+            "\n  byte {d:5}: ours {:3} golden {:3}   [{}]",
             mine[d],
             REF[d],
             secs.name(d)
@@ -124,7 +123,7 @@ fn the_default_tables_blob_is_the_reference_blob() {
         .map(|(h, n)| format!("{h}: {n} byte(s)"))
         .collect();
     panic!(
-        "{} of {} bytes differ from the reference's default tables.{}\n\n\
+        "{} of {} bytes differ from the oracle's default tables.{}\n\n\
          by section — {}\n\
          If the length model moved on purpose, regenerate the golden with \
          scripts/gen_uli_default_tables.sh and read the diff first.",
@@ -135,16 +134,16 @@ fn the_default_tables_blob_is_the_reference_blob() {
     );
 }
 
-/// The same invariant, read off the reference's own bytes.
+/// The same invariant, read off the oracle's own bytes.
 ///
 /// `tables_default.rs`'s unit test asserts that the unused row of every class is
 /// zeros in **our** blob. Without this half, a writer and a checker that agree
 /// with each other and with nobody else would pass — which is the situation the
-/// row leak came out of. The reference's zeros come from a `memset` in `tables_default`
+/// row leak came out of. The oracle's zeros come from a `memset` in `tables_default`
 /// that `tables_from_stats` never overwrites, and they are unchanged in the golden
 /// and in all five corpora alike.
 #[test]
-fn the_reference_golden_keeps_the_same_shape() {
+fn the_golden_keeps_the_same_shape() {
     let t = DefaultTables::build();
     let k = t.k;
     assert_eq!(REF[0] as usize, k, "the frozen blob's class count");
@@ -157,23 +156,23 @@ fn the_reference_golden_keeps_the_same_shape() {
         match t.ctype[c] {
             CT_QUAD => assert!(
                 all_zero(row(len_p, 256)),
-                "class {c}: the reference's len_p row of a QUAD class is not zeros"
+                "class {c}: the oracle's len_p row of a QUAD class is not zeros"
             ),
             CT_PAIR => assert!(
                 all_zero(row(len_q, 81)),
-                "class {c}: the reference's len_q row of a PAIR class is not zeros"
+                "class {c}: the oracle's len_q row of a PAIR class is not zeros"
             ),
             _ => assert!(
                 all_zero(row(len_q, 81)) && all_zero(row(len_p, 256)),
-                "class {c}: the reference carries lengths for a ZERO class"
+                "class {c}: the oracle carries lengths for a ZERO class"
             ),
         }
     }
 }
 
-/// The transcribed rows, witnessed against real reference output.
+/// The transcribed parameter rows, witnessed against the golden.
 ///
-/// `ctype`/`rbits`/`esck` are constants this crate copies out of `enc_core.c`, and
+/// `ctype`/`rbits`/`esck` are the format's parameter rows, transcribed into this crate, and
 /// nothing in the tree compared them to anything: `premise.rs` asserts each corpus
 /// *satisfies* E-R4, which a mis-transcribed row would happily do too. Bytes
 /// `0..1+3k` are the part of the tables blob that is **not** retrained per album, so

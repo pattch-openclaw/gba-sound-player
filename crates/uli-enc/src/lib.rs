@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 //! `uli-enc` — the host-side ULI2 encoder, step S1.
 //!
-//! The encoder's contract boundary is the reference's own input pair: an
-//! `album.f32` (float32 interleaved stereo at PCM16 scale, 32,768 Hz) and a
-//! `tracks.tsv`, in; one ULA2 blob the `uli-lite` decoder accepts, out
-//! (`PLAN-OF-RECORD.md` → "The encoder", E-R2).
+//! The contract boundary is PCM: an `album.f32` (float32 interleaved stereo at PCM16
+//! scale, 32,768 Hz) and a `tracks.tsv` in; one ULA2 blob the `uli-lite` decoder accepts,
+//! out (`PLAN-OF-RECORD.md` → "The encoder", E-R2). Samples rather than a waveform format,
+//! because a decoder in the loop makes the boundary testable byte for byte.
 //!
 //! What S1 is: the plan-then-emit writer. It takes the album length from the
 //! track table and requires `album.f32` to be exactly that long (E-R2), fixes the
@@ -65,14 +65,16 @@ pub struct Args {
     /// Search `g` per frame against the bit budget (S3). Needs `g` unset: either a
     /// fixed step or a search, not both.
     pub rd: bool,
-    /// The search's Lagrangian distortion-to-bits scale, the reference's `--kappa`.
+    /// The search's Lagrangian distortion-to-bits scale (`--kappa`): the price of one bit
+    /// in squared-error units, before `λ` scales it by the step.
     pub kappa: f64,
     /// Candidate spacing across `GMIN..=GMAX`, in step indices.
     pub stride: i32,
-    /// Force M/S, or leave the choice to the encoder. `None` is the reference's own
-    /// rule: per `g`, pick whichever of L/R and M/S is cheaper under `J`, subject to the
-    /// cycle cap. `Some(true)`/`Some(false)` exist for the S3b witness — a fixed step
-    /// with one of the two domains forced on both encoders.
+    /// Force M/S, or leave the choice to the encoder. `None` lets the search pick, per `g`,
+    /// whichever of L/R and M/S is cheaper under `J` subject to the cycle cap — at a fixed
+    /// step the two are two concrete codings of the same frame, so one of them dominates.
+    /// `Some(true)`/`Some(false)` pin the domain, which is what a fixed-step comparison
+    /// needs in order to hold it constant.
     pub ms: Option<bool>,
     pub threads: usize,
 }
@@ -109,8 +111,9 @@ pub struct Report {
     pub hfnz: u32,
     /// Coefficients that coded a nonzero magnitude, both channels.
     pub nonzero_coeffs: usize,
-    /// Frames coded as M/S. The reference reports the same number as `M/S frames %.1f%%`,
-    /// and it is the fastest way to see whether the flag is doing anything at all.
+    /// Frames coded as M/S. The fastest way to see whether the flag is doing anything at
+    /// all: on real stereo it should be most of them, and a search that silently never
+    /// chose it would otherwise look merely mediocre.
     pub ms_frames: usize,
 }
 
@@ -152,7 +155,7 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Encode with the reference's default tables.
+/// Encode with the built-in default tables.
 pub fn encode(args: &Args) -> Result<Output, Error> {
     let tables = DefaultTables::build();
     encode_with_tables(args, &tables)
@@ -244,14 +247,14 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             })
             .collect();
         let w = rd::weights(&pcm, &energy);
-        // The retry loop, which is what closes the budget residue. The search solves
-        // on bits measured from a candidate's *own* frame; the real stream also pays
-        // the `g` delta (which a stride-8 walk makes expensive), the terminator and
-        // the halfword padding, none of which any candidate owns. So the plan is
-        // built, checked, and the target lowered by exactly what it overshot — the
-        // reference's `tgt -= (size - budget) * 8 * 1.02 + 2000`, with the same
-        // 2% and 2000-bit margins. A budget this cannot meet is refused by
-        // `Plan::new` on the last attempt, citing both numbers (E-R6).
+        // The retry loop, which is what closes the budget residue. The search solves on
+        // bits measured from a candidate's *own* frame; the real stream also pays the `g`
+        // delta (expensive when a coarser walk makes `g` jump), the terminator and the
+        // halfword padding, and no candidate owns any of them. So the plan is built,
+        // checked against the budget, and the target lowered by exactly what it overshot —
+        // with a 2% margin and a flat 2000 bits so the next attempt lands under rather than
+        // oscillating. A budget this cannot meet is refused by `Plan::new` on the last
+        // attempt, citing both numbers (E-R6).
         let mut target = sizing.target_bits as f64;
         let mut chosen: Option<(Content, Vec<i32>, f64)> = None;
         for attempt in 0..RETRY_ATTEMPTS {
@@ -425,9 +428,9 @@ pub struct Verify {
 /// and the place to revisit when the bake starts feeding 43-minute albums through
 /// it (decision 4 names the second pass this implies).
 ///
-/// The sample alignment is the reference's own, `p = (f - 1) * M + i`: frame 0 is
-/// the preroll and contributes nothing, and the frame's *output* is the block of
-/// input it was analysed from, not the block its window started on.
+/// The sample alignment is `p = (f - 1) * M + i`: frame 0 is the preroll and contributes
+/// nothing, and a frame's *output* is the block of input it was analysed from, not the
+/// block its window started on — the window begins one hop earlier by construction.
 fn self_verify(
     bytes: &[u8],
     n_frames: usize,
@@ -489,11 +492,11 @@ fn self_verify(
         )));
     }
 
-    // The reference's mean is the integer mean over frames (`csum / NF`), and an
-    // album always has at least the preroll frame.
+    // The mean is the integer mean over frames, and an album always has at least the
+    // preroll frame, so the division is safe.
     let mean = (sum_cycles / n_frames as u64) as u32;
-    // A silent input has no energy to compare against; the reference would print
-    // `nan`, and `None` says the same thing without a float in the API.
+    // A silent input has no energy to compare against: the ratio is 0/0, so `None` says
+    // "undefined" instead of putting a NaN in the API.
     let snr_db = if samples.is_some() && sx > 0.0 && se > 0.0 {
         Some(10.0 * (sx / se).log10())
     } else if samples.is_some() {

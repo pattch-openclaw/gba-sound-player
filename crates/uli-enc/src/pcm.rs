@@ -1,30 +1,29 @@
 //! PCM and track-list input: the encoder's contract boundary (E-R2).
 //!
-//! `album.f32` is float32 **interleaved stereo at PCM16 scale** (samples ×
-//! 32768, joined gaplessly at 32,768 Hz) and `tracks.tsv` is the reference's own
-//! `n start len title artist` table in 32,768 Hz samples. S1 does not read the
-//! sample values at all — its frames are content-independent — but the *length*
-//! is the frame count, so it is settled here rather than discovered while
-//! writing the container.
+//! `album.f32` is float32 **interleaved stereo at PCM16 scale** (samples × 32768, joined
+//! gaplessly at 32,768 Hz), and `tracks.tsv` is `n start len title artist` in 32,768 Hz
+//! samples.
 //!
 //! **The length belongs to the track table.** `Pcm::open` takes
-//! `n_samples = last.start + last.len`, exactly as `uli_enc.c:read_tracks`
-//! computes `NS`, and then requires the file to be *precisely* that long; a
-//! disagreement is a refusal citing both counts, never a truncated album and
-//! never a tail invented from the file size. Before this ruling the encoder read
-//! the length off the file and only required the tracks to fit inside it, so the
-//! two encoders given the same pair could disagree on `NS` — hence `NF`, hence
-//! the seek table, hence every byte after the header — for reasons that have
-//! nothing to do with the codec. That is the `NS` ruling in `PLAN-OF-RECORD.md` → "S1 review
-//! — the fix plan".
+//! `n_samples = last.start + last.len` and then requires the file to be *precisely* that
+//! long; a disagreement is a refusal citing both counts, never a truncated album and never
+//! a tail invented from the file size. This is not pedantry: the length decides the frame
+//! count, the frame count decides the seek table, and the seek table shifts every byte after
+//! the header. A rule that let the two sides differ would put a whole-album offset between
+//! two encoders fed the same input, for reasons having nothing to do with the codec.
 //!
-//! Two things the reference does *not* require, and neither do we: contiguity
-//! between tracks (E-R2's "gaplessly" describes what `prep.py` emits, not a
-//! constraint on input — a gap is silence that still costs frames), and a first
-//! track starting at zero. Overlap and descending order *are* refused, because
-//! they make `NS` ambiguous: with ascending non-overlapping rows the last row is
-//! the furthest end, which is what the reference's `TR[NT-1]` assumes without
-//! checking.
+//! Two things are deliberately **not** required, because neither is a property of the
+//! format:
+//!
+//! - **contiguity.** A gap between tracks is silence, and silence still costs frames. E-R2's
+//!   "joined gaplessly" describes what a track splitter emits, not a constraint on what the
+//!   encoder will accept.
+//! - **a first track at zero.** A lead-in is legal, and the preroll frame absorbs it.
+//!
+//! Overlap and descending order **are** refused, and not for tidiness: they make `NS`
+//! ambiguous, because "the last row's end" is only the furthest end if the rows ascend. With
+//! ascending non-overlapping rows that is guaranteed by construction rather than checked at
+//! every use.
 
 use std::path::Path;
 
@@ -104,9 +103,9 @@ impl Pcm {
                     parsed.len() + 1
                 )));
             }
-            // The sum is the reference's `NS` candidate, so it must not wrap; it
-            // is not compared against a length here, because the length *is* the
-            // last row's sum (see the module doc).
+            // The sum is the album length candidate, so it must not wrap; it is not
+            // compared against a length here, because the length *is* the last row's sum
+            // (see the module doc).
             start.checked_add(len).ok_or_else(|| {
                 Error::Tracks(format!(
                     "{}:{lineno}: start {start} + len {len} overflows",
@@ -119,8 +118,8 @@ impl Pcm {
                 if start < prev_end {
                     return Err(Error::Tracks(format!(
                         "{}:{lineno}: track starts at {start}, before the previous track's \
-                         end ({prev_end}); the reference's tracks are non-overlapping and \
-                         ascending",
+                         end ({prev_end}); the rows must ascend without overlap, or the \
+                         last row is not the furthest end",
                         tracks.display()
                     )));
                 }
@@ -151,9 +150,8 @@ impl Pcm {
             )));
         }
 
-        // The reference's `NS = TR[NT-1].start + TR[NT-1].len`. Ascending and
-        // non-overlapping were enforced row by row, so this is also the furthest
-        // end any track claims.
+        // `NS = last.start + last.len`. Ascending and non-overlapping were enforced row by
+        // row, so the last row is also the furthest end any track claims.
         let last = parsed
             .last()
             .expect("the track list is not empty, checked just above");
@@ -191,7 +189,7 @@ impl Pcm {
 /// S1 never needed them — its frames are content-independent — and S2 does. The
 /// buffer is the whole album because the analysis window straddles hops in both
 /// directions and a frame near the end reads samples a streaming reader would
-/// already have dropped; the reference `mmap`s the same bytes.
+/// already have dropped.
 #[derive(Clone)]
 pub struct Samples {
     data: Vec<f32>,

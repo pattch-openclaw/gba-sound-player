@@ -1,11 +1,14 @@
 //! MSB-first bit writer for the ULA2 frame stream.
 //!
-//! The primitives are the reference encoder's (`enc_core.c`: `bw_put`,
-//! `bw_put_eg`, `zz`): bits go MSB-first into little-endian 16-bit halfwords,
-//! chunked across a halfword boundary exactly as `bw_put` chunks them, and the
-//! stream is padded to an even halfword count (a 32-bit boundary) at the end.
-//! Pure integers — no float, no libm — because this path also has to be
-//! deterministic on every host.
+//! Bits go MSB-first into little-endian 16-bit halfwords, chunked across the halfword
+//! boundary as they are written, and the stream is padded to an even halfword count at the
+//! end. Pure integers — no float, no libm — because this path has to be deterministic on
+//! every host.
+//!
+//! The chunking is not obvious and it is what makes the format readable: a field that
+//! straddles a halfword occupies the low bits of one word and the high bits of the next,
+//! rather than being split into byte order or buffered. The reader's 16-bit window depends
+//! on exactly that.
 
 /// Accumulates bits into halfwords; `pos` is the absolute bit position.
 #[derive(Debug, Default)]
@@ -14,8 +17,9 @@ pub struct BitWriter {
     pos: u64,
 }
 
-/// The format's trailing padding: four extra halfwords, then round the count up
-/// to even (the reference's `hw = (bits + 15) / 16 + 4; if (hw & 1) hw++`).
+/// The format's trailing padding: four extra halfwords, then the count is rounded up to
+/// even. The four give the reader room to peek eight bytes past the last frame without
+/// running off the buffer; the round to even lands the stream on a 32-bit boundary.
 const PAD_HALFWORDS: usize = 4;
 
 impl BitWriter {
@@ -93,10 +97,9 @@ impl BitWriter {
     }
 }
 
-/// The stream's declared length in halfwords: the reference's
-/// `hw = (bits + 15) / 16 + 4`, rounded up to even so the stream ends on a
-/// 32-bit boundary. The trailing halfwords are what the decoder's 8-byte peek
-/// at the last frame relies on.
+/// The stream's declared length in halfwords: the bit count rounded up to whole halfwords,
+/// plus four, rounded up to even. The trailing halfwords are what a reader's 8-byte peek at
+/// the last frame relies on, so they are part of the format rather than slack.
 pub fn padded_halfwords(bits: u64) -> usize {
     let mut hw = ((bits as usize) + 15) / 16 + PAD_HALFWORDS;
     if hw & 1 != 0 {

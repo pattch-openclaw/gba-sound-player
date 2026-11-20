@@ -1251,13 +1251,15 @@ reader's own `bitpos` advance must equal the bits the plan sized, and the decode
 consumption-level check rather than a "did it error" check, and the difference is
 this bug — an error-free wrong decode.
 
-Two smaller things the same pass settled. The **candidate set is the reference's,
-not the nearest level**: `enc_core.c` offers `{0, floor t, floor t + 1}`, and
-because every reconstruction is pulled down by `dq/16` the closest level is
-sometimes `floor t - 1`, which the reference declines to consider. An encoder that
-rounds honestly instead would encode different magnitudes and a different blob, so
-S2 reproduces the candidate rule and `tests/quant.rs` compares against an
-independent restatement of the C. And the **analysis constants are checked in** —
+Two smaller things the same pass settled. The **candidate set is `{0, floor t, floor t + 1}`,
+not the nearest level**, and it is *complete*: a level reconstructs to `m − dq/16`, so the
+best level for `t` is `t + dq/16`, which lies in `(floor t, floor t + 1]` for every `dq` in
+`0..16` — `floor t − 1` is never optimal. **Corrected 2026-11-20:** this paragraph used to
+claim the opposite, that `floor t − 1` was sometimes closest and was being declined, which
+has the sign of the `dq` shift backwards. The code was right; the explanation made a
+complete candidate set look like a shortcut. `tests/quant.rs` asserts the rule against an
+independent restatement, and `tests/fixtures/band_rdo.txt` pins 2,400 cases against a frozen
+oracle. And the **analysis constants are checked in** —
 `mdct_tables.rs`, generated from `mdct_init`'s expressions by
 `scripts/gen_uli_mdct_tables.py`, which is R5c applied to the encoder for the first
 time; the window is stored as its symmetric half and the frozen fixture proves the

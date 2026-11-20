@@ -1,38 +1,52 @@
-//! The rate/distortion search: choosing `g` per frame so the album lands on the
-//! bit budget at the least distortion, subject to the decoder-cycle cap.
+//! The rate/distortion search: choosing `g` and the M/S flag per frame so the album
+//! lands on the bit budget at the least distortion, subject to the decoder-cycle cap.
 //!
-//! This is where S1's `--cap` finally constrains something, and where rate stops
-//! being an accident of the step. The shape is the reference's (`uli_enc.c`):
-//! precompute an RD curve per frame, then bisect a Lagrangian multiplier λ until
-//! the chosen points sum to the target rate. What the search trades is exactly
-//! `w[f]·D + λ·R` per frame — weighted distortion against bits.
+//! This is where `--cap` finally constrains something, and where rate stops being an
+//! accident of the step.
 //!
-//! **Three things are deliberately different from the reference, and each is a
-//! byte-exactness caveat for S7, not an optimisation.**
+//! **Why a price rather than a greedy allocation.** Each frame is measured at a set of
+//! candidate steps, giving a curve of `(bits, distortion, cycles)` points. The budget is
+//! a single constraint over the whole album, so frames cannot be decided one at a time
+//! by any local rule. They can, however, be decided *independently* given one price `λ`:
+//! if every frame minimises `w[f]·D + λ·R` on its own, the total lands on the budget for
+//! exactly one `λ`, because at that point every frame's marginal distortion per bit is
+//! equal — spend one more bit anywhere and you get the same distortion back. So the
+//! search bisects `λ`, which is a monotone function of total rate, and the frames stay
+//! trivially parallel.
 //!
-//! - The reference computes a *local* window of `NG` candidates around
-//!   `g_guess(λ)`, sliding it while the cap is unmet; this walks a fixed stride
-//!   across the whole `GMIN..=GMAX` window once. Cheaper to reason about and it
-//!   makes the curves λ-independent, at the cost of resolution: the chosen `g` can
-//!   sit up to `stride - 1` away from the reference's.
-//! - The reference's target is `target_bits − 3.5·NF`. That allowance is *not*
-//!   slack for loose accounting, as this file first assumed: it is the frame
-//!   header. A candidate's measured cost omits the `g` delta and the M/S bit
-//!   because those depend on the previous frame's `g` and so cannot be attributed
-//!   to one candidate — and with `g` varying across the album they really cost
-//!   ~5 bits/frame, so a search that ignores them overshoots the budget and trips
-//!   its own E-R6 refusal. The same allowance is taken here, now for a known
-//!   reason, and the final plan still checks the real stream.
-//! - M/S is **not in the candidate set**. The reference rotates the coefficients by
-//!   `1/√2` and quantises with `D = step·√2/16` while the reader combines the two
-//!   channels with a plain integer add/subtract; that √2 needs a derivation of its
-//!   own before it can be trusted, and a search that silently mis-scaled half the
-//!   album is worse than a search without it. `Args::ms` is off, `Content` still
-//!   carries the flag, and the plan says so.
+//! `w[f]` normalises each frame by its track's mean energy. Without it a fixed `λ` buys
+//! more absolute distortion reduction where the signal is loud, so the allocation spends
+//! the album on its loudest passage; the weights make the trade relative to each track's
+//! own scale, and are normalised to a geometric mean of one so that `λ` keeps its units.
 //!
-//! R5b and R5d are load-bearing here, not decoration: the allocation sums are
-//! reduced in frame-index order, and ties break to the lower `g` because the
-//! candidates are visited in ascending `g` and the comparison is strict.
+//! **The candidate grid is uniform, and that costs resolution.** One step of `g` changes
+//! the step size by `2^(1/8) ≈ 1.09`, which is ~0.75 dB of SNR, so a grid `stride` steps
+//! apart can only place a frame within `±(stride-1)/2` steps of its ideal operating point.
+//! At `stride = 8` that is up to ~3 dB, and it is measurable: on a rate-limited album,
+//! refining the grid from 8 to 1 bought 2.6 dB at one budget. The uniform sweep is kept
+//! for now because it is cheap to reason about and makes the curves `λ`-independent, but
+//! the fix is a two-stage sweep — coarse across the window, then fine around each frame's
+//! best point — which buys one-step resolution for a fraction of the candidates. That is
+//! a cost/quality trade to be settled by measurement, not a stylistic choice.
+//!
+//! **A candidate's measured cost excludes the frame header.** The `g` delta and the M/S
+//! bit belong to the *sequence*: the delta depends on the previous frame's `g`, so
+//! charging it per candidate would double-count one bit or thirty depending on visit
+//! order, and the flag is not a property of the bands at all. Their real cost is
+//! ~5 bits/frame when `g` moves, so the search subtracts a per-frame header allowance from
+//! the target and the final plan checks the *real* stream against the budget afterwards —
+//! which is what E-R6 is actually about.
+//!
+//! **Two domains, one scale.** M/S is part of the candidate set, but at each `g` the two
+//! domains are quantised with their own unit (an M/S frame's magnitudes are sized by a
+//! `√2`-scaled step) and then *compared* with a single `λ` computed from the L/R unit.
+//! Comparing them each on their own unit's `λ` would weigh them on different scales and
+//! systematically favour whichever had the larger. The cycle cap is a constraint rather
+//! than a term: a candidate over the cap loses before `J` is consulted at all.
+//!
+//! R5b and R5d are load-bearing here, not decoration: the allocation sums are reduced in
+//! frame-index order, and ties break to the lower `g` because candidates are visited in
+//! ascending `g` and the comparison is strict.
 
 use uli_lite::Ops;
 use uli_lite::format::{CT_PAIR, M, NBANDS};
@@ -44,14 +58,20 @@ use crate::quant::{self, Chan};
 use crate::tables_default::DefaultTables;
 use crate::{Error, FrameKind, frame};
 
-/// The reference's search window (`enc_core.h`). It is **policy**, not a container
-/// limit: the format accepts any `g` with `0 ≤ g − 4·ms < NSTEP`, and S1's refusal
-/// enforces only that. Stepping outside this window is legal and worse.
+/// The window the search considers. It is **policy**, not a container limit: the format
+/// accepts any `g` with `0 ≤ g − 4·ms < NSTEP`, and the plan refuses only what the reader
+/// would reject. Outside this window a frame is legal and simply worse — the bottom of the
+/// range wastes bits on precision nothing can hear, the top leaves audible error.
 pub const G_MIN: i32 = 8;
 pub const G_MAX: i32 = 187;
-/// The reference's default `--kappa`, the scale that turns distortion into bits.
+/// The default `--kappa`: the price of a bit in units of squared error, before `λ` scales
+/// it by the step. Chosen so that at a typical rate the search sits near the knee of the
+/// rate/distortion curve rather than on either flat end of it.
 pub const DEFAULT_KAPPA: f64 = 0.13;
-/// The reference's λ bisection bracket and iteration count.
+/// The λ bracket, in log space, and the bisection's depth. `2^-25 … 2^40` spans every
+/// operating point from "bits are free" to "bits are everything" by many orders of
+/// magnitude; 64 halvings resolve `λ` far finer than the candidate grid can express, so the
+/// bisection is not the limiting precision.
 const LAMBDA_LO: f64 = -25.0;
 const LAMBDA_HI: f64 = 40.0;
 const LAMBDA_ITERS: usize = 64;
@@ -70,11 +90,12 @@ pub struct SearchParams<'a> {
     pub n_frames: usize,
     /// Candidate spacing across `GMIN..=GMAX`, in step indices.
     pub stride: i32,
-    /// The reference's `--kappa`: the distortion-to-bits scale.
+    /// The distortion-to-bits scale, `--kappa`.
     pub kappa: f64,
     /// `--cap PCT` expressed as cycles.
     pub cap: u32,
-    /// `Some(_)` pins the domain; `None` lets the reference's rule choose per `g`.
+    /// `Some(_)` pins the domain; `None` lets the search choose per `g` (the rule is in
+    /// [`Curves::compute`]).
     pub force_ms: Option<bool>,
 }
 
@@ -89,9 +110,11 @@ pub struct Curve {
     pub d: Vec<f64>,
     /// Reader cycle model of each candidate.
     pub c: Vec<u32>,
-    /// Whether each candidate is an M/S frame. The reference pre-chooses this *per `g`*
-    /// (`uli_enc.c:165-171`) rather than letting the allocation choose it, so a candidate
-    /// is a `(g, ms)` pair with `ms` already decided.
+    /// Whether each candidate is an M/S frame. The domain is decided *per `g`*, inside the
+    /// curve, rather than by the allocation: at a fixed step the two domains are two
+    /// concrete codings of the same frame, so one of them strictly dominates on
+    /// `w·D + λ·R`, and letting the allocation choose would compare them under a `λ` that
+    /// had already moved. A candidate is therefore a `(g, ms)` pair with `ms` settled.
     pub ms: Vec<bool>,
 }
 
@@ -116,9 +139,10 @@ pub fn measure(
     ms: bool,
     kappa: f64,
 ) -> Result<(Point, [Chan; 2]), Error> {
-    // Rotate once for the frame, then quantise both channels in the rotated domain —
-    // the reference's `frame_code` does exactly this, and the domain is what makes the
-    // measured distortion comparable to an L/R frame's (see `PLAN-OF-RECORD.md` → S3b).
+    // Rotate once for the frame, then quantise both channels in the rotated domain. The
+    // rotation is orthonormal, which is what makes a rotated frame's measured distortion
+    // directly comparable to an L/R frame's — the two output channels err by
+    // `(e_M ± e_S)/√2`, whose squares sum to `e_M² + e_S²`.
     let rot = quant::rotate(coef, ms);
     let mut chans = [Chan::empty(), Chan::empty()];
     let mut dist = 0f64;
@@ -133,9 +157,8 @@ pub fn measure(
     // The header is excluded from the measured bits: the `g` delta depends on the
     // previous frame's `g`, so charging it per candidate would double-count one bit or
     // thirty depending on order, and the `ms` bit belongs to the flag rather than to the
-    // bands. The reference's curve omits both too; the final pass sizes the real stream,
-    // and that is what E-R6 is checked against. `ops.ms` *is* set, because the cycle
-    // model charges for it.
+    // bands. The final pass sizes the real stream and checks that against the budget, which
+    // is what E-R6 is about. `ops.ms` *is* set, because the cycle model charges for it.
     for chan in &chans {
         frame::write_chan(&mut bw, tables, chan);
     }
@@ -260,9 +283,9 @@ pub fn weights(pcm: &Pcm, energy: &[f64]) -> Vec<f64> {
             } else {
                 0.0
             };
-            // The `+ 1.0` is the reference's: it keeps a silent track's weight
-            // finite, and a track of digital silence is exactly what a real album's
-            // gap between songs looks like.
+            // The `+ 1.0` keeps a silent track's weight finite: a track of digital
+            // silence is exactly what a gap between songs looks like, and dividing by zero
+            // there would poison every other frame's weight through the normalisation.
             m + 1.0
         })
         .collect();
@@ -292,7 +315,11 @@ impl Curves {
     /// Code every frame at every candidate step. This is the expensive part of S3
     /// and the part S5 parallelises: frames are independent once `g` is fixed, so
     /// the same ordered-assembly argument as the emit pass applies.
-    pub fn compute(samples: &Samples, n_samples: usize, p: &SearchParams<'_>) -> Result<Self, Error> {
+    pub fn compute(
+        samples: &Samples,
+        n_samples: usize,
+        p: &SearchParams<'_>,
+    ) -> Result<Self, Error> {
         let SearchParams {
             tables,
             n_frames,
@@ -315,18 +342,17 @@ impl Curves {
             };
             let mut g = G_MIN;
             while g <= G_MAX {
-                // The reference's rule, transcribed from `curves_compute`. Two details
-                // matter and neither is obvious:
+                // Two rules decide which domain this candidate is in, and both matter:
                 //
-                //  * each candidate is quantised with **its own** unit (`step_D(g, ms)`,
-                //    so an M/S frame's magnitudes are sized by the √2-scaled step), but
-                //  * the *comparison* between the two uses `lam` from the **ms = 0**
-                //    unit, so the two are weighed on one scale rather than each on its
-                //    own. Weighing them separately would systematically favour whichever
-                //    unit happened to have the larger λ.
+                //  * each is quantised with **its own** unit — an M/S frame's magnitudes
+                //    are sized by a √2-scaled step, because the reader's add recovers the
+                //    amplitude and the quantiser has to anticipate that;
+                //  * the two are then *compared* under one `λ`, computed from the L/R
+                //    unit, so that they are weighed on the same scale. Giving each its own
+                //    unit's `λ` would silently favour whichever came out larger.
                 //
-                // And a candidate over the cycle cap loses to one that is not, before J
-                // is consulted at all — the cap is a constraint, not a term.
+                // A candidate over the cycle cap loses to one that is not before `J` is
+                // consulted at all: the cap is a constraint, not a term.
                 let lam0 = kappa * quant::Unit::of(g, false).d * quant::Unit::of(g, false).d;
                 let (a, _) = measure(&coef, tables, g, false, kappa)?;
                 let (b, _) = measure(&coef, tables, g, true, kappa)?;
@@ -390,8 +416,9 @@ impl Curves {
     /// midpoint: a λ slightly too generous overshoots the budget, and E-R6 makes
     /// overshooting a refusal rather than a rounding error.
     pub fn allocate(&self, w: &[f64], target: f64, cap: u32) -> Result<(f64, Vec<usize>), Error> {
-        // Header allowance: the `g` delta plus the M/S bit, which no single
-        // candidate owns. See the module doc; the reference uses the same number.
+        // The header allowance: the `g` delta plus the M/S bit, which belong to the
+        // sequence and so to no single candidate. 3.5 bits/frame is what they cost when
+        // `g` moves by a few steps; the module doc has the reasoning.
         let target = target - 3.5 * self.per_frame.len() as f64;
         let mut lo = LAMBDA_LO;
         let mut hi = LAMBDA_HI;
@@ -467,13 +494,17 @@ impl Curves {
     }
 }
 
-/// `--cap PCT` as a cycle count, the way the reference computes it.
+/// `--cap PCT` as a cycle count for one frame period.
 pub fn cap_cycles(cap_pct: f64) -> u32 {
     (cap_pct / 100.0 * CYCLE_PERIOD as f64) as u32
 }
 
-/// The step the search would start from, ported from `g_guess` — kept for the
-/// report line that says how far the stride landed from the reference's window.
+/// An initial guess at the step a given `λ` and weight would choose, for diagnostics.
+///
+/// Inverting `J = w·D + λ·R` for a `D ∝ step²` model gives `step = √(λ/(w·κ))`, and
+/// `g = 32 + 8·log₂(step)` is the inverse of the step table's `step = 2^(g/8)` scaling
+/// about its midpoint. Useful for saying *where* an allocation landed without running the
+/// search; it is not on the search path.
 pub fn g_guess(lambda: f64, w: f64, kappa: f64) -> i32 {
     let d = (lambda / (w * kappa)).sqrt();
     let g = (32.0 + 8.0 * d.log2()).round() as i32;

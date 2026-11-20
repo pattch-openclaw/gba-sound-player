@@ -1,5 +1,10 @@
-//! `uli-enc` — the reference CLI's flags, so the later byte-exactness matrix can
-//! drive both with identical arguments (`PLAN-OF-RECORD.md` → "The encoder").
+//! `uli-enc` — the encoder's command line.
+//!
+//! The flag names and meanings are a fixed interface rather than a preference: the
+//! acceptance harness drives this binary and an external one with identical arguments, so
+//! `--budget`, `--cap` and `--kappa` cannot be renamed freely. The rest are this encoder's
+//! own knobs — `--g` for a fixed step, `--rd` for the search, `--stride` for the candidate
+//! grid, and `--ms` to pin the stereo domain for a fixed-step comparison.
 //!
 //! A refusal is an error exit that cites needed and allowed bytes, and it
 //! happens before `--out` is created: the encoder either writes a whole album or
@@ -112,8 +117,7 @@ fn run() -> Result<(), ExitCode> {
             report.nonzero_coeffs,
         );
         println!("g {}; xover {} hfnz {}", gline, report.xover, report.hfnz);
-        // The reference prints the same number as `M/S frames %.1f%%`, and it is the
-        // fastest way to see whether the flag is doing anything at all — a search that
+        // The fastest way to see whether the flag is doing anything at all — a search that
         // silently never chose M/S would otherwise look merely mediocre.
         println!(
             "M/S frames {:.1}% ({} of {})",
