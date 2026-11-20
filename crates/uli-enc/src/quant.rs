@@ -27,7 +27,7 @@
 //! written; an earlier version of it claimed the opposite and had the sign of the shift
 //! backwards.)
 
-use uli_lite::format::{BANDW, CT_PAIR, CT_QUAD, CT_ZERO, NBANDS, NCODED};
+use uli_lite::format::{BANDW, CT_PAIR, CT_QUAD, CT_ZERO, MAXK, NBANDS, NCODED};
 use uli_lite::tables_data::STEP;
 
 use crate::tables_default::DefaultTables;
@@ -670,27 +670,21 @@ pub fn quantise_chan_rd(
         energy[b] = e;
     }
 
-    // Best option per band, kept as the band itself so nothing is recomputed.
-    let mut best_cost = [f64::INFINITY; NBANDS];
-    let mut best_class = [0usize; NBANDS];
-    let mut best_band: Vec<Band> = (0..NBANDS).map(|_| Band::zero()).collect();
-    let mut best_bits = [0u64; NBANDS];
-    let mut best_dist = [0f64; NBANDS];
-
+    // Per-band, per-class cost of coding that band **ignoring the band symbol**, which is
+    // charged in the shortest-path below because it depends on the *previous* class.
+    //
+    // `band_dist[b][c]` and `band_bits[b][c]` are `f64::INFINITY` / `None` where the class
+    // cannot code the band (a symbol with no code), which the search then skips.
+    let mut band_dist = [[f64::INFINITY; MAXK]; NBANDS];
+    let mut band_bits = [[0u64; MAXK]; NBANDS];
     for b in 0..NBANDS {
         let ncod = band_ncod(b);
-
-        // Option: code nothing in this band. One band symbol, all its energy lost.
-        best_class[b] = 0;
-        best_band[b] = Band::zero();
-        best_bits[b] = zero_len;
-        best_dist[b] = energy[b];
-        best_cost[b] = energy[b] + lam * best_bits[b] as f64;
-
+        // Code nothing: one band symbol, all of this band's energy left as error.
+        band_dist[b][0] = energy[b];
+        band_bits[b][0] = 0;
         for klass in rd_classes(tables) {
             // A class whose band symbol has no code cannot be written, so it must not be
-            // priced — for the same reason as the coefficient guard inside `band_rdo`, one
-            // level up: a zero-length symbol costs nothing here and therefore wins.
+            // priced: a zero-length symbol costs nothing here and therefore wins.
             if tables.cb[0].symbol_len(klass) == 0 {
                 continue;
             }
@@ -705,63 +699,120 @@ pub fn quantise_chan_rd(
             ) else {
                 continue;
             };
-            let bits = rd.bits + tables.cb[0].symbol_len(klass) as u64;
-            let cost = rd.dist + lam * bits as f64;
-            if cost < best_cost[b] {
-                let mut band = Band {
-                    class: klass,
-                    m: [0; BANDW],
-                };
-                for i in 0..ncod {
-                    let v = rd.m[i];
-                    // The sign rides on the magnitude, as the writer expects.
-                    band.m[i] = if v != 0 && coef[b * BANDW + i] < 0.0 {
-                        -v
-                    } else {
-                        v
-                    };
-                }
-                best_cost[b] = cost;
-                best_class[b] = klass;
-                best_band[b] = band;
-                best_bits[b] = bits;
-                best_dist[b] = rd.dist;
-            }
+            band_dist[b][klass] = rd.dist;
+            band_bits[b][klass] = rd.bits;
         }
     }
 
-    // Where does the spectrum end? Prefix cost against the energy left uncoded.
+    // Shortest path over (band, last class). The class symbol for band `b` is read from the
+    // context the *previous* band's class selected, so the bands are not independent once
+    // the context codebooks differ — which the default set's do not (all 15 rows are
+    // byte-identical) but a trained set's will. This is the general form; with identical
+    // rows it collapses to the per-band greedy that a single context would allow.
+    let k = tables.k;
     let mut suffix = [0f64; NBANDS + 1];
     for b in (0..NBANDS).rev() {
         suffix[b] = suffix[b + 1] + energy[b];
     }
-    let mut prefix = 0f64;
-    let mut best_total = suffix[0]; // terminate before band 0: everything zero
-    let mut best_b = 0usize;
+    const NONE: usize = usize::MAX;
+    let mut v = [[f64::INFINITY; MAXK + 1]; NBANDS + 1];
+    let mut from = [[NONE; MAXK + 1]; NBANDS + 1];
+    v[0][k] = 0.0; // the reader's initial context is the sentinel `k`
+    // Terminating before band 0 is a real option: the channel is silence.
+    let mut best_total = suffix[0];
+    let mut best_end = (0usize, k);
     for b in 0..NBANDS {
-        prefix += best_cost[b];
-        // Stopping after `b + 1` bands owes the terminator; stopping after all
-        // `NBANDS` owes none, because the reader's loop ends first.
-        // The terminator is deliberately **not** priced. Its three bits are real, but
-        // they are constant per channel — every terminating channel pays the same — so
-        // including `lam × 3` in the scan shifts the decision boundary between "stop here"
-        // and "code one more band" without ever changing which choice is better once the
-        // window is fixed. Pricing it was measured at `g = 140`: 2.5% more distortion and 3
-        // bits/frame, i.e. the search terminated earlier for no reason. The bits are still
-        // counted in the reported total; only the *decision* ignores them.
-        let term = 0.0;
-        let total = prefix + term + suffix[b + 1];
-        if total < best_total {
-            best_total = total;
-            best_b = b + 1;
+        for s in 0..=k {
+            if v[b][s].is_infinite() {
+                continue;
+            }
+            // Terminate here: the terminator is deliberately unpriced (see above).
+            let stop = v[b][s] + suffix[b];
+            if stop < best_total {
+                best_total = stop;
+                best_end = (b, s);
+            }
+            for c in 0..k {
+                if band_dist[b][c].is_infinite() {
+                    continue;
+                }
+                let j = v[b][s]
+                    + lam * tables.cb[s].symbol_len(c) as f64
+                    + band_dist[b][c]
+                    + lam * band_bits[b][c] as f64;
+                if j < v[b + 1][c] {
+                    v[b + 1][c] = j;
+                    from[b + 1][c] = s;
+                }
+            }
+        }
+    }
+    // Coding every band needs no terminator, so it is a candidate end too.
+    for s in 0..=k {
+        if v[NBANDS][s] < best_total {
+            best_total = v[NBANDS][s];
+            best_end = (NBANDS, s);
         }
     }
 
-    let bands: Vec<Band> = best_band.into_iter().take(best_b).collect();
-    let dist = best_dist[..best_b].iter().sum::<f64>() + suffix[best_b];
-    let mut bits = best_bits[..best_b].iter().sum::<u64>();
+    let (best_b, _) = best_end;
+    // Backtrack the class of each coded band.
+    let mut classes = vec![0usize; best_b];
+    let mut s = best_end.1;
+    for b in (0..best_b).rev() {
+        classes[b] = s;
+        s = from[b + 1][s];
+        debug_assert_ne!(s, NONE, "the shortest path lost its predecessor");
+    }
+
+    // Re-derive the magnitudes for the classes the path chose. Keeping them for every
+    // (band, class) would be 32 KB of dead alternatives per channel.
+    let mut bands = Vec::with_capacity(best_b);
+    let mut dist = 0f64;
+    let mut bits = 0u64;
+    let mut ctx = k;
+    for (b, &klass) in classes.iter().enumerate() {
+        bits += tables.cb[ctx].symbol_len(klass) as u64;
+        ctx = klass;
+        if klass == 0 {
+            // A zero band inside the coded range still loses all of its energy, and that
+            // energy is distortion like any other. Charging it in the shortest path but not
+            // in the reported total would understate the cost of every plan that leaves a
+            // hole in the middle of the spectrum — and this number is what the allocation
+            // compares frames on.
+            dist += energy[b];
+            bands.push(Band::zero());
+            continue;
+        }
+        let rd = band_rdo(
+            &coef[b * BANDW..b * BANDW + BANDW],
+            tables,
+            klass,
+            d,
+            lam,
+            mmax,
+            band_ncod(b),
+        )
+        .expect("a class on the shortest path was codeable when it was costed");
+        let mut band = Band {
+            class: klass,
+            m: [0; BANDW],
+        };
+        for i in 0..band_ncod(b) {
+            let v = rd.m[i];
+            band.m[i] = if v != 0 && coef[b * BANDW + i] < 0.0 {
+                -v
+            } else {
+                v
+            };
+        }
+        dist += rd.dist;
+        bits += rd.bits;
+        bands.push(band);
+    }
+    dist += suffix[best_b];
     if best_b < NBANDS {
-        bits += eob_len;
+        bits += tables.cb[ctx].symbol_len(k) as u64;
     }
     ChanRd {
         chan: Chan { bands },
