@@ -85,6 +85,63 @@ pub fn step_of(g: i32, ms: bool) -> u32 {
     STEP[(g - i32::from(ms) * 4) as usize]
 }
 
+/// Everything a quantiser needs to know about a `(g, ms)` pair, in one place.
+///
+/// An M/S frame costs 4 step indices out of `g` **and** changes the size of a magnitude
+/// step, and those are two different things. The reader reconstructs with
+/// `step_bar = STEP[g - 4*ms]`, while the encoder compares against coefficients the
+/// forward rotation left `√2` larger than the reader's per-channel value — hence
+/// `d = step_bar*√2/16` for M/S against `step_bar/16` for L/R, which is the reference's
+/// `step_D`. `mmax` comes from `step_bar`, not from `d`, because it is the reader's
+/// `|X| < 2^28` that bounds it.
+#[derive(Clone, Copy, Debug)]
+pub struct Unit {
+    /// The reader's step for this frame.
+    pub step_bar: f64,
+    /// The encoder's reconstruction unit: `step_bar/16`, or `step_bar*√2/16` for M/S.
+    pub d: f64,
+    /// The largest magnitude the reader can carry at this step.
+    pub mmax: i32,
+}
+
+impl Unit {
+    pub fn of(g: i32, ms: bool) -> Self {
+        let step_bar = step_of(g, ms) as f64;
+        Self {
+            step_bar,
+            d: if ms {
+                step_bar * std::f64::consts::SQRT_2 / 16.0
+            } else {
+                step_bar / 16.0
+            },
+            mmax: mmax_of(step_bar as u32),
+        }
+    }
+}
+
+/// The forward M/S rotation, exactly as `frame_code` performs it: `M = (L+R)/√2` and
+/// `S = (L-R)/√2`.
+///
+/// The arithmetic order is the reference's and it is load-bearing for byte-exactness:
+/// `(float)((coef[i] + coef[M+i]) * r)` adds the two `float` coefficients **in float**,
+/// promotes to `double` for the `√2` multiply, and rounds back to `float`. Adding in
+/// `f64` rounds differently on some inputs and would shift every downstream decision.
+pub fn rotate(coef: &[f32], ms: bool) -> Vec<f32> {
+    let m = coef.len() / 2;
+    if !ms {
+        return coef.to_vec();
+    }
+    let r = std::f64::consts::FRAC_1_SQRT_2;
+    let mut out = vec![0f32; coef.len()];
+    for i in 0..m {
+        let sum = coef[i] + coef[m + i];
+        let diff = coef[i] - coef[m + i];
+        out[i] = (f64::from(sum) * r) as f32;
+        out[m + i] = (f64::from(diff) * r) as f32;
+    }
+    out
+}
+
 /// The largest magnitude the format can carry without overflowing the reader's
 /// `|X| < 2^28` guarantee: `(16m - dq) * step < 2^28`. The reference derives
 /// `mmax` the same way and clamps it to `1..=65535`; the lower clamp matters
@@ -575,22 +632,14 @@ pub fn quantise_chan_rd(
     ms: bool,
     kappa: f64,
 ) -> ChanRd {
-    // M/S is S3b, and the gap is not cosmetic: the reference quantises a rotated frame
-    // at `step*sqrt(2)/16`, while this function only shifts the step index. A frame
-    // passed here with `ms = true` would be assigned the flag, written with it, and
-    // quantised without the rotation — silently mis-scaled audio, which is the family
-    // of bug this file has already produced twice. Loud beats plausible.
-    assert!(
-        !ms,
-        "M/S quantisation is S3b: the 1/sqrt(2) forward rotation and the sqrt(2) step \
-         compensation are not implemented, so a frame quantised with ms = true would be \
-         silently mis-scaled. `GPlan` and the writer carry the flag; the quantiser is \
-         what is missing."
-    );
-    let step = step_of(g, ms) as f64;
-    let d = step / 16.0;
+    // The coefficients handed in must already be in the domain the reader will see: the
+    // caller applies [`rotate`] when `ms` is set. The `√2` step compensation belongs
+    // here, next to the unit it scales; the rotation is per frame rather than per
+    // channel, so applying it in both places would silently rotate twice.
+    let unit = Unit::of(g, ms);
+    let d = unit.d;
     let lam = kappa * d * d;
-    let mmax = mmax_of(step as u32);
+    let mmax = unit.mmax;
     let k = tables.k;
     let eob_len = tables.cb[0].symbol_len(k) as u64;
     let zero_len = tables.cb[0].symbol_len(0) as u64;

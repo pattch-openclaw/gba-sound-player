@@ -69,6 +69,11 @@ pub struct Args {
     pub kappa: f64,
     /// Candidate spacing across `GMIN..=GMAX`, in step indices.
     pub stride: i32,
+    /// Force M/S, or leave the choice to the encoder. `None` is the reference's own
+    /// rule: per `g`, pick whichever of L/R and M/S is cheaper under `J`, subject to the
+    /// cycle cap. `Some(true)`/`Some(false)` exist for the S3b witness — a fixed step
+    /// with one of the two domains forced on both encoders.
+    pub ms: Option<bool>,
     pub threads: usize,
 }
 
@@ -104,6 +109,9 @@ pub struct Report {
     pub hfnz: u32,
     /// Coefficients that coded a nonzero magnitude, both channels.
     pub nonzero_coeffs: usize,
+    /// Frames coded as M/S. The reference reports the same number as `M/S frames %.1f%%`,
+    /// and it is the fastest way to see whether the flag is doing anything at all.
+    pub ms_frames: usize,
 }
 
 /// How many times the search may re-try the bit target before refusing.
@@ -171,6 +179,7 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         rd,
         kappa,
         stride,
+        ms,
         threads,
     } = input;
     // The parameter is `input`, not `args`, so there is no way to reach a field
@@ -178,8 +187,8 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
     // version of this guard missed: `args.rd` still resolved, so the exhaustive
     // pattern proved nothing.
     let (album, tracks) = (album.as_path(), tracks.as_path());
-    let (budget, cap_pct, g, rd, kappa, stride, threads) =
-        (*budget, *cap_pct, *g, *rd, *kappa, *stride, *threads);
+    let (budget, cap_pct, g, rd, kappa, stride, ms, threads) =
+        (*budget, *cap_pct, *g, *rd, *kappa, *stride, *ms, *threads);
     let _ = kappa; // S3's remaining substance: the per-coefficient RD it should scale.
     let pcm = Pcm::open(album, tracks)?;
     let mut report_g: Option<Vec<i32>> = None;
@@ -214,7 +223,19 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         // the real plan is then checked against the real stream, as below.
         let sizing = Plan::new(&pcm, tables, &Content::silence(nf), budget, cap_pct)?;
         let s = samples.as_ref().expect("--rd loads the album above");
-        let curves = Curves::compute(s, pcm.n_samples as usize, tables, nf, stride)?;
+        let cap = rd::cap_cycles(cap_pct);
+        let curves = Curves::compute(
+            s,
+            pcm.n_samples as usize,
+            &rd::SearchParams {
+                tables,
+                n_frames: nf,
+                stride,
+                kappa,
+                cap,
+                force_ms: ms,
+            },
+        )?;
         let mut coef = [0f32; 2 * M];
         let energy: Vec<f64> = (0..nf)
             .map(|f| {
@@ -223,7 +244,6 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             })
             .collect();
         let w = rd::weights(&pcm, &energy);
-        let cap = rd::cap_cycles(cap_pct);
         // The retry loop, which is what closes the budget residue. The search solves
         // on bits measured from a candidate's *own* frame; the real stream also pays
         // the `g` delta (which a stride-8 walk makes expensive), the terminator and
@@ -236,7 +256,7 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         let mut chosen: Option<(Content, Vec<i32>, f64)> = None;
         for attempt in 0..RETRY_ATTEMPTS {
             let (lambda, picks) = curves.allocate(&w, target, cap)?;
-            let content = curves.to_content(&picks, s, pcm.n_samples as usize, tables)?;
+            let content = curves.to_content(&picks, s, pcm.n_samples as usize, tables, kappa)?;
             match Plan::new(&pcm, tables, &content, budget, cap_pct) {
                 Ok(_) => {
                     chosen = Some((content, curves.chosen_g(&picks), lambda));
@@ -271,6 +291,9 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             pcm.n_samples as usize,
             tables,
             g,
+            // A fixed step has no search to choose the domain, so `--ms` is the only way
+            // to ask for one; absent it, L/R, which is what `--g` has always meant.
+            ms.unwrap_or(false),
             kappa,
             nf,
         )?
@@ -375,6 +398,7 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             xover: verify.xover,
             hfnz: verify.hfnz,
             nonzero_coeffs: content.nonzero_coeffs(),
+            ms_frames: content.ms_frames(),
         },
     })
 }

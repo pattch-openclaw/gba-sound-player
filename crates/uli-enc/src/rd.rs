@@ -35,7 +35,7 @@
 //! candidates are visited in ascending `g` and the comparison is strict.
 
 use uli_lite::Ops;
-use uli_lite::format::{BANDW, CT_PAIR, M, NBANDS, NCODED};
+use uli_lite::format::{CT_PAIR, M, NBANDS};
 use uli_lite::tables_data::STEP;
 
 use crate::pcm::{Pcm, Samples};
@@ -58,6 +58,26 @@ const LAMBDA_ITERS: usize = 64;
 /// The frame period, and so the unit `--cap` is a percentage of.
 pub const CYCLE_PERIOD: u32 = 262_144;
 
+/// Everything the curve computation needs that is not the samples.
+///
+/// Bundled because the list had reached eight positional arguments, five of them numbers
+/// with different meanings — the kind of signature where swapping `stride` and `cap` still
+/// compiles. The command-line flags are all here, so this is also the one place to read to
+/// see what the search is told.
+#[derive(Clone, Copy, Debug)]
+pub struct SearchParams<'a> {
+    pub tables: &'a DefaultTables,
+    pub n_frames: usize,
+    /// Candidate spacing across `GMIN..=GMAX`, in step indices.
+    pub stride: i32,
+    /// The reference's `--kappa`: the distortion-to-bits scale.
+    pub kappa: f64,
+    /// `--cap PCT` expressed as cycles.
+    pub cap: u32,
+    /// `Some(_)` pins the domain; `None` lets the reference's rule choose per `g`.
+    pub force_ms: Option<bool>,
+}
+
 /// One frame's RD curve: `stride`-spaced candidates, cheapest-rate-last order.
 #[derive(Clone, Debug)]
 pub struct Curve {
@@ -69,6 +89,10 @@ pub struct Curve {
     pub d: Vec<f64>,
     /// Reader cycle model of each candidate.
     pub c: Vec<u32>,
+    /// Whether each candidate is an M/S frame. The reference pre-chooses this *per `g`*
+    /// (`uli_enc.c:165-171`) rather than letting the allocation choose it, so a candidate
+    /// is a `(g, ms)` pair with `ms` already decided.
+    pub ms: Vec<bool>,
 }
 
 /// One measured candidate.
@@ -90,15 +114,20 @@ pub fn measure(
     tables: &DefaultTables,
     g: i32,
     ms: bool,
+    kappa: f64,
 ) -> Result<(Point, [Chan; 2]), Error> {
+    // Rotate once for the frame, then quantise both channels in the rotated domain —
+    // the reference's `frame_code` does exactly this, and the domain is what makes the
+    // measured distortion comparable to an L/R frame's (see `PLAN-OF-RECORD.md` → S3b).
+    let rot = quant::rotate(coef, ms);
     let mut chans = [Chan::empty(), Chan::empty()];
     let mut dist = 0f64;
     let mut bits = 0u64;
     for ch in 0..2 {
-        let slice = &coef[ch * M..ch * M + M];
-        let (chan, _) = quant::quantise_chan(slice, tables, g, ms);
-        dist += candidate_distortion(slice, tables, g, ms, &chan);
-        chans[ch] = chan;
+        let slice = &rot[ch * M..ch * M + M];
+        let lr = crate::quant::quantise_chan_rd(slice, tables, g, ms, kappa);
+        dist += lr.dist;
+        chans[ch] = lr.chan;
     }
     let mut bw = crate::bitwriter::BitWriter::new();
     // The header is excluded from the measured bits: the `g` delta depends on the
@@ -126,45 +155,6 @@ pub fn measure(
 /// the *reader's* arithmetic — `(16|m| − dq) · step`, right-shifted back into
 /// analysis units — so a disagreement here is a disagreement with the decoder and
 /// not with a model of it.
-fn candidate_distortion(
-    coef: &[f32],
-    tables: &DefaultTables,
-    g: i32,
-    ms: bool,
-    chan: &Chan,
-) -> f64 {
-    let step = quant::step_of(g, ms) as f64;
-    let mut total = 0f64;
-    for b in 0..chan.bands.len() {
-        let band = &chan.bands[b];
-        if band.is_zero_class() {
-            continue;
-        }
-        let dq = &tables.dq[band.class];
-        for i in 0..BANDW {
-            let k = b * BANDW + i;
-            if k >= NCODED {
-                break;
-            }
-            let a = band.m[i].unsigned_abs();
-            let rec = if a == 0 {
-                0.0
-            } else {
-                let v = (16.0 * a as f64 - dq[a.min(15) as usize] as f64) * step / 256.0;
-                if band.m[i] < 0 { -v } else { v }
-            };
-            let e = f64::from(coef[k]) - rec;
-            total += e * e;
-        }
-    }
-    // Everything uncoded reconstructs as zero.
-    let coded = (chan.bands.len() * BANDW).min(NCODED);
-    for &v in &coef[coded..NCODED] {
-        total += f64::from(v) * f64::from(v);
-    }
-    total
-}
-
 /// The op counts the reader will report for these two channels.
 ///
 /// This is decision 4's resolution in code: the encoder does not keep a second
@@ -302,13 +292,15 @@ impl Curves {
     /// Code every frame at every candidate step. This is the expensive part of S3
     /// and the part S5 parallelises: frames are independent once `g` is fixed, so
     /// the same ordered-assembly argument as the emit pass applies.
-    pub fn compute(
-        samples: &Samples,
-        n_samples: usize,
-        tables: &DefaultTables,
-        n_frames: usize,
-        stride: i32,
-    ) -> Result<Self, Error> {
+    pub fn compute(samples: &Samples, n_samples: usize, p: &SearchParams<'_>) -> Result<Self, Error> {
+        let SearchParams {
+            tables,
+            n_frames,
+            stride,
+            kappa,
+            cap,
+            force_ms,
+        } = *p;
         let stride = stride.max(1);
         let mut per_frame = Vec::with_capacity(n_frames);
         let mut coef = [0f32; 2 * M];
@@ -319,14 +311,45 @@ impl Curves {
                 r: Vec::new(),
                 d: Vec::new(),
                 c: Vec::new(),
+                ms: Vec::new(),
             };
             let mut g = G_MIN;
             while g <= G_MAX {
-                let (p, _) = measure(&coef, tables, g, false)?;
+                // The reference's rule, transcribed from `curves_compute`. Two details
+                // matter and neither is obvious:
+                //
+                //  * each candidate is quantised with **its own** unit (`step_D(g, ms)`,
+                //    so an M/S frame's magnitudes are sized by the √2-scaled step), but
+                //  * the *comparison* between the two uses `lam` from the **ms = 0**
+                //    unit, so the two are weighed on one scale rather than each on its
+                //    own. Weighing them separately would systematically favour whichever
+                //    unit happened to have the larger λ.
+                //
+                // And a candidate over the cycle cap loses to one that is not, before J
+                // is consulted at all — the cap is a constraint, not a term.
+                let lam0 = kappa * quant::Unit::of(g, false).d * quant::Unit::of(g, false).d;
+                let (a, _) = measure(&coef, tables, g, false, kappa)?;
+                let (b, _) = measure(&coef, tables, g, true, kappa)?;
+                let fa = a.cycles <= cap;
+                let fb = b.cycles <= cap;
+                let useb = match force_ms {
+                    Some(m) => m,
+                    None => {
+                        if fa == fb {
+                            let jb = b.dist + lam0 * b.bits as f64;
+                            let ja = a.dist + lam0 * a.bits as f64;
+                            jb < ja
+                        } else {
+                            fb
+                        }
+                    }
+                };
+                let p = if useb { b } else { a };
                 c.g.push(g);
                 c.r.push(p.bits as f64);
                 c.d.push(p.dist);
                 c.c.push(p.cycles);
+                c.ms.push(useb);
                 if g == G_MAX {
                     break;
                 }
@@ -410,27 +433,28 @@ impl Curves {
         samples: &Samples,
         n_samples: usize,
         tables: &DefaultTables,
+        kappa: f64,
     ) -> Result<Content, Error> {
         let n_frames = self.per_frame.len();
         let mut g_by_frame = Vec::with_capacity(n_frames);
+        let mut ms_by_frame = Vec::with_capacity(n_frames);
         let mut chans = Vec::with_capacity(n_frames);
         let mut coef = [0f32; 2 * M];
         for (f, &pick) in picks.iter().enumerate() {
             let g = self.per_frame[f].g[pick];
+            let ms = self.per_frame[f].ms[pick];
             g_by_frame.push(g);
+            ms_by_frame.push(ms);
             crate::mdct::mdct_frame(samples, f, n_samples, &mut coef);
+            let rot = quant::rotate(&coef, ms);
             let mut frame_chans = [Chan::empty(), Chan::empty()];
             for ch in 0..2 {
-                let slice = &coef[ch * M..ch * M + M];
-                let (c, _) = quant::quantise_chan(slice, tables, g, false);
-                frame_chans[ch] = c;
+                let slice = &rot[ch * M..ch * M + M];
+                frame_chans[ch] = quant::quantise_chan_rd(slice, tables, g, ms, kappa).chan;
             }
             chans.push(frame_chans);
         }
-        Ok(Content::coded(
-            GPlan::new(g_by_frame, vec![false; n_frames]),
-            chans,
-        ))
+        Ok(Content::coded(GPlan::new(g_by_frame, ms_by_frame), chans))
     }
 
     /// The chosen steps, for the report.

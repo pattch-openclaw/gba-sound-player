@@ -430,15 +430,16 @@ impl Content {
         n_samples: usize,
         tables: &DefaultTables,
         g: i32,
+        ms: bool,
         kappa: f64,
         n_frames: usize,
     ) -> Result<Self, Error> {
-        if !GPlan::legal(g, false) {
+        if !GPlan::legal(g, ms) {
             return Err(Error::GPlan(GPlanViolation {
                 frame: 0,
                 g,
-                ms: false,
-                geff: GPlan::step_index(g, false),
+                ms,
+                geff: GPlan::step_index(g, ms),
                 kind: GPlanViolationKind::StepIndex,
             }));
         }
@@ -446,17 +447,17 @@ impl Content {
         let mut coef = [0f32; 2 * M];
         for f in 0..n_frames {
             crate::mdct::mdct_frame(samples, f, n_samples, &mut coef);
-            let ms = false;
+            let rot = crate::quant::rotate(&coef, ms);
             // S3's rate/distortion quantiser, not S2's nearest rule: `kappa` is the
             // encoder's own knob and a fixed step is only the *step*, so leaving `lam`
             // at zero here would make `--g` a different coder from `--rd` and from the
             // reference, and every fixed-step comparison would be measuring that.
-            let l = crate::quant::quantise_chan_rd(&coef[..M], tables, g, ms, kappa).chan;
-            let r = crate::quant::quantise_chan_rd(&coef[M..], tables, g, ms, kappa).chan;
+            let l = crate::quant::quantise_chan_rd(&rot[..M], tables, g, ms, kappa).chan;
+            let r = crate::quant::quantise_chan_rd(&rot[M..], tables, g, ms, kappa).chan;
             frames.push([l, r]);
         }
         Ok(Self {
-            plan: GPlan::new(vec![g; n_frames], vec![false; n_frames]),
+            plan: GPlan::new(vec![g; n_frames], vec![ms; n_frames]),
             coded: Some(frames),
         })
     }
@@ -507,6 +508,11 @@ impl Content {
     /// Coded bands across the album, for the report. `None` while nothing is coded.
     pub fn coded_frames(&self) -> Option<&[[crate::quant::Chan; 2]]> {
         self.coded.as_deref()
+    }
+
+    /// How many frames are coded as M/S.
+    pub fn ms_frames(&self) -> usize {
+        (0..self.len()).filter(|&f| self.plan.ms(f) != 0).count()
     }
 
     /// Coefficients that actually carry a nonzero magnitude, both channels.

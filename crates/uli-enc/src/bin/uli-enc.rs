@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 use uli_enc::{Args, DEFAULT_BUDGET, DEFAULT_CAP_PCT, encode};
 
-const USAGE: &str = "usage: uli-enc --album F --tracks TSV --out U [--budget BYTES]                     [--cap PCT] [--threads N] [--g N] [--rd] [--kappa X] [--stride N]";
+const USAGE: &str = "usage: uli-enc --album F --tracks TSV --out U [--budget BYTES]                     [--cap PCT] [--threads N] [--g N] [--rd] [--kappa X] [--stride N] [--ms]";
 
 fn main() -> ExitCode {
     match run() {
@@ -34,6 +34,8 @@ fn run() -> Result<(), ExitCode> {
     let mut rd = false;
     let mut kappa = uli_enc::DEFAULT_KAPPA;
     let mut stride = 8i32;
+    // `--ms` forces M/S; absent, the encoder chooses per frame.
+    let mut ms: Option<bool> = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -48,6 +50,7 @@ fn run() -> Result<(), ExitCode> {
             "--rd" => rd = true,
             "--kappa" => kappa = parse(&mut it, "--kappa")?,
             "--stride" => stride = parse(&mut it, "--stride")?,
+            "--ms" => ms = Some(true),
             other => return Err(usage(format!("unknown argument {other:?}"))),
         }
     }
@@ -66,6 +69,7 @@ fn run() -> Result<(), ExitCode> {
         rd,
         kappa,
         stride,
+        ms,
     };
     if rd && g.is_some() {
         return Err(usage(
@@ -108,6 +112,15 @@ fn run() -> Result<(), ExitCode> {
             report.nonzero_coeffs,
         );
         println!("g {}; xover {} hfnz {}", gline, report.xover, report.hfnz);
+        // The reference prints the same number as `M/S frames %.1f%%`, and it is the
+        // fastest way to see whether the flag is doing anything at all — a search that
+        // silently never chose M/S would otherwise look merely mediocre.
+        println!(
+            "M/S frames {:.1}% ({} of {})",
+            100.0 * report.ms_frames as f64 / report.n_frames as f64,
+            report.ms_frames,
+            report.n_frames
+        );
         if let Some(snr) = report.snr_db {
             println!(
                 "verify: decoded {} frames OK; codec SNR {:.2} dB",

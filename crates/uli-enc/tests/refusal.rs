@@ -44,6 +44,7 @@ fn a_budget_below_overhead_plus_the_stream_refuses_and_cites_both_numbers() {
         rd: false,
         kappa: 0.13,
         stride: 8,
+        ms: None,
         threads: 1,
     })
     .expect_err("the stream does not fit in the overhead alone");
@@ -80,6 +81,7 @@ fn a_budget_below_the_container_overhead_refuses() {
         rd: false,
         kappa: 0.13,
         stride: 8,
+        ms: None,
         threads: 1,
     })
     .expect_err("88 bytes cannot hold the header, tables, track and stream");

@@ -23,7 +23,14 @@ means a whole album written, every encoder-side check passed, and a `BadFrame` o
 hardware. It is the decoder's window, not the reference's `GMIN 8..GMAX 187` search
 range — that is S3's policy, and copying it here would refuse legal albums.
 
-**`--rd` searches.** Per frame and per band it applies `J = D + kappa·D²·R`, which is
+**`--rd` searches, and can choose M/S per frame.** The two channels are rotated to
+`M = (L+R)/√2`, `S = (L−R)/√2` — orthonormal, so the rotated-domain distortion *is* the
+output-domain distortion — and quantised at `step·√2/16`, which is what the reader's plain
+integer add inverts. At each step the two domains are weighed on one scale (λ from the
+L/R unit, as the reference does). `--ms` forces it; absent, the search decides, and 93% of
+frames on real stereo pick it.
+
+**Per frame and per band it applies `J = D + kappa·D²·R`**, which is
 what lets a coefficient be *dropped* rather than coded — the difference between S2's
 rate at a fixed step and the reference's. `--cap` finally constrains something: a
 candidate whose reader cycle model exceeds it is not offered. The bit target is then
@@ -48,10 +55,9 @@ early whole-album refusal, and thread-invariant output.
 
 ## What it is not (yet)
 
-* **no M/S** — the search cannot offer the flag yet: the reference's rotation by
-  `1/√2` against the reader's plain integer add/subtract needs a derivation, and a wrong
-  √2 would silently mis-scale most frames. This is the 4–7 dB between our SNR and the
-  reference's at equal budget, and it is S3's outstanding item;
+* **no trained code tables** — S4. Every frame is coded with `tables_default`, where the
+  reference fits the codebooks to the album. This is where the remaining 1.2–3.4 dB
+  between our SNR and the reference's at equal budget is attributed;
 
 
 A DC frame (`FrameKind::DcImpulse`) is
