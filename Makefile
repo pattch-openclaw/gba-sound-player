@@ -5,7 +5,7 @@
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
-        uli-default-tables uli-mdct-fixture uli-rd-ab \
+        uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-rd-ab \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-playback-test uli-player uli-player-rom uli-player-speaker uli-player-speaker-rom \
@@ -252,7 +252,7 @@ ULI_ENC_MANIFEST := $(abspath crates/uli-enc/Cargo.toml)
 # fails to compile, is renamed out of `tests/`, or is filtered away cannot quietly
 # vanish from the run. A count, not a per-suite shape check: the binary target and
 # the doc-tests legitimately report zero.
-ULI_ENC_MIN_TESTS := 51
+ULI_ENC_MIN_TESTS := 53
 # The ULI2 measurement vehicle (examples/uli_bench/): prove the corpus pins on the
 # measured image, then time full frames through both kernel sets. An mGBA
 # measurement; no playback or hardware claim. ULI2's plan, not FLAC's.
@@ -734,6 +734,13 @@ uli-default-tables:
 # bytes in the tree, no gate builds C.
 uli-mdct-fixture:
 	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/gen_uli_mdct_fixture.py
+	@echo
+# The band_rdo differential: 2400 frozen (coefficients, class, step) -> (magnitudes,
+# bits, distortion) cases from the reference, so a dropped guard or a re-ordered
+# comparison in the quantiser's inner loop shows up as a failing test instead of as a
+# whisper in the bitstream. Same off-tree posture as the two goldens above.
+uli-band-rdo-fixture:
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/gen_uli_band_rdo_fixture.py
 
 # S3's acceptance harness: our --rd encoder against the reference's, same PCM, same
 # budgets: bytes, fit, kbit/s, SNR, chosen g. Exits nonzero if any row overshoots.
@@ -1858,6 +1865,7 @@ help:
 	@echo "                           uli-enc's blob round-trips through it"
 	@echo "      uli-default-tables   regenerate the reference default-tables golden"
 	@echo "      uli-mdct-fixture     regenerate the reference forward-MDCT coefficients"
+	@echo "      uli-band-rdo-fixture regenerate the reference band_rdo differential"
 	@echo "      uli-rd-ab            S3 gate: ours vs the reference, same PCM and budgets"
 	@echo "      uli-overlay-test     product path vs the portable reference, both builds, + premise"
 	@echo "      uli-fixture          regenerate the committed expected-vector file"

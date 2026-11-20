@@ -575,12 +575,34 @@ pub fn quantise_chan_rd(
     ms: bool,
     kappa: f64,
 ) -> ChanRd {
+    // M/S is S3b, and the gap is not cosmetic: the reference quantises a rotated frame
+    // at `step*sqrt(2)/16`, while this function only shifts the step index. A frame
+    // passed here with `ms = true` would be assigned the flag, written with it, and
+    // quantised without the rotation — silently mis-scaled audio, which is the family
+    // of bug this file has already produced twice. Loud beats plausible.
+    assert!(
+        !ms,
+        "M/S quantisation is S3b: the 1/sqrt(2) forward rotation and the sqrt(2) step \
+         compensation are not implemented, so a frame quantised with ms = true would be \
+         silently mis-scaled. `GPlan` and the writer carry the flag; the quantiser is \
+         what is missing."
+    );
     let step = step_of(g, ms) as f64;
     let d = step / 16.0;
     let lam = kappa * d * d;
     let mmax = mmax_of(step as u32);
     let k = tables.k;
     let eob_len = tables.cb[0].symbol_len(k) as u64;
+    let zero_len = tables.cb[0].symbol_len(0) as u64;
+    // A table with no terminator, or no way to say "this band is zero", cannot describe
+    // any channel at all. That is a table-integrity precondition rather than data, so it
+    // is an assert and not a refusal — and it is reached before the per-class skip below
+    // can hide it by choosing a class.
+    assert!(
+        eob_len > 0 && zero_len > 0,
+        "the class tables have no code for EOB ({eob_len} bits) or for class 0 \
+         ({zero_len} bits): no channel is representable"
+    );
 
     // Every band's energy, uncoded. The tail's energy is distortion, not a saving:
     // a search that ignored it would think "code nothing" is optimal, which is how
@@ -608,11 +630,19 @@ pub fn quantise_chan_rd(
         // Option: code nothing in this band. One band symbol, all its energy lost.
         best_class[b] = 0;
         best_band[b] = Band::zero();
-        best_bits[b] = tables.cb[0].symbol_len(0) as u64;
+        best_bits[b] = zero_len;
         best_dist[b] = energy[b];
         best_cost[b] = energy[b] + lam * best_bits[b] as f64;
 
         for klass in rd_classes(tables) {
+            // The reference guards its DP the same way (`int l = T.len_cb[s][c]; if (!l)
+            // continue;`): a class whose band symbol has no code cannot be written, so it
+            // must not be priced. Without this, a zero-length class symbol costs zero
+            // bits and wins every comparison — the same shape as the coefficient-symbol
+            // guard inside `band_rdo`, one level up.
+            if tables.cb[0].symbol_len(klass) == 0 {
+                continue;
+            }
             let Some(rd) = band_rdo(
                 &coef[b * BANDW..b * BANDW + BANDW],
                 tables,

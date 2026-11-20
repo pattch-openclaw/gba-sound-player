@@ -101,10 +101,12 @@ pub fn measure(
         chans[ch] = chan;
     }
     let mut bw = crate::bitwriter::BitWriter::new();
-    // The header's `g` delta is excluded: it depends on the previous frame's `g`,
-    // so charging it per candidate would double-count one bit or thirty depending on
-    // order. The reference's curve omits it too; the final pass sizes the real
-    // stream, and that is what E-R6 is checked against.
+    // The header is excluded from the measured bits: the `g` delta depends on the
+    // previous frame's `g`, so charging it per candidate would double-count one bit or
+    // thirty depending on order, and the `ms` bit belongs to the flag rather than to the
+    // bands. The reference's curve omits both too; the final pass sizes the real stream,
+    // and that is what E-R6 is checked against. `ops.ms` *is* set, because the cycle
+    // model charges for it.
     for chan in &chans {
         frame::write_chan(&mut bw, tables, chan);
     }

@@ -567,3 +567,127 @@ fn a_symbol_with_no_code_is_never_chosen() {
         "a band that never needs symbol 0 must still find a codeable combination"
     );
 }
+
+/// `band_rdo`, differentially against the C reference on 2,400 frozen cases.
+///
+/// The fixture (`tests/fixtures/band_rdo.txt`, `make uli-band-rdo-fixture`) covers all
+/// 13 classes across 180 steps and five magnitude regimes: all-zero, entirely below one
+/// step (the case the zeroing decision exists for), straddling the candidate edges,
+/// needing escapes, and sparse. Every field is an integer or an exact hex bit pattern,
+/// so the comparison is exact rather than tolerant.
+///
+/// Why this and not more reading: reading the C against this port found one dropped
+/// guard already (`if (!l) continue;`). Reading catches what reading catches. This is
+/// the instrument that found the tables-blob row leak and proved the MDCT bit-exact —
+/// freeze the oracle's answers, assert ours match.
+#[test]
+fn band_rdo_matches_the_reference_on_every_frozen_case() {
+    let tables = DefaultTables::build();
+    let raw = include_str!("fixtures/band_rdo.txt");
+    let mut cases = 0usize;
+    let mut worst_rel = 0f64;
+    let mut per_class = [0usize; 14];
+    for (lineno, line) in raw.lines().enumerate() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(f.len(), 16 + 4 + 2 + 16, "line {}: field count", lineno + 1);
+        let mut x = [0f32; BANDW];
+        for i in 0..BANDW {
+            let bits = u32::from_str_radix(f[i], 16).expect("f32 hex");
+            x[i] = f32::from_bits(bits);
+        }
+        let class: usize = f[16].parse().expect("class");
+        let g: i32 = f[17].parse().expect("g");
+        let mmax: i32 = f[18].parse().expect("mmax");
+        let ncod: usize = f[19].parse().expect("ncod");
+        let want_dist = f64::from_bits(u64::from_str_radix(f[20], 16).expect("dist hex"));
+        let want_bits: u64 = f[21].parse().expect("bits");
+        let want_m: Vec<i32> = (0..BANDW).map(|i| f[22 + i].parse().expect("m")).collect();
+
+        let d = quant::step_of(g, false) as f64 / 16.0;
+        let lam = 0.13 * d * d;
+        let got = quant::band_rdo(&x, &tables, class, d, lam, mmax, ncod).unwrap_or_else(|| {
+            panic!("line {}: class {class} found no codeable tuple", lineno + 1)
+        });
+
+        assert_eq!(
+            got.m.to_vec(),
+            want_m,
+            "line {}: class {class} g={g} ncod={ncod} — magnitudes differ from the \
+             reference's. x = {:?}",
+            lineno + 1,
+            &x[..8]
+        );
+        assert_eq!(
+            got.bits,
+            want_bits,
+            "line {}: class {class} g={g} — {} bits against the reference's {want_bits}",
+            lineno + 1,
+            got.bits
+        );
+        // Distortion is compared relatively, not bitwise, and the distinction is
+        // deliberate: the reference sums the 16 squared errors sequentially and this
+        // implementation sums per tuple then across tuples, so the two differ by
+        // rounding — 1 ULP at 4e11, measured. The *decisions* above are compared
+        // exactly, which is where a real divergence would show; the tolerance here is
+        // 1e-12 relative against the ~1e-6+ a genuine disagreement produces (the first
+        // version of this test compared `J` and read a 5e-4 gap).
+        let rel = (got.dist - want_dist).abs() / want_dist.abs().max(1e-300);
+        assert!(
+            rel < 1e-12,
+            "line {}: class {class} g={g} — distortion {:.12e} against the reference's \
+             {want_dist:.12e} (relative {rel:.3e})",
+            lineno + 1,
+            got.dist
+        );
+        worst_rel = worst_rel.max(rel);
+        cases += 1;
+        per_class[class] += 1;
+    }
+    assert_eq!(cases, 2400, "the fixture changed size");
+    eprintln!(
+        "band_rdo differential: {cases} cases, worst distortion drift {worst_rel:.2e} relative"
+    );
+    // A fixture that drifted to one class would still "pass" while testing one arm.
+    for (c, &n) in per_class.iter().enumerate().skip(1) {
+        assert!(
+            n > 50,
+            "class {c} has only {n} cases; the differential is too narrow"
+        );
+    }
+}
+
+/// The class-symbol counterpart of [`a_symbol_with_no_code_is_never_chosen`], and the
+/// third place the reference carries an `if (!l) continue;`.
+///
+/// `quantise_chan_rd` prices a band's class with the context table's length. A class
+/// whose symbol has no code would cost zero bits and therefore win every comparison —
+/// and unlike the coefficient case, the writer would then trip an `assert!` inside a
+/// worker thread, which is a panic where a filter belongs.
+#[test]
+fn a_class_with_no_code_is_never_chosen() {
+    let mut tables = DefaultTables::build();
+    let starved = 3usize;
+    assert!(
+        tables.cb[0].symbol_len(starved) > 0,
+        "the default row codes class 3"
+    );
+    tables.cb[0].len[starved] = 0;
+    tables.cb[0].code[starved] = 0;
+
+    let d = quant::step_of(100, false) as f64 / 16.0;
+    let mut coef = [0f32; M];
+    // A band whose magnitudes sit where class 3 is the natural fit.
+    for (i, v) in coef.iter_mut().take(16).enumerate() {
+        *v = (i as f32 + 1.0) * d as f32 * 2.0;
+    }
+    let rd = quant::quantise_chan_rd(&coef, &tables, 100, false, 0.13);
+    assert!(
+        rd.chan.bands.iter().all(|b| b.class != starved),
+        "a class whose band symbol has no code was chosen; the writer would then panic \
+         inside a frame-coding thread instead of this being a filter"
+    );
+    assert!(
+        !rd.chan.bands.is_empty(),
+        "the channel came out empty for a band with real energy"
+    );
+}
