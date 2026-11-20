@@ -176,6 +176,7 @@ fn a_length_mismatch_refuses_before_any_frame_is_planned() {
         kappa: 0.13,
         stride: 8,
         fine_width: 0,
+        train: false,
         ms: None,
         threads: 1,
     })

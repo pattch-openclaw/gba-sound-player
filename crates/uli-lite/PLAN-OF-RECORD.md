@@ -1131,7 +1131,7 @@ read-side, so this does not reopen the paragraph above.
 | **S2** | Forward MDCT + fixed-step quantisation, default tables | E-R5·R5c, E-R7 (partly) | decodes bit-exactly; SNR sane; rate reported. Fills the `GPlan` S1 fixed at silence, so the step-index bound and the per-frame `frame_bits` walk become live rather than degenerate | **done** |
 | **S3** | Rate/distortion quantisation and the `g` search: per-coefficient `J = D + kappa·D²·R`, band-class choice, the spectrum-end decision, λ bisection against the budget, cycle cap | E-R5·R5b/R5d, E-R6, E-R7 (L/R only) | rate/quality within tolerance of the reference's curve at equal budget, **at `ms = 0`**: rate ≤ 1.01×, distortion ≤ 1.03× at fixed `g` (`make uli-rd-ab`); the cap respected; `--threads 1` = `N` byte-identical | **done** |
 | **S3b** | **M/S**: the `1/√2` forward rotation, the `√2` step compensation, `ms` in the candidate set (weighed per `g` with one λ, as the reference does), `ms` in the cycle model | E-R7, E-R6 | with `ms` forced, our distortion matches the reference's at fixed `g` (exact at g=100/140); at equal budget the search beats L/R-only on correlated stereo; the SNR gap to the reference closes | **done** |
-| **S4** | Two-pass table training (`tables_from_stats`, length floor) | E-R4, E-R5, E-R7 | output byte-stable across runs; trained tables still inside E-R4; **and** the trained lengths satisfy E-R5's any-host half, which means either freezing them or amending the requirement out loud; and the library's remaining `assert!`s become errors, because a trained table is what trips them | not started |
+| **S4** | Two-pass table training: the album's own symbol counts into Huffman lengths, and its own reconstruction errors into `dq`, then a second search with the trained set | E-R4, E-R5, E-R7 | output byte-stable across runs; the trained set is a complete prefix code and stays inside E-R4; training measurably beats the built-in tables at a binding budget; and the band-class choice is a shortest path, since trained context codebooks differ | **done** |
 | **S5** | Album assembly; `--budget`/`--cap` wired to real sizes; the WAV/resample front end | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes; hashes pinned; too small refuses **before** the first frame, citing both numbers; a WAV reaches the same blob its pre-resampled PCM would not, but only its SNR is quoted; the CLI prints the reference's columns, since by then something compares them | not started |
 | **S6** | `mu` (decoder-cycle-aware) search, optional | E-R8 | a knob that demonstrably trades SNR for decode cycles, measured on the bench | not started |
 | **S7** | **The acceptance matrix, as a buildable target** | E-R2, E-R5, E-R7 (and E-R1's oracle posture) | the four cells below run in CI-shaped form and compare SHA-256s against the reference's blobs, including the two header cycle fields | not started |
@@ -1139,6 +1139,56 @@ read-side, so this does not reopen the paragraph above.
 S7 is a step rather than a property of the plan because it has work in it — a host
 target that builds nothing of ours from C, calls the off-tree binary, compares hashes
 — and it has been standing as prose since the gate was declared measurable.
+
+#### S4 — training, and the ~1 dB it turns out to have been
+
+**What training buys, measured.** The same albums, same budgets, same cap, with the trained
+pass on and off, against an independent encoder at the same budget:
+
+| budget | built-in tables | trained | oracle |
+|---|---|---|---|
+| 400,000 | 39.74 dB | 39.87 | 41.02 |
+| 120,000 | 30.28 | **31.19** | 31.35 |
+| 40,000 | 20.81 | **21.67** | 21.83 |
+
+So the residual this plan had been calling "~1 dB, probably tables" was in fact tables: at the
+two lower budgets the gap to the oracle closes to **0.16 dB**. At the top budget 1.15 dB
+remains, and that one is the cycle cap rather than the codebooks — at cap 74 both encoders are
+constrained and the oracle keeps over-cap frames by re-coding them with the cycle term
+(dropping cheap coefficients) where this encoder simply refuses those candidates. That is
+E-R8's knob, S6.
+
+**Two things are trained and one is not.** The Huffman **lengths** come from the album's own
+symbol counts, and the **reconstruction offsets** `dq` come from the mean error per magnitude
+bucket — the second is a *quality* mechanism, not a rate one, and it was not obvious from the
+outside that training had two mechanisms rather than one. The class *structure* is not
+trained: `ctype`, `rbits` and `esck` are the format's, so E-R4's premise holds across training
+by construction — and is still re-checked on the trained bytes, because "by construction" is a
+claim and not a witness.
+
+**Two passes, because one is not enough.** Which symbols are emitted depends on the lengths,
+and the quantiser prices its candidates with the lengths, so a plan made with the built-in
+tables is only an approximation of the plan the trained tables will produce. Pass one is the
+measurement; pass two is the album as it will ship. It doubles encode time, which is the price
+of the 0.9 dB.
+
+**The shortest path had to exist first.** The per-band class choice was only ever valid
+because all 15 default context codebooks are byte-identical — a class symbol then costs the
+same from any context, so bands carry no coupling. Trained codebooks differ per context, so
+S4 required the band-class choice to become a shortest path over (band, class), shipped one
+commit earlier as a provable no-op: bits and distortion identical to the greedy version and to
+the oracle's, because on context-independent tables the DP *is* the greedy.
+
+**Determinism.** The counts are integers and the merge is deterministic; the only float in the
+path is the length-capping re-merge's `sqrt`, which E-R5's amendment already covers ("wherever
+the bytes come from integers; on the reference host, wherever they cross a float"). So a
+trained table is reproducible per host and is *not* claimed to be reproducible across libms.
+That is the same posture as the default tables before their golden froze them, and the same
+way out would be available if a trained set ever needed pinning.
+
+Five tests: training pays for itself at a binding budget, two encodes are byte-identical, the
+trained set parses and satisfies the premise, an empty statistic set leaves the base tables
+valid, and the shipped tables really differ from the built-in ones.
 
 #### S3 — the ratio was the measurement, and two silent failures nearly hid it
 

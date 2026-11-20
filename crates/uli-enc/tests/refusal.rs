@@ -45,6 +45,7 @@ fn a_budget_below_overhead_plus_the_stream_refuses_and_cites_both_numbers() {
         kappa: 0.13,
         stride: 8,
         fine_width: 0,
+        train: false,
         ms: None,
         threads: 1,
     })
@@ -83,6 +84,7 @@ fn a_budget_below_the_container_overhead_refuses() {
         kappa: 0.13,
         stride: 8,
         fine_width: 0,
+        train: false,
         ms: None,
         threads: 1,
     })

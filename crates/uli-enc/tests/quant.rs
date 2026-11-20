@@ -298,6 +298,7 @@ fn rate_and_snr_move_the_right_way_with_the_step() {
             kappa: 0.13,
             stride: 8,
             fine_width: 0,
+            train: false,
             ms: None,
             threads: 1,
         })
@@ -355,6 +356,7 @@ fn the_search_actually_runs_and_changes_the_album() {
             kappa: 0.13,
             stride: 8,
             fine_width: 0,
+            train: false,
             ms: None,
             threads: 1,
         })
@@ -487,6 +489,7 @@ fn the_search_fits_every_budget_it_accepts() {
             kappa: 0.13,
             stride: 8,
             fine_width: 0,
+            train: false,
             ms: None,
             threads: 1,
         })
@@ -815,6 +818,7 @@ fn an_ms_album_decodes_to_sane_audio_and_beats_lr_on_correlated_stereo() {
             kappa: 0.13,
             stride: 8,
             fine_width: 0,
+            train: false,
             ms,
             threads: 1,
         })
@@ -874,6 +878,7 @@ fn the_search_chooses_the_domain_per_frame_and_the_stream_agrees() {
         kappa: 0.13,
         stride: 8,
         fine_width: 0,
+        train: false,
         ms: None,
         threads: 1,
     })
@@ -898,6 +903,7 @@ fn the_search_chooses_the_domain_per_frame_and_the_stream_agrees() {
         kappa: 0.13,
         stride: 8,
         fine_width: 0,
+        train: false,
         ms: Some(false),
         threads: 1,
     })
@@ -938,6 +944,7 @@ fn ms_frames_are_thread_invariant() {
             kappa: 0.13,
             stride: 8,
             fine_width: 0,
+            train: false,
             ms: None,
             threads,
         })
@@ -979,6 +986,9 @@ fn refining_the_grid_never_costs_quality() {
             kappa: 0.13,
             stride: 8,
             fine_width,
+            // Training off: this test is about the candidate grid, and the two-pass trainer
+            // would double the runtime of both arms without touching the claim.
+            train: false,
             ms: None,
             threads: 1,
         })

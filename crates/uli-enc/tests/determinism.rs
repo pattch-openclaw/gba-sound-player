@@ -23,6 +23,7 @@ fn encode_with_threads(dir: &std::path::Path, threads: usize) -> uli_enc::Output
         kappa: 0.13,
         stride: 8,
         fine_width: 0,
+        train: false,
         ms: None,
         threads,
     })
