@@ -1129,7 +1129,8 @@ read-side, so this does not reopen the paragraph above.
 |---|---|---|---|---|
 | **S1** | Skeleton: PCM boundary, bit writer, plan-then-emit container, default tables, budget arithmetic, silence + DC frames | E-R1, E-R2, E-R3, E-R4, E-R5·R5a, E-R6, E-R10 | blob parses and decodes; `premise()` called by the encoder; `--threads 1` and `--threads N` give the same bytes; **the default tables blob equals the reference's byte for byte**; the frame plan is refused if any `g` leaves the reader's window; the suite runs under `make uli-test` | **done** — 39 tests, `make uli-check` + `make uli-test` green |
 | **S2** | Forward MDCT + fixed-step quantisation, default tables | E-R5·R5c, E-R7 (partly) | decodes bit-exactly; SNR sane; rate reported. Fills the `GPlan` S1 fixed at silence, so the step-index bound and the per-frame `frame_bits` walk become live rather than degenerate | **done** |
-| **S3** | Rate/distortion quantisation and the `g` search: per-coefficient `J = D + kappa·D²·R`, band-class choice, the spectrum-end decision, λ bisection against the budget, cycle cap | E-R5·R5b/R5d, E-R6, E-R7 | rate/quality within tolerance of the reference's curve at equal budget: rate ≤ 1.01×, distortion ≤ 1.03× at fixed `g` (`make uli-rd-ab`); the cap respected; `--threads 1` = `N` byte-identical | **quantiser done; search done; M/S outstanding** |
+| **S3** | Rate/distortion quantisation and the `g` search: per-coefficient `J = D + kappa·D²·R`, band-class choice, the spectrum-end decision, λ bisection against the budget, cycle cap | E-R5·R5b/R5d, E-R6, E-R7 (L/R only) | rate/quality within tolerance of the reference's curve at equal budget, **at `ms = 0`**: rate ≤ 1.01×, distortion ≤ 1.03× at fixed `g` (`make uli-rd-ab`); the cap respected; `--threads 1` = `N` byte-identical | **done for L/R; E-R7 unmet until S3b** |
+| **S3b** | **M/S**: the `1/√2` forward rotation, the `√2` step compensation, `ms` in the RD candidate set and the cycle model, and the distortion-domain question the allocation must answer | E-R7, E-R6 | with `ms` forced, our bytes and decoded samples match the reference's at fixed `g`; then at equal budget the SNR gap to the reference closes from 4–7 dB to within tolerance | not started |
 | **S4** | Two-pass table training (`tables_from_stats`, length floor) | E-R4, E-R5, E-R7 | output byte-stable across runs; trained tables still inside E-R4; **and** the trained lengths satisfy E-R5's any-host half, which means either freezing them or amending the requirement out loud; and the library's remaining `assert!`s become errors, because a trained table is what trips them | not started |
 | **S5** | Album assembly; `--budget`/`--cap` wired to real sizes; the WAV/resample front end | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes; hashes pinned; too small refuses **before** the first frame, citing both numbers; a WAV reaches the same blob its pre-resampled PCM would not, but only its SNR is quoted; the CLI prints the reference's columns, since by then something compares them | not started |
 | **S6** | `mu` (decoder-cycle-aware) search, optional | E-R8 | a knob that demonstrably trades SNR for decode cycles, measured on the bench | not started |
@@ -1177,7 +1178,32 @@ reported rather than inferring health from silence, `Args` is destructured exhau
 so a field cannot be added and ignored, and the harness prints four columns instead of
 one.
 
-**M/S is the remaining gap, and it is now a number.** At equal budget the reference
+**M/S is a separate step (S3b), and S3's gate is only met at `ms = 0`.** That
+distinction is the whole point of splitting it: the quantiser reproduces the
+reference's decisions *at equal `(g, ms)`*, which is measured and true, but E-R7 is
+about quality at equal rate, and 87% of the reference's frames are M/S. So S3 cannot
+close E-R7 and is not marked done — it is done for L/R, with S3b owing the rest.
+
+**M/S is not an S2 flaw, and not a S3 oversight either — it is a mechanism with its
+own derivation.** S1 wired the `ms` bit into the frame header, the `g` plan and the
+`g - 4·ms` bound; S2 quantised L/R by scope, and S3's candidate set left `ms` out
+deliberately. The derivation is now done on paper (see below) but not verified by
+measurement, which is exactly the boundary at which it should stop being prose.
+
+*Derived, not yet measured.* The forward rotation is `M = (L+R)/√2`, `S = (L−R)/√2`
+(orthonormal, so energy is preserved). The reference then quantises with
+`step_D = step̄·√2/16` where `step̄ = uli_step[g − 4]` is the step the reader will
+actually use, and the reader combines the dequantised channels with a plain integer
+add/subtract. That works out exactly: coding `M` at that step reconstructs
+`(16m − dq)·step̄ ≈ 256·M/√2`, so `L' = (X_M + X_S)/256 = L` and `R' = R`. The `√2` in
+`step_D` is what pays for the `1/√2` in the rotation and the factor lost in the add —
+three places for the constant to go wrong, which is why S3b's witness is *decoded
+samples*, not bit counts. What remains open is the **distortion domain**: `D` is
+accumulated on the rotated coefficients, and the allocation compares `w·D + λR` across
+`ms` choices, so S3b has to show that a rotated-domain `D` is comparable to an L/R one.
+That question is arithmetic, not opinion, and it is the first thing to settle.
+
+The gap is a number: At equal budget the reference
 measures **40.98 dB against our 33.66** (and 31.41 vs 26.89; 21.81 vs 17.81) on the same
 20 s of `bioluminescent`. That 4–7 dB is M/S. It stays out because the reference rotates
 coefficients by `1/√2` and quantises at `D = step·√2/16` while the reader combines

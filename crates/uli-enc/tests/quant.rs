@@ -498,3 +498,30 @@ fn the_search_fits_every_budget_it_accepts() {
         assert_eq!(chosen.len(), out.report.n_frames);
     }
 }
+
+/// The cycle model charges `3 * 512` for an M/S frame, and `frame_ops` used to
+/// hardcode `ms = 0`. Nothing could see it while M/S was not offered, and the moment
+/// it is, an under-counted model over-admits candidates against the `--cap` filter —
+/// silently, in the direction that looks like a bigger search. The flag is an
+/// argument now, and this pins the arithmetic so enabling M/S is a search change and
+/// not a re-derivation.
+#[test]
+fn an_ms_frame_costs_exactly_three_hundred_twelve_cycles_more() {
+    let tables = DefaultTables::build();
+    let (_d, _pcm, _samples, _tables, content, nf) = coded(100);
+    let chans = content
+        .coded_frames()
+        .expect("a coded plan")
+        .get(nf.min(4))
+        .expect("at least five frames");
+    let lr = uli_enc::rd::frame_ops(&tables, chans, false);
+    let ms = uli_enc::rd::frame_ops(&tables, chans, true);
+    assert_eq!(lr.ms, 0);
+    assert_eq!(ms.ms, 1);
+    assert_eq!(
+        ms.cycle_model() - lr.cycle_model(),
+        3 * 512,
+        "an M/S frame's cycle cost is ULI_CY_MS = 3 * 512; frame_ops must charge it or \
+         the --cap filter is comparing candidates on a number that is 1536 cycles short"
+    );
+}

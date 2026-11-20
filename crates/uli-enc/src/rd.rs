@@ -89,14 +89,15 @@ pub fn measure(
     coef: &[f32; 2 * M],
     tables: &DefaultTables,
     g: i32,
+    ms: bool,
 ) -> Result<(Point, [Chan; 2]), Error> {
     let mut chans = [Chan::empty(), Chan::empty()];
     let mut dist = 0f64;
     let mut bits = 0u64;
     for ch in 0..2 {
         let slice = &coef[ch * M..ch * M + M];
-        let (chan, _) = quant::quantise_chan(slice, tables, g, false);
-        dist += candidate_distortion(slice, tables, g, &chan);
+        let (chan, _) = quant::quantise_chan(slice, tables, g, ms);
+        dist += candidate_distortion(slice, tables, g, ms, &chan);
         chans[ch] = chan;
     }
     let mut bw = crate::bitwriter::BitWriter::new();
@@ -108,7 +109,7 @@ pub fn measure(
         frame::write_chan(&mut bw, tables, chan);
     }
     bits += bw.pos();
-    let ops = frame_ops(tables, &chans);
+    let ops = frame_ops(tables, &chans, ms);
     Ok((
         Point {
             bits,
@@ -123,8 +124,14 @@ pub fn measure(
 /// the *reader's* arithmetic — `(16|m| − dq) · step`, right-shifted back into
 /// analysis units — so a disagreement here is a disagreement with the decoder and
 /// not with a model of it.
-fn candidate_distortion(coef: &[f32], tables: &DefaultTables, g: i32, chan: &Chan) -> f64 {
-    let step = quant::step_of(g, false) as f64;
+fn candidate_distortion(
+    coef: &[f32],
+    tables: &DefaultTables,
+    g: i32,
+    ms: bool,
+    chan: &Chan,
+) -> f64 {
+    let step = quant::step_of(g, ms) as f64;
     let mut total = 0f64;
     for b in 0..chan.bands.len() {
         let band = &chan.bands[b];
@@ -163,9 +170,14 @@ fn candidate_distortion(coef: &[f32], tables: &DefaultTables, g: i32, chan: &Cha
 /// `cycle_model()`. `long_codes` is counted exactly — a symbol longer than the
 /// first-level LUT takes the slow path, and the encoder knows every code length it
 /// wrote.
-pub fn frame_ops(tables: &DefaultTables, chans: &[Chan; 2]) -> Ops {
+pub fn frame_ops(tables: &DefaultTables, chans: &[Chan; 2], ms: bool) -> Ops {
     let mut ops = Ops::ZERO;
-    ops.ms = 0;
+    // `ops.ms` is not decoration: the cycle model charges `3 * 512` for an M/S frame,
+    // and this function hardcoded `0`. Nothing could see that while M/S was not
+    // offered — and the moment it is, an under-counted cycle model silently over-admits
+    // candidates against the `--cap` filter. Taking the flag as an argument is what
+    // makes the omission impossible rather than merely absent.
+    ops.ms = u32::from(ms);
     for chan in chans {
         let full = chan.bands.len() >= NBANDS;
         for band in &chan.bands {
@@ -308,7 +320,7 @@ impl Curves {
             };
             let mut g = G_MIN;
             while g <= G_MAX {
-                let (p, _) = measure(&coef, tables, g)?;
+                let (p, _) = measure(&coef, tables, g, false)?;
                 c.g.push(g);
                 c.r.push(p.bits as f64);
                 c.d.push(p.dist);
