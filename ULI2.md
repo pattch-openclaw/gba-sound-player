@@ -363,15 +363,22 @@ committed expected-vector file remains the frozen C-pinned reference; the Rust
 tool is a maintenance/snapshot generator, not an independent oracle, so a
 failing decoder test must not be "fixed" by regenerating it.
 
-**Status (2026-11-19): scheduled, and it is now the last missing piece.** The
-decoder and the playback path are done (1.070x the reference on the decode wall),
-so this milestone is what stands between ULI2 and being the album player's codec:
-without it the assets would come from a build we do not own. The requirements
-(notably that the encoder must emit `rbits <= 5` on PAIR classes and `esck <= 2`
-to make the product's closed-world reader sound), the six slices and the exit
-gates are in [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md)
--> "The encoder — the last missing piece". Until it lands, the `gba-audio` C
-encoder remains the encoder of record for existing assets.
+**Status (2026-11-20): the encoder exists in-repo, and what is left is acceptance,
+not capability.** S1–S5 have landed in `crates/uli-enc`: the PCM boundary and the
+container, the forward MDCT, the RD search with M/S, trained code tables, and album
+assembly with the WAV front end and a frame-parallel search. It encodes the
+43.5-minute, 12-track `cross` album inside a passed-in budget with 392 bytes to spare,
+every track seeked to and decoded; a natively-32,768 Hz WAV reaches its PCM pair's exact
+blob; `biomaster`'s blob is unchanged from S4's while the wall clock fell 12m16s → 3m46s
+at four threads. **E-R9 is met in mechanism, not in rationale:** that album takes 40m11s
+where the reference takes 14m30s on the same box, because every candidate is coded
+exactly rather than estimated — a named follow-up, not a claim. What remains is **S6** (the
+optional cycle-aware re-code, worth 1.48 dB to the reference at a binding cap) and
+**S7**, the acceptance matrix that holds this encoder to the C oracle's bytes — the
+hand-written C encoder is now the **oracle and the asset producer**, not the only
+encoder in existence. Requirements, slices and gates:
+[`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) -> "The
+encoder — the last missing piece".
 
 ### Suggested public API
 
@@ -779,6 +786,31 @@ product codec without pretending one codec covers both jobs.
 numbers *of that day* and are superseded by the current state at the top of
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md); each
 entry is kept for the decision and its reasoning, not for its numbers.**
+
+- **2026-11-20 — S5 lands, and two small things turn out to be load-bearing: the
+  CLI's defaults and the resampler's corner.** The WAV front end is a *second input shape*
+  rather than a second boundary — `--album/--tracks` stays E-R2's contract, `--wav` is the
+  convenience over it, and `--emit-pcm DIR` writes back the pair it assembled so "a 32,768 Hz
+  WAV reaches the identical blob its PCM pair does" is a test (`tests/wav.rs`) instead of a
+  sentence. Two failures are kept because they will recur:
+  1. **A CLI default is behaviour, and rewriting a parser is a behaviour change.** `--fine`
+  (4) and training-on moved silently while the argument parser was rewritten for `--wav`;
+  on the 5-frame `corr` fixture the search emitted 18,331 bits where S4 emitted 15,664, and
+  the blob hash changed. No test noticed, because the RD tests pass explicit shapes; what
+  caught it was re-running S4's binary and diffing hashes. The defaults are restored and the
+  equality to S4's blob is recorded for `biomaster` (`6f4f3d66…82be51`).
+  2. **A resampler corner that is wrong only when downsampling.** The first version used a
+  fixed 0.475-of-source-rate cutoff, right for upsampling and wrong the other way: a 20 kHz
+  tone at 44,100 Hz came out at −2.2 dB and aliased straight into the band. The test that
+  found it asserts the guard band, not the passband.
+  **E-R9 is half-discharged and that is recorded as half.** The curves were nearly all of the
+  wall clock (`--threads` reached only emit), so `Curves::compute`/`refine` are now
+  frame-parallel: `biomaster` 12m16s → **3m46s** at four threads with a **byte-identical**
+  blob. But the 43.5-minute album takes **40m11s** where the reference takes **14m30s** on the
+  same box and flags, because `measure` codes every `(g, ms)` candidate exactly
+  (`write_chan` twice) while the reference's curve pass estimates — the mechanism is met, the
+  "bake is in the edit loop" rationale is not. Making the curve pass cheaper is a new step;
+  S6 (cycle-aware re-code) and S7 (the acceptance matrix) remain open.
 
 - **2026-11-19 (later) — the encoder's shape is settled before it is written: plan-
   then-emit, four determinism rules, a byte budget that is an argument, and exactness

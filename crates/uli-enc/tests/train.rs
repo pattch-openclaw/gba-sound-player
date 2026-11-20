@@ -20,7 +20,7 @@
 mod common;
 
 use common::{TempDir, materialise, write_tracks};
-use uli_enc::{Args, DEFAULT_CAP_PCT, DefaultTables, train};
+use uli_enc::{Args, DEFAULT_CAP_PCT, DefaultTables, Input, train};
 use uli_lite::CodeTables;
 
 const N_SAMPLES: usize = 2048;
@@ -46,8 +46,7 @@ fn album(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
 
 fn args(album: std::path::PathBuf, tracks: std::path::PathBuf, budget: u64, train: bool) -> Args {
     Args {
-        album,
-        tracks,
+        input: Input::Pcm { album, tracks },
         budget,
         cap_pct: DEFAULT_CAP_PCT,
         g: None,

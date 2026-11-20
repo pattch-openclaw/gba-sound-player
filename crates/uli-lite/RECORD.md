@@ -3255,6 +3255,49 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
+- **2026-11-20 — S5: the 43.5-minute album fits a passed-in budget, and the search
+  is frame-parallel.** The album is the `cross` corpus (12 tracks, 167,222 frames,
+  85,616,716 samples = 2612.8 s), run at `--rd --budget 33292288 --cap 74
+  --threads 4` with training on and the shipped `--stride 8 --fine 4`. Both encoders
+  were run on the same box, same inputs, same flags:
+
+  | | this encoder | reference (C, `--threads 4`) |
+  |---|---|---|
+  | wall clock | **40m11s** | 14m30s |
+  | user time | 122m | 52m |
+  | peak RSS | 1.69 GB | 1.43 GB |
+  | blob | **33,291,896 B** (392 unused) | 33,280,720 B (11,568 unused) |
+  | SHA-256 | `69911924…e656b8` | `b3c63657…89ae2a` |
+  | per-track SNR mean pcm16 / int8 | 31.75 / 28.56 dB | 32.16 / 28.97 dB |
+  | pooled codec SNR (ours) | 29.43 dB | — |
+  | `g` range | 8..132 | 72..142 |
+  | M/S frames | 78.1% | 77.4% |
+  | est. cycles mean / max | 67.3% / 74.0% | 67.2% / 74.3% |
+
+  What this establishes: the blob **fits the passed-in budget with 392 bytes to
+  spare**, all 12 tracks decode — the verify pass seeks to each track's own preroll,
+  so that is a claim about the track table, not only about a linear walk — and
+  nothing overflows (`xover 0`, `hfnz 0`). The 0.41 dB pcm16 shortfall against the
+  reference is a quality gap, not a fit or validity gap, and it is on a different
+  album from the S4 tables' 0.16 dB result, so the two must not be quoted as one.
+
+  What it does **not** establish, recorded rather than smoothed: 40 minutes is 2.8x
+  the reference's 14.5 on the same box, so E-R9's *rationale* ("the bake is in the
+  edit loop") is not met for an album of this length even though its mechanism
+  (frame-parallel compute, ordered emit) now is. The cause is named rather than
+  guessed: `measure` codes the frame for **every** candidate — `write_chan` twice,
+  the exact-bitstream approach S7's byte gate wants — while the reference's curve
+  pass is an estimate. Ours also offers ~54 `(g, ms)` candidates per frame against
+  the reference's 28. Making the curve pass cheaper is a new step, not an S5 task.
+
+  Same-day, same flags, on `biomaster` (16,553 frames, `--budget 3294000 --cap 74`):
+  moving `Curves::compute`/`refine` from the caller's thread to `--threads` took
+  **12m16s → 3m46s** at four threads with a **byte-identical blob**
+  (`6f4f3d66…82be51`), CPU time 11m18s → 12m24s. The S4-blob equality is the
+  assertion; the CLI's `--fine` default (4) and training default (on) had to be
+  restored to get it, and a rewritten parser that quietly moved them changed the
+  fixture's blob from 15,664 to 18,331 bits without failing any test.
+
 - **2026-11-19 — the reference encoder reproduces its own corpora, so the
   encoder's acceptance gate is a measurement and not a hope.** Before sizing E1,
   the off-tree reference at `gba-audio/encoder` was built and pointed at the two

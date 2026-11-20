@@ -85,3 +85,123 @@ pub fn materialise(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
     std::fs::write(&path, bytes).expect("write fixture");
     path
 }
+
+/// A WAV's `fmt ` fields, as the S5 front end's tests state them.
+#[derive(Clone, Copy, Debug)]
+pub struct WavSpec {
+    /// 1 = integer PCM, 3 = IEEE float, 0xFFFE = extensible (subformat 1).
+    pub tag: u16,
+    pub channels: u16,
+    pub rate: u32,
+    pub bits: u16,
+    pub title: Option<&'static str>,
+    pub artist: Option<&'static str>,
+}
+
+impl WavSpec {
+    pub fn pcm(channels: u16, rate: u32, bits: u16) -> Self {
+        Self {
+            tag: 1,
+            channels,
+            rate,
+            bits,
+            title: None,
+            artist: None,
+        }
+    }
+}
+
+/// Serialise a RIFF/WAVE file whose payload is the *native* encoding of `samples`
+/// (for 8-bit PCM, unsigned 0..=255; otherwise two's complement little-endian).
+///
+/// Tests build their inputs this way rather than committing binaries: the point of
+/// the WAV front end is that it reads a format, and a hand-built header is the only
+/// way to exercise 24-bit or a mono file without carrying a fixture per case.
+pub fn wav_bytes(spec: &WavSpec, samples: &[i32]) -> Vec<u8> {
+    let width = spec.bits.div_ceil(8) as usize;
+    let mut data = Vec::with_capacity(samples.len() * width);
+    for &s in samples {
+        match spec.bits {
+            8 => data.push(s as u8),
+            16 => data.extend_from_slice(&(s as i16).to_le_bytes()),
+            24 => {
+                let b = s.to_le_bytes();
+                data.extend_from_slice(&b[0..3]);
+            }
+            32 => data.extend_from_slice(&s.to_le_bytes()),
+            other => panic!("no test encoding for {other} bits"),
+        }
+    }
+    wav_with_payload(spec, &data)
+}
+
+/// A float32 WAV, whose payload is the samples' raw f32 bits.
+pub fn wav_bytes_f32(spec: &WavSpec, samples: &[f32]) -> Vec<u8> {
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    wav_with_payload(spec, &data)
+}
+
+fn wav_with_payload(spec: &WavSpec, data: &[u8]) -> Vec<u8> {
+    let mut chunks: Vec<u8> = Vec::new();
+
+    // fmt: the 16-byte PCM header, plus the 22-byte extension for extensible.
+    let fmt_len = if spec.tag == 0xFFFE { 40 } else { 16 };
+    let mut fmt = Vec::with_capacity(fmt_len);
+    let effective_tag = if spec.tag == 0xFFFE { 1 } else { spec.tag };
+    fmt.extend_from_slice(&spec.tag.to_le_bytes());
+    fmt.extend_from_slice(&spec.channels.to_le_bytes());
+    fmt.extend_from_slice(&spec.rate.to_le_bytes());
+    let block = spec.channels as u32 * u32::from(spec.bits.div_ceil(8));
+    fmt.extend_from_slice(&(spec.rate * block).to_le_bytes());
+    fmt.extend_from_slice(&(block as u16).to_le_bytes());
+    fmt.extend_from_slice(&spec.bits.to_le_bytes());
+    if spec.tag == 0xFFFE {
+        fmt.extend_from_slice(&22u16.to_le_bytes());
+        fmt.extend_from_slice(&spec.bits.to_le_bytes());
+        fmt.extend_from_slice(&0u32.to_le_bytes());
+        fmt.extend_from_slice(&effective_tag.to_le_bytes());
+        fmt.extend_from_slice(&[0u8; 14]);
+    }
+    chunks.extend_from_slice(b"fmt ");
+    chunks.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+    chunks.extend_from_slice(&fmt);
+    if fmt.len() % 2 != 0 {
+        chunks.push(0);
+    }
+
+    if spec.title.is_some() || spec.artist.is_some() {
+        let mut info = Vec::new();
+        info.extend_from_slice(b"INFO");
+        for (id, value) in [(b"INAM", spec.title), (b"IART", spec.artist)] {
+            let Some(value) = value else { continue };
+            let mut text = value.as_bytes().to_vec();
+            text.push(0);
+            info.extend_from_slice(id);
+            info.extend_from_slice(&(text.len() as u32).to_le_bytes());
+            info.extend_from_slice(&text);
+            if text.len() % 2 != 0 {
+                info.push(0);
+            }
+        }
+        chunks.extend_from_slice(b"LIST");
+        chunks.extend_from_slice(&(info.len() as u32).to_le_bytes());
+        chunks.extend_from_slice(&info);
+        if info.len() % 2 != 0 {
+            chunks.push(0);
+        }
+    }
+
+    chunks.extend_from_slice(b"data");
+    chunks.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    chunks.extend_from_slice(data);
+    if data.len() % 2 != 0 {
+        chunks.push(0);
+    }
+
+    let mut out = Vec::with_capacity(12 + chunks.len());
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&((4 + chunks.len()) as u32).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(&chunks);
+    out
+}

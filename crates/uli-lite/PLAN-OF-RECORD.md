@@ -34,6 +34,17 @@ mGBA, WAITCNT 4/2, 262,144-cycle period, no UI. Both corpora pinned
 - **Open:** the non-decode gate half; the dense-frame tail of entropy (the
   sub-frame partition needs re-measuring on the product reader first — see "The
   entropy path against the C+ASM reference"); a licensing/publish decision.
+- **The encoder: S5 (album assembly, the WAV layer, the parallel curves) is done.** It
+  encodes a 43.5-minute album (167,222 frames, 12 tracks) inside a passed-in budget with a
+  pinned hash; a 32,768 Hz stereo WAV reaches its PCM pair's exact blob and a resampled one
+  is held to SNR; the search runs frame-parallel, so `biomaster` (16,553 frames) went from
+  **12m16s to 3m46s** at four threads **with byte-identical output**. See "S5" below.
+- **The encoder: S4 (trained code tables) is done.** Two passes: the album's own symbol
+  counts and per-bucket reconstruction errors rebuild the Huffman lengths and `dq`, then the
+  search ships the plan it would actually code. At binding budgets the gap to the reference
+  closed to **0.16 dB** (31.19 vs 31.35 at `budget 120000`); the residual 1.15 dB at the top
+  budget is cap-constrained frames, not the codebooks — S6. Trained context codebooks differ
+  per row, which is why the band-class choice became a shortest path first.
 - **The encoder: S2 (the codec's first real frame) is done.** The forward MDCT
   reproduces the reference's coefficients bit for bit on a frozen fixture, and a
   fixed step now trades rate against distortion the way the format intends:
@@ -1132,13 +1143,84 @@ read-side, so this does not reopen the paragraph above.
 | **S3** | Rate/distortion quantisation and the `g` search: per-coefficient `J = D + kappa·D²·R`, band-class choice, the spectrum-end decision, λ bisection against the budget, cycle cap | E-R5·R5b/R5d, E-R6, E-R7 (L/R only) | rate/quality within tolerance of the reference's curve at equal budget, **at `ms = 0`**: rate ≤ 1.01×, distortion ≤ 1.03× at fixed `g` (`make uli-rd-ab`); the cap respected; `--threads 1` = `N` byte-identical | **done** |
 | **S3b** | **M/S**: the `1/√2` forward rotation, the `√2` step compensation, `ms` in the candidate set (weighed per `g` with one λ, as the reference does), `ms` in the cycle model | E-R7, E-R6 | with `ms` forced, our distortion matches the reference's at fixed `g` (exact at g=100/140); at equal budget the search beats L/R-only on correlated stereo; the SNR gap to the reference closes | **done** |
 | **S4** | Two-pass table training: the album's own symbol counts into Huffman lengths, and its own reconstruction errors into `dq`, then a second search with the trained set | E-R4, E-R5, E-R7 | output byte-stable across runs; the trained set is a complete prefix code and stays inside E-R4; training measurably beats the built-in tables at a binding budget; and the band-class choice is a shortest path, since trained context codebooks differ | **done** |
-| **S5** | Album assembly; `--budget`/`--cap` wired to real sizes; the WAV/resample front end | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes; hashes pinned; too small refuses **before** the first frame, citing both numbers; a WAV reaches the same blob its pre-resampled PCM would not, but only its SNR is quoted; the CLI prints the reference's columns, since by then something compares them | not started |
+| **S5** | Album assembly (WAV front end, gapless join, tags/fold), `--budget`/`--cap` on real sizes, frame-parallel search | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes (each seeked to its own preroll); hashes pinned; too small refuses **before the first frame**, citing both numbers; a 32,768 Hz WAV reaches the same blob its pre-resampled PCM does, and a resampled WAV is quoted by SNR; the CLI prints the reference's columns | **done** — see "S5" below for the numbers and the defaults-restored failure |
 | **S6** | `mu` (decoder-cycle-aware) search: re-code an over-cap frame by dropping its cheapest coefficients instead of refusing the candidate | E-R8, E-R7 | a knob that demonstrably trades SNR for decode cycles, measured on the bench — and, measured 2026-11-20, it closes the last high-rate gap: at `--budget 400000 --cap 74` the equivalent mechanism is worth **1.48 dB** to the oracle, against a 1.15 dB gap | not started |
 | **S7** | **The acceptance matrix, as a buildable target** | E-R2, E-R5, E-R7 (and E-R1's oracle posture) | the four cells below run in CI-shaped form and compare SHA-256s against the reference's blobs, including the two header cycle fields | not started |
 
 S7 is a step rather than a property of the plan because it has work in it — a host
 target that builds nothing of ours from C, calls the off-tree binary, compares hashes
 — and it has been standing as prose since the gate was declared measurable.
+
+#### S5 — assembly, the WAV layer, and the curves that had to move
+
+**Two things S5 was not.** It was not the budget arithmetic — that has been exact since S1,
+and the 43-minute run exercises it rather than adding to it. And it was not "the encoder
+needs to accept WAV": E-R2's boundary is the PCM pair, and the WAV front end is a
+convenience over it whose only correctness claims are that a natively-32,768 Hz file is
+untouched and that everything else is held to SNR.
+
+**What it was, and the number that says so: E-R9.** The plan said S5 parallelises the curve
+passes; the measurement says they were nearly all of the time. `Curves::compute` and
+`refine` were one loop over every frame, so `--threads` reached only the emit pass and the
+search ran at one core. Frame-parallel now — contiguous chunks, results assembled by frame
+index, each worker owning its coefficient scratch and its frames' float sums (R5a/R5b) —
+on `biomaster` (16,553 frames, 14 minutes of audio, `--budget 3294000 --cap 74`):
+
+| | wall | user | blob |
+|---|---|---|---|
+| S4, four threads | 12m16s | 11m18s | `6f4f3d66…82be51` |
+| S5, four threads | **3m46s** | 12m24s | `6f4f3d66…82be51` |
+
+Total CPU time barely moved (11m18s → 12m24s, +9% of contention and memory bandwidth), which
+is the honest reading: the work did not get cheaper, it stopped queueing. The blob is
+**byte-identical to S4's**, so the parallelisation changed the clock and nothing else — that
+is the assertion, not a hope, and `tests/determinism.rs` now covers the RD path at 1 vs 4
+threads as well as emit.
+
+**The failure worth recording is that the CLI's defaults are behaviour.** Rewriting the
+argument parser for `--wav`/`--emit-pcm` quietly moved `--fine` from 4 to 0 and turned
+training off by default; on the 5-frame `corr` fixture the search then emitted 18,331 bits
+where S4 emitted 15,664, and the blob hash changed. Nothing in the suite noticed — the RD
+tests pass explicit shapes — and the thing that caught it was re-running S4's binary on the
+same input and diffing hashes, not reading the diff of the parser. The defaults are restored
+(`--fine 4`, training on, `--no-train` the A/B arm), and the equivalence is recorded above
+as a blob hash rather than as an intention.
+
+**The WAV layer, and the resampler bug its test found.** `wav.rs` reads RIFF/WAVE including
+`WAVE_FORMAT_EXTENSIBLE`, integer PCM 8/16/24/32 and float 32, one or two channels, any
+rate; `assemble.rs` duplicates mono, joins the tracks gaplessly, reads `LIST/INFO`
+`INAM`/`IART`, folds tags the way §5.5 requires and falls back to the file stem and `?`;
+`resample.rs` is a polyphase Kaiser-windowed sinc, 32 taps per phase, each phase normalised
+to unity DC. The first version's cutoff was a constant 0.475 of the *source* rate, which is
+right for upsampling and wrong for downsampling: a 20 kHz tone at 44,100 Hz came out only
+−2.2 dB down, i.e. it aliased straight into the band. `tests/resample.rs` now asserts the
+guard band rejects what 32,768 Hz cannot carry, alongside the assertions that matter to the
+encoder: 32,768 Hz is a byte copy, DC gain is 1 within 0.05 PCM16 units, and a 1 kHz
+passband tone keeps >80 dB both up and down.
+
+**The byte claim is a test, not prose.** `tests/wav.rs` builds the same samples twice — as
+`album.f32` + `tracks.tsv` and as a 32,768 Hz stereo 16-bit WAV — encodes both at `--g 100`
+and asserts the blobs are equal. `--emit-pcm DIR` writes back the pair the front end
+assembled, and a CLI test re-encodes the dump to the same bytes, so the dump is the buffer
+that was encoded rather than a second conversion.
+
+**The verify block grew the reference's columns** (S7 needs a readable diff): per-track
+time-domain SNR at pcm16 and int8, their means, the pooled album codec SNR that E-R7 is
+stated against, and every track is now also **seeked to its own preroll** and decoded — "every
+track decodes" as a claim about the track table, not merely about a linear walk. The album
+line prints `dacw off`: that pass is S6's, and printing `0` would claim a knob ran.
+
+**The gate, measured.** The 43.5-minute `cross` album (167,222 frames) at
+`--rd --budget 33292288 --cap 74 --threads 4` encodes to **33,291,896 bytes — 392 spare**
+(`69911924…e656b8`), every one of the 12 tracks decodes and is seeked to, `xover 0`,
+`hfnz 0`, est. cycles 67.3% mean / 74.0% max. The reference on the same box, inputs and
+flags is 33,280,720 bytes (`b3c63657…89ae2a`), 32.16/28.97 dB against our 31.75/28.56 —
+a 0.41 dB quality gap, on a different album from S4's 0.16 dB, and the two must not be
+quoted as one. The full table, including the one thing S5 does **not** discharge — 40m11s
+against the reference's 14m30s, i.e. E-R9's *rationale* rather than its mechanism, because
+`measure` codes every candidate exactly — is in
+[`RECORD.md`](RECORD.md) → "2026-11-20 — S5". A too-small budget still refuses before the
+first frame (S1's `Refusal`, covered by `tests/refusal.rs`).
 
 #### S4 — training, and the ~1 dB it turns out to have been
 
