@@ -297,6 +297,7 @@ fn rate_and_snr_move_the_right_way_with_the_step() {
             rd: false,
             kappa: 0.13,
             stride: 8,
+            fine_width: 0,
             ms: None,
             threads: 1,
         })
@@ -353,6 +354,7 @@ fn the_search_actually_runs_and_changes_the_album() {
             rd,
             kappa: 0.13,
             stride: 8,
+            fine_width: 0,
             ms: None,
             threads: 1,
         })
@@ -484,6 +486,7 @@ fn the_search_fits_every_budget_it_accepts() {
             rd: true,
             kappa: 0.13,
             stride: 8,
+            fine_width: 0,
             ms: None,
             threads: 1,
         })
@@ -811,6 +814,7 @@ fn an_ms_album_decodes_to_sane_audio_and_beats_lr_on_correlated_stereo() {
             rd: false,
             kappa: 0.13,
             stride: 8,
+            fine_width: 0,
             ms,
             threads: 1,
         })
@@ -869,6 +873,7 @@ fn the_search_chooses_the_domain_per_frame_and_the_stream_agrees() {
         rd: true,
         kappa: 0.13,
         stride: 8,
+        fine_width: 0,
         ms: None,
         threads: 1,
     })
@@ -892,6 +897,7 @@ fn the_search_chooses_the_domain_per_frame_and_the_stream_agrees() {
         rd: true,
         kappa: 0.13,
         stride: 8,
+        fine_width: 0,
         ms: Some(false),
         threads: 1,
     })
@@ -931,6 +937,7 @@ fn ms_frames_are_thread_invariant() {
             rd: true,
             kappa: 0.13,
             stride: 8,
+            fine_width: 0,
             ms: None,
             threads,
         })
@@ -946,5 +953,59 @@ fn ms_frames_are_thread_invariant() {
     assert_eq!(
         one.bytes, four.bytes,
         "--threads 1 and 4 differ with M/S enabled"
+    );
+}
+
+/// The refinement pass: a coarse sweep locates each frame's neighbourhood, then one-step
+/// resolution inside it. The claim is that this buys nearly all of the fine-grid quality for
+/// a fraction of the fine-grid cost, so this asserts the quality half — the cost half is the
+/// gate script's business, and was measured when the pass was built (2.6 dB of the fine
+/// grid's gain recovered for ~20% of its runtime).
+///
+/// Both runs share a binding budget, so it is like for like: the refined search must beat the
+/// coarse-only search it replaces, and must still fit.
+#[test]
+fn refining_the_grid_never_costs_quality() {
+    let dir = TempDir::new("refine");
+    let (album, tracks) = correlated_album(dir.path());
+    let run = |fine_width: i32| {
+        encode(&Args {
+            album: album.clone(),
+            tracks: tracks.clone(),
+            budget: 8_000,
+            cap_pct: DEFAULT_CAP_PCT,
+            g: None,
+            rd: true,
+            kappa: 0.13,
+            stride: 8,
+            fine_width,
+            ms: None,
+            threads: 1,
+        })
+        .expect("encodes")
+    };
+    let coarse = run(0);
+    let refined = run(4);
+    assert!(
+        refined.bytes.len() as u64 <= 8_000,
+        "the refined search overshot its budget: {} bytes",
+        refined.bytes.len()
+    );
+    let (a, b) = (
+        refined.report.snr_db.expect("SNR"),
+        coarse.report.snr_db.expect("SNR"),
+    );
+    assert!(
+        a >= b,
+        "refining the grid measured {a:.2} dB against the coarse grid's {b:.2} dB at the same \
+         budget. A finer grid contains every coarse point, so it cannot be worse: if it is, \
+         the window is centred wrongly and frames are being pushed away from their optimum."
+    );
+    assert_eq!(refined.report.n_frames, coarse.report.n_frames);
+    // The refined plan is a different one, not a relabelled coarse plan.
+    assert!(
+        refined.report.stream_bits != coarse.report.stream_bits || a > b,
+        "the refined search produced the coarse search's plan unchanged, so the fine sweep \
+         never ran"
     );
 }

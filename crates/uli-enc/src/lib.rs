@@ -68,8 +68,12 @@ pub struct Args {
     /// The search's Lagrangian distortion-to-bits scale (`--kappa`): the price of one bit
     /// in squared-error units, before `λ` scales it by the step.
     pub kappa: f64,
-    /// Candidate spacing across `GMIN..=GMAX`, in step indices.
+    /// Spacing of the coarse sweep across `GMIN..=GMAX`, in step indices.
     pub stride: i32,
+    /// Half-width of the fine sweep around each frame's coarse optimum, in steps. `0`
+    /// leaves the coarse grid alone; ~4 buys one-step resolution for a few extra
+    /// candidates rather than `stride` times as many.
+    pub fine_width: i32,
     /// Force M/S, or leave the choice to the encoder. `None` lets the search pick, per `g`,
     /// whichever of L/R and M/S is cheaper under `J` subject to the cycle cap — at a fixed
     /// step the two are two concrete codings of the same frame, so one of them dominates.
@@ -182,6 +186,7 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         rd,
         kappa,
         stride,
+        fine_width,
         ms,
         threads,
     } = input;
@@ -190,8 +195,17 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
     // version of this guard missed: `args.rd` still resolved, so the exhaustive
     // pattern proved nothing.
     let (album, tracks) = (album.as_path(), tracks.as_path());
-    let (budget, cap_pct, g, rd, kappa, stride, ms, threads) =
-        (*budget, *cap_pct, *g, *rd, *kappa, *stride, *ms, *threads);
+    let (budget, cap_pct, g, rd, kappa, stride, fine_width, ms, threads) = (
+        *budget,
+        *cap_pct,
+        *g,
+        *rd,
+        *kappa,
+        *stride,
+        *fine_width,
+        *ms,
+        *threads,
+    );
     let _ = kappa; // S3's remaining substance: the per-coefficient RD it should scale.
     let pcm = Pcm::open(album, tracks)?;
     let mut report_g: Option<Vec<i32>> = None;
@@ -227,18 +241,16 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         let sizing = Plan::new(&pcm, tables, &Content::silence(nf), budget, cap_pct)?;
         let s = samples.as_ref().expect("--rd loads the album above");
         let cap = rd::cap_cycles(cap_pct);
-        let curves = Curves::compute(
-            s,
-            pcm.n_samples as usize,
-            &rd::SearchParams {
-                tables,
-                n_frames: nf,
-                stride,
-                kappa,
-                cap,
-                force_ms: ms,
-            },
-        )?;
+        let params = rd::SearchParams {
+            tables,
+            n_frames: nf,
+            stride,
+            fine_width,
+            kappa,
+            cap,
+            force_ms: ms,
+        };
+        let curves = Curves::compute(s, pcm.n_samples as usize, &params)?;
         let mut coef = [0f32; 2 * M];
         let energy: Vec<f64> = (0..nf)
             .map(|f| {
@@ -255,6 +267,20 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         // with a 2% margin and a flat 2000 bits so the next attempt lands under rather than
         // oscillating. A budget this cannot meet is refused by `Plan::new` on the last
         // attempt, citing both numbers (E-R6).
+        // The search runs coarse, then fine, then — if the budget has to move — coarse
+        // again, because a window is only meaningful at a price. Concretely: the coarse
+        // sweep locates each frame's neighbourhood for a given λ; the fine sweep gives that
+        // neighbourhood one-step resolution; and if the real stream overshoots, the target
+        // moves, hence λ moves, hence every frame's neighbourhood is in the wrong place.
+        // Re-centring on the retry is what makes the refinement self-correcting instead of a
+        // bet that the first price was right — which it is not, because the first price is
+        // computed against curve bits that exclude the frame header.
+        let coarse = curves;
+        let mut curves = coarse.clone();
+        let (lam_coarse, _) = coarse.allocate(&w, sizing.target_bits as f64, cap)?;
+        if fine_width > 0 {
+            curves = coarse.refine(s, pcm.n_samples as usize, &params, &w, lam_coarse)?;
+        }
         let mut target = sizing.target_bits as f64;
         let mut chosen: Option<(Content, Vec<i32>, f64)> = None;
         for attempt in 0..RETRY_ATTEMPTS {
@@ -272,9 +298,13 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
                     let over = (r.needed as f64 - r.allowed as f64) * 8.0 * 1.02 + 2000.0;
                     target -= over;
                     if target < 1000.0 {
-                        // The album cannot be coded that cheaply; say so with the
-                        // numbers rather than looping into a degenerate target.
+                        // The album cannot be coded that cheaply; say so with the numbers
+                        // rather than looping into a degenerate target.
                         return Err(Error::Refusal(r));
+                    }
+                    if fine_width > 0 {
+                        let (lam2, _) = coarse.allocate(&w, target, cap)?;
+                        curves = coarse.refine(s, pcm.n_samples as usize, &params, &w, lam2)?;
                     }
                 }
                 Err(e) => return Err(e),

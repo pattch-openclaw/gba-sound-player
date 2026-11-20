@@ -15,7 +15,7 @@ use std::process::ExitCode;
 
 use uli_enc::{Args, DEFAULT_BUDGET, DEFAULT_CAP_PCT, encode};
 
-const USAGE: &str = "usage: uli-enc --album F --tracks TSV --out U [--budget BYTES]                     [--cap PCT] [--threads N] [--g N] [--rd] [--kappa X] [--stride N] [--ms]";
+const USAGE: &str = "usage: uli-enc --album F --tracks TSV --out U [--budget BYTES]                     [--cap PCT] [--threads N] [--g N] [--rd] [--kappa X] [--stride N] [--fine N] [--ms]";
 
 fn main() -> ExitCode {
     match run() {
@@ -39,6 +39,7 @@ fn run() -> Result<(), ExitCode> {
     let mut rd = false;
     let mut kappa = uli_enc::DEFAULT_KAPPA;
     let mut stride = 8i32;
+    let mut fine_width = 4i32;
     // `--ms` forces M/S; absent, the encoder chooses per frame.
     let mut ms: Option<bool> = None;
 
@@ -55,6 +56,7 @@ fn run() -> Result<(), ExitCode> {
             "--rd" => rd = true,
             "--kappa" => kappa = parse(&mut it, "--kappa")?,
             "--stride" => stride = parse(&mut it, "--stride")?,
+            "--fine" => fine_width = parse(&mut it, "--fine")?,
             "--ms" => ms = Some(true),
             other => return Err(usage(format!("unknown argument {other:?}"))),
         }
@@ -74,6 +76,7 @@ fn run() -> Result<(), ExitCode> {
         rd,
         kappa,
         stride,
+        fine_width,
         ms,
     };
     if rd && g.is_some() {
