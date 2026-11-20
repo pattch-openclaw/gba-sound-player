@@ -1,41 +1,45 @@
 # uli-enc
 
-The host-side ULI2 encoder — **steps S1 through S3b**. It takes a PCM album and a track
+The host-side ULI2 encoder — **steps S1 through S4**. It takes a PCM album and a track
 table and writes one ULA2 blob that `uli-lite` (and therefore the GBA decoder) accepts:
 
-* `album.f32` — float32 interleaved stereo at PCM16 scale (samples × 32768),
-  joined gaplessly at 32,768 Hz;
-* `tracks.tsv` — `n start len title artist`, one row per track, in 32,768 Hz
-  samples. This pair is the boundary E-R2 fixes, and it is deliberately narrow: samples
-  rather than a waveform format, so a decoder in the loop makes it testable byte for byte.
+* `album.f32` — float32 interleaved stereo at PCM16 scale (samples × 32768), joined
+  gaplessly at 32,768 Hz;
+* `tracks.tsv` — `n start len title artist`, one row per track, in 32,768 Hz samples.
 
-The **track table sets the album length**: `NS = last.start + last.len`, as in the
-table, and `album.f32` must be exactly `NS` samples — no padded tail, no
-truncated one. A disagreement is refused with both counts before a frame is planned
-(`PLAN-OF-RECORD.md` → "S1 — what the review found", the `NS` ruling). Gaps between tracks and a
-first track that starts after sample 0 are fine; overlap and descending order are
-not, because they make `NS` ambiguous.
+That pair is the boundary E-R2 fixes, and it is deliberately narrow: samples rather than a
+waveform format, so a decoder in the loop makes it testable byte for byte.
 
-**`g` is bounded on the way out.** `Plan::new` takes the per-frame `GPlan` of
-`(g, ms)` and refuses any frame whose step index `g - 4*ms` falls outside the
-reader's `0..NSTEP`, because that is the decoder's own check and an unbounded `g`
-means a whole album written, every encoder-side check passed, and a `BadFrame` on
-hardware. It is the decoder's window; the search's own `GMIN..GMAX` range is narrower
-and is a policy about where good rates live — refusing legal albums there would trade a
-format guarantee for a heuristic.
+The **track table sets the album length**: `NS = last.start + last.len`, and `album.f32` must
+be exactly `NS` samples — no padded tail, no truncated one. A disagreement is refused with
+both counts before a frame is planned (`PLAN-OF-RECORD.md` → "S1 — what the review found", the
+`NS` ruling). Gaps between tracks and a first track starting after sample 0 are fine; overlap
+and descending order are not, because they make `NS` ambiguous.
+
+**`g` is bounded on the way out.** `Plan::new` takes the per-frame `GPlan` of `(g, ms)` and
+refuses any frame whose step index `g - 4*ms` falls outside the reader's `0..NSTEP`, because
+that is the decoder's own check and an unbounded `g` means a whole album written, every
+encoder-side check passed, and a `BadFrame` on hardware. It is the decoder's window; the
+search's own `GMIN..GMAX` range is narrower and is a policy about where good rates live —
+refusing legal albums there would trade a format guarantee for a heuristic.
 
 **`--rd` searches, and can choose M/S per frame.** The two channels are rotated to
 `M = (L+R)/√2`, `S = (L−R)/√2` — orthonormal, so the rotated-domain distortion *is* the
 output-domain distortion — and quantised at `step·√2/16`, which is what the reader's plain
-integer add inverts. At each step the two domains are weighed on one scale (λ from the
-L/R unit, so the two are compared on one scale). `--ms` forces it; absent, the search
-decides, and 93% of frames on real stereo pick it.
+integer add inverts. At each step the two domains are quantised with their own unit but weighed
+on one scale (λ from the L/R unit). `--ms` forces the flag; absent, the search decides, and 93%
+of frames on real stereo pick it.
 
-**Per frame and per band it applies `J = D + kappa·D²·R`**, which is
-what lets a coefficient be *dropped* rather than coded — the difference between S2's
-rate at a fixed step and the rate a distortion-only quantiser spends. `--cap` finally
-constrains something: a candidate whose reader cycle model exceeds it is not offered. The bit target is then
-solved by bisecting λ, and the plan is rebuilt until the *real* stream fits the budget.
+**Per band and per coefficient it applies `J = D + kappa·D²·R`**, which is what lets a
+coefficient be *dropped* rather than coded — the difference between a fixed-step quantiser and
+the rate a distortion-only one spends. `--cap` constrains the candidate set: a band
+arrangement whose reader cycle model exceeds it is not offered.
+
+The grid is swept **coarse, then fine**: a uniform sweep across the window locates each frame's
+neighbourhood, then one-step resolution is spent inside it. That recovers ~96% of a full
+one-step sweep for ~20% of its cost, because a step is ~0.75 dB of SNR and eight steps of
+coarseness can leave a frame up to ±3 dB off its operating point. The bit target is solved by
+bisecting λ, and the plan is rebuilt until the *real* stream fits the budget.
 
 **Tables are trained on the album by default** (`--no-train` turns it off). Pass one codes the
 album with the built-in tables to measure its own symbol counts and reconstruction errors; the
@@ -43,48 +47,40 @@ lengths and per-class `dq` offsets are rebuilt from those counts; pass two searc
 the trained set, and that second plan is the one that ships. It costs a second search and buys
 ~0.9 dB at a binding budget.
 
-**With `--g N`, S2 runs.** The forward MDCT reproduces a too-independent-to-be-lucky
-golden of its own coefficients **bit for bit**
-(`tests/fixtures/mdct_in.f32` → `mdct_ref_coef.f32`, regenerated by
-`make uli-mdct-fixture`), its constants are checked in rather than called for
-(E-R5's rule R5c), and the fixed-step quantiser offers the same candidate set — `{0, floor t, floor t + 1}`, first minimum wins — rather than
-rounding honestly, which would encode different magnitudes and so a different blob.
-Without `--g` or `--rd` the album is S1's silence, because the container and the
-refusals should not depend on the codec.
+**With `--g N`, a fixed step is used instead.** The forward MDCT reproduces a frozen golden of
+its coefficients **bit for bit** (`tests/fixtures/mdct_in.f32` → `mdct_ref_coef.f32`,
+regenerated by `make uli-mdct-fixture`), its constants are checked in rather than called for
+(E-R5's rule R5c), and the quantiser offers the candidate set `{0, floor t, floor t + 1}` with
+the first minimum winning — a *complete* set, since a level reconstructs to `m − dq/16` and the
+best level for `t` is therefore always in `(floor t, floor t + 1]`. Without `--g` or `--rd` the
+album is silence, because the container and the refusals should not depend on the codec.
 
-What S1 owns is the structure, not the codec: the table transcription and
-computed default code lengths (pinned byte-for-byte to a golden, see
-`tests/fixtures/README.md`), the bit writer, plan-then-emit container writing
-(header, tracks, tables, seek table, strings, stream), the per-frame content plan
-and the step-index bound the reader enforces, the overhead/budget arithmetic with an
-early whole-album refusal, and thread-invariant output.
+A DC frame (`FrameKind::DcImpulse`) is implemented and round-trip tested: "DC" means *one
+non-zero band-0 coefficient*, a structural witness that a non-zero band codes and decodes — its
+amplitude is the quantiser's business, not an audio claim.
 
 ## What it is not (yet)
 
-* **no trained code tables** — S4. Every frame is coded with `tables_default`, where the
-  the target fits the codebooks to the album. This is the leading explanation for the
-  remaining ~1 dB at equal rate — not yet measured, so not yet a conclusion;
-
-
-A DC frame (`FrameKind::DcImpulse`) is
-implemented and round-trip tested: "DC" here means *one non-zero band-0
-coefficient*, a structural witness that a non-zero band codes and decodes — the
-amplitude is the quantiser's job in E2, not an audio claim.
-
-`--cap` is accepted and validated but still has nothing to constrain yet, because the
-RD search it bounds does not exist yet.
+* **no cycle-aware re-coding** — S6. At a binding `--cap` this search refuses candidates over
+  the cap; re-coding them with the cycle term instead keeps a finer step by dropping the
+  cheapest coefficients. Measured at `--budget 400000 --cap 74`, that mechanism is worth
+  **1.48 dB** to an encoder that has it, against a 1.15 dB gap here — so it is the whole
+  high-rate difference, and nothing else needs to move there;
+* **no WAV front end, and no real per-frame budget tuning** — S5. Input is the PCM pair, and a
+  43-minute album takes ~56 min single-threaded, which is why S5 owns the frame parallelism.
 
 ## Run
 
 ```sh
 cargo run --bin uli-enc -- --album album.f32 --tracks tracks.tsv --out album.uli \
-    [--budget 33292288] [--cap 74] [--threads N] [--g 100]
+    [--budget 33292288] [--cap 74] [--threads N] [--rd] [--stride 8] [--fine 4] \
+    [--no-train] [--kappa 0.13] [--ms] [--g 100]
 ```
 
-It prints a sizing line
-(`container overhead N bytes; stream target N bits = N.N bits/frame`) and exits
-nonzero, citing needed and allowed bytes, if the album does not fit the budget —
-before writing `--out`.
+It prints a sizing line (`container overhead N bytes; stream target N bits = N.N bits/frame`),
+the stream it actually produced, the step range or fixed step, the M/S share, and the codec's
+own verify line. It exits nonzero, citing needed and allowed bytes, if the album does not fit
+the budget — before writing `--out`.
 
 ## Test
 
@@ -92,30 +88,34 @@ before writing `--out`.
 make uli-test
 ```
 
-Or by hand, **from a neutral directory** and with the host triple: the repository
-root's `.cargo/config.toml` pins the GBA target and `-Zbuild-std`, and cargo
-discovers that file by walking up from the *current directory* — so running
-`cargo test` inside `crates/uli-enc/` builds for thumbv4t and fails with a storm of
-`cannot find type Vec` errors that say nothing about this code. (Being a standalone
-workspace isolates the dependency graph; it does not isolate the target.)
+Or by hand, **from a neutral directory** and with the host triple: the repository root's
+`.cargo/config.toml` pins the GBA target and `-Zbuild-std`, and cargo discovers that file by
+walking up from the *current directory* — so running `cargo test` inside `crates/uli-enc/`
+builds for thumbv4t and fails with a storm of `cannot find type Vec` errors that say nothing
+about this code. (Being a standalone workspace isolates the dependency graph; it does not
+isolate the target.)
 
 ```sh
 mkdir -p /tmp/gba-sound-player-host-gate && cd /tmp/gba-sound-player-host-gate
 cargo test --manifest-path <repo>/crates/uli-enc/Cargo.toml --target <host-triple>
 ```
 
-Two gates matter, and they are not the same question:
+Four things are checked, and they are not the same question:
 
-- `tests/roundtrip.rs` — the encoder's output is parsed by `uli_lite::Album`, its
-  tables by `CodeTables::parse_into`, and every frame is decoded. The decoder, not
-  this crate, says whether the blob is real.
-- `tests/tables_golden.rs` — the tables blob equals the **pinned golden's bytes**,
+- `tests/roundtrip.rs` — the output is parsed by `uli_lite::Album`, its tables by
+  `CodeTables::parse_into`, and every frame is decoded. The decoder, not this crate, says
+  whether the blob is real.
+- `tests/tables_golden.rs` — the default tables blob equals the **pinned golden's bytes**,
   frozen at `tests/fixtures/uli2_default_tables.bin` and regenerated by
-  `make uli-default-tables`. The round-trip structurally cannot catch a blob that
-  parses and decodes but differs from the golden, and that difference is the
-  E6 acceptance gate; see `PLAN-OF-RECORD.md` → "S1 — what the review found".
+  `make uli-default-tables`. A round-trip structurally cannot catch a blob that parses and
+  decodes but differs from the golden, and that difference is the acceptance gate.
+- `tests/quant.rs` — the quantiser differentially against 2,400 frozen oracle cases
+  (`make uli-band-rdo-fixture`), plus the consumption check that the reader's bit position
+  advance equals the bits the plan sized.
+- `tests/train.rs` — a trained table set is a *usable* set (complete prefix codes, still
+  inside the closed-world premise), training pays for itself, and two encodes are byte-identical.
 
-`tests/gplan.rs` and `tests/pcm.rs` witness the two refusals above. One of
-`gplan.rs`'s tests is the counter-example for the whole slice: it hand-builds an
-out-of-window stream past `Plan::new` and shows the container parsing it happily and
-the reader then refusing frame 0 — which is what the encoder used to do on its own.
+`tests/gplan.rs` and `tests/pcm.rs` witness the two refusals above. One of `gplan.rs`'s tests
+is the counter-example for the whole slice: it hand-builds an out-of-window stream past
+`Plan::new` and shows the container parsing it happily and the reader then refusing frame 0 —
+which is what the encoder used to do on its own.
