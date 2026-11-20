@@ -165,10 +165,11 @@ def main() -> int:
             print()
         print("Reminder: the SNR column is full-band time-domain on both sides. E-R7's")
         print("32.29/25.78 dB is codec-only; do not compare the two metrics.")
-        print("Both sides now offer M/S (S3b). What the reference still has and we do not:")
-        print("trained code tables (S4) and a second allocation pass over the frame")
-        print("weights (`--dacw`). Those are where a remaining gap belongs until S4 says")
-        print("otherwise -- not in the search, which the fixed-g A/B shows is exact.")
+        print("Both sides offer M/S (S3b) and train their code tables (S4). What the")
+        print("remaining gap is NOT: the quantiser (the fixed-step A/B matches distortion to")
+        print("seven figures) or the codebooks. What it is: at a binding --cap this encoder")
+        print("refuses candidates over the cap, where the other re-codes them with the cycle")
+        print("term and keeps a finer step. That is E-R8's knob, S6.")
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

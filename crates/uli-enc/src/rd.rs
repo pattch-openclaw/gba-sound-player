@@ -88,8 +88,11 @@ pub const CYCLE_PERIOD: u32 = 262_144;
 pub struct SearchParams<'a> {
     pub tables: &'a DefaultTables,
     pub n_frames: usize,
-    /// Candidate spacing across `GMIN..=GMAX`, in step indices.
+    /// Spacing of the coarse sweep across `GMIN..=GMAX`, in step indices.
     pub stride: i32,
+    /// Half-width, in steps, of the fine sweep around each frame's coarse optimum. Zero
+    /// disables refinement and leaves the coarse grid alone.
+    pub fine_width: i32,
     /// The distortion-to-bits scale, `--kappa`.
     pub kappa: f64,
     /// `--cap PCT` expressed as cycles.
@@ -324,6 +327,7 @@ impl Curves {
             tables,
             n_frames,
             stride,
+            fine_width: _,
             kappa,
             cap,
             force_ms,
@@ -384,6 +388,111 @@ impl Curves {
             per_frame.push(c);
         }
         Ok(Self { per_frame, stride })
+    }
+
+    /// Re-measure each frame on a **fine** grid inside a window around its coarse optimum.
+    ///
+    /// A single uniform sweep forces one trade for the whole search: a coarse grid is cheap
+    /// and loses up to `±(stride-1)/2` steps of resolution, a fine one costs `stride` times
+    /// as much. Neither is necessary. Coarse points locate each frame's neighbourhood for a
+    /// given price, and only that neighbourhood needs one-step resolution — so the second
+    /// sweep is `2*width+1` candidates per frame instead of `stride` times the whole window.
+    ///
+    /// `lambda` is the price the first allocation settled on. Re-using it is what makes this
+    /// a *refinement* rather than a second search: the neighbourhood is chosen where the
+    /// final answer is expected, and the allocation is then re-run on the finer curves, so
+    /// the price can still move once the rates are better known.
+    pub fn refine(
+        &self,
+        samples: &Samples,
+        n_samples: usize,
+        p: &SearchParams<'_>,
+        w: &[f64],
+        lambda: f64,
+    ) -> Result<Self, Error> {
+        let width = p.fine_width;
+        if width <= 0 {
+            return Ok(self.clone());
+        }
+        debug_assert_eq!(w.len(), self.per_frame.len(), "one weight per frame");
+        let mut coef = [0f32; 2 * M];
+        let mut per_frame = Vec::with_capacity(self.per_frame.len());
+        for (f, coarse) in self.per_frame.iter().enumerate() {
+            crate::mdct::mdct_frame(samples, f, n_samples, &mut coef);
+            // Where the coarse grid says this frame wants to be, at this price.
+            let mut best_j = f64::INFINITY;
+            let mut centre = G_MIN;
+            for i in 0..coarse.g.len() {
+                if coarse.c[i] > p.cap {
+                    continue;
+                }
+                let j = w[f] * coarse.d[i] + lambda * coarse.r[i];
+                if j < best_j {
+                    best_j = j;
+                    centre = coarse.g[i];
+                }
+            }
+            let lo = (centre - width).max(G_MIN);
+            let hi = (centre + width).min(G_MAX);
+            let mut c = Curve {
+                g: Vec::new(),
+                r: Vec::new(),
+                d: Vec::new(),
+                c: Vec::new(),
+                ms: Vec::new(),
+            };
+            let mut g = lo;
+            while g <= hi {
+                if let Some((i, _)) = coarse.g.iter().enumerate().find(|&(_, &cg)| cg == g) {
+                    // Already measured on the coarse sweep; reordering would be waste.
+                    c.g.push(g);
+                    c.r.push(coarse.r[i]);
+                    c.d.push(coarse.d[i]);
+                    c.c.push(coarse.c[i]);
+                    c.ms.push(coarse.ms[i]);
+                } else {
+                    let point = Self::measure_g(&coef, p, g)?;
+                    c.g.push(g);
+                    c.r.push(point.0.bits as f64);
+                    c.d.push(point.0.dist);
+                    c.c.push(point.0.cycles);
+                    c.ms.push(point.1);
+                }
+                g += 1;
+            }
+            per_frame.push(c);
+        }
+        Ok(Self {
+            per_frame,
+            stride: 1,
+        })
+    }
+
+    /// Measure one `(g, ms)` candidate: quantise both domains, take the cheaper under one
+    /// price, and report the winner. Returns the point and whether it is M/S.
+    fn measure_g(
+        coef: &[f32; 2 * M],
+        p: &SearchParams<'_>,
+        g: i32,
+    ) -> Result<(Point, bool), Error> {
+        let lam0 = p.kappa * quant::Unit::of(g, false).d * quant::Unit::of(g, false).d;
+        let (a, _) = measure(coef, p.tables, g, false, p.kappa)?;
+        let (b, _) = measure(coef, p.tables, g, true, p.kappa)?;
+        let fa = a.cycles <= p.cap;
+        let fb = b.cycles <= p.cap;
+        let useb = match p.force_ms {
+            Some(m) => m,
+            None => {
+                if fa == fb {
+                    let jb = b.dist + lam0 * b.bits as f64;
+                    let ja = a.dist + lam0 * a.bits as f64;
+                    jb < ja
+                } else {
+                    fb
+                }
+            }
+        };
+        Ok((if useb { b } else { a }, useb))
     }
 
     /// Pick one candidate per frame for a given λ, minimising `w·D + λR` subject to

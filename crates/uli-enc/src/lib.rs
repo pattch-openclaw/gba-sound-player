@@ -31,6 +31,7 @@ pub mod plan;
 pub mod quant;
 pub mod rd;
 pub mod tables_default;
+pub mod train;
 
 use std::fmt;
 use std::path::PathBuf;
@@ -68,8 +69,17 @@ pub struct Args {
     /// The search's Lagrangian distortion-to-bits scale (`--kappa`): the price of one bit
     /// in squared-error units, before `λ` scales it by the step.
     pub kappa: f64,
-    /// Candidate spacing across `GMIN..=GMAX`, in step indices.
+    /// Spacing of the coarse sweep across `GMIN..=GMAX`, in step indices.
     pub stride: i32,
+    /// Half-width of the fine sweep around each frame's coarse optimum, in steps. `0`
+    /// leaves the coarse grid alone; ~4 buys one-step resolution for a few extra
+    /// candidates rather than `stride` times as many.
+    pub fine_width: i32,
+    /// Train the code tables on the album before coding it (S4). Two passes: code once with
+    /// the built-in tables to measure the album's own statistics, rebuild the lengths and
+    /// reconstruction offsets from those counts, then search again with the trained set.
+    /// The plan that ships is the second one, measured as it will actually be coded.
+    pub train: bool,
     /// Force M/S, or leave the choice to the encoder. `None` lets the search pick, per `g`,
     /// whichever of L/R and M/S is cheaper under `J` subject to the cycle cap — at a fixed
     /// step the two are two concrete codings of the same frame, so one of them dominates.
@@ -111,6 +121,8 @@ pub struct Report {
     pub hfnz: u32,
     /// Coefficients that coded a nonzero magnitude, both channels.
     pub nonzero_coeffs: usize,
+    /// Whether the code tables were trained on this album (S4).
+    pub trained: bool,
     /// Frames coded as M/S. The fastest way to see whether the flag is doing anything at
     /// all: on real stereo it should be most of them, and a search that silently never
     /// chose it would otherwise look merely mediocre.
@@ -182,6 +194,8 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         rd,
         kappa,
         stride,
+        fine_width,
+        train,
         ms,
         threads,
     } = input;
@@ -190,9 +204,18 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
     // version of this guard missed: `args.rd` still resolved, so the exhaustive
     // pattern proved nothing.
     let (album, tracks) = (album.as_path(), tracks.as_path());
-    let (budget, cap_pct, g, rd, kappa, stride, ms, threads) =
-        (*budget, *cap_pct, *g, *rd, *kappa, *stride, *ms, *threads);
-    let _ = kappa; // S3's remaining substance: the per-coefficient RD it should scale.
+    let (budget, cap_pct, g, rd, kappa, stride, fine_width, train, ms, threads) = (
+        *budget,
+        *cap_pct,
+        *g,
+        *rd,
+        *kappa,
+        *stride,
+        *fine_width,
+        *train,
+        *ms,
+        *threads,
+    );
     let pcm = Pcm::open(album, tracks)?;
     let mut report_g: Option<Vec<i32>> = None;
     let mut report_lambda: Option<f64> = None;
@@ -218,6 +241,8 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
     } else {
         None
     };
+    let mut tables_effective: Option<DefaultTables> = None;
+    let mut trained_used = false;
     let content = if rd {
         // S3's chicken-and-egg: the search needs the bit target, the bit target
         // needs the container overhead. Overhead is a function of the track table,
@@ -227,18 +252,9 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         let sizing = Plan::new(&pcm, tables, &Content::silence(nf), budget, cap_pct)?;
         let s = samples.as_ref().expect("--rd loads the album above");
         let cap = rd::cap_cycles(cap_pct);
-        let curves = Curves::compute(
-            s,
-            pcm.n_samples as usize,
-            &rd::SearchParams {
-                tables,
-                n_frames: nf,
-                stride,
-                kappa,
-                cap,
-                force_ms: ms,
-            },
-        )?;
+        // The per-frame weights the allocation trades under: a frame is normalised by its
+        // track's mean energy, so a fixed price buys the same *relative* improvement
+        // everywhere instead of spending the album on its loudest passage.
         let mut coef = [0f32; 2 * M];
         let energy: Vec<f64> = (0..nf)
             .map(|f| {
@@ -247,44 +263,82 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             })
             .collect();
         let w = rd::weights(&pcm, &energy);
-        // The retry loop, which is what closes the budget residue. The search solves on
-        // bits measured from a candidate's *own* frame; the real stream also pays the `g`
-        // delta (expensive when a coarser walk makes `g` jump), the terminator and the
-        // halfword padding, and no candidate owns any of them. So the plan is built,
-        // checked against the budget, and the target lowered by exactly what it overshot —
-        // with a 2% margin and a flat 2000 bits so the next attempt lands under rather than
-        // oscillating. A budget this cannot meet is refused by `Plan::new` on the last
-        // attempt, citing both numbers (E-R6).
-        let mut target = sizing.target_bits as f64;
-        let mut chosen: Option<(Content, Vec<i32>, f64)> = None;
-        for attempt in 0..RETRY_ATTEMPTS {
-            let (lambda, picks) = curves.allocate(&w, target, cap)?;
-            let content = curves.to_content(&picks, s, pcm.n_samples as usize, tables, kappa)?;
-            match Plan::new(&pcm, tables, &content, budget, cap_pct) {
-                Ok(_) => {
-                    chosen = Some((content, curves.chosen_g(&picks), lambda));
-                    break;
-                }
-                Err(Error::Refusal(r)) => {
-                    if attempt + 1 == RETRY_ATTEMPTS {
-                        return Err(Error::Refusal(r));
+
+        // One search over a given table set, so training can run it twice: once to measure
+        // the album, once to code it with what the measurement produced.
+        let run = |tbl: &DefaultTables| -> Result<(Content, Vec<i32>, f64), Error> {
+            let params = rd::SearchParams {
+                tables: tbl,
+                n_frames: nf,
+                stride,
+                fine_width,
+                kappa,
+                cap,
+                force_ms: ms,
+            };
+            let coarse = Curves::compute(s, pcm.n_samples as usize, &params)?;
+            let (lam_coarse, _) = coarse.allocate(&w, sizing.target_bits as f64, cap)?;
+            let mut curves = if fine_width > 0 {
+                coarse.refine(s, pcm.n_samples as usize, &params, &w, lam_coarse)?
+            } else {
+                coarse.clone()
+            };
+            let mut target = sizing.target_bits as f64;
+            for attempt in 0..RETRY_ATTEMPTS {
+                let (lambda, picks) = curves.allocate(&w, target, cap)?;
+                let content = curves.to_content(&picks, s, pcm.n_samples as usize, tbl, kappa)?;
+                match Plan::new(&pcm, tbl, &content, budget, cap_pct) {
+                    Ok(_) => return Ok((content, curves.chosen_g(&picks), lambda)),
+                    Err(Error::Refusal(r)) => {
+                        if attempt + 1 == RETRY_ATTEMPTS {
+                            return Err(Error::Refusal(r));
+                        }
+                        let over = (r.needed as f64 - r.allowed as f64) * 8.0 * 1.02 + 2000.0;
+                        target -= over;
+                        if target < 1000.0 {
+                            // The album cannot be coded that cheaply; say so with the
+                            // numbers rather than looping into a degenerate target.
+                            return Err(Error::Refusal(r));
+                        }
+                        if fine_width > 0 {
+                            let (lam2, _) = coarse.allocate(&w, target, cap)?;
+                            curves = coarse.refine(s, pcm.n_samples as usize, &params, &w, lam2)?;
+                        }
                     }
-                    let over = (r.needed as f64 - r.allowed as f64) * 8.0 * 1.02 + 2000.0;
-                    target -= over;
-                    if target < 1000.0 {
-                        // The album cannot be coded that cheaply; say so with the
-                        // numbers rather than looping into a degenerate target.
-                        return Err(Error::Refusal(r));
-                    }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
             }
-        }
-        let Some((content, gs, lambda)) = chosen else {
-            return Err(Error::Plan(
+            Err(Error::Plan(
                 "the bit target did not converge in the retry loop".into(),
-            ));
+            ))
         };
+
+        let (first, _, _) = run(tables)?;
+        let effective = if train {
+            // Pass one measured the album with the built-in tables. What it saw is only an
+            // approximation of what the trained tables will see — lengths change which
+            // magnitudes are worth coding — so this pass exists to get close, not to be
+            // right, and the second pass is the one that ships.
+            let stats = train::collect(s, pcm.n_samples as usize, tables, &first, kappa);
+            let trained = train::build(tables, &stats);
+            train::validate(&trained).map_err(|e| {
+                Error::Plan(format!(
+                    "the trained tables are not a usable table set: {e}"
+                ))
+            })?;
+            // The premise is a property of the bytes, so check the bytes — the same
+            // discipline the untrained path applies for the same reason.
+            let blob = trained.to_blob();
+            let mut parsed = CodeTables::new();
+            parsed.parse_into(&blob).map_err(Error::Tables)?;
+            parsed.premise().map_err(Error::Premise)?;
+            trained_used = true;
+            trained
+        } else {
+            tables.clone()
+        };
+        let (content, gs, lambda) = run(&effective)?;
+        tables_effective = Some(effective);
         report_g = Some(gs);
         report_lambda = Some(lambda);
         content
@@ -304,6 +358,11 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         Content::silence(nf)
     };
 
+    // Everything after this point must use the tables the album was actually coded with:
+    // the plan's sizes, the frame bodies and the container's tables region. A trained set
+    // that sized the plan and a default set that wrote the stream would produce a blob whose
+    // declared sizes match neither.
+    let tables: &DefaultTables = tables_effective.as_ref().unwrap_or(tables);
     let plan = Plan::new(&pcm, tables, &content, budget, cap_pct)?;
 
     let ranges = chunks(plan.n_frames, threads.max(1));
@@ -401,6 +460,7 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             xover: verify.xover,
             hfnz: verify.hfnz,
             nonzero_coeffs: content.nonzero_coeffs(),
+            trained: trained_used,
             ms_frames: content.ms_frames(),
         },
     })

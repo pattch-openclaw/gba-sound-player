@@ -252,7 +252,7 @@ ULI_ENC_MANIFEST := $(abspath crates/uli-enc/Cargo.toml)
 # fails to compile, is renamed out of `tests/`, or is filtered away cannot quietly
 # vanish from the run. A count, not a per-suite shape check: the binary target and
 # the doc-tests legitimately report zero.
-ULI_ENC_MIN_TESTS := 57
+ULI_ENC_MIN_TESTS := 62
 # The ULI2 measurement vehicle (examples/uli_bench/): prove the corpus pins on the
 # measured image, then time full frames through both kernel sets. An mGBA
 # measurement; no playback or hardware claim. ULI2's plan, not FLAC's.

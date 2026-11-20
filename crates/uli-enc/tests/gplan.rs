@@ -216,6 +216,8 @@ fn e1s_own_content_is_legal() {
         rd: false,
         kappa: 0.13,
         stride: 8,
+        fine_width: 0,
+        train: false,
         ms: None,
         threads: 2,
     })
