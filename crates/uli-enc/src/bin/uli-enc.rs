@@ -10,8 +10,7 @@ use std::process::ExitCode;
 
 use uli_enc::{Args, DEFAULT_BUDGET, DEFAULT_CAP_PCT, encode};
 
-const USAGE: &str =
-    "usage: uli-enc --album F --tracks TSV --out U [--budget BYTES] [--cap PCT] [--threads N]";
+const USAGE: &str = "usage: uli-enc --album F --tracks TSV --out U [--budget BYTES]                     [--cap PCT] [--threads N] [--g N] [--rd] [--kappa X] [--stride N]";
 
 fn main() -> ExitCode {
     match run() {
@@ -32,6 +31,9 @@ fn run() -> Result<(), ExitCode> {
     let mut threads = default_threads;
     // No `--g` and the album is S1's: silence, sized and refused exactly as before.
     let mut g: Option<i32> = None;
+    let mut rd = false;
+    let mut kappa = uli_enc::DEFAULT_KAPPA;
+    let mut stride = 8i32;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -43,6 +45,9 @@ fn run() -> Result<(), ExitCode> {
             "--cap" => cap_pct = parse(&mut it, "--cap")?,
             "--threads" => threads = parse(&mut it, "--threads")?,
             "--g" => g = Some(parse(&mut it, "--g")?),
+            "--rd" => rd = true,
+            "--kappa" => kappa = parse(&mut it, "--kappa")?,
+            "--stride" => stride = parse(&mut it, "--stride")?,
             other => return Err(usage(format!("unknown argument {other:?}"))),
         }
     }
@@ -58,7 +63,15 @@ fn run() -> Result<(), ExitCode> {
         cap_pct,
         threads,
         g,
+        rd,
+        kappa,
+        stride,
     };
+    if rd && g.is_some() {
+        return Err(usage(
+            "--rd searches for g, so it cannot also be given one".into(),
+        ));
+    }
     let encoded = encode(&args).map_err(|e| {
         eprintln!("uli-enc: {e}");
         ExitCode::from(1)
@@ -69,19 +82,32 @@ fn run() -> Result<(), ExitCode> {
         report.overhead_bytes, report.target_bits, report.bits_per_frame
     );
     if report.stream_bits > 0 {
-        println!(
-            "stream {} bits = {:.1} bits/frame ({:.3} kbit/s at 32768 Hz); g {}; {} nonzero              coefficients; xover {} hfnz {}",
-            report.stream_bits,
-            report.stream_bits as f64 / report.n_frames as f64,
-            report.stream_bits as f64 / (report.n_frames as f64 * 512.0 / 32768.0) / 1000.0,
-            match report.g {
+        // The step actually used, and the λ that chose it, are printed unconditionally:
+        // silence and "all coarse" cost the same eight bits per frame, so a rate alone
+        // cannot tell a search that failed from a search that never ran. S3's first
+        // attempt was misdiagnosed twice because the one field that distinguished them
+        // was filtered out of the output before it was read.
+        let gline = match &report.g_chosen {
+            Some(v) => format!(
+                "searched {}..{} (lambda {:.3e}, target {} bits)",
+                v.iter().min().unwrap(),
+                v.iter().max().unwrap(),
+                report.lambda.unwrap_or(0.0),
+                report.target_bits
+            ),
+            None => match report.g {
                 Some(g) => g.to_string(),
                 None => "none (silence)".to_string(),
             },
+        };
+        println!(
+            "stream {} bits = {:.1} bits/frame ({:.3} kbit/s at 32768 Hz); {} nonzero coefficients",
+            report.stream_bits,
+            report.stream_bits as f64 / report.n_frames as f64,
+            report.stream_bits as f64 / (report.n_frames as f64 * 512.0 / 32768.0) / 1000.0,
             report.nonzero_coeffs,
-            report.xover,
-            report.hfnz,
         );
+        println!("g {}; xover {} hfnz {}", gline, report.xover, report.hfnz);
         if let Some(snr) = report.snr_db {
             println!(
                 "verify: decoded {} frames OK; codec SNR {:.2} dB",

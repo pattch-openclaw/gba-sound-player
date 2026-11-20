@@ -10,8 +10,7 @@ mod common;
 use common::{TempDir, silence_album, single_track};
 use std::process::Command;
 use uli_enc::{
-    Args, Content, DEFAULT_CAP_PCT, DefaultTables, Error, GPlan, Pcm, Plan, Refusal, encode,
-    frame_count,
+    Args, Content, DEFAULT_CAP_PCT, DefaultTables, Error, Pcm, Plan, Refusal, encode, frame_count,
 };
 use uli_lite::format::M;
 
@@ -42,6 +41,9 @@ fn a_budget_below_overhead_plus_the_stream_refuses_and_cites_both_numbers() {
         budget,
         cap_pct: DEFAULT_CAP_PCT,
         g: None,
+        rd: false,
+        kappa: 0.13,
+        stride: 8,
         threads: 1,
     })
     .expect_err("the stream does not fit in the overhead alone");
@@ -75,6 +77,9 @@ fn a_budget_below_the_container_overhead_refuses() {
         budget: 88,
         cap_pct: DEFAULT_CAP_PCT,
         g: None,
+        rd: false,
+        kappa: 0.13,
+        stride: 8,
         threads: 1,
     })
     .expect_err("88 bytes cannot hold the header, tables, track and stream");

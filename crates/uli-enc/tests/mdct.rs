@@ -20,7 +20,7 @@ const N_SAMPLES: usize = 2048;
 const FRAMES: usize = 4;
 
 fn f32s(b: &[u8]) -> Vec<f32> {
-    b.chunks_exact(4)
+    b.chunks(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }

@@ -19,6 +19,9 @@ fn encode_with_threads(dir: &std::path::Path, threads: usize) -> uli_enc::Output
         budget: DEFAULT_BUDGET,
         cap_pct: DEFAULT_CAP_PCT,
         g: None,
+        rd: false,
+        kappa: 0.13,
+        stride: 8,
         threads,
     })
     .expect("the silence album encodes")

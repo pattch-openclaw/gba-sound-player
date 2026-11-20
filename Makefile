@@ -5,7 +5,7 @@
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
-        uli-default-tables uli-mdct-fixture \
+        uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-rd-ab \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-playback-test uli-player uli-player-rom uli-player-speaker uli-player-speaker-rom \
@@ -247,6 +247,12 @@ ULI_OVERLAY_MANIFEST := $(abspath crates/uli-lite-gba/Cargo.toml)
 # it. Its gate is a round-trip through `uli-lite`: the decoder, not the encoder,
 # says whether the blob is real.
 ULI_ENC_MANIFEST := $(abspath crates/uli-enc/Cargo.toml)
+# How many `uli-enc` tests must run for the gate to count as having run anything.
+# Raise it when tests are added; the gate refuses to pass below it, so a suite that
+# fails to compile, is renamed out of `tests/`, or is filtered away cannot quietly
+# vanish from the run. A count, not a per-suite shape check: the binary target and
+# the doc-tests legitimately report zero.
+ULI_ENC_MIN_TESTS := 53
 # The ULI2 measurement vehicle (examples/uli_bench/): prove the corpus pins on the
 # measured image, then time full frames through both kernel sets. An mGBA
 # measurement; no playback or hardware claim. ULI2's plan, not FLAC's.
@@ -693,8 +699,25 @@ uli-test: toolchain-check
 	# is its own cargo workspace, but cargo discovers the root `.cargo/config.toml`
 	# from the *cwd*, so building in place inherits the GBA target and `build-std`
 	# and fails with ~150 errors that say nothing about the code.
-	cd $(GATE_NEUTRAL_CWD) && \
-	  $(CARGO) test --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE)
+	# Count the suites that actually reported a result, and refuse to pass below the
+	# expected number. A `cargo test` whose test binaries fail to *build* can still
+	# read as green through a pipe or a grep, which is how a broken S3 suite looked
+	# fine twice: the difference between "nothing failed" and "something ran" has to
+	# be asserted, not inferred from silence.
+	@out=$$(cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE) 2>&1); \
+	status=$$?; \
+	printf '%s\n' "$$out" | grep -E 'test result|^error' | sed 's/^/  /'; \
+	if [ $$status -ne 0 ]; then echo "uli-enc test run failed (exit $$status)"; exit 1; fi; \
+	suites=$$(printf '%s\n' "$$out" | grep -c 'test result: ok'); \
+	failed=$$(printf '%s\n' "$$out" | grep -c 'test result: FAILED'); \
+	if [ "$$failed" != 0 ]; then echo "uli-enc: $$failed suite(s) FAILED"; exit 1; fi; \
+	total=$$(printf '%s\n' "$$out" | sed -n 's/.*test result: ok\. \([0-9]*\) passed.*/\1/p' | awk '{t+=$$1} END {print t+0}'); \
+	total=$${total:-0}; \
+	if [ "$$total" -lt $(ULI_ENC_MIN_TESTS) ]; then \
+	  echo "uli-enc: $$total tests ran, expected >= $(ULI_ENC_MIN_TESTS)"; \
+	  echo "  a suite that fails to compile reports nothing, and nothing is not green"; exit 1; fi; \
+	echo "  uli-enc: $$suites suites, $$total tests, all passing"
 	@echo "uli-test passed: uli-lite compiles for $(TARGET) and is bit-exact on the host corpus; uli-enc round-trips through it"
 
 # Regenerate the reference's default tables blob — the byte-exactness witness the
@@ -711,6 +734,30 @@ uli-default-tables:
 # bytes in the tree, no gate builds C.
 uli-mdct-fixture:
 	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/gen_uli_mdct_fixture.py
+	@echo
+# The band_rdo differential: 2400 frozen (coefficients, class, step) -> (magnitudes,
+# bits, distortion) cases from the reference, so a dropped guard or a re-ordered
+# comparison in the quantiser's inner loop shows up as a failing test instead of as a
+# whisper in the bitstream. Same off-tree posture as the two goldens above.
+uli-band-rdo-fixture:
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/gen_uli_band_rdo_fixture.py
+
+# S3's acceptance harness: our --rd encoder against the reference's, same PCM, same
+# budgets: bytes, fit, kbit/s, SNR, chosen g. Exits nonzero if any row overshoots.
+# Deliberately NOT on any gate's path: it needs the off-tree reference binary, and
+# E-R1 keeps that off `make uli-test`. Run it when the search changes and record the
+# distillation in PLAN-OF-RECORD.md -> S3.
+ULI_RD_ALBUM ?= $(ULI_BENCH_DIR)/assets/album.f32
+ULI_RD_TRACKS ?= $(ULI_BENCH_DIR)/assets/tracks.tsv
+ULI_RD_BUDGETS ?= 400000,120000,40000
+uli-rd-ab:
+	@test -f $(ULI_RD_ALBUM) || { echo "uli-rd-ab: no album at $(ULI_RD_ALBUM) (set ULI_RD_ALBUM=)"; exit 1; }
+	@test -x $(GBA_AUDIO)/build/uli_enc || { echo "uli-rd-ab: no reference encoder (make -C $(GBA_AUDIO)/encoder)"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) build --release --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE) --bins
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_rd_ab.py \
+	  --album $(ULI_RD_ALBUM) --tracks $(ULI_RD_TRACKS) --budgets $(ULI_RD_BUDGETS)
 	@echo "now: cd $(GATE_NEUTRAL_CWD) && $(CARGO) test --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE)"
 
 uli-check: toolchain-check
@@ -1818,6 +1865,8 @@ help:
 	@echo "                           uli-enc's blob round-trips through it"
 	@echo "      uli-default-tables   regenerate the reference default-tables golden"
 	@echo "      uli-mdct-fixture     regenerate the reference forward-MDCT coefficients"
+	@echo "      uli-band-rdo-fixture regenerate the reference band_rdo differential"
+	@echo "      uli-rd-ab            S3 gate: ours vs the reference, same PCM and budgets"
 	@echo "      uli-overlay-test     product path vs the portable reference, both builds, + premise"
 	@echo "      uli-fixture          regenerate the committed expected-vector file"
 	@echo "      uli-bench            build + run + read PASS: 129-frame cycle/witness image"
