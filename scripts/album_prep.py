@@ -42,12 +42,6 @@ REPO = Path(__file__).resolve().parent.parent
 #: The one clock the product plays at (Q14; `geometry.rs::PLAYBACK_RATE_HZ`).
 PRODUCT_CLOCK_HZ = 16384
 
-#: The widest title box the app's layout carries, in characters. A folded title
-#: longer than this is PRINTED by the bake and never refused — §5.5 makes "fix
-#: the title" an album decision, so the tool's job is to say so loudly.
-TITLE_BOX_MAX = 28
-
-
 class Refusal(Exception):
     """A named refusal: the rule, and what it was checked against."""
 
@@ -83,11 +77,6 @@ def fold(text: str) -> str:
         if inner:
             collapsed = inner
     return collapsed
-
-
-def title_fits(text: str) -> bool:
-    """Whether a folded title fits the app's widest title box."""
-    return len(text) <= TITLE_BOX_MAX
 
 
 # --- sources: probe, tags, clip --------------------------------------------
@@ -295,9 +284,16 @@ def _run(cmd: list[str], why: str) -> str:
 
 FOLD_CASES = (
     # (in, out, why) — all synthetic inputs, each chosen for the one shape of §5.5 it
-    # exercises. This is where Q15's "free extra" (a title over 28 characters, a title
-    # carrying non-ASCII) is witnessed: NOT by decorating the tracked fixture's titles,
-    # which are Q15's own names (deviation D5, `examples/album_player/album.toml`).
+    # exercises. This is where Q15's "free extra" (a long title, a title carrying
+    # non-ASCII) is witnessed: NOT by decorating the tracked fixture's titles, which
+    # are Q15's own names (deviation D5, `examples/album_player/album.toml`).
+    #
+    # What the long case is about is the *fold*, and only the fold: whether such a
+    # title fits is a pixel measurement against the box the selected layout variant
+    # declares, which `scripts/album_bake.py`'s layout generator does (§5.0, §5.5).
+    # The `TITLE_BOX_MAX`/`title_fits` pair that used to answer it here counted
+    # characters, and 2a's D9 discharge retires it: a count of characters is not a
+    # box. `scripts/album_bake.py --self-test` asserts the pair stays gone.
     ("Bioluminescent 1", "Bioluminescent 1", "ASCII already: nothing moves"),
     ("Synthetic — Öffnung", "Synthetic Offnung", "NFKD then drop: the em-dash is dropped, not transliterated"),
     ("  spaced   out  ", "spaced out", "whitespace collapsed and trimmed"),
@@ -307,7 +303,7 @@ FOLD_CASES = (
     (
         "Synthetic Fixture Title Long Enough To Overflow Twenty-Eight Cells Öffnung",
         "Synthetic Fixture Title Long Enough To Overflow Twenty-Eight Cells Offnung",
-        "Q15's > 28-char case: folded, never truncated — the box report below prints it",
+        "Q15's long-title case: folded, never truncated — truncating here would be the tool making an album decision",
     ),
 )
 
@@ -320,14 +316,6 @@ def self_test() -> int:
         ok = got == want
         failures += 0 if ok else 1
         print(f"{'PASS' if ok else 'FAIL'} fold({text!r}) = {got!r}  [{why}]")
-    # The box test is a report, not a refusal: both answers are correct. The second
-    # string is Q15's over-the-box case, kept synthetic for the same reason.
-    for text in (
-        "Bioluminescent 1",
-        "Synthetic Fixture Title Long Enough To Overflow Twenty-Eight Cells",
-    ):
-        folded = fold(text)
-        print(f"INFO fits({folded!r}) = {title_fits(folded)} (box {TITLE_BOX_MAX})")
     if failures:
         print(f"album_prep self-test: {failures} failure(s)")
         return 1
