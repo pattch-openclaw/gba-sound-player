@@ -149,9 +149,9 @@ fn candidate_distortion(coef: &[f32], tables: &DefaultTables, g: i32, chan: &Cha
         }
     }
     // Everything uncoded reconstructs as zero.
-    let coded = chan.bands.len() * BANDW;
-    for k in coded.min(NCODED)..NCODED {
-        total += f64::from(coef[k]) * f64::from(coef[k]);
+    let coded = (chan.bands.len() * BANDW).min(NCODED);
+    for &v in &coef[coded..NCODED] {
+        total += f64::from(v) * f64::from(v);
     }
     total
 }
@@ -176,17 +176,12 @@ pub fn frame_ops(tables: &DefaultTables, chans: &[Chan; 2]) -> Ops {
             ops.coded_bands += 1;
             let r = tables.rbits[band.class];
             let pair = tables.ctype[band.class] == CT_PAIR;
-            for group in band.m.chunks_exact(if pair { 2 } else { 4 }) {
-                let per = group.len();
+            for group in band.m.chunks(if pair { 2 } else { 4 }) {
                 let heads: Vec<u32> = group
                     .iter()
                     .map(|m| {
                         let a = m.unsigned_abs();
-                        if pair {
-                            (a >> r).min(15)
-                        } else {
-                            (a as u32).min(2)
-                        }
+                        if pair { (a >> r).min(15) } else { a.min(2) }
                     })
                     .collect();
                 let sym = if pair {
@@ -238,13 +233,13 @@ pub fn weights(pcm: &Pcm, energy: &[f64]) -> Vec<f64> {
     let mut track_of = vec![0usize; n_frames];
     {
         let mut t = 0usize;
-        for f in 0..n_frames {
+        for (f, slot) in track_of.iter_mut().enumerate() {
             while t + 1 < pcm.tracks.len()
                 && (pcm.tracks[t + 1].start_sample as u64) <= (f as u64 * M as u64)
             {
                 t += 1;
             }
-            track_of[f] = t;
+            *slot = t;
         }
     }
     let n_tracks = pcm.tracks.len().max(1);
@@ -279,7 +274,7 @@ pub fn weights(pcm: &Pcm, energy: &[f64]) -> Vec<f64> {
 
 /// The frame energy the weights are built from: `Σ coef²` over both channels.
 pub fn frame_energy(coef: &[f32; 2 * M]) -> f64 {
-    coef.iter().map(|&v| (f64::from(v) * f64::from(v))).sum()
+    coef.iter().map(|&v| f64::from(v) * f64::from(v)).sum()
 }
 
 /// An album's worth of curves, computed once and reused across the λ bisection.
@@ -406,8 +401,8 @@ impl Curves {
         let mut g_by_frame = Vec::with_capacity(n_frames);
         let mut chans = Vec::with_capacity(n_frames);
         let mut coef = [0f32; 2 * M];
-        for f in 0..n_frames {
-            let g = self.per_frame[f].g[picks[f]];
+        for (f, &pick) in picks.iter().enumerate() {
+            let g = self.per_frame[f].g[pick];
             g_by_frame.push(g);
             crate::mdct::mdct_frame(samples, f, n_samples, &mut coef);
             let mut frame_chans = [Chan::empty(), Chan::empty()];

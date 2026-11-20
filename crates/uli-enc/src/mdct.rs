@@ -94,9 +94,9 @@ pub fn mdct_frame(x: &Samples, f: usize, n_samples: usize, coef: &mut [f32; 2 * 
     let mut y = [0f64; M];
 
     for ch in 0..2 {
-        for i in 0..2 * M {
+        for (i, zi) in z.iter_mut().enumerate() {
             let t = t0 + i as i64;
-            z[i] = if t >= 0 && (t as usize) < n_samples {
+            *zi = if t >= 0 && (t as usize) < n_samples {
                 f64::from(x.at(t as usize, ch)) * win(i)
             } else {
                 0.0
@@ -107,9 +107,12 @@ pub fn mdct_frame(x: &Samples, f: usize, n_samples: usize, coef: &mut [f32; 2 * 
         //   v[i] = -c[255-i] - d[i];   v[256+i] = a[i] - b[255-i]
         // which is what the DCT-IV-into-FFT derivation wants; the strides are
         // spelled out here rather than through slices so the offsets are legible.
+        // Split at `h` so the two halves borrow independently; the reference writes
+        // `v[i]` and `v[h + i]` in one loop, which is the same thing.
+        let (v_lo, v_hi) = v.split_at_mut(h);
         for i in 0..h {
-            v[i] = -z[M + (h - 1 - i)] - z[3 * h + i];
-            v[h + i] = z[i] - z[h + (h - 1 - i)];
+            v_lo[i] = -z[M + (h - 1 - i)] - z[3 * h + i];
+            v_hi[i] = z[i] - z[h + (h - 1 - i)];
         }
         dct4_ortho(&v, &mut y);
         for (k, out) in coef[ch * M..ch * M + M].iter_mut().enumerate() {

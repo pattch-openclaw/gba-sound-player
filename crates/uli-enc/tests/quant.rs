@@ -29,7 +29,7 @@ use uli_enc::{
     Args, Content, DEFAULT_BUDGET, DEFAULT_CAP_PCT, DefaultTables, Pcm, Samples, chan_bits, encode,
     frame_count, mdct::mdct_frame, quant,
 };
-use uli_lite::format::{BANDW, M, NBANDS, NCODED};
+use uli_lite::format::{BANDW, M, NBANDS};
 use uli_lite::{Album, Decoder, DecoderState};
 
 const IN: &[u8] = include_bytes!("fixtures/mdct_in.f32");
@@ -204,7 +204,7 @@ fn reference_magnitude(ax: f64, step: f64, dq: &[i8; 16], mmax: i32) -> i32 {
             v.push(0i32);
         }
         v.push(f as i32);
-        if f + 1 <= mmax as i64 {
+        if f < mmax as i64 {
             v.push((f + 1) as i32);
         }
         v

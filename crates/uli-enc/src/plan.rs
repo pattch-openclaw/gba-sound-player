@@ -9,7 +9,6 @@
 use std::fmt;
 use std::ops::Range;
 
-use crate::frame::FrameKind;
 use crate::tables_default::DefaultTables;
 use crate::{Error, Pcm};
 

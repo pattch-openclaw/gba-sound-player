@@ -10,8 +10,7 @@ mod common;
 use common::{TempDir, silence_album, single_track};
 use std::process::Command;
 use uli_enc::{
-    Args, Content, DEFAULT_CAP_PCT, DefaultTables, Error, GPlan, Pcm, Plan, Refusal, encode,
-    frame_count,
+    Args, Content, DEFAULT_CAP_PCT, DefaultTables, Error, Pcm, Plan, Refusal, encode, frame_count,
 };
 use uli_lite::format::M;
 

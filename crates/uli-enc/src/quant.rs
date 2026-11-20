@@ -73,7 +73,7 @@ pub fn band_ncod(band: usize) -> usize {
     let start = band * BANDW;
     if start + BANDW <= NCODED {
         BANDW
-    } else if start >= NCODED {
+    } else if start > NCODED - 1 {
         0
     } else {
         NCODED - start
@@ -91,7 +91,7 @@ pub fn step_of(g: i32, ms: bool) -> u32 {
 /// because a coarse `g` can make the quotient zero, and a band needs at least
 /// `m = 1` to be codeable at all.
 pub fn mmax_of(step: u32) -> i32 {
-    let m = ((1i64 << 28) / step as i64 / 16 - 1) as i64;
+    let m = (1i64 << 28) / step as i64 / 16 - 1;
     m.clamp(1, 65535) as i32
 }
 
@@ -129,7 +129,7 @@ fn quantise_magnitude(ax: f64, d: f64, inv: f64, mmax: i32, dq: &[i8; 16]) -> i3
         consider(0);
     }
     consider(f);
-    if f + 1 <= mmax {
+    if f < mmax {
         consider(f + 1);
     }
     best_m
@@ -319,7 +319,7 @@ fn make_cands(ax: f64, d: f64, mmax: i32, out: &mut [i32; MAX_CANDS]) -> usize {
     }
     out[n] = f;
     n += 1;
-    if f + 1 <= mmax {
+    if f < mmax {
         out[n] = f + 1;
         n += 1;
     }
@@ -361,7 +361,7 @@ fn extra_bits(tables: &DefaultTables, class: usize, m: i32) -> u32 {
         if m != 0 {
             b += 1;
         }
-        if m >= 2 {
+        if m > 1 {
             b += crate::bitwriter::eg_bits((m - 2) as u32, tables.esck[class] as u32);
         }
         b
@@ -489,9 +489,7 @@ pub fn band_rdo(
                 }
             }
         }
-        for kk in 0..per {
-            out.m[i + kk] = best[kk];
-        }
+        out.m[i..i + per].copy_from_slice(&best[..per]);
         out.bits += best_bits;
         out.dist += best_dist;
         i += per;

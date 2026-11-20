@@ -70,6 +70,12 @@ def main() -> int:
         "//! decoder's Q31 `i32` on purpose: the analysis side is host-side and the",
         "//! reference is `double` — matching its arithmetic is what keeps S7's",
         "//! byte-exactness reachable, and none of this ships in a ROM.",
+        "//!",
+        "//! Some entries land exactly on `cos(-2*pi*64/256)` = 1/sqrt(2), so clippy's",
+        "//! `approx_constant` fires on generated data. Substituting the crate constant",
+        "//! would make them depend on libm's rounding of it instead of on the",
+        "//! reference's own `cos`, which is the one thing this file exists to avoid.",
+        "#![allow(clippy::approx_constant)]",
         "",
     ]
     src.append(emit("FFT_C", "FFT twiddle real parts, `cos(-2*pi*k/256)`, `k < 128`.", fft_c))

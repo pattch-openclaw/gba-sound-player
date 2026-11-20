@@ -190,13 +190,13 @@ fn write_coeff_tail(
     if tables.ctype[class] == CT_PAIR {
         let h = a >> r;
         if h >= 15 {
-            bw.put_eg((h - 15) as u32, esck);
+            bw.put_eg(h - 15, esck);
         }
         if r != 0 {
-            bw.put((a & ((1u32 << r) - 1)) as u32, r);
+            bw.put(a & ((1u32 << r) - 1), r);
         }
     } else if a >= 2 {
-        bw.put_eg((a - 2) as u32, esck);
+        bw.put_eg(a - 2, esck);
     }
     if a != 0 {
         bw.put(u32::from(m < 0), 1);
@@ -215,13 +215,9 @@ pub fn escape_bits(m: i32, r: u32, esck: u32, is_pair: bool) -> u32 {
     let a = m.unsigned_abs();
     if is_pair {
         let h = a >> r;
-        if h >= 15 {
-            eg_bits((h - 15) as u32, esck)
-        } else {
-            0
-        }
+        if h >= 15 { eg_bits(h - 15, esck) } else { 0 }
     } else if a >= 2 {
-        eg_bits((a - 2) as u32, esck)
+        eg_bits(a - 2, esck)
     } else {
         0
     }
