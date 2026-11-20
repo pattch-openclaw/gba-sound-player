@@ -182,6 +182,16 @@ __pycache__/
 # scripts/fmt_with_generated_stub.sh's GENERATED override, exactly as
 # flac_integration's master pin is handled above.
 /examples/album_player/src/assets.rs
+# The generated `layout` module (2a PR-1, §5/§9.0's D9 row): the geometry, bar grid and
+# derived face figures of the variant `[layout]` selects. Never tracked, for the same two
+# reasons as the pin module above — it is a function of tracked inputs (`layout_spec.toml`
+# and `album.toml`, both tracked), and tracking it would put a second copy of every derived
+# number in the tree for a reviewer to diff against the spec instead of reading the spec.
+# §9.0's duty (i) is what makes it safe: the bake re-reads the module it wrote and refuses
+# a grid disagreement, and the ROM's boot check (`meta.rs`) refuses a manifest that disagrees
+# with the module linked into it — R11's stale-artifact failure, caught at boot rather than
+# in a host test that shares the artifact. Same fmt stub as assets.rs, same `make clean`.
+/examples/album_player/src/layout.rs
 # `make album-pack-check`'s log: per-run output, rewritten every run, with the
 # counts recorded per landing elsewhere (the playback-test.log/album-probe*.log rule).
 /album-pack-check.log

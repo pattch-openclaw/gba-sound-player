@@ -13,7 +13,7 @@
         uli-player-cross uli-player-cross-rom \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
-        album-bake album-pack-check album-seam-test album-rom album-player-rom album-test \
+        album-bake album-pack-check album-seam-test album-layout-test album-rom album-player-rom album-test \
         clean clean-cache check help toolchain-check target-spec-check
 
 # ===========================================================================
@@ -192,6 +192,13 @@ ALBUM ?= examples/album_player/album.toml
 ALBUM_ASSETS_DIR := $(ALBUM_CRATE_DIR)/assets
 ALBUM_BLOB := $(ALBUM_ASSETS_DIR)/albm1.bin
 ALBUM_ASSETS_RS := $(ALBUM_CRATE_DIR)/src/assets.rs
+# 2a's second generated module: the layout the selected variant declares
+# (§5, §9.0's D9 row). Same class as assets.rs — a fresh clone has neither, and
+# `make album-bake` writes both — so it is gitignored, cleaned, and reached
+# through the same fmt stub, and `make album-layout-test` is its own gate.
+ALBUM_LAYOUT_RS := $(ALBUM_CRATE_DIR)/src/layout.rs
+ALBUM_LAYOUT_SPEC := $(ALBUM_CRATE_DIR)/layout_spec.toml
+ALBUM_LAYOUT_GATE_LOG := album-layout-test.log
 ALBUM_GATE_LOG := album-pack-check.log
 ALBUM_SEAM_GATE_LOG := album-seam-test.log
 # The playback ROM (PR-3a step iii): the binary cargo writes, and the fixed image
@@ -302,11 +309,13 @@ WORKSPACES := . crates/flac-lite crates/flac-lite-gba crates/gba-playback \
               examples/album_probe
 
 # examples/album_player is deliberately NOT in WORKSPACES: its `src/lib.rs`
-# declares `pub mod assets;` from a GENERATED, gitignored `src/assets.rs` that
-# only `make album-bake` writes, so it cannot be a plain `cargo fmt` / `cargo
+# declares `pub mod assets;` from a GENERATED, gitignored `src/assets.rs` and
+# (from 2a) `pub mod layout;` from a GENERATED `src/layout.rs`, both of which only
+# `make album-bake` writes, so it cannot be a plain `cargo fmt` / `cargo
 # clean` target on a fresh clone — rustfmt resolves `mod` statically and aborts.
 # Its fmt coverage comes from the `fmt_with_generated_stub.sh` call below (which
-# writes a comment-only stub with GENERATED=<file>, formats, and removes it), and
+# writes a comment-only stub for each GENERATED=<file> it is given, formats, and
+# removes them), and
 # its caches are still covered by `clean-caches`, whose WORKSPACE_DIRS is derived
 # from the manifests on disk rather than from this list.
 
@@ -331,7 +340,7 @@ ifeq ($(HAS_RUSTFMT),1)
 format:
 	@for d in $(WORKSPACES); do (cd $$d && $(CARGO) fmt) || exit 1; done
 	CARGO='$(CARGO)' sh scripts/fmt_with_generated_stub.sh $(FLAC_CRATE_DIR)
-	CARGO='$(CARGO)' GENERATED='$(abspath $(ALBUM_ASSETS_RS))' sh scripts/fmt_with_generated_stub.sh $(ALBUM_CRATE_DIR)
+	CARGO='$(CARGO)' GENERATED='$(abspath $(ALBUM_ASSETS_RS)):$(abspath $(ALBUM_LAYOUT_RS))' sh scripts/fmt_with_generated_stub.sh $(ALBUM_CRATE_DIR)
 else
 format:
 	@echo "format: skipping — no rustfmt for '$(TOOLCHAIN)' (build continues)."
@@ -1307,6 +1316,9 @@ album-pack-check: toolchain-check
 	  done; \
 	  cmp -s $$first/assets.rs $(ALBUM_ASSETS_RS) \
 	    || { echo "album-pack-check: the bake is not deterministic — src/assets.rs differs between two runs"; rm -rf $$first; exit 1; }; \
+	  cp $(ALBUM_LAYOUT_RS) $$first/layout.rs || { echo "album-pack-check: $(ALBUM_LAYOUT_RS) is missing — the bake writes the layout module next to the pin module, and a pack gate that cannot see it cannot call it reproducible"; rm -rf $$first; exit 1; }; \
+	  cmp -s $$first/layout.rs $(ALBUM_LAYOUT_RS) \
+	    || { echo "album-pack-check: the bake is not deterministic — src/layout.rs differs between two runs of the same album.toml"; rm -rf $$first; exit 1; }; \
 	  cp $$first/assets.rs $$first/assets.mutant.rs; \
 	  python3 -c 'import sys; p = sys.argv[1]; d = bytearray(open(p, "rb").read()); d[0] ^= 0xFF; open(p, "wb").write(d)' $$first/assets.mutant.rs; \
 	  cmp -s $$first/assets.mutant.rs $(ALBUM_ASSETS_RS) \
@@ -1412,6 +1424,57 @@ album-seam-test: toolchain-check
 	@echo "  no clock movement and no dropped sample, its stream still the source's byte for byte, a ring that"
 	@echo "  can prime pays nothing for that branch, and the wait holds inside resume_to_audio_bound at four pass"
 	@echo "  lengths while the state that feeds the ring is kept apart from the state a pass may be timed on."
+
+# The layout generator's own gate (2a PR-1: §11's 2a row, §9.0's register, D9). `album-layout-gen`
+# is a step inside `scripts/album_bake.py` and `make album-bake` already runs it, so this target
+# exists to make its *test* reachable by name — it is host-only, needs no audio and no ROM, and it
+# is deliberately not a prerequisite of `album-rom`: a ROM build gets the layout through the bake,
+# and this is the half that says the generator answers for its own numbers. Three legs:
+#   1. the tracked spec exists exactly once, so the gate cannot be green against a spec that went
+#      missing or was duplicated (the same shape as the two host gates' input legs);
+#   2. `--layout-self-test` exits 0 AND the log names what it proved: every §9.0 register row fired
+#      by id (8 of 8), no failed summary line, and a floor on the reproduction legs — because an
+#      exit status alone would be satisfied by a run that measured nothing. Each leg of that run
+#      prints where its expected number comes from (`plan` / `spec` / `arithmetic`), which is what
+#      D9 asks for; a leg whose two sides are the same path is not evidence;
+#   3. the generated module is byte-reproducible, the same way `album-pack-check` holds assets.rs:
+#      emit twice, compare, and witness the comparison negatively with one flipped byte.
+album-layout-test: toolchain-check
+	@test $$(find $(ALBUM_CRATE_DIR) -maxdepth 1 -name 'layout_spec.toml' | wc -l) -eq 1 \
+	  || { echo "album-layout-test: $(ALBUM_LAYOUT_SPEC) is missing or duplicated — one tracked layout spec, or this gate is measuring nothing"; exit 1; }
+	@command -v python3 >/dev/null 2>&1 \
+	  || { echo "album-layout-test: 'python3' is not on PATH — the generator and its self-test are host tools"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	@cd $(GATE_NEUTRAL_CWD) && python3 $(abspath scripts/album_bake.py) --layout-self-test > $(abspath $(ALBUM_LAYOUT_GATE_LOG)) 2>&1; \
+	  status=$$?; \
+	  tail -n 25 $(abspath $(ALBUM_LAYOUT_GATE_LOG)); \
+	  [ $$status -eq 0 ] \
+	    || { echo "album-layout-test: the layout self-test refused — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
+	  grep -q '^  register rows fired: 8 of 8$$' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) \
+	    || { echo "album-layout-test: §9.0's register did not fire all of its 2a rows by id — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
+	  ! grep -q 'SELF-TEST FAILED' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) \
+	    || { echo "album-layout-test: a reproduction leg failed — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
+	  n=$$(grep -c '  ok   <-' $(abspath $(ALBUM_LAYOUT_GATE_LOG))); \
+	  [ "$$n" -ge 100 ] || { echo "album-layout-test: '$$n' legs passed, needs >= 100 — a green that names nothing is not a green"; exit 1; }
+	@first=$$(mktemp -d); \
+	  python3 scripts/album_bake.py --emit-layout >/dev/null || { rm -rf $$first; exit 1; }; \
+	  cp $(ALBUM_LAYOUT_RS) $$first/layout.rs || { rm -rf $$first; exit 1; }; \
+	  python3 scripts/album_bake.py --emit-layout >/dev/null || { rm -rf $$first; exit 1; }; \
+	  cmp -s $$first/layout.rs $(ALBUM_LAYOUT_RS) \
+	    || { echo "album-layout-test: the generated src/layout.rs differs between two runs — it is not reproducible"; rm -rf $$first; exit 1; }; \
+	  cp $$first/layout.rs $$first/layout.mutant.rs; \
+	  python3 -c 'import sys; p = sys.argv[1]; d = bytearray(open(p, "rb").read()); d[0] ^= 0xFF; open(p, "wb").write(d)' $$first/layout.mutant.rs; \
+	  cmp -s $$first/layout.mutant.rs $(ALBUM_LAYOUT_RS) \
+	    && { echo "album-layout-test: the layout comparison passed two files that differ by one byte — the byte leg is not witnessing anything"; rm -rf $$first; exit 1; } \
+	    || echo "  layout reproducibility leg: one flipped byte is reported as a difference (negative control)"; \
+	  rm -rf $$first
+	@echo "album-layout-test passed: §9.0's eight 2a refusals each fired by id on a spec written to be"
+	@echo "  wrong about it, the measured face/interaction geometry reproduces from the tracked files with"
+	@echo "  every expected number labelled by its source, the declared bar grid reaches the ALBM1 header and"
+	@echo "  the generated module and the three agree (and disagree by name when they do not), no"
+	@echo "  character-count box owns a fit in the product or in its tests, every declared face is tracked"
+	@echo "  with its licence, and src/layout.rs is byte-identical across two runs (with the comparison"
+	@echo "  witnessed negatively). See $(ALBUM_LAYOUT_GATE_LOG) for the legs and their sources."
 
 # The playback ROM (PR-3a step iii): `ALBM1` + the packed blobs → the app's own chain at 16,384 Hz.
 # It boots, verifies its own album (§D-C), plays track 1 end to end through the shipped feeder, and
@@ -1753,7 +1816,7 @@ clean-outputs:
 	@rm -f $(SPIKE_CRATE_DIR)/assets/rate_*.bin
 	@rm -f uli-bench*.log uli-attrib*.log
 	@rm -f album-probe*.log
-	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_ROM_RUN_LOG) $(ALBUM_TEST_LOG)
+	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_LAYOUT_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_ROM_RUN_LOG) $(ALBUM_TEST_LOG)
 	@find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} + 2>/dev/null || true
 
 # The caches: the fifteen workspaces' `target/` dirs, discovered from the tree.
@@ -1774,7 +1837,7 @@ clean-cache:
 check:
 	@for d in $(WORKSPACES); do (cd $$d && $(CARGO) fmt --check) || exit 1; done
 	CARGO='$(CARGO)' sh scripts/fmt_with_generated_stub.sh $(FLAC_CRATE_DIR) --check
-	CARGO='$(CARGO)' GENERATED='$(abspath $(ALBUM_ASSETS_RS))' sh scripts/fmt_with_generated_stub.sh $(ALBUM_CRATE_DIR) --check
+	CARGO='$(CARGO)' GENERATED='$(abspath $(ALBUM_ASSETS_RS)):$(abspath $(ALBUM_LAYOUT_RS))' sh scripts/fmt_with_generated_stub.sh $(ALBUM_CRATE_DIR) --check
 	@echo "check: all workspaces rustfmt-clean"
 
 # The target spec is an *instrument*, so it gets a witness like the toolchain pin
