@@ -34,6 +34,13 @@ mGBA, WAITCNT 4/2, 262,144-cycle period, no UI. Both corpora pinned
 - **Open:** the non-decode gate half; the dense-frame tail of entropy (the
   sub-frame partition needs re-measuring on the product reader first — see "The
   entropy path against the C+ASM reference"); a licensing/publish decision.
+- **The encoder: S2 (the codec's first real frame) is done.** The forward MDCT
+  reproduces the reference's coefficients bit for bit on a frozen fixture, and a
+  fixed step now trades rate against distortion the way the format intends:
+  ~18 dB at a near-white test album's finest step, and on the real `biomaster`
+  album 53 dB at 363 kbit/s (g=60), 38 dB at 108 kbit/s (g=100), with no
+  coefficient overflow and none past `NCODED`. S3 is where rate stops being an
+  accident of the step and becomes something the encoder chooses.
 - **The encoder: S1 (the skeleton) is done.** `crates/uli-enc` takes the
   reference's own PCM pair and writes a ULA2 blob that `uli-lite` decodes, its
   default tables blob is byte-identical to the reference's, and its refusal paths
@@ -1121,7 +1128,7 @@ read-side, so this does not reopen the paragraph above.
 | Step | Delivers | Discharges | Exit gate | State |
 |---|---|---|---|---|
 | **S1** | Skeleton: PCM boundary, bit writer, plan-then-emit container, default tables, budget arithmetic, silence + DC frames | E-R1, E-R2, E-R3, E-R4, E-R5·R5a, E-R6, E-R10 | blob parses and decodes; `premise()` called by the encoder; `--threads 1` and `--threads N` give the same bytes; **the default tables blob equals the reference's byte for byte**; the frame plan is refused if any `g` leaves the reader's window; the suite runs under `make uli-test` | **done** — 39 tests, `make uli-check` + `make uli-test` green |
-| **S2** | Forward MDCT + fixed-step quantisation, default tables | E-R5·R5c, E-R7 (partly) | decodes bit-exactly; SNR sane; rate reported. Fills the `GPlan` S1 fixed at silence, so the step-index bound and the per-frame `frame_bits` walk become live rather than degenerate | not started |
+| **S2** | Forward MDCT + fixed-step quantisation, default tables | E-R5·R5c, E-R7 (partly) | decodes bit-exactly; SNR sane; rate reported. Fills the `GPlan` S1 fixed at silence, so the step-index bound and the per-frame `frame_bits` walk become live rather than degenerate | **done** |
 | **S3** | RD search: `g`, `ms`, `kappa`; per-frame bit accounting | E-R5·R5b/R5d, E-R6, E-R7 | rate/quality on the fixture vs the reference's curve; owns the `GMIN 8..GMAX 187` window as **search policy** — it is not a container bound, and S1 refuses only what cannot decode; settles decision 4's op-count agreement | not started |
 | **S4** | Two-pass table training (`tables_from_stats`, length floor) | E-R4, E-R5, E-R7 | output byte-stable across runs; trained tables still inside E-R4; **and** the trained lengths satisfy E-R5's any-host half, which means either freezing them or amending the requirement out loud; and the library's remaining `assert!`s become errors, because a trained table is what trips them | not started |
 | **S5** | Album assembly; `--budget`/`--cap` wired to real sizes; the WAV/resample front end | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes; hashes pinned; too small refuses **before** the first frame, citing both numbers; a WAV reaches the same blob its pre-resampled PCM would not, but only its SNR is quoted; the CLI prints the reference's columns, since by then something compares them | not started |
@@ -1131,6 +1138,39 @@ read-side, so this does not reopen the paragraph above.
 S7 is a step rather than a property of the plan because it has work in it — a host
 target that builds nothing of ours from C, calls the off-tree binary, compares hashes
 — and it has been standing as prose since the gate was declared measurable.
+
+#### S2 — the terminator is conditional, and only real audio could say so
+
+**A channel that codes all `NBANDS` bands owes no EOB symbol.** The reader loops
+`for b in 0..NBANDS` and returns when it *reads* the terminator, so when the loop
+exhausts first the terminator is never consumed — and a writer that emits one
+regardless leaves three bits in front of the **next channel**, which reads them as
+its own first class. Since `cb[ctx][k]` is the EOB code, that class *is* `k`, and
+the channel terminates immediately. The frame then decodes **without error** and
+silently drops half its spectrum: right container, right size accounting, wrong
+audio. `enc_core.c` guards the same thing with `if (endB < nb)`; ours guards it with
+`if chan.bands.len() < NBANDS`.
+
+S1 could not have found this. Its frames coded zero bands, which is the one case
+where the terminator is unambiguously owed, so every round-trip it owned was right.
+What surfaced it was the first dense album through the first real quantiser, and
+what pinned it down is now the S2 gate's strongest assertion: for every frame, the
+reader's own `bitpos` advance must equal the bits the plan sized, and the decoded
+`ops` counts must equal the ones the encoder decided to write. That is a
+consumption-level check rather than a "did it error" check, and the difference is
+this bug — an error-free wrong decode.
+
+Two smaller things the same pass settled. The **candidate set is the reference's,
+not the nearest level**: `enc_core.c` offers `{0, floor t, floor t + 1}`, and
+because every reconstruction is pulled down by `dq/16` the closest level is
+sometimes `floor t - 1`, which the reference declines to consider. An encoder that
+rounds honestly instead would encode different magnitudes and a different blob, so
+S2 reproduces the candidate rule and `tests/quant.rs` compares against an
+independent restatement of the C. And the **analysis constants are checked in** —
+`mdct_tables.rs`, generated from `mdct_init`'s expressions by
+`scripts/gen_uli_mdct_tables.py`, which is R5c applied to the encoder for the first
+time; the window is stored as its symmetric half and the frozen fixture proves the
+mirroring is bit-exact, not merely algebraically equal.
 
 #### S1 — what the review found, and what each one decided
 

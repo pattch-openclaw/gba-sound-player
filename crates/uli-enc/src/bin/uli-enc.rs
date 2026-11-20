@@ -30,6 +30,8 @@ fn run() -> Result<(), ExitCode> {
         .map(|n| n.get())
         .unwrap_or(1);
     let mut threads = default_threads;
+    // No `--g` and the album is S1's: silence, sized and refused exactly as before.
+    let mut g: Option<i32> = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -40,6 +42,7 @@ fn run() -> Result<(), ExitCode> {
             "--budget" => budget = parse(&mut it, "--budget")?,
             "--cap" => cap_pct = parse(&mut it, "--cap")?,
             "--threads" => threads = parse(&mut it, "--threads")?,
+            "--g" => g = Some(parse(&mut it, "--g")?),
             other => return Err(usage(format!("unknown argument {other:?}"))),
         }
     }
@@ -54,6 +57,7 @@ fn run() -> Result<(), ExitCode> {
         budget,
         cap_pct,
         threads,
+        g,
     };
     let encoded = encode(&args).map_err(|e| {
         eprintln!("uli-enc: {e}");
@@ -64,6 +68,27 @@ fn run() -> Result<(), ExitCode> {
         "container overhead {} bytes; stream target {} bits = {:.1} bits/frame",
         report.overhead_bytes, report.target_bits, report.bits_per_frame
     );
+    if report.stream_bits > 0 {
+        println!(
+            "stream {} bits = {:.1} bits/frame ({:.3} kbit/s at 32768 Hz); g {}; {} nonzero              coefficients; xover {} hfnz {}",
+            report.stream_bits,
+            report.stream_bits as f64 / report.n_frames as f64,
+            report.stream_bits as f64 / (report.n_frames as f64 * 512.0 / 32768.0) / 1000.0,
+            match report.g {
+                Some(g) => g.to_string(),
+                None => "none (silence)".to_string(),
+            },
+            report.nonzero_coeffs,
+            report.xover,
+            report.hfnz,
+        );
+        if let Some(snr) = report.snr_db {
+            println!(
+                "verify: decoded {} frames OK; codec SNR {:.2} dB",
+                report.n_frames, snr
+            );
+        }
+    }
     std::fs::write(&out, &encoded.bytes).map_err(|e| {
         eprintln!("uli-enc: {}: {e}", out.display());
         ExitCode::from(1)

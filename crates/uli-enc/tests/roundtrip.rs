@@ -11,8 +11,8 @@ mod common;
 use common::{TempDir, silence_album, single_track};
 
 use uli_enc::{
-    Args, DC_G, DEFAULT_BUDGET, DEFAULT_CAP_PCT, DefaultTables, FrameKind, FramePos, GPlan, Pcm,
-    Plan, bitwriter::BitWriter, container, encode, frame_bits, write_frame,
+    Args, Content, DC_G, DEFAULT_BUDGET, DEFAULT_CAP_PCT, DefaultTables, FrameKind, FramePos,
+    GPlan, Pcm, Plan, bitwriter::BitWriter, container, encode, frame_bits, write_frame,
 };
 use uli_lite::format::M;
 use uli_lite::{Album, CodeTables, Decoder, DecoderState, Error as DecodeError};
@@ -23,6 +23,7 @@ fn args(album: std::path::PathBuf, tracks: std::path::PathBuf, threads: usize) -
         tracks,
         budget: DEFAULT_BUDGET,
         cap_pct: DEFAULT_CAP_PCT,
+        g: None,
         threads,
     }
 }
@@ -108,10 +109,10 @@ fn a_dc_impulse_frame_decodes_as_one_coded_band_per_channel() {
     // frame 0 and stays — so the plan's bit arithmetic accounts for that delta
     // instead of assuming the silence S1's `encode` would have written. What the
     // plan cannot yet say is the frame *kind*, which is E2's per-frame work.
-    let content = GPlan::new(
+    let content = Content::from_plan(GPlan::new(
         vec![DC_G; n_frames as usize],
         vec![false; n_frames as usize],
-    );
+    ));
     content
         .validate()
         .expect("DC_G must be inside the reader's step window, or the DC frame is a lie");

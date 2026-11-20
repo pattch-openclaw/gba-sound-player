@@ -76,3 +76,12 @@ pub fn repo_root() -> PathBuf {
         .expect("this crate lives at <repo>/crates/<name>")
         .to_path_buf()
 }
+
+/// Write frozen fixture bytes into `dir` so a test can hand them to code that
+/// takes a path rather than a slice. The bytes are `include_bytes!`-ed by the
+/// test, so a missing fixture is a compile error, never a skipped assertion.
+pub fn materialise(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, bytes).expect("write fixture");
+    path
+}
