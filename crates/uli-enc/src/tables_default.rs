@@ -131,6 +131,14 @@ pub struct DefaultTables {
 }
 
 impl DefaultTables {
+    /// The class's geometric-model mean, which is what its Huffman table was built
+    /// to fit. Not written into the blob (the format has no `mu` field), so it is
+    /// only available here — which is exactly where S3's class choice needs it:
+    /// matching the model's mean to a band's mean magnitude is a far better guess
+    /// than "lowest class with enough headroom".
+    pub fn mu(&self, class: usize) -> f64 {
+        MU_MICRO[class] as f64 / 1e6
+    }
     /// Build the reference's default tables: transcribed rows, computed lengths.
     pub fn build() -> Self {
         let mut t = Self {

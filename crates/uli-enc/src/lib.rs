@@ -106,6 +106,9 @@ pub struct Report {
     pub nonzero_coeffs: usize,
 }
 
+/// How many times the search may re-try the bit target before refusing.
+const RETRY_ATTEMPTS: usize = 10;
+
 /// The finished blob and its report.
 #[derive(Clone, Debug)]
 pub struct Output {
@@ -153,7 +156,7 @@ pub fn encode(args: &Args) -> Result<Output, Error> {
 /// that breaks the closed-world premise before it produces a byte, which a test
 /// can only observe if it can hand the encoder such a table. Production callers
 /// use [`encode`].
-pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output, Error> {
+pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output, Error> {
     // Destructure exhaustively, on purpose. `--rd` once parsed into a field that
     // nothing read: the crate built, the suite stayed green, and the encoder emitted
     // silence. A binding pattern with no `..` makes that a compile error — adding a
@@ -169,7 +172,11 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
         kappa,
         stride,
         threads,
-    } = args;
+    } = input;
+    // The parameter is `input`, not `args`, so there is no way to reach a field
+    // through it and quietly bypass the bindings above. That is what the first
+    // version of this guard missed: `args.rd` still resolved, so the exhaustive
+    // pattern proved nothing.
     let (album, tracks) = (album.as_path(), tracks.as_path());
     let (budget, cap_pct, g, rd, kappa, stride, threads) =
         (*budget, *cap_pct, *g, *rd, *kappa, *stride, *threads);
@@ -194,24 +201,18 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
     // and the refusals never depend on the codec), `--g N` is S2's fixed step, and
     // `--rd` is S3's search.
     let nf = frame_count(pcm.n_samples);
-    let samples = if args.g.is_some() || args.rd {
+    let samples = if g.is_some() || rd {
         Some(Samples::open(album, pcm.n_samples as usize)?)
     } else {
         None
     };
-    let content = if args.rd {
+    let content = if rd {
         // S3's chicken-and-egg: the search needs the bit target, the bit target
         // needs the container overhead. Overhead is a function of the track table,
         // the tables blob, the seek count and the strings — none of which frame
         // content can change — so the target is taken from a silence-sized plan and
         // the real plan is then checked against the real stream, as below.
-        let sizing = Plan::new(
-            &pcm,
-            tables,
-            &Content::silence(nf),
-            args.budget,
-            args.cap_pct,
-        )?;
+        let sizing = Plan::new(&pcm, tables, &Content::silence(nf), budget, cap_pct)?;
         let s = samples.as_ref().expect("--rd loads the album above");
         let curves = Curves::compute(s, pcm.n_samples as usize, tables, nf, stride)?;
         let mut coef = [0f32; 2 * M];
@@ -222,19 +223,55 @@ pub fn encode_with_tables(args: &Args, tables: &DefaultTables) -> Result<Output,
             })
             .collect();
         let w = rd::weights(&pcm, &energy);
-        let target = sizing.target_bits as f64;
         let cap = rd::cap_cycles(cap_pct);
-        let (lambda, picks) = curves.allocate(&w, target, cap)?;
-        let chosen = curves.chosen_g(&picks);
-        report_g = Some(chosen);
+        // The retry loop, which is what closes the budget residue. The search solves
+        // on bits measured from a candidate's *own* frame; the real stream also pays
+        // the `g` delta (which a stride-8 walk makes expensive), the terminator and
+        // the halfword padding, none of which any candidate owns. So the plan is
+        // built, checked, and the target lowered by exactly what it overshot — the
+        // reference's `tgt -= (size - budget) * 8 * 1.02 + 2000`, with the same
+        // 2% and 2000-bit margins. A budget this cannot meet is refused by
+        // `Plan::new` on the last attempt, citing both numbers (E-R6).
+        let mut target = sizing.target_bits as f64;
+        let mut chosen: Option<(Content, Vec<i32>, f64)> = None;
+        for attempt in 0..RETRY_ATTEMPTS {
+            let (lambda, picks) = curves.allocate(&w, target, cap)?;
+            let content = curves.to_content(&picks, s, pcm.n_samples as usize, tables)?;
+            match Plan::new(&pcm, tables, &content, budget, cap_pct) {
+                Ok(_) => {
+                    chosen = Some((content, curves.chosen_g(&picks), lambda));
+                    break;
+                }
+                Err(Error::Refusal(r)) => {
+                    if attempt + 1 == RETRY_ATTEMPTS {
+                        return Err(Error::Refusal(r));
+                    }
+                    let over = (r.needed as f64 - r.allowed as f64) * 8.0 * 1.02 + 2000.0;
+                    target -= over;
+                    if target < 1000.0 {
+                        // The album cannot be coded that cheaply; say so with the
+                        // numbers rather than looping into a degenerate target.
+                        return Err(Error::Refusal(r));
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let Some((content, gs, lambda)) = chosen else {
+            return Err(Error::Plan(
+                "the bit target did not converge in the retry loop".into(),
+            ));
+        };
+        report_g = Some(gs);
         report_lambda = Some(lambda);
-        curves.to_content(&picks, s, pcm.n_samples as usize, tables)?
-    } else if let Some(g) = args.g {
+        content
+    } else if let Some(g) = g {
         Content::quantise(
             samples.as_ref().expect("--g loads the album above"),
             pcm.n_samples as usize,
             tables,
             g,
+            kappa,
             nf,
         )?
     } else {

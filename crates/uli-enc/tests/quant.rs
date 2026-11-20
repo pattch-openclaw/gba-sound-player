@@ -29,7 +29,7 @@ use uli_enc::{
     Args, Content, DEFAULT_BUDGET, DEFAULT_CAP_PCT, DefaultTables, Pcm, Samples, chan_bits, encode,
     frame_count, mdct::mdct_frame, quant,
 };
-use uli_lite::format::{BANDW, CT_PAIR, M, NBANDS, NCODED};
+use uli_lite::format::{BANDW, M, NBANDS, NCODED};
 use uli_lite::{Album, Decoder, DecoderState};
 
 const IN: &[u8] = include_bytes!("fixtures/mdct_in.f32");
@@ -44,7 +44,8 @@ fn coded(g: i32) -> (TempDir, Pcm, Samples, DefaultTables, Content, usize) {
     let pcm = Pcm::open(&album_path, &tracks).expect("inputs open");
     let samples = Samples::open(&album_path, N_SAMPLES).expect("samples");
     let tables = DefaultTables::build();
-    let content = Content::quantise(&samples, N_SAMPLES, &tables, g, n_frames).expect("quantise");
+    let content =
+        Content::quantise(&samples, N_SAMPLES, &tables, g, 0.13, n_frames).expect("quantise");
     (dir, pcm, samples, tables, content, n_frames)
 }
 
@@ -221,39 +222,53 @@ fn reference_magnitude(ax: f64, step: f64, dq: &[i8; 16], mmax: i32) -> i32 {
     best
 }
 
+/// The candidate rule itself, compared against an independent restatement of the C.
+///
+/// This is about [`quant::band_rdo`] with `lam = 0`, i.e. the nearest-level rule S2
+/// shipped. It is *not* about the content plan: with `kappa > 0` the RD quantiser
+/// deliberately chooses levels the nearest rule would not — including zero — and that
+/// freedom is exactly what closed the rate gap. Comparing an RD plan against the
+/// nearest rule would only assert that RD had done nothing.
 #[test]
-fn the_magnitudes_are_the_references_candidates_not_the_nearest_level() {
-    let (_d, _pcm, samples, tables, content, nf) = coded(100);
+fn at_lam_zero_the_magnitudes_are_the_references_candidates() {
+    let (_d, _pcm, samples, tables, _, nf) = coded(100);
     let step = quant::step_of(100, false) as f64;
+    let d = step / 16.0;
     let mmax = quant::mmax_of(step as u32);
     let mut checked = 0usize;
     let mut coef = [0f32; 2 * M];
     for f in 0..nf {
         mdct_frame(&samples, f, N_SAMPLES, &mut coef);
-        for (ci, chans) in content.coded_frames().unwrap()[f].iter().enumerate() {
+        for ci in 0..2 {
             let base = ci * M;
-            for (bi, band) in chans.bands.iter().enumerate() {
-                if band.is_zero_class() {
+            for b in 0..NBANDS {
+                let ncod = quant::band_ncod(b);
+                if ncod == 0 {
                     continue;
                 }
-                // The class this band got sizes its own headroom, so the
-                // comparison is only exact where the chosen class could have
-                // carried both magnitudes without an escape.
-                let dq = &tables.dq[band.class];
-                let r = tables.rbits[band.class];
-                let head = (15i32 << r) - 1;
-                for i in 0..BANDW {
-                    let idx = bi * BANDW + i;
-                    if idx >= NCODED {
-                        continue;
-                    }
-                    let ax = f64::from(coef[base + idx]).abs();
+                // Class 3 (PAIR, rbits 0) is the row S2's headroom rule picks for
+                // small bands, and the one whose head can carry these magnitudes.
+                let klass = 3usize;
+                let dq = &tables.dq[klass];
+                let head = (15i32 << tables.rbits[klass]) - 1;
+                let rd = quant::band_rdo(
+                    &coef[base + b * BANDW..base + b * BANDW + BANDW],
+                    &tables,
+                    klass,
+                    d,
+                    0.0,
+                    mmax,
+                    ncod,
+                );
+                for i in 0..ncod {
+                    let ax = f64::from(coef[base + b * BANDW + i]).abs();
                     let want = reference_magnitude(ax, step, dq, mmax);
-                    let got = band.m[i].abs();
+                    let got = rd.m[i];
                     if want.max(got) <= head {
                         assert_eq!(
                             got, want,
-                            "frame {f} ch{ci} band {bi} coeff {i}: coded m={got}, the                              reference's candidate rule gives {want} for |coef| {ax}"
+                            "frame {f} ch{ci} band {b} coeff {i}: lam=0 chose m={got}, the \
+                             reference's candidate rule gives {want} for |coef| {ax}"
                         );
                     }
                     checked += 1;
@@ -362,4 +377,124 @@ fn the_search_actually_runs_and_changes_the_album() {
         searched.bytes, silence.bytes,
         "the searched blob is byte-identical to the silence blob"
     );
+}
+
+// ---------------------------------------------------------------------------
+// S3: the rate/distortion quantiser
+// ---------------------------------------------------------------------------
+
+/// **The bug this file was written for.** `rd_classes` filtered classes by whether
+/// their headroom could hold the band's largest magnitude, so a band louder than
+/// every class was offered *no* coded class and fell through to `class 0` — silence.
+/// On the test album that turned the loudest band (energy 1.5e11) into nothing, and
+/// because the class symbol is cheaper than the coefficients the frame still looked
+/// *better* on a rate-only comparison: 0.80× the reference's bits. Only distortion
+/// exposed it, six orders of magnitude above the reference's.
+#[test]
+fn a_band_louder_than_every_class_headroom_is_still_coded() {
+    let tables = DefaultTables::build();
+    // A magnitude of 800 quantised levels: past the widest class's headroom (479), so
+    // escapes must carry it — but comfortably inside `mmax`, which is the *other*
+    // limit and a different one. (At a step fine enough for `mmax` to bind, no encoder
+    // can represent the band: the reference clamps to 65535 identically, and picking
+    // a coarser step is the search's job, not the quantiser's.)
+    // Only at steps where `mmax` is above the widest headroom can this case exist at
+    // all: past g≈124 the format's own |X| limit is tighter than the class ladder, and
+    // the ladder is what this test is about.
+    for g in [60i32, 80, 100] {
+        let d = quant::step_of(g, false) as f64 / 16.0;
+        assert!(
+            800.0 < quant::mmax_of(quant::step_of(g, false)) as f64,
+            "g={g}: 800 levels is not representable at this step, so the test would be              measuring the format's limit instead of the class ladder"
+        );
+        let mut loud = [0f32; M];
+        for v in loud.iter_mut().take(16) {
+            *v = 800.0 * d as f32;
+        }
+        let rd = quant::quantise_chan_rd(&loud, &tables, g, false, 0.13);
+        assert!(
+            !rd.chan.bands.is_empty() && rd.chan.bands[0].class != 0,
+            "g={g}: the band was coded as class 0 (silence). Every class's headroom is \
+             below its magnitude, so a headroom filter offers no class at all — and the \
+             band with all the album's energy in it disappears."
+        );
+        let energy: f64 = loud[..16]
+            .iter()
+            .map(|&v| f64::from(v) * f64::from(v))
+            .sum();
+        assert!(
+            rd.dist < energy * 0.25,
+            "g={g}: coded, but the distortion is {:.3e} against {energy:.3e} of energy",
+            rd.dist
+        );
+    }
+}
+
+/// `kappa` is what makes the reference's rate reachable, and the mechanism is that a
+/// coefficient which is cheap to lose is dropped instead of coded. With `kappa = 0`
+/// the quantiser is S2's and keeps everything; a bigger `kappa` must never cost more
+/// bits at the same step.
+#[test]
+fn a_larger_kappa_never_costs_more_bits() {
+    let (_d, _pcm, samples, tables, _content, nf) = coded(100);
+    let mut coef = [0f32; 2 * M];
+    let mut prev = u64::MAX;
+    let mut seen = Vec::new();
+    for kappa in [0.0f64, 0.01, 0.13, 1.0, 10.0] {
+        let mut bits = 0u64;
+        for f in 0..nf {
+            mdct_frame(&samples, f, N_SAMPLES, &mut coef);
+            let l = uli_enc::quant::quantise_chan_rd(&coef[..M], &tables, 100, false, kappa);
+            let r = uli_enc::quant::quantise_chan_rd(&coef[M..], &tables, 100, false, kappa);
+            bits += chan_bits(&tables, &l.chan) + chan_bits(&tables, &r.chan);
+        }
+        assert!(
+            bits <= prev,
+            "kappa {kappa} spent {bits} bits, more than the previous kappa's {prev}: the \
+             search is supposed to buy rate with distortion, never sell it back"
+        );
+        prev = bits;
+        seen.push(bits);
+    }
+    assert!(
+        seen[0] > seen[4],
+        "kappa had no effect at all ({seen:?}); the RD term is not reaching the \
+         quantiser, which is exactly how S3 shipped silence once already"
+    );
+}
+
+/// The search must fit the budget it is given — and a reachable budget must never be
+/// refused, because an encoder that refuses work it could have done is E-R6 failing
+/// in the other direction.
+#[test]
+fn the_search_fits_every_budget_it_accepts() {
+    let dir = TempDir::new("rd-budget");
+    let album = materialise(dir.path(), "album.f32", IN);
+    let tracks = write_tracks(dir.path(), &format!("1\t0\t{N_SAMPLES}\tDense\tS3\n"));
+    for budget in [40_000u64, 60_000, 120_000, 400_000] {
+        let out = encode(&Args {
+            album: album.clone(),
+            tracks: tracks.clone(),
+            budget,
+            cap_pct: DEFAULT_CAP_PCT,
+            g: None,
+            rd: true,
+            kappa: 0.13,
+            stride: 8,
+            threads: 1,
+        })
+        .unwrap_or_else(|e| panic!("budget {budget} was refused: {e}"));
+        assert!(
+            out.bytes.len() as u64 <= budget,
+            "budget {budget}: the search produced {} bytes, {} over",
+            out.bytes.len(),
+            out.bytes.len() as u64 - budget
+        );
+        let chosen = out
+            .report
+            .g_chosen
+            .as_ref()
+            .expect("the search reports its g");
+        assert_eq!(chosen.len(), out.report.n_frames);
+    }
 }

@@ -22,7 +22,7 @@
 //! `3 * step / 16`, and an encoder that rounds differently from the reference
 //! encodes a different `m`, and therefore a different blob.
 
-use uli_lite::format::{BANDW, CT_PAIR, CT_QUAD, CT_ZERO, NCODED};
+use uli_lite::format::{BANDW, CT_PAIR, CT_QUAD, CT_ZERO, NBANDS, NCODED};
 use uli_lite::tables_data::STEP;
 
 use crate::tables_default::DefaultTables;
@@ -285,4 +285,385 @@ pub struct ChanStats {
     pub escs: u32,
     /// Raw `rbits` fields.
     pub raws: u32,
+}
+
+// ---------------------------------------------------------------------------
+// S3: rate/distortion quantisation
+// ---------------------------------------------------------------------------
+
+/// The most candidates `make_cand` can offer for one coefficient.
+const MAX_CANDS: usize = 3;
+
+/// `make_cand` from `enc_core.c`, transcribed: `{0, floor t, floor t + 1}` clipped
+/// to `mmax`, and **only** `0` when the coefficient is exactly zero or the band's
+/// headroom is closed (`mmax <= 0`, i.e. at or past `NCODED`).
+///
+/// The order is the reference's and it matters: `0` is offered first and the
+/// comparison that consumes these is strict, so a tie keeps the zero — the
+/// cheaper symbol — rather than the nonzero one.
+#[inline]
+fn make_cands(ax: f64, d: f64, mmax: i32, out: &mut [i32; MAX_CANDS]) -> usize {
+    if mmax <= 0 || ax == 0.0 {
+        out[0] = 0;
+        return 1;
+    }
+    let mut f = (ax / d).floor() as i64;
+    if f > mmax as i64 {
+        f = mmax as i64;
+    }
+    let f = f as i32;
+    let mut n = 0;
+    if f > 0 {
+        out[n] = 0;
+        n += 1;
+    }
+    out[n] = f;
+    n += 1;
+    if f + 1 <= mmax {
+        out[n] = f + 1;
+        n += 1;
+    }
+    n
+}
+
+/// `nib_of`: the part of a magnitude that rides inside the tuple symbol.
+#[inline]
+fn nib_of(tables: &DefaultTables, class: usize, m: i32) -> u32 {
+    if tables.ctype[class] == CT_PAIR {
+        ((m as u32) >> tables.rbits[class]).min(15)
+    } else {
+        (m as u32).min(2)
+    }
+}
+
+/// `extra_bits`: everything a coefficient costs *besides* its share of the tuple
+/// symbol — the raw field, the sign, and any escape.
+///
+/// Two details the writer forces and the naive cost model gets wrong: the raw field
+/// is written for **every** coefficient of a PAIR class with `rbits > 0`, including
+/// zero magnitudes (the reader always takes the bits), and the sign bit exists only
+/// for a nonzero magnitude.
+#[inline]
+fn extra_bits(tables: &DefaultTables, class: usize, m: i32) -> u32 {
+    if tables.ctype[class] == CT_PAIR {
+        let r = tables.rbits[class] as u32;
+        let mut b = r;
+        if m != 0 {
+            b += 1;
+        }
+        let h = (m as u32) >> r;
+        if h >= 15 {
+            b += crate::bitwriter::eg_bits(h - 15, tables.esck[class] as u32);
+        }
+        b
+    } else {
+        let mut b = 0;
+        if m != 0 {
+            b += 1;
+        }
+        if m >= 2 {
+            b += crate::bitwriter::eg_bits((m - 2) as u32, tables.esck[class] as u32);
+        }
+        b
+    }
+}
+
+/// The reconstruction of a magnitude, in analysis units: `(m - dq/16) · step/16`,
+/// which is the reader's `(16m - dq) · step` divided by the 2^8 the format's `X` is
+/// scaled by. One definition, used by both the distortion and the search.
+#[inline]
+fn recon(dq: &[i8; 16], m: i32, d: f64) -> f64 {
+    (m as f64 - dq[m.min(15) as usize] as f64 / 16.0) * d
+}
+
+/// One band coded by a given class: the magnitudes chosen under
+/// `J = Σ error² + λ·bits`, and what that cost.
+#[derive(Clone, Copy, Debug)]
+pub struct BandRd {
+    pub m: [i32; BANDW],
+    pub dist: f64,
+    pub bits: u64,
+}
+
+impl BandRd {
+    pub fn j(&self, lam: f64) -> f64 {
+        self.dist + lam * self.bits as f64
+    }
+}
+
+/// Rate/distortion quantisation of one 16-coefficient band under one class.
+///
+/// This is `band_rdo` from `enc_core.c`. The whole point of it — and the reason S2's
+/// `lam = 0` quantiser was never going to reach the reference's rate — is that the
+/// candidate set includes **zero**, so a coefficient whose magnitude is small
+/// relative to its bit cost is dropped instead of coded. With `lam = 0` the zero is
+/// never chosen; with `lam = kappa·D²` it wins whenever `x²` is cheaper to lose than
+/// the bits are to spend, which at a coarse step is most of the spectrum.
+pub fn band_rdo(
+    x: &[f32],
+    tables: &DefaultTables,
+    class: usize,
+    d: f64,
+    lam: f64,
+    mmax: i32,
+    ncod: usize,
+) -> BandRd {
+    let pair = tables.ctype[class] == CT_PAIR;
+    debug_assert!(
+        pair || tables.rbits[class] == 0,
+        "the QUAD arm writes no raw field, so a QUAD class with rbits > 0 would be \
+         costed by a rule the writer does not follow"
+    );
+    let per = if pair { 2 } else { 4 };
+    let len = &tables.cls[class].len;
+    let dq = &tables.dq[class];
+    let mut out = BandRd {
+        m: [0; BANDW],
+        dist: 0.0,
+        bits: 0,
+    };
+
+    let mut i = 0;
+    while i < BANDW {
+        let mut cs = [[0i32; MAX_CANDS]; 4];
+        let mut cn = [0usize; 4];
+        let mut ax = [0f64; 4];
+        for kk in 0..per {
+            let k = i + kk;
+            ax[kk] = f64::from(x[k].abs());
+            let mx = if k < ncod { mmax } else { 0 };
+            cn[kk] = make_cands(ax[kk], d, mx, &mut cs[kk]);
+        }
+        let mut best_j = f64::INFINITY;
+        let mut best = [0i32; 4];
+        let mut best_bits = 0u64;
+        let mut best_dist = 0.0f64;
+
+        if pair {
+            for p in 0..cn[0] {
+                for q in 0..cn[1] {
+                    let (m0, m1) = (cs[0][p], cs[1][q]);
+                    let sym = (nib_of(tables, class, m0) * 16 + nib_of(tables, class, m1)) as usize;
+                    let bits = len[sym] as u64
+                        + extra_bits(tables, class, m0) as u64
+                        + extra_bits(tables, class, m1) as u64;
+                    let e0 = ax[0] - recon(dq, m0, d);
+                    let e1 = ax[1] - recon(dq, m1, d);
+                    let dist = e0 * e0 + e1 * e1;
+                    let j = dist + lam * bits as f64;
+                    if j < best_j {
+                        best_j = j;
+                        best = [m0, m1, 0, 0];
+                        best_bits = bits;
+                        best_dist = dist;
+                    }
+                }
+            }
+        } else {
+            for p0 in 0..cn[0] {
+                for p1 in 0..cn[1] {
+                    for p2 in 0..cn[2] {
+                        for p3 in 0..cn[3] {
+                            let m = [cs[0][p0], cs[1][p1], cs[2][p2], cs[3][p3]];
+                            let sym = (27 * nib_of(tables, class, m[0])
+                                + 9 * nib_of(tables, class, m[1])
+                                + 3 * nib_of(tables, class, m[2])
+                                + nib_of(tables, class, m[3]))
+                                as usize;
+                            let mut bits = len[sym] as u64;
+                            let mut dist = 0.0f64;
+                            for kk in 0..4 {
+                                bits += extra_bits(tables, class, m[kk]) as u64;
+                                let e = ax[kk] - recon(dq, m[kk], d);
+                                dist += e * e;
+                            }
+                            let j = dist + lam * bits as f64;
+                            if j < best_j {
+                                best_j = j;
+                                best = m;
+                                best_bits = bits;
+                                best_dist = dist;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for kk in 0..per {
+            out.m[i + kk] = best[kk];
+        }
+        out.bits += best_bits;
+        out.dist += best_dist;
+        i += per;
+    }
+    out
+}
+
+/// The class groups of the default rows: `(ctype, rbits)`. Classes in one group cost
+/// a coefficient the same way and differ only in the distribution their Huffman
+/// table was built from, so within a group the choice is a model fit, not a
+/// structural one.
+/// Which classes S3 offers a band: **all of the nonzero ones**, which is what the
+/// reference's Viterbi explores and what the measurement demanded.
+///
+/// The first version of this function tried a heuristic — the two tightest headroom
+/// groups that could hold the band, with the group member chosen by matching the
+/// model's `mu` to the band's mean magnitude — on the theory that going up a headroom
+/// group must lose. Measured against the reference's own coder at a fixed step, it
+/// cost 1.07×/1.16×/1.20× the bits at `g = 60/100/140`; offering every class brings
+/// that to 0.9997×/0.9989×/0.968×, with distortion identical to the reference's to
+/// seven significant figures. The heuristic's premise was wrong: a wider head group
+/// shortens the *symbol code* by more than the raw field widens it, because the
+/// Huffman table of a high-`mu` class prices small heads cheaply. Measure the class
+/// ladder, do not reason about it.
+pub fn rd_classes(tables: &DefaultTables) -> Vec<usize> {
+    (1..tables.k)
+        .filter(|&c| tables.ctype[c] != CT_ZERO)
+        .collect()
+}
+
+/// What a whole channel costs under the RD quantiser.
+#[derive(Clone, Debug)]
+pub struct ChanRd {
+    pub chan: Chan,
+    /// Squared error over the coded range, in analysis units.
+    pub dist: f64,
+    /// Bits the coefficients and band symbols occupy, EOB included.
+    pub bits: u64,
+}
+
+/// Rate/distortion quantisation of one channel at a fixed step (S3).
+///
+/// Three decisions, all taken with `lam = kappa·D²`:
+///
+/// - **per band**, whether it is worth coding at all — class 0 costs one band symbol
+///   and leaves the band's whole energy as distortion; a coded class costs its
+///   coefficients and less distortion. S2 could not decline to code a band, because
+///   with `lam = 0` coding is always weakly better.
+/// - **per coefficient**, magnitude zero or not, which is what closes the rate gap
+///   measured against the reference (1.41× at `g = 100`, 2.58× at `g = 140`).
+/// - **where the spectrum ends.** The reader stops at the first terminator, so
+///   everything from `B` on reconstructs as zero; `B` is chosen by scanning prefix
+///   cost against the energy left uncoded. Exact rather than heuristic, because every
+///   context table in the default set is identical (measured: all 15 rows equal), so
+///   a band's class symbol costs the same from any context and the class sequence
+///   carries no coupling. **That equality is what makes the scan optimal; S4's
+///   trained tables break it and will need the reference's band-class Viterbi.**
+pub fn quantise_chan_rd(
+    coef: &[f32],
+    tables: &DefaultTables,
+    g: i32,
+    ms: bool,
+    kappa: f64,
+) -> ChanRd {
+    let step = step_of(g, ms) as f64;
+    let d = step / 16.0;
+    let lam = kappa * d * d;
+    let mmax = mmax_of(step as u32);
+    let k = tables.k;
+    let eob_len = tables.cb[0].symbol_len(k) as u64;
+
+    // Every band's energy, uncoded. The tail's energy is distortion, not a saving:
+    // a search that ignored it would think "code nothing" is optimal, which is how
+    // this kind of search fails quietly.
+    let mut energy = [0f64; NBANDS];
+    for b in 0..NBANDS {
+        let mut e = 0.0;
+        for i in 0..band_ncod(b) {
+            let v = f64::from(coef[b * BANDW + i]);
+            e += v * v;
+        }
+        energy[b] = e;
+    }
+
+    // Best option per band, kept as the band itself so nothing is recomputed.
+    let mut best_cost = [f64::INFINITY; NBANDS];
+    let mut best_class = [0usize; NBANDS];
+    let mut best_band: Vec<Band> = (0..NBANDS).map(|_| Band::zero()).collect();
+    let mut best_bits = [0u64; NBANDS];
+    let mut best_dist = [0f64; NBANDS];
+
+    for b in 0..NBANDS {
+        let ncod = band_ncod(b);
+
+        // Option: code nothing in this band. One band symbol, all its energy lost.
+        best_class[b] = 0;
+        best_band[b] = Band::zero();
+        best_bits[b] = tables.cb[0].symbol_len(0) as u64;
+        best_dist[b] = energy[b];
+        best_cost[b] = energy[b] + lam * best_bits[b] as f64;
+
+        for klass in rd_classes(tables) {
+            let rd = band_rdo(
+                &coef[b * BANDW..b * BANDW + BANDW],
+                tables,
+                klass,
+                d,
+                lam,
+                mmax,
+                ncod,
+            );
+            let bits = rd.bits + tables.cb[0].symbol_len(klass) as u64;
+            let cost = rd.dist + lam * bits as f64;
+            if cost < best_cost[b] {
+                let mut band = Band {
+                    class: klass,
+                    m: [0; BANDW],
+                };
+                for i in 0..ncod {
+                    let v = rd.m[i];
+                    // The sign rides on the magnitude, as the writer expects.
+                    band.m[i] = if v != 0 && coef[b * BANDW + i] < 0.0 {
+                        -v
+                    } else {
+                        v
+                    };
+                }
+                best_cost[b] = cost;
+                best_class[b] = klass;
+                best_band[b] = band;
+                best_bits[b] = bits;
+                best_dist[b] = rd.dist;
+            }
+        }
+    }
+
+    // Where does the spectrum end? Prefix cost against the energy left uncoded.
+    let mut suffix = [0f64; NBANDS + 1];
+    for b in (0..NBANDS).rev() {
+        suffix[b] = suffix[b + 1] + energy[b];
+    }
+    let mut prefix = 0f64;
+    let mut best_total = suffix[0]; // terminate before band 0: everything zero
+    let mut best_b = 0usize;
+    for b in 0..NBANDS {
+        prefix += best_cost[b];
+        // Stopping after `b + 1` bands owes the terminator; stopping after all
+        // `NBANDS` owes none, because the reader's loop ends first.
+        // The terminator is *not* priced, and that is deliberate fidelity rather
+        // than an oversight: the reference's DP charges `lam` for a coded band's
+        // bits and nothing for the EOB symbol, so pricing it here makes this
+        // search terminate earlier than the reference's and diverge — measured at
+        // `g = 140`: 2.5% more distortion and 3 bits/frame more, versus exact
+        // agreement once the charge is dropped. It is the reference's quirk, and
+        // S7 has to reproduce it to be byte-exact.
+        let term = 0.0;
+        let total = prefix + term + suffix[b + 1];
+        if total < best_total {
+            best_total = total;
+            best_b = b + 1;
+        }
+    }
+
+    let bands: Vec<Band> = best_band.into_iter().take(best_b).collect();
+    let dist = best_dist[..best_b].iter().sum::<f64>() + suffix[best_b];
+    let mut bits = best_bits[..best_b].iter().sum::<u64>();
+    if best_b < NBANDS {
+        bits += eob_len;
+    }
+    ChanRd {
+        chan: Chan { bands },
+        dist,
+        bits,
+    }
 }

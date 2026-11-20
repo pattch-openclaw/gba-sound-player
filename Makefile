@@ -5,7 +5,7 @@
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
-        uli-default-tables uli-mdct-fixture \
+        uli-default-tables uli-mdct-fixture uli-rd-ab \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-playback-test uli-player uli-player-rom uli-player-speaker uli-player-speaker-rom \
@@ -734,6 +734,23 @@ uli-default-tables:
 # bytes in the tree, no gate builds C.
 uli-mdct-fixture:
 	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/gen_uli_mdct_fixture.py
+
+# S3's acceptance harness: our --rd encoder against the reference's, same PCM, same
+# budgets: bytes, fit, kbit/s, SNR, chosen g. Exits nonzero if any row overshoots.
+# Deliberately NOT on any gate's path: it needs the off-tree reference binary, and
+# E-R1 keeps that off `make uli-test`. Run it when the search changes and record the
+# distillation in PLAN-OF-RECORD.md -> S3.
+ULI_RD_ALBUM ?= $(ULI_BENCH_DIR)/assets/album.f32
+ULI_RD_TRACKS ?= $(ULI_BENCH_DIR)/assets/tracks.tsv
+ULI_RD_BUDGETS ?= 400000,120000,40000
+uli-rd-ab:
+	@test -f $(ULI_RD_ALBUM) || { echo "uli-rd-ab: no album at $(ULI_RD_ALBUM) (set ULI_RD_ALBUM=)"; exit 1; }
+	@test -x $(GBA_AUDIO)/build/uli_enc || { echo "uli-rd-ab: no reference encoder (make -C $(GBA_AUDIO)/encoder)"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) build --release --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE) --bins
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_rd_ab.py \
+	  --album $(ULI_RD_ALBUM) --tracks $(ULI_RD_TRACKS) --budgets $(ULI_RD_BUDGETS)
 	@echo "now: cd $(GATE_NEUTRAL_CWD) && $(CARGO) test --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE)"
 
 uli-check: toolchain-check
@@ -1841,6 +1858,7 @@ help:
 	@echo "                           uli-enc's blob round-trips through it"
 	@echo "      uli-default-tables   regenerate the reference default-tables golden"
 	@echo "      uli-mdct-fixture     regenerate the reference forward-MDCT coefficients"
+	@echo "      uli-rd-ab            S3 gate: ours vs the reference, same PCM and budgets"
 	@echo "      uli-overlay-test     product path vs the portable reference, both builds, + premise"
 	@echo "      uli-fixture          regenerate the committed expected-vector file"
 	@echo "      uli-bench            build + run + read PASS: 129-frame cycle/witness image"

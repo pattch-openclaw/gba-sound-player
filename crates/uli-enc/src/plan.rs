@@ -431,6 +431,7 @@ impl Content {
         n_samples: usize,
         tables: &DefaultTables,
         g: i32,
+        kappa: f64,
         n_frames: usize,
     ) -> Result<Self, Error> {
         if !GPlan::legal(g, false) {
@@ -447,8 +448,12 @@ impl Content {
         for f in 0..n_frames {
             crate::mdct::mdct_frame(samples, f, n_samples, &mut coef);
             let ms = false;
-            let (l, _) = crate::quant::quantise_chan(&coef[..M], tables, g, ms);
-            let (r, _) = crate::quant::quantise_chan(&coef[M..], tables, g, ms);
+            // S3's rate/distortion quantiser, not S2's nearest rule: `kappa` is the
+            // encoder's own knob and a fixed step is only the *step*, so leaving `lam`
+            // at zero here would make `--g` a different coder from `--rd` and from the
+            // reference, and every fixed-step comparison would be measuring that.
+            let l = crate::quant::quantise_chan_rd(&coef[..M], tables, g, ms, kappa).chan;
+            let r = crate::quant::quantise_chan_rd(&coef[M..], tables, g, ms, kappa).chan;
             frames.push([l, r]);
         }
         Ok(Self {
