@@ -1143,7 +1143,7 @@ read-side, so this does not reopen the paragraph above.
 | **S3** | Rate/distortion quantisation and the `g` search: per-coefficient `J = D + kappa·D²·R`, band-class choice, the spectrum-end decision, λ bisection against the budget, cycle cap | E-R5·R5b/R5d, E-R6, E-R7 (L/R only) | rate/quality within tolerance of the reference's curve at equal budget, **at `ms = 0`**: rate ≤ 1.01×, distortion ≤ 1.03× at fixed `g` (`make uli-rd-ab`); the cap respected; `--threads 1` = `N` byte-identical | **done** |
 | **S3b** | **M/S**: the `1/√2` forward rotation, the `√2` step compensation, `ms` in the candidate set (weighed per `g` with one λ, as the reference does), `ms` in the cycle model | E-R7, E-R6 | with `ms` forced, our distortion matches the reference's at fixed `g` (exact at g=100/140); at equal budget the search beats L/R-only on correlated stereo; the SNR gap to the reference closes | **done** |
 | **S4** | Two-pass table training: the album's own symbol counts into Huffman lengths, and its own reconstruction errors into `dq`, then a second search with the trained set | E-R4, E-R5, E-R7 | output byte-stable across runs; the trained set is a complete prefix code and stays inside E-R4; training measurably beats the built-in tables at a binding budget; and the band-class choice is a shortest path, since trained context codebooks differ | **done** |
-| **S5** | Album assembly (WAV front end, gapless join, tags/fold), `--budget`/`--cap` on real sizes, frame-parallel search | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes (each seeked to its own preroll); hashes pinned; too small refuses **before the first frame**, citing both numbers; a 32,768 Hz WAV reaches the same blob its pre-resampled PCM does, and a resampled WAV is quoted by SNR; the CLI prints the reference's columns | **done** — see "S5" below for the numbers and the defaults-restored failure |
+| **S5** | Album assembly (WAV front end, gapless join, tags verbatim), `--budget`/`--cap` on real sizes, frame-parallel search | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes (each seeked to its own preroll); hashes pinned; too small refuses **before the first frame**, citing both numbers; a 32,768 Hz WAV reaches the same blob its pre-resampled PCM does, and a resampled WAV is quoted by SNR; the CLI prints the reference's columns | **done** — see "S5" below for the numbers and the defaults-restored failure |
 | **S6** | `mu` (decoder-cycle-aware) search: re-code an over-cap frame by dropping its cheapest coefficients instead of refusing the candidate | E-R8, E-R7 | a knob that demonstrably trades SNR for decode cycles, measured on the bench — and, measured 2026-11-20, it closes the last high-rate gap: at `--budget 400000 --cap 74` the equivalent mechanism is worth **1.48 dB** to the oracle, against a 1.15 dB gap | not started |
 | **S7** | **The acceptance matrix, as a buildable target** | E-R2, E-R5, E-R7 (and E-R1's oracle posture) | the four cells below run in CI-shaped form and compare SHA-256s against the reference's blobs, including the two header cycle fields | not started |
 
@@ -1189,7 +1189,13 @@ as a blob hash rather than as an intention.
 **The WAV layer, and the resampler bug its test found.** `wav.rs` reads RIFF/WAVE including
 `WAVE_FORMAT_EXTENSIBLE`, integer PCM 8/16/24/32 and float 32, one or two channels, any
 rate; `assemble.rs` duplicates mono, joins the tracks gaplessly, reads `LIST/INFO`
-`INAM`/`IART`, folds tags the way §5.5 requires and falls back to the file stem and `?`;
+`INAM`/`IART` and falls back to the file stem and `?`. **The tags are carried verbatim:** the
+first version of this file also folded them to ASCII, which was wrong for a reason worth
+recording — §5.5's fold already has one home (`scripts/album_prep.py::fold`, used by the
+bake), and the encoder's copy could not do NFKD, so it mapped Latin-1 and silently dropped
+every other script (`fold("日本語")` was the empty string, which the test then pinned). Text
+is album policy, decided before `tracks.tsv` exists; the encoder's job is to carry what it
+read, and `--emit-pcm` hands the caller the same bytes;
 `resample.rs` is a polyphase Kaiser-windowed sinc, 32 taps per phase, each phase normalised
 to unity DC. The first version's cutoff was a constant 0.475 of the *source* rate, which is
 right for upsampling and wrong for downsampling: a 20 kHz tone at 44,100 Hz came out only

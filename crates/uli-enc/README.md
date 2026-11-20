@@ -21,7 +21,10 @@ not, because they make `NS` ambiguous.
 `--wav FILE` (repeatable, in play order) decodes **PCM 8/16/24/32 or float 32, one or two
 channels, any rate**, joins the tracks gaplessly and encodes the result. Mono is duplicated
 to both channels; titles and artists come from the file's `LIST/INFO` `INAM`/`IART` tags,
-falling back to the file stem and `?`, both folded to ASCII the way §5.5 requires. Source
+falling back to the file stem and `?`, and are carried **verbatim** — the encoder does not
+fold text. §5.5's fold has one owner, `scripts/album_prep.py::fold`, used by the bake; a
+second implementation here would be a second owner of a rule that has to mean one thing
+(and a Latin-1-only table without NFKD turned a Japanese title into an empty string). Source
 files at 32,768 Hz are copied **without touching a sample**, which is why such a WAV reaches
 *the identical blob* its `album.f32` + `tracks.tsv` pair does — `tests/wav.rs` encodes both
 and compares the bytes. Any other rate goes through a polyphase Kaiser-windowed sinc
@@ -157,7 +160,7 @@ The gates that matter, and they are not the same question:
 - `tests/train.rs` — a trained table set is a *usable* set (complete prefix codes, still
   inside the closed-world premise), training pays for itself, and two encodes are byte-identical.
 - `tests/wav.rs` — a 32,768 Hz stereo WAV reaches the PCM pair's exact bytes; a resampled
-  one is held to SNR; every PCM depth lands on one scale; the fold matches the packer's.
+  one is held to SNR; every PCM depth lands on one scale; tags stay verbatim.
 - `tests/resample.rs` — the product rate is an untouched copy, DC gain is one, a passband
   tone keeps >80 dB, and the guard band rejects what 32,768 Hz cannot carry.
 - `tests/determinism.rs` — `--threads 1` and `--threads 4` agree byte for byte on both the

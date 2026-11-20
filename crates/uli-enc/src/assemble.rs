@@ -8,16 +8,17 @@
 //! samples are produced by the same code and cannot disagree.
 //!
 //! Titles and artists come from the file's `LIST/INFO` tags, falling back to the
-//! file stem and `?` — the reference's own order (`prep.py`). Both are folded to
-//! ASCII because the product font is a 96-glyph subset; a fold that leaves a
-//! non-ASCII title in the container would be a display bug at 03:00, not here.
+//! file stem and `?` — the reference's own order (`prep.py`). They are carried
+//! **verbatim**, including a non-ASCII one.
 //!
-//! **The fold is not NFKD.** `album_prep.py` decomposes with Unicode's tables and
-//! drops the combining marks, so `Ö` becomes `O`; this reproduces that for the
-//! Latin-1 and Latin-Extended-A precomposed letters, which is where real tags
-//! live, and drops anything else outside ASCII. A character outside those blocks
-//! folds to nothing rather than to a wrong letter — the same thing the reference
-//! does with a script it cannot decompose.
+//! **The encoder does not fold text, and that is deliberate.** §5.5's ASCII fold
+//! lives in one place — `scripts/album_prep.py::fold`, used by the bake — and a
+//! second implementation here would be a second owner of a rule that has to mean
+//! one thing. A Unicode table in a codec encoder is also a table that can only be
+//! half right without NFKD: the version this file used to carry mapped Latin-1 and
+//! Latin-Extended-A and silently dropped every other script, turning a Japanese
+//! title into an empty string. Whether a title is folded, shortened or refused is
+//! the album layer's decision, taken before the encoder ever sees a `tracks.tsv`.
 
 use std::path::Path;
 
@@ -25,10 +26,7 @@ use crate::wav;
 use crate::{Error, Pcm, Samples, TrackInput};
 use uli_lite::format::MAX_TRACKS;
 
-/// The reference's tag truncation (`uli_enc.c` writes `title[120]`, `artist[150]`).
-const TITLE_MAX: usize = 120;
-const ARTIST_MAX: usize = 150;
-/// What an empty artist becomes, in the reference's own table.
+/// What an absent artist becomes, in the reference's own table.
 const UNKNOWN: &str = "?";
 
 /// Assemble `paths` (in play order) into the encoder's PCM boundary.
@@ -118,102 +116,20 @@ fn to_stereo(samples: &[f32], channels: u16) -> Result<Vec<f32>, Error> {
     }
 }
 
-/// The folded `(title, artist)` pair, tags first, the file's name last.
+/// The `(title, artist)` pair: the file's tags, then its name, then `?`.
+///
+/// Verbatim on purpose — see the module doc. The encoder carrying a title
+/// unchanged is what keeps it from owning a second copy of §5.5's fold; `?` is the
+/// reference's own placeholder for an absent artist.
 fn tags(path: &Path, tags: &wav::Tags) -> (String, String) {
     let stem = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let title = fold(tags.title.as_deref().unwrap_or(&stem));
-    let artist = fold(tags.artist.as_deref().unwrap_or(""));
-    let title = truncate(&title, TITLE_MAX);
-    let artist = truncate(
-        if artist.is_empty() { UNKNOWN } else { &artist },
-        ARTIST_MAX,
-    );
-    (title, artist)
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    s.chars().take(max).collect()
-}
-
-/// §5.5's ASCII fold: map the precomposed Latin letters to their base, drop what is
-/// not ASCII, collapse whitespace, and unwrap a title that is entirely
-/// parenthesised. An empty result stays empty and is the caller's to replace.
-pub fn fold(text: &str) -> String {
-    let mut ascii = String::with_capacity(text.len());
-    for ch in text.chars() {
-        if ch.is_ascii() {
-            ascii.push(ch);
-        } else if let Some(base) = latin_base(ch) {
-            ascii.push_str(base);
-        }
-        // Everything else is dropped, as the reference drops a mark it cannot map.
-    }
-    let collapsed = ascii.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.len() >= 2 && collapsed.starts_with('(') && collapsed.ends_with(')') {
-        let inner = collapsed[1..collapsed.len() - 1].trim();
-        if !inner.is_empty() {
-            return inner.to_string();
-        }
-    }
-    collapsed
-}
-
-/// The base ASCII letters for the precomposed Latin-1 / Latin-Extended-A block.
-///
-/// Grouped by base letter rather than listed one code point per line, because the
-/// list's meaning is the grouping: every diacritic on `A` is an `A`. Ligatures and
-/// the two letters that expand (`Æ`, `ß`, `Œ`, `Þ`) expand, matching NFKD.
-fn latin_base(ch: char) -> Option<&'static str> {
-    let s = match ch {
-        'À'..='Å' | 'Ā' | 'Ă' | 'Ą' => "A",
-        'à'..='å' | 'ā' | 'ă' | 'ą' => "a",
-        'Æ' => "AE",
-        'æ' => "ae",
-        'Ç' | 'Ć' | 'Ĉ' | 'Ċ' | 'Č' => "C",
-        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => "c",
-        'Ď' | 'Đ' | 'Ð' => "D",
-        'ď' | 'đ' | 'ð' => "d",
-        'È'..='Ë' | 'Ē' | 'Ĕ' | 'Ė' | 'Ę' | 'Ě' => "E",
-        'è'..='ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => "e",
-        'Ĝ' | 'Ğ' | 'Ġ' | 'Ģ' => "G",
-        'ĝ' | 'ğ' | 'ġ' | 'ģ' => "g",
-        'Ĥ' | 'Ħ' => "H",
-        'ĥ' | 'ħ' => "h",
-        'Ì'..='Ï' | 'Ĩ' | 'Ī' | 'Ĭ' | 'Į' | 'İ' => "I",
-        'ì'..='ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => "i",
-        'Ĳ' => "IJ",
-        'ĳ' => "ij",
-        'Ĵ' => "J",
-        'ĵ' => "j",
-        'Ķ' => "K",
-        'ķ' => "k",
-        'Ĺ' | 'Ļ' | 'Ľ' | 'Ŀ' | 'Ł' => "L",
-        'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => "l",
-        'Ñ' | 'Ń' | 'Ņ' | 'Ň' | 'Ŋ' => "N",
-        'ñ' | 'ń' | 'ņ' | 'ň' | 'ŋ' => "n",
-        'Ò'..='Ö' | 'Ø' | 'Ō' | 'Ŏ' | 'Ő' => "O",
-        'ò'..='ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => "o",
-        'Œ' => "OE",
-        'œ' => "oe",
-        'Ŕ' | 'Ŗ' | 'Ř' => "R",
-        'ŕ' | 'ŗ' | 'ř' => "r",
-        'Ś' | 'Ŝ' | 'Ş' | 'Š' | 'ß' => "S",
-        'ś' | 'ŝ' | 'ş' | 'š' => "s",
-        'Ţ' | 'Ť' | 'Ŧ' | 'Þ' => "T",
-        'ţ' | 'ť' | 'ŧ' | 'þ' => "t",
-        'Ù'..='Ü' | 'Ũ' | 'Ū' | 'Ŭ' | 'Ů' | 'Ű' | 'Ų' => "U",
-        'ù'..='ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => "u",
-        'Ŵ' => "W",
-        'ŵ' => "w",
-        'Ý' | 'Ŷ' | 'Ÿ' => "Y",
-        'ý' | 'ÿ' | 'ŷ' => "y",
-        'Ź' | 'Ż' | 'Ž' => "Z",
-        'ź' | 'ż' | 'ž' => "z",
-        'ſ' => "s",
-        _ => return None,
+    let title = tags.title.clone().unwrap_or(stem);
+    let artist = match tags.artist.as_deref() {
+        Some(a) if !a.is_empty() => a.to_string(),
+        _ => UNKNOWN.to_string(),
     };
-    Some(s)
+    (title, artist)
 }

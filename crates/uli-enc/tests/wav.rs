@@ -18,7 +18,6 @@
 mod common;
 
 use common::{TempDir, WavSpec, wav_bytes, wav_bytes_f32};
-use uli_enc::assemble::fold;
 use uli_enc::{
     Args, DEFAULT_BUDGET, DEFAULT_CAP_PCT, Error, Input, Pcm, Samples, assemble, encode, wav,
 };
@@ -182,7 +181,7 @@ fn tracks_are_joined_gaplessly_and_the_table_partitions_the_album() {
 }
 
 #[test]
-fn mono_is_duplicated_and_tags_are_folded() {
+fn mono_is_duplicated_and_tags_are_carried_verbatim() {
     let dir = TempDir::new("wav-mono-tags");
     let path = dir.path().join("synthetic.wav");
     let spec = WavSpec {
@@ -195,9 +194,11 @@ fn mono_is_duplicated_and_tags_are_folded() {
     assert_eq!(pcm.n_samples, 2);
     assert_eq!(samples.at(0, 0), 1000.0);
     assert_eq!(samples.at(0, 1), 1000.0, "mono is duplicated, not mixed");
-    // The §5.5 fold: the em dash is dropped, Ö decomposes to O, whitespace collapses.
-    assert_eq!(pcm.tracks[0].title, "Synthetic Offnung (Mix)");
-    assert_eq!(pcm.tracks[0].artist, "Somebody");
+    // Verbatim: the encoder is not a second owner of §5.5's fold. The bake folds
+    // (and reports offenders) before an album ever reaches `tracks.tsv`; a WAV read
+    // here keeps the tag's own bytes so `--emit-pcm` hands the caller what it read.
+    assert_eq!(pcm.tracks[0].title, "Synthetic — Öffnung (Mix)");
+    assert_eq!(pcm.tracks[0].artist, "Sömebödy");
 }
 
 #[test]
@@ -220,23 +221,6 @@ fn an_empty_source_is_refused() {
     std::fs::write(&path, wav_bytes(&WavSpec::pcm(2, 32768, 16), &[])).unwrap();
     let err = assemble::assemble(&[path]).expect_err("an empty track cannot be an album");
     assert!(err.to_string().contains("0 samples"), "{err}");
-}
-
-#[test]
-fn fold_matches_the_packers_cases() {
-    // The same shapes `scripts/album_prep.py`'s FOLD_CASES pin, so the two folds
-    // cannot drift without one of the two suites saying so.
-    assert_eq!(fold("Bioluminescent 1"), "Bioluminescent 1");
-    assert_eq!(fold("Synthetic — Öffnung"), "Synthetic Offnung");
-    assert_eq!(fold("  spaced   out  "), "spaced out");
-    assert_eq!(fold("(wrapped title)"), "wrapped title");
-    assert_eq!(fold("a (phrase) inside"), "a (phrase) inside");
-    assert_eq!(
-        fold("日本語"),
-        "",
-        "a script with no Latin base folds to nothing"
-    );
-    assert_eq!(fold("Æther"), "AEther", "ligatures expand, as NFKD would");
 }
 
 // --- the boundary itself ---------------------------------------------------
