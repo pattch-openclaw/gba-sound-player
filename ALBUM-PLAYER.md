@@ -995,7 +995,10 @@ pool gates know which variants they are asked about (§13).
 application — `examples/album_player/layout_spec.toml`, a table of named variants (band
 rows, per-element tile spans, **per-element `row_px` (the line pitch: see below)**, bar cells and
 pixel width, face per element, image box, `image_tiles` budget, per-variant `tile_budget` and
-`resident_scenes` (§5.1), palette banks, and a `product = true/false` flag) — and the bake step's layout emitter — **`album-layout-gen`**, the generator inside `scripts/album_bake.py` that §9.0's register names, run by `make album-bake` and gated by `make album-layout-test`** — generates `src/layout.rs` from it:
+`resident_scenes` (§5.1), palette banks, and a `product = true/false` flag) — and the bake step's
+layout emitter — **`album-layout-gen`**, the generator inside `scripts/album_bake.py` that §9.0's
+register names, run by `make album-bake` and gated by `make album-layout-test`, which also emits
+§5.5a's glyph atlas — generates `src/layout.rs` from it:
 `pub const`s, `const _: () = assert!(…)` assertions that the bands tile exactly 20 rows and
 that every declared box sits inside its own region, the derived legal art boxes (§7), the
 derived title-fit box (§5.5), the derived list window — **visible rows = `floor(region_height /
@@ -1811,6 +1814,91 @@ in its own bank (§5.4), or a declared dither. This is a legibility rule, not a 
 what happens when a band inherits whatever the picture happened to put under it. The bake
 report should say what it computed for each band, in the file's usual style of printing the
 number instead of asserting the taste.
+
+### 5.5a The glyph atlas, as a build — the baseline 2a implements
+
+The atlas was described above by what it must *buy* — dedupe, 188 tiles, one rasteriser — and §11's
+2a row and AP-3b's L4 leg are the two places that depend on it. This is the same thing by what it
+must be *made of*, because "rasterise the face into a `TileSet`" is where a phase quietly acquires an
+unbounded tool if nobody bounds it. The rule that bounds it is §9.0's:
+2a may refuse only facts about input its own tools can read, and the atlas reads **one tracked
+`.ttf`** and nothing else. So the baseline is deliberately the smallest thing that produces correct
+text, and everything not in this list is out of 2a rather than unfinished.
+
+**Scope of the baseline, stated as cuts** (each one is a decision with a reason, not a TODO):
+
+- **One face, one raster.** `ark-pixel-10px`'s ASCII cut at its design size (10), in a 16 px cell.
+  Per-element faces stay a declared field that resolves to the *same* atlas in the baseline — a
+  second face is a second atlas (§5.1: 376 of 512 tiles), so it is Q19's work, not 2a's.
+- **4bpp, one palette bank, ink = index 1, background = index 0 (transparent).** No dither, no
+  8bpp, no per-glyph colour. §5.4's banks are already allocated; the atlas just picks one.
+- **No kerning, no hints, no antialiasing, no sub-pixel positions.** Advances are integers at the
+  design raster (the grid test in §5.1's measured pass is 0 of 94 off-grid there), so integer
+  placement is exact and `measure()` is bit-identical to what the ROM draws. A fit box that refuses
+  on `measure()` therefore agrees with the pixels *by construction* — which is the property
+  `title-fit` and one-line elision actually need.
+- **Coverage is `cmap ∩ U+0020–U+007E`.** Space costs nothing: it is `TileSetting::BLANK`, i.e. the
+  `0xffff` sentinel (`display/tiled.rs:117,168-169`) that `set_tile_at_pos` skips allocating for
+  (`regular_background.rs:364`) — so the pool sum in §5.1 assumes nothing it has to take on faith. A
+  character outside coverage is the same failure it is today — `text.rs:74`'s `renderable()` — not a
+  new refusal.
+- **Elision is three ASCII periods, not U+2026.** A one-cell ellipsis would be a declared extra
+  slot: +1 glyph × 2 tile rows = **190 tiles and a distinct cap of 190**, moving §5.1's 444/488 to
+  446/490. The baseline keeps `...` so every number in §5.1's tables stays exactly as printed; a
+  real ellipsis tile is a one-line addition later, and the arithmetic it costs is written down here
+  rather than discovered in a review.
+
+**The build, in the order it is written** — one script, one generated module, one Make step, one
+check. Names are the ones §9.0's register and §5.0's emitter already use.
+
+1. **The cut is an asset step, not code.** `pyftsubset` with the exact command already in
+   `assets/fonts/README.md`, output committed under `assets/fonts/` beside the two faces already
+   there, with its licence rows (§2.1). This is the step that makes the product variant's declared
+   face *resolvable* at all — today `assets/fonts/` holds the 349 KB full face and no ASCII cut of
+   it — so it comes first, and `face-not-resolvable` is what fires if it is skipped.
+2. **`scripts/album_glyphs.py`** reads that cut and emits `examples/album_player/src/glyphs.rs`
+   (generated, gitignored, regenerated — the `--emit-pin`/`master_pin.rs` convention, `Makefile:180`).
+   Inputs by table, so there are no hidden ones: `cmap` (coverage), `hmtx` (advances), `hhea`
+   (line box, baseline). It walks U+0020–U+007E, rasterises each glyph with an **integer even-odd
+   scanline fill** over the `glyf` contours at the declared raster, and packs each into **two 8×8
+   4bpp tiles** (32 B each) — one tile row per 8 px of a 16 px cell.
+   *Why a hand-rolled scanline is the right answer and not a shortcut:* at the design size every
+   contour coordinate is already an integer (that 0-of-94 grid result), so the fill is exact
+   arithmetic over rectangles and steps — **no freetype, no antialiasing, no second rasteriser**, and
+   the pixels are reproducible byte for byte from the `.ttf` by anyone who runs the script.
+3. **What the module contains**, and nothing more: `GLYPHS` (the packed tile data), `SLOT`
+   (`[GlyphSlot; 95]`: `tile0`, `advance_px`, `lead_px`), `BASELINE_PX`, `LINE_BOX_PX`,
+   `ATLAS_TILES`, `pub fn measure(&str) -> u32` (sum of `advance_px`, no kerning), and
+   `const _: () = assert!(…)` for the two facts the rest of the file computes with —
+   `ATLAS_TILES == 94 * 2` and `LINE_BOX_PX <= row_px`. `row_px` comes from
+   `layout.rs`, so the two generated modules are asserted against each other rather than trusted.
+4. **Two mechanical gotchas, written down because both are silent when wrong.** `TileSet::new` is
+   **unsafe** and requires a 32-bit-aligned slice whose length is a multiple of the tile size
+   (`vram_manager.rs:59-66`), so `GLYPHS` is emitted as `[u32; N]` and the `TileSet` is built from
+   `core::slice::from_raw_parts(GLYPHS.as_ptr().cast::<u8>(), N * 4)` — aligned and sized by
+   construction, without a runtime copy. And a background map names a `u16` tile id with 10 usable
+   bits, so 188 is nowhere near the 1,023-tile addressability limit but *is* inside it — the atlas
+   is one allocation, not a per-glyph cache.
+5. **The step is `make album-bake`, and the check is `make album-layout-test`.** The atlas is
+   generated where `layout.rs` already is (one emitter, `album-layout-gen`, §5.0), and
+   `album_glyphs.py --check` (the `gen_gafp_blob.py --check` convention, `Makefile:489`) proves the
+   committed-to-nothing generated module is byte-identical to a fresh run. No new Make target: a
+   target per generated file is how a build becomes a menu.
+6. **Runtime use is two writes per changed glyph cell**, at `y = i × row_px / 8` (§5.5's
+   rows-are-placed rule): `set_tile((x, row), &ATLAS, TileSetting::new(SLOT[c].tile0, BANK))` and
+   the same for `tile0 + 1`. A clock digit change is 2 writes ≈ 1.5–3 k c (§10.2), a title line is
+   `28 × 2 = 56` writes, and a scrolled list row is `44 × 2 = 88` — which is the arithmetic §5.1's
+   bounds were always describing.
+
+**Acceptance, and what is deliberately not measured yet.** `album_glyphs.py --check` is
+byte-identity; a host test asserts every `SLOT.advance_px` equals the TTF's rounded advance and every
+glyph's ink bounding box equals `ControlBoundsPen`'s box at the same raster (a *geometry* validator,
+so it can never quietly become the second rasteriser §5.5 forbids); AP-3's snapshot leg records slot
+identity per variant; and AP-3b's L4 leg reads the live refcount on a repeated glyph's tile — it must
+be ≥ 2, which is the one number that proves dedupe rather than assuming it. **Not in the baseline:**
+per-element faces, 8bpp, a one-cell ellipsis, wrapping, kerning, sub-pixel placement, OBJ text, and any
+use of agb's `Layout` for a list. Each is a declared field or a later phase, and none of them is on
+2a's critical path.
 
 ### 5.6 Every on-screen state must be readable by the person who reads it (ruled 2026-11-16, corrected the same day)
 
@@ -2659,7 +2747,7 @@ that rather than promote an internal constant into a headline.
 |---|---|
 | **0 — Probes.** Three throwaway ROMs and no product code: (a) UI spike — 3 BGs + 1 OBJ + text + palette fade, VBlank-paced, *with the shipped lossless feeder playing underneath*; (b) art spike — a PNG on screen from a hand-written `ART1`; (c) skip spike — fade/drop/re-prime against the real ring, measuring the silence gap and proving the re-prime costs no underrun | `make album-probe-rom` + logs; **AP-0**: the frame cost breakdown closes with UI terms, the VRAM/OBJ split is recorded, `SKIP_PRIME_CHUNKS` gets its first number, and the *targets in §10 are replaced by measurements*. **Landed 2026-11-14** (`examples/album_probe/README.md`; `make album-probe-art/-test/-rom`, `make album-probe`): UI full arm **1.89%** of a period (≤2% target, and a lower bound), feeder 0.92%, video period **280,896 c** (§4.5's ~281,000 confirmed), one 4bpp tile write 726 c, art upload **0.60 period** live (+2.08% over audio-disarmed, n=1, emulator — the same upload has now read three ways and AP-4 re-prices it), `late_max` 4 samples in the skip sweep's total, inside the 16-sample grace — and `SKIP_PRIME_CHUNKS` came back **blocked on the truncate ruling (§4.4, Q13b)**, which is the finding Phase 0 existed to produce |
 | **1 — It builds an album, and it plays one.** A1–A4, A6, A10, **A3a**. In order: **§2.2's lift of the feeder out of `examples/flac_spike/` into project source, with `truncate()` (§4.4) landing on the lifted type** — Phase 1 may not `#[path]` a spike. **Landed 2026-11-15 as PR-1**: `crates/gba-playback` holds `playback` + `checksum`, `RingFeed::truncate()` is on the lifted type with four host tests, `make playback-test` is part of `make flac-check`, and the skip probe's `truncate` arm measures it (3–17 periods = 102.5–581.1 ms). `SKIP_PRIME_CHUNKS` remains un-chosen; then **the pack step (§2.3, §9.0): `examples/album_player/album.toml` (tracked) → `scripts/album_bake.py`'s Phase 1 subset → N `GAFP` blobs + `ALBM1` + `src/assets.rs`, all generated and gitignored**, default material N entries over the tracked reference master plus one short clip (Q15) so a fresh clone builds with no untracked input; then the app crate — `PcmSource` + `backend/{flac,stub}` (§4.2b), the app's derived `geometry.rs`, `meta.rs` (the validating `ALBM1` reader over the per-track ROM-location map), the fade→**truncate**→re-seek→silence-cover→re-prime→fade-in feeder (§4.4), the 32-bit session clock (§10.4, ruled), the no-divide arithmetic (§6), play/pause/next/prev/restart, and title + elapsed/remaining on screen. **The `stub` and both backend arms compile from here on, and the suite runs on `stub` + `flac`; `uli2` runs when U4/U5 land (Phase 5, AP-9). **Corrected 2026-11-19: they have landed — U4 with 13.73 points of margin at the worst frame, U5 on hardware with 0 underruns (§2, [`ULI2.md`](ULI2.md) §Gates). What still keeps the `uli2` arm from *running* here is asset generation (R7, Q3) and this app's own `src/backend/uli2.rs`, which is Phase 5's work. The three-arm compile result and the host-side parity PR-3a actually got are unchanged by any of that.**** | **AP-1**, **AP-2**, **AP-9** — and the phase that hands the codec track its UI-cost addend (§10.2, R1b) and its first per-track real-music census (§10.2b, Q16). Landing it also updates `README.md` → "Build Process" and the `gba-build-and-test` skill with the new `album-*` targets |
-| **2a — The surface exists, and the album plays on it.** **A5** (the layout *module*: a tracked `layout_spec.toml` → generated `src/layout.rs`, §5.0), **A7** (the progress widget — **moved here from Phase 3**, see the note under this table), the **authored control art** for A2/A4's transport in declared slots (§5.3), A6's `elapsed / total` wording on the real layout, one **`blank` scene** plus the scene slot's narrow contract (§5.2), and element-addressed redraw with per-element cost records (§5.1, §10.2), **and the text *mechanism* — `measure`/`fit` over the declared face plus the static glyph atlas (§5.5): 94 glyphs × 2 tile rows at the 16 px cut, ≈6 KB, one `TileSet`, generated host-side from the tracked `.ttf`.** The 2a ROM draws no list, and 2a still owns it, because the pool audit 2a owns (`image-tiles-over-budget`) is arithmetic *about a text path*: a bound that only holds once 2b has built a renderer is 2b's refusal wearing 2a's name, and it would put the critical path of a 2a gate through a 2b tool (§9.0's rule) | **AP-3.** Deliberately **no album art, no track list, no title card, no viz**: the point of 2a is that a person can play the album *on the real layout*, and that the layout can then be changed by editing a config file instead of rewriting a module. If 2a does not make the ROM more playable on its own, it should not have been split off. **Two things this row has to say and did not (review, 2026-11-20), both written where they belong rather than in prose elsewhere:** *(i)* **2a is the layout and its mechanisms, not the rendering** — every declared field (geometry, band table, control slots, fit boxes, `image_tiles`, `tile_budget`) exists, is generated and is checked at 2a even where the 2a ROM draws none of it, and `album-preview` composes the unrendered ones as host instruments (§9.1's row, the note under this table). The line the split draws is about **what the ROM may draw**: 2a's ROM draws the chrome and `blank`, nothing else. *(ii)* **2a's boot state is option (c) of §5.2's three** — chrome + title band + `blank`, audio auto-starting exactly as the gate ROM does. Decided 2026-11-20 rather than left to the PR, because "a row that says nothing ships the smallest option by default" is how defaults become decisions without anyone making them. **Not (a)**, which shows a person nothing of the layout this phase exists to build and leaves the phase unable to claim it made the player more playable. **Not (b)**, which puts a key press before the first sample: **AP-1**'s term is "audio begins within 1.5 s of boot", measured on a run where nothing is pressed (§13's AP-1 row, 578–580 ms witnessed), and a phase that wants a press has to restate that claim in its own PR, not inherit it. **(c) keeps the term byte-identical** — same run, same key log, same measurement — while putting a title band, a clock and a control column in front of a human with none of 2b's content. **The title card stays 2b's scene** (same renderer as the list, same fit boxes as A6, and §5.2's rule is that a scene earns residency by an answer it gives), and **whether a press should ever precede audio is Q20's to answer in 2b — and the PR that answers it restates AP-1 in the same PR.** What 2a owes that future decision is mechanism only: §5.2's scene-slot contract, and a chrome + title band drawn before any sample plays, which is exactly what its switch leg (L3) is priced at. **AP-3b (§13) belongs to 2a, not 2b**: its three legs are the numbers §5.1's switch ordering and §10.2's element rows are waiting on, they need only chrome and a background (no art, no list), and the instrument is already ~80 % present in `examples/album_probe` (§5.1), so the leg costs one new probe bin rather than a new harness |
+| **2a — The surface exists, and the album plays on it.** **A5** (the layout *module*: a tracked `layout_spec.toml` → generated `src/layout.rs`, §5.0), **A7** (the progress widget — **moved here from Phase 3**, see the note under this table), the **authored control art** for A2/A4's transport in declared slots (§5.3), A6's `elapsed / total` wording on the real layout, one **`blank` scene** plus the scene slot's narrow contract (§5.2), and element-addressed redraw with per-element cost records (§5.1, §10.2), **and the text *mechanism* — `measure`/`fit` over the declared face plus the static glyph atlas (§5.5a is its build spec: `scripts/album_glyphs.py`, `--check` under `make album-layout-test`, 94 glyphs × 2 tile rows at the 16 px cut, ≈6 KB, one `TileSet`, from the tracked `.ttf`).** The 2a ROM draws no list, and 2a still owns it, because the pool audit 2a owns (`image-tiles-over-budget`) is arithmetic *about a text path*: a bound that only holds once 2b has built a renderer is 2b's refusal wearing 2a's name, and it would put the critical path of a 2a gate through a 2b tool (§9.0's rule) | **AP-3.** Deliberately **no album art, no track list, no title card, no viz**: the point of 2a is that a person can play the album *on the real layout*, and that the layout can then be changed by editing a config file instead of rewriting a module. If 2a does not make the ROM more playable on its own, it should not have been split off. **Two things this row has to say and did not (review, 2026-11-20), both written where they belong rather than in prose elsewhere:** *(i)* **2a is the layout and its mechanisms, not the rendering** — every declared field (geometry, band table, control slots, fit boxes, `image_tiles`, `tile_budget`) exists, is generated and is checked at 2a even where the 2a ROM draws none of it, and `album-preview` composes the unrendered ones as host instruments (§9.1's row, the note under this table). The line the split draws is about **what the ROM may draw**: 2a's ROM draws the chrome and `blank`, nothing else. *(ii)* **2a's boot state is option (c) of §5.2's three** — chrome + title band + `blank`, audio auto-starting exactly as the gate ROM does. Decided 2026-11-20 rather than left to the PR, because "a row that says nothing ships the smallest option by default" is how defaults become decisions without anyone making them. **Not (a)**, which shows a person nothing of the layout this phase exists to build and leaves the phase unable to claim it made the player more playable. **Not (b)**, which puts a key press before the first sample: **AP-1**'s term is "audio begins within 1.5 s of boot", measured on a run where nothing is pressed (§13's AP-1 row, 578–580 ms witnessed), and a phase that wants a press has to restate that claim in its own PR, not inherit it. **(c) keeps the term byte-identical** — same run, same key log, same measurement — while putting a title band, a clock and a control column in front of a human with none of 2b's content. **The title card stays 2b's scene** (same renderer as the list, same fit boxes as A6, and §5.2's rule is that a scene earns residency by an answer it gives), and **whether a press should ever precede audio is Q20's to answer in 2b — and the PR that answers it restates AP-1 in the same PR.** What 2a owes that future decision is mechanism only: §5.2's scene-slot contract, and a chrome + title band drawn before any sample plays, which is exactly what its switch leg (L3) is priced at. **AP-3b (§13) belongs to 2a, not 2b**: its three legs are the numbers §5.1's switch ordering and §10.2's element rows are waiting on, they need only chrome and a background (no art, no list), and the instrument is already ~80 % present in `examples/album_probe` (§5.1), so the leg costs one new probe bin rather than a new harness |
 | **2b — The region has content in it.** **A8** (album art: the `ART1` path, `album_art.py`, §7's derived boxes and the `bleed` option), **A11** (the track-list scene), **A12** (the title-card scene), the remaining icon slots (`RESTART`, the paused badge — §5.3), and the scene registry made complete (§5.2's table) | **AP-4** — real fixtures for art and control art, the 8bpp alternative judged on a screen, and the tile-pool question (R14) that only `bleed` raises (§5.1, §7). **A2b's art leg has an input this tree does not have: no image file outside `target/`, and the only art anywhere in it is the synthetic ART1 card `scripts/album_probe_art.py` generates (R15)** — so 2b's art work starts by supplying a cover (or ruling which album's art this product is allowed to carry), not by writing `album_art.py` (§7, §9, §13 AP-4) |
 | **3 — The bake becomes a verdict.** A3b, A13: the **same** `scripts/album_bake.py` grows §9's remaining refusal set (budget, 32-track cap, palette count, title fit, unused viz streams, the §10.4 audit ceiling), plus `album_viz.py` and the `[viz]`/`[game]` config sections (`[art]` and `album_art.py` land at **2b**, §9.0 — this row said otherwise until 2026-11-20), and two full runs → one byte-identical `.gba` (its audio-only half has been checked since Phase 1) | **AP-5** |
 | **4 — It moves.** A9: `ALVZ1` + `bar` + `skyline`, `beat`-driven sprite; art+breathe | **AP-6**. **And A9's sprite spends from a pool this file has never budgeted** (§5.1, read out of agb 2026-11-20): OBJ tile data is its own run-time-allocated 32 KiB region at `0x0601_0000` — **1,024 4bpp tiles / 512 at 8bpp** — with agb itself selecting hardware mapping mode 1 (`object.rs:30`), so sprites never contend with the BG pools but have a ceiling of their own; **AP-6's row declares and audits that ceiling** |
