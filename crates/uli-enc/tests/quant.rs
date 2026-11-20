@@ -259,7 +259,8 @@ fn at_lam_zero_the_magnitudes_are_the_references_candidates() {
                     0.0,
                     mmax,
                     ncod,
-                );
+                )
+                .expect("the default tables code every symbol, so no tuple can fail");
                 for i in 0..ncod {
                     let ax = f64::from(coef[base + b * BANDW + i]).abs();
                     let want = reference_magnitude(ax, step, dq, mmax);
@@ -523,5 +524,46 @@ fn an_ms_frame_costs_exactly_three_hundred_twelve_cycles_more() {
         3 * 512,
         "an M/S frame's cycle cost is ULI_CY_MS = 3 * 512; frame_ops must charge it or \
          the --cap filter is comparing candidates on a number that is 1536 cycles short"
+    );
+}
+
+/// A symbol with no code cannot be written, so it cannot be chosen.
+///
+/// Inert with the default tables — `huff_lengths` gives every symbol a code — but S4's
+/// *trained* tables leave never-seen symbols at length 0, and a price list that treats
+/// "no code" as "zero bits" makes the uncodeable symbol look **free**. The reference
+/// guards with `if (!l) continue;` and propagates failure as `BIG`; here it is `None`.
+#[test]
+fn a_symbol_with_no_code_is_never_chosen() {
+    let mut tables = DefaultTables::build();
+    let class = 3usize; // PAIR, rbits 0: symbol index is m0 * 16 + m1
+    // Symbol 0 is the "both coefficients zero" pair — the cheapest thing in the table
+    // and the first thing a zeroing quantiser would reach for.
+    assert!(
+        tables.cls[class].symbol_len(0) > 0,
+        "the default row codes symbol 0"
+    );
+    tables.cls[class].len[0] = 0;
+    tables.cls[class].code[0] = 0;
+
+    let d = quant::step_of(100, false) as f64 / 16.0;
+    let mmax = quant::mmax_of(quant::step_of(100, false));
+    // A band of exactly-zero coefficients: symbol 0 is the only candidate there is.
+    let zeros = [0f32; BANDW];
+    let rd = quant::band_rdo(&zeros, &tables, class, d, 0.13, mmax, BANDW);
+    assert!(
+        rd.is_none(),
+        "band_rdo chose a magnitude pair whose code length is 0; writing it would \
+         desynchronise the stream, and the reader would decode noise"
+    );
+
+    // And an ordinary band still works, so the guard is a filter, not an off switch.
+    let mut loud = [0f32; BANDW];
+    for (i, v) in loud.iter_mut().enumerate() {
+        *v = 40.0 * (i as f32 + 1.0) * d as f32;
+    }
+    assert!(
+        quant::band_rdo(&loud, &tables, class, d, 0.13, mmax, BANDW).is_some(),
+        "a band that never needs symbol 0 must still find a codeable combination"
     );
 }

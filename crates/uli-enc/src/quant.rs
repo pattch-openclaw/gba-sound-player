@@ -407,7 +407,7 @@ pub fn band_rdo(
     lam: f64,
     mmax: i32,
     ncod: usize,
-) -> BandRd {
+) -> Option<BandRd> {
     let pair = tables.ctype[class] == CT_PAIR;
     debug_assert!(
         pair || tables.rbits[class] == 0,
@@ -422,6 +422,14 @@ pub fn band_rdo(
         dist: 0.0,
         bits: 0,
     };
+    // A symbol with no code cannot be written, so it cannot be chosen — `make_cand`
+    // offers it, the price list has nothing for it, and a `lam * 0` cost would make it
+    // look free. The reference guards the same way (`int l = L[sym]; if (!l) continue;`)
+    // and propagates failure up as `BIG`; here it is `None`, and the caller drops the
+    // class. Inert with the default tables, where `huff_lengths` gives every symbol a
+    // code — but S4's *trained* tables leave never-seen symbols at length 0, and this
+    // is exactly the class of bug that would then encode an uncodeable symbol and
+    // desync the stream silently.
 
     let mut i = 0;
     while i < BANDW {
@@ -444,7 +452,11 @@ pub fn band_rdo(
                 for q in 0..cn[1] {
                     let (m0, m1) = (cs[0][p], cs[1][q]);
                     let sym = (nib_of(tables, class, m0) * 16 + nib_of(tables, class, m1)) as usize;
-                    let bits = len[sym] as u64
+                    let l = len[sym] as u64;
+                    if l == 0 {
+                        continue;
+                    }
+                    let bits = l
                         + extra_bits(tables, class, m0) as u64
                         + extra_bits(tables, class, m1) as u64;
                     let e0 = ax[0] - recon(dq, m0, d);
@@ -470,7 +482,11 @@ pub fn band_rdo(
                                 + 3 * nib_of(tables, class, m[2])
                                 + nib_of(tables, class, m[3]))
                                 as usize;
-                            let mut bits = len[sym] as u64;
+                            let l = len[sym] as u64;
+                            if l == 0 {
+                                continue;
+                            }
+                            let mut bits = l;
                             let mut dist = 0.0f64;
                             for kk in 0..4 {
                                 bits += extra_bits(tables, class, m[kk]) as u64;
@@ -489,12 +505,17 @@ pub fn band_rdo(
                 }
             }
         }
+        if best_j.is_infinite() {
+            // No combination of this tuple is codeable under this class: the
+            // reference propagates the same thing as `BIG` and the class is dropped.
+            return None;
+        }
         out.m[i..i + per].copy_from_slice(&best[..per]);
         out.bits += best_bits;
         out.dist += best_dist;
         i += per;
     }
-    out
+    Some(out)
 }
 
 /// The class groups of the default rows: `(ctype, rbits)`. Classes in one group cost
@@ -592,7 +613,7 @@ pub fn quantise_chan_rd(
         best_cost[b] = energy[b] + lam * best_bits[b] as f64;
 
         for klass in rd_classes(tables) {
-            let rd = band_rdo(
+            let Some(rd) = band_rdo(
                 &coef[b * BANDW..b * BANDW + BANDW],
                 tables,
                 klass,
@@ -600,7 +621,9 @@ pub fn quantise_chan_rd(
                 lam,
                 mmax,
                 ncod,
-            );
+            ) else {
+                continue;
+            };
             let bits = rd.bits + tables.cb[0].symbol_len(klass) as u64;
             let cost = rd.dist + lam * bits as f64;
             if cost < best_cost[b] {
