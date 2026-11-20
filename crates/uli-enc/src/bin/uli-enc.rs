@@ -1,5 +1,10 @@
-//! `uli-enc` — the reference CLI's flags, so the later byte-exactness matrix can
-//! drive both with identical arguments (`PLAN-OF-RECORD.md` → "The encoder").
+//! `uli-enc` — the encoder's command line.
+//!
+//! The flag names and meanings are a fixed interface rather than a preference: the
+//! acceptance harness drives this binary and an external one with identical arguments, so
+//! `--budget`, `--cap` and `--kappa` cannot be renamed freely. The rest are this encoder's
+//! own knobs — `--g` for a fixed step, `--rd` for the search, `--stride` for the candidate
+//! grid, and `--ms` to pin the stereo domain for a fixed-step comparison.
 //!
 //! A refusal is an error exit that cites needed and allowed bytes, and it
 //! happens before `--out` is created: the encoder either writes a whole album or
@@ -10,7 +15,7 @@ use std::process::ExitCode;
 
 use uli_enc::{Args, DEFAULT_BUDGET, DEFAULT_CAP_PCT, encode};
 
-const USAGE: &str = "usage: uli-enc --album F --tracks TSV --out U [--budget BYTES]                     [--cap PCT] [--threads N] [--g N] [--rd] [--kappa X] [--stride N]";
+const USAGE: &str = "usage: uli-enc --album F --tracks TSV --out U [--budget BYTES]                     [--cap PCT] [--threads N] [--g N] [--rd] [--kappa X] [--stride N] [--ms]";
 
 fn main() -> ExitCode {
     match run() {
@@ -34,6 +39,8 @@ fn run() -> Result<(), ExitCode> {
     let mut rd = false;
     let mut kappa = uli_enc::DEFAULT_KAPPA;
     let mut stride = 8i32;
+    // `--ms` forces M/S; absent, the encoder chooses per frame.
+    let mut ms: Option<bool> = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -48,6 +55,7 @@ fn run() -> Result<(), ExitCode> {
             "--rd" => rd = true,
             "--kappa" => kappa = parse(&mut it, "--kappa")?,
             "--stride" => stride = parse(&mut it, "--stride")?,
+            "--ms" => ms = Some(true),
             other => return Err(usage(format!("unknown argument {other:?}"))),
         }
     }
@@ -66,6 +74,7 @@ fn run() -> Result<(), ExitCode> {
         rd,
         kappa,
         stride,
+        ms,
     };
     if rd && g.is_some() {
         return Err(usage(
@@ -108,6 +117,14 @@ fn run() -> Result<(), ExitCode> {
             report.nonzero_coeffs,
         );
         println!("g {}; xover {} hfnz {}", gline, report.xover, report.hfnz);
+        // The fastest way to see whether the flag is doing anything at all — a search that
+        // silently never chose M/S would otherwise look merely mediocre.
+        println!(
+            "M/S frames {:.1}% ({} of {})",
+            100.0 * report.ms_frames as f64 / report.n_frames as f64,
+            report.ms_frames,
+            report.n_frames
+        );
         if let Some(snr) = report.snr_db {
             println!(
                 "verify: decoded {} frames OK; codec SNR {:.2} dB",

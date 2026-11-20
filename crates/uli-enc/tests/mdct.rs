@@ -1,11 +1,10 @@
-//! S2's forward transform, against the C reference's own coefficients.
+//! S2's forward transform, against the frozen golden coefficients.
 //!
 //! `tests/fixtures/mdct_in.f32` is a deterministic 2,048-sample test album and
-//! `mdct_ref_coef.f32` is what `mdct_frame()` in `gba-audio/encoder/enc_core.c`
-//! produces from it, frozen by `scripts/gen_uli_mdct_fixture.py`. E-R5 rule R5c
-//! says the analysis constants are checked in rather than called for; this is what
-//! proves the checked-in values plus the ported arithmetic give the reference's
-//! answer and not merely a close one.
+//! `mdct_ref_coef.f32` is the coefficients an independent encoder produced from it, frozen
+//! by `scripts/gen_uli_mdct_fixture.py`. E-R5 rule R5c says the analysis constants are
+//! checked in rather than called for, so this is what proves the checked-in values plus this
+//! arithmetic give that answer and not merely a close one.
 
 mod common;
 
@@ -26,7 +25,7 @@ fn f32s(b: &[u8]) -> Vec<f32> {
 }
 
 #[test]
-fn the_forward_transform_is_the_reference_bit_for_bit() {
+fn the_forward_transform_is_the_golden_bit_for_bit() {
     let dir = TempDir::new("mdct");
     let album = Samples::open(
         &common::materialise(dir.path(), "mdct_in.f32", IN),
@@ -57,9 +56,9 @@ fn the_forward_transform_is_the_reference_bit_for_bit() {
     assert_eq!(
         mismatched,
         0,
-        "{mismatched} of {} coefficients differ from the reference; worst bit-pattern gap \
-         {worst} at frame {} k={} ours {:#010x} reference {:#010x}. Any difference at all means \
-         the checked-in constants or the operation order moved away from `enc_core.c`.",
+        "{mismatched} of {} coefficients differ from the golden; worst bit-pattern gap \
+         {worst} at frame {} k={} ours {:#010x} golden {:#010x}. Any difference at all means \
+         the checked-in constants or the operation order moved away from the golden.",
         FRAMES * 2 * M,
         worst_at.0,
         worst_at.1,
@@ -68,19 +67,19 @@ fn the_forward_transform_is_the_reference_bit_for_bit() {
     );
 }
 
-/// Not a tautology: it asserts the reference *also* zeroed the top coefficients,
+/// Not a tautology: it asserts the golden *also* zeroed the top coefficients,
 /// which is what makes forcing them in `mdct_frame` the format's rule rather than
 /// a local convention. Frame 0 is the preroll and frame 3 reads past the end of
 /// the album, so this fixture covers both out-of-bounds edges as well.
 #[test]
-fn the_reference_zeroes_every_coefficient_at_or_beyond_ncoded() {
+fn the_golden_zeroes_every_coefficient_at_or_beyond_ncoded() {
     let ref_coef = f32s(REF);
     for f in 0..FRAMES {
         for ch in 0..2 {
             let base = f * 2 * M + ch * M;
             assert!(
                 ref_coef[base + NCODED..base + M].iter().all(|&v| v == 0.0),
-                "frame {f} channel {ch}: the reference left energy past NCODED — the fixture's \
+                "frame {f} channel {ch}: the golden left energy past NCODED — the fixture's \
                  claim about the format rule needs re-reading"
             );
             assert!(

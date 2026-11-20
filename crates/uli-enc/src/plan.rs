@@ -16,16 +16,20 @@ use uli_lite::format::{
     ALBUM_HEADER_BYTES, M, NSTEP, SEEK_ENTRY_BYTES, SEEK_INTERVAL, TRACK_ENTRY_BYTES,
 };
 
-/// The reference CLI's default `--budget`: 32 MiB − 256 KiB, "the audio
-/// producer's own envelope, not the cartridge's" (E-R6).
+/// The default `--budget`: 32 MiB − 256 KiB. An audio producer's own envelope, not a
+/// cartridge's — the cart's total is the bake's business, and art and reaction data are
+/// carved out of *it*, never out of the audio's share (E-R6).
 pub const DEFAULT_BUDGET: u64 = 33_292_288;
 
-/// The reference CLI's default `--cap`, in percent of the 262,144-cycle period.
+/// The default `--cap`, as a percentage of the 262,144-cycle frame period. Leaves a
+/// quarter of each frame for everything the decoder is not: interrupts, the mixer, the UI.
 pub const DEFAULT_CAP_PCT: f64 = 74.0;
 
-/// The reference's `+ 16` in the overhead sum.
+/// Slack added to the computed container overhead, covering the alignment and padding
+/// that squaring each region up to four bytes contributes.
 const OVERHEAD_SLACK: usize = 16;
-/// The reference reserves 64 bits below the target (`(budget - overhead) * 8 - 64`).
+/// Bits held back from the stream target, so a plan that lands exactly on its arithmetic is
+/// still inside the budget rather than on the boundary.
 const TARGET_RESERVE_BITS: i64 = 64;
 
 /// What an M/S frame pays out of `g` before the step lookup: the reader computes
@@ -34,8 +38,8 @@ const TARGET_RESERVE_BITS: i64 = 64;
 /// the same field seen from either side.
 const MS_G_OFFSET: i32 = 4;
 
-/// Frames in an album of `n_samples` interleaved stereo frames: the reference's
-/// `NF = (NS + M - 1) / M + 1`, the `+ 1` being the frame-0 preroll.
+/// Frames in an album of `n_samples` interleaved stereo frames: `ceil(NS/M) + 1`, the
+/// `+ 1` being the frame-0 preroll, which carries the overlap into the first real frame.
 ///
 /// Free because the content plan needs it before the `Plan` that owns the number
 /// exists — `Plan::new` takes the content as an argument (decision 1), so the frame count
@@ -72,9 +76,9 @@ impl fmt::Display for GPlanViolation {
                 "frame {} wants g={} ms={}, a step index of {}, outside the reader's \
                  0..{NSTEP}: it decodes as `BadFrame`, so the album would be written, \
                  pass every encoder-side check, and then refuse to play. The bound is \
-                 the decoder's own (`uli_lite::format::NSTEP`, applied in `decode_frame`); \
-                 the reference's `GMIN 8..GMAX 187` is its search window, which is E3's \
-                 business, not a container limit.",
+                 the decoder's own (`uli_lite::format::NSTEP`, applied in `decode_frame`). \
+                 The search's own `GMIN..GMAX` window is narrower, and is a policy choice \
+                 about where good rates live, not a limit of the format.",
                 self.frame, self.g, self.ms, self.geff
             ),
         }
@@ -287,9 +291,8 @@ impl Plan {
                 artist_off,
             });
         }
-        // The parser requires the region's last byte to be NUL, and the stream
-        // offset to be even; padding to 4 satisfies both and is what the
-        // reference writes (`(strings_bytes + 3) & ~3`).
+        // The parser requires the region's last byte to be NUL and the stream offset to be
+        // even; squaring up to 4 satisfies both, and keeps every later region 4-aligned.
         while strings.len() & 3 != 0 {
             strings.push(0);
         }
@@ -430,15 +433,16 @@ impl Content {
         n_samples: usize,
         tables: &DefaultTables,
         g: i32,
+        ms: bool,
         kappa: f64,
         n_frames: usize,
     ) -> Result<Self, Error> {
-        if !GPlan::legal(g, false) {
+        if !GPlan::legal(g, ms) {
             return Err(Error::GPlan(GPlanViolation {
                 frame: 0,
                 g,
-                ms: false,
-                geff: GPlan::step_index(g, false),
+                ms,
+                geff: GPlan::step_index(g, ms),
                 kind: GPlanViolationKind::StepIndex,
             }));
         }
@@ -446,17 +450,17 @@ impl Content {
         let mut coef = [0f32; 2 * M];
         for f in 0..n_frames {
             crate::mdct::mdct_frame(samples, f, n_samples, &mut coef);
-            let ms = false;
-            // S3's rate/distortion quantiser, not S2's nearest rule: `kappa` is the
-            // encoder's own knob and a fixed step is only the *step*, so leaving `lam`
-            // at zero here would make `--g` a different coder from `--rd` and from the
-            // reference, and every fixed-step comparison would be measuring that.
-            let l = crate::quant::quantise_chan_rd(&coef[..M], tables, g, ms, kappa).chan;
-            let r = crate::quant::quantise_chan_rd(&coef[M..], tables, g, ms, kappa).chan;
+            let rot = crate::quant::rotate(&coef, ms);
+            // The rate/distortion quantiser, not a nearest-level rule: `kappa` is the
+            // encoder's own knob and a fixed step is only the *step*, so leaving `lam` at
+            // zero here would make `--g` a different coder from `--rd`, and a fixed-step
+            // comparison between the two would be measuring that instead of the step.
+            let l = crate::quant::quantise_chan_rd(&rot[..M], tables, g, ms, kappa).chan;
+            let r = crate::quant::quantise_chan_rd(&rot[M..], tables, g, ms, kappa).chan;
             frames.push([l, r]);
         }
         Ok(Self {
-            plan: GPlan::new(vec![g; n_frames], vec![false; n_frames]),
+            plan: GPlan::new(vec![g; n_frames], vec![ms; n_frames]),
             coded: Some(frames),
         })
     }
@@ -507,6 +511,11 @@ impl Content {
     /// Coded bands across the album, for the report. `None` while nothing is coded.
     pub fn coded_frames(&self) -> Option<&[[crate::quant::Chan; 2]]> {
         self.coded.as_deref()
+    }
+
+    /// How many frames are coded as M/S.
+    pub fn ms_frames(&self) -> usize {
+        (0..self.len()).filter(|&f| self.plan.ms(f) != 0).count()
     }
 
     /// Coefficients that actually carry a nonzero magnitude, both channels.

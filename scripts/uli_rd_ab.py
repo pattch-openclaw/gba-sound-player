@@ -165,7 +165,10 @@ def main() -> int:
             print()
         print("Reminder: the SNR column is full-band time-domain on both sides. E-R7's")
         print("32.29/25.78 dB is codec-only; do not compare the two metrics.")
-        print("The reference explores M/S and cannot be told not to; ours does not, yet.")
+        print("Both sides now offer M/S (S3b). What the reference still has and we do not:")
+        print("trained code tables (S4) and a second allocation pass over the frame")
+        print("weights (`--dacw`). Those are where a remaining gap belongs until S4 says")
+        print("otherwise -- not in the search, which the fixed-g A/B shows is exact.")
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

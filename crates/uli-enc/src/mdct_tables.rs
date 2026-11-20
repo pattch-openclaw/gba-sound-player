@@ -1,18 +1,21 @@
 //! Checked-in constants for the encoder's forward MDCT (E-R5, rule R5c).
 //!
 //! Regenerate with `scripts/gen_uli_mdct_tables.py`; the generator owns this
-//! file and the comments below are its comments. These are the doubles the C
-//! reference computes in `mdct_init()` (`gba-audio/encoder/enc_core.c`), stored
-//! rather than called for, so the encode path touches no libm and the values do
-//! not depend on which math library answers. They are `f64` rather than the
-//! decoder's Q31 `i32` on purpose: the analysis side is host-side and the
-//! reference is `double` — matching its arithmetic is what keeps S7's
-//! byte-exactness reachable, and none of this ships in a ROM.
+//! file and the comments below are its comments. These are the exact values of the
+//! twiddle and window expressions — `cos(-2*pi*k/256)`, `sin(-pi*(4k+1)/4M)`,
+//! `sqrt(2/M)` and so on — computed once and stored rather than called for, so the
+//! encode path touches no libm and the output cannot depend on which math library
+//! answered. That is E-R5 rule R5c, and it is the difference between a blob that
+//! reproduces anywhere and one that reproduces on the machine that made it.
+//!
+//! They are `f64` rather than the decoder's Q31 `i32` on purpose: the analysis side
+//! is host-side, needs more than 32 bits of headroom over a 2M-sample window, and
+//! none of this ships in a ROM.
 //!
 //! Some entries land exactly on `cos(-2*pi*64/256)` = 1/sqrt(2), so clippy's
 //! `approx_constant` fires on generated data. Substituting the crate constant
-//! would make them depend on libm's rounding of it instead of on the
-//! reference's own `cos`, which is the one thing this file exists to avoid.
+//! would make them depend on libm's rounding of it instead of on the value
+//! of libm, which is the one thing this file exists to avoid.
 #![allow(clippy::approx_constant)]
 
 /// FFT twiddle real parts, `cos(-2*pi*k/256)`, `k < 128`.

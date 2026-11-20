@@ -3,7 +3,7 @@ name = "uli-enc"
 version = "0.1.0"
 edition = "2024"
 description = "Host-only ULI2 encoder skeleton: PCM in, ULA2 container out"
-# Licensing of the ULI2 format/reference is unresolved; see ../../ULI2.md.
+# Licensing of the ULI2 format is unresolved; see ../../ULI2.md.
 publish = false
 
 [dependencies]

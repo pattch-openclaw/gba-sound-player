@@ -3,7 +3,7 @@
 //! S1 does not read the samples (frames are content-independent), so what can be
 //! wrong at this boundary is the **album length**, which belongs to the track
 //! table, and the track arithmetic. The length tests below witness the `NS` ruling
-//! (`PLAN-OF-RECORD.md` → "S1 — what the review found"): the reference computes
+//! (`PLAN-OF-RECORD.md` → "S1 — what the review found"): the oracle computes
 //! `NS = TR[NT-1].start + TR[NT-1].len` and asserts the file matches, and an
 //! encoder that read the length off the file instead would disagree with it on
 //! every byte after the header for reasons that have nothing to do with the codec.
@@ -64,7 +64,7 @@ fn a_thirty_third_track_is_rejected_with_the_format_limit() {
 }
 
 /// The `NS` ruling, case 1: a padded tail. File-size-derived length would silently encode
-/// 2,048 samples and call it an album; the reference reads 1,024 off the table
+/// 2,048 samples and call it an album; the oracle reads 1,024 off the table
 /// and refuses the file. Both counts must be in the message (E-R6's rule, which
 /// is not only about the budget).
 #[test]
@@ -94,7 +94,7 @@ fn an_album_longer_than_the_track_table_refuses_and_cites_both_counts() {
 }
 
 /// The other direction: a table that promises more than the file holds. Not
-/// clamped to the shorter of the two — the reference's `fstat` check refuses, and
+/// clamped to the shorter of the two — the oracle's check refuses, and
 /// clamping would quietly produce a different album from the one asked for.
 #[test]
 fn an_album_shorter_than_the_track_table_refuses() {
@@ -109,7 +109,7 @@ fn an_album_shorter_than_the_track_table_refuses() {
     );
 }
 
-/// Contiguity is not required — the reference never requires it, and a gap is
+/// Contiguity is not required — the oracle never requires it, and a gap is
 /// silence that still costs frames. What *is* required is that the last row
 /// defines the end, so the file length has to reach it.
 #[test]
@@ -142,7 +142,7 @@ fn a_gap_between_tracks_is_allowed_and_the_last_row_defines_the_length() {
     );
 }
 
-/// A first track need not start at zero; the reference only asks for the last
+/// A first track need not start at zero; the oracle only asks for the last
 /// row's end. The `roundtrip` DC test depends on this.
 #[test]
 fn an_album_may_start_mid_track() {
@@ -175,6 +175,7 @@ fn a_length_mismatch_refuses_before_any_frame_is_planned() {
         rd: false,
         kappa: 0.13,
         stride: 8,
+        ms: None,
         threads: 1,
     })
     .expect_err("a mismatched pair cannot encode");

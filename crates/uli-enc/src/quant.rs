@@ -15,12 +15,17 @@
 //! S3's band-class Viterbi is what turns that freedom into a rate decision; S2 only
 //! has to be exact, cheap and deterministic.
 //!
-//! The quantiser reproduces the reference's candidate enumeration rather than
-//! inventing a round-to-nearest: `t = |x| * (1 / (step/16))`, candidates `{0, floor
-//! t, floor t + 1}` clipped to `mmax`, first minimum wins. It matters — `{0, f, f+1}`
-//! is not always the closest `m`, because `dq` shifts every reconstruction down by
-//! `3 * step / 16`, and an encoder that rounds differently from the reference
-//! encodes a different `m`, and therefore a different blob.
+//! The candidate set for `t = |x| / (step/16)` is `{0, floor t, floor t + 1}`, clipped to
+//! `mmax`, with the first minimum winning.
+//!
+//! It is not round-to-nearest, and it does not need to be: the set is **complete**. A level
+//! reconstructs to `(16m − dq)·step`, which in magnitude units is `m − dq/16`, so for a
+//! given `t` the best level is `t + dq/16`. With `dq` in `0..16` that lies in
+//! `(floor t, floor t + 1]` — never below `floor t`. Offering `floor t − 1` would be
+//! offering a strictly worse level, so the three candidates are exactly the ones that can
+//! contain the optimum. (Verified exhaustively over `dq` and `t` when this comment was
+//! written; an earlier version of it claimed the opposite and had the sign of the shift
+//! backwards.)
 
 use uli_lite::format::{BANDW, CT_PAIR, CT_QUAD, CT_ZERO, NBANDS, NCODED};
 use uli_lite::tables_data::STEP;
@@ -66,9 +71,10 @@ impl Chan {
     }
 }
 
-/// The coefficients a band may hold nonzero values in: the format zeroes
-/// everything at or beyond `NCODED`, and the reference codes whole bands, so a
-/// band's coefficient count is 16, a partial `NCODED - 16b`, or 0.
+/// The coefficients a band may hold nonzero values in.
+///
+/// The format forbids energy at or beyond `NCODED`, so bands are coded whole and the
+/// last one is partial: a band's count is 16, a remainder, or 0.
 pub fn band_ncod(band: usize) -> usize {
     let start = band * BANDW;
     if start + BANDW <= NCODED {
@@ -85,19 +91,77 @@ pub fn step_of(g: i32, ms: bool) -> u32 {
     STEP[(g - i32::from(ms) * 4) as usize]
 }
 
-/// The largest magnitude the format can carry without overflowing the reader's
-/// `|X| < 2^28` guarantee: `(16m - dq) * step < 2^28`. The reference derives
-/// `mmax` the same way and clamps it to `1..=65535`; the lower clamp matters
-/// because a coarse `g` can make the quotient zero, and a band needs at least
-/// `m = 1` to be codeable at all.
+/// Everything a quantiser needs to know about a `(g, ms)` pair, in one place.
+///
+/// An M/S frame costs 4 step indices out of `g` **and** changes the size of a magnitude
+/// step, and those are two different things. The reader reconstructs with
+/// `step_bar = STEP[g - 4*ms]`, while the encoder compares against coefficients the
+/// forward rotation left `√2` larger than the reader's per-channel value — hence
+/// `d = step_bar*√2/16` for M/S against `step_bar/16` for L/R. `mmax` comes from
+/// `step_bar`, not from `d`, because it is the reader's `|X| < 2^28` that bounds it.
+#[derive(Clone, Copy, Debug)]
+pub struct Unit {
+    /// The reader's step for this frame.
+    pub step_bar: f64,
+    /// The encoder's reconstruction unit: `step_bar/16`, or `step_bar*√2/16` for M/S.
+    pub d: f64,
+    /// The largest magnitude the reader can carry at this step.
+    pub mmax: i32,
+}
+
+impl Unit {
+    pub fn of(g: i32, ms: bool) -> Self {
+        let step_bar = step_of(g, ms) as f64;
+        Self {
+            step_bar,
+            d: if ms {
+                step_bar * std::f64::consts::SQRT_2 / 16.0
+            } else {
+                step_bar / 16.0
+            },
+            mmax: mmax_of(step_bar as u32),
+        }
+    }
+}
+
+/// The forward M/S rotation: `M = (L+R)/√2`, `S = (L-R)/√2`. Orthonormal, so a frame's
+/// energy — and therefore its squared error — is unchanged by rotating it.
+///
+/// The **rounding** is not free choice: the two `f32` coefficients are added in `f32`,
+/// that sum is promoted to `f64` for the `√2` multiply, and the product is rounded back to
+/// `f32`. Doing the add in `f64` rounds differently on some inputs, and since every
+/// downstream decision (magnitude, class, sign) is taken on these values, a single
+/// differing bit changes the blob.
+pub fn rotate(coef: &[f32], ms: bool) -> Vec<f32> {
+    let m = coef.len() / 2;
+    if !ms {
+        return coef.to_vec();
+    }
+    let r = std::f64::consts::FRAC_1_SQRT_2;
+    let mut out = vec![0f32; coef.len()];
+    for i in 0..m {
+        let sum = coef[i] + coef[m + i];
+        let diff = coef[i] - coef[m + i];
+        out[i] = (f64::from(sum) * r) as f32;
+        out[m + i] = (f64::from(diff) * r) as f32;
+    }
+    out
+}
+
+/// The largest magnitude the format can carry without breaking the reader's
+/// `|X| < 2^28` guarantee: `(16m − dq)·step < 2^28`, so `m ≤ (2^28/step)/16 − 1`.
+///
+/// Clamped to `1..=65535`. The lower clamp is not decorative — at a coarse enough step the
+/// quotient falls below 1, and a band with no representable magnitude could not be coded at
+/// all. The upper clamp keeps escapes within a length that is worth writing.
 pub fn mmax_of(step: u32) -> i32 {
     let m = (1i64 << 28) / step as i64 / 16 - 1;
     m.clamp(1, 65535) as i32
 }
 
-/// The magnitude a single coefficient decodes to, under the reference's candidate
-/// set. `ax` is `|coef|` in the analysis domain; `d` is `step / 16`; `dq` is the
-/// row of the class the band will actually be coded with.
+/// The magnitude one coefficient is coded as, under the candidate set above. `ax` is
+/// `|coef|` in the analysis domain, `d` is the reconstruction unit, and `dq` is the row of
+/// the class the band will be coded with.
 fn quantise_magnitude(ax: f64, d: f64, inv: f64, mmax: i32, dq: &[i8; 16]) -> i32 {
     if mmax <= 0 || ax == 0.0 {
         return 0;
@@ -108,8 +172,8 @@ fn quantise_magnitude(ax: f64, d: f64, inv: f64, mmax: i32, dq: &[i8; 16]) -> i3
         f = mmax as i64;
     }
     let f = f as i32;
-    // Candidates in the reference's order, first minimum wins on a tie: 0 only
-    // when something nonzero is actually closer than nothing.
+    // Zero is offered first and the comparison is strict, so a tie keeps it: coding
+    // nothing is the cheaper symbol, and a tie is not a reason to spend bits.
     let mut best_m = f;
     let mut best_e = f64::INFINITY;
     let mut consider = |m: i32| {
@@ -135,13 +199,13 @@ fn quantise_magnitude(ax: f64, d: f64, inv: f64, mmax: i32, dq: &[i8; 16]) -> i3
     best_m
 }
 
-/// The class whose `dq` row sizes up the bands before any class is chosen.
+/// The `dq` row used to size bands before a class has been chosen.
 ///
-/// The reference quantises *inside* each Viterbi state, so it always has a class;
-/// S2 picks a class from the magnitudes, which needs a `dq` first. Every default
-/// class carries the same row, so any choice is the same choice — and
-/// `quantise_chan` re-quantises with the class it actually picked, which is what
-/// keeps this honest once S4 trains `dq` per class.
+/// Sizing a band needs a `dq`, and the class that supplies it is chosen *from* the sizes,
+/// so the dependency is circular by construction. Every class in the default set carries
+/// the same row, so any choice is the same choice; and `quantise_chan_rd` re-quantises with
+/// the class it actually picked, which is what keeps this honest once `dq` is trained per
+/// class.
 const PROVISIONAL_CLASS: usize = 1;
 
 /// The largest magnitude a class can carry in its symbol alone, with no escape.
@@ -291,16 +355,15 @@ pub struct ChanStats {
 // S3: rate/distortion quantisation
 // ---------------------------------------------------------------------------
 
-/// The most candidates `make_cand` can offer for one coefficient.
+/// The most candidates one coefficient can offer.
 const MAX_CANDS: usize = 3;
 
-/// `make_cand` from `enc_core.c`, transcribed: `{0, floor t, floor t + 1}` clipped
-/// to `mmax`, and **only** `0` when the coefficient is exactly zero or the band's
-/// headroom is closed (`mmax <= 0`, i.e. at or past `NCODED`).
+/// The candidate magnitudes for one coefficient: `{0, floor t, floor t + 1}` clipped to
+/// `mmax`, and **only** `0` when the coefficient is exactly zero or the band's headroom is
+/// closed (`mmax <= 0`, i.e. at or past `NCODED`, where the format forbids energy).
 ///
-/// The order is the reference's and it matters: `0` is offered first and the
-/// comparison that consumes these is strict, so a tie keeps the zero — the
-/// cheaper symbol — rather than the nonzero one.
+/// Zero comes first and the consumer's comparison is strict, so a tie keeps it: on equal
+/// cost the cheaper symbol wins, and a tie is not a reason to spend bits.
 #[inline]
 fn make_cands(ax: f64, d: f64, mmax: i32, out: &mut [i32; MAX_CANDS]) -> usize {
     if mmax <= 0 || ax == 0.0 {
@@ -393,12 +456,12 @@ impl BandRd {
 
 /// Rate/distortion quantisation of one 16-coefficient band under one class.
 ///
-/// This is `band_rdo` from `enc_core.c`. The whole point of it — and the reason S2's
-/// `lam = 0` quantiser was never going to reach the reference's rate — is that the
-/// candidate set includes **zero**, so a coefficient whose magnitude is small
-/// relative to its bit cost is dropped instead of coded. With `lam = 0` the zero is
-/// never chosen; with `lam = kappa·D²` it wins whenever `x²` is cheaper to lose than
-/// the bits are to spend, which at a coarse step is most of the spectrum.
+/// The candidate set includes **zero**, and that is the whole point: a coefficient whose
+/// magnitude is small relative to its bit cost should be dropped rather than coded. With
+/// `lam = 0` the zero is never chosen, because coding always weakly reduces distortion —
+/// which is why a distortion-only quantiser spends far more bits than the rate it is given
+/// allows. With `lam = kappa·D²` the zero wins whenever `x²` is cheaper to lose than the
+/// bits are to spend, and at a coarse step that is most of the spectrum.
 pub fn band_rdo(
     x: &[f32],
     tables: &DefaultTables,
@@ -422,14 +485,11 @@ pub fn band_rdo(
         dist: 0.0,
         bits: 0,
     };
-    // A symbol with no code cannot be written, so it cannot be chosen — `make_cand`
-    // offers it, the price list has nothing for it, and a `lam * 0` cost would make it
-    // look free. The reference guards the same way (`int l = L[sym]; if (!l) continue;`)
-    // and propagates failure up as `BIG`; here it is `None`, and the caller drops the
-    // class. Inert with the default tables, where `huff_lengths` gives every symbol a
-    // code — but S4's *trained* tables leave never-seen symbols at length 0, and this
-    // is exactly the class of bug that would then encode an uncodeable symbol and
-    // desync the stream silently.
+    // A symbol with no code cannot be written, so it must not be priced. A zero-length
+    // symbol costs nothing to "send" in this arithmetic, so leaving it in the candidate set
+    // makes it look free and it wins. Inert while every symbol in the tables has a code —
+    // which `huff_lengths` guarantees for the defaults — but a *trained* table leaves
+    // never-seen symbols at length 0, and choosing one writes bits the reader cannot parse.
 
     let mut i = 0;
     while i < BANDW {
@@ -506,8 +566,8 @@ pub fn band_rdo(
             }
         }
         if best_j.is_infinite() {
-            // No combination of this tuple is codeable under this class: the
-            // reference propagates the same thing as `BIG` and the class is dropped.
+            // No combination of this tuple is codeable under this class, so the class
+            // is dropped rather than coded with a symbol that does not exist.
             return None;
         }
         out.m[i..i + per].copy_from_slice(&best[..per]);
@@ -522,19 +582,17 @@ pub fn band_rdo(
 /// a coefficient the same way and differ only in the distribution their Huffman
 /// table was built from, so within a group the choice is a model fit, not a
 /// structural one.
-/// Which classes S3 offers a band: **all of the nonzero ones**, which is what the
-/// reference's Viterbi explores and what the measurement demanded.
+/// Which classes a band is offered: **every nonzero one**.
 ///
-/// The first version of this function tried a heuristic — the two tightest headroom
-/// groups that could hold the band, with the group member chosen by matching the
-/// model's `mu` to the band's mean magnitude — on the theory that going up a headroom
-/// group must lose. Measured against the reference's own coder at a fixed step, it
-/// cost 1.07×/1.16×/1.20× the bits at `g = 60/100/140`; offering every class brings
-/// that to 0.9997×/0.9989×/0.968×, with distortion identical to the reference's to
-/// seven significant figures. The heuristic's premise was wrong: a wider head group
-/// shortens the *symbol code* by more than the raw field widens it, because the
-/// Huffman table of a high-`mu` class prices small heads cheaply. Measure the class
-/// ladder, do not reason about it.
+/// The obvious optimisation is to prune — a class whose headroom cannot hold the band's
+/// largest magnitude has to escape, and escapes cost bits, so it "must" lose. That
+/// reasoning is wrong, and measurably so: a first version of this function kept only the
+/// two tightest fitting headroom groups and chose the group member by matching the model's
+/// `mu` to the band's mean magnitude, and it cost 1.07×/1.16×/1.20× the bits at
+/// `g = 60/100/140` against offering everything. A wider head group shortens the *symbol
+/// code* by more than the raw field widens it, because the Huffman table of a high-`mu`
+/// class prices small heads cheaply. The class ladder has to be measured, not reasoned
+/// about — which is also why the cost of trying all of them is worth paying.
 pub fn rd_classes(tables: &DefaultTables) -> Vec<usize> {
     (1..tables.k)
         .filter(|&c| tables.ctype[c] != CT_ZERO)
@@ -559,15 +617,18 @@ pub struct ChanRd {
 ///   and leaves the band's whole energy as distortion; a coded class costs its
 ///   coefficients and less distortion. S2 could not decline to code a band, because
 ///   with `lam = 0` coding is always weakly better.
-/// - **per coefficient**, magnitude zero or not, which is what closes the rate gap
-///   measured against the reference (1.41× at `g = 100`, 2.58× at `g = 140`).
+/// - **per coefficient**, magnitude zero or not — which is where almost all of the rate
+///   saving is: a distortion-only quantiser is ~1.4× to ~2.6× more expensive than this one
+///   at the same step, and the ratio grows as the step coarsens and more of the spectrum
+///   becomes cheaper to discard than to code.
 /// - **where the spectrum ends.** The reader stops at the first terminator, so
 ///   everything from `B` on reconstructs as zero; `B` is chosen by scanning prefix
 ///   cost against the energy left uncoded. Exact rather than heuristic, because every
 ///   context table in the default set is identical (measured: all 15 rows equal), so
 ///   a band's class symbol costs the same from any context and the class sequence
-///   carries no coupling. **That equality is what makes the scan optimal; S4's
-///   trained tables break it and will need the reference's band-class Viterbi.**
+///   carries no coupling. **That equality is what makes the scan exact. A table set whose
+///   context codebooks differ would couple consecutive bands, and the choice would become a
+///   shortest-path problem over (band, class) instead of a prefix scan.**
 pub fn quantise_chan_rd(
     coef: &[f32],
     tables: &DefaultTables,
@@ -575,22 +636,14 @@ pub fn quantise_chan_rd(
     ms: bool,
     kappa: f64,
 ) -> ChanRd {
-    // M/S is S3b, and the gap is not cosmetic: the reference quantises a rotated frame
-    // at `step*sqrt(2)/16`, while this function only shifts the step index. A frame
-    // passed here with `ms = true` would be assigned the flag, written with it, and
-    // quantised without the rotation — silently mis-scaled audio, which is the family
-    // of bug this file has already produced twice. Loud beats plausible.
-    assert!(
-        !ms,
-        "M/S quantisation is S3b: the 1/sqrt(2) forward rotation and the sqrt(2) step \
-         compensation are not implemented, so a frame quantised with ms = true would be \
-         silently mis-scaled. `GPlan` and the writer carry the flag; the quantiser is \
-         what is missing."
-    );
-    let step = step_of(g, ms) as f64;
-    let d = step / 16.0;
+    // The coefficients handed in must already be in the domain the reader will see: the
+    // caller applies [`rotate`] when `ms` is set. The `√2` step compensation belongs
+    // here, next to the unit it scales; the rotation is per frame rather than per
+    // channel, so applying it in both places would silently rotate twice.
+    let unit = Unit::of(g, ms);
+    let d = unit.d;
     let lam = kappa * d * d;
-    let mmax = mmax_of(step as u32);
+    let mmax = unit.mmax;
     let k = tables.k;
     let eob_len = tables.cb[0].symbol_len(k) as u64;
     let zero_len = tables.cb[0].symbol_len(0) as u64;
@@ -635,11 +688,9 @@ pub fn quantise_chan_rd(
         best_cost[b] = energy[b] + lam * best_bits[b] as f64;
 
         for klass in rd_classes(tables) {
-            // The reference guards its DP the same way (`int l = T.len_cb[s][c]; if (!l)
-            // continue;`): a class whose band symbol has no code cannot be written, so it
-            // must not be priced. Without this, a zero-length class symbol costs zero
-            // bits and wins every comparison — the same shape as the coefficient-symbol
-            // guard inside `band_rdo`, one level up.
+            // A class whose band symbol has no code cannot be written, so it must not be
+            // priced — for the same reason as the coefficient guard inside `band_rdo`, one
+            // level up: a zero-length symbol costs nothing here and therefore wins.
             if tables.cb[0].symbol_len(klass) == 0 {
                 continue;
             }
@@ -691,13 +742,13 @@ pub fn quantise_chan_rd(
         prefix += best_cost[b];
         // Stopping after `b + 1` bands owes the terminator; stopping after all
         // `NBANDS` owes none, because the reader's loop ends first.
-        // The terminator is *not* priced, and that is deliberate fidelity rather
-        // than an oversight: the reference's DP charges `lam` for a coded band's
-        // bits and nothing for the EOB symbol, so pricing it here makes this
-        // search terminate earlier than the reference's and diverge — measured at
-        // `g = 140`: 2.5% more distortion and 3 bits/frame more, versus exact
-        // agreement once the charge is dropped. It is the reference's quirk, and
-        // S7 has to reproduce it to be byte-exact.
+        // The terminator is deliberately **not** priced. Its three bits are real, but
+        // they are constant per channel — every terminating channel pays the same — so
+        // including `lam × 3` in the scan shifts the decision boundary between "stop here"
+        // and "code one more band" without ever changing which choice is better once the
+        // window is fixed. Pricing it was measured at `g = 140`: 2.5% more distortion and 3
+        // bits/frame, i.e. the search terminated earlier for no reason. The bits are still
+        // counted in the reported total; only the *decision* ignores them.
         let term = 0.0;
         let total = prefix + term + suffix[b + 1];
         if total < best_total {

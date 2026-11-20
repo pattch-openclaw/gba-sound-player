@@ -116,7 +116,8 @@ pub fn write_chan(bw: &mut BitWriter, tables: &DefaultTables, chan: &Chan) {
     // is already finished. Emitting the symbol anyway puts three bits in front of
     // the *next channel*, which reads them as its first class — as EOB — and
     // decodes a silently empty channel: the frame parses, "succeeds", and half its
-    // spectrum is gone. `enc_core.c` guards the same thing with `if (endB < nb)`.
+    // spectrum is gone. The guard is on the *writer* because the reader has no way to ask
+    // for a terminator it will never read.
     if chan.bands.len() < NBANDS {
         put_symbol(bw, tables, ctx, k);
     }
