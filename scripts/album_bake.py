@@ -36,14 +36,17 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import math
 import os
+import re
 import shutil
 import struct
 import subprocess
 import sys
 import tempfile
 import tomllib
+import tokenize
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -3181,10 +3184,106 @@ INTERACTION_TABLE = (
 #: ALBUM-PLAYER.md's `title_fits` and `MAX_TITLE` rows ("now 28 characters, a box
 #: hand-written at 1A-B, no measured or declared width behind it") and at D9 item 2.
 BANNED_CHARACTER_BOX = ("TITLE_BOX_MAX", "def title_fits", "MAX_TITLE", "chars().count() <= 28")
-BANNED_SEARCH_PATHS = (
+# Split by whose code it is. A library that owns a character box and a host test that
+# re-establishes one are two different pieces of work, so the legs stay separate and each
+# failure names one of them.
+BANNED_SEARCH_PRODUCT = (
     "scripts/album_bake.py", "scripts/album_prep.py", "scripts/album_pack.py",
-    "examples/album_player/src", "examples/album_player/tests", "crates/gba-playback/src",
+    "examples/album_player/src", "crates/gba-playback/src",
 )
+BANNED_SEARCH_TESTS = ("examples/album_player/tests",)
+
+
+def _blank_python(src: str) -> str:
+    """`src` with string literals and comments blanked, line numbers preserved."""
+    python_comment = re.compile(r"#.*$")
+    any_quote = re.compile(r"'(?:[^'\\]|\\.)*'" r'|"(?:[^"\\]|\\.)*"')
+    lines = src.splitlines()
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return "\n".join(any_quote.sub("", python_comment.sub("", ln)) for ln in lines)
+    grid = [list(ln) for ln in lines]
+    text_tokens = {tokenize.STRING, tokenize.COMMENT}
+    for name in ("FSTRING_START", "FSTRING_MIDDLE", "FSTRING_END"):
+        code = getattr(tokenize, name, None)
+        if code is not None:
+            text_tokens.add(code)
+    for tok in toks:
+        if tok.type not in text_tokens:
+            continue
+        for row in range(tok.start[0], tok.end[0] + 1):
+            cols = grid[row - 1]
+            lo = tok.start[1] if row == tok.start[0] else 0
+            hi = tok.end[1] if row == tok.end[0] else len(cols)
+            for col in range(min(lo, len(cols)), min(hi, len(cols))):
+                cols[col] = " "
+    return "\n".join("".join(row) for row in grid)
+
+
+def _blank_rust(src: str) -> str:
+    """`src` with comments (line and block) and string literals removed, line numbers kept."""
+    out: list[str] = []
+    in_block = False
+    for line in src.splitlines():
+        keep: list[str] = []
+        i = 0
+        if in_block:
+            end = line.find("*/")
+            if end < 0:
+                out.append("")
+                continue
+            in_block, i = False, end + 2
+        while i < len(line):
+            if line.startswith("//", i):
+                break
+            if line.startswith("/*", i):
+                end = line.find("*/", i + 2)
+                in_block = end < 0
+                i = len(line) if in_block else end + 2
+                continue
+            if line[i] == '"':
+                j = i + 1
+                while j < len(line) and line[j] != '"':
+                    j += 2 if line[j] == "\\" else 1
+                i = j + 1
+                continue
+            keep.append(line[i])
+            i += 1
+        out.append("".join(keep))
+    return "\n".join(out)
+
+
+def _banned_box_hits(paths: tuple[str, ...]) -> list[str]:
+    """Where a retired character-count box is *used*, not mentioned: `path:line: hit`.
+
+    The ban is on code that owns a fit. The sentences that retire the old number — this
+    tool's own tuple of banned strings, the wording of the leg that greps for them, the
+    generated module's doc comment that says those names are gone — name it without using
+    it, and a grep that reported those would be quoting itself. So literals and comments
+    are blanked first (Python through the tokenizer, so a triple-quoted block is blanked
+    whole; Rust through a scanner for `//`, `/* */` and `"…"`), and each matching line is
+    reported once with every pattern it matched.
+    """
+    hits: list[str] = []
+    for rel in paths:
+        target = REPO / rel
+        if target.is_file():
+            found = [target]
+        elif target.is_dir():
+            found = sorted(list(target.rglob("*.rs")) + list(target.rglob("*.py")))
+        else:
+            continue
+        for path in found:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            code = _blank_python(text) if path.suffix == ".py" else _blank_rust(text)
+            for no, line in enumerate(code.splitlines(), 1):
+                matched = [banned for banned in BANNED_CHARACTER_BOX if banned in line]
+                if matched:
+                    hits.append(
+                        f"{path.relative_to(REPO)}:{no}: {', '.join(matched)} in {line.strip()[:110]}"
+                    )
+    return hits
 
 
 def _probe_spec_text(face: FaceSpec, raster: int, row_px: int) -> str:
@@ -3790,11 +3889,32 @@ def layout_self_test() -> int:
                     f"the declared box, and {len(probe_text)} characters is not a measurement of anything. "
                     "The bake prints a title that does not fit rather than refusing it (§5.5: an album "
                     "decision, not a build failure); a host test is what asserts a shipped album fits")
-                if not fits_it:
-                    leg(f"variant B: what it refuses for {probe_text!r}",
-                        "elide, not refuse", f"{len(unwritten)} chars unwritten", bool(unwritten),
-                        "§5.5: over-long titles are elided by the text module and the bake *prints* the fact "
-                        "(the longest title on the fixture album is measured and printed, not a build error)")
+                # The third value `title_fit` returns is *unmapped code points*, not elided
+                # ones, so no leg here may call it elision: §5.5's elision happens at draw
+                # time in the text module and is a host-test claim. What this layer can
+                # check is the precondition under which `unwritten` would stay empty — that
+                # the face's cmap covers the title — and it checks it by two paths, because
+                # an all-passing probe set proves nothing on its own.
+                direct_units, direct_missing = facts.title_element.metrics.measure_text(probe_text)
+                leg(f"variant B: every code point of {probe_text!r} is mapped by the title face",
+                    "0 unwritten", f"{len(direct_missing)} unwritten",
+                    direct_missing == "" and unwritten == direct_missing,
+                    f"spec/measurement: {len(set(probe_text))} distinct code points in that title, asked "
+                    "of the declared title face twice — once through `title_fit`'s own path ("
+                    "`fits` -> `measure_text`) and once through `measure_text` directly, so a glyph missing "
+                    "from the cmap would show as a disagreement between the paths before it showed as a "
+                    "blank box. The ark ASCII cut this variant declares is what makes the answer yes; a "
+                    "title outside it is not elided here, it is unwritten, and the leg below is the "
+                    "negative control that keeps this one from being a tautology")
+            unmapped_probe = "\u266b Albums"
+            _, probe_missing = facts.title_element.metrics.measure_text(unmapped_probe)
+            leg("variant B: a code point outside the cmap is reported, not silently zero-width",
+                "\u266b unwritten", f"{probe_missing!r} unwritten",
+                probe_missing == "\u266b",
+                "arithmetic on the same measurement path: a glyph the face does not carry contributes "
+                    "nothing to the width and *is* named in the return value, which is what makes the "
+                    "mapping leg above a check rather than a pass-by-default. §5.5 keeps the verdict "
+                    "about width separate from the verdict about glyphs for exactly this reason")
         bar_box_px = ((facts.bar_element.spec.x1 - facts.bar_element.spec.x0 + 1) * spec.tile_px
                       if facts.bar_element else 0)
         if a_variant:
@@ -3818,20 +3938,39 @@ def layout_self_test() -> int:
             variant.bar_cells >= BAR_CELLS_FLOOR,
             "plan §6's floor of 16 cells, whose stated reason is precision rather than pixels "
             "(6.2% of the track per +-1 cell)")
+        # Two paths for the pattern-tile count. `_pattern_tiles` takes the reachable
+        # residues of a cell step modulo the tile; this renders the bar at every fill
+        # position and collects the partial tiles that actually appear in a row of them.
+        # They agree only if the residue argument describes what gets drawn.
+        rendered = set()
+        for filled in range(variant.bar_cells + 1):
+            for start in range(0, facts.bar_px, spec.tile_px):
+                lit = max(0, min(spec.tile_px, filled * facts.bar_cell_px - start))
+                if 0 < lit < spec.tile_px:
+                    rendered.add("#" * lit + "." * (spec.tile_px - lit))
+        leg(f"variant {variant_id}: partial-fill pattern tiles, counted two ways",
+            f"{len(rendered)} partial + empty + full", f"{facts.bar_pattern_tiles} derived",
+            facts.bar_pattern_tiles == len(rendered) + 2,
+            "arithmetic: a row of the bar rendered cell by cell can only show the partial fills its own "
+            f"cell step can produce, so the distinct tiles are the partials that appear ({len(rendered)}) "
+            "plus the empty and full tiles any bar needs. Counted twice on purpose — a count taken from "
+            "the same residues the generator reports would be one path agreeing with itself")
         if a_variant:
-            leg("variant A: partial-fill pattern tiles", "~5 (§6's estimate)",
-                str(facts.bar_pattern_tiles), facts.bar_pattern_tiles > 1,
-                "plan §6 prices 18 cells of 4 px “at the cost of ~5 extra pattern tiles”. Counted here "
-                "rather than copied: the distinct tiles a fill boundary can need are the reachable residues "
-                "of a 4 px step inside an 8 px tile, plus the full tile a finished track needs. The count "
-                "comes out lower than the estimate — a 4 px step reaches only two interior offsets in an "
-                "8 px tile — so this leg exists to record that disagreement, and the document's estimate is "
-                "what should move (§6 carries the derived figure and the method, the way §5.1's table does)")
+            leg("variant A: §6's pattern-tile figure, as the document now states it",
+                "3 (2 residues + the full tile)", str(facts.bar_pattern_tiles),
+                facts.bar_pattern_tiles == 3,
+                "plan §6 as corrected on 2026-11-20: it now states the rule — the residues a cell step "
+                "reaches inside an 8 px tile, plus the full tile — and the figure that rule gives for A's "
+                "4 px cells, in place of the earlier “~5 extra pattern tiles”. That correction *is* the "
+                "disagreement this leg used to record: the estimate was a guess at “a handful”, and a 4 px "
+                "step reaches only two interior offsets in an 8 px tile, so the document moved to the "
+                "derived figure the way §5.1's table carries its method — not this row keeping a rounder "
+                "number alive")
         else:
-            note(f"variant {variant_id}: partial-fill pattern tiles", str(facts.bar_pattern_tiles),
-                 "no plan figure for B: 1 px cells land on every pixel, so the count is the residues an "
-                 "8 px tile can show. Printed to show the derivation runs on both grids, not only on the "
-                 "one the plan priced")
+            note(f"variant {variant_id}: pattern tiles at 1 px cells", str(facts.bar_pattern_tiles),
+                 "no plan figure for B, and none needed: 1 px cells make every residue inside an 8 px tile "
+                 "reachable, so the same rule gives 8 + 1. Printed to show the derivation runs on both "
+                 "grids, not only on the one the plan priced")
         leg(f"variant {variant_id}: the chrome term, declared and derived",
             f"declared {variant.chrome_art_tiles}", f"derived {facts.chrome_derived}",
             facts.chrome_derived == variant.chrome_art_tiles,
@@ -3907,47 +4046,52 @@ def layout_self_test() -> int:
                 and bar_recip(12_582_912, 80) == (80 << 32) // 12_582_912,
                 "not a quoted figure: the same function answers for any declared grid, so a reader can "
                 "re-run §6's arithmetic at 32 cells without that grid being anybody's product choice")
-        for n, want_overflow in ((1, True), (cells, True), (cells + 1, False)):
-            overflow = bar_recip(n, cells) >= 2**32
+        for n, want_refused in ((1, True), (cells, True), (cells + 1, False)):
+            # `bar_recip` refuses at that boundary instead of returning a value past u32, so
+            # the thing this leg can observe is the refusal *by id* — the arithmetic form
+            # (`>= 2**32`) is unreachable code below the guard, and a leg written on it would
+            # be checking a branch that never runs.
+            try:
+                bar_recip(n, cells)
+            except Refusal as exc:
+                rule = exc.rule
+            else:
+                rule = None
             leg(f"variant {variant_id}: {n} sample(s) against a {cells}-cell grid",
-                "u32 overflow, pack refuses" if want_overflow else "fits u32",
-                "refused" if overflow else "packs", overflow == want_overflow,
-                "arithmetic: (cells << 32) // n has to fit 32 bits, so a track no longer than the grid "
-                "cannot be given a reciprocal at all. Not a plan figure — a consequence of grids this fine "
-                "(1 px cells), and the reason the reciprocal is asserted before the bytes are written "
-                "rather than at boot")
+                "refused by id" if want_refused else "packs",
+                rule or "packs",
+                rule == "bar-reciprocal" if want_refused else rule is None,
+                "arithmetic: at exactly {c} samples floor(2^32 x {c} / n) is 2^32, one past ALBM1's u32 "
+                "recip field, and below that larger still — so a track no longer than the grid cannot be "
+                "given a reciprocal at all, and `build_albm1` would raise a bare `struct.error` instead. "
+                "Not a plan figure: a consequence of grids this fine (1 px cells), and the reason the "
+                "reciprocal is refused before the bytes are written rather than caught at boot".format(c=cells))
 
     # --- where a character-count box must no longer be ----------------------------
     print()
-    print("  D9 item 2: no character-count box may own a fit anywhere in the tree")
-    hits = []
-    for rel in BANNED_SEARCH_PATHS:
-        target = REPO / rel
-        if target.is_file():
-            found = [target]
-        elif target.is_dir():
-            found = sorted(list(target.rglob("*.rs")) + list(target.rglob("*.py")))
-        else:
-            continue
-        for path in found:
-            for no, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-                stripped = line.strip()
-                if stripped.startswith(("#", "//", "///", "/*", "*", "!")):
-                    continue
-                for banned in BANNED_CHARACTER_BOX:
-                    if banned in line:
-                        hits.append(f"{path.relative_to(REPO)}:{no}: {stripped[:110]}")
-    leg("no TITLE_BOX_MAX / title_fits / MAX_TITLE / chars().count() <= 28 in code",
+    print("  D9 item 2: no character-count box may own a fit — in the product, or in its tests")
+    hits = _banned_box_hits(BANNED_SEARCH_PRODUCT)
+    leg("no character-count box in the product's own code",
         "none", f"{len(hits)} hit(s)", not hits,
         "ALBUM-PLAYER.md's own words about the number it is retiring: “now 28 characters, a box "
         "hand-written at 1A-B, no measured or declared width behind it”, and D9 item 2 “the title-fit "
-        "box … comes from the declared or measured face metrics of the variant, not from a character count”")
+        "box … comes from the declared or measured face metrics of the variant, not from a character "
+        "count”. Searched over `scripts/` and the two `src/` trees with literals and comments blanked "
+        "first: the sentences that retire the old name — this tool's own list of banned strings, the "
+        "generated module's doc comment saying those names are gone — would otherwise each count as a "
+        "hit, and a grep that reports its own wording is quoting itself")
     for hit in hits:
         print(f"      {hit}")
-    leg("the pack's own title guard is not a character count either",
-        "a measured bound", "see the hits above", not any("MAX_TITLE" in h or "TITLE_BOX_MAX" in h for h in hits),
-        "the same rule read from the other side: `scripts/album_pack.py` used to carry the box; if it "
-        "still did, the grep would find it")
+    test_hits = _banned_box_hits(BANNED_SEARCH_TESTS)
+    leg("and the host tests do not re-establish one either",
+        "none", f"{len(test_hits)} hit(s)", not test_hits,
+        "the same strings, looked for in `examples/album_player/tests`: a test asserting "
+        "`chars().count() <= 28` puts the retired box back as the thing a build is checked against, "
+        "which is how a number meant to die becomes load-bearing again. The fixture's title test belongs "
+        "on the measured side — the declared box in the generated layout module, against the declared "
+        "face's advances — so this leg stays red until that assertion counts pixels instead of characters")
+    for hit in test_hits:
+        print(f"      {hit}")
 
     # --- the faces themselves: provenance, not folklore ---------------------------
     print()

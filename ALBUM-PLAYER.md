@@ -2015,10 +2015,19 @@ width a constant of this file. It is now a field of the variant (§5.0) — `bar
 is not pixels, it is precision: with the grid at *N* cells, the ±1-cell error this section
 already proves is **100/N percent of the track**, so the bake report prints that percentage
 beside the geometry that produced it (32 cells → 3.1%; 18 → 5.6%; 9 → 11%). Fine cells are
-cheap where the grid is narrow: a bar may use *partial-fill pattern tiles* (a handful of
-tiles filled to 2 or 4 px, plus one empty and one full), so a 72-pixel-wide bar in the
+cheap where the grid is narrow: a bar may use *partial-fill pattern tiles* (tiles filled
+to each reachable fill offset, plus one empty and one full), so a 72-pixel-wide bar in the
 right of the title band can still be 18 cells of 4 px rather than 9 of 8 — at the cost of
-~5 extra pattern tiles, which is nothing next to a glyph cache.
+**3 pattern tiles, of which only 1 is extra** over the empty/full pair any bar needs. That
+figure replaced “~5 extra pattern tiles”, which was a guess at *a handful*; the count follows
+from the geometry and `--layout-self-test` counts it rather than quoting it. A fill boundary
+can only land on a cell step, so the distinct partial tiles are exactly the residues of
+`bar_px / bar_cells` inside an 8 px tile: a 4 px step reaches two of them (0 px, which is the
+empty tile already paid for, and 4 px), and the finished track needs the full tile — 2 + 1 =
+**3**. At variant B's 1 px cells every residue is reachable and the same rule gives 8 + 1 =
+**9**, which is why this section states the rule and the figure belongs to the variant (the
+two paths the self-test runs are the residue set and a render of the bar at every fill
+position, agreeing).
 
 **One invariant that has to be written down because it joins geometry to audio arithmetic.**
 The reciprocals are computed *per track at bake time* from the cell count —
