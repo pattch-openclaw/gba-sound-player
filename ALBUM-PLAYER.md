@@ -1715,7 +1715,7 @@ real periodic bill is 1–2 characters a second, not 11.
 Nothing in this table is frame-paced, and the two rows that are periodic are periodic at
 *seconds*, not frames — which is the point of the "how often" column being the second column
 rather than a footnote. No scene in 2a or 2b needs a 1 Hz redraw: the clock's worst case is one
-digit cell per second and the bar's is one cell per 1/32 of a track, and both are cheaper than
+digit cell per second and the bar's is at most one cell per declared cell (§6), which is a variant field, and both are cheaper than
 the row-level redraw R1b measured on hardware. The scenes that *do* want frequent redraws are
 the interactive ones — viz (§8), the game (§11 Phase 6) — and neither is a text row.
 
@@ -1862,7 +1862,7 @@ const BAR_CELLS: u32 = 32` (`crates/gba-playback/src/nodiv.rs:44`) — the ROM *
 whose header declares a different value** (`examples/album_player/src/meta.rs:582-583`,
 `Refusal::BarCellsMismatch`, whose own message reads *"bar_cells {n}, §6's grid is 32"*), and the
 reciprocal is verified against that same constant (`meta.rs:811-814`); the bake produces it as
-`floor(2^32 × 32 / n_samples)` (`scripts/album_bake.py:89,456`). So a variant declaring
+`floor(2^32 × 32 / n_samples)` (`scripts/album_bake.py:76`, `bar_recip` at `:284-296`). So a variant declaring
 `bar_cells = 18` (§5.0's starting default for A) is **not** a narrower redraw: until that
 constant is generated from the variant like the rest of the geometry, **the 2a ROM rejects its own
 album** — and the sentence above about the three agreeing is the guard that says so, not a note of
