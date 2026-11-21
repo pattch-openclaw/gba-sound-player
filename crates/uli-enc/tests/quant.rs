@@ -302,6 +302,7 @@ fn rate_and_snr_move_the_right_way_with_the_step() {
             fine_width: 0,
             train: false,
             ms: None,
+            musearch: false,
             threads: 1,
         })
         .unwrap_or_else(|e| panic!("g={g}: {e}"));
@@ -362,6 +363,7 @@ fn the_search_actually_runs_and_changes_the_album() {
             fine_width: 0,
             train: false,
             ms: None,
+            musearch: false,
             threads: 1,
         })
         .expect("encodes")
@@ -422,7 +424,7 @@ fn a_band_louder_than_every_class_headroom_is_still_coded() {
         for v in loud.iter_mut().take(16) {
             *v = 800.0 * d as f32;
         }
-        let rd = quant::quantise_chan_rd(&loud, &tables, g, false, 0.13);
+        let rd = quant::quantise_chan_rd(&loud, &tables, g, false, 0.13, 0.0);
         assert!(
             !rd.chan.bands.is_empty() && rd.chan.bands[0].class != 0,
             "g={g}: the band was coded as class 0 (silence). Every class's headroom is \
@@ -455,8 +457,8 @@ fn a_larger_kappa_never_costs_more_bits() {
         let mut bits = 0u64;
         for f in 0..nf {
             mdct_frame(&samples, f, N_SAMPLES, &mut coef);
-            let l = uli_enc::quant::quantise_chan_rd(&coef[..M], &tables, 100, false, kappa);
-            let r = uli_enc::quant::quantise_chan_rd(&coef[M..], &tables, 100, false, kappa);
+            let l = uli_enc::quant::quantise_chan_rd(&coef[..M], &tables, 100, false, kappa, 0.0);
+            let r = uli_enc::quant::quantise_chan_rd(&coef[M..], &tables, 100, false, kappa, 0.0);
             bits += chan_bits(&tables, &l.chan) + chan_bits(&tables, &r.chan);
         }
         assert!(
@@ -497,6 +499,7 @@ fn the_search_fits_every_budget_it_accepts() {
             fine_width: 0,
             train: false,
             ms: None,
+            musearch: false,
             threads: 1,
         })
         .unwrap_or_else(|e| panic!("budget {budget} was refused: {e}"));
@@ -695,7 +698,7 @@ fn a_class_with_no_code_is_never_chosen() {
     for (i, v) in coef.iter_mut().take(16).enumerate() {
         *v = (i as f32 + 1.0) * d as f32 * 2.0;
     }
-    let rd = quant::quantise_chan_rd(&coef, &tables, 100, false, 0.13);
+    let rd = quant::quantise_chan_rd(&coef, &tables, 100, false, 0.13, 0.0);
     assert!(
         rd.chan.bands.iter().all(|b| b.class != starved),
         "a class whose band symbol has no code was chosen; the writer would then panic \
@@ -828,6 +831,7 @@ fn an_ms_album_decodes_to_sane_audio_and_beats_lr_on_correlated_stereo() {
             fine_width: 0,
             train: false,
             ms,
+            musearch: false,
             threads: 1,
         })
         .expect("encodes")
@@ -890,6 +894,7 @@ fn the_search_chooses_the_domain_per_frame_and_the_stream_agrees() {
         fine_width: 0,
         train: false,
         ms: None,
+        musearch: false,
         threads: 1,
     })
     .expect("encodes");
@@ -914,6 +919,7 @@ fn the_search_chooses_the_domain_per_frame_and_the_stream_agrees() {
         fine_width: 0,
         train: false,
         ms: Some(false),
+        musearch: false,
         threads: 1,
     })
     .expect("encodes with M/S disabled");
@@ -957,6 +963,7 @@ fn ms_frames_are_thread_invariant() {
             fine_width: 0,
             train: false,
             ms: None,
+            musearch: false,
             threads,
         })
         .expect("encodes")
@@ -1003,6 +1010,7 @@ fn refining_the_grid_never_costs_quality() {
             // would double the runtime of both arms without touching the claim.
             train: false,
             ms: None,
+            musearch: false,
             threads: 1,
         })
         .expect("encodes")
@@ -1030,5 +1038,177 @@ fn refining_the_grid_never_costs_quality() {
         refined.report.stream_bits != coarse.report.stream_bits || a > b,
         "the refined search produced the coarse search's plan unchanged, so the fine sweep \
          never ran"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// S6: the decoder-cycle price (`mu`)
+// ---------------------------------------------------------------------------
+
+/// The cycle-aware search prices a band with constants mirrored from the reader. Mirroring
+/// is only safe if it is a test: this reconstructs `Ops::cycle_model()` from the
+/// `quant::CY_*` constants and [`quant::band_cycles`] for a real coded channel pair. A
+/// constant or a per-band count that drifts on either side fails here rather than as a
+/// `--cap` that quietly stopped binding.
+#[test]
+fn band_cycles_witness_the_reader_cycle_model() {
+    let (_d, _pcm, _samples, tables, content, nf) = coded(100);
+    let frames = content.coded_frames().expect("a coded plan");
+    for f in [0usize, nf / 2, nf - 1] {
+        let chans = &frames[f];
+        for ms in [false, true] {
+            let ops = uli_enc::rd::frame_ops(&tables, chans, ms);
+            let mut cycles = quant::CY_FRAME
+                + 2 * quant::CY_CH
+                + 2 * quant::CY_IMDCT_CH
+                + if ms { quant::CY_MS } else { 0 }
+                + (2 * M as u32 / 4) * quant::CY_ZEROFILL_X4
+                + quant::CY_LONGCODE * ops.long_codes;
+            for chan in chans {
+                for band in &chan.bands {
+                    cycles += quant::CY_BANDSYM + quant::band_cycles(&tables, band);
+                }
+                // The reader's terminator: a band symbol with no band behind it.
+                if chan.bands.len() < NBANDS {
+                    cycles += quant::CY_BANDSYM;
+                }
+            }
+            assert_eq!(
+                cycles,
+                ops.cycle_model(),
+                "the mirrored CY_* constants and band_cycles disagree with the reader's own \
+                 model (frame {f}, ms {ms})"
+            );
+        }
+    }
+}
+
+/// Raising `mu` buys decoder cycles with distortion, so the cycle count must never go back
+/// up as the price rises. This is the ladder the search bisects: if it were not monotone,
+/// "the smallest price that meets the cap" would not be a well-defined answer.
+#[test]
+fn a_larger_mu_never_costs_more_decoder_cycles() {
+    let (_d, _pcm, samples, tables, _content, nf) = coded(100);
+    let mut coef = [0f32; 2 * M];
+    mdct_frame(&samples, nf / 2, N_SAMPLES, &mut coef);
+    let run = |mu: f64| {
+        [
+            quant::quantise_chan_rd(&coef[..M], &tables, 100, false, 0.13, mu),
+            quant::quantise_chan_rd(&coef[M..], &tables, 100, false, 0.13, mu),
+        ]
+    };
+    let cycles = |rd: &[quant::ChanRd; 2]| {
+        let pair = [rd[0].chan.clone(), rd[1].chan.clone()];
+        uli_enc::rd::frame_ops(&tables, &pair, false).cycle_model()
+    };
+    let ladder = [0.0f64, 0.01, 0.1, 1.0, 10.0, 100.0];
+    let mut prev = u32::MAX;
+    let mut at_zero = 0u32;
+    let mut at_top = 0u32;
+    for (i, &mu) in ladder.iter().enumerate() {
+        let cyc = cycles(&run(mu));
+        assert!(
+            cyc <= prev,
+            "mu {mu} costs {cyc} cycles, more than the previous rung's {prev}: the cycle \
+             price is not ordering the same search the bisection assumes"
+        );
+        prev = cyc;
+        if i == 0 {
+            at_zero = cyc;
+        }
+        if i + 1 == ladder.len() {
+            at_top = cyc;
+        }
+    }
+    assert!(
+        at_top < at_zero,
+        "the mu ladder never bought a cycle ({at_zero} at mu 0 and {at_top} at the top). \
+         Either the cycle term is not reaching the band-class shortest path, or this fixture \
+         has no cycle slack to trade."
+    );
+}
+
+/// The over-cap candidate is **re-coded**, not refused: measured at `mu = 0` it exceeds the
+/// cap, and the same `(g, ms)` under the cycle price comes back under it with a positive
+/// `mu`. That is the whole of S6's mechanism, and it is why the price is carried on the
+/// curve — the final encode has to re-code at exactly the price the measurement used.
+#[test]
+fn an_over_cap_candidate_is_re_coded_not_refused() {
+    let (_d, _pcm, samples, tables, _content, _nf) = coded(100);
+    let mut coef = [0f32; 2 * M];
+    mdct_frame(&samples, 1, N_SAMPLES, &mut coef);
+    let params = |cap: u32, musearch: bool| uli_enc::rd::SearchParams {
+        tables: &tables,
+        n_frames: 1,
+        stride: 8,
+        fine_width: 0,
+        kappa: 0.13,
+        cap,
+        musearch,
+        force_ms: Some(false),
+        threads: 1,
+    };
+    // The densest coarse candidate under the rate-only search, measured without a cap.
+    let off_params = params(u32::MAX, false);
+    let mut worst = (uli_enc::rd::G_MIN, 0u32);
+    for g in (uli_enc::rd::G_MIN..=uli_enc::rd::G_MAX).step_by(8) {
+        let p = uli_enc::rd::point(&coef, &off_params, g, false).expect("measure");
+        if p.0.cycles > worst.1 {
+            worst = (g, p.0.cycles);
+        }
+    }
+    let (g, over) = worst;
+    // A cap the rate-only coding misses but a small amount of dropping can meet.
+    let cap = over - 1_500;
+    let off = uli_enc::rd::point(&coef, &params(cap, false), g, false).expect("measure");
+    assert!(
+        off.0.cycles > cap,
+        "g={g} measured {} cycles against a cap of {cap}; this fixture no longer binds",
+        off.0.cycles
+    );
+    assert_eq!(off.2, 0.0, "the rate-only search charged a cycle price");
+    let on = uli_enc::rd::point(&coef, &params(cap, true), g, false).expect("measure");
+    assert!(
+        on.0.cycles <= cap,
+        "the cycle-aware re-code left g={g} at {} cycles against a cap of {cap}",
+        on.0.cycles
+    );
+    assert!(
+        on.2 > 0.0,
+        "the frame met the cap without a cycle price; this is not the re-code path"
+    );
+}
+
+/// A cap nothing exceeds must leave the search **byte-for-byte** unchanged. This is the
+/// other half of S6: the price is a constraint tool, not a quality knob, and turning it on
+/// where the cap does not bind must be inert (the reference's `--musearch` behaves the same
+/// way at the low budgets).
+#[test]
+fn musearch_is_inert_when_the_cap_does_not_bind() {
+    let (_d, _pcm, samples, tables, _content, _nf) = coded(100);
+    let params = |musearch: bool| uli_enc::rd::SearchParams {
+        tables: &tables,
+        n_frames: 1,
+        stride: 8,
+        fine_width: 0,
+        kappa: 0.13,
+        cap: u32::MAX,
+        musearch,
+        force_ms: None,
+        threads: 1,
+    };
+    let off = uli_enc::Curves::compute(&samples, N_SAMPLES, &params(false)).expect("curves");
+    let on = uli_enc::Curves::compute(&samples, N_SAMPLES, &params(true)).expect("curves");
+    let (a, b) = (&off.per_frame[0], &on.per_frame[0]);
+    assert_eq!(a.g, b.g);
+    assert_eq!(a.r, b.r);
+    assert_eq!(a.d, b.d);
+    assert_eq!(a.c, b.c);
+    assert_eq!(a.ms, b.ms);
+    assert!(
+        on.per_frame
+            .iter()
+            .all(|c| c.mu.iter().all(|&mu| mu == 0.0)),
+        "a candidate was re-coded under a cap it already met"
     );
 }

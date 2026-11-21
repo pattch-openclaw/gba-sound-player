@@ -29,6 +29,7 @@ fn args(album: std::path::PathBuf, tracks: std::path::PathBuf, threads: usize) -
         fine_width: 0,
         train: false,
         ms: None,
+        musearch: false,
         threads,
     }
 }

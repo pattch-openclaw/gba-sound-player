@@ -454,9 +454,11 @@ impl Content {
             // The rate/distortion quantiser, not a nearest-level rule: `kappa` is the
             // encoder's own knob and a fixed step is only the *step*, so leaving `lam` at
             // zero here would make `--g` a different coder from `--rd`, and a fixed-step
-            // comparison between the two would be measuring that instead of the step.
-            let l = crate::quant::quantise_chan_rd(&rot[..M], tables, g, ms, kappa).chan;
-            let r = crate::quant::quantise_chan_rd(&rot[M..], tables, g, ms, kappa).chan;
+            // comparison between the two would be measuring that instead of the step. The
+            // cycle price is zero: a fixed step does not search, so there is no cap for it
+            // to meet and no candidate to re-code.
+            let l = crate::quant::quantise_chan_rd(&rot[..M], tables, g, ms, kappa, 0.0).chan;
+            let r = crate::quant::quantise_chan_rd(&rot[M..], tables, g, ms, kappa, 0.0).chan;
             frames.push([l, r]);
         }
         Ok(Self {

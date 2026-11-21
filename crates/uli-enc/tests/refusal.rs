@@ -47,6 +47,7 @@ fn a_budget_below_overhead_plus_the_stream_refuses_and_cites_both_numbers() {
         fine_width: 0,
         train: false,
         ms: None,
+        musearch: false,
         threads: 1,
     })
     .expect_err("the stream does not fit in the overhead alone");
@@ -85,6 +86,7 @@ fn a_budget_below_the_container_overhead_refuses() {
         fine_width: 0,
         train: false,
         ms: None,
+        musearch: false,
         threads: 1,
     })
     .expect_err("88 bytes cannot hold the header, tables, track and stream");

@@ -97,6 +97,9 @@ pub struct SearchParams<'a> {
     pub kappa: f64,
     /// `--cap PCT` expressed as cycles.
     pub cap: u32,
+    /// Whether an over-cap candidate is re-coded with the decoder-cycle price instead of
+    /// being left for the allocation to exclude (`--musearch`, S6). Off is the S5 search.
+    pub musearch: bool,
     /// `Some(_)` pins the domain; `None` lets the search choose per `g` (the rule is in
     /// [`Curves::compute`]).
     pub force_ms: Option<bool>,
@@ -124,6 +127,10 @@ pub struct Curve {
     /// `w·D + λ·R`, and letting the allocation choose would compare them under a `λ` that
     /// had already moved. A candidate is therefore a `(g, ms)` pair with `ms` settled.
     pub ms: Vec<bool>,
+    /// The cycle price each candidate was re-coded under (S6). `0.0` means the candidate
+    /// already met the cap; a positive value is the `mu` that bought it under. The final
+    /// encode re-codes at exactly this price, so the shipped bands are the measured ones.
+    pub mu: Vec<f64>,
 }
 
 /// One measured candidate.
@@ -146,6 +153,7 @@ pub fn measure(
     g: i32,
     ms: bool,
     kappa: f64,
+    mu: f64,
 ) -> Result<(Point, [Chan; 2]), Error> {
     // Rotate once for the frame, then quantise both channels in the rotated domain. The
     // rotation is orthonormal, which is what makes a rotated frame's measured distortion
@@ -157,7 +165,7 @@ pub fn measure(
     let mut bits = 0u64;
     for ch in 0..2 {
         let slice = &rot[ch * M..ch * M + M];
-        let lr = crate::quant::quantise_chan_rd(slice, tables, g, ms, kappa);
+        let lr = crate::quant::quantise_chan_rd(slice, tables, g, ms, kappa, mu);
         dist += lr.dist;
         chans[ch] = lr.chan;
     }
@@ -180,6 +188,54 @@ pub fn measure(
         },
         chans,
     ))
+}
+
+/// One candidate with the cycle-aware re-code applied (S6) — the reference's `point()`.
+///
+/// Measure at `mu = 0` first. If the search is off, or the candidate already meets the cap,
+/// that is the answer. Otherwise raise `mu` until the frame's reader cycle model comes under
+/// the cap, then bisect it down to the smallest price that still fits and return that coding.
+/// If no price reaches the cap the plain candidate is returned unchanged; the allocation
+/// then excludes it, which is the same "leave it to the allocation" the reference uses.
+///
+/// The returned `mu` is the price the winning coding was made under, and the final encode
+/// must re-code at exactly it: the bands that met the cap are a function of that price.
+pub fn point(
+    coef: &[f32; 2 * M],
+    p: &SearchParams<'_>,
+    g: i32,
+    ms: bool,
+) -> Result<(Point, [Chan; 2], f64), Error> {
+    let (plain, chans) = measure(coef, p.tables, g, ms, p.kappa, 0.0)?;
+    if !p.musearch || plain.cycles <= p.cap {
+        return Ok((plain, chans, 0.0));
+    }
+    let d = quant::Unit::of(g, ms).d;
+    let lam = p.kappa * d * d;
+    let mut lo = 0.0;
+    let mut hi = lam * 0.01;
+    let mut rh = measure(coef, p.tables, g, ms, p.kappa, hi)?;
+    let mut it = 0;
+    while rh.0.cycles > p.cap && it < 14 {
+        lo = hi;
+        hi *= 2.5;
+        rh = measure(coef, p.tables, g, ms, p.kappa, hi)?;
+        it += 1;
+    }
+    if rh.0.cycles > p.cap {
+        return Ok((plain, chans, 0.0));
+    }
+    for _ in 0..6 {
+        let mid = if lo > 0.0 { (lo * hi).sqrt() } else { hi * 0.3 };
+        let rm = measure(coef, p.tables, g, ms, p.kappa, mid)?;
+        if rm.0.cycles <= p.cap {
+            hi = mid;
+            rh = rm;
+        } else {
+            lo = mid;
+        }
+    }
+    Ok((rh.0, rh.1, hi))
 }
 
 /// `(coef − reconstruction)²` summed over the coded range. The reconstruction is
@@ -370,16 +426,16 @@ impl Curves {
         })
     }
 
-    /// Measure one `(g, ms)` candidate: quantise both domains, take the cheaper under one
-    /// price, and report the winner. Returns the point and whether it is M/S.
+    /// Measure one `(g, ms)` candidate: re-code each domain under the cycle price if it is
+    /// over the cap, take the cheaper under one price, and report the winner with its `mu`.
     fn measure_g(
         coef: &[f32; 2 * M],
         p: &SearchParams<'_>,
         g: i32,
-    ) -> Result<(Point, bool), Error> {
+    ) -> Result<(Point, bool, f64), Error> {
         let lam0 = p.kappa * quant::Unit::of(g, false).d * quant::Unit::of(g, false).d;
-        let (a, _) = measure(coef, p.tables, g, false, p.kappa)?;
-        let (b, _) = measure(coef, p.tables, g, true, p.kappa)?;
+        let (a, _, mua) = point(coef, p, g, false)?;
+        let (b, _, mub) = point(coef, p, g, true)?;
         let fa = a.cycles <= p.cap;
         let fb = b.cycles <= p.cap;
         let useb = match p.force_ms {
@@ -394,7 +450,7 @@ impl Curves {
                 }
             }
         };
-        Ok((if useb { b } else { a }, useb))
+        Ok((if useb { b } else { a }, useb, if useb { mub } else { mua }))
     }
 
     /// Pick one candidate per frame for a given λ, minimising `w·D + λR` subject to
@@ -481,6 +537,7 @@ impl Curves {
         for (f, &pick) in picks.iter().enumerate() {
             let g = self.per_frame[f].g[pick];
             let ms = self.per_frame[f].ms[pick];
+            let mu = self.per_frame[f].mu[pick];
             g_by_frame.push(g);
             ms_by_frame.push(ms);
             crate::mdct::mdct_frame(samples, f, n_samples, &mut coef);
@@ -488,7 +545,7 @@ impl Curves {
             let mut frame_chans = [Chan::empty(), Chan::empty()];
             for ch in 0..2 {
                 let slice = &rot[ch * M..ch * M + M];
-                frame_chans[ch] = quant::quantise_chan_rd(slice, tables, g, ms, kappa).chan;
+                frame_chans[ch] = quant::quantise_chan_rd(slice, tables, g, ms, kappa, mu).chan;
             }
             chans.push(frame_chans);
         }
@@ -571,15 +628,17 @@ fn coarse_curve(coef: &[f32; 2 * M], p: &SearchParams<'_>) -> Result<Curve, Erro
         d: Vec::new(),
         c: Vec::new(),
         ms: Vec::new(),
+        mu: Vec::new(),
     };
     let mut g = G_MIN;
     while g <= G_MAX {
-        let (point, useb) = Curves::measure_g(coef, p, g)?;
+        let (point, useb, mu) = Curves::measure_g(coef, p, g)?;
         c.g.push(g);
         c.r.push(point.bits as f64);
         c.d.push(point.dist);
         c.c.push(point.cycles);
         c.ms.push(useb);
+        c.mu.push(mu);
         if g == G_MAX {
             break;
         }
@@ -617,6 +676,7 @@ fn refine_curve(
         d: Vec::new(),
         c: Vec::new(),
         ms: Vec::new(),
+        mu: Vec::new(),
     };
     let mut g = lo;
     while g <= hi {
@@ -627,13 +687,15 @@ fn refine_curve(
             c.d.push(coarse.d[i]);
             c.c.push(coarse.c[i]);
             c.ms.push(coarse.ms[i]);
+            c.mu.push(coarse.mu[i]);
         } else {
-            let (point, useb) = Curves::measure_g(coef, p, g)?;
+            let (point, useb, mu) = Curves::measure_g(coef, p, g)?;
             c.g.push(g);
             c.r.push(point.bits as f64);
             c.d.push(point.dist);
             c.c.push(point.cycles);
             c.ms.push(useb);
+            c.mu.push(mu);
         }
         g += 1;
     }

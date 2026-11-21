@@ -119,6 +119,10 @@ pub struct Args {
     /// `Some(true)`/`Some(false)` pin the domain, which is what a fixed-step comparison
     /// needs in order to hold it constant.
     pub ms: Option<bool>,
+    /// Re-code an over-cap frame with the decoder-cycle price instead of leaving the
+    /// candidate for the allocation to exclude (S6, `--musearch`). Only the search uses it;
+    /// with `--g` there is no candidate set and no cap to meet.
+    pub musearch: bool,
     pub threads: usize,
 }
 
@@ -173,6 +177,13 @@ pub struct Report {
     /// all: on real stereo it should be most of them, and a search that silently never
     /// chose it would otherwise look merely mediocre.
     pub ms_frames: usize,
+    /// Whether the cycle-aware re-code ran (S6). `false` on every path where there is no
+    /// candidate search, whatever the flag said.
+    pub musearch: bool,
+    /// Frames whose winning candidate was re-coded under a positive `mu`, i.e. frames the
+    /// cycle cap actually bound. Zero is the honest answer on a non-binding cap, and the
+    /// CLI prints it so "musearch on" cannot be mistaken for "musearch did something".
+    pub mu_frames: usize,
 }
 
 /// How many times the search may re-try the bit target before refusing.
@@ -266,13 +277,14 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         fine_width,
         train,
         ms,
+        musearch,
         threads,
     } = input;
     // The parameter is `input`, not `args`, so there is no way to reach a field
     // through it and quietly bypass the bindings above. That is what the first
     // version of this guard missed: `args.rd` still resolved, so the exhaustive
     // pattern proved nothing.
-    let (budget, cap_pct, g, rd, kappa, stride, fine_width, train, ms, threads) = (
+    let (budget, cap_pct, g, rd, kappa, stride, fine_width, train, ms, musearch, threads) = (
         *budget,
         *cap_pct,
         *g,
@@ -282,6 +294,7 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         *fine_width,
         *train,
         *ms,
+        *musearch,
         *threads,
     );
     // S5's two input shapes meet here, and only here: below this point an album is
@@ -296,6 +309,7 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
     };
     let mut report_g: Option<Vec<i32>> = None;
     let mut report_lambda: Option<f64> = None;
+    let mut report_mu_frames = 0usize;
 
     // The premise is a property of the *final* tables, so serialise and re-parse
     // them first: a bound checked against the in-memory model would not prove
@@ -359,8 +373,13 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         let w = rd::weights(&pcm, &energy);
 
         // One search over a given table set, so training can run it twice: once to measure
-        // the album, once to code it with what the measurement produced.
-        let run = |tbl: &DefaultTables| -> Result<(Content, Vec<i32>, f64), Error> {
+        // the album, once to code it with what the measurement produced. The measurement
+        // pass never pays the cycle price: it exists to collect statistics, and S6's
+        // re-code belongs to the pass whose bands ship (the reference's two
+        // `curves_compute` calls make the same split).
+        let run = |tbl: &DefaultTables,
+                   musearch: bool|
+         -> Result<(Content, Vec<i32>, f64, usize), Error> {
             let params = rd::SearchParams {
                 tables: tbl,
                 n_frames: nf,
@@ -368,6 +387,7 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
                 fine_width,
                 kappa,
                 cap,
+                musearch,
                 force_ms: ms,
                 threads,
             };
@@ -383,7 +403,14 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
                 let (lambda, picks) = curves.allocate(&w, target, cap)?;
                 let content = curves.to_content(&picks, s, pcm.n_samples as usize, tbl, kappa)?;
                 match Plan::new(&pcm, tbl, &content, budget, cap_pct) {
-                    Ok(_) => return Ok((content, curves.chosen_g(&picks), lambda)),
+                    Ok(_) => {
+                        let mu_frames = picks
+                            .iter()
+                            .enumerate()
+                            .filter(|&(f, &i)| curves.per_frame[f].mu[i] > 0.0)
+                            .count();
+                        return Ok((content, curves.chosen_g(&picks), lambda, mu_frames));
+                    }
                     Err(Error::Refusal(r)) => {
                         if attempt + 1 == RETRY_ATTEMPTS {
                             return Err(Error::Refusal(r));
@@ -408,7 +435,7 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             ))
         };
 
-        let (first, _, _) = run(tables)?;
+        let (first, _, _, _) = run(tables, false)?;
         let effective = if train {
             // Pass one measured the album with the built-in tables. What it saw is only an
             // approximation of what the trained tables will see — lengths change which
@@ -432,10 +459,11 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         } else {
             tables.clone()
         };
-        let (content, gs, lambda) = run(&effective)?;
+        let (content, gs, lambda, mu_frames) = run(&effective, musearch)?;
         tables_effective = Some(effective);
         report_g = Some(gs);
         report_lambda = Some(lambda);
+        report_mu_frames = mu_frames;
         content
     } else if let Some(g) = g {
         Content::quantise(
@@ -561,6 +589,8 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             nonzero_coeffs: content.nonzero_coeffs(),
             trained: trained_used,
             ms_frames: content.ms_frames(),
+            musearch: rd && musearch,
+            mu_frames: report_mu_frames,
         },
         // Only a WAV front end has a boundary that is not already a file. Moving
         // the samples here is why `--emit-pcm` can promise the dump is the exact

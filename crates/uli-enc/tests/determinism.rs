@@ -24,6 +24,7 @@ fn encode_with_threads(dir: &std::path::Path, threads: usize) -> uli_enc::Output
         fine_width: 0,
         train: false,
         ms: None,
+        musearch: false,
         threads,
     })
     .expect("the silence album encodes")
@@ -107,6 +108,7 @@ fn the_rd_search_is_thread_invariant() {
             fine_width: 4,
             train: false,
             ms: None,
+            musearch: true,
             threads,
         })
         .expect("the tone album searches")

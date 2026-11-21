@@ -56,6 +56,7 @@ fn args(album: std::path::PathBuf, tracks: std::path::PathBuf, budget: u64, trai
         fine_width: 0,
         train,
         ms: None,
+        musearch: false,
         threads: 1,
     }
 }

@@ -609,6 +609,66 @@ pub struct ChanRd {
     pub bits: u64,
 }
 
+/// The decoder's ARM7TDMI cycle constants, in cycles, mirrored from
+/// `uli_lite::Ops::cycle_model` (and `uli_dec_ref.h`). The cycle-aware search prices a
+/// band's decode work with these, and the witness in `tests/quant.rs` reconstructs the
+/// reader's whole model from them — a constant that drifts on either side is a failing
+/// test rather than a `--cap` that quietly stopped binding.
+pub const CY_FRAME: u32 = 5_200;
+pub const CY_CH: u32 = 300;
+pub const CY_BANDSYM: u32 = 30;
+pub const CY_CODEDBAND: u32 = 40;
+pub const CY_ZEROFILL_X4: u32 = 5;
+pub const CY_PAIR: u32 = 44;
+pub const CY_QUAD: u32 = 52;
+pub const CY_NZ: u32 = 22;
+pub const CY_ZC: u32 = 3;
+pub const CY_RAW: u32 = 8;
+pub const CY_ESC: u32 = 45;
+pub const CY_LONGCODE: u32 = 40;
+pub const CY_MS: u32 = 3 * 512;
+pub const CY_IMDCT_CH: u32 = 73_297 + 3 * 512;
+
+/// A coded band's decoder cycles beyond its band symbol, relative to a zero band — the
+/// reference's `band_cyc`. The band symbol itself is charged by the shortest path, because
+/// every band (and the terminator) sends one; this is only what changes when the band is
+/// *coded*. A zero class costs nothing here.
+pub fn band_cycles(tables: &DefaultTables, band: &Band) -> u32 {
+    cycles_of(tables, band.class, &band.m)
+}
+
+fn cycles_of(tables: &DefaultTables, class: usize, m: &[i32; BANDW]) -> u32 {
+    if class == 0 {
+        return 0;
+    }
+    let pair = tables.ctype[class] == CT_PAIR;
+    let r = tables.rbits[class];
+    let mut nz = 0u32;
+    let mut escs = 0u32;
+    for &v in m {
+        let a = v.unsigned_abs();
+        if a != 0 {
+            nz += 1;
+        }
+        if pair {
+            if (a >> r) >= 15 {
+                escs += 1;
+            }
+        } else if a >= 2 {
+            escs += 1;
+        }
+    }
+    let zc = BANDW as u32 - nz;
+    let raws = if pair && r != 0 { BANDW as u32 } else { 0 };
+    let (nsym, per_sym) = if pair {
+        (8u32, CY_PAIR)
+    } else {
+        (4u32, CY_QUAD)
+    };
+    CY_CODEDBAND + nsym * per_sym + nz * CY_NZ + zc * CY_ZC + raws * CY_RAW + escs * CY_ESC
+        - 4 * CY_ZEROFILL_X4
+}
+
 /// Rate/distortion quantisation of one channel at a fixed step (S3).
 ///
 /// Three decisions, all taken with `lam = kappa·D²`:
@@ -629,12 +689,20 @@ pub struct ChanRd {
 ///   carries no coupling. **That equality is what makes the scan exact. A table set whose
 ///   context codebooks differ would couple consecutive bands, and the choice would become a
 ///   shortest-path problem over (band, class) instead of a prefix scan.**
+///
+/// **`mu` is the decoder-cycle price (S6).** With `mu = 0` this is exactly the rate/distortion
+/// search above, bit for bit. With `mu > 0` every band transition also costs
+/// `mu · (CY_BANDSYM + band_cycles)`, so a band whose decoder work is expensive relative to
+/// its distortion is more readily dropped — which is how an over-cap frame is re-coded below
+/// the cap instead of refusing the candidate.
+#[allow(clippy::too_many_arguments)]
 pub fn quantise_chan_rd(
     coef: &[f32],
     tables: &DefaultTables,
     g: i32,
     ms: bool,
     kappa: f64,
+    mu: f64,
 ) -> ChanRd {
     // The coefficients handed in must already be in the domain the reader will see: the
     // caller applies [`rotate`] when `ms` is set. The `√2` step compensation belongs
@@ -677,6 +745,10 @@ pub fn quantise_chan_rd(
     // cannot code the band (a symbol with no code), which the search then skips.
     let mut band_dist = [[f64::INFINITY; MAXK]; NBANDS];
     let mut band_bits = [[0u64; MAXK]; NBANDS];
+    // The decoder work a class adds to this band, for the `mu` term. Zero for class 0,
+    // which is what makes a zero band cheap in the cycle-aware search as well as the rate
+    // one.
+    let mut band_cyc = [[0u32; MAXK]; NBANDS];
     for b in 0..NBANDS {
         let ncod = band_ncod(b);
         // Code nothing: one band symbol, all of this band's energy left as error.
@@ -701,6 +773,7 @@ pub fn quantise_chan_rd(
             };
             band_dist[b][klass] = rd.dist;
             band_bits[b][klass] = rd.bits;
+            band_cyc[b][klass] = cycles_of(tables, klass, &rd.m);
         }
     }
 
@@ -718,16 +791,31 @@ pub fn quantise_chan_rd(
     let mut v = [[f64::INFINITY; MAXK + 1]; NBANDS + 1];
     let mut from = [[NONE; MAXK + 1]; NBANDS + 1];
     v[0][k] = 0.0; // the reader's initial context is the sentinel `k`
-    // Terminating before band 0 is a real option: the channel is silence.
-    let mut best_total = suffix[0];
+    // Terminating before band 0 is a real option: the channel is silence. It still sends
+    // the terminator's band symbol, and the cycle term charges for that symbol whenever the
+    // price is live — the `mu > 0` guard is what keeps `0 * cycles` off the `f64::INFINITY`
+    // sentinels this search uses for unreachable states.
+    let mut best_total = suffix[0]
+        + if mu > 0.0 {
+            mu * CY_BANDSYM as f64
+        } else {
+            0.0
+        };
     let mut best_end = (0usize, k);
     for b in 0..NBANDS {
         for s in 0..=k {
             if v[b][s].is_infinite() {
                 continue;
             }
-            // Terminate here: the terminator is deliberately unpriced (see above).
-            let stop = v[b][s] + suffix[b];
+            // Terminate here: the terminator's *bits* are deliberately unpriced (see
+            // above); its band symbol still costs `mu` cycles when the price is live.
+            let stop = v[b][s]
+                + suffix[b]
+                + if mu > 0.0 {
+                    mu * CY_BANDSYM as f64
+                } else {
+                    0.0
+                };
             if stop < best_total {
                 best_total = stop;
                 best_end = (b, s);
@@ -739,7 +827,12 @@ pub fn quantise_chan_rd(
                 let j = v[b][s]
                     + lam * tables.cb[s].symbol_len(c) as f64
                     + band_dist[b][c]
-                    + lam * band_bits[b][c] as f64;
+                    + lam * band_bits[b][c] as f64
+                    + if mu > 0.0 {
+                        mu * (CY_BANDSYM + band_cyc[b][c]) as f64
+                    } else {
+                        0.0
+                    };
                 if j < v[b + 1][c] {
                     v[b + 1][c] = j;
                     from[b + 1][c] = s;

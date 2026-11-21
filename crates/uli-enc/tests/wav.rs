@@ -36,6 +36,7 @@ fn args(input: Input, g: Option<i32>, rd: bool) -> Args {
         fine_width: 0,
         train: false,
         ms: None,
+        musearch: false,
         threads: 2,
     }
 }
