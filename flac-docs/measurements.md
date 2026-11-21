@@ -190,8 +190,43 @@ unchanged. The +160 is the generated module — per-face advance tables and `Fac
 verdict — plus the guards reading it, not a decode-path change: `bar_cell(pos, recip)` never took
 a cell count, and the reciprocal is still computed once at bake time. The `album-rom` (default-feature) and
 `album-test` (deep-audit + input-replay) builds still end `verdict PASSED`, with
-`layout=B bar_cells=80` on the boot line. Recorded in §2.2's form: a re-baseline from the change,
-so nobody reads these bytes as the layout PR buying decoding time.
+`layout=B bar_cells=80` on the boot line.
+
+**What this entry is, and what it is not (2026-11-21, in the same PR's review).** The 2026-11-15
+re-baseline above records per-image bytes, `.text`, `.rodata`, `.iwram`/`.bss` and a `sha256`, with a
+**same-session control** built minutes earlier on the pre-change tree. This entry has none of that:
+no `sha256`, no `.rodata` column, no control, and one image of the three the album builds. A control
+on `cfedcfa` was not run. Nor is the 2026-11-15 table usable as the baseline — ten PRs have landed
+since, and its `bytes` column already describes a different tree (the spike built here is 1,040,540 B
+against the recorded 1,042,156). What *was* witnessed on this branch, with `size -A` on each ELF and
+one grep:
+
+| check | result |
+|---|---|
+| which device code reaches the changed arithmetic | `nodiv::bar_cell` is called from **one** site in the tree, `examples/album_player/src/meta.rs:508`; **nothing** in device code calls `bar_recip` (it is bake-time, and the bake has its own Python copy at `album_bake.py:328`); `grep -rn "bar_cell\|bar_recip\|BAR_CELLS" examples/album_probe/src/` returns nothing, so the probe's bar arithmetic lives only in its host gate |
+| `flac-spike` | `.text` **50,132** · `.rodata` **990,464** · `.iwram` **812** · `.bss` **12** — identical to the 2026-11-15 row, across ten landed PRs and this one |
+| `flac-integration` | `.text` **68,528** · `.rodata` **572,992** · `.iwram` **2,036** · `.bss` **20** — likewise identical to that row |
+| `product-play` | `.text` 79,128 · `.rodata` 578,392 · `.iwram` 2,036 · `.bss` 42,608 — that row recorded 81,172 / 578,400. The gap is **not attributable to this PR** and no claim is made either way; it needs the control this entry lacks |
+| `album-probe-skip` | `.text` 43,796 · `.rodata` 124,536 · `.iwram` 556 · `.bss` **42,696** — that row recorded 45,008 / 124,536; same caveat |
+| `album-player.gba` (the audited gate image) | `.text` **96,764** · `.iwram` **2,040** · `.bss` **43,008** · sha256 `a15f802ce7c879edb92569ab662583fe6480066618c42d73c47ffea21948a6fb` |
+| `album-player-fast.gba` (no `deep-audit`) | `.text` **92,796** · `.iwram` **2,040** · `.bss` **43,008** · sha256 `4c0c0d4e32ca0285782d1263ed281bc64b50461c32066e63f324f61889c2b8a0` |
+| `album-player-replay.gba` (`input-replay` + `deep-audit`, the `make album-test` arm) | `.text` **98,500** · `.rodata` **15,250,672** · `.iwram` **2,040** · `.bss` **43,008** · sha256 `d34fbead450c1e5bea22ee52646514268071558c048b2e31d8fa646e5cdf2e36`; its own run prints `verdict PASSED` with every gated term true |
+| boot-to-audio, the audited arm | `parse=25,203 open=4,343,040 gate=86,781 prefill=5,022,982 total=9,483,307 c` = **565 ms** (`album-rom-run.log:10-11`); the replay arm on the same branch reads `parse=25,203 open=4,343,034 gate=65,008 prefill=5,022,665 total=9,461,223 c` = **563 ms** (`album-test.log:10-11`), where ALBUM-PLAYER.md §5.2 records 9,744,862 c = 580 ms for the same bin. The difference sits almost wholly in `prefill` — the one leg that waits on the emulator's audio clock, so it is not a repeatable cycle count and **no speed claim is made from it**. What it does establish is that ALBUM-PLAYER.md §11's PR-(1) claim "changes no boot behaviour … byte-identical" was not true as written (a line is now printed before audio, and the total moved), while AP-1's actual term — audio inside 1.5 s with nothing pressed — holds with room |
+
+The two identical rows are the load-bearing ones, and they are stronger than they look given this
+file's own warning above that `.rodata` "moves with the asset and with a comment edit": `nodiv.rs`'s
+doc comments *were* edited here, and an image that linked the module's bar path would have shown it.
+So the `crates/gba-playback` rule in README.md — "a change here re-baselines all three images and
+`make flac-check` is the witness" — is answered for the spike and the FLAC images by those two rows
+and refused for the probes by the missing control. All three album images now carry sections *and*
+hashes above, and `make playback-test` (that crate's own host suite, 25 tests) with
+`make album-rom`/`album-test`/`album-pack-check`/`album-layout-test`/`album-seam-test`/`check` were all
+run green on this branch after the fixes. Two gaps stay open, stated rather than smoothed: `product-play`
+and the probe images cannot be attributed to or cleared of this PR without a **same-session control on
+`cfedcfa`**, which was not run; `make flac-check` was not run here either; and `.rodata` is captured only
+for the replay arm, because `make album-rom` and `make album-player-rom` print
+`.text`/`.iwram`/`.bss` and no more (`Makefile:1544`, `:1561`) — and that 15 MB `.rodata` is the embedded
+album, so it is the one column that moves with `album.toml` rather than with a code change.
 
 ## Rules every run follows
 

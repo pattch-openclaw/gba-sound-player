@@ -325,12 +325,17 @@ def check_sample_agreement(index: int, prepared_samples: int, container: dict) -
 # --- §6: the reciprocal, and the four bake-time assertions ------------------
 
 
-def bar_recip(n_samples: int, bar_cells: int = BAR_CELLS_REGISTERED) -> int:
+def bar_recip(n_samples: int, bar_cells: int) -> int:
     """`floor(2^32 × bar_cells / n_samples)` — the host's one divide.
 
-    The grid is the variant's declared cell count (§6), not a constant here.
-    Refuses a track at or below that many samples: at exactly 32 the quotient
-    is 2^32, one past ALBM1's `u32` recip field, and below 32 it is larger
+    The grid is the variant's declared cell count (§6), not a constant here, and
+    it has **no default**: §6's rule is that a grid is never assumed, so every
+    caller names the grid it means (`BAR_CELLS_REGISTERED` is passed explicitly
+    at §6's worked example and at the Phase-1 fixture legs, which are the two
+    places that are about the retired 32-cell grid on purpose).
+
+    Refuses a track at or below that many samples: at exactly the declared count
+    the quotient is 2^32, one past ALBM1's `u32` recip field, and below it larger
     still, so such a track is not one the manifest can describe (and
     `struct.pack_into` would raise a bare `struct.error` instead of a refusal).
     """
@@ -345,7 +350,7 @@ def bar_recip(n_samples: int, bar_cells: int = BAR_CELLS_REGISTERED) -> int:
 
 
 def assert_bar_reciprocal(index: int, n_samples: int, recip: int,
-                         bar_cells: int = BAR_CELLS_REGISTERED) -> None:
+                         bar_cells: int) -> None:
     """The four §6 properties plus the exact-floor inequality, over sampled positions.
 
     §6 names them as "the bake-time assertions, not hopes": monotonic in
@@ -435,7 +440,7 @@ def build_albm1(
     backend: int,
     tracks: list[dict],
     asset_bytes: bytes,
-    bar_cells: int = BAR_CELLS_REGISTERED,
+    bar_cells: int,
 ) -> bytes:
     """Assemble the manifest: header ‖ track table ‖ string pool ‖ asset region."""
     strings = [album_title, album_artist]
@@ -573,7 +578,7 @@ AUDIT_MUTATIONS = {
 }
 
 
-def audit_blob(blob: bytes, bar_cells: int = BAR_CELLS_REGISTERED) -> list[str]:
+def audit_blob(blob: bytes, bar_cells: int) -> list[str]:
     """Re-read the finished manifest byte for byte, exactly as meta.rs will.
 
     Nothing here trusts `build_albm1`: every field is read from the bytes, every
@@ -821,9 +826,13 @@ pub const ALBUM_ARTIST: &str = {rust_str(config.artist)};
 pub const YEAR: u16 = {config.year};
 
 /// The layout variant this ROM's geometry comes from. `layout::LAYOUT_ID` is the
-/// same string from the other generator, and a host test asserts the two agree:
-/// a manifest that names one variant and a module that names another is exactly
-/// the staleness R11 describes, and a build that compiles cannot see it.
+/// same string from the other generator, and
+/// `tests/album_pack_host.rs`'s `the_pinned_album_and_the_generated_module_name_one_layout_variant`
+/// asserts the two agree (`make album-layout-test` runs that leg by name): a manifest that names
+/// one variant and a module that names another is exactly the staleness R11 describes, and a build
+/// that compiles cannot see it. What that leg cannot see either, because `ALBM1`'s header carries
+/// no variant field, is a module regenerated for a different variant declaring the same grid —
+/// §11's D9 says so, and §6 is where a spec digest would be ruled.
 pub const LAYOUT_VARIANT: &str = "{facts.variant.id}";
 
 {fit_note}
@@ -841,7 +850,8 @@ pub struct TrackPin {{
     pub start_sample: u32,
     /// Samples in the track.
     pub n_samples: u32,
-    /// §6's progress reciprocal, `floor(2^32 × 32 / n_samples)`.
+    /// §6's progress reciprocal, `floor(2^32 × {facts.variant.bar_cells} / n_samples)` — the grid
+    /// variant {facts.variant.id} declares, generated into `src/layout.rs` as `BAR_CELLS`.
     pub recip: u32,
     /// Offset of the blob inside `ALBM1`'s asset region.
     pub asset_off: u32,
@@ -1045,8 +1055,16 @@ def bake(config_path: Path) -> int:
             # `TITLE_BOX_MAX`) is gone — D9's discharge says a count of
             # characters is not a box. The bake still prints rather than
             # refuses, exactly as §5.5 rules: an overflowing title is an album
-            # decision, not a build failure, and 2a's elision path makes any
-            # title renderable in one line.
+            # decision, not a build failure.
+            #
+            # What that leaves unpaid until 2a PR-(2) lands: nothing on either
+            # side bounds a title now. The measured fit is the bake's verdict on
+            # the album in front of it, the elision that would make an over-long
+            # title renderable in one line is the text module's (`measure`/`fit`/
+            # elide, PR-(2) — not in this tree yet), and the ROM draws the string
+            # it is handed. So a title longer than the declared box prints this
+            # note today and overflows on screen; §11's PR-(2) row is where the
+            # other half of §5.5's rule is discharged.
             fits, width, unwritten, box_px = facts.title_fit(title)
             if not fits:
                 print(
@@ -1284,7 +1302,7 @@ LAYOUT_REGISTER = (
     ("face-not-resolvable", "a declared face is not a tracked asset, or its licence rows are absent"),
     ("image-tiles-over-budget", "image_tiles (at the derived ceiling) + the text term + authored chrome art exceed the declared tile_budget / resident_scenes"),
     ("scene-minimum", "a scene's own declared minimum cannot be met at the declared geometry"),
-    ("bar-cells-out-of-range", "declared bar_cells is below §6's floor, is not a whole number of pixels per cell in the box the variant declares, or would not fit the pack's u32"),
+    ("bar-cells-out-of-range", "declared bar_cells is below §6's floor, or is not a whole number of pixels per cell in the box the variant declares. The third §6 range condition — a track so short its reciprocal would not fit the pack's u32 — is refused at the track, not at the grid, and so by the Phase-1 id `bar-reciprocal` (§9.0's `bar-cells-out-of-range` row says the same)"),
     ("bar-cells-disagree", "declared bar_cells is not the grid the ALBM1 reciprocals were computed for, or not the value in layout.rs"),
 )
 
@@ -1752,12 +1770,15 @@ class LayoutSpec:
                 setattr(self, field, _int(meta, field, f"{path}: [meta]", 1))
         if self.map_tiles[0] < self.screen_tiles[0] or self.map_tiles[1] < self.screen_tiles[1]:
             raise Refusal("spec", f"{path}: [meta] map_tiles is smaller than screen_tiles — the map is the hardware's, the screen is the visible part of it")
-        if self.pool_slots > 1024:
+        if self.pool_slots > 512:
             # agb 0.25's regular pool is 512 4bpp slots and the affine pool is a
             # *different* 510 with a fallback path between them (§5.1). A spec
             # naming 1,024 is reading the two as one pool, which is the error
-            # §5.1's rewrite exists to prevent.
-            raise Refusal("spec", f"{path}: [meta] pool_slots {self.pool_slots} is not a pool agb 0.25 hands out (§5.1: 512 regular, 510 affine, two pools)")
+            # §5.1's rewrite exists to prevent — so the bound is the larger of the
+            # two real pools, not a number above both of them. Under 512 is a
+            # smaller claim, not a wrong one; `album-layout-test` asks this guard at
+            # 512, 256 and 1,024 because a refusal nothing fires is not a guard.
+            raise Refusal("spec", f"{path}: [meta] pool_slots {self.pool_slots} is not a pool agb 0.25 hands out (§5.1: 512 regular, 510 affine, two pools — 1,024 is those two read as one, which is the mistake this row refuses)")
         self.faces = [FaceSpec(item, index) for index, item in enumerate(doc.get("face") or [])]
         self.variants = [VariantSpec(item, index) for index, item in enumerate(doc.get("variant") or [])]
         if not self.variants:
@@ -2703,8 +2724,11 @@ def layout_rs_text(facts: VariantFacts) -> str:
     add("/// rather than a preference (§5.0).")
     add(f"pub const RESIDENT_SCENE_MAX: u32 = {_rs(spec.resident_scene_max)};")
     add("")
-    add("/// Which variant this module is, and whether it is the product's (§5.0's `product` field). A")
-    add("/// mismatch against the manifest's variant is the stale-module case `meta::parse` refuses.")
+    add("/// Which variant this module is, and whether it is the product's (§5.0's `product` field).")
+    add("/// Stated for the boot log's attribution, and nothing more: `ALBM1`'s header carries no")
+    add("/// variant field, so `meta::parse` never reads these two. What it does compare is the grid")
+    add("/// below — `BAR_CELLS` against the manifest's `bar_cells` — and that single comparison is")
+    add("/// the whole of the stale-module backstop (§6, §9.0's `bar-cells-disagree` row).")
     add(f'pub const LAYOUT_ID: &str = "{variant.id}";')
     add(f"pub const LAYOUT_PRODUCT: bool = {str(variant.product).lower()};")
     add(f"pub const TILE_BUDGET: u32 = {_rs(variant.tile_budget)};")
@@ -3308,10 +3332,21 @@ INTERACTION_TABLE = (
 #: §9.0's D9 half, stated as an executable claim: a number that appears in more than one
 #: artifact must be generated from one source. These are the strings that would mean a
 #: character-count or fixed-grid box is still owning something; the search is over code, so
-#: prose about the old number does not count. The plan prints them at
-#: ALBUM-PLAYER.md's `title_fits` and `MAX_TITLE` rows ("now 28 characters, a box
-#: hand-written at 1A-B, no measured or declared width behind it") and at D9 item 2.
+#: prose about the old number does not count. The names come from D9 ("geometry is stated
+#: three times in the tree") as the three copies this PR removes, and the rule they are
+#: removed by is §5.5's: "every text element's fit box now comes from the variant's declared
+#: *span* (a pixel width — §5.0) and the face's real metrics". Quoted by section, because a
+#: leg that invents its own source sentence is worse than one that cites no sentence at all.
 BANNED_CHARACTER_BOX = ("TITLE_BOX_MAX", "def title_fits", "MAX_TITLE", "chars().count() <= 28")
+#
+# What this leg does NOT prove, stated here so nobody reads it as a wider claim: it is a
+# grep for four retired *names*, so it answers "did the 28-character box come back?" and
+# nothing else. One character-count bound is live in product code and stays live by
+# decision: `examples/album_player/src/text.rs:65`'s `COLUMNS = 30`, the verdict line, which
+# is 30 columns of the instrument face's 8 px cell = the whole 240 px row — a measured cell
+# width, not a box that stands in for one, and witnessed by `album_seam_host.rs:811-831`.
+# §5.5's ruling retires the *fit* box made of characters; converting the verdict line to the
+# same measured fit is 2a PR-(2)'s, with `measure`/`fit`.
 # Split by whose code it is. A library that owns a character box and a host test that
 # re-establishes one are two different pieces of work, so the legs stay separate and each
 # failure names one of them.
@@ -3708,11 +3743,13 @@ def layout_self_test() -> int:
         variant, and a shared crate that carries one becomes the thing a manifest is
         validated against by accident. Reading the file rather than knowing the answer is
         the point — a leg that cannot tell whether the constant is gone is not a leg.
+
+        So the read is *not* guarded: an unreadable `nodiv.rs` raises and the self-test
+        dies with a traceback naming the file, which is honest. A `try/except OSError`
+        here returned `None`, and `None` is the value that says "no constant, leg green" —
+        the one way this check could pass without looking.
         """
-        try:
-            source = (REPO / "crates/gba-playback/src/nodiv.rs").read_text()
-        except OSError:
-            return None
+        source = (REPO / "crates/gba-playback/src/nodiv.rs").read_text()
         for line in source.splitlines():
             if "pub const BAR_CELLS" in line and "=" in line:
                 try:
@@ -3783,7 +3820,6 @@ def layout_self_test() -> int:
     # plan's ✔/✘ marks come out of this tool's own `image-tiles-over-budget` gate asked at
     # a 512-slot budget — the same refusal the register rows above watch fire.
     print()
-    print("  §5.1's interaction table: each row becomes a probe spec this tool derives")
     with tempfile.TemporaryDirectory(prefix="album-layout-probes-") as tmpdir:
         tmp = Path(tmpdir)
 
@@ -3803,6 +3839,33 @@ def layout_self_test() -> int:
             except Refusal as exc:
                 return None, exc.rule
 
+        print()
+        print("  §5.1's [meta] pool guard, asked at the values it exists for")
+
+        def probe_meta_pool(pool: int) -> str:
+            """`[meta] pool_slots = <pool>` as the spec parser answers it: accepted, or refused."""
+            try:
+                LayoutSpec(_write_spec(tmp, _fixture_text(("pool_slots = 512", f"pool_slots = {pool}")),
+                                       f"meta-pool-{pool}.toml"))
+            except Refusal as exc:
+                return f"refused: {exc.rule}"
+            return "accepted"
+
+        # §5.1's two pools, asked at the values the guard exists for. A refusal nothing
+        # fires is not a guard, and this one had no leg at all: the case its own comment
+        # names (1,024 — the two pools counted as one) sat on the wrong side of a `>`.
+        for pool, expect in ((512, "accepted"), (256, "accepted"), (1024, "refused: spec")):
+            got = probe_meta_pool(pool)
+            leg(f"[meta] pool_slots = {pool} against §5.1's two pools", expect, got, got == expect,
+                "plan §5.1: agb 0.25's regular pool is 512 4bpp slots and the affine pool is a "
+                "*different* 510, so 512 is the largest number a spec may claim for the pool this "
+                "app draws from and anything below it is a smaller claim, not a wrong one. 1,024 is "
+                "the two read as one — the error §5.1's rewrite exists to prevent — and it reaches "
+                "`POOL_SLOTS` in the generated module and the audit line that prints the pool, so it "
+                "has to refuse here")
+
+        print()
+        print("  §5.1's interaction table: each row becomes a probe spec this tool derives")
         for face_id, raster, row_px, rows, upper, cap, art256, art300 in INTERACTION_TABLE:
             name = f"{face_id} @ {raster} px, pitch {row_px}"
             measured = FaceMetrics(face_at(face_id, raster), spec.tile_px)
@@ -3849,13 +3912,16 @@ def layout_self_test() -> int:
                  "a variant, because this row's raster is refused before any variant exists"))
             total, fits, _ = art256
             if built:
-                at512_facts, fired = derive_probe(
+                # NB: `fired` is the register's set of refusal ids and this loop must not
+                # rebind it — an earlier cut named the local `fired`, which turned the
+                # summary's `len(fired)` into the length of one id string.
+                at512_facts, fired_rule = derive_probe(
                     _write_spec(tmp, text, f"probe-{face_id}-{raster}-at-512.toml"))
                 shown = (at512_facts or facts).pool_distinct
-                verdict = not fired
+                verdict = not fired_rule
                 sum_src = ("plan §5.1's mark for that row, derived as raise/no-raise at "
                            "`image-tiles-over-budget` — the gate its ✔/✘ column is asking about, not a "
-                           "transcription of the column") + (f" (fired: {fired})" if fired else "")
+                           "transcription of the column") + (f" (fired: {fired_rule})" if fired_rule else "")
             else:
                 shown = cap_got + art_got
                 verdict = shown <= 512
@@ -4193,11 +4259,11 @@ def layout_self_test() -> int:
                 "no such constant", f"nodiv.rs declares BAR_CELLS = {owned}" if owned is not None else "none",
                 owned is None,
                 "D9 item 1, stated where it can actually be checked. `crates/gba-playback/src/nodiv.rs` "
-                "carries `BAR_CELLS = 32` today and `meta::parse` validates a manifest against it; the "
-                "grids this spec declares are 18 and 80, so that constant can only ever be a third "
-                "opinion. This leg fails until the constant is gone and the boot check compares a "
-                "manifest against the generated module instead — §6 keeps that boot check as the hardware "
-                "backstop, and it stays")
+                "carried `BAR_CELLS = 32` until 2a PR-1, and `meta::parse` validated a manifest against it; "
+                "the grids this spec declares are 18 and 80, so that constant was only ever a third "
+                "opinion. It is gone and the boot check compares a manifest against the generated module "
+                "instead — this leg is the guard that keeps it gone, and §6 keeps the boot check as the "
+                "hardware backstop, so it stays")
             leg("and neither artifact this tool writes carries the old value",
                 "not 32", str(carried), carried != 32 and int(module["BAR_CELLS"]) != 32,
                 "the same claim about the two artifacts under test: 80 is B's grid, and nothing in this "
@@ -4234,15 +4300,16 @@ def layout_self_test() -> int:
     print()
     print("  D9 item 2: no character-count box may own a fit — in the product, or in its tests")
     hits = _banned_box_hits(BANNED_SEARCH_PRODUCT)
-    leg("no character-count box in the product's own code",
+    leg("none of the four retired character-count names survives in the product's own code",
         "none", f"{len(hits)} hit(s)", not hits,
-        "ALBUM-PLAYER.md's own words about the number it is retiring: “now 28 characters, a box "
-        "hand-written at 1A-B, no measured or declared width behind it”, and D9 item 2 “the title-fit "
-        "box … comes from the declared or measured face metrics of the variant, not from a character "
-        "count”. Searched over `scripts/` and the two `src/` trees with literals and comments blanked "
-        "first: the sentences that retire the old name — this tool's own list of banned strings, the "
-        "generated module's doc comment saying those names are gone — would otherwise each count as a "
-        "hit, and a grep that reports its own wording is quoting itself")
+        "§5.5's ruling, quoted: “every text element's fit box now comes from the variant's declared "
+        "*span* (a pixel width — §5.0) and the face's real metrics, and the bake tool still prints any "
+        "title that will not fit its box”. D9 is the record of the three copies that rule removed — this "
+        "file's old prose, the `chars().count() <= 28` host guard, and `TITLE_BOX_MAX = 28`. Searched over "
+        "`scripts/` and the two `src/` trees with literals and comments blanked first: the sentences that "
+        "retire the old name — this tool's own list of banned strings, the generated module's doc comment "
+        "saying those names are gone — would otherwise each count as a hit, and a grep that reports its "
+        "own wording is quoting itself")
     for hit in hits:
         print(f"      {hit}")
     test_hits = _banned_box_hits(BANNED_SEARCH_TESTS)
@@ -4250,9 +4317,10 @@ def layout_self_test() -> int:
         "none", f"{len(test_hits)} hit(s)", not test_hits,
         "the same strings, looked for in `examples/album_player/tests`: a test asserting "
         "`chars().count() <= 28` puts the retired box back as the thing a build is checked against, "
-        "which is how a number meant to die becomes load-bearing again. The fixture's title test belongs "
-        "on the measured side — the declared box in the generated layout module, against the declared "
-        "face's advances — so this leg stays red until that assertion counts pixels instead of characters")
+        "which is how a number meant to die becomes load-bearing again. D9 item 2's copy of the number "
+        "was exactly this test's guard; the fixture's title test now sits on the measured side — the "
+        "declared box in the generated layout module, against the declared face's advances — and this "
+        "leg is the guard that it stays there")
     for hit in test_hits:
         print(f"      {hit}")
 
@@ -4458,7 +4526,7 @@ def self_test() -> int:
             # `struct.pack_into` would raise a bare struct.error instead of a
             # refusal.
             try:
-                bar_recip(BAR_CELLS_REGISTERED)
+                bar_recip(n_samples=BAR_CELLS_REGISTERED, bar_cells=BAR_CELLS_REGISTERED)
             except Refusal as exc:
                 assert exc.rule == "bar-reciprocal", exc.rule
                 print(f"  refused — {exc.rule}: {exc.detail}")
@@ -4482,7 +4550,7 @@ def self_test() -> int:
                 {
                     "start_sample": 0,
                     "n_samples": 4_237_112,
-                    "recip": bar_recip(4_237_112),
+                    "recip": bar_recip(4_237_112, BAR_CELLS_REGISTERED),
                     "asset_off": 0,
                     "asset_len": len(first),
                     "frames": 2_068,
@@ -4496,7 +4564,7 @@ def self_test() -> int:
                 {
                     "start_sample": 4_237_112,
                     "n_samples": 491_520,
-                    "recip": bar_recip(491_520),
+                    "recip": bar_recip(491_520, BAR_CELLS_REGISTERED),
                     "asset_off": len(first),
                     "asset_len": len(second),
                     "frames": 240,
@@ -4508,8 +4576,9 @@ def self_test() -> int:
                     "fnv": fnv1a32_parts(second),
                 },
             ]
-            blob = build_albm1("Self Test", "album_bake", 2026, 1, tracks, first + second)
-            problems = audit_blob(blob)
+            blob = build_albm1("Self Test", "album_bake", 2026, 1, tracks, first + second,
+                               bar_cells=BAR_CELLS_REGISTERED)
+            problems = audit_blob(blob, BAR_CELLS_REGISTERED)
             assert not problems, problems
             # Every mutation is refused by the same structural rule the reader
             # applies; the shipping parser is driven by the host gate, which
@@ -4519,7 +4588,7 @@ def self_test() -> int:
             for name, mutate in AUDIT_MUTATIONS.items():
                 bad = bytearray(blob)
                 mutate(bad)
-                problems = audit_blob(bytes(bad))
+                problems = audit_blob(bytes(bad), BAR_CELLS_REGISTERED)
                 assert problems, f"an audited mutation ({name}) was accepted"
             print(f"  audit: round trip ok, {len(AUDIT_MUTATIONS)} mutations refused")
 

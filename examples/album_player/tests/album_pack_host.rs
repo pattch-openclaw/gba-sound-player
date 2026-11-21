@@ -605,6 +605,30 @@ fn refuses_a_bar_grid_that_is_not_the_one_this_rom_was_built_for() {
 }
 
 #[test]
+fn the_pinned_album_and_the_generated_module_name_one_layout_variant() {
+    // `src/assets.rs` is generated from `album.toml` (whose `[layout] variant` names the variant
+    // the reciprocals were computed for) and `src/layout.rs` is generated from `layout_spec.toml`
+    // for that same variant, in one bake. Two files, two emissions, one fact — and the case this
+    // asserts is §11's D9 staleness a *build* cannot see: a module left behind by an earlier bake
+    // for a different variant compiles clean, and `assets.rs` names this test in its own
+    // `LAYOUT_VARIANT` comment for exactly that reason.
+    //
+    // What it cannot catch, stated so nobody over-reads it: `ALBM1`'s header carries no variant
+    // field, so a module regenerated for a *different* variant that happens to declare the same
+    // grid and the same geometry agrees with every check in this suite and at boot. The boot
+    // check compares one number (`meta.rs:595-596`); a spec digest in the header is the only
+    // wider net, and §6 is where that would be ruled.
+    assert_eq!(
+        assets::LAYOUT_VARIANT,
+        layout::LAYOUT_ID,
+        "the packed album names variant {} and the generated layout module names {} — the two \
+         generators ran for one variant, so a disagreement means a stale artifact in the tree",
+        assets::LAYOUT_VARIANT,
+        layout::LAYOUT_ID
+    );
+}
+
+#[test]
 fn refuses_an_unknown_backend() {
     let refusal = refuse_after(|blob| blob[6] = 7);
     assert_eq!(refusal, Refusal::BackendUnknown { backend: 7 });

@@ -1291,6 +1291,12 @@ album-bake: toolchain-check format
 #      `build-std` are never inherited;
 #   5. a green that collected (nearly) nothing is refused: the count is read from
 #      the log only after the suite passed.
+#
+# Note on the two generated modules: both `assets.rs` and `layout.rs` are snapshotted into
+# `$$first` BEFORE the second bake runs, on purpose. A copy taken after it would be the second
+# run's own bytes, and `cmp` of a file against itself is green whatever the bake does — the
+# layout leg was written that way for one revision and reported a determinism it never
+# measured. Both are compared run-1 against run-2, and each comparison is witnessed negatively.
 album-pack-check: toolchain-check
 	@test -f "$(ALBUM)" || { echo "album-pack-check: $(ALBUM) is missing — the tracked fixture config is this gate's input"; exit 1; }
 	@test $$(find $(ALBUM_CRATE_DIR)/tests -name 'album_pack_host.rs' | wc -l) -eq 1 \
@@ -1303,6 +1309,7 @@ album-pack-check: toolchain-check
 	@first=$$(mktemp -d); \
 	  cp -r $(ALBUM_ASSETS_DIR) $$first/assets || exit 1; \
 	  cp $(ALBUM_ASSETS_RS) $$first/assets.rs || exit 1; \
+	  cp $(ALBUM_LAYOUT_RS) $$first/layout.rs || { echo "album-pack-check: $(ALBUM_LAYOUT_RS) is missing — the bake writes the layout module next to the pin module, and a pack gate that cannot see it cannot call it reproducible"; rm -rf $$first; exit 1; }; \
 	  ls $(ALBUM_ASSETS_DIR) > $$first/assets.list || exit 1; \
 	  python3 scripts/album_bake.py "$(ALBUM)" >/dev/null || { rm -rf $$first; exit 1; }; \
 	  ls $(ALBUM_ASSETS_DIR) > $$first/assets.after.list || exit 1; \
@@ -1316,7 +1323,6 @@ album-pack-check: toolchain-check
 	  done; \
 	  cmp -s $$first/assets.rs $(ALBUM_ASSETS_RS) \
 	    || { echo "album-pack-check: the bake is not deterministic — src/assets.rs differs between two runs"; rm -rf $$first; exit 1; }; \
-	  cp $(ALBUM_LAYOUT_RS) $$first/layout.rs || { echo "album-pack-check: $(ALBUM_LAYOUT_RS) is missing — the bake writes the layout module next to the pin module, and a pack gate that cannot see it cannot call it reproducible"; rm -rf $$first; exit 1; }; \
 	  cmp -s $$first/layout.rs $(ALBUM_LAYOUT_RS) \
 	    || { echo "album-pack-check: the bake is not deterministic — src/layout.rs differs between two runs of the same album.toml"; rm -rf $$first; exit 1; }; \
 	  cp $$first/assets.rs $$first/assets.mutant.rs; \
@@ -1324,6 +1330,11 @@ album-pack-check: toolchain-check
 	  cmp -s $$first/assets.mutant.rs $(ALBUM_ASSETS_RS) \
 	    && { echo "album-pack-check: the determinism comparison passed two files that differ by one byte — the byte leg is not witnessing anything"; rm -rf $$first; exit 1; } \
 	    || echo "  determinism leg: one flipped byte is reported as a difference (negative control)"; \
+	  cp $$first/layout.rs $$first/layout.mutant.rs; \
+	  python3 -c 'import sys; p = sys.argv[1]; d = bytearray(open(p, "rb").read()); d[0] ^= 0xFF; open(p, "wb").write(d)' $$first/layout.mutant.rs; \
+	  cmp -s $$first/layout.mutant.rs $(ALBUM_LAYOUT_RS) \
+	    && { echo "album-pack-check: the layout comparison passed two files that differ by one byte — that leg is not witnessing anything"; rm -rf $$first; exit 1; } \
+	    || echo "  layout determinism leg: one flipped byte is reported as a difference (negative control)"; \
 	  rm -rf $$first
 	python3 scripts/album_bake.py --self-test
 	@mkdir -p $(GATE_NEUTRAL_CWD)
@@ -1334,7 +1345,7 @@ album-pack-check: toolchain-check
 	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_GATE_LOG)) \
 	    || { echo "album-pack-check: the host suite did not pass — see $(ALBUM_GATE_LOG)"; exit 1; }; \
 	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_GATE_LOG))); \
-	  [ -n "$$n" ] && [ "$$n" -ge 50 ] || { echo "album-pack-check: collected '$$n' tests, needs >= 50 — a green that names nothing is not a green"; exit 1; }
+	  [ -n "$$n" ] && [ "$$n" -ge 51 ] || { echo "album-pack-check: collected '$$n' tests, needs >= 51 — a green that names nothing is not a green (the suite is 53 since 2a PR-1's review added the pinned-variant leg; two may vanish before this floor speaks, the same margin the 48 → 50 raise used)"; exit 1; }
 	@echo "album-pack-check passed: the four §9.0 Phase-1 refusals fired — (a) declared rate != product clock,"
 	@echo "  (b) frames outside the encode profile (inherited from gafp_pack.py), (c) ALBM1 n_samples vs the"
 	@echo "  container's total_samples, (d) the writer's output re-read through meta.rs — plus two bakes"
@@ -1439,12 +1450,14 @@ album-seam-test: toolchain-check
 #      D9 asks for; a leg whose two sides are the same path is not evidence;
 #   3. the generated module is byte-reproducible, the same way `album-pack-check` holds assets.rs:
 #      emit twice, compare, and witness the comparison negatively with one flipped byte;
-#   4. the Rust half — the two claims a Python tool cannot make: that `meta::parse` refuses a
+#   4. the Rust half — the three claims a Python tool cannot make: that `meta::parse` refuses a
 #      manifest whose grid is not the one the generated module declares (the boot backstop, run
-#      against the real baked blob), and that the fixture's titles are measured against the
-#      declared box from the generated advance table rather than counted. `album-bake` is a
-#      prerequisite because those legs parse the real `ALBM1`; the filters are named so a leg that
-#      vanished from the suite fails here rather than passing for lack of a `--filter` match.
+#      against the real baked blob), that the fixture's titles are measured against the declared
+#      box from the generated advance table rather than counted, and that the two generated
+#      modules name one variant (`assets::LAYOUT_VARIANT` ↔ `layout::LAYOUT_ID`) — the staleness a
+#      compiling build cannot see, and the one `assets.rs`'s own comment promises a host test
+#      asserts. The filters are named so a leg that vanished from the suite fails here rather than
+#      passing for lack of a `--filter` match.
 album-layout-test: toolchain-check album-bake
 	@test $$(find $(ALBUM_CRATE_DIR) -maxdepth 1 -name 'layout_spec.toml' | wc -l) -eq 1 \
 	  || { echo "album-layout-test: $(ALBUM_LAYOUT_SPEC) is missing or duplicated — one tracked layout spec, or this gate is measuring nothing"; exit 1; }
@@ -1489,13 +1502,22 @@ album-layout-test: toolchain-check album-bake
 	    || { tail -n 40 $(abspath $(ALBUM_LAYOUT_GATE_LOG)); echo "album-layout-test: the measured-title host legs did not pass — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
 	  m=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) | tail -1); \
 	  [ -n "$$m" ] && [ "$$m" -ge 3 ] || { echo "album-layout-test: collected '$$m' title tests, needs >= 3 — a filter that matched nothing is a green that names nothing"; exit 1; }
-	@echo "album-layout-test passed: §9.0's eight 2a refusals each fired by id on a spec written to be"
-	@echo "  wrong about it, the measured face/interaction geometry reproduces from the tracked files with"
-	@echo "  every expected number labelled by its source, the declared bar grid reaches the ALBM1 header and"
-	@echo "  the generated module and the three agree (and disagree by name when they do not), no"
-	@echo "  character-count box owns a fit in the product or in its tests, every declared face is tracked"
-	@echo "  with its licence, and src/layout.rs is byte-identical across two runs (with the comparison"
-	@echo "  witnessed negatively). See $(ALBUM_LAYOUT_GATE_LOG) for the legs and their sources."
+	@cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) --test album_pack_host -- variant >> $(abspath $(ALBUM_LAYOUT_GATE_LOG)) 2>&1; \
+	  status=$$?; \
+	  [ $$status -eq 0 ] \
+	    || { tail -n 40 $(abspath $(ALBUM_LAYOUT_GATE_LOG)); echo "album-layout-test: the pinned-variant host leg did not pass — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
+	  v=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) | tail -1); \
+	  [ -n "$$v" ] && [ "$$v" -ge 1 ] || { echo "album-layout-test: collected '$$v' variant-agreement tests, needs >= 1 — the generated assets.rs names this leg in its own `LAYOUT_VARIANT` comment, so it may not vanish quietly"; exit 1; }
+	@echo "album-layout-test passed: §9.0's eight fireable 2a refusals each fired by id on a spec written"
+	@echo "  to be wrong about it, the measured face/interaction geometry reproduces from the tracked files"
+	@echo "  with every expected number labelled by its source, the declared bar grid reaches the ALBM1 header"
+	@echo "  and the generated module and the three agree (and disagree by name when they do not), the two"
+	@echo "  generated modules name one variant, and none of the four retired character-count names survives"
+	@echo "  in the product or in its tests (the verdict line's measured `text::COLUMNS = 30` is a different"
+	@echo "  bound, and §5.5 says so). Every declared face is tracked with its licence, and src/layout.rs is"
+	@echo "  byte-identical across two runs, the comparison witnessed negatively."
+	@echo "  See $(ALBUM_LAYOUT_GATE_LOG) for the legs and their sources."
 
 # The playback ROM (PR-3a step iii): `ALBM1` + the packed blobs → the app's own chain at 16,384 Hz.
 # It boots, verifies its own album (§D-C), plays track 1 end to end through the shipped feeder, and
@@ -1837,7 +1859,7 @@ clean-outputs:
 	@rm -f $(SPIKE_CRATE_DIR)/assets/rate_*.bin
 	@rm -f uli-bench*.log uli-attrib*.log
 	@rm -f album-probe*.log
-	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_LAYOUT_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_ROM_RUN_LOG) $(ALBUM_TEST_LOG)
+	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_LAYOUT_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_LAYOUT_GATE_LOG) $(ALBUM_ROM_RUN_LOG) $(ALBUM_TEST_LOG)
 	@find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} + 2>/dev/null || true
 
 # The caches: the fifteen workspaces' `target/` dirs, discovered from the tree.
@@ -1977,6 +1999,11 @@ help:
 	@echo "      album-seam-test (the seam's host gate: derived geometry vs the shipped figures, both"
 	@echo "      backend arms, the FLAC arm's fnv_pcm and fnv_fifo_l/fnv_fifo_r pins, and a stub-only"
 	@echo "      build with no decoder linked),"
+	@echo "      album-layout-test (2a's layout gate: the generator's own self-test with §9.0's eight"
+	@echo "      fireable refusals fired by id and the [meta] pool guard asked at its own error case, the"
+	@echo "      generated src/layout.rs byte-identical across two emits, and the Rust half — meta.rs's"
+	@echo "      boot backstop, the measured title legs, and the two generated modules naming one variant;"
+	@echo "      host-only, and not a prerequisite of album-rom, which gets its layout through album-bake),"
 	@echo "      album-rom -> $(ALBUM_ROM) (bake + the audited ROM: all five verdict terms true; run it"
 	@echo "      with mgba-test-runner and read the [album-rom] ledger — exit 124 IS the pass),"
 	@echo "      album-player-rom -> $(ALBUM_FAST_ROM) (the same ROM built without deep-audit: no cold"
