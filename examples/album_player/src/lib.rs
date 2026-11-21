@@ -80,6 +80,11 @@ pub mod assets;
 pub mod backend;
 pub mod geometry;
 pub mod keys;
+// `layout.rs` is `make album-bake`'s output, not source (§2.3): its advance tables are packed
+// for scannability and its assertions are one line each, so rustfmt is told to leave the module
+// alone. `scripts/fmt_with_generated_stub.sh` still stubs it when absent, so a fresh clone
+// formats without the artifact ever existing.
+#[rustfmt::skip]
 pub mod layout;
 pub mod meta;
 pub mod pcm;
