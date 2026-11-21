@@ -190,13 +190,20 @@ pub fn measure(
     ))
 }
 
-/// One candidate with the cycle-aware re-code applied (S6) — the reference's `point()`.
+/// One candidate with the cycle-aware re-code applied (S6).
 ///
 /// Measure at `mu = 0` first. If the search is off, or the candidate already meets the cap,
-/// that is the answer. Otherwise raise `mu` until the frame's reader cycle model comes under
-/// the cap, then bisect it down to the smallest price that still fits and return that coding.
-/// If no price reaches the cap the plain candidate is returned unchanged; the allocation
-/// then excludes it, which is the same "leave it to the allocation" the reference uses.
+/// that is the answer. Otherwise raise a price on decoder cycles until the coding fits, then
+/// bisect *down* to the cheapest price that still does. The two phases are separate because
+/// `mu` enters the search multiplicatively: the admissible prices form a ray `mu >= mu*`,
+/// so there is nothing to interpolate towards — find one by growing a price, then narrow it
+/// geometrically. If no price reaches the cap the frame is genuinely over the cap at this
+/// step: the plain candidate comes back unchanged and the allocation's cap filter excludes
+/// it, which is the honest outcome rather than a re-code that quietly broke the constraint.
+///
+/// The seed, the growth ratio and the two iteration counts come from the acceptance target,
+/// because S7 compares bytes: a different ladder lands on a different `mu` and therefore on
+/// different bands. They are not tuned for speed.
 ///
 /// The returned `mu` is the price the winning coding was made under, and the final encode
 /// must re-code at exactly it: the bands that met the cap are a function of that price.

@@ -46,9 +46,12 @@ impl Ops {
         long_codes: 0,
     };
 
-    /// The reference ARM7TDMI cycle model, in cycles at WAITCNT 4/2.
-    /// The IMDCT term is the measured bench-P asm number plus the fused 8-bit
-    /// output stage; the rest are estimates. See `uli_dec_ref.h`.
+    /// The ARM7TDMI cost model, in cycles at WAITCNT 4/2 — what decoding one frame is
+    /// expected to cost. The IMDCT term is the measured bench-P asm number plus the fused
+    /// 8-bit output stage; the rest are per-event estimates of the reader's work. The
+    /// encoder prices its candidates with this same model (it needs the terms per band, so
+    /// `uli-enc` repeats them and a test forces the two to agree), which is what makes a
+    /// `--cap` a claim about this frame rather than about an estimate nobody uses.
     pub fn cycle_model(&self) -> u32 {
         const FRAME: u32 = 5_200;
         const CH: u32 = 300;

@@ -58,8 +58,8 @@ pub use tables_default::{Codes, DefaultTables};
 
 /// Where an album comes from.
 ///
-/// Two shapes, one boundary. [`Input::Pcm`] **is** the boundary (E-R2): the
-/// reference's own pair, and the only shape the byte-exactness gate is stated
+/// Two shapes, one boundary. [`Input::Pcm`] **is** the boundary (E-R2): the pair the bake
+/// and the acceptance gate both speak, and the only shape the byte-exactness gate is stated
 /// over. [`Input::Wav`] is the convenience layer on top of it, and the variants
 /// are separate rather than one struct with an empty field because a caller that
 /// supplies both has not said which album it means — the CLI refuses that instead
@@ -129,8 +129,8 @@ pub struct Args {
 /// What the encoder measured while producing the blob.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
-    /// Album length and track count, reported so the CLI can print the reference's
-    /// album line without re-reading the input.
+    /// Album length and track count, reported so the CLI can print the album line the
+    /// acceptance diff compares, without re-reading the input.
     pub n_samples: u32,
     pub n_tracks: usize,
     pub overhead_bytes: usize,
@@ -157,10 +157,10 @@ pub struct Report {
     /// column is [`Self::track_snr`]; the two differ on a heterogeneous album, and
     /// E-R7's 32.29/25.78 dB is stated against this pooled one.
     pub snr_db: Option<f64>,
-    /// The same SNR at int8, pooled; the reference's second verify column.
+    /// The same SNR at int8, pooled; the verify block's second column.
     pub snr8_db: Option<f64>,
-    /// Per-track time-domain SNR, pcm16 and int8, in track order — the reference's
-    /// `verify: per-track … pcm16 / int8` line. `None` per field when a track has
+    /// Per-track time-domain SNR, pcm16 and int8, in track order, for the verify block's
+    /// per-track line. `None` per field when a track has
     /// no signal energy to compare against (the ratio is 0/0 there).
     pub track_snr: Vec<TrackSnr>,
     /// `|X| >= 2^28` coefficients the reader counted: the encoder's `mmax` should
@@ -189,7 +189,8 @@ pub struct Report {
 /// How many times the search may re-try the bit target before refusing.
 const RETRY_ATTEMPTS: usize = 10;
 
-/// One track's measured SNR, in the reference's two output profiles.
+/// One track's measured SNR, in the two output profiles the DMA stage writes (pcm16 and
+/// int8).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrackSnr {
     pub pcm16: Option<f64>,
@@ -374,9 +375,9 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
 
         // One search over a given table set, so training can run it twice: once to measure
         // the album, once to code it with what the measurement produced. The measurement
-        // pass never pays the cycle price: it exists to collect statistics, and S6's
-        // re-code belongs to the pass whose bands ship (the reference's two
-        // `curves_compute` calls make the same split).
+        // pass never pays the cycle price: training reads only the plan's symbol counts and
+        // its reconstruction errors, so re-coding there would fit the tables to codings that
+        // never ship. The price belongs to the pass whose bands do.
         let run = |tbl: &DefaultTables,
                    musearch: bool|
          -> Result<(Content, Vec<i32>, f64, usize), Error> {
@@ -612,7 +613,7 @@ pub struct Verify {
     /// Codec-only SNR against the input, or `None` if there were no samples to
     /// compare against (S1's silence path never loads them).
     pub snr_db: Option<f64>,
-    /// The int8 profile's pooled SNR, and the per-track columns the reference also
+    /// The int8 profile's pooled SNR, and the per-track columns the verify block also
     /// prints — both undefined when there is no input to compare against.
     pub snr8_db: Option<f64>,
     pub track_snr: Vec<TrackSnr>,
@@ -656,7 +657,7 @@ fn self_verify(
     let mut se = 0f64;
     let mut sx = 0f64;
     let mut se8 = 0f64;
-    // The same three sums per track, which is the reference's verify column.
+    // The same three sums per track, for the verify block's per-track column.
     let n_tracks = pcm.tracks.len();
     let mut se_t = vec![0f64; n_tracks];
     let mut sx_t = vec![0f64; n_tracks];
@@ -690,8 +691,8 @@ fn self_verify(
                     let x = f64::from(s.at(p, ch));
                     let y = f64::from(if ch == 0 { out16l[i] } else { out16r[i] });
                     // The int8 profile's scale is 256 PCM16 units per step; that is
-                    // the same number the reader writes to the DMA and the same one
-                    // the reference's verify line uses.
+                    // the same number the reader writes to the DMA, so this column reports
+                    // the DMA's scale rather than a second convention of its own.
                     let y8 = 256.0 * f64::from(if ch == 0 { out8l[i] } else { out8r[i] });
                     let d = x - y;
                     let d8 = x - y8;

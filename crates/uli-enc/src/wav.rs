@@ -4,8 +4,8 @@
 //! exactly the samples that pair would hold, in the same units (PCM16 scale, so a
 //! 16-bit source needs no scaling at all), and `--emit-pcm` writes the pair out so
 //! the equivalence is *checkable* rather than asserted. What it does **not** claim
-//! is byte-equality at the WAV boundary: the resample inside it is not held to the
-//! reference's bytes, and only its SNR is quoted (E-R2, "The acceptance question").
+//! is byte-equality at the WAV boundary: the resample inside it is not held to
+//! bytes at all, and only its SNR is quoted (E-R2, "The acceptance question").
 //!
 //! Supported, on purpose and refusing everything else with a citation:
 //!

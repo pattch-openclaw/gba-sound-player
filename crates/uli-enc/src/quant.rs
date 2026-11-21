@@ -609,30 +609,44 @@ pub struct ChanRd {
     pub bits: u64,
 }
 
-/// The decoder's ARM7TDMI cycle constants, in cycles, mirrored from
-/// `uli_lite::Ops::cycle_model` (and `uli_dec_ref.h`). The cycle-aware search prices a
-/// band's decode work with these, and the witness in `tests/quant.rs` reconstructs the
-/// reader's whole model from them — a constant that drifts on either side is a failing
-/// test rather than a `--cap` that quietly stopped binding.
-pub const CY_FRAME: u32 = 5_200;
-pub const CY_CH: u32 = 300;
-pub const CY_BANDSYM: u32 = 30;
-pub const CY_CODEDBAND: u32 = 40;
-pub const CY_ZEROFILL_X4: u32 = 5;
-pub const CY_PAIR: u32 = 44;
-pub const CY_QUAD: u32 = 52;
-pub const CY_NZ: u32 = 22;
-pub const CY_ZC: u32 = 3;
-pub const CY_RAW: u32 = 8;
-pub const CY_ESC: u32 = 45;
-pub const CY_LONGCODE: u32 = 40;
-pub const CY_MS: u32 = 3 * 512;
-pub const CY_IMDCT_CH: u32 = 73_297 + 3 * 512;
+/// The reader's cycle model, in cycles at WAITCNT 4/2: what decoding one frame costs, and
+/// therefore the quantity `--cap` is a percentage of.
+///
+/// `uli_lite::Ops::cycle_model` is the authority — that is the model the GBA build ships and
+/// the one a cap is checked against. The search needs these terms **per band** as well as in
+/// total, and `uli-lite` reports only the total, so they are repeated here. The repetition is
+/// not trusted: `tests/quant.rs` rebuilds the reader's whole model from this copy for a real
+/// channel pair, so a term that drifts on either side fails a test rather than moving
+/// `--cap` without anyone noticing.
+///
+/// The terms are estimates of the reader's work rather than measurements of it, with one
+/// exception (the IMDCT), and what the search actually trades on is their *relative* size. A
+/// band symbol costs a refill and a table walk; entering a coded band costs more; a
+/// coefficient carries a sign bit, its raw low bits and a store, an escaped magnitude carries
+/// a second fetch, and a coefficient left zero carries almost nothing. That ordering is why
+/// dropping a band is cheaper than coding it once the cap binds, which is the whole of what
+/// this price is for.
+pub const CY_FRAME: u32 = 5_200; // fixed per-frame cost: header, state, wrapper
+pub const CY_CH: u32 = 300; // per-channel entry
+pub const CY_BANDSYM: u32 = 30; // one band's class symbol, resolved in its context
+pub const CY_CODEDBAND: u32 = 40; // entering a coded band's body
+pub const CY_ZEROFILL_X4: u32 = 5; // per four coefficients bulk-zeroed
+pub const CY_PAIR: u32 = 44; // per pair symbol, 8 per band
+pub const CY_QUAD: u32 = 52; // per quad symbol, 4 per band
+pub const CY_NZ: u32 = 22; // per nonzero coefficient: sign, raw bits, store
+pub const CY_ZC: u32 = 3; // per coefficient left zero
+pub const CY_RAW: u32 = 8; // per coefficient's low bits, pair classes only
+pub const CY_ESC: u32 = 45; // per escaped magnitude: the extension fetch
+pub const CY_LONGCODE: u32 = 40; // per code that misses the first-level LUT
+pub const CY_MS: u32 = 3 * 512; // the M/S rotation pass
+pub const CY_IMDCT_CH: u32 = 73_297 + 3 * 512; // IMDCT + fused 8-bit output stage
 
-/// A coded band's decoder cycles beyond its band symbol, relative to a zero band — the
-/// reference's `band_cyc`. The band symbol itself is charged by the shortest path, because
-/// every band (and the terminator) sends one; this is only what changes when the band is
-/// *coded*. A zero class costs nothing here.
+/// A coded band's decoder cycles beyond its band symbol, relative to a band left zero.
+///
+/// The band symbol is charged by the shortest path, because every band and the terminator
+/// sends one; this is only what *changes* when the band is coded — the body's entry, its
+/// tuple symbols and their coefficients. A zero class costs nothing here, which is what makes
+/// dropping a band the cheap answer when the cap binds.
 pub fn band_cycles(tables: &DefaultTables, band: &Band) -> u32 {
     cycles_of(tables, band.class, &band.m)
 }

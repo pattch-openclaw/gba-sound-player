@@ -2,7 +2,7 @@
 //!
 //! **This is a convenience, and it is not in the byte contract.** E-R2 holds
 //! byte-equality at the PCM boundary and explicitly exempts the resample, because
-//! the reference's own preparation dispatches across libraries (`prep.py` →
+//! the corpus preparation dispatches across libraries (`prep.py` →
 //! `gba_dac_model.resample`, FFT path or `soxr` or `scipy`) and the same flags can
 //! therefore produce different bytes on two machines. So this module's job is a
 //! *good* resample — flat passband, steep enough stopband that the encoder's own

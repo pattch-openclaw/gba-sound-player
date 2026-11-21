@@ -6,7 +6,8 @@
 //! own knobs — `--g` for a fixed step, `--rd` for the search, `--train` for the two-pass
 //! tables, `--stride`/`--fine` for the candidate grid, `--ms` to pin the stereo domain
 //! for a fixed-step comparison, and `--musearch 0|1` to control the cycle-aware re-code
-//! (S6; on by default, as the reference's is).
+//! (S6; on by default, because the cap is a playback constraint and meeting it is the
+//! shipping behaviour — `0` is the A/B arm).
 //!
 //! **Two input shapes, one boundary.** `--album`/`--tracks` *is* the boundary E-R2 fixes;
 //! `--wav` is the convenience layer on top of it (S5), and `--emit-pcm DIR` writes back the
@@ -17,12 +18,12 @@
 //! happens before `--out` is created: the encoder either writes a whole album or
 //! nothing at all.
 //!
-//! **The printed lines are the reference's columns** (`uli_enc.c`), because S7's acceptance
-//! matrix compares the two encoders and a diff has to be readable: album summary, container
-//! overhead and bit target, the written size against the budget, the `g` range and M/S
-//! share, and the verify block's per-track pcm16 / int8 SNR. Ours prints `dacw off` where
-//! the reference prints its DAC-weight pass number: that pass does not exist here, and a
-//! made-up `0` would read as a knob that ran.
+//! **The printed lines are the oracle's columns**, because S7's acceptance matrix compares
+//! the two encoders and a diff has to be readable: album summary, container overhead and bit
+//! target, the written size against the budget, the `g` range and M/S share, and the verify
+//! block's per-track pcm16 / int8 SNR. Ours prints `dacw off` where the oracle prints its
+//! DAC-weight pass number: that pass does not exist here, and a made-up `0` would read as a
+//! knob that ran.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -67,8 +68,8 @@ fn run() -> Result<(), ExitCode> {
     let mut fine_width = 4i32;
     // `--ms` forces M/S; absent, the encoder chooses per frame.
     let mut ms: Option<bool> = None;
-    // The cycle-aware re-code is the shipped default (S6), matching the reference's
-    // `--musearch 1`; `--musearch 0` is the A/B arm.
+    // The cycle-aware re-code is the shipped default (S6): the cap is a playback constraint,
+    // so meeting it is what the product does. `--musearch 0` is the A/B arm.
     let mut musearch = true;
 
     let mut it = std::env::args().skip(1);
@@ -157,7 +158,7 @@ fn run() -> Result<(), ExitCode> {
     })?;
     let report = &encoded.report;
 
-    // The reference's album line, then its sizing line. Printed after the encode because
+    // The oracle's album line, then its sizing line. Printed after the encode because
     // this encoder does not stream its progress; the columns are the same.
     println!(
         "album: {} samples ({:.1} s), {} tracks, {} frames; budget {} bytes; cap {:.1}%; \
@@ -221,7 +222,7 @@ fn run() -> Result<(), ExitCode> {
                 report.mu_frames, report.n_frames
             );
         }
-        // The reference's verify block, column for column.
+        // The oracle's verify block, column for column.
         println!(
             "verify: decoded {} frames OK, |X| overflows {}, nonzero coefs >= {}: {}, \
              model max cycles {:.1}%",
