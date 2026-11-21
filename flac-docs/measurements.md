@@ -180,6 +180,19 @@ unmoved); `album-pack-check` **45 → 46** — the app's new `meta::PRODUCT_RATE
 nodiv::RATE_LOG2` tie test (floor 20, unmoved). `spike-test` stays 17 and `product-play-test`
 is untouched: no image that compiles the moved module changed a byte.
 
+**Re-baseline 2026-11-21 (album 2a PR-1, the Rust half) — ROM movement from a layout change,
+not a regression.** `crates/gba-playback/src/nodiv.rs` lost its `BAR_CELLS` constant (the grid is
+now the selected variant's, generated into the app's `src/layout.rs`) and `bar_recip` gained the
+cell count as a parameter; the app links the generated module and its boot line now prints
+`layout=<id> bar_cells=<n>`. The audited `album-player.gba` (default features) moved `.text`
+**96,604 → 96,764 B (+160)** with `.iwram` (**2,040**) and `.bss` (**43,008**) byte-for-byte
+unchanged. The +160 is the generated module — per-face advance tables and `Face::measure`'s `Fit`
+verdict — plus the guards reading it, not a decode-path change: `bar_cell(pos, recip)` never took
+a cell count, and the reciprocal is still computed once at bake time. The default-feature and
+deep-audit builds that `album-rom` and `album-test` run still end `verdict PASSED`, with
+`layout=B bar_cells=80` on the boot line. Recorded in §2.2's form: a re-baseline from the change,
+so nobody reads these bytes as the layout PR buying decoding time.
+
 ## Rules every run follows
 
 - **Correctness before speed.** No number is reported from an image whose decode has not

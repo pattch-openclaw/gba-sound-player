@@ -184,9 +184,12 @@ mod rom {
     use album_player::position;
     use album_player::text;
     use album_player::transport::{
-        SKIP_PRIME_CHUNKS, State, Step, Transport, pause_to_freeze_bound, resume_to_audio_bound,
-        take_to_handoff_bound,
+        SKIP_PRIME_CHUNKS, State, Step, Transport, pause_to_freeze_bound, take_to_handoff_bound,
     };
+    // Only the `input-replay` arm reads its resume bound (see the `resume_bound` split below);
+    // the fast player image does not import a name it never calls.
+    #[cfg(feature = "input-replay")]
+    use album_player::transport::resume_to_audio_bound;
     use gba_audio_hw::{
         AudioChain, CycleCounter, arm_audio_chain, clear_timer1_if, enable_sound, io_read_u16,
         rearm_dma, regs, teardown_audio,

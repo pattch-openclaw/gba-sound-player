@@ -2031,47 +2031,47 @@ position, agreeing).
 
 **One invariant that has to be written down because it joins geometry to audio arithmetic.**
 The reciprocals are computed *per track at bake time* from the cell count —
-`scripts/album_bake.py` does `recip = ((1 << 32) * BAR_CELLS) // n_samples`, with
-`BAR_CELLS = 32` at `album_bake.py:76` today. So a variant that declares a different count
-must feed that same constant into the bake, or a ROM would draw a bar out of reciprocals
-computed for a different grid: **the declared `bar_cells`, `ALBM1`'s reciprocals and
-`layout.rs` must agree, and `album-layout-test` asserts that they do.** That is the
+`scripts/album_bake.py` does `recip = ((1 << 32) * bar_cells) // n_samples` with `bar_cells`
+read from the selected variant (`bar_recip(n_samples, bar_cells)` at `album_bake.py:328`, and
+`BAR_CELLS_REGISTERED = 32` at `:104` survives only as this section's worked example), so a
+variant that declares a different count cannot be baked against the old one by accident:
+**the declared `bar_cells`, `ALBM1`'s reciprocals and `layout.rs` must agree, and
+`album-layout-test` asserts that they do.** That is the
 cheapest possible guard on the one place where a layout number and a decoder's arithmetic
 touch, and it is the reason the layout spec owns the bar rather than the app module.
 
-**What that agreement costs today, since the cell count is hard-coded on both sides of it
-(checked at review, 2026-11-20).** The ROM-side grid is a constant in the shared crate — `pub
-const BAR_CELLS: u32 = 32` (`crates/gba-playback/src/nodiv.rs:44`) — the ROM **refuses any pack
-whose header declares a different value** (`examples/album_player/src/meta.rs:582-583`,
-`Refusal::BarCellsMismatch`, whose own message reads *"bar_cells {n}, §6's grid is 32"*), and the
-reciprocal is verified against that same constant (`meta.rs:811-814`); the bake produces it as
-`floor(2^32 × 32 / n_samples)` (`scripts/album_bake.py:76`, `bar_recip` at `:284-296`). So a variant declaring
-`bar_cells = 18` (§5.0's starting default for A) is **not** a narrower redraw: until that
-constant is generated from the variant like the rest of the geometry, **the 2a ROM rejects its own
-album** — and the sentence above about the three agreeing is the guard that says so, not a note of
-taste. **Ruled at the second review (2026-11-20): the invariant this section owns is the
-*agreement*, not the value 32.** `BAR_CELLS` at `crates/gba-playback/src/nodiv.rs:44` is a compile-time
-constant today, the ROM refuses any pack declaring anything else (`meta.rs:582-584`,
-`Refusal::BarCellsMismatch` — a refusal met on *hardware*), and its reciprocal check re-derives the
-same constant (`:811-814`), with guard tests asserting a 64-cell pack is refused
-(`tests/album_pack_host.rs:398-426`, and `:492` for the mismatch arm). Making it variant-derived is
-therefore A5/2a work (the one place where a layout field reaches the arithmetic, §11's 2a row), and
-the arithmetic says it is a small change: `bar_recip(n_samples)` is `((bar_cells as u64) << 32) /
-n_samples` and `bar_cell(pos, recip)` is one `UMULL` plus a shift (`nodiv.rs:83-84`), so **the
-runtime path is already value-agnostic — it reads the value out of the pack, and only the *guard* is
-hard-coded.** What 2a replaces the equality with is §9.0's two rows (**and the boot-time refusal is
-kept, not replaced — ruled 2026-11-20 while scoping 2a's first PR.** The bake-side check is the one
-that aims at the spec; `meta.rs:582-584` is the only place that catches a stale generated
-`layout.rs` linked against yesterday's manifest — R11's staleness failure, invisible to every host
-test. The two bake checks and that backstop all stay, exactly as §9.0's row says):
-`bar-cells-disagree` (declared
-value ≡ the grid the reciprocals were computed for ≡ `layout.rs`) and `bar-cells-out-of-range`
-(**a floor of 16 as this section already recommends, and a ceiling from arithmetic rather than taste:
-the reciprocal fits a `u32` while `bar_cells < n_samples`, which no real track is anywhere near, so
-the ceiling is the precision rule above**). A 5-cell bar is arithmetically legal and 40 px of 8 px
-cells is a clean shape; what the rule does is make its ±1 cell = 20 % of the track a *printed* number
-in the bake report next to the geometry that produced it, so the coarse bar is an authored choice
-rather than an oversight.
+**What that agreement costs today: the invariant is the *agreement*, not the value 32 (re-ruled
+2026-11-20, and discharged by 2a's first PR).** The cell count is no longer hard-coded on either
+side of the seam. It is declared once in the tracked spec
+(`examples/album_player/layout_spec.toml`, per variant), generated into the app's gitignored
+`src/layout.rs` as `layout::BAR_CELLS`, and passed into the arithmetic as an argument —
+`bar_recip(n_samples, bar_cells)` (`crates/gba-playback/src/nodiv.rs:105`), whose count the bake
+supplies from the selected variant (`scripts/album_bake.py:991`,
+`recip = bar_recip(container["total_samples"], facts.variant.bar_cells)`). The shared crate
+therefore holds no grid of its own, and a second opinion there is what §9.0's `bar-cells-disagree`
+row and the layout self-test's banned-box leg exist to catch. `bar_cell(pos, recip)`
+(`nodiv.rs:121`) never needed the count — the grid is already inside the reciprocal — so **the
+runtime path did not change when the grid stopped being a constant; only the guard moved.**
+
+A variant declaring `bar_cells = 18` (§5.0's starting default for A) is now simply a variant with
+an 18-cell bar: the grid is generated for it like the rest of its geometry, and the bake
+pre-flights the reciprocals against that value rather than against 32. What remains is the refusal,
+kept deliberately: `meta::parse` compares the manifest's `bar_cells` against the linked
+`layout::BAR_CELLS` (`examples/album_player/src/meta.rs:595`, `Refusal::BarCellsMismatch`, whose
+message now reads *"bar_cells {n}, this ROM's generated grid is {N}"*, `:229-233`) and re-derives
+the reciprocal against the same value (`:827-830`); the host suite's refusal arm mutates the header
+to `layout::BAR_CELLS - 1` rather than a literal (`tests/album_pack_host.rs:596-605`). **The
+boot-time refusal is kept, not replaced** — ruled 2026-11-20 while scoping 2a's first PR — because
+`meta.rs:595` is the only place that catches a stale generated `layout.rs` linked against
+yesterday's manifest, R11's staleness failure, invisible to every host test. The two bake checks
+and that backstop all stay, exactly as §9.0's row says: `bar-cells-disagree` (declared value ≡ the
+grid the reciprocals were computed for ≡ `layout.rs`) and `bar-cells-out-of-range` (**a floor of 16
+as this section already recommends, and a ceiling from arithmetic rather than taste: the reciprocal
+fits a `u32` while `bar_cells < n_samples`, which no real track is anywhere near, so the ceiling is
+the precision rule above**). A 5-cell bar is arithmetically legal and 40 px of 8 px cells is a clean
+shape; what the rule does is make its ±1 cell = 20 % of the track a *printed* number in the bake
+report next to the geometry that produced it, so the coarse bar is an authored choice rather than an
+oversight.
 
 **AP-2 is the gate that says these
 agree:** the bar cell at refresh *n* and the printed elapsed must derive from the
