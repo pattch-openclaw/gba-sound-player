@@ -106,8 +106,12 @@ image_tiles = 225
 
 # §6's fine grid, at the value §6 names as A's starting default: 18 cells in the
 # 72 px this variant's title band carries = 4 px per cell, i.e. 9 cells of 8 px
-# redrawn as 18 of 4 px "at the cost of ~5 extra pattern tiles" — which the
-# generator derives (4 px cells -> 5 pattern tiles) and prints rather than estimates.
+# redrawn as 18 of 4 px. §6 used to price that "at the cost of ~5 extra pattern
+# tiles"; the cost is derived instead — a 4 px step reaches one interior fill
+# residue inside an 8 px tile, so the bar needs that partial plus the empty and
+# full tiles any bar needs: 3 pattern tiles, 1 of them extra — and
+# `--layout-self-test` counts it two ways (the residue set, and a render of the
+# bar at every fill position) rather than quoting it.
 bar_cells = 18
 
 # §5.1's BG0 term: the backdrop fills that tile the bands and the region's opaque
@@ -144,11 +148,16 @@ banks = [3, 4, 5, 6]         # up to 4 x 15 colours (§5.4); 2b fills them
 
 [[variant.palette]]
 role = "viz"
-banks = [7, 8, 9, 10]        # declared for Phase 4; no 2a element may use these
+banks = [7, 8, 9, 10]        # declared for Phase 4; a 2a element shouldn't use these
 
 [[variant.palette]]
 role = "game"
-banks = [11, 12, 13, 14, 15] # reserved, unusable by any element of this variant
+banks = [11, 12, 13, 14, 15] # reserved for the game scene; a 2a element shouldn't use these.
+                             # Said as an intention, not as an enforced rule: what the generator
+                             # refuses (`spec`, album_bake.py:2001) is an element naming a bank
+                             # outside the *union* of this variant's declared roles. Per-role
+                             # exclusivity is a fact about a real image, and §9.0 gives the
+                             # palette refusals to 2b, where `album_art.py` can see one.
 
 # The band stack, bottom-up: the bottom bands are always shown, the region is the
 # swappable part (§5.0). Rows are tile rows; the three must tile exactly 20.
@@ -469,10 +478,12 @@ face = "ark10"
 row_px = 16
 banks = [0]
 # §5.5's fit box is *derived from this box*, never typed as a character count:
-# `title-fit` measures the folded string against 160 px using the declared face's
-# real advance widths, and the fixture's longest title measures 103 px. The
-# 28-character figure §11's D9 discharges is gone with this comment's existence —
-# what replaces it is `TITLE_BOX_PX` in the generated module.
+# the fit verdict measures the folded string against `w` of this element's entry
+# in the generated `layout::ELEMENTS` — 20 columns × 8 px = 160 px — using the declared
+# face's real advance widths, and the fixture's longest title measures 103 px of it.
+# The 28-character figure §11's D9 discharges is gone with this comment's existence; the
+# module's derived `max_chars` (the conservative span at the face's *widest* advance) is
+# printed beside it, and is a capacity report, never the bound a fit is judged against.
 
 [[variant.element]]
 id = "bar"

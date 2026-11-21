@@ -20,12 +20,30 @@ which 95 are mapped and 94 have outlines (space is mapped with no outline, and
 glyphs" because the three numbers mean different things to three different tools:
 `agb::include_font!` rasterizes `numGlyphs`, a fit verdict needs the mapped codepoints
 and the ones with advances, and the glyph-atlas term in the pool audit needs the
-outlines. `scripts/album_bake.py --print-layout` prints all three from the file.
+outlines. `scripts/album_bake.py --print-layout` prints three per face — `95 mapped
+codepoints / 94 outlined / 94 printable` — which is *not* the same triple: `numGlyphs` is
+the file's own `maxp` table and nothing in this repository reads it (the thing that does is
+`agb::include_font!`, at build time), so the 96 above was read with fontTools and is written
+down only to keep the three from being conflated.
 
-Both cuts are **generated, and re-checked as generated**: `--layout-self-test` runs
-the command below against the tracked parent and compares sha256 with the tracked
-cut, so a hand-edited subset would be caught rather than trusted. That leg passed
-byte for byte when the ark cut was added (`29100b1e…a75f9`).
+Provenance, from the tree rather than from memory: `OFL.txt` names the holder as
+*Copyright (c) 2021, TakWolf (https://takwolf.com), with Reserved Font Name 'Ark Pixel'*;
+the release string is the one both ark files carry in their own name table, `2024.03.27`
+(`Ark-Pixel-10px-Proportional-latin-Regular;2024.03.27`), and the parent's `maxp.numGlyphs`
+is 2,881 — which is why the cut exists at all. Unlike the fusion row above, no upstream
+repository URL is recorded anywhere in this tree, so none is claimed here; the leg that
+re-runs the subset needs none, because it works from the tracked parent.
+
+The **ark** cut is **generated, and re-checked as generated**: `--layout-self-test` runs
+the command below against the tracked parent and compares sha256 with the tracked cut, so a
+hand-edited subset would be caught rather than trusted. That leg passed byte for byte when
+the ark cut was added (`29100b1e…a75f9`). The **fusion** cut is **not** re-checked that way,
+and the tool says so rather than skipping quietly: its parent
+`fusion-pixel-8px-proportional-latin.ttf` is not in this tree and the spec declares the cut
+as the tracked asset itself, so the leg prints `no parent row` and the chain of provenance
+stops at an upstream download — which is also why §5.5 rules the 8 px face an instrument and
+not a product face. The command below is kept for the fusion file because it is how the file
+was made, but running it in-tree needs the parent fetched from upstream first.
 
 Regenerate with fontTools:
 
