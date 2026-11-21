@@ -7,6 +7,7 @@
 //! |---|---|
 //! | [`meta`] | the validating `ALBM1` reader — validate, bounds-check, slice, refuse by name (ALBUM-PLAYER.md §4.3) |
 //! | [`assets`] | generated: `ALBM1` via `include_bytes!` and the per-track pins the bake cross-checked against each packed `GAFP` container |
+//! | [`layout`] | generated: the selected variant's geometry — bands, region, elements, the bar grid, and every number derived from them (ALBUM-PLAYER.md §5, §5.1, §6) |
 //! | [`pcm`] | [`pcm::PcmSource`], the codec seam (§4.2): nine methods, album samples across the boundary, no codec name |
 //! | [`geometry`] | the app's audio-chain geometry (§4.2b), derived per backend from declared facts rather than transcribed |
 //! | [`backend`] | the only module that knows an implementor exists — `flac` (shipped) or `stub` (synthetic, codec-free) |
@@ -39,15 +40,27 @@
 //!
 //! ## Generated, never tracked
 //!
-//! `album.toml` is tracked; `assets/albm1.bin`, `assets/trackNN.gfp` and
-//! `src/assets.rs` are build output (§2.3, §9.0). `make album-bake` writes them;
-//! `make album-pack-check` packs twice and compares bytes, then runs this
-//! crate's host gate, which parses the finished `ALBM1` through [`meta`] and
-//! compares it field by field with the config restated as literals.
+//! `album.toml` and `layout_spec.toml` are tracked; `assets/albm1.bin`,
+//! `assets/trackNN.gfp`, `src/assets.rs` and `src/layout.rs` are build output
+//! (§2.3, §9.0). `make album-bake` writes them; `make album-pack-check` packs
+//! twice and compares bytes, then runs this crate's host gate, which parses the
+//! finished `ALBM1` through [`meta`] and compares it field by field with the
+//! config restated as literals. `make album-layout-test` holds [`layout`] itself:
+//! §9.0's eight 2a refusals fire by id, and the module is byte-identical across
+//! two emits.
 //!
-//! A fresh clone has no `src/assets.rs`, so `make check` (rustfmt, which resolves
-//! `#[path]` modules statically) formats this crate through
-//! `scripts/fmt_with_generated_stub.sh`'s `GENERATED` override.
+//! Two of those artifacts must agree about one number, and the agreement is §6's:
+//! the bar grid the reciprocals in `ALBM1` were computed for is [`layout::BAR_CELLS`],
+//! the same const the generated module declares, which is the same value
+//! `layout_spec.toml` declares for the variant. [`meta::parse`] compares the
+//! manifest against [`layout::BAR_CELLS`] at boot — that is the backstop and it is
+//! kept on purpose (R11: a stale generated module linked against yesterday's
+//! manifest is invisible to every host test that shares the module).
+//!
+//! A fresh clone has no `src/assets.rs` or `src/layout.rs`, so `make check`
+//! (rustfmt, which resolves `#[path]` modules statically) formats this crate
+//! through `scripts/fmt_with_generated_stub.sh`'s `GENERATED` override, which
+//! takes both paths.
 
 #![cfg_attr(target_arch = "arm", no_std)]
 #![cfg_attr(not(target_arch = "arm"), forbid(unsafe_code))]
@@ -67,6 +80,12 @@ pub mod assets;
 pub mod backend;
 pub mod geometry;
 pub mod keys;
+// `layout.rs` is `make album-bake`'s output, not source (§2.3): its advance tables are packed
+// for scannability and its assertions are one line each, so rustfmt is told to leave the module
+// alone. `scripts/fmt_with_generated_stub.sh` still stubs it when absent, so a fresh clone
+// formats without the artifact ever existing.
+#[rustfmt::skip]
+pub mod layout;
 pub mod meta;
 pub mod pcm;
 pub mod position;

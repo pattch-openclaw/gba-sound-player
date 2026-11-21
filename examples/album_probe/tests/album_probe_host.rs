@@ -513,34 +513,39 @@ fn label_combines_seconds_and_mmss() {
 
 #[test]
 fn bar_cell_has_the_four_bake_time_properties() {
+    // The probe asks §6's arithmetic at the grid the probe's own bar is priced at — **32 cells ×
+    // 7 px on a 256-px bar**, §6's worked example — and the number lives here because the grid
+    // is a *declaration*, not a property of the arithmetic. It used to be
+    // `nodiv::BAR_CELLS`, a constant in the shared crate, which meant every consumer inherited
+    // one app's geometry; §6 re-ruled it on 2026-11-20 to a per-variant field, and `nodiv` now
+    // takes the cell count as an argument. The application reads its own grid from the generated
+    // `layout.rs`; this probe has no layout variant and no album, so it states its own grid once,
+    // here, where a reader can see it is this probe's choice.
+    const BAR_CELLS: u32 = 32;
     let lengths = [
         1_000, 1_021, 1_500, 2_048, 5_000, 16_384, 65_520, 90_000, 131_072, 262_144, 524_288,
         1_048_576, 2_097_152, 2_600_000,
     ];
     for n in lengths {
-        let recip = nodiv::bar_recip(n);
+        let recip = nodiv::bar_recip(n, BAR_CELLS);
         let stride = (n / 512).max(1);
         let mut previous = 0;
         let mut pos = 0;
         while pos < n {
             let cell = nodiv::bar_cell(pos, recip);
             assert!(
-                cell < nodiv::BAR_CELLS,
+                cell < BAR_CELLS,
                 "n={n} pos={pos}: cell {cell} reached the end"
             );
             assert!(cell >= previous, "n={n} pos={pos}: cell went backwards");
-            let exact = (pos as u64 * nodiv::BAR_CELLS as u64 / n as u64) as u32;
+            let exact = (pos as u64 * BAR_CELLS as u64 / n as u64) as u32;
             let drift = cell.abs_diff(exact);
             assert!(drift <= 1, "n={n} pos={pos}: cell {cell} vs exact {exact}");
             previous = cell;
             pos += stride;
         }
         let last = nodiv::bar_cell(n - 1, recip);
-        assert_eq!(
-            last,
-            nodiv::BAR_CELLS - 1,
-            "n={n}: last sample is the last cell"
-        );
+        assert_eq!(last, BAR_CELLS - 1, "n={n}: last sample is the last cell");
     }
 }
 
@@ -548,8 +553,21 @@ fn bar_cell_has_the_four_bake_time_properties() {
 fn bar_recip_is_the_bake_time_value() {
     // A power-of-two length makes the reciprocal exact and readable by hand:
     // floor(2^32 * 32 / 2^17) = 32 * 2^15.
-    assert_eq!(nodiv::bar_recip(1 << 17), nodiv::BAR_CELLS << 15);
-    assert_eq!(nodiv::bar_cell(0, nodiv::bar_recip(90_000)), 0);
+    assert_eq!(nodiv::bar_recip(1 << 17, 32), 32 << 15);
+    assert_eq!(nodiv::bar_cell(0, nodiv::bar_recip(90_000, 32)), 0);
+}
+
+#[test]
+fn bar_recip_takes_the_grid_it_is_given() {
+    // The same function answers for a grid this probe does not draw with, which is the whole point
+    // of the parameter: no consumer can be wrong about "the" grid because there is no default. §6's
+    // other priced option is 64 cells, and a variant declaring 18 or 80 gets its own value —
+    // `scripts/album_bake.py --layout-self-test` reads this same function's Python twin back at
+    // both.
+    assert_eq!(nodiv::bar_recip(1 << 17, 32), 32 << 15);
+    assert_eq!(nodiv::bar_recip(1 << 17, 64), 64 << 15);
+    assert_eq!(nodiv::bar_recip(1 << 17, 18), (18u64 << 15) as u32);
+    assert_ne!(nodiv::bar_recip(1 << 17, 18), nodiv::bar_recip(1 << 17, 80));
 }
 
 // ---------------------------------------------------------------------------

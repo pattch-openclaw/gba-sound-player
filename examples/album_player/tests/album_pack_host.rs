@@ -10,8 +10,11 @@
 //! 1. the manifest parses, and every header field is what `album.toml` declares
 //!    (4 tracks, 16,384 Hz, the album length, title/artist/year, `flac`);
 //! 2. the track table is a contiguous timeline whose lengths sum to the album;
-//! 3. titles are §5.5's fold (ASCII, wrapped title stripped), and the long one
-//!    is *kept and printed*, not truncated or refused;
+//! 3. titles are §5.5's fold (ASCII, wrapped title stripped); the long one
+//!    is *kept and printed*, not truncated or refused — and every fixture title
+//!    is *measured* against the box the selected variant declares for it, from
+//!    the face's own advance widths in the generated `src/layout.rs`, never a
+//!    character count (D9 item 2);
 //! 4. the aliased pair (tracks 0 and 2, same source bytes) addresses one blob —
 //!    Q15's device: a long list costs one encode;
 //! 5. every pin agrees with the manifest and with the packed container's own
@@ -25,6 +28,7 @@
 //! the image.
 
 use album_player::assets::{self, TrackPin};
+use album_player::layout;
 use album_player::meta::{self, Album, Refusal};
 use album_player::nodiv;
 
@@ -90,6 +94,36 @@ fn refuse_after(edit: impl FnOnce(&mut Vec<u8>)) -> Refusal {
 /// The byte offset of one track entry.
 fn entry(track: u32) -> usize {
     HEADER_BYTES + track as usize * TRACK_BYTES
+}
+
+/// The fit box the selected variant declares for a track title: its title band's text element.
+///
+/// Found by what it is *for* — a text element in the `title` band that carries a face — rather
+/// than by the generated id `title_text`. An id is a name, and a name is the thing a later
+/// variant is free to change; the role is what §5.5's box is (this is the same rule the bake's
+/// own list-element legs follow). Two candidates is a refusal rather than a pick, because “the
+/// box a title is measured against” must not be a choice the test made quietly.
+fn fit_box_element() -> &'static layout::Element {
+    let mut found: Option<&'static layout::Element> = None;
+    for candidate in &layout::ELEMENTS {
+        if candidate.kind == "text" && candidate.band == "title" && !candidate.face.is_empty() {
+            assert!(
+                found.is_none(),
+                "variant {} declares more than one text element in the title band, so there is no \
+                 single box a title is measured against",
+                layout::LAYOUT_ID
+            );
+            found = Some(candidate);
+        }
+    }
+    found.unwrap_or_else(|| {
+        panic!(
+            "variant {} declares no title-band text element, so this album has no box to measure a \
+             title against — but it was packed for that variant, and §5.0's A carries its title band \
+             as art",
+            layout::LAYOUT_ID
+        )
+    })
 }
 
 /// The string pool's byte range, derived from the header the way the reader does.
@@ -237,20 +271,84 @@ fn the_fixture_titles_are_q15s_names_verbatim() {
         let index = index as u32;
         let title = album.track_title(index);
         assert_eq!(title, want, "track {index} is not Q15's name");
-        assert!(
-            title.chars().count() <= 28,
-            "track {index}: {title:?} overflows §5.2's box, and the fixture has no business doing that"
-        );
         assert_eq!(
             album.track_artist(index),
             "",
             "the tracked master carries no RIFF tags, so a track artist here would be invented"
         );
     }
-    assert_eq!(
-        album.album_artist(),
-        "unknown",
-        "see `[album]` in album.toml"
+}
+
+/// The fit box the selected variant declares for a track title, and the face it is drawn in:
+/// resolved once, so a leg that measures a title cannot pick a different box than the one the
+/// layout module declares.
+fn title_fit_box() -> (&'static layout::Element, &'static layout::Face) {
+    let element = fit_box_element();
+    let face = layout::face(element.face).unwrap_or_else(|| {
+        panic!(
+            "the fit box names face {:?}, which the generated module does not declare",
+            element.face
+        )
+    });
+    (element, face)
+}
+
+#[test]
+fn every_fixture_title_measures_inside_the_declared_box() {
+    // §5.5's fit verdict, measured: a title's width from the declared face's own advance widths
+    // (generated into `src/layout.rs` from the tracked `.ttf`'s `hmtx`), against the box the
+    // selected variant declares for it. This replaced `title.chars().count() <= 28` — a character
+    // count with no measured or declared width behind it, which D9 item 2 retires.
+    //
+    // The fixture's four names would pass either test, which is the point of asserting them here
+    // *and* the negative direction below: a measurement that always answered `fits` would satisfy
+    // this leg and nothing else, so the leg after this one takes it to a string that must not fit.
+    let album = parsed();
+    let (element, face) = title_fit_box();
+    for index in 0..album.n_tracks() {
+        let title = album.track_title(index);
+        let fit = face.measure(title, element.w);
+        assert_eq!(
+            fit.unwritten, 0,
+            "track {index}: {title:?} has code points the declared face {:?} has no glyph for — \
+             unwritten, which §5.5 keeps separate from an overflow",
+            face.id
+        );
+        assert!(
+            fit.inside_box,
+            "track {index}: {title:?} measures {} px against the {} px box variant {} declares for \
+             {:?} — the fixture has no business overflowing it",
+            fit.width_px,
+            element.w,
+            layout::LAYOUT_ID,
+            element.id
+        );
+    }
+}
+
+#[test]
+fn an_over_long_title_is_measured_outside_the_declared_box() {
+    // The negative control for the leg above, and the half that makes "measured" mean something:
+    // the same path, the same box, a string no one would ship a bar under. §5.5 says an over-long
+    // title is *printed*, not refused at bake time (an album decision, not a build failure), so the
+    // verdict has to be able to come back `false` — a fit test that only ever sees fitting strings
+    // is not evidence that anything is being measured.
+    let (element, face) = title_fit_box();
+    let overlong = "An unreasonably long album title that will not fit anywhere";
+    let fit = face.measure(overlong, element.w);
+    assert!(
+        !fit.inside_box,
+        "{overlong:?} measures {} px and must not fit the {} px box, or `measure` is not \
+         measuring anything",
+        fit.width_px, element.w
+    );
+    // Both verdicts are the same inequality, `units × raster ≤ box × upem`, evaluated before any
+    // division — so the reported width and the verdict cannot disagree the way a rounded float
+    // would. Pinned here because a later "cleanup" to a float comparison is exactly the change
+    // that would make this test pass and the ROM's verdict wrong.
+    assert!(
+        fit.width_px > element.w,
+        "the reported width agrees with the verdict"
     );
 }
 
@@ -386,11 +484,14 @@ fn pin_samples_are_the_packed_totals_the_bake_cross_checked() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn recip_is_the_bake_time_value() {
+fn bar_recip_is_the_bake_time_value() {
     let album = parsed();
     for index in 0..album.n_tracks() {
         let track = album.track(index);
-        assert_eq!(track.recip, nodiv::bar_recip(track.n_samples));
+        assert_eq!(
+            track.recip,
+            nodiv::bar_recip(track.n_samples, layout::BAR_CELLS)
+        );
     }
 }
 
@@ -410,11 +511,11 @@ fn bar_cell_has_the_four_properties_on_the_baked_reciprocals() {
         for pos in positions {
             let cell = nodiv::bar_cell(pos, recip);
             assert!(
-                cell < nodiv::BAR_CELLS,
+                cell < layout::BAR_CELLS,
                 "track {index} pos {pos} reached the bar"
             );
             assert!(cell >= previous, "track {index} went backwards at {pos}");
-            let exact = pos as u64 * nodiv::BAR_CELLS as u64 / n as u64;
+            let exact = pos as u64 * layout::BAR_CELLS as u64 / n as u64;
             assert!(
                 (cell as u64).abs_diff(exact) <= 1,
                 "track {index} pos {pos}: cell {cell} vs exact {exact}"
@@ -423,14 +524,14 @@ fn bar_cell_has_the_four_properties_on_the_baked_reciprocals() {
         }
         assert_eq!(
             nodiv::bar_cell(n - 1, recip),
-            nodiv::BAR_CELLS - 1,
+            layout::BAR_CELLS - 1,
             "track {index} last sample"
         );
     }
 }
 
 #[test]
-fn elapsed_cell_reads_the_manifest_reciprocal() {
+fn elapsed_bar_cell_reads_the_manifest_reciprocal() {
     let album = parsed();
     for index in 0..album.n_tracks() {
         let track = album.track(index);
@@ -440,7 +541,13 @@ fn elapsed_cell_reads_the_manifest_reciprocal() {
                 nodiv::bar_cell(pos, track.recip)
             );
         }
-        assert_eq!(album.elapsed_cell(index, track.n_samples - 1), 31);
+        // The last sample lands on the last cell, and "last" is the grid this ROM was generated
+        // for rather than a number written here: §6's grid is a field of the selected variant, and
+        // the 31 that used to stand in this line was the shared crate's 32-cell constant.
+        assert_eq!(
+            album.elapsed_cell(index, track.n_samples - 1),
+            layout::BAR_CELLS - 1
+        );
     }
 }
 
@@ -487,9 +594,14 @@ fn refuses_a_rate_that_is_not_the_product_clock() {
 }
 
 #[test]
-fn refuses_a_bar_grid_that_is_not_32() {
-    let refusal = refuse_after(|blob| blob[12..16].copy_from_slice(&64u32.to_le_bytes()));
-    assert_eq!(refusal, Refusal::BarCellsMismatch { bar_cells: 64 });
+fn refuses_a_bar_grid_that_is_not_the_one_this_rom_was_built_for() {
+    // §6: the grid is the selected variant's declared `bar_cells`, generated into
+    // `src/layout.rs`, and the manifest's reciprocals must have been computed for the same value.
+    // The mutation is derived from the linked module rather than written down, so this leg keeps
+    // meaning something when a variant's grid moves: it asks for *a different grid*, not for 64.
+    let other = layout::BAR_CELLS - 1;
+    let refusal = refuse_after(|blob| blob[12..16].copy_from_slice(&other.to_le_bytes()));
+    assert_eq!(refusal, Refusal::BarCellsMismatch { bar_cells: other });
 }
 
 #[test]

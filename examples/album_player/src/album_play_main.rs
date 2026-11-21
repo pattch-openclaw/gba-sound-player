@@ -178,14 +178,18 @@ mod rom {
     use album_player::backend;
     use album_player::geometry;
     use album_player::keys;
+    use album_player::layout;
     use album_player::meta::{Album, Track};
     use album_player::pcm::{PcmSource, SourceError};
     use album_player::position;
     use album_player::text;
     use album_player::transport::{
-        SKIP_PRIME_CHUNKS, State, Step, Transport, pause_to_freeze_bound, resume_to_audio_bound,
-        take_to_handoff_bound,
+        SKIP_PRIME_CHUNKS, State, Step, Transport, pause_to_freeze_bound, take_to_handoff_bound,
     };
+    // Only the `input-replay` arm reads its resume bound (see the `resume_bound` split below);
+    // the fast player image does not import a name it never calls.
+    #[cfg(feature = "input-replay")]
+    use album_player::transport::resume_to_audio_bound;
     use gba_audio_hw::{
         AudioChain, CycleCounter, arm_audio_chain, clear_timer1_if, enable_sound, io_read_u16,
         rearm_dma, regs, teardown_audio,
@@ -3750,6 +3754,18 @@ mod rom {
             album.album_samples(),
             album.rate_hz(),
             album.album_title()
+        );
+        // §13's AP-3 row: every hardware report has to be attributable to a geometry, so the boot
+        // line names the variant and its bar grid. Both come from the generated `layout` module — the
+        // same one `meta::parse` just compared the manifest against — which is what makes a report
+        // like "the bar looked wrong at 240 px" a statement about a known layout rather than an
+        // unnamed one. Printed after the parse so a refused manifest prints no layout it did not use.
+        agb::println!(
+            "[album-rom] layout={} bar_cells={} bar_px={} cell_px={} (generated: ALBUM-PLAYER.md §5, §6)",
+            layout::LAYOUT_ID,
+            layout::BAR_CELLS,
+            layout::BAR_PX,
+            layout::BAR_CELL_PX
         );
         agb::println!(
             "[album-rom] start_track={} (this gate starts at track 1; the product plays the record from its first track)",
