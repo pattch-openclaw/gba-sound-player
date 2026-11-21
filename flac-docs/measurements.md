@@ -188,8 +188,8 @@ cell count as a parameter; the app links the generated module and its boot line 
 **96,604 → 96,764 B (+160)** with `.iwram` (**2,040**) and `.bss` (**43,008**) byte-for-byte
 unchanged. The +160 is the generated module — per-face advance tables and `Face::measure`'s `Fit`
 verdict — plus the guards reading it, not a decode-path change: `bar_cell(pos, recip)` never took
-a cell count, and the reciprocal is still computed once at bake time. The default-feature and
-deep-audit builds that `album-rom` and `album-test` run still end `verdict PASSED`, with
+a cell count, and the reciprocal is still computed once at bake time. The `album-rom` (default-feature) and
+`album-test` (deep-audit + input-replay) builds still end `verdict PASSED`, with
 `layout=B bar_cells=80` on the boot line. Recorded in §2.2's form: a re-baseline from the change,
 so nobody reads these bytes as the layout PR buying decoding time.
 
