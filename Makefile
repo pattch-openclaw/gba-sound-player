@@ -1334,7 +1334,7 @@ album-pack-check: toolchain-check
 	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_GATE_LOG)) \
 	    || { echo "album-pack-check: the host suite did not pass — see $(ALBUM_GATE_LOG)"; exit 1; }; \
 	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_GATE_LOG))); \
-	  [ -n "$$n" ] && [ "$$n" -ge 48 ] || { echo "album-pack-check: collected '$$n' tests, needs >= 48 — a green that names nothing is not a green"; exit 1; }
+	  [ -n "$$n" ] && [ "$$n" -ge 50 ] || { echo "album-pack-check: collected '$$n' tests, needs >= 50 — a green that names nothing is not a green"; exit 1; }
 	@echo "album-pack-check passed: the four §9.0 Phase-1 refusals fired — (a) declared rate != product clock,"
 	@echo "  (b) frames outside the encode profile (inherited from gafp_pack.py), (c) ALBM1 n_samples vs the"
 	@echo "  container's total_samples, (d) the writer's output re-read through meta.rs — plus two bakes"
@@ -1438,8 +1438,14 @@ album-seam-test: toolchain-check
 #      prints where its expected number comes from (`plan` / `spec` / `arithmetic`), which is what
 #      D9 asks for; a leg whose two sides are the same path is not evidence;
 #   3. the generated module is byte-reproducible, the same way `album-pack-check` holds assets.rs:
-#      emit twice, compare, and witness the comparison negatively with one flipped byte.
-album-layout-test: toolchain-check
+#      emit twice, compare, and witness the comparison negatively with one flipped byte;
+#   4. the Rust half — the two claims a Python tool cannot make: that `meta::parse` refuses a
+#      manifest whose grid is not the one the generated module declares (the boot backstop, run
+#      against the real baked blob), and that the fixture's titles are measured against the
+#      declared box from the generated advance table rather than counted. `album-bake` is a
+#      prerequisite because those legs parse the real `ALBM1`; the filters are named so a leg that
+#      vanished from the suite fails here rather than passing for lack of a `--filter` match.
+album-layout-test: toolchain-check album-bake
 	@test $$(find $(ALBUM_CRATE_DIR) -maxdepth 1 -name 'layout_spec.toml' | wc -l) -eq 1 \
 	  || { echo "album-layout-test: $(ALBUM_LAYOUT_SPEC) is missing or duplicated — one tracked layout spec, or this gate is measuring nothing"; exit 1; }
 	@command -v python3 >/dev/null 2>&1 \
@@ -1468,6 +1474,21 @@ album-layout-test: toolchain-check
 	    && { echo "album-layout-test: the layout comparison passed two files that differ by one byte — the byte leg is not witnessing anything"; rm -rf $$first; exit 1; } \
 	    || echo "  layout reproducibility leg: one flipped byte is reported as a difference (negative control)"; \
 	  rm -rf $$first
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	@cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) --test album_pack_host -- bar >> $(abspath $(ALBUM_LAYOUT_GATE_LOG)) 2>&1; \
+	  status=$$?; \
+	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) \
+	    || { tail -n 40 $(abspath $(ALBUM_LAYOUT_GATE_LOG)); echo "album-layout-test: the bar-grid host legs did not pass — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
+	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) | tail -1); \
+	  [ -n "$$n" ] && [ "$$n" -ge 4 ] || { echo "album-layout-test: collected '$$n' bar-grid tests, needs >= 4 — the boot backstop's legs are not in the suite any more"; exit 1; }
+	@cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) --test album_pack_host -- title >> $(abspath $(ALBUM_LAYOUT_GATE_LOG)) 2>&1; \
+	  status=$$?; \
+	  [ $$status -eq 0 ] \
+	    || { tail -n 40 $(abspath $(ALBUM_LAYOUT_GATE_LOG)); echo "album-layout-test: the measured-title host legs did not pass — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
+	  m=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) | tail -1); \
+	  [ -n "$$m" ] && [ "$$m" -ge 3 ] || { echo "album-layout-test: collected '$$m' title tests, needs >= 3 — a filter that matched nothing is a green that names nothing"; exit 1; }
 	@echo "album-layout-test passed: §9.0's eight 2a refusals each fired by id on a spec written to be"
 	@echo "  wrong about it, the measured face/interaction geometry reproduces from the tracked files with"
 	@echo "  every expected number labelled by its source, the declared bar grid reaches the ALBM1 header and"

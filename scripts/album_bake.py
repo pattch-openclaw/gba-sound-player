@@ -2465,6 +2465,57 @@ def read_layout_module_text(text: str, where: str) -> dict[str, object]:
     return facts
 
 
+def read_advance_table(text: str, face_id: str, where: str) -> dict[int, int]:
+    """A generated `ADVANCES_<FACE>` table, read back as `{codepoint: font units}`.
+
+The generated module carries the face's advance widths so the *Rust* side can measure a
+    string instead of counting characters (D9 item 2, §5.5). That table is written from this
+    tool's own `hmtx` read, so a leg that compared it with itself would prove nothing: the
+    point of reading it back here is that the bytes a Rom links are the bytes this tool
+    measured, and a transcription slip between the two is exactly the sort of thing a
+    review cannot see in a 700-line generated file.
+    """
+    ident = "ADVANCES_" + "".join(c if c.isalnum() else "_" for c in face_id).upper()
+    marker = f"pub const {ident}:"
+    start = text.find(marker)
+    if start < 0:
+        raise Refusal(
+            "audit",
+            f"{where}: the generated module declares no {ident}, so a fit verdict on the device "
+            "would have to count characters (§5.5, D9 item 2)",
+        )
+    body_start = text.find("= [", start)
+    body_end = text.find("];", body_start)
+    if body_start < 0 or body_end < 0:
+        raise Refusal("audit", f"{where}: {ident} has no `= [ … ];` body to read")
+    table: dict[int, int] = {}
+    for point, units in re.findall(r"\(\s*(0x[0-9a-fA-F]+|\d+)\s*,\s*(\d+)\s*\)", text[body_start:body_end]):
+        table[int(point, 0)] = int(units)
+    if not table:
+        raise Refusal("audit", f"{where}: {ident} parsed to no entries")
+    return table
+
+
+def measure_from_table(table: dict[int, int], text: str, raster: int, upem: int,
+                       box_px: int) -> tuple[bool, float, str]:
+    """The same verdict as `FontMetrics.fits`, computed from a read-back table.
+
+The arithmetic is the *Rust* side's, restated: units summed over mapped characters,
+    `units*raster <= box*upem` for the verdict, and unmapped characters named rather than
+    silently zero-width. Deliberately not `FontMetrics.fits` with another argument — that
+    would be one path twice.
+    """
+    units = 0
+    missing = ""
+    for char in text:
+        width = table.get(ord(char))
+        if width is None:
+            missing += char
+        else:
+            units += width
+    return units * raster <= box_px * upem, units * raster / upem, missing
+
+
 def assert_bar_grid_agrees(declared: int, pack: int, layout: int, context: str) -> None:
     """§9.0's `bar-cells-disagree`, on the bake side.
 
@@ -2770,9 +2821,33 @@ def layout_rs_text(facts: VariantFacts) -> str:
     add("    /// that measures the string, in pixels, against a box (§5.5).")
     add("    pub max_advance_permyriad: u32,")
     add("    pub mean_advance_permyriad: u32,")
+    add("    /// Every mapped code point's advance width, in this face's own font units, as")
+    add("    /// `(codepoint, units)` sorted by codepoint. This is the table §5.5's fit verdict")
+    add("    /// measures a string with: a verdict computed from a mean or a maximum advance is")
+    add("    /// a bound, not a measurement, and D9 item 2 is about the difference. Read from the")
+    add("    /// same .ttf `hmtx` table the bake read, so the two cannot drift.")
+    add("    pub advances: &'static [(u32, u16)],")
     add("}")
+    # One table per face, named from the face id so the module is readable and a
+    # duplicate id is a compile error rather than a silent last-wins.
+    for face_id, metrics in facts.face_metrics.items():
+        ident = "ADVANCES_" + "".join(c if c.isalnum() else "_" for c in face_id).upper()
+        units = sorted(metrics.advance_units.items(), key=lambda kv: ord(kv[0]))
+        add(f"/// `{face_id}`'s advances, from `{metrics.face.file}`'s `hmtx` and `head.unitsPerEm` {metrics.upem}.")
+        add(f"pub const {ident}: [(u32, u16); {len(units)}] = [")
+        row: list[str] = []
+        for char, value in units:
+            row.append(f"(0x{ord(char):02x}, {value}),")
+            if len(row) == 8:
+                add("    " + " ".join(row))
+                row = []
+        if row:
+            add("    " + " ".join(row))
+        add("];")
+        add("")
     add(f"pub const FACES: [Face; {len(facts.face_metrics)}] = [")
     for face_id, metrics in facts.face_metrics.items():
+        ident = "ADVANCES_" + "".join(c if c.isalnum() else "_" for c in face_id).upper()
         add("    Face {")
         add(f'        id: "{face_id}",')
         add(f'        file: "{metrics.face.file}",')
@@ -2787,8 +2862,59 @@ def layout_rs_text(facts: VariantFacts) -> str:
         add(f"        atlas_tiles: {metrics.outlined * metrics.tile_rows_per_line},")
         add(f"        max_advance_permyriad: {round(metrics.max_advance_px * 10_000)},")
         add(f"        mean_advance_permyriad: {round(metrics.avg_advance_px * 10_000)},")
+        add(f"        advances: &{ident},")
         add("    },")
     add("];")
+    add("")
+    add("/// §5.5's fit verdict for one string against one declared box, measured rather than counted.")
+    add("pub struct Fit {")
+    add("    /// The string's width in pixels, for a report line. Truncating: the verdict below is the")
+    add("    /// inequality, done before any division.")
+    add("    pub width_px: u32,")
+    add("    /// Whether the string fits the box it was measured against: `units × raster ≤ box × upem`,")
+    add("    /// the same inequality `scripts/album_bake.py`'s `FontMetrics::fits` uses, so the host gate")
+    add("    /// and the bake cannot disagree about a verdict.")
+    add("    pub inside_box: bool,")
+    add("    /// Code points this face has no glyph for. §5.5 keeps this verdict separate from width:")
+    add("    /// an unwritten character is not an elision, and a title that renders partly blank is a")
+    add("    /// different failure from a title that overflows.")
+    add("    pub unwritten: usize,")
+    add("}")
+    add("")
+    add("impl Face {")
+    add("    /// The advance width of `ch` in this face's own font units, or `None` when the face has no")
+    add("    /// glyph for it. A linear scan over a 95-entry table: this is a measurement path, never the")
+    add("    /// paint path, and §6's ban on divides is why the paint path carries a reciprocal instead.")
+    add("    pub fn advance_units(&self, ch: char) -> Option<u32> {")
+    add("        let code = ch as u32;")
+    add("        for &(point, units) in self.advances {")
+    add("            if point == code {")
+    add("                return Some(units as u32);")
+    add("            }")
+    add("        }")
+    add("        None")
+    add("    }")
+    add("")
+    add("    /// §5.5's fit verdict: measure `text` from this face's own advances and compare it with a")
+    add("    /// declared box in pixels. Never a count of characters, and never a float comparison.")
+    add("    pub fn measure(&self, text: &str, box_px: u32) -> Fit {")
+    add("        let mut units: u32 = 0;")
+    add("        let mut unwritten = 0usize;")
+    add("        for ch in text.chars() {")
+    add("            match self.advance_units(ch) {")
+    add("                Some(width) => units += width,")
+    add("                None => unwritten += 1,")
+    add("            }")
+    add("        }")
+    add("        Fit {")
+    add("            // A divide for the reported width only: the verdict below is the same inequality")
+    add("            // without one, and this function is called from the host gates, not from a repaint.")
+    add("            width_px: units * self.raster / self.upem,")
+    add("            inside_box: units * self.raster <= box_px * self.upem,")
+    add("            unwritten,")
+    add("        }")
+    add("    }")
+    add("}")
     add("")
     add("/// One element of the layout: a box owned by a band or by a scene (§5.0's second correction — a")
     add("/// chrome element's geometry belongs to the band, not to a scene). Coordinates are as declared")
@@ -3028,7 +3154,9 @@ def layout_rs_text(facts: VariantFacts) -> str:
     add("    BAR_CELLS == 0")
     add("        || (BAR_CELLS >= BAR_CELLS_FLOOR")
     add("            && BAR_PX == BAR_CELLS * BAR_CELL_PX")
-    add("            && BAR_PX % BAR_CELLS == 0);")
+    add("            && BAR_PX % BAR_CELLS == 0),")
+    add("    \"the declared bar grid is below §6's floor, or its cells are not whole pixels\"")
+    add(");")
     if facts.art_element is not None:
         add("const _: () = assert!(art_ceiling_is_derived(), \"the art ceiling is not the derived value\");")
     add("")
@@ -3915,6 +4043,41 @@ def layout_self_test() -> int:
                     "nothing to the width and *is* named in the return value, which is what makes the "
                     "mapping leg above a check rather than a pass-by-default. §5.5 keeps the verdict "
                     "about width separate from the verdict about glyphs for exactly this reason")
+            # The device's own measurement path, read back out of the generated module: the table
+            # written into `src/layout.rs` must produce the *same* verdict as the Python metrics it
+            # was generated from, for a string that fits and one that does not. Without this leg the
+            # Rust side's `Face::measure` is only ever exercised by a test that shares its table.
+            module_text = layout_rs_text(facts)
+            title_face_id = facts.title_element.face
+            metrics = facts.title_element.metrics
+            table = read_advance_table(module_text, title_face_id, "the generated title face")
+            for probe, box in (("Bioluminescent 1", facts.title_element.w),
+                               ("An unreasonably long album title that will not fit anywhere",
+                                facts.title_element.w)):
+                rust_fits, rust_px, rust_missing = measure_from_table(
+                    table, probe, metrics.raster, metrics.upem, box)
+                bake_fits, bake_px, bake_missing = metrics.fits(probe, box)
+                leg(f"variant B: the generated advance table reproduces {probe!r}'s verdict",
+                    f"{bake_px:.1f} px {'fits' if bake_fits else 'overflows'}",
+                    f"{rust_px:.1f} px {'fits' if rust_fits else 'overflows'}",
+                    (rust_fits, round(rust_px, 4), rust_missing) == (bake_fits, round(bake_px, 4), bake_missing),
+                    "two paths for one verdict: the left number comes from `FontMetrics.fits` (the "
+                    f"tracked .ttf's `hmtx`), the right from the {len(table)}-entry table the generator "
+                    "wrote into `src/layout.rs`, parsed back out of that file and summed with the "
+                    "device's own inequality (`units × raster ≤ box × upem`). This is what makes "
+                    "D9's replacement real: the ROM measures the title, it does not count characters. "
+                    "The two probes straddle the declared box — a shipped title that fits and one that "
+                    "does not — because a leg whose both halves answer `fits` is satisfied by a "
+                    "measurement that always returns true, which is the failure a one-sided leg "
+                    "would be")
+            leg("variant B: the read-back table covers exactly the face's mapped code points",
+                f"{metrics.mapped_count} mapped", f"{len(table)} entries",
+                len(table) == metrics.mapped_count
+                and set(table) == {ord(c) for c in metrics.advance_units},
+                "spec/measurement: the generated table is not allowed to grow or lose a code point "
+                "between the font and the device — a missing entry would show as `unwritten` at "
+                "runtime and a spurious one would be a glyph this face does not have, and both are "
+                "invisible in a generated file a reviewer reads past")
         bar_box_px = ((facts.bar_element.spec.x1 - facts.bar_element.spec.x0 + 1) * spec.tile_px
                       if facts.bar_element else 0)
         if a_variant:

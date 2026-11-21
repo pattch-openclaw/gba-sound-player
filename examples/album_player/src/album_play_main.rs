@@ -178,6 +178,7 @@ mod rom {
     use album_player::backend;
     use album_player::geometry;
     use album_player::keys;
+    use album_player::layout;
     use album_player::meta::{Album, Track};
     use album_player::pcm::{PcmSource, SourceError};
     use album_player::position;
@@ -3750,6 +3751,18 @@ mod rom {
             album.album_samples(),
             album.rate_hz(),
             album.album_title()
+        );
+        // §13's AP-3 row: every hardware report has to be attributable to a geometry, so the boot
+        // line names the variant and its bar grid. Both come from the generated `layout` module — the
+        // same one `meta::parse` just compared the manifest against — which is what makes a report
+        // like "the bar looked wrong at 240 px" a statement about a known layout rather than an
+        // unnamed one. Printed after the parse so a refused manifest prints no layout it did not use.
+        agb::println!(
+            "[album-rom] layout={} bar_cells={} bar_px={} cell_px={} (generated: ALBUM-PLAYER.md §5, §6)",
+            layout::LAYOUT_ID,
+            layout::BAR_CELLS,
+            layout::BAR_PX,
+            layout::BAR_CELL_PX
         );
         agb::println!(
             "[album-rom] start_track={} (this gate starts at track 1; the product plays the record from its first track)",
