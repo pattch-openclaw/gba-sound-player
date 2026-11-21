@@ -695,7 +695,6 @@ fn cycles_of(tables: &DefaultTables, class: usize, m: &[i32; BANDW]) -> u32 {
 /// `mu · (CY_BANDSYM + band_cycles)`, so a band whose decoder work is expensive relative to
 /// its distortion is more readily dropped — which is how an over-cap frame is re-coded below
 /// the cap instead of refusing the candidate.
-#[allow(clippy::too_many_arguments)]
 pub fn quantise_chan_rd(
     coef: &[f32],
     tables: &DefaultTables,

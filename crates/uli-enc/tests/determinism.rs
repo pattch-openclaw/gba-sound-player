@@ -117,6 +117,10 @@ fn the_rd_search_is_thread_invariant() {
     let four = run(4);
     assert!(one.report.g_chosen.is_some(), "the search did not run");
     assert!(
+        one.report.mu_frames > 0,
+        "musearch never engaged; the S6 path is untested here"
+    );
+    assert!(
         four.report.workers_used >= 2,
         "four workers were not exercised"
     );

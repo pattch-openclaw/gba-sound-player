@@ -1179,10 +1179,11 @@ fn an_over_cap_candidate_is_re_coded_not_refused() {
     );
 }
 
-/// A cap nothing exceeds must leave the search **byte-for-byte** unchanged. This is the
+/// A cap nothing exceeds must leave the search's **curve** unchanged. This is the
 /// other half of S6: the price is a constraint tool, not a quality knob, and turning it on
 /// where the cap does not bind must be inert (the reference's `--musearch` behaves the same
-/// way at the low budgets).
+/// way at the low budgets). What is asserted is the per-frame curve — `g`, rate,
+/// distortion, cycles and M/S — and that no candidate was re-coded, not the emitted bytes.
 #[test]
 fn musearch_is_inert_when_the_cap_does_not_bind() {
     let (_d, _pcm, samples, tables, _content, _nf) = coded(100);
