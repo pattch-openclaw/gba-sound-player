@@ -42,6 +42,96 @@ libraries that other GBA ROMs can build on top of.
 
 5. **Upstream higher sample rates.** Add support for higher sample rates (like 65kHz) to the upstream `agb` library to push past the current 32kHz software mixer limit.
 
+## The map: two pipelines, three tools, one bundle
+
+The sections below this one are organised by *track*; this section is the shape they share, and it
+is the quickest way to answer "which file do I edit?" for the album application. That application is
+built from **two independent inputs** which meet in **one driver** and are assembled into **one
+binary blob** — so the first question about any album behaviour is which of the two it belongs to.
+
+```
+  AUDIO    album.toml ────────► album_prep.py ──► gafp_pack.py ───┐
+           (the album)          codec-blind       the codec       │  GAFP bytes
+                                PCM · tags ·      frames ·        │
+                                ASCII fold        profile · pin   │
+                                                                  │
+  LAYOUT   layout_spec.toml ──► album-layout-gen ─────────────────┤
+           (the app)            inside album_bake.py,             │
+           + tracked .ttf       reads no audio at all             │
+                                                                  ▼
+                                              album_bake.py — the single driver
+                                              resolves · checks · bundles
+                                                                  │
+                                         ┌────────────────────────┘
+                                         │
+                                         ▼
+                assets/albm1.bin         ALBM1 = header ‖ track table ‖ string pool ‖ GAFP bytes
+                src/assets.rs            generated: the pin table + include_bytes!("albm1.bin")
+                src/layout.rs            generated: the selected variant's geometry
+                                         │
+                                         ▼  make album-rom
+                                  album-player.gba
+```
+
+**The two tracked configs, and which one answers your question.**
+
+| | `examples/album_player/album.toml` | `examples/album_player/layout_spec.toml` |
+|---|---|---|
+| owns | **the album** — what is recorded | **the app** — how it is drawn |
+| shape | `[album]`, `[out]`, `[layout]` (one key: `variant`), `[[track]]` × N | `[meta]`, `[[face]]`, `[[variant]]` → nested `palette`/`band`/`scene`/`element`/`control` |
+| units | samples at the source's own rate, then 16,384 Hz after prep | **tiles** — never pixels, never text rows (a row count is a derived consequence) |
+| read by | `Config` (`scripts/album_bake.py:173`) | `LayoutSpec` (`scripts/album_bake.py:1745`) |
+| grows in | Phase 3 (`[art]`/`[viz]`/`[ui]`/`[game]` are refused by name until then) | 2b and Phase 3 (art boxes, viz streams) |
+| authority | [ALBUM-PLAYER.md](ALBUM-PLAYER.md) §9.0, §11 (A3a, A13) | [ALBUM-PLAYER.md](ALBUM-PLAYER.md) §5.0, §6 |
+
+The seam between them is deliberately **one field wide**: `album.toml` may say `[layout] variant =
+"B"` and nothing else — any other key in that section is refused, because geometry is declared in the
+spec and the config only *selects* (§5.0). Config never produces the other's numbers, and the spec
+never names a track. (Today the tracked `album.toml` names no variant at all: exactly one variant
+declares `product = true`, and that is what makes the line optional — a second product variant would
+make it mandatory.)
+
+**The three tools, and what each is forbidden to know.**
+
+| tool | what it decides | what it must not know |
+|---|---|---|
+| `scripts/album_prep.py` (364 lines) | probe, normalise to the product rate, extract clips, read tags, ASCII-fold titles | **anything about GAFP** — its own rule: "nothing here may learn what a GAFP frame is". Produces PCM and text, never a bitstream |
+| `scripts/gafp_pack.py` (1,616 lines) | every byte of audio: frames, the encode profile and its refusal, the `flac -d` differential, the pin file | anything about the layout, or which album this is |
+| `scripts/album_bake.py` (4,721 lines) | the album as a whole: timeline, which sources alias one blob, the manifest, the generated Rust, and the layout variant | how to encode audio — it shells the packer and forwards its refusal verbatim; it owns no encode decision |
+
+`album_bake.py` is one file with two halves, and they share nothing but the driver: the bake
+(`:911`) and `album-layout-gen` (`:1254`). The **layout half reads no audio at all** — only the spec
+and the tracked `.ttf` tables — so `python3 scripts/album_bake.py --layout-self-test` runs it
+standalone: `python3` with `fontTools` (module **and** the `pyftsubset` CLI), and `git` to ask whether
+a face is tracked. **No `flac`, no `metaflac`, no `ffmpeg`, no `cargo`, no ROM** — verified by running
+that command with only those four binaries on `PATH` (109 legs, eight register rows).
+`make album-layout-test` adds the Rust legs, which do parse a real `ALBM1`, and that is why the gate
+takes `album-bake` as a prerequisite. The driver resolves the layout **first**, on purpose, so no
+manifest is ever written whose bar arithmetic describes a grid the ROM cannot draw.
+
+**The bundle.** `assets/albm1.bin` is one artifact, laid out as
+`header ‖ track table ‖ string pool ‖ asset region`, where the asset region *is* the concatenated
+`GAFP` blobs. The ROM links exactly that file (`include_bytes!` in the generated `src/assets.rs`) and
+reaches a track by `(asset_off, asset_len)`; the `assets/trackNN.gfp` files on disk are intermediates
+— they are what the pins are read from, what the determinism leg compares, and what a re-bake deletes
+when a track leaves the config. Rebuild anything with `make album-bake`; `make help` lists the whole
+album surface.
+
+**Where it is checked** — four layers, each able to catch what the one above it cannot:
+
+| layer | catches | gate |
+|---|---|---|
+| config shape | unknown sections or keys, wrong TOML types, a section silently ignored | `make album-bake` |
+| spec semantics | geometry that does not tile, a pitch below the line box, a pool sum over budget, a face that is not a tracked licensed asset | `make album-layout-test` (eight refusals, fired by id) |
+| cross-file | manifest vs packed header disagreement; the writer's output re-read through the shipping reader; spec, `ALBM1` and `layout.rs` disagreeing about the grid or the variant | `make album-pack-check`, `make album-seam-test` |
+| the ROM | a stale artifact that reached the binary — the boot backstop nothing above can cover | `make album-rom`, `make album-test` |
+
+Two organising rules make the boundaries fall where they do, and both are stated in the plan of
+record rather than here: **a phase may refuse only facts its own tools can read** (§9.0), and **a
+generated number has one home** (§11's D9). If you are looking for a tool's duties or a refusal's
+owner, §9.0's table and register are the authority; §5.0 is the layout spec's; the tree listing that
+says which paths are tracked and which are generated is §4.1.
+
 ## Project ideas (top-level ROMs)
 
 The top-level behaviour of this ROM is intentionally minimal for now. Future
@@ -96,6 +186,12 @@ repository:
 For now the audio and input logic live inline in this crate. As they grow they
 will be split out into dedicated crates (`gba-sound-player-lib`, `gba-input-lib`) that
 the top-level ROM depends on.
+
+*(The diagram above is the **intended** layering from this project's first weeks, kept because it is
+still the design bet — it is not an inventory. The shipped tree is 8 crates and 12 example
+applications under `crates/` and `examples/`, listed in [Current state](#current-state) below; the
+album application's own two pipelines and three tools are mapped at the top of this file,
+[The map](#the-map-two-pipelines-three-tools-one-bundle).)*
 
 ### Current state
 
