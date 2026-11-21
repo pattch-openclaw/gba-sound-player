@@ -11,15 +11,14 @@ mod common;
 
 use common::{TempDir, silence_album, single_track};
 use uli_enc::{
-    Args, DEFAULT_BUDGET, DEFAULT_CAP_PCT, DefaultTables, Error, encode, encode_with_tables,
+    Args, DEFAULT_BUDGET, DEFAULT_CAP_PCT, DefaultTables, Error, Input, encode, encode_with_tables,
 };
 use uli_lite::format::ENC_PAIR_RBITS_MAX;
 use uli_lite::{Album, CodeTables, PremiseViolationKind};
 
 fn args(album: std::path::PathBuf, tracks: std::path::PathBuf, budget: u64) -> Args {
     Args {
-        album,
-        tracks,
+        input: Input::Pcm { album, tracks },
         budget,
         cap_pct: DEFAULT_CAP_PCT,
         g: None,

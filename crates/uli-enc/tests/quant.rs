@@ -26,8 +26,8 @@ mod common;
 
 use common::{TempDir, materialise, write_tracks};
 use uli_enc::{
-    Args, Content, DEFAULT_BUDGET, DEFAULT_CAP_PCT, DefaultTables, Pcm, Samples, chan_bits, encode,
-    frame_count, mdct::mdct_frame, quant,
+    Args, Content, DEFAULT_BUDGET, DEFAULT_CAP_PCT, DefaultTables, Input, Pcm, Samples, chan_bits,
+    encode, frame_count, mdct::mdct_frame, quant,
 };
 use uli_lite::format::{BANDW, M, NBANDS};
 use uli_lite::{Album, Decoder, DecoderState};
@@ -289,8 +289,10 @@ fn rate_and_snr_move_the_right_way_with_the_step() {
     let mut snrs = Vec::new();
     for g in [40i32, 80, 120, 160] {
         let out = encode(&Args {
-            album: album.clone(),
-            tracks: tracks.clone(),
+            input: Input::Pcm {
+                album: album.clone(),
+                tracks: tracks.clone(),
+            },
             budget: DEFAULT_BUDGET,
             cap_pct: DEFAULT_CAP_PCT,
             g: Some(g),
@@ -347,8 +349,10 @@ fn the_search_actually_runs_and_changes_the_album() {
     let tracks = write_tracks(dir.path(), &format!("1\t0\t{N_SAMPLES}\tDense\tS3\n"));
     let base = |rd: bool, g: Option<i32>| {
         encode(&Args {
-            album: album.clone(),
-            tracks: tracks.clone(),
+            input: Input::Pcm {
+                album: album.clone(),
+                tracks: tracks.clone(),
+            },
             budget: 4_000_000,
             cap_pct: DEFAULT_CAP_PCT,
             g,
@@ -480,8 +484,10 @@ fn the_search_fits_every_budget_it_accepts() {
     let tracks = write_tracks(dir.path(), &format!("1\t0\t{N_SAMPLES}\tDense\tS3\n"));
     for budget in [40_000u64, 60_000, 120_000, 400_000] {
         let out = encode(&Args {
-            album: album.clone(),
-            tracks: tracks.clone(),
+            input: Input::Pcm {
+                album: album.clone(),
+                tracks: tracks.clone(),
+            },
             budget,
             cap_pct: DEFAULT_CAP_PCT,
             g: None,
@@ -809,8 +815,10 @@ fn an_ms_album_decodes_to_sane_audio_and_beats_lr_on_correlated_stereo() {
     let (album, tracks) = correlated_album(dir.path());
     let run = |ms: Option<bool>, g: i32| {
         encode(&Args {
-            album: album.clone(),
-            tracks: tracks.clone(),
+            input: Input::Pcm {
+                album: album.clone(),
+                tracks: tracks.clone(),
+            },
             budget: 4_000_000,
             cap_pct: DEFAULT_CAP_PCT,
             g: Some(g),
@@ -869,8 +877,10 @@ fn the_search_chooses_the_domain_per_frame_and_the_stream_agrees() {
     // A budget that binds: at 8,000 bytes this album is rate-limited, which is the only
     // regime in which the two domains are comparable at all.
     let out = encode(&Args {
-        album: album.clone(),
-        tracks: tracks.clone(),
+        input: Input::Pcm {
+            album: album.clone(),
+            tracks: tracks.clone(),
+        },
         budget: 8_000,
         cap_pct: DEFAULT_CAP_PCT,
         g: None,
@@ -894,8 +904,7 @@ fn the_search_chooses_the_domain_per_frame_and_the_stream_agrees() {
     // the two at a fixed step cannot work — an M/S frame spends 4 step indices and
     // quantises at √2 times the unit, so at equal `g` it is simply coarser.
     let lr_only = encode(&Args {
-        album,
-        tracks,
+        input: Input::Pcm { album, tracks },
         budget: 8_000,
         cap_pct: DEFAULT_CAP_PCT,
         g: None,
@@ -935,8 +944,10 @@ fn ms_frames_are_thread_invariant() {
     let (album, tracks) = correlated_album(dir.path());
     let run = |threads: usize| {
         encode(&Args {
-            album: album.clone(),
-            tracks: tracks.clone(),
+            input: Input::Pcm {
+                album: album.clone(),
+                tracks: tracks.clone(),
+            },
             budget: 8_000,
             cap_pct: DEFAULT_CAP_PCT,
             g: None,
@@ -977,8 +988,10 @@ fn refining_the_grid_never_costs_quality() {
     let (album, tracks) = correlated_album(dir.path());
     let run = |fine_width: i32| {
         encode(&Args {
-            album: album.clone(),
-            tracks: tracks.clone(),
+            input: Input::Pcm {
+                album: album.clone(),
+                tracks: tracks.clone(),
+            },
             budget: 8_000,
             cap_pct: DEFAULT_CAP_PCT,
             g: None,

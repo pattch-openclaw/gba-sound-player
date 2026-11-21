@@ -16,8 +16,8 @@ mod common;
 
 use common::{TempDir, silence_album, single_track};
 use uli_enc::{
-    Args, Content, DEFAULT_BUDGET, DEFAULT_CAP_PCT, DefaultTables, FrameKind, FramePos, GPlan, Pcm,
-    Plan, bitwriter::BitWriter, container, frame_count, write_frame,
+    Args, Content, DEFAULT_BUDGET, DEFAULT_CAP_PCT, DefaultTables, FrameKind, FramePos, GPlan,
+    Input, Pcm, Plan, bitwriter::BitWriter, container, frame_count, write_frame,
 };
 use uli_lite::format::{M, NSTEP};
 use uli_lite::{Album, Decoder, DecoderState, Error as DecodeError};
@@ -208,8 +208,7 @@ fn e1s_own_content_is_legal() {
     let album = silence_album(dir.path(), n_samples);
     let tracks = single_track(dir.path(), n_samples as u32);
     let out = uli_enc::encode(&Args {
-        album,
-        tracks,
+        input: Input::Pcm { album, tracks },
         budget: DEFAULT_BUDGET,
         cap_pct: DEFAULT_CAP_PCT,
         g: None,

@@ -12,15 +12,14 @@ use common::{TempDir, silence_album, single_track};
 
 use uli_enc::{
     Args, Content, DC_G, DEFAULT_BUDGET, DEFAULT_CAP_PCT, DefaultTables, FrameKind, FramePos,
-    GPlan, Pcm, Plan, bitwriter::BitWriter, container, encode, frame_bits, write_frame,
+    GPlan, Input, Pcm, Plan, bitwriter::BitWriter, container, encode, frame_bits, write_frame,
 };
 use uli_lite::format::M;
 use uli_lite::{Album, CodeTables, Decoder, DecoderState, Error as DecodeError};
 
 fn args(album: std::path::PathBuf, tracks: std::path::PathBuf, threads: usize) -> Args {
     Args {
-        album,
-        tracks,
+        input: Input::Pcm { album, tracks },
         budget: DEFAULT_BUDGET,
         cap_pct: DEFAULT_CAP_PCT,
         g: None,
@@ -105,8 +104,11 @@ fn a_dc_impulse_frame_decodes_as_one_coded_band_per_channel() {
     // carry that frame's bitpos and the `g` state entering it (DC_G, not 0).
     let tracks = common::write_tracks(
         dir.path(),
-        "# n start len title artist (32768 Hz samples)\n\
-         1\t1024\t512\tDC\tuli-enc test\n",
+        &format!(
+            "# n start len title artist ({} Hz samples)\n\
+             1\t1024\t512\tDC\tuli-enc test\n",
+            uli_lite::format::RATE
+        ),
     );
 
     let tables = DefaultTables::build();

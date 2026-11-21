@@ -10,7 +10,8 @@ mod common;
 use common::{TempDir, silence_album, single_track};
 use std::process::Command;
 use uli_enc::{
-    Args, Content, DEFAULT_CAP_PCT, DefaultTables, Error, Pcm, Plan, Refusal, encode, frame_count,
+    Args, Content, DEFAULT_CAP_PCT, DefaultTables, Error, Input, Pcm, Plan, Refusal, encode,
+    frame_count,
 };
 use uli_lite::format::M;
 
@@ -36,8 +37,7 @@ fn a_budget_below_overhead_plus_the_stream_refuses_and_cites_both_numbers() {
     let budget = planned.overhead_bytes as u64;
 
     let err = encode(&Args {
-        album,
-        tracks,
+        input: Input::Pcm { album, tracks },
         budget,
         cap_pct: DEFAULT_CAP_PCT,
         g: None,
@@ -75,8 +75,7 @@ fn a_budget_below_the_container_overhead_refuses() {
     let dir = TempDir::new("refusal-overhead");
     let (album, tracks) = inputs(dir.path());
     let err = encode(&Args {
-        album,
-        tracks,
+        input: Input::Pcm { album, tracks },
         budget: 88,
         cap_pct: DEFAULT_CAP_PCT,
         g: None,

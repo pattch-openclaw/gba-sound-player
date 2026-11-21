@@ -100,6 +100,11 @@ pub struct SearchParams<'a> {
     /// `Some(_)` pins the domain; `None` lets the search choose per `g` (the rule is in
     /// [`Curves::compute`]).
     pub force_ms: Option<bool>,
+    /// Workers for the curve passes. Frames are independent once the tables are
+    /// fixed, so this is where E-R9's frame-parallelism lives; assembly is by frame
+    /// index, never by completion order (R5a), and each frame's own float sums stay
+    /// in their written order (R5b).
+    pub threads: usize,
 }
 
 /// One frame's RD curve: `stride`-spaced candidates, cheapest-rate-last order.
@@ -315,78 +320,19 @@ pub struct Curves {
 }
 
 impl Curves {
-    /// Code every frame at every candidate step. This is the expensive part of S3
-    /// and the part S5 parallelises: frames are independent once `g` is fixed, so
-    /// the same ordered-assembly argument as the emit pass applies.
+    /// Code every frame at every candidate step. This is the expensive part of S3 —
+    /// and, measured at S5's sizes, the part that made a 43-minute album take tens of
+    /// minutes on one thread: it is now frame-parallel (`p.threads`), with the same
+    /// ordered-assembly rule as the emit pass (R5a).
     pub fn compute(
         samples: &Samples,
         n_samples: usize,
         p: &SearchParams<'_>,
     ) -> Result<Self, Error> {
-        let SearchParams {
-            tables,
-            n_frames,
-            stride,
-            fine_width: _,
-            kappa,
-            cap,
-            force_ms,
-        } = *p;
-        let stride = stride.max(1);
-        let mut per_frame = Vec::with_capacity(n_frames);
-        let mut coef = [0f32; 2 * M];
-        for f in 0..n_frames {
-            crate::mdct::mdct_frame(samples, f, n_samples, &mut coef);
-            let mut c = Curve {
-                g: Vec::new(),
-                r: Vec::new(),
-                d: Vec::new(),
-                c: Vec::new(),
-                ms: Vec::new(),
-            };
-            let mut g = G_MIN;
-            while g <= G_MAX {
-                // Two rules decide which domain this candidate is in, and both matter:
-                //
-                //  * each is quantised with **its own** unit — an M/S frame's magnitudes
-                //    are sized by a √2-scaled step, because the reader's add recovers the
-                //    amplitude and the quantiser has to anticipate that;
-                //  * the two are then *compared* under one `λ`, computed from the L/R
-                //    unit, so that they are weighed on the same scale. Giving each its own
-                //    unit's `λ` would silently favour whichever came out larger.
-                //
-                // A candidate over the cycle cap loses to one that is not before `J` is
-                // consulted at all: the cap is a constraint, not a term.
-                let lam0 = kappa * quant::Unit::of(g, false).d * quant::Unit::of(g, false).d;
-                let (a, _) = measure(&coef, tables, g, false, kappa)?;
-                let (b, _) = measure(&coef, tables, g, true, kappa)?;
-                let fa = a.cycles <= cap;
-                let fb = b.cycles <= cap;
-                let useb = match force_ms {
-                    Some(m) => m,
-                    None => {
-                        if fa == fb {
-                            let jb = b.dist + lam0 * b.bits as f64;
-                            let ja = a.dist + lam0 * a.bits as f64;
-                            jb < ja
-                        } else {
-                            fb
-                        }
-                    }
-                };
-                let p = if useb { b } else { a };
-                c.g.push(g);
-                c.r.push(p.bits as f64);
-                c.d.push(p.dist);
-                c.c.push(p.cycles);
-                c.ms.push(useb);
-                if g == G_MAX {
-                    break;
-                }
-                g = (g + stride).min(G_MAX);
-            }
-            per_frame.push(c);
-        }
+        let n_frames = p.n_frames;
+        let stride = p.stride.max(1);
+        let per_frame = map_frames(samples, n_samples, p, |_f, coef| coarse_curve(coef, p))?;
+        debug_assert_eq!(per_frame.len(), n_frames, "one curve per frame");
         Ok(Self { per_frame, stride })
     }
 
@@ -415,53 +361,9 @@ impl Curves {
             return Ok(self.clone());
         }
         debug_assert_eq!(w.len(), self.per_frame.len(), "one weight per frame");
-        let mut coef = [0f32; 2 * M];
-        let mut per_frame = Vec::with_capacity(self.per_frame.len());
-        for (f, coarse) in self.per_frame.iter().enumerate() {
-            crate::mdct::mdct_frame(samples, f, n_samples, &mut coef);
-            // Where the coarse grid says this frame wants to be, at this price.
-            let mut best_j = f64::INFINITY;
-            let mut centre = G_MIN;
-            for i in 0..coarse.g.len() {
-                if coarse.c[i] > p.cap {
-                    continue;
-                }
-                let j = w[f] * coarse.d[i] + lambda * coarse.r[i];
-                if j < best_j {
-                    best_j = j;
-                    centre = coarse.g[i];
-                }
-            }
-            let lo = (centre - width).max(G_MIN);
-            let hi = (centre + width).min(G_MAX);
-            let mut c = Curve {
-                g: Vec::new(),
-                r: Vec::new(),
-                d: Vec::new(),
-                c: Vec::new(),
-                ms: Vec::new(),
-            };
-            let mut g = lo;
-            while g <= hi {
-                if let Some((i, _)) = coarse.g.iter().enumerate().find(|&(_, &cg)| cg == g) {
-                    // Already measured on the coarse sweep; reordering would be waste.
-                    c.g.push(g);
-                    c.r.push(coarse.r[i]);
-                    c.d.push(coarse.d[i]);
-                    c.c.push(coarse.c[i]);
-                    c.ms.push(coarse.ms[i]);
-                } else {
-                    let point = Self::measure_g(&coef, p, g)?;
-                    c.g.push(g);
-                    c.r.push(point.0.bits as f64);
-                    c.d.push(point.0.dist);
-                    c.c.push(point.0.cycles);
-                    c.ms.push(point.1);
-                }
-                g += 1;
-            }
-            per_frame.push(c);
-        }
+        let per_frame = map_frames(samples, n_samples, p, |f, coef| {
+            refine_curve(coef, &self.per_frame[f], p, w[f], lambda)
+        })?;
         Ok(Self {
             per_frame,
             stride: 1,
@@ -601,6 +503,141 @@ impl Curves {
             .map(|(f, &i)| self.per_frame[f].g[i])
             .collect()
     }
+}
+
+/// Run `f` over every frame, frame-parallel, and return the results **by frame
+/// index** — never by completion order (R5a).
+///
+/// This is the shape E-R9 asks for and the reason a 43-minute album encodes in
+/// minutes rather than tens of them: every frame's MDCT and every candidate's
+/// quantisation are independent, and only their *assembly* has to be ordered. Each
+/// worker owns its coefficient scratch and its frames' float sums, so a frame's
+/// numbers are the same at one thread or many (R5b); `chunks` is contiguous, so the
+/// per-frame work does not depend on the split either.
+fn map_frames<F>(
+    samples: &Samples,
+    n_samples: usize,
+    p: &SearchParams<'_>,
+    f: F,
+) -> Result<Vec<Curve>, Error>
+where
+    F: Fn(usize, &[f32; 2 * M]) -> Result<Curve, Error> + Sync,
+{
+    let ranges = crate::plan::chunks(p.n_frames, p.threads.max(1));
+    let parts: Vec<Result<Vec<Curve>, Error>> = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            let f = &f;
+            handles.push(scope.spawn(move || {
+                let mut out = Vec::with_capacity(range.len());
+                let mut coef = [0f32; 2 * M];
+                for frame in range {
+                    crate::mdct::mdct_frame(samples, frame, n_samples, &mut coef);
+                    out.push(f(frame, &coef)?);
+                }
+                Ok(out)
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("an RD-search thread panicked"))
+            .collect()
+    });
+    let mut out = Vec::with_capacity(p.n_frames);
+    for part in parts {
+        out.extend(part?);
+    }
+    Ok(out)
+}
+
+/// One frame's coarse curve: a point every `stride` steps across `GMIN..=GMAX`.
+///
+/// Two rules decide which domain each candidate is in, and both matter:
+///
+///  * each is quantised with **its own** unit — an M/S frame's magnitudes are sized
+///    by a √2-scaled step, because the reader's add recovers the amplitude and the
+///    quantiser has to anticipate that;
+///  * the two are then *compared* under one `λ`, computed from the L/R unit, so that
+///    they are weighed on the same scale. Giving each its own unit's `λ` would
+///    silently favour whichever came out larger.
+///
+/// A candidate over the cycle cap loses to one that is not before `J` is consulted
+/// at all: the cap is a constraint, not a term.
+fn coarse_curve(coef: &[f32; 2 * M], p: &SearchParams<'_>) -> Result<Curve, Error> {
+    let stride = p.stride.max(1);
+    let mut c = Curve {
+        g: Vec::new(),
+        r: Vec::new(),
+        d: Vec::new(),
+        c: Vec::new(),
+        ms: Vec::new(),
+    };
+    let mut g = G_MIN;
+    while g <= G_MAX {
+        let (point, useb) = Curves::measure_g(coef, p, g)?;
+        c.g.push(g);
+        c.r.push(point.bits as f64);
+        c.d.push(point.dist);
+        c.c.push(point.cycles);
+        c.ms.push(useb);
+        if g == G_MAX {
+            break;
+        }
+        g = (g + stride).min(G_MAX);
+    }
+    Ok(c)
+}
+
+/// One frame's fine curve around where the coarse grid says it wants to be at the
+/// price `lambda`. Coarse points inside the window are reused rather than re-coded.
+fn refine_curve(
+    coef: &[f32; 2 * M],
+    coarse: &Curve,
+    p: &SearchParams<'_>,
+    wf: f64,
+    lambda: f64,
+) -> Result<Curve, Error> {
+    let mut best_j = f64::INFINITY;
+    let mut centre = G_MIN;
+    for i in 0..coarse.g.len() {
+        if coarse.c[i] > p.cap {
+            continue;
+        }
+        let j = wf * coarse.d[i] + lambda * coarse.r[i];
+        if j < best_j {
+            best_j = j;
+            centre = coarse.g[i];
+        }
+    }
+    let lo = (centre - p.fine_width).max(G_MIN);
+    let hi = (centre + p.fine_width).min(G_MAX);
+    let mut c = Curve {
+        g: Vec::new(),
+        r: Vec::new(),
+        d: Vec::new(),
+        c: Vec::new(),
+        ms: Vec::new(),
+    };
+    let mut g = lo;
+    while g <= hi {
+        if let Some(i) = coarse.g.iter().position(|&cg| cg == g) {
+            // Already measured on the coarse sweep; re-measuring would be waste.
+            c.g.push(g);
+            c.r.push(coarse.r[i]);
+            c.d.push(coarse.d[i]);
+            c.c.push(coarse.c[i]);
+            c.ms.push(coarse.ms[i]);
+        } else {
+            let (point, useb) = Curves::measure_g(coef, p, g)?;
+            c.g.push(g);
+            c.r.push(point.bits as f64);
+            c.d.push(point.dist);
+            c.c.push(point.cycles);
+            c.ms.push(useb);
+        }
+        g += 1;
+    }
+    Ok(c)
 }
 
 /// `--cap PCT` as a cycle count for one frame period.

@@ -1,10 +1,16 @@
 #![forbid(unsafe_code)]
-//! `uli-enc` — the host-side ULI2 encoder, step S1.
+//! `uli-enc` — the host-side ULI2 encoder, steps S1 through S5.
 //!
 //! The contract boundary is PCM: an `album.f32` (float32 interleaved stereo at PCM16
 //! scale, 32,768 Hz) and a `tracks.tsv` in; one ULA2 blob the `uli-lite` decoder accepts,
 //! out (`PLAN-OF-RECORD.md` → "The encoder", E-R2). Samples rather than a waveform format,
 //! because a decoder in the loop makes the boundary testable byte for byte.
+//!
+//! **The WAV front end is a convenience layer over that boundary, not a second one.** A
+//! list of WAV sources is decoded, brought to 32,768 Hz stereo at PCM16 scale and joined
+//! gaplessly (`wav`, `resample`, `assemble`), and `--emit-pcm` writes back the exact pair
+//! the encoder read — so "a natively-32,768 Hz WAV reaches the same blob its PCM pair
+//! does" is a checkable claim, and the resampled path is held to SNR because E-R2 says so.
 //!
 //! What S1 is: the plan-then-emit writer. It takes the album length from the
 //! track table and requires `album.f32` to be exactly that long (E-R2), fixes the
@@ -12,15 +18,14 @@
 //! an argument to `Plan::new` and refuses one the reader cannot decode (the step-index
 //! bound), checks the whole album against `--budget` (refusing before a frame is written), then
 //! codes frame bodies in index order with the workers computing but never ordering
-//! (R5a). Its frames carry **silence at `g = 0`**; the DC frame exists as
-//! [`FrameKind::DcImpulse`] and
-//! is exercised by the round-trip test. There is no MDCT, no quantiser, no RD
-//! search and no table training: those are S2…S5. See `README.md`.
+//! (R5a). Its frames carry **silence at `g = 0`** when no codec knob is given; the DC frame
+//! exists as [`FrameKind::DcImpulse`] and is exercised by the round-trip test.
 //!
 //! `uli-lite` stays read-side (2026-11-19 later, decision 1), so the tables
 //! blob geometry, the code-length computation and the canonical code assignment
 //! all live here; the decoder's parser is the authority that catches a mistake.
 
+pub mod assemble;
 pub mod bitwriter;
 pub mod container;
 pub mod frame;
@@ -30,8 +35,10 @@ pub mod pcm;
 pub mod plan;
 pub mod quant;
 pub mod rd;
+pub mod resample;
 pub mod tables_default;
 pub mod train;
+pub mod wav;
 
 use std::fmt;
 use std::path::PathBuf;
@@ -49,11 +56,37 @@ pub use plan::{
 pub use rd::{Curves, DEFAULT_KAPPA, G_MAX, G_MIN, cap_cycles, measure, weights};
 pub use tables_default::{Codes, DefaultTables};
 
+/// Where an album comes from.
+///
+/// Two shapes, one boundary. [`Input::Pcm`] **is** the boundary (E-R2): the
+/// reference's own pair, and the only shape the byte-exactness gate is stated
+/// over. [`Input::Wav`] is the convenience layer on top of it, and the variants
+/// are separate rather than one struct with an empty field because a caller that
+/// supplies both has not said which album it means — the CLI refuses that instead
+/// of silently preferring one.
+#[derive(Clone, Debug)]
+pub enum Input {
+    /// `album.f32` + `tracks.tsv`: float32 interleaved stereo at PCM16 scale, and
+    /// the track table that sets the album length.
+    Pcm { album: PathBuf, tracks: PathBuf },
+    /// WAV sources in play order, joined gaplessly (S5). Titles and artists come
+    /// from each file's `LIST/INFO` tags, falling back to its stem and `?`.
+    Wav(Vec<PathBuf>),
+}
+
+impl Input {
+    /// Whether this input is the PCM boundary itself. The distinction decides
+    /// whether [`Output::boundary`] carries an album (a WAV front end produced one
+    /// in memory) or `None` (the pair is already a file the caller owns).
+    pub fn is_pcm_pair(&self) -> bool {
+        matches!(self, Input::Pcm { .. })
+    }
+}
+
 /// Everything the CLI passes; the library reads no environment.
 #[derive(Clone, Debug)]
 pub struct Args {
-    pub album: PathBuf,
-    pub tracks: PathBuf,
+    pub input: Input,
     /// Whole-blob byte budget, never a cart size (E-R10).
     pub budget: u64,
     /// Percent of the 262,144-cycle frame period. S3 gives it something to
@@ -92,6 +125,10 @@ pub struct Args {
 /// What the encoder measured while producing the blob.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
+    /// Album length and track count, reported so the CLI can print the reference's
+    /// album line without re-reading the input.
+    pub n_samples: u32,
+    pub n_tracks: usize,
     pub overhead_bytes: usize,
     pub target_bits: i64,
     pub bits_per_frame: f64,
@@ -110,9 +147,18 @@ pub struct Report {
     pub lambda: Option<f64>,
     /// Bits the stream actually used, from the decoder's own per-frame counts.
     pub stream_bits: u64,
-    /// Codec-only SNR of the decoded int16 output against the input, in dB.
-    /// `None` when the album was silence, where it has no meaning.
+    /// Codec-only SNR of the decoded int16 output against the input, in dB,
+    /// **pooled over the album** (one squared-error sum against one signal sum).
+    /// `None` when the album was silence, where it has no meaning. The per-track
+    /// column is [`Self::track_snr`]; the two differ on a heterogeneous album, and
+    /// E-R7's 32.29/25.78 dB is stated against this pooled one.
     pub snr_db: Option<f64>,
+    /// The same SNR at int8, pooled; the reference's second verify column.
+    pub snr8_db: Option<f64>,
+    /// Per-track time-domain SNR, pcm16 and int8, in track order — the reference's
+    /// `verify: per-track … pcm16 / int8` line. `None` per field when a track has
+    /// no signal energy to compare against (the ratio is 0/0 there).
+    pub track_snr: Vec<TrackSnr>,
     /// `|X| >= 2^28` coefficients the reader counted: the encoder's `mmax` should
     /// make this impossible, and it is the number that says whether it did.
     pub xover: u32,
@@ -132,17 +178,37 @@ pub struct Report {
 /// How many times the search may re-try the bit target before refusing.
 const RETRY_ATTEMPTS: usize = 10;
 
+/// One track's measured SNR, in the reference's two output profiles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrackSnr {
+    pub pcm16: Option<f64>,
+    pub int8: Option<f64>,
+}
+
 /// The finished blob and its report.
 #[derive(Clone, Debug)]
 pub struct Output {
     pub bytes: Vec<u8>,
     pub report: Report,
+    /// The PCM boundary this blob was encoded from, present only when the input was
+    /// a set of WAVs (the front end assembled it in memory). `--emit-pcm` writes it
+    /// out, so the dump is bit-for-bit what the encoder read rather than a second
+    /// conversion of the same sources.
+    pub boundary: Option<Boundary>,
+}
+
+/// `album.f32`'s contents plus the track table that describes them.
+#[derive(Clone, Debug)]
+pub struct Boundary {
+    pub pcm: Pcm,
+    pub samples: Samples,
 }
 
 #[derive(Debug)]
 pub enum Error {
     Pcm(String),
     Tracks(String),
+    Wav(String),
     Tables(uli_lite::Error),
     Premise(PremiseViolation),
     GPlan(GPlanViolation),
@@ -155,7 +221,11 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Pcm(m) | Error::Tracks(m) | Error::Plan(m) | Error::Verify(m) => f.write_str(m),
+            Error::Pcm(m)
+            | Error::Tracks(m)
+            | Error::Wav(m)
+            | Error::Plan(m)
+            | Error::Verify(m) => f.write_str(m),
             Error::Tables(e) => write!(f, "tables blob does not parse: {e:?}"),
             Error::Premise(v) => write!(f, "tables violate the encoder premise (E-R4): {v}"),
             Error::GPlan(v) => write!(f, "the frame plan cannot decode: {v}"),
@@ -186,8 +256,7 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
     // field to `Args` without deciding what `encode` does with it no longer survives
     // to become a test result, let alone a shipped album.
     let Args {
-        album,
-        tracks,
+        input,
         budget,
         cap_pct,
         g,
@@ -203,7 +272,6 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
     // through it and quietly bypass the bindings above. That is what the first
     // version of this guard missed: `args.rd` still resolved, so the exhaustive
     // pattern proved nothing.
-    let (album, tracks) = (album.as_path(), tracks.as_path());
     let (budget, cap_pct, g, rd, kappa, stride, fine_width, train, ms, threads) = (
         *budget,
         *cap_pct,
@@ -216,7 +284,16 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         *ms,
         *threads,
     );
-    let pcm = Pcm::open(album, tracks)?;
+    // S5's two input shapes meet here, and only here: below this point an album is
+    // a `Pcm` and (when it has content) a `Samples`, whichever door it came in by.
+    let from_wav = !input.is_pcm_pair();
+    let (pcm, mut loaded) = match input {
+        Input::Pcm { album, tracks } => (Pcm::open(album, tracks)?, None),
+        Input::Wav(paths) => {
+            let (pcm, samples) = assemble::assemble(paths)?;
+            (pcm, Some(samples))
+        }
+    };
     let mut report_g: Option<Vec<i32>> = None;
     let mut report_lambda: Option<f64> = None;
 
@@ -236,7 +313,24 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
     // and the refusals never depend on the codec), `--g N` is S2's fixed step, and
     // `--rd` is S3's search.
     let nf = frame_count(pcm.n_samples);
-    let samples = if g.is_some() || rd {
+    // A WAV source *is* real audio, so asking for one and no codec knob would write
+    // S1's silence — the exact silent failure S3's ledger is about. The PCM path
+    // keeps the silence arm because half the suite (containers, refusals) uses it
+    // and must not depend on the codec.
+    if from_wav && g.is_none() && !rd {
+        return Err(Error::Plan(
+            "a --wav source is real audio, but neither --rd nor --g was given, so the \
+             album would be S1's silence: give --rd to search the budget or --g to pin \
+             a step"
+                .to_string(),
+        ));
+    }
+    let samples = if loaded.is_some() {
+        loaded.take()
+    } else if g.is_some() || rd {
+        let Input::Pcm { album, .. } = input else {
+            unreachable!("a WAV input always assembles its samples above")
+        };
         Some(Samples::open(album, pcm.n_samples as usize)?)
     } else {
         None
@@ -275,6 +369,7 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
                 kappa,
                 cap,
                 force_ms: ms,
+                threads,
             };
             let coarse = Curves::compute(s, pcm.n_samples as usize, &params)?;
             let (lam_coarse, _) = coarse.allocate(&w, sizing.target_bits as f64, cap)?;
@@ -445,6 +540,8 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
     Ok(Output {
         bytes,
         report: Report {
+            n_samples: pcm.n_samples,
+            n_tracks: pcm.tracks.len(),
             overhead_bytes: plan.overhead_bytes,
             target_bits: plan.target_bits,
             bits_per_frame: plan.bits_per_frame,
@@ -457,17 +554,27 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             est_mean_cycles: verify.mean_cycles,
             stream_bits: verify.bits,
             snr_db: verify.snr_db,
+            snr8_db: verify.snr8_db,
+            track_snr: verify.track_snr.clone(),
             xover: verify.xover,
             hfnz: verify.hfnz,
             nonzero_coeffs: content.nonzero_coeffs(),
             trained: trained_used,
             ms_frames: content.ms_frames(),
         },
+        // Only a WAV front end has a boundary that is not already a file. Moving
+        // the samples here is why `--emit-pcm` can promise the dump is the exact
+        // buffer that was encoded, not a re-read of it.
+        boundary: if from_wav {
+            samples.map(|samples| Boundary { pcm, samples })
+        } else {
+            None
+        },
     })
 }
 
 /// What a verification decode of the finished blob measured.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Verify {
     pub max_cycles: u32,
     pub mean_cycles: u32,
@@ -475,6 +582,10 @@ pub struct Verify {
     /// Codec-only SNR against the input, or `None` if there were no samples to
     /// compare against (S1's silence path never loads them).
     pub snr_db: Option<f64>,
+    /// The int8 profile's pooled SNR, and the per-track columns the reference also
+    /// prints — both undefined when there is no input to compare against.
+    pub snr8_db: Option<f64>,
+    pub track_snr: Vec<TrackSnr>,
     pub xover: u32,
     pub hfnz: u32,
 }
@@ -514,7 +625,14 @@ fn self_verify(
     // feeds a reported number is reduced by index, never by completion order).
     let mut se = 0f64;
     let mut sx = 0f64;
+    let mut se8 = 0f64;
+    // The same three sums per track, which is the reference's verify column.
+    let n_tracks = pcm.tracks.len();
+    let mut se_t = vec![0f64; n_tracks];
+    let mut sx_t = vec![0f64; n_tracks];
+    let mut se8_t = vec![0f64; n_tracks];
     let n_samples = pcm.n_samples as usize;
+    let mut track = 0usize;
 
     for f in 0..n_frames {
         let info = dec
@@ -534,12 +652,25 @@ fn self_verify(
                     continue;
                 }
                 let p = p as usize;
+                // `p` ascends, so advance the track cursor instead of rescanning.
+                while track + 1 < n_tracks && pcm.tracks[track + 1].start_sample as usize <= p {
+                    track += 1;
+                }
                 for ch in 0..2 {
                     let x = f64::from(s.at(p, ch));
                     let y = f64::from(if ch == 0 { out16l[i] } else { out16r[i] });
+                    // The int8 profile's scale is 256 PCM16 units per step; that is
+                    // the same number the reader writes to the DMA and the same one
+                    // the reference's verify line uses.
+                    let y8 = 256.0 * f64::from(if ch == 0 { out8l[i] } else { out8r[i] });
                     let d = x - y;
+                    let d8 = x - y8;
                     se += d * d;
                     sx += x * x;
+                    se8 += d8 * d8;
+                    se_t[track] += d * d;
+                    sx_t[track] += x * x;
+                    se8_t[track] += d8 * d8;
                 }
             }
         }
@@ -550,6 +681,22 @@ fn self_verify(
         return Err(Error::Verify(format!(
             "expected EndOfStream after {n_frames} frames, got {after:?}"
         )));
+    }
+
+    // Every track must be reachable through its own preroll entry, not only as a
+    // stretch of the linear decode: a track table is a claim about seeking, and S5's
+    // gate is "every track decodes". A fresh decoder per track keeps this from
+    // depending on where the previous seek left the overlap state.
+    for t in 0..n_tracks {
+        let mut st = DecoderState::new();
+        let mut seeker = Decoder::new(album, &mut st).map_err(Error::Decode)?;
+        seeker.seek_track(t).map_err(|e| {
+            Error::Verify(format!(
+                "track {} ({:?}) does not seek to its preroll frame: {e:?}",
+                t + 1,
+                pcm.tracks[t].title
+            ))
+        })?;
     }
 
     // The mean is the integer mean over frames, and an album always has at least the
@@ -564,12 +711,33 @@ fn self_verify(
     } else {
         None
     };
+    let snr8_db = if samples.is_some() && sx > 0.0 && se8 > 0.0 {
+        Some(10.0 * (sx / se8).log10())
+    } else if samples.is_some() {
+        Some(f64::INFINITY)
+    } else {
+        None
+    };
+    let track_snr = (0..n_tracks)
+        .map(|t| TrackSnr {
+            pcm16: ratio(sx_t[t], se_t[t]),
+            int8: ratio(sx_t[t], se8_t[t]),
+        })
+        .collect();
     Ok(Verify {
         max_cycles,
         mean_cycles: mean,
         bits,
         snr_db,
+        snr8_db,
+        track_snr,
         xover,
         hfnz,
     })
+}
+
+/// `10 log10(signal / error)`, or `None` when there is no signal or no error to
+/// divide — an inaudible track has no meaningful ratio and `inf` is not a report.
+fn ratio(sx: f64, se: f64) -> Option<f64> {
+    (sx > 0.0 && se > 0.0).then(|| 10.0 * (sx / se).log10())
 }

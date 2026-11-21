@@ -28,7 +28,7 @@
 use std::path::Path;
 
 use crate::Error;
-use uli_lite::format::MAX_TRACKS;
+use uli_lite::format::{MAX_TRACKS, RATE};
 
 /// One track as the container will carry it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,6 +182,39 @@ impl Pcm {
             tracks: parsed,
         })
     }
+
+    /// The WAV front end's construction: the lengths came from the same buffer the
+    /// samples did (`assemble.rs`), so `NS = last.start + last.len` holds by
+    /// construction and there is no file to compare against.
+    pub(crate) fn assembled(n_samples: u32, tracks: Vec<TrackInput>) -> Self {
+        if let Some(last) = tracks.last() {
+            debug_assert_eq!(
+                u64::from(last.start_sample) + u64::from(last.n_samples),
+                u64::from(n_samples),
+                "assembled API violated its own NS rule"
+            );
+        }
+        Self { n_samples, tracks }
+    }
+
+    /// Write the track table in the boundary's own format, so a WAV front end can
+    /// hand back the pair it encoded from (`--emit-pcm`). Round-trips through
+    /// [`Self::open`] by construction: one tab-separated row per track, numbered
+    /// from 1, with no empty field.
+    pub fn write_tracks(&self, path: &Path) -> Result<(), Error> {
+        let mut text = format!("# n\tstart\tlen\ttitle\tartist ({RATE} Hz samples)\n");
+        for (i, t) in self.tracks.iter().enumerate() {
+            text.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\n",
+                i + 1,
+                t.start_sample,
+                t.n_samples,
+                t.title,
+                t.artist
+            ));
+        }
+        std::fs::write(path, text).map_err(|e| Error::Tracks(format!("{}: {e}", path.display())))
+    }
 }
 
 /// The album's sample values: interleaved stereo `f32` at PCM16 scale.
@@ -241,6 +274,35 @@ impl Samples {
                 0.0
             };
         }
+    }
+
+    /// Interleaved stereo samples, already at PCM16 scale — the WAV front end's
+    /// output (`assemble.rs`). The length is even by construction; the assertion
+    /// is what keeps a mono buffer from reaching the encoder as half an album.
+    pub fn from_interleaved(data: Vec<f32>) -> Self {
+        assert_eq!(
+            data.len() % 2,
+            0,
+            "interleaved stereo data must have two samples per frame, got {}",
+            data.len()
+        );
+        Self { data }
+    }
+
+    /// Interleaved frames in the buffer.
+    pub fn n_samples(&self) -> usize {
+        self.data.len() / 2
+    }
+
+    /// Write the buffer as `album.f32`: float32 interleaved stereo, little-endian,
+    /// at PCM16 scale. Reading it back through [`Self::open`] reproduces these
+    /// exact bits, which is what makes `--emit-pcm` a witness and not a souvenir.
+    pub fn write_f32(&self, path: &Path) -> Result<(), Error> {
+        let mut bytes = Vec::with_capacity(self.data.len() * 4);
+        for s in &self.data {
+            bytes.extend_from_slice(&s.to_le_bytes());
+        }
+        std::fs::write(path, bytes).map_err(|e| Error::Pcm(format!("{}: {e}", path.display())))
     }
 }
 

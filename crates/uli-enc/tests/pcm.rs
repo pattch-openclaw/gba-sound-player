@@ -11,7 +11,7 @@
 mod common;
 
 use common::{TempDir, silence_album, single_track, write_tracks};
-use uli_enc::{Args, DEFAULT_BUDGET, DEFAULT_CAP_PCT, Error, Pcm, encode};
+use uli_enc::{Args, DEFAULT_BUDGET, DEFAULT_CAP_PCT, Error, Input, Pcm, encode};
 
 #[test]
 fn a_good_input_pair_reads_the_length_and_both_tracks() {
@@ -19,9 +19,12 @@ fn a_good_input_pair_reads_the_length_and_both_tracks() {
     let album = silence_album(dir.path(), 1024);
     let tracks = write_tracks(
         dir.path(),
-        "# n start len title artist (32768 Hz samples)\n\
-         1\t0\t512\tFirst\tArtist A\n\
-         2\t512\t512\tSecond\tArtist B\n",
+        &format!(
+            "# n start len title artist ({} Hz samples)\n\
+             1\t0\t512\tFirst\tArtist A\n\
+             2\t512\t512\tSecond\tArtist B\n",
+            uli_lite::format::RATE
+        ),
     );
 
     let pcm = Pcm::open(&album, &tracks).expect("the input pair is valid");
@@ -165,8 +168,10 @@ fn a_length_mismatch_refuses_before_any_frame_is_planned() {
     let tracks = single_track(dir.path(), 1024);
 
     let err = encode(&Args {
-        album: album.clone(),
-        tracks: tracks.clone(),
+        input: Input::Pcm {
+            album: album.clone(),
+            tracks: tracks.clone(),
+        },
         // Deliberately absurd: if the boundary did *not* run first, this would
         // be the error reported, and the length bug would hide behind it.
         budget: 1,
