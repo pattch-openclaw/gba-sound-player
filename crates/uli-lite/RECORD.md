@@ -3281,6 +3281,15 @@ authoritative and this one carries the numbers.
   *ahead* of the oracle's (39.57 vs 39.54), so the re-code is a mechanism both
   encoders either have or lack, worth ~1.45 dB to either.
 
+  **It is a high-rate mechanism, and the product album is not high rate.** At the
+  album's own 199 B/frame (1,594 bits/frame) the cap binds on **3.5%** of a 60 s
+  `cross` slice's 3,840 frames and the re-code is worth **0.02 dB to the reference**
+  (28.78 → 28.80) and **0.01 to us** (28.80 → 28.81), same 60 s, same 764,500-byte
+  budget. So "the high-rate gap was all of it" is true where the cap binds hard and
+  false at the rate the product ships at: S5's **0.41 dB `cross` residual is not
+  cap-constrained** and S6 does not touch it. That gap is still the largest measured,
+  and its owner is not this step.
+
   **It does not touch the two lower budgets, and that was measured rather than
   assumed.** `--budget 40000 --cap 74`: the two arms are **byte-identical**
   (39,732 B, `80ab819a…572e51`, 0 frames re-coded) — the cap does not bind at all.

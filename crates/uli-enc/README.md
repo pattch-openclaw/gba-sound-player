@@ -82,8 +82,10 @@ smallest price that does, and the final encode re-codes at exactly that price. A
 price can bring under the cap is left for the allocation to exclude, as the reference does.
 Measured on 20 s of the reference album at `--budget 400000 --cap 74`, the switch is worth
 **1.44 dB** (39.57 → 41.01 dB) with `est. cycles max` at 74.0% both ways, against the
-reference's 1.48 dB — 22% of frames are re-coded there. It is inert where the cap does not
-bind: at `--budget 40000` the blob is byte-identical with it on and off, and at
+reference's 1.48 dB — 22% of frames are re-coded there. That is a **high-rate** figure: at
+the album's own 199 B/frame only 3.5% of a `cross` slice's frames bind the cap and the
+switch is worth 0.02 dB, so it is not the lever for the album-scale gap. It is inert where
+the cap does not bind: at `--budget 40000` the blob is byte-identical with it on and off, and at
 `--budget 120000` it moves 9 frames' bytes and not the SNR. `--musearch 0` is the A/B arm;
 the CLI prints the album line's `musearch on|off` **and** how many frames were actually
 re-coded, because a flag being on is not the same claim as the price having bound. It is
