@@ -86,7 +86,10 @@ reference's 1.48 dB — 22% of frames are re-coded there. It is inert where the 
 bind: at `--budget 40000` the blob is byte-identical with it on and off, and at
 `--budget 120000` it moves 9 frames' bytes and not the SNR. `--musearch 0` is the A/B arm;
 the CLI prints the album line's `musearch on|off` **and** how many frames were actually
-re-coded, because a flag being on is not the same claim as the price having bound.
+re-coded, because a flag being on is not the same claim as the price having bound. It is
+not free: on that binding slice the wall clock goes 18.1 s → 73.2 s (4.1×), against the
+reference's 1.9×, because every over-cap candidate is re-quantised up to 22 times in both
+domains.
 
 **With `--g N`, S2 runs.** The forward MDCT reproduces a too-independent-to-be-lucky
 golden of its own coefficients **bit for bit** (`tests/fixtures/mdct_in.f32` →

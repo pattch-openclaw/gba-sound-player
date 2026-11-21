@@ -3296,7 +3296,17 @@ authoritative and this one carries the numbers.
   third of the slice's gain, because the cap binds on a tenth of the frames at this
   rate instead of a fifth. The `--musearch 0` hash is S5's pinned blob, so the
   price is a no-op when it is off, which is the assertion the `mu = 0` guard exists
-  for.
+  for — and which means **S5's gate numbers, `cross` included, are the
+  `--musearch 0` arm**; none were re-pinned at the shipped default.
+
+  **It costs 4.1× on a cap-binding album.** Same 20 s slice: 18.1 s rate-only
+  against 73.2 s with the price, where the reference goes 7.5 s → 13.9 s (1.9×).
+  Every over-cap candidate is re-quantised up to 22 times in both domains, and at a
+  binding cap most fine-step candidates are over it. `biomaster`'s 3m46s rate-only
+  therefore predicts ~15 min with the price on, and `cross` predicts over two
+  hours. That is the same shape of debt as the exact-curve pass already recorded
+  under E-R9 ("met in mechanism, not in rationale"), and it is a named follow-up,
+  not a claim.
 
   Four new tests hold the mechanism: the mirrored `CY_*` constants reconstruct
   `Ops::cycle_model()` exactly for a real channel pair, a rising `mu` never costs

@@ -1214,7 +1214,21 @@ unattributed".
 16,553 frames (10.7%) re-coded, cap 74.0% max in both. So the blob **does** change and
 quality rises 0.46 dB — but the cap binds on a tenth of the frames at this rate rather than
 a fifth, which is why the gain is a third of the slice's. The musearch-0 hash is S5's
-pinned blob, i.e. the price is a no-op when it is off.
+pinned blob, i.e. the price is a no-op when it is off — so **every S5 gate number in this
+file, the `cross` pin included, is the `--musearch 0` arm by construction**. Under the
+shipped default those blobs move wherever the cap binds, and no album has been re-pinned
+at `--musearch 1`: `cross` at four threads would run over two hours under the multiplier
+below, which is the cost argument rather than an oversight.
+
+**What it costs, because a knob that is free is a knob that is lying.** Same slice, same
+flags, wall clock: `--musearch 0` **18.1 s**, `--musearch 1` **73.2 s** — a 4.1×
+multiplier, against the reference's 7.5 s → 13.9 s (1.9×). Every over-cap candidate is
+re-quantised up to 22 times (the seed, fourteen doublings, six bisections) in both
+domains, and at a binding cap most fine-step candidates are over it. So S6 widens S5's
+E-R9 gap rather than narrowing it: `biomaster` took 3m46s rate-only, and 4× on the slice
+predicts ~15 min with the price on. That is a named follow-up of the same shape as the
+curve-pass estimate — "the bake is in the edit loop" is still not true — not a defect of
+the mechanism.
 
 **Four tests, and one print that refuses to overclaim.** `band_cycles_witness_the_reader_cycle_model`
 reconstructs `Ops::cycle_model()` from the mirrored constants and `band_cycles` for a real
