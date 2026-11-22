@@ -289,7 +289,7 @@ inside the 13.73 points that are left** (R1b).
 | A2 | Skip next / previous **on the cartridge itself** | 1 | AP-1 | `PcmSource::start_track` + a fade + a ring re-prime; a short, bounded delay is accepted product behaviour, not a defect (§4.4). Buttons, not the emulator. |
 | A3a | Tool: a declared track list → a packed ROM (**the blobs are generated, never committed**) | **1** | AP-1 | `scripts/album_bake.py` at its Phase 1 scope: `album.toml`'s track list → one `GAFP` per track via `gafp_pack.py --master --emit-pin` → `ALBM1` + generated `src/assets.rs` → ROM (§2.3, §9.0). Refuses the two things Phase 1 can check: rate identity, and manifest-vs-container disagreement. |
 | A4 | Play / pause | 1 | AP-1 | fade-in/fade-out over the DMA boundary, silent-ring state, no click (§4.4). |
-| A5 | General UI layout support | **2a** bands / **2b** region | AP-3 | **one** surface, not five screens: a band table for the always-shown chrome, generated from a tracked layout spec into `src/layout.rs`, plus a host snapshot twin of **every** declared variant — snapshots for all of them, fit verdicts and pool audits only for the product-eligible ones (§13's AP-3 row, §5.0's `product` field) (§5). The declared fields include the per-variant **`tile_budget`** the tile pools are audited against (§5.1, R14) — declared here, refused at bake (§9, §9.0), measured by AP-3/AP-3b (§13). (**Table integrity was checked over the whole file, and the check has a history worth putting in the register it protects.** On `origin/main` it reports §9.1's phase table as malformed — a three-column header (`Phase | Ships | Exit gate`) over seven rows that hold two cells each — and that defect predates this branch. This branch's fourth commit repaired it by re-heading that table to the two columns its rows actually have, and the *same* commit introduced three new ones: rows A5, A8 and A13 were each left split across two physical lines, which to GitHub is a one-cell continuation row, so three requirement rows silently lost their Notes column. The next commit's own check found them and joined them; HEAD reports **33 table blocks, 0 mismatched rows**, and every pipe inside a code span in a table cell is escaped (`BACKEND=flac\|uli2`), because an unescaped one is a cell boundary and not text. Recorded rather than quietly fixed: this is the table the rest of the file cites by requirement ID, and the check is not self-congratulation: it found a table malformed on the branch's own base — seven rows sitting under a header that does not match them — and three split rows this branch introduced itself. The only way either class gets seen is a check that runs over the whole file rather than over the diff. |
+| A5 | General UI layout support | **2a** bands / **2b** region | AP-3 | **one** surface, not five screens: a band table for the always-shown chrome, generated from a tracked layout spec into `src/layout.rs`, plus a host snapshot twin of **every** declared variant — snapshots for all of them, fit verdicts and pool audits only for the product-eligible ones (§13's AP-3 row, §5.0's `product` field) (§5). The declared fields include the per-variant **`tile_budget`** the tile pools are audited against (§5.1, R14) — declared here, refused at bake (§9, §9.0), measured by AP-3/AP-3b (§13). (**Table integrity was checked over the whole file, and the check has a history worth putting in the register it protects.** On `origin/main` it reports §9.1's phase table as malformed — a three-column header (`Phase \| Ships \| Exit gate`) over seven rows that hold two cells each — and that defect predates this branch. This branch's fourth commit repaired it by re-heading that table to the two columns its rows actually have, and the *same* commit introduced three new ones: rows A5, A8 and A13 were each left split across two physical lines, which to GitHub is a one-cell continuation row, so three requirement rows silently lost their Notes column. The next commit's own check found them and joined them; HEAD reports **33 table blocks, 0 mismatched rows**, and every pipe inside a code span in a table cell is escaped (`BACKEND=flac\|uli2`), because an unescaped one is a cell boundary and not text. Recorded rather than quietly fixed: this is the table the rest of the file cites by requirement ID, and the check is not self-congratulation: it found a table malformed on the branch's own base — seven rows sitting under a header that does not match them — and three split rows this branch introduced itself. The only way either class gets seen is a check that runs over the whole file rather than over the diff. |
 | A6 | Elapsed time / **total** time | 1 | AP-2 | *(pair re-ruled 2026-11-20 from elapsed/remaining — §5.2, §6; the arithmetic is untouched, and the shipped screen's wording change rides in 2a's `chrome.rs`.)* shifts, not divides, because both clocks are powers of two (§6). |
 | A7 | Progress bar | **2a** | AP-2 | bake-time reciprocal per track; monotonic; bar ↔ time agreement (§6). The reciprocal is generated and host-tested today; the widget — a small right-hand bar sharing the title band — is 2a. |
 | A8 | Album art, even low-res | **2b** | AP-4 | 4bpp palettised tiles + ordered dither, generated by our own host tool (§7). *(Was Phase 2; moved with the 2a/2b split — 2a is deliberately art-free so the layout and the transport ship first, §11.)* An art box is *declared* in `[art]`, so that section lands with **2b**, not Phase 3 (§9.0 corrected 2026-11-20); and the input this feature needs does not exist in the tree — there is no cover anywhere outside `target/` (R15) |
@@ -1467,8 +1467,8 @@ since that is what "from boot" names. What (b) actually costs is the product dec
 - **Geometry is derived, never repeated.** The list's window comes out of a division on the
   region *by the declared line pitch* (§5.0's `row_px`), so picking a variant resizes the list and
   changing the face re-derives it; there is no "17 rows" (or any other row count) in a Rust file, and
-  no `TITLE_BOX_MAX`-shaped sibling of it (§11's D9 names the duplication that is in the
-  tree today and what removes it).
+  no `TITLE_BOX_MAX`-shaped sibling of it (§11's D9 named the duplication that was in the tree and
+  records which PR removed each copy of it).
 - **A scene cannot invalidate a measurement.** A scene draws into dynamic tiles and its own
   map (§5.1) and may not touch a chrome cell, so an AP-3 cost line for the chrome and the
   bar stays true whichever scene is showing. That is what makes the per-element cost
@@ -1768,17 +1768,22 @@ place in the tree where the choice was deferred rather than made, and 2a makes i
 `measure`/`fit`, host-tested — which also means 2a owns the thing that sentence lists as missing:
 measure, wrapping-then-eliding, and the palette banks beyond 0/1 that §5.4 declares per element.
 
-**The fit box is derived, and it lives in one place, not three (ruled 2026-11-20).**
-Today the same number sits in three places with no sync between them: this section's old
-prose ("a 28-character worst case"), a Rust host-test guard, and `TITLE_BOX_MAX = 28` in
-`scripts/album_prep.py:48`. That duplication is recorded as §11's **D9**; this PR removes the
-copy this file owns (the prose above), and 2a removes the two in code: every text element's fit
-box comes from the variant's declared *span*
-(a pixel width — §5.0) and the face's real metrics, and the bake tool still prints any title
-that will not fit its box, so an album can still be *fixed at bake time*. The 8-row/30-cell
-framing this section used is also dropped: a 30-cell line was never the budget, because the
-face is proportional — the unit is advance width in pixels, and the honest number is the one
-the tool prints.
+**The fit box is derived, and it lives in one place, not three (ruled 2026-11-20; the two
+copies in code removed by 2a PR-1).** The number used to sit in three places with no sync
+between them: this section's old prose ("a 28-character worst case"), a Rust host-test guard
+(`assert!(title.chars().count() <= 28, …)`, then at `album_pack_host.rs:241`), and
+`TITLE_BOX_MAX = 28` in `scripts/album_prep.py:48`. That duplication is recorded as §11's
+**D9**, with each copy's fate written there. This file removed its own copy at the ruling;
+2a PR-1 removed the two in code, so every text element's fit box now comes from the variant's
+declared *span* (a pixel width — §5.0) and the face's real metrics, and the bake tool still
+prints any title that will not fit its box, so an album can still be *fixed at bake time*. The
+8-row/30-cell framing this section used is also dropped **for fit boxes**: what a text element
+may hold is advance width in pixels, and the honest number is the one the tool prints. The one
+character bound still standing in product code is `text.rs:65`'s `COLUMNS = 30` on the verdict
+line — 30 columns of the instrument face's 8 px cell is the whole 240 px row, so that is a
+measured cell count rather than a box standing in for one, and converting it to the same
+measured fit is 2a PR-(2)'s with `measure`/`fit` (it is witnessed at
+`album_seam_host.rs:811-831`, which is why the retired-name grep does not pretend to cover it).
 
 **Which face draws which element is a declared field — and the 8 px face is an instrument,
 not a product face (opened, not decided: new Q19).** The instinct that fusion-pixel at 8 px
@@ -1791,7 +1796,7 @@ in cycles rather than taste:
 |---|---|---|---|
 | bar cell | only when it changes *cell* — at most **once per declared cell** (a field of the variant, §6; not "1/32 of a track" as this row said until 2026-11-20), and no more often than that | no glyphs | 1–2 tile writes per change ≈ **0.7–1.5 k c** at AP-0's measured 726 c/tile |
 | clock `1:47 / 3:12` | **when a displayed digit changes** — at most once a second, and then only the cells whose glyph differs. "Once a second" is R1b's measured habit, not a cadence this design wants (§5.2's rule) | **the smallest declared face**, and this is the row where a pitch costs real cycles | **re-cut at the 16 px pitch (2026-11-20).** A full redraw of the 11-character clock at a 16 px pitch is 11 characters × **two tile rows** each ≈ 12–22 tile writes ≈ **9–16 k c** (at the instrument face's 1 tile row, half that: ~6–10 tiles ≈ 4–7 k c). But the periodic event is not a redraw, it is **one or two changed digit cells ≈ 2–4 tile writes ≈ 1.5–3 k c per second** — and that is the only number that is a permanent addend. R1b's measured failure was precisely a **full-row** 1 Hz text redraw: 104 of 16,553 periods late, which is why "redraw only the cells that differ" is load-bearing at a large pitch and was survivable at a small one |
-| title line | on a track change | **a large pitch is affordable here** | **28 characters (the box's limit, §5.5) × two tile rows ≈ 56 tile writes ≈ 41 k c** at the 16 px pitch — up from the ~40 writes / 29 k c this row carried at the instrument face's 8 px cell. Paid rarely, with §12.2's ring lead paying for it |
+| title line | on a track change | **a large pitch is affordable here** | **the declared box, in cells: variant B's `title_text` is 20 tile columns × two tile rows = at most 40 tile writes ≈ 29 k c disarmed / 44–50 k c live** at the 16 px pitch. This row was priced at "28 characters (the box's limit, §5.5)" until 2a PR-1 removed that limit — there is no character box to price against any more, and 160 px holds ~29 characters of ark10 only by the accident of its 5.44 px mean advance (the fixture's longest title measures 103 px of the 160 px). The cell count is the cost; the character count never was. Paid rarely, with §12.2's ring lead paying for it |
 | title card (A12) | once per boot | **the largest pitch this app may use** | paid once, and it is the screen where a face is actually being read; at a 16 px pitch its three text spans are on the order of 10⁵ c of writes, which a boot path with seconds of headroom absorbs (§10.5) |
 
 **Re-cut at the second review (2026-11-20), because every text row above had been priced at the
@@ -2015,54 +2020,68 @@ width a constant of this file. It is now a field of the variant (§5.0) — `bar
 is not pixels, it is precision: with the grid at *N* cells, the ±1-cell error this section
 already proves is **100/N percent of the track**, so the bake report prints that percentage
 beside the geometry that produced it (32 cells → 3.1%; 18 → 5.6%; 9 → 11%). Fine cells are
-cheap where the grid is narrow: a bar may use *partial-fill pattern tiles* (a handful of
-tiles filled to 2 or 4 px, plus one empty and one full), so a 72-pixel-wide bar in the
+cheap where the grid is narrow: a bar may use *partial-fill pattern tiles* (tiles filled
+to each reachable fill offset, plus one empty and one full), so a 72-pixel-wide bar in the
 right of the title band can still be 18 cells of 4 px rather than 9 of 8 — at the cost of
-~5 extra pattern tiles, which is nothing next to a glyph cache.
+**3 pattern tiles, of which only 1 is extra** over the empty/full pair any bar needs. That
+figure replaced “~5 extra pattern tiles”, which was a guess at *a handful*; the count follows
+from the geometry and `--layout-self-test` counts it rather than quoting it. A fill boundary
+can only land on a cell step, so the distinct partial tiles are exactly the residues of
+`bar_px / bar_cells` inside an 8 px tile: a 4 px step reaches two of them (0 px, which is the
+empty tile already paid for, and 4 px), and the finished track needs the full tile — 2 + 1 =
+**3**. At variant B's 1 px cells every residue is reachable and the same rule gives 8 + 1 =
+**9**, which is why this section states the rule and the figure belongs to the variant (the
+two paths the self-test runs are the residue set and a render of the bar at every fill
+position, agreeing).
 
 **One invariant that has to be written down because it joins geometry to audio arithmetic.**
 The reciprocals are computed *per track at bake time* from the cell count —
-`scripts/album_bake.py` does `recip = ((1 << 32) * BAR_CELLS) // n_samples`, with
-`BAR_CELLS = 32` at `album_bake.py:76` today. So a variant that declares a different count
-must feed that same constant into the bake, or a ROM would draw a bar out of reciprocals
-computed for a different grid: **the declared `bar_cells`, `ALBM1`'s reciprocals and
+`scripts/album_bake.py` does `recip = ((1 << 32) * bar_cells) // n_samples` with `bar_cells`
+read from the selected variant (`bar_recip(n_samples, bar_cells)` at `album_bake.py:328`), so a
+variant that declares a different count cannot be baked against the old one by accident:
+`BAR_CELLS_REGISTERED = 32` survives at `:104` as a value two call sites pass *by name* — §6's
+worked example (`:4274`, and the leg beside it that asks the same function at 32 and at 80) and
+the Phase-1 fixture legs that build a synthetic `ALBM1` (`:4529`, `:4553`, `:4567`, `:4580` and `:4581`) — and
+it is the default of nothing: `bar_recip` (`:328`), `assert_bar_reciprocal` (`:352`),
+`build_albm1` (`:436`) and `audit_blob` (`:581`) all require the grid as an argument, so there is
+no path through this tool that gets a grid without choosing one. That is what makes the next
+sentence checkable rather than hopeful: **the declared `bar_cells`, `ALBM1`'s reciprocals and
 `layout.rs` must agree, and `album-layout-test` asserts that they do.** That is the
 cheapest possible guard on the one place where a layout number and a decoder's arithmetic
 touch, and it is the reason the layout spec owns the bar rather than the app module.
 
-**What that agreement costs today, since the cell count is hard-coded on both sides of it
-(checked at review, 2026-11-20).** The ROM-side grid is a constant in the shared crate — `pub
-const BAR_CELLS: u32 = 32` (`crates/gba-playback/src/nodiv.rs:44`) — the ROM **refuses any pack
-whose header declares a different value** (`examples/album_player/src/meta.rs:582-583`,
-`Refusal::BarCellsMismatch`, whose own message reads *"bar_cells {n}, §6's grid is 32"*), and the
-reciprocal is verified against that same constant (`meta.rs:811-814`); the bake produces it as
-`floor(2^32 × 32 / n_samples)` (`scripts/album_bake.py:76`, `bar_recip` at `:284-296`). So a variant declaring
-`bar_cells = 18` (§5.0's starting default for A) is **not** a narrower redraw: until that
-constant is generated from the variant like the rest of the geometry, **the 2a ROM rejects its own
-album** — and the sentence above about the three agreeing is the guard that says so, not a note of
-taste. **Ruled at the second review (2026-11-20): the invariant this section owns is the
-*agreement*, not the value 32.** `BAR_CELLS` at `crates/gba-playback/src/nodiv.rs:44` is a compile-time
-constant today, the ROM refuses any pack declaring anything else (`meta.rs:582-584`,
-`Refusal::BarCellsMismatch` — a refusal met on *hardware*), and its reciprocal check re-derives the
-same constant (`:811-814`), with guard tests asserting a 64-cell pack is refused
-(`tests/album_pack_host.rs:398-426`, and `:492` for the mismatch arm). Making it variant-derived is
-therefore A5/2a work (the one place where a layout field reaches the arithmetic, §11's 2a row), and
-the arithmetic says it is a small change: `bar_recip(n_samples)` is `((bar_cells as u64) << 32) /
-n_samples` and `bar_cell(pos, recip)` is one `UMULL` plus a shift (`nodiv.rs:83-84`), so **the
-runtime path is already value-agnostic — it reads the value out of the pack, and only the *guard* is
-hard-coded.** What 2a replaces the equality with is §9.0's two rows (**and the boot-time refusal is
-kept, not replaced — ruled 2026-11-20 while scoping 2a's first PR.** The bake-side check is the one
-that aims at the spec; `meta.rs:582-584` is the only place that catches a stale generated
-`layout.rs` linked against yesterday's manifest — R11's staleness failure, invisible to every host
-test. The two bake checks and that backstop all stay, exactly as §9.0's row says):
-`bar-cells-disagree` (declared
-value ≡ the grid the reciprocals were computed for ≡ `layout.rs`) and `bar-cells-out-of-range`
-(**a floor of 16 as this section already recommends, and a ceiling from arithmetic rather than taste:
-the reciprocal fits a `u32` while `bar_cells < n_samples`, which no real track is anywhere near, so
-the ceiling is the precision rule above**). A 5-cell bar is arithmetically legal and 40 px of 8 px
-cells is a clean shape; what the rule does is make its ±1 cell = 20 % of the track a *printed* number
-in the bake report next to the geometry that produced it, so the coarse bar is an authored choice
-rather than an oversight.
+**What that agreement costs today: the invariant is the *agreement*, not the value 32 (re-ruled
+2026-11-20, and discharged by 2a's first PR).** The cell count is no longer hard-coded on either
+side of the seam. It is declared once in the tracked spec
+(`examples/album_player/layout_spec.toml`, per variant), generated into the app's gitignored
+`src/layout.rs` as `layout::BAR_CELLS`, and passed into the arithmetic as an argument —
+`bar_recip(n_samples, bar_cells)` (`crates/gba-playback/src/nodiv.rs:105`), whose count the bake
+supplies from the selected variant (`scripts/album_bake.py:1001`,
+`recip = bar_recip(container["total_samples"], facts.variant.bar_cells)`). The shared crate
+therefore holds no grid of its own, and a second opinion there is what §9.0's `bar-cells-disagree`
+row and the layout self-test's banned-box leg exist to catch. `bar_cell(pos, recip)`
+(`nodiv.rs:121`) never needed the count — the grid is already inside the reciprocal — so **the
+runtime path did not change when the grid stopped being a constant; only the guard moved.**
+
+A variant declaring `bar_cells = 18` (§5.0's starting default for A) is now simply a variant with
+an 18-cell bar: the grid is generated for it like the rest of its geometry, and the bake
+pre-flights the reciprocals against that value rather than against 32. What remains is the refusal,
+kept deliberately: `meta::parse` compares the manifest's `bar_cells` against the linked
+`layout::BAR_CELLS` (`examples/album_player/src/meta.rs:595`, `Refusal::BarCellsMismatch`, whose
+message now reads *"bar_cells {n}, this ROM's generated grid is {N}"*, `:229-233`) and re-derives
+the reciprocal against the same value (`:827-830`); the host suite's refusal arm mutates the header
+to `layout::BAR_CELLS - 1` rather than a literal (`tests/album_pack_host.rs:596-605`). **The
+boot-time refusal is kept, not replaced** — ruled 2026-11-20 while scoping 2a's first PR — because
+`meta.rs:595` is the only place that catches a stale generated `layout.rs` linked against
+yesterday's manifest, R11's staleness failure, invisible to every host test. The two bake checks
+and that backstop all stay, exactly as §9.0's row says: `bar-cells-disagree` (declared value ≡ the
+grid the reciprocals were computed for ≡ `layout.rs`) and `bar-cells-out-of-range` (**a floor of 16
+as this section already recommends, and a ceiling from arithmetic rather than taste: the reciprocal
+fits a `u32` while `bar_cells < n_samples`, which no real track is anywhere near, so the ceiling is
+the precision rule above**). A 5-cell bar is arithmetically legal and 40 px of 8 px cells is a clean
+shape; what the rule does is make its ±1 cell = 20 % of the track a *printed* number in the bake
+report next to the geometry that produced it, so the coarse bar is an authored choice rather than an
+oversight.
 
 **AP-2 is the gate that says these
 agree:** the bar cell at refresh *n* and the printed elapsed must derive from the
@@ -2365,7 +2384,7 @@ table quietly keeps asserting after the ruling that superseded it.)
 | `scripts/album_art.py` | not built | **2b**: built and refusing (§7) — and it exists already in probe form (§9's tool row), so 2b's art work is pointed at a cover, which this tree does not have (R15) |
 | `scripts/album_viz.py` | not built | **Phase 3**, for Phase 4 (§8) |
 | determinism | **pack twice, compare bytes** — nearly free once the packer exists, and it is what makes "generated" mean "regenerable" rather than "whatever is lying around" (§2.3) | two full `make album-rom` runs → byte-identical `.gba` |
-| refusals that fire | declared rate ≠ product clock (Q14); frames outside the encode profile (inherited from `gafp_pack.py`); **`ALBM1`'s `n_samples` disagreeing with the packed container's `total_samples`** (§4.3 rule 1); the writer's own output re-read through the shipping `meta.rs` parser (§4.3's `audit_blob` rule); **and title fit — shipped today as `TITLE_BOX_MAX = 28` (`scripts/album_prep.py:48`), which from 2a is measured against the *declared* box instead (A5, D9)** | **per the register below**, which owns this cell now. It no longer restates a list here — the restatement had drifted: the art-box and `tile_budget` refusals are 2a's, the image-side ones are 2b's, and `>32 tracks` was claimed by two phases at once |
+| refusals that fire | declared rate ≠ product clock (Q14); frames outside the encode profile (inherited from `gafp_pack.py`); **`ALBM1`'s `n_samples` disagreeing with the packed container's `total_samples`** (§4.3 rule 1); the writer's own output re-read through the shipping `meta.rs` parser (§4.3's `audit_blob` rule); **and, from 2a PR-1, no fifth item: the title's fit left this refusal set when `TITLE_BOX_MAX` did, and is a measured verdict the bake prints (§5.5) — the count stays the four this row and AP-5's both name, and `title-fit` comes back as a refusal only with PR-(2)'s elision (A5, D9)** | **per the register below**, which owns this cell now. It no longer restates a list here — the restatement had drifted: the art-box and `tile_budget` refusals are 2a's, the image-side ones are 2b's, and `>32 tracks` was claimed by two phases at once |
 
 **The refusal register — one row per refusal, with the tool and the phase that owns it (2026-11-20).**
 This exists because the same list was kept in four places (§9.0's table cell, §9's prose, §11's phase
@@ -2389,9 +2408,9 @@ quoting a message.
 | `image-tiles-over-budget` | `image_tiles` + the text term (§5.1's upper **and** distinct bounds) + authored chrome art exceed the variant's declared `tile_budget` / `resident_scenes` (R14). **At 2a the image term is taken at the variant's derived ceiling — the largest box that variant derives — not at any album's selection, because there is no album-side box to read yet (§5.0)** | `album-layout-gen`, from declared fields + face metrics — no image required | **2a** | bake log, **both bounds printed**, and the ceiling the image term was taken at |
 | `art-box-not-derived` | `[art] box` is not one the selected variant derives — a spec fact, refused before any image is opened (§7) | `album-layout-gen` — it owns the derived box list, at 2a and before any image exists | **2a** for the validator and the derived list; **2b** for the `[art]` key the refusal reads (see the note below this table) | 2a: the derived box list and the pool term at that ceiling, printed in the bake log; **2b: the refusal itself**, the first time `[art]` is parsed at all — D2 keeps that whole section a named refusal through 2a |
 | `scene-minimum` | a scene's own declared minimum cannot be met at the declared geometry (a list under ~4 visible rows at the declared pitch; an art box outside its region) — the minima are §5.2's scene table's, per scene, not a global number | `album-layout-gen` + §5.2's table | **2a** | bake log |
-| `bar-cells-out-of-range` | declared `bar_cells` outside the range §6 declares, or large enough that `bar_recip` would not fit a `u32` (that needs `bar_cells ≥ n_samples`, §6) | `album_bake.py` — it is the tool that computes `recip` | **2a** | bake log |
-| `bar-cells-disagree` | declared `bar_cells` ≠ the grid the `ALBM1` reciprocals were computed for, or ≠ `layout.rs` | **today:** the ROM at boot (`meta.rs:582-584`, `Refusal::BarCellsMismatch`) — i.e. on hardware; **from 2a:** `album_bake.py` + `album-layout-test` (§6) | **2a** — the constant becomes variant-derived; the code is already in the tree (`nodiv.rs:44`, `meta.rs:582-584`, `meta.rs:811-814`, `tests/album_pack_host.rs:398-426,492`) | bake log; the boot refusal stays as the backstop |
-| `title-fit` | a title does not fit the box its variant derives, after §5.5's elision (§5.5, D9) | **today:** `album_prep.py`'s `TITLE_BOX_MAX = 28`; **from 2a:** the box comes from the spec and a host test proves the *elision* itself fits | **Phase 1, shipped**; the *box*'s owner moves to 2a | bake log; AP-3 |
+| `bar-cells-out-of-range` | declared `bar_cells` below §6's floor, or not a whole number of pixels per cell in the box the variant declares. The third range condition §6 names — a reciprocal that would not fit a `u32`, which needs `bar_cells ≥ n_samples` — is **refused at the track, not at the grid**, under the Phase-1 id `bar-reciprocal` (`album_bake.py:328`, and the self-test asks it at `n = 1`, `n = cells` and `n = cells + 1` for both variants); it is listed here because §6 states the three together, and a reader looking for the u32 case must find which id owns it | `album_bake.py` — it is the tool that computes `recip` | **2a** (the grid's two conditions); the u32 condition's id is **Phase 1**'s | bake log |
+| `bar-cells-disagree` | declared `bar_cells` ≠ the grid the `ALBM1` reciprocals were computed for, or ≠ `layout.rs` | **at boot:** `meta.rs:595-596` (`Refusal::BarCellsMismatch`), with the reciprocal re-derived from the same const at `meta.rs:827-832` (called at `:721`) — i.e. on hardware; **in the bake:** `album_bake.py:2540` (`assert_bar_grid_agrees`), three artifacts asked at once | **2a — landed with PR-1.** The grid is `layout::BAR_CELLS`, generated; `nodiv::BAR_CELLS` is deleted and `bar_recip` takes the count as an argument (`crates/gba-playback/src/nodiv.rs:105`); the host legs are `tests/album_pack_host.rs:487-534` and `:597-606`. The boot refusal is **kept**, and it compares one number: a stale generated module that keeps the grid and changes anything else boots without a word (D9 states the limit) | bake log; the boot refusal stays as the backstop |
+| `title-fit` | a title does not fit the box its variant derives, after §5.5's elision (§5.5, D9) | **no tool refuses it today, and that is stated rather than smoothed over.** Until 2a PR-1 it was `album_prep.py`'s `TITLE_BOX_MAX = 28`; PR-1 made it a measured verdict the bake computes (`album_bake.py:2270` `title_fit`, called at `:1068`) and *prints* (§5.5: an album decision, not a build failure), and host legs prove the shipped fixture fits (`tests/album_pack_host.rs:297`, `:330`). The refusal needs the elision that would render an over-long title, which is PR-(2)'s | **Phase 1** shipped the count; **2a PR-1** shipped the measurement; **2a PR-(2)** owns the refusal and the elision | bake log (a note, today); AP-3 |
 | `rate-bridge` / `frames-out-of-profile` / `n-samples-mismatch` | Q14's rate rule; frames outside the encode profile; `ALBM1`'s totals ≠ the packed container's | `album_bake.py` / `album_prep.py` / `gafp_pack.py` | **Phase 1, shipped** | bake log (AP-1, AP-5) |
 | `art-palette-count` / `art-off-palette-source` / `art-image-tiles-exceed` | an actual image needs more palettes than §5.4 allocates, carries an off-palette source colour, or exceeds the variant's image term | `album_art.py` — the only tool that reads an image | **2b** (AP-4) | bake log |
 | `over-budget` / `over-track-count` / `unused-viz-streams` / `audit-ceiling` | cart budget (album + art + viz + code reserve), the track ceiling, `ALVZ1` streams the chosen animation never reads, §10.4's 16-bit period ceiling (37.4 min at 16,384 Hz) | `album_bake.py` | **Phase 3** (A3b) — `over-track-count` was claimed by both 2a and Phase 3 until this review; the budget *policy* is Phase 3's, so that is its only home | bake log (AP-5) |
@@ -2498,9 +2517,11 @@ refuse, and the reason this paragraph no longer enumerates a count).** Of that l
 validator with a 2b input — `art-box-not-derived` reads `album.toml`'s `[art]`, which stays a named
 `config-section` refusal until 2b — so that enumeration is a list of **ownership**, not a count of
 what 2a's own instrument can fire: eight fire, the ninth is reported named-and-skipped with its
-reason (§9.0's note under the refusal register, §11's note (iii)). The two `bar_cells` rows move
-to 2a because the *constant* moves: that refusal is shipped today as a boot-time header check
-(`meta.rs:582-584`) and §6 names the four code sites that make it variant-derived. That last minimum
+reason (§9.0's note under the refusal register, §11's note (iii)). The two `bar_cells` rows moved
+to 2a because the *constant* moved: the same refusal that shipped as a boot-time header check
+(`meta.rs:582-584` when this row was written) is now `meta.rs:595-596` against the generated
+`layout::BAR_CELLS`, with `assert_bar_grid_agrees` (`album_bake.py:2540`) asking the declared spec,
+the packed header and the generated module in one call, and §6 names where each of them lives. That last minimum
 is not a global number — §5.2's scene table
 carries it per scene, because the list refuses a region under ~4 rows ("where a list has
 stopped being a list"), the art scene refuses a box outside its own region, and the `blank`
@@ -2578,7 +2599,7 @@ FLAC geometry: `PERIOD_CYCLES = 573,440` (34.18 ms); a 2,048-sample frame is
 | **boot audit** — `ALBM1` v2 structure fold + per-track 32 KiB/4 KiB content tripwire | **589 ms of CPU** (`parse` 25,477 + `open` 4,328,610 + `gate` 62,009 + `prefill` 5,461,122 c) | **measured 2026-11-16 (PR-3a fix 2, `CycleCounter`, mGBA — cycles, so it transfers to hardware, §10.5)**. Bounded by construction and guarded by a host test (`boot_audit_bytes < 1 MiB`), because the first cut of this row was **52.56 s** (R12) |
 | **post-audio proof + asset audit** — cold re-decode, the two content folds, the full asset fold | **75 s of CPU** (proof 817,429,485 c + assets 439,233,721 c) | **measured, same run.** Off the audio deadline, so it buys with a waiting listener and a lamp rather than with a drop — but it is a real per-run cost for `make album-test` and for Phase 5's hardware sessions, where it is now gated by the `deep-audit` feature — `make album-player-rom` drops it and prints `SKIPPED` terms plus a boot NOTE line so a player artifact is never mistaken for the gate one (§11, fix 3) |
 | UI: key read, position, bar + 2 text lines, palette fade | **1.89% of a period measured** (AP-0's `full` arm: 5,306 c/frame → 10,832 c of a 573,440 c period; ≤ 2% target met) | measured, shipped (AP-0) — **but the characterisation of the arm is corrected here, and it cuts both ways.** The probe's arms are *cumulative*: `bg` = one BG + text, `bg3` = three BGs with one scrolling, `obj` = `bg3` + an animated `DynamicSprite16`, `full` = `obj` + a palette fade every frame (`examples/album_probe/README.md`). So `full` was never "one composed text screen with a palette fade": it is **three backgrounds, a live sprite, a per-frame fade and text**, and it is properly read as (i) **an upper bound for a 2a frame**, which has two BGs, no OBJ, and element-addressed redraw (§5.1) instead of a whole-screen composition, and (ii) **a lower bound for a full player**, which adds art, viz, sprites and scene changes on top. Both halves are statements about arms rather than one number wearing two hats, and neither is measured — AP-3's render leg is what turns them into figures |
-| **UI, per element — the unit is an element, not a row or a screen** (§5.1's redraw rule) | upper bounds from AP-0's measured **726 c per 4bpp tile write — which is the audio-*disarmed*, IME-off, cold-cache leg** (`examples/album_probe/README.md:169-176`). The same cells at the **live** figures the same probe reports (floor **1,096 c**, mean **1,242 c**, `:202-207`) are **1.5–1.7× larger, and that is the arm the audio deadline lives in**: a bar-cell change (§5.5: only when a cell changes; at most one per declared cell, §6) 1–2 tiles ≈ **0.7–1.5 k c disarmed / 1.1–2.6 k c live**; the clock row's *event*, **only the digits that changed and at most once a second**, 1–2 characters × the tile rows the line box spans = **2–4 tiles ≈ 1.5–3 k c / 2.5–5 k c** (a full 11-character clock redraw, which is what R1b's late run was doing every second, would be ~22 tiles ≈ **16 k c / 27 k c** — the difference between those two numbers *is* the changed-cells rule, and it is why this row is itemised); a title line, on a track change, **28 characters (the box's limit, §5.5) × two tile rows = ~56 tiles ≈ 41 k c disarmed / 69 k c live** (§5.5's table; **re-cut at the 16 px product pitch on 2026-11-20 — every one of these figures previously assumed the 8 px instrument face's one-tile-row cell, which is why they were all understated by half**) | **arithmetic on AP-0's figure, not a measurement — AP-3 re-prices every one of these rows per element, in the live arm.** They are itemised because the failure mode is already measured and is not hypothetical: R1b's hardware arm had **one 1 Hz text redraw** late on **104 of 16,553 periods**. A bar tick and a clock tick are different addends on different cadences, and a design that repaints a whole band to move one cell charges the cheap event at the expensive one's price. **The cadences are not free-floating: they come from §5.5's table and §5.2's rule, and nothing in 2a or 2b is frame-paced** — R1b's fix is a *changed-cell* redraw, not a faster one, and every row here has to name the cadence it is priced at or it is not a cost, it is a guess |
+| **UI, per element — the unit is an element, not a row or a screen** (§5.1's redraw rule) | upper bounds from AP-0's measured **726 c per 4bpp tile write — which is the audio-*disarmed*, IME-off, cold-cache leg** (`examples/album_probe/README.md:169-176`). The same cells at the **live** figures the same probe reports (floor **1,096 c**, mean **1,242 c**, `:202-207`) are **1.5–1.7× larger, and that is the arm the audio deadline lives in**: a bar-cell change (§5.5: only when a cell changes; at most one per declared cell, §6) 1–2 tiles ≈ **0.7–1.5 k c disarmed / 1.1–2.6 k c live**; the clock row's *event*, **only the digits that changed and at most once a second**, 1–2 characters × the tile rows the line box spans = **2–4 tiles ≈ 1.5–3 k c / 2.5–5 k c** (a full 11-character clock redraw, which is what R1b's late run was doing every second, would be ~22 tiles ≈ **16 k c / 27 k c** — the difference between those two numbers *is* the changed-cells rule, and it is why this row is itemised); a title line, on a track change, **the declared box in cells: variant B's `title_text` is 20 tile columns × two tile rows = at most 40 tiles ≈ 29 k c disarmed / 44–50 k c live** (this row priced it as "28 characters (the box's limit, §5.5) × two tile rows ≈ 56 tiles ≈ 41 k c / 69 k c" until 2a PR-1 deleted that limit; the box is a 160 px span now, and the fill cost is the element's cell count — the same 40 tiles whether the string reaches 103 px or the full 160, which is the point of pricing cells and not characters) (§5.5's table; **re-cut at the 16 px product pitch on 2026-11-20 — every one of these figures previously assumed the 8 px instrument face's one-tile-row cell, which is why they were all understated by half**) | **arithmetic on AP-0's figure, not a measurement — AP-3 re-prices every one of these rows per element, in the live arm.** They are itemised because the failure mode is already measured and is not hypothetical: R1b's hardware arm had **one 1 Hz text redraw** late on **104 of 16,553 periods**. A bar tick and a clock tick are different addends on different cadences, and a design that repaints a whole band to move one cell charges the cheap event at the expensive one's price. **The cadences are not free-floating: they come from §5.5's table and §5.2's rule, and nothing in 2a or 2b is frame-paced** — R1b's fix is a *changed-cell* redraw, not a faster one, and every row here has to name the cadence it is priced at or it is not a cost, it is a guess |
 | **scene switch between resident scenes** | a `set_priority` write, with both scenes shown into every frame and the visible one winning on priority — **there is no per-BG hide/enable to write in agb 0.25.0**, and the frame mechanics (DISPCNT derived from what a frame showed) plus the exact API are in §5.1, which is where the old wording, "a layer enable/priority write", is corrected | "tens of cycles" is an **assumption**, not a figure, and it is precisely the number the residency ruling is buying — so **AP-3 measures the switch on ROM with both scenes mapped**, records which of §5.1's four residency options it was taken under (they differ by two orders of magnitude), and prices the per-frame `show()` of more than one background that this mechanism actually requires |
 | **partial map rewrite** — a list scroll, a title line, any in-place content change | ≤ the element's cell count × **AP-0's per-tile figure, because agb has no cheaper path: `set_tile` *is* the map write** (allocation, refcount and the map entry in one call — §5.1's correction, with the source cited). **This row's old "~295 c/cell, by subtraction from AP-0's upload leg" is withdrawn**: that 66.5 k gap is the loop around 225 calls, not the price of a cell, and nothing in this tree measures a map-only write because agb has no map-only write to measure. So the honest arithmetic for a whole region (600 cells) is **0.44 M c disarmed, 0.66–0.75 M c live ≈ 1.7–2.8 lossy periods = 12–21× that period's whole spare margin** (13.73 points of 262,144 c ≈ 36.0 k c — the margin this row and §10.5 quote, so the comparison is against a named number and not a feeling), **not** the ~177 k c / 0.68 period this row used to claim, and it is **not an admissible per-press cost** — further from admissible than it was. What *is* cheap: an unchanged cell, which `set_tile_at_pos` skips before it touches the map (`regular_background.rs:375-378`) — the whole argument for element-addressed redraw | same arithmetic, **now known to be a floor rather than an upper bound**, since the real per-cell cost is `set_tile`'s whole call and AP-3 measures it per element in the live arm. This row still exists because a claim in review of this re-rule said a map rewrite was "tens of cycles" and AP-0's log already said otherwise — and the same review pass corrected *this* row's number, which is recorded in §5.1 rather than quietly fixed |
 | viz tick (1–2 ROM reads + table + tiles/sprites) | **≤ 1% target, unmeasured** | AP-6 |
@@ -2846,14 +2867,17 @@ AP-3's bake-leg check reports eight firing plus one named-and-skipped.** Two con
 phase rows above. **(i)** **2a
 settles the list's row count even though the list scene is 2b's**: `row_px` and the face are 2a's
 fields, so the window §5.2's list gets is derived and refused at 2a, and 2b builds a scene into a
-rectangle whose size is already a settled number. **(ii)** The only *code* change 2a owns in order
-for its refusals to be its own is making the bar grid variant-derived instead of a shared constant:
-`BAR_CELLS` at `crates/gba-playback/src/nodiv.rs:44`, the boot-time `Refusal::BarCellsMismatch` at
-`examples/album_player/src/meta.rs:582-584`, its reciprocal check at `:811-814`, and the guard tests
-at `examples/album_player/tests/album_pack_host.rs:398-426,492` (§6). That code exists today, so it
-is not a tool from the future — but until it lands, a variant declaring anything other than 32 cells
-makes the 2a ROM refuse its own album, which is a refusal aimed at the hardware instead of at the
-spec. **(iii)** **`[art]` is not opened part-way (2026-11-20, scoping 2a's first PR).** 2a does not
+rectangle whose size is already a settled number. **(ii)** The only *code* change 2a owned in order
+for its refusals to be its own was making the bar grid variant-derived instead of a shared constant,
+and **2a PR-1 landed it**: `BAR_CELLS` is gone from `crates/gba-playback/src/nodiv.rs` (it sat at
+`:44` when this note was written) and `bar_recip` takes the count as an argument (`nodiv.rs:105`);
+the boot-time `Refusal::BarCellsMismatch` is now `examples/album_player/src/meta.rs:595-596`, its
+reciprocal check `:827-832` (called at `:721`), and the guard tests are
+`examples/album_player/tests/album_pack_host.rs:487-534` and `:597-606` (§6). The consequence this
+note was written to warn about — a variant declaring anything other than 32 cells making the ROM
+refuse its own album, a refusal aimed at the hardware instead of at the spec — is closed: variant B
+carries 80 cells and the shipped ROM plays it, and the refusal now fires from the bake and the
+spec's own pre-flight instead. **(iii)** **`[art]` is not opened part-way (2026-11-20, scoping 2a's first PR).** 2a does not
 accept `[art]` with one key made legal; it keeps refusing the section exactly as D2 does, and
 `art-box-not-derived` is raised by 2b's parser against the derived list 2a generates into
 `layout.rs`. See §9.0's note under the refusal register for the ruling and §5.0 for the pool-sum
@@ -2868,16 +2892,31 @@ existing `scripts/album_bake.py` (no new build target for it — `make album-bak
 §5.0's step 5); generated, gitignored `src/layout.rs`, with the `.gitignore` and `make clean`
 entries §9.0's duty (i) asks for; `make album-layout-test`; the eight fireable register refusals
 asserted by `id`; the derived box list and the `tile_budget` sum at the variant's ceiling; D9
-discharged — the fit box and the bar grid become variant-derived across
-`scripts/album_prep.py:48`, `examples/album_player/tests/album_pack_host.rs:241`,
-`crates/gba-playback/src/nodiv.rs:44` and `examples/album_player/src/meta.rs:582-584,811-814`,
+discharged — the fit box and the bar grid became variant-derived across
+four sites (`scripts/album_prep.py:48`, `examples/album_player/tests/album_pack_host.rs:241`,
+`crates/gba-playback/src/nodiv.rs:44` and `examples/album_player/src/meta.rs:582-584,811-814`, as
+those files stood when this row was written; each one's fate is in D9 below),
 with the boot-time refusal **kept** as the backstop (§6, §9.0's `bar-cells-disagree` row); and the
 `pyftsubset` ASCII cut of the declared face committed under `assets/fonts/` (§5.5a step 1 —
 without it a product-eligible variant's face is not resolvable, and `face-not-resolvable` turns
-every fit and pool leg into a *skipped* row instead of a number). It draws nothing new and changes
-no boot behaviour: R12's ~580 ms and AP-1's 1.5 s term stay byte-identical. Expect exactly one
-re-baseline of `ALBM1` and the ROM hashes, from the reciprocal grid moving — recorded in §2.2's
-form, as a re-baseline from the change, not as a regression. **(2) The text mechanism:**
+every fit and pool leg into a *skipped* row instead of a number). **What it actually cost, as
+against what this row expected (measured on the landed branch, 2026-11-21).** It draws nothing
+new, and it does not leave boot behaviour byte-identical: the ROM prints one more line before
+audio (`[album-rom] layout=B bar_cells=80 …`, `album-rom-run.log:4`) and the audited image moved
+`.text` 96,604 → 96,764 B (`flac-docs/measurements.md`). Boot-to-audio on that same run reads
+`parse=25,203 open=4,343,040 gate=86,781 prefill=5,022,982 total=9,483,307 c` = **565 ms** against
+the 9,744,862 c = 580 ms §5.2's instrument paragraph records for the same bin — a difference that
+sits almost wholly in `prefill`, the one leg that waits on the emulator's audio clock and so was
+never a repeatable cycle count. So the honest term is the one AP-1 states: audio begins well
+inside 1.5 s, on a run where nothing is pressed. And the re-baseline this row expected arrived
+*differently*: `ALBM1` moved — its `bar_cells` word is 80 where it was 32, and every reciprocal
+with it, including the copies of those reciprocals pinned in `src/assets.rs`'s `TrackPin` table (that
+module's own `/// §6's progress reciprocal, floor(2^32 × 32 / n_samples)` comment said 32 beside
+values computed on 80 until this row's review fixed it to the declared grid). No *content* pin is a
+function of the grid — frames, blob sha256, the FNV folds are the audio's own facts. And the ROM
+re-baseline was recorded as section
+sizes for one image rather than as §2.2's table of bytes, sections and `sha256` per image — see
+the note under that entry, which is where the gap is stated instead of being papered over. **(2) The text mechanism:**
 `scripts/album_glyphs.py` → generated `src/glyphs.rs`, `measure`/`fit`/one-line elision,
 `album_glyphs.py --check`, and AP-3's fit legs (§5.5a). **(3) The surface:** `surface.rs`,
 `chrome.rs`, the `blank` scene and §5.2's scene contract, boot option (c) as ruled above,
@@ -2980,13 +3019,18 @@ exactly Q15's (`Bioluminescent 1`, `Bioluminescent Clip 1`, `Bioluminescent 2`, 
 Clip 2`), the album artist is `"unknown"` because the tracked master carries **no RIFF tags**
 (verified by `ffprobe`, which prints nothing for it) and a track artist is therefore empty by
 observation rather than by invention, and a host test
-(`the_fixture_titles_are_q15s_names_verbatim`) now refuses any future decoration — a title over the
-28-character limit (`album_prep.py:48`; §9.0's `title-fit` row, and §5.5/D9 record that this number
-is a *copy* of a box the spec will own from 2a, not a box §5.2 defines any more) or a non-empty track
-artist is a red, so this cannot silently come back.
-Nothing is lost as coverage: non-ASCII, a >28-char title, a whole wrapped title and a
+(`the_fixture_titles_are_q15s_names_verbatim`) now refuses any future decoration — it asserts the four
+titles are Q15's names *verbatim* and every track artist empty, so a decorated or accented title can
+only reach `ALBM1` through the fold that `scripts/album_prep.py --self-test` witnesses on inputs
+labelled synthetic. A title's *fit* is not this test's business and, after 2a PR-1, was never a
+character count: `album_prep.py`'s `TITLE_BOX_MAX = 28` is gone (it sat at `:48` when this row was
+written), and the box belongs to the variant (§9.0's `title-fit` row, §5.5, §11's D9).
+Nothing is lost as coverage: non-ASCII, the 74-character synthetic that used to be the >28-char case
+(its own note says it is *folded, never truncated* — truncating there would be the tool making an album
+decision), a whole wrapped title and a
 title that folds to nothing are all `scripts/album_prep.py --self-test` cases on inputs
-labelled synthetic (7 fold cases + the box report), which is where a rule gets tested
+labelled synthetic (7 fold cases, and no box report — the box left this tool with `TITLE_BOX_MAX`, and
+the fit measurement is `album_bake.py`'s, witnessed by `make album-layout-test`), which is where a rule gets tested
 against *every* branch instead of against whichever word happened to be in a title. What
 §5.5's one-line-elision rule still lacks is a **screen** to overflow — that is AP-3's, in 2b's
 list window, and it will need such a string in a layout fixture rather than in an album's metadata
@@ -3035,32 +3079,56 @@ tracks alias one blob, the index→content claim therefore rests on `ALBM1`'s
 what PR-3a's boot gate does, and why a stale or swapped blob is a named `FAIL` and not a
 plausible-sounding track.
 
-**D9: geometry is stated three times in the tree today. This PR deletes the copy it owns; 2a is
-what removes the other two (2026-11-20).** This is a deviation the spec did not name, found while
-re-ruling §5 — recorded here rather than fixed silently, because the fix is a work item with a
-gate (§13 AP-3), not a doc edit. Three copies of the same number, with nothing between them:
+**D9: geometry was stated three times in the tree. This file deleted the copy it owned on
+2026-11-20; 2a PR-1 deleted the other two (landed).** This was a deviation the spec did not name,
+found while re-ruling §5 — recorded here rather than fixed silently, because the fix was a work
+item with a gate (§13 AP-3), not a doc edit. Three copies of the same number, with nothing between
+them, and what became of each:
 
 1. **this file's prose** — §5's old "28-character worst case", and §5.5's old 8-row/30-cell
-   framing. **This is the only copy this file could remove by itself, and it has**: §5.5 now
-   names both numbers as history instead of stating them as rules. The two that remain are in
-   code, and they are 2a's to remove;
-2. **a Rust host-test guard**, `examples/album_player/tests/album_pack_host.rs:241`
-   (`assert!(title.chars().count() <= 28, …)`), which is the only one of the three that
-   actually fails a build — and note its failure message: *“{title:?} overflows §5.2's box,
-   and the fixture has no business doing that.”* After this PR's re-rule, **§5.2 no longer
-   states a 28-character box at all**; the fit box is derived from a variant (§5.0, §5.5). So
-   the copy of the number that has the most authority is the one whose explanation points at a
-   section that no longer defines it. That is the drift, in one line, and it is why the number
-   may not live in three places;
-3. **`TITLE_BOX_MAX = 28` in `scripts/album_prep.py:48`**, which decides what the *bake*
-   refuses and is the one that reaches a user's album.
+   framing. **Removed here**, at the ruling: §5.5 names both numbers as history instead of stating
+   them as rules, and §5.5's cost table and §10.2's element row are re-priced in tile cells rather
+   than in characters (the "28 characters (the box's limit)" both of those rows carried is gone);
+2. **a Rust host-test guard**, `assert!(title.chars().count() <= 28, …)` at
+   `examples/album_player/tests/album_pack_host.rs:241` as this note found it — **removed by 2a
+   PR-1**, which is the copy that had the most authority because it was the only one that failed a
+   build. Its failure message pointed at *"§5.2's box"*, a section that stopped defining a
+   28-character box at the re-rule: the drift, in one line. What stands in its place measures —
+   `album_pack_host.rs:297` asserts every fixture title's advance sum is inside the box the variant
+   declares, and `:330` is the negative control that shows the measurement can say *no*; the
+   `chars().count() <= 28` string is on `album-layout-test`'s banned-name list so it cannot creep
+   back;
+3. **`TITLE_BOX_MAX = 28` in `scripts/album_prep.py:48`**, which decided what the *bake* refused
+   and was the one that reached a user's album — **removed by 2a PR-1.** The bake now measures
+   (`album_bake.py:2270`, called at `:1068`) and, per §5.5, prints a title that does not fit rather
+   than refusing it. **What that leaves unpaid, stated as a debt rather than as a discharge:**
+   nothing in the product bounds a title any more, and the elision that would make an over-long one
+   renderable in one line is PR-(2)'s with `measure`/`fit` (§11's PR-(2) row, §9.0's `title-fit`
+   row). Until then a longer title prints the bake's note and overflows on screen.
 
-A fourth copy exists in different form: **`BAR_CELLS = 32` at `scripts/album_bake.py:76`**, which
-feeds each track's `recip` in `ALBM1` — geometry that has already reached the audio arithmetic
-(§6). And `src/layout.rs`, which §4.1's tree has always listed as "every geometry constant in
-the tree", **does not exist**: geometry today lives inside `examples/album_player/src/text.rs`
-and the surface-ish parts of `album_play_main.rs`. So 2a's job is to make that listing true:
-the tracked `layout_spec.toml` owns the numbers, `src/layout.rs` is generated output, and the
+A fourth copy existed in a different form: **`BAR_CELLS = 32`**, at `scripts/album_bake.py:76` as this
+note found it (`:76` is `DEFAULT_ALBUM` today), which fed each track's `recip` in `ALBM1` — geometry that had already reached the audio arithmetic (§6).
+**2a PR-1 removed the shared-crate constant too** (`nodiv::BAR_CELLS` is gone; `bar_recip` takes the
+grid as an argument), and the number survives as `BAR_CELLS_REGISTERED` at `album_bake.py:104`,
+passed **by name** at §6's worked example and at the Phase-1 fixture legs and the default of nothing
+(:328, :352, :436, :581 all require it). And `src/layout.rs`, which §4.1's tree has always listed as
+"every geometry constant in the tree", **now exists** — as generated, gitignored output, which is
+what makes that listing true rather than aspirational. What it does *not* buy is a module-wide
+backstop, and this is where the claim has to stop short: the boot check compares **one number**
+(`meta.rs:595-596`, the manifest's `bar_cells` against `layout::BAR_CELLS`, with `:827-832` proving
+the reciprocal against the same const). Two of the three artifacts are at least pinned to one
+variant by name now — `assets::LAYOUT_VARIANT` against `layout::LAYOUT_ID`, in
+`the_pinned_album_and_the_generated_module_name_one_layout_variant`, which `album-layout-test` runs
+by filter because `assets.rs` promises that leg in its own comment. A stale `src/layout.rs` regenerated from an older revision
+of the *same* variant — same grid, different advance tables, boxes or pool counts — boots without a
+word, and so does a module for a *different* variant that declares the same grid and the same
+geometry. `album-pack-check` and `album-layout-test` compare the module's bytes against a re-run of the
+bake, which catches that drift on any machine that runs a gate; a `layout.rs` regenerated after the
+last gate is not caught on hardware, and if 2b wants that, it wants a spec digest in the manifest
+header. §6's row is where that would be ruled.
+
+The shape that replaced the three copies is the one this note asked for: the tracked
+`layout_spec.toml` owns the numbers, `src/layout.rs` is generated output, and the
 bake tool and the host tests *read* both instead of holding their own. `album-layout-test`
 then asserts the agreement across the three artifacts (§6's `bar_cells` ↔ reciprocals guard is
 the first of them), which is cheaper than the alternative — a build that is green while the
@@ -3449,8 +3517,10 @@ Numbered in this file's own space (the codec tracks keep theirs).
   --self-test`; inventing a recording to exercise a rule puts fake metadata in the one artifact
   a reviewer reads. §5.2's overflow needs a layout fixture at AP-3, not an album title. **(Re-ruled
   2026-11-20 and now actually schedulable: that fixture is `make album-layout-test`, which snapshots
-  every product-eligible declared variant and asserts fit against the derived box — including a title long enough to
-  elide, which is a synthetic input in that suite and stays out of the tracked album, for exactly the
+  every product-eligible declared variant and asserts fit against the derived box — including a title
+  long enough to fall outside that box, which the suite measures (the elision that would shorten it is
+  PR-(2)'s, so what this proves today is the measurement and not the elide); it is a synthetic input in
+  that suite and stays out of the tracked album, for exactly the
   reason D5 gave.)**)
 
 ---

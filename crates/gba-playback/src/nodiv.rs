@@ -14,11 +14,28 @@
 //! `2^14 = 16,384 Hz` and `2^32` of accumulator per unit.
 //!
 //! There is exactly **one** divide in this file, [`bar_recip`], and it is the
-//! bake tool's: `floor(2^32 × BAR_CELLS / n_samples)` is computed once per track
+//! bake tool's: `floor(2^32 × bar_cells / n_samples)` is computed once per track
 //! on the host and carried in the manifest, so the ROM only ever multiplies. This
 //! crate's host suite reads this file and refuses a second one — that is the
 //! code-level half of the §6 rule; the linked-image half (`__aeabi_u*div*`) is
 //! AP-2's.
+//!
+//! ## The bar grid belongs to the layout variant, not to this module
+//!
+//! §6 re-ruled the grid on 2026-11-20: it is a field of the layout variant
+//! (`bar_cells` in `layout_spec.toml`), generated into each app's `src/layout.rs`,
+//! and this module used to carry a second, hard-coded opinion (`BAR_CELLS = 32`)
+//! that a manifest was validated against. That constant is gone. [`bar_recip`]
+//! takes the cell count as an argument, so the one implementation of the
+//! arithmetic serves any declared grid and the *value* has exactly one home —
+//! the generated module the app links. A grid constant here would make this crate
+//! the third opinion again, which is precisely the failure §9.0's
+//! `bar-cells-disagree` row exists to catch, so a host leg reads this file and
+//! refuses one by name (see `scripts/album_bake.py --layout-self-test`).
+//!
+//! [`bar_cell`] was always grid-agnostic — it takes the reciprocal, and the grid
+//! is already inside that number — which is why the runtime path did not change
+//! at all when the grid stopped being a constant: only the guard moved.
 //!
 //! ## The clock is the link site's fact, not this module's
 //!
@@ -38,10 +55,6 @@
 /// power of two — see the module docs — so this stays an arithmetic fact rather
 /// than a claim about someone else's geometry file.
 pub const RATE_LOG2: u32 = 14;
-
-/// Cells in the progress bar: §6's fixed grid of 32 equal cells (32 cells × 7 px
-/// on a 256-px-wide bar; a 64-cell bar is the other priced option).
-pub const BAR_CELLS: u32 = 32;
 
 /// The reciprocal for `mm:ss`: `floor(2^32 / 60) + 1`, the constant §6 verified
 /// exact for `sec < 2^20` (an album needs `sec < 2^12`; the margin is the point
@@ -72,22 +85,35 @@ pub const fn label(pos_samples: u32) -> (u32, u32) {
     mmss(seconds(pos_samples))
 }
 
-/// The bake-time reciprocal for a track of `n_samples`: `floor(2^32 × BAR_CELLS /
-/// n_samples)`. Host-side and per track — the *only* divide in this file, and it
-/// never runs on the GBA.
+/// The bake-time reciprocal for a track of `n_samples` on a grid of `bar_cells`:
+/// `floor(2^32 × bar_cells / n_samples)`. Host-side and per track — the *only*
+/// divide in this file, and it never runs on the GBA.
+///
+/// `bar_cells` is the layout variant's declared cell count (§6: the grid is
+/// per-variant, generated into the app's `layout.rs`), passed in rather than read
+/// from a constant here, so this crate holds no grid of its own. The bake and the
+/// app's boot check both call it with the same generated value; §9.0's
+/// `bar-cells-disagree` row is what makes "same" mean something.
 ///
 /// # Panics
 ///
-/// `n_samples == 0` has no bar; the bake tool refuses an empty track before it
-/// ever calls this.
-pub const fn bar_recip(n_samples: u32) -> u32 {
-    (((BAR_CELLS as u64) << 32) / n_samples as u64) as u32 // bake-time divide
+/// `n_samples == 0` has no bar, and `n_samples <= bar_cells` overflows a `u32`
+/// (`floor(2^32 × bar_cells / n_samples) >= 2^32`), so such a track has no
+/// reciprocal the manifest can carry. The bake tool refuses both by name before
+/// it ever calls this; as a `const fn` it can only panic, and a render that
+/// reaches this path with an empty track is a caller bug rather than a length.
+pub const fn bar_recip(n_samples: u32, bar_cells: u32) -> u32 {
+    (((bar_cells as u64) << 32) / n_samples as u64) as u32 // bake-time divide
 }
 
-/// Position → bar cell: one UMULL and a shift. Never reaches `BAR_CELLS` for
-/// `pos < n_samples`, never goes backwards while `pos` does not, and lands on
-/// `BAR_CELLS - 1` at the last sample — the three properties the §6 bake-time
-/// assertions name, proved over 1,000..2.6 M samples by the host suite.
+/// Position → bar cell: one UMULL and a shift. Never reaches the grid's cell
+/// count for `pos < n_samples`, never goes backwards while `pos` does not, and
+/// lands on the last cell at the last sample — the three properties the §6
+/// bake-time assertions name, proved over 1,000..2.6 M samples by the host suite.
+///
+/// The grid is already inside `recip`, so this needs no cell count: the same
+/// function serves every declared grid, and §6's "the runtime path is already
+/// value-agnostic" is this signature.
 ///
 /// The caller passes `pos` already clamped to the track
 /// (`position::paint_position_in_track`), because a bar cell past the end is a

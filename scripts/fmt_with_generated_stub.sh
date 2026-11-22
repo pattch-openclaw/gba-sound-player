@@ -41,11 +41,18 @@
 #
 # GENERATED names a generated module whose absence rustfmt cannot tolerate, when
 # that module is not the master pin: examples/album_player declares
-# `pub mod assets;` from a bake-generated `src/assets.rs`, and a fresh clone has
+# `pub mod assets;` from a bake-generated `src/assets.rs`, and from 2a also
+# `pub mod layout;` from a bake-generated `src/layout.rs`, and a fresh clone has
 # neither. The stub it writes is comment-only, which is valid Rust for a whole
 # module — rustfmt only needs the file to parse, never to type-check. With no
 # GENERATED the script behaves exactly as before (the six-constant master-pin
 # stub), so flac_integration's gate is byte-for-byte unchanged.
+#
+# GENERATED may hold SEVERAL such paths, colon-separated, because one crate can
+# carry more than one generated module. Each absent one gets its own stub and
+# each stub is removed by name; a generated file that already exists (a real
+# `album-bake` output) is formatted in place and never touched, so the list never
+# destroys the thing it is guarding.
 #
 # GENERATED is passed absolute (`$(abspath ...)` in the Makefile): the script
 # never changes the cwd, so a relative path would work here, but an absolute one
@@ -59,13 +66,19 @@ dir=${1:?usage: fmt_with_generated_stub.sh <crate-dir> [--check]}
 shift
 
 generated=${GENERATED:-}
-pin="$dir/src/master_pin.rs"
 if [ -n "$generated" ]; then
-    pin="$generated"
+    # Colon-separated: one crate may own more than one generated module
+    # (album_player's assets.rs and, from 2a, layout.rs).
+    pins=$(printf '%s\n' "$generated" | tr ':' ' ')
+else
+    pins="$dir/src/master_pin.rs"
 fi
-created=0
+created=""
 
-if [ ! -e "$pin" ]; then
+for pin in $pins; do
+    if [ -e "$pin" ]; then
+        continue
+    fi
     mkdir -p "$(dirname "$pin")"
     if [ -n "$generated" ]; then
         # A whole generated module, not one pin: an empty-module stub (comments
@@ -112,9 +125,13 @@ pub const FNV_FIFO_R: u64 = 0;
 pub const MAX_FIXED_ORDER: u8 = 0;
 STUB
     fi
-    created=1
-    # Clean up on Ctrl-C / any exit, but only the stub we made.
-    trap 'if [ "$created" = 1 ]; then rm -f "$pin"; fi' EXIT INT TERM
+    created="$created $pin"
+done
+
+if [ -n "$created" ]; then
+    # Clean up on Ctrl-C / any exit, but only the stubs this run made — by name,
+    # so a real generated file that was already present is never removed.
+    trap 'for stub in $created; do rm -f "$stub"; done' EXIT INT TERM
 fi
 
 # No `cd`: the working directory never has to change, so there is no window in
@@ -130,7 +147,7 @@ fi
 ${CARGO:-cargo} fmt --manifest-path "$dir/Cargo.toml" "$@"
 status=$?
 
-if [ "$created" = 1 ]; then
-    rm -f "$pin"
-fi
+for stub in $created; do
+    rm -f "$stub"
+done
 exit "$status"

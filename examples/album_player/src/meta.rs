@@ -21,13 +21,21 @@
 //!   [`boot_audit_bytes`] is the bound it is held to).
 //!
 //! The §6 reciprocal is *checked*, not taken on trust, and the check itself
-//! contains no divide: `recip == floor(2^32 × 32 / n)` is exactly
-//! `recip·n ≤ 2^32·32 < (recip+1)·n`, two 64-bit multiplies — which is why the
+//! contains no divide: `recip == floor(2^32 × N / n)` is exactly
+//! `recip·n ≤ 2^32·N < (recip+1)·n`, two 64-bit multiplies — which is why the
 //! reader can hold the bake to its own arithmetic without carrying the bake's
-//! one tagged divide onto the GBA.
+//! one tagged divide onto the GBA. `N` is [`layout::BAR_CELLS`]: the grid is the
+//! selected variant's declared cell count (§6 re-ruled it on 2026-11-20 from a
+//! constant in the shared crate to a generated field), so this reader compares a
+//! manifest against the module it was linked with rather than against a number
+//! written here. That comparison is the boot backstop of §9.0's
+//! `bar-cells-disagree` row and it stays: the bake checks the spec, but only the
+//! ROM can see a `layout.rs` generated yesterday sitting next to a manifest packed
+//! today (R11).
 //!
 //! Host-pure: no `agb`, no registers, no allocation, no unsafe.
 
+use crate::layout;
 use crate::nodiv;
 
 /// The product clock this reader accepts, and the one every track is encoded and
@@ -68,7 +76,12 @@ pub enum Refusal {
         /// The rate the blob declared.
         rate_hz: u32,
     },
-    /// The bar grid is not §6's 32 cells (the reciprocal was baked for 32).
+    /// The bar grid in the manifest is not the one this ROM was built to draw:
+    /// [`layout::BAR_CELLS`], the selected variant's declared count, generated
+    /// into `src/layout.rs`. §6's grid is per-variant, so the refusal names the
+    /// number the linked module declares rather than a constant of its own — a
+    /// pack whose reciprocals were computed for another grid would paint a bar
+    /// that disagrees with the audio it is drawing.
     BarCellsMismatch {
         /// The cell count the blob declared.
         bar_cells: u32,
@@ -215,8 +228,8 @@ impl core::fmt::Display for Refusal {
             ),
             Refusal::BarCellsMismatch { bar_cells } => write!(
                 f,
-                "bar_cells {bar_cells}, §6's grid is {}",
-                nodiv::BAR_CELLS
+                "bar_cells {bar_cells}, this ROM's generated grid is {}",
+                layout::BAR_CELLS
             ),
             Refusal::BackendUnknown { backend } => {
                 write!(
@@ -292,7 +305,7 @@ impl core::fmt::Display for Refusal {
             } => write!(
                 f,
                 "track {track}: recip {recip:#x} is not floor(2^32 × {0} / {n_samples})",
-                nodiv::BAR_CELLS
+                layout::BAR_CELLS
             ),
             Refusal::ChecksumMismatch { stored, computed } => write!(
                 f,
@@ -579,7 +592,7 @@ impl<'a> Album<'a> {
         if rate_hz != PRODUCT_RATE_HZ {
             return Err(Refusal::RateNotProductClock { rate_hz });
         }
-        if bar_cells != nodiv::BAR_CELLS {
+        if bar_cells != layout::BAR_CELLS {
             return Err(Refusal::BarCellsMismatch { bar_cells });
         }
 
@@ -808,10 +821,11 @@ pub fn suffix_fnv(asset: &[u8]) -> u32 {
     fnv1a32_parts(&[&asset[at..]])
 }
 
-/// Should `recip` be `floor(2^32 × BAR_CELLS / n_samples)`? Two 64-bit
-/// multiplies and no divide — exactly the inequality the floor satisfies.
+/// Should `recip` be `floor(2^32 × N / n_samples)` on the grid `N` this ROM was
+/// generated for ([`layout::BAR_CELLS`])? Two 64-bit multiplies and no divide —
+/// exactly the inequality the floor satisfies.
 fn reciprocal_is_exact(n_samples: u32, recip: u32) -> bool {
-    let target = (nodiv::BAR_CELLS as u64) << 32;
+    let target = (layout::BAR_CELLS as u64) << 32;
     (recip as u64) * (n_samples as u64) <= target
         && ((recip as u64) + 1) * (n_samples as u64) > target
 }
