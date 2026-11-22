@@ -28,6 +28,7 @@ fn args(album: std::path::PathBuf, tracks: std::path::PathBuf, budget: u64) -> A
         fine_width: 0,
         train: false,
         ms: None,
+        musearch: false,
         threads: 1,
     }
 }

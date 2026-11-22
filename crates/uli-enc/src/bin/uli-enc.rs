@@ -4,8 +4,10 @@
 //! acceptance harness drives this binary and an external one with identical arguments, so
 //! `--budget`, `--cap` and `--kappa` cannot be renamed freely. The rest are this encoder's
 //! own knobs — `--g` for a fixed step, `--rd` for the search, `--train` for the two-pass
-//! tables, `--stride`/`--fine` for the candidate grid, and `--ms` to pin the stereo domain
-//! for a fixed-step comparison.
+//! tables, `--stride`/`--fine` for the candidate grid, `--ms` to pin the stereo domain
+//! for a fixed-step comparison, and `--musearch 0|1` to control the cycle-aware re-code
+//! (S6; on by default, because the cap is a playback constraint and meeting it is the
+//! shipping behaviour — `0` is the A/B arm).
 //!
 //! **Two input shapes, one boundary.** `--album`/`--tracks` *is* the boundary E-R2 fixes;
 //! `--wav` is the convenience layer on top of it (S5), and `--emit-pcm DIR` writes back the
@@ -16,12 +18,12 @@
 //! happens before `--out` is created: the encoder either writes a whole album or
 //! nothing at all.
 //!
-//! **The printed lines are the reference's columns** (`uli_enc.c`), because S7's acceptance
-//! matrix compares the two encoders and a diff has to be readable: album summary, container
-//! overhead and bit target, the written size against the budget, the `g` range and M/S
-//! share, and the verify block's per-track pcm16 / int8 SNR. Ours prints `dacw off` where
-//! the reference prints its DAC-weight pass number: that pass does not exist here, and a
-//! made-up `0` would read as a knob that ran.
+//! **The printed lines are the oracle's columns**, because S7's acceptance matrix compares
+//! the two encoders and a diff has to be readable: album summary, container overhead and bit
+//! target, the written size against the budget, the `g` range and M/S share, and the verify
+//! block's per-track pcm16 / int8 SNR. Ours prints `dacw off` where the oracle prints its
+//! DAC-weight pass number: that pass does not exist here, and a made-up `0` would read as a
+//! knob that ran.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -32,7 +34,8 @@ use uli_lite::format::{M, NCODED, RATE};
 
 const USAGE: &str = "usage: uli-enc {--album F --tracks TSV | --wav F [--wav F ...]} --out U \
                      [--budget BYTES] [--cap PCT] [--threads N] [--g N] [--rd] [--no-train] \
-                     [--kappa X] [--stride N] [--fine N] [--ms] [--emit-pcm DIR]";
+                     [--kappa X] [--stride N] [--fine N] [--ms] [--musearch 0|1] \
+                     [--emit-pcm DIR]";
 
 fn main() -> ExitCode {
     match run() {
@@ -65,6 +68,9 @@ fn run() -> Result<(), ExitCode> {
     let mut fine_width = 4i32;
     // `--ms` forces M/S; absent, the encoder chooses per frame.
     let mut ms: Option<bool> = None;
+    // The cycle-aware re-code is the shipped default (S6): the cap is a playback constraint,
+    // so meeting it is what the product does. `--musearch 0` is the A/B arm.
+    let mut musearch = true;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -83,6 +89,14 @@ fn run() -> Result<(), ExitCode> {
             "--kappa" => kappa = parse(&mut it, "--kappa")?,
             "--stride" => stride = parse(&mut it, "--stride")?,
             "--fine" => fine_width = parse(&mut it, "--fine")?,
+            "--musearch" => {
+                let v: u32 = parse(&mut it, "--musearch")?;
+                musearch = match v {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(usage("--musearch takes 0 or 1".into())),
+                };
+            }
             "--ms" => ms = Some(true),
             other => return Err(usage(format!("unknown argument {other:?}"))),
         }
@@ -136,6 +150,7 @@ fn run() -> Result<(), ExitCode> {
         fine_width,
         train,
         ms,
+        musearch,
     };
     let encoded = encode(&args).map_err(|e| {
         eprintln!("uli-enc: {e}");
@@ -143,17 +158,18 @@ fn run() -> Result<(), ExitCode> {
     })?;
     let report = &encoded.report;
 
-    // The reference's album line, then its sizing line. Printed after the encode because
+    // The oracle's album line, then its sizing line. Printed after the encode because
     // this encoder does not stream its progress; the columns are the same.
     println!(
         "album: {} samples ({:.1} s), {} tracks, {} frames; budget {} bytes; cap {:.1}%; \
-         dacw off; threads {}",
+         dacw off; musearch {}; threads {}",
         report.n_samples,
         f64::from(report.n_samples) / f64::from(uli_lite::format::RATE),
         report.n_tracks,
         report.n_frames,
         budget,
         cap_pct,
+        if report.musearch { "on" } else { "off" },
         threads
     );
     println!(
@@ -200,7 +216,13 @@ fn run() -> Result<(), ExitCode> {
             }
         );
         println!("{gline}; xover {} hfnz {}", report.xover, report.hfnz);
-        // The reference's verify block, column for column.
+        if report.musearch {
+            println!(
+                "musearch: {} of {} frames re-coded under a cycle price (mu > 0)",
+                report.mu_frames, report.n_frames
+            );
+        }
+        // The oracle's verify block, column for column.
         println!(
             "verify: decoded {} frames OK, |X| overflows {}, nonzero coefs >= {}: {}, \
              model max cycles {:.1}%",

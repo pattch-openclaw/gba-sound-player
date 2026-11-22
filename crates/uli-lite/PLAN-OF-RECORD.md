@@ -34,6 +34,16 @@ mGBA, WAITCNT 4/2, 262,144-cycle period, no UI. Both corpora pinned
 - **Open:** the non-decode gate half; the dense-frame tail of entropy (the
   sub-frame partition needs re-measuring on the product reader first — see "The
   entropy path against the C+ASM reference"); a licensing/publish decision.
+- **The encoder: S6 (the decoder-cycle price) is done, and it was the whole of the high-rate
+  gap — but only where the cap binds hard.** An over-cap candidate is re-coded under
+  `mu · (band symbol + decoded work)` instead of being refused, and the final encode re-codes
+  at the price that bought the cap. On 20 s of `bioluminescent` at `--budget 400000 --cap 74`
+  the switch is worth **1.44 dB** (39.57 → 41.01) against the reference's 1.48 dB, i.e. parity
+  within 0.01 dB at a cap of 74.0% max. At the product album's rate — 199 B/frame, against
+  that slice's 2,498 bits/frame — the cap binds on **3.5%** of a `cross` slice's frames and the
+  switch is worth **0.02 dB** to the reference, so S5's **0.41 dB `cross` residual is not
+  cap-constrained** and S6 leaves it alone. It does not touch the two lower budgets' 0.16 dB
+  either (byte-identical at 40,000). See "S6" below.
 - **The encoder: S5 (album assembly, the WAV layer, the parallel curves) is done.** It
   encodes a 43.5-minute album (167,222 frames, 12 tracks) inside a passed-in budget with a
   pinned hash; a 32,768 Hz stereo WAV reaches its PCM pair's exact blob and a resampled one
@@ -43,8 +53,9 @@ mGBA, WAITCNT 4/2, 262,144-cycle period, no UI. Both corpora pinned
   counts and per-bucket reconstruction errors rebuild the Huffman lengths and `dq`, then the
   search ships the plan it would actually code. At binding budgets the gap to the reference
   closed to **0.16 dB** (31.19 vs 31.35 at `budget 120000`); the residual 1.15 dB at the top
-  budget is cap-constrained frames, not the codebooks — S6. Trained context codebooks differ
-  per row, which is why the band-class choice became a shortest path first.
+  budget was cap-constrained frames, not the codebooks — that was S6, now done. Trained
+  context codebooks differ per row, which is why the band-class choice became a shortest
+  path first.
 - **The encoder: S2 (the codec's first real frame) is done.** The forward MDCT
   reproduces the reference's coefficients bit for bit on a frozen fixture, and a
   fixed step now trades rate against distortion the way the format intends:
@@ -1144,12 +1155,105 @@ read-side, so this does not reopen the paragraph above.
 | **S3b** | **M/S**: the `1/√2` forward rotation, the `√2` step compensation, `ms` in the candidate set (weighed per `g` with one λ, as the reference does), `ms` in the cycle model | E-R7, E-R6 | with `ms` forced, our distortion matches the reference's at fixed `g` (exact at g=100/140); at equal budget the search beats L/R-only on correlated stereo; the SNR gap to the reference closes | **done** |
 | **S4** | Two-pass table training: the album's own symbol counts into Huffman lengths, and its own reconstruction errors into `dq`, then a second search with the trained set | E-R4, E-R5, E-R7 | output byte-stable across runs; the trained set is a complete prefix code and stays inside E-R4; training measurably beats the built-in tables at a binding budget; and the band-class choice is a shortest path, since trained context codebooks differ | **done** |
 | **S5** | Album assembly (WAV front end, gapless join, tags verbatim), `--budget`/`--cap` on real sizes, frame-parallel search | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes (each seeked to its own preroll); hashes pinned; too small refuses **before the first frame**, citing both numbers; a 32,768 Hz WAV reaches the same blob its pre-resampled PCM does, and a resampled WAV is quoted by SNR; the CLI prints the reference's columns | **done** — see "S5" below for the numbers and the defaults-restored failure |
-| **S6** | `mu` (decoder-cycle-aware) search: re-code an over-cap frame by dropping its cheapest coefficients instead of refusing the candidate | E-R8, E-R7 | a knob that demonstrably trades SNR for decode cycles, measured on the bench — and, measured 2026-11-20, it closes the last high-rate gap: at `--budget 400000 --cap 74` the equivalent mechanism is worth **1.48 dB** to the oracle, against a 1.15 dB gap | not started |
+| **S6** | `mu` (decoder-cycle-aware) search: re-code an over-cap frame by dropping its cheapest coefficients instead of refusing the candidate | E-R8 **discharged**; E-R7 **contributed to, not discharged** — its criterion is codec-only and unmeasured, and S7 accepts it | a knob that demonstrably trades SNR for decode cycles, measured on the bench — and, measured 2026-11-20, it closes the last high-rate gap: at `--budget 400000 --cap 74` the equivalent mechanism is worth **1.48 dB** to the oracle, against a 1.15 dB gap | **done** — `--musearch 1` by default; worth **1.44 dB** here (39.57 → 41.01 dB) and the oracle's 41.02 is 0.01 dB above, cap 74.0% max on both arms. See "S6" below |
 | **S7** | **The acceptance matrix, as a buildable target** | E-R2, E-R5, E-R7 (and E-R1's oracle posture) | the four cells below run in CI-shaped form and compare SHA-256s against the reference's blobs, including the two header cycle fields | not started |
 
 S7 is a step rather than a property of the plan because it has work in it — a host
 target that builds nothing of ours from C, calls the off-tree binary, compares hashes
 — and it has been standing as prose since the gate was declared measurable.
+
+#### S6 — the cycle price, and the high-rate gap it turns out to be all of
+
+**Two things S6 was not.** It was not a second quantiser: the tuple candidate set, the
+band-class shortest path and `J = D + kappa·D²·R` are S3's, and the new argument is a
+price on decoder cycles, not a new rule — with it at `0.0` the search reproduces the S5
+blob **byte for byte** (the whole album below is the witness). And it was not an answer
+to the 0.16 dB residual at the two lower budgets: measured, it does not move it.
+
+**What it is.** The reference re-codes an over-cap frame instead of refusing the
+candidate. `quant::band_cycles` is the reference's `band_cyc` (a coded band's decode work
+beyond its band symbol, relative to a zero band) built from `CY_*` constants mirrored from
+`uli_lite::Ops::cycle_model`; `quantise_chan_rd` takes `mu` and charges
+`mu · (CY_BANDSYM + band_cycles)` on every band transition and on the terminator. `rd::point()`
+is the reference's `point()`: measure at `mu = 0`, and if the cap is missed raise the price
+from `lam · 0.01` by ×2.5 (14 tries), then six geometric bisections down to the smallest
+price that still fits. `Curve` carries that `mu` per candidate and `to_content` re-codes at
+the winner's price, so the shipped bands are the ones that met the cap rather than a second
+search that happens to be near them. A frame no price can bring under the cap returns its
+plain coding and the allocation excludes it — the reference's "leave it to allocation". The
+measurement pass that feeds training stays at `mu = 0`, as the reference's first
+`curves_compute` does; only the pass whose bands ship pays the price.
+
+**Measured, 20 s of `bioluminescent` (655,360 samples, 1,281 frames),**
+`--budget 400000 --cap 74 --threads 4`, `--rd` with the shipped `--stride 8 --fine 4`:
+
+| | codec SNR | stream bits | blob | est. cycles max | SHA-256 |
+|---|---:|---:|---:|---:|---|
+| ours, `--musearch 0` | 39.57 dB | 3,154,706 | 399,736 B | 74.0% | `b32614c3…ab771d` |
+| ours, `--musearch 1` | **41.01** dB | 3,154,594 | 399,724 B | 74.0% | `7a63311f…b00ff42` |
+| reference, `--musearch 0` | 39.54 dB | 3,154,854 | 399,756 B | 74.0% (verify prints 74.2%) | `f994a199…e4c139` |
+| reference, `--musearch 1` | **41.02** dB | 3,156,681 | 399,984 B | 74.0% (verify prints 74.3%) | `a3e949fd…9965c1` |
+
+Three things follow from the table rather than from intent. The ordering is the one the
+gate asks for: our re-coded output sits between our own rate-only output and the
+reference's re-coded output (39.57 < 41.01 < 41.02). The re-code is worth **1.44 dB** here
+against the oracle's **1.48 dB** — same direction, same size, and the `g` range moves the
+same way it moves for the oracle (ours 8..112 → 8..108). And the residual at this budget
+is **0.01 dB**: on this slice the rate-only search was already 0.03 dB ahead of the
+oracle's (39.57 against 39.54), so S6 was not closing a 1.15 dB deficit here — it was a
+mechanism both encoders either have or lack, worth ~1.45 dB to either. The 278 of 1,281
+frames that were re-coded (22%) are the cap-constrained ones.
+
+**It is a high-rate mechanism, and the product album is not high rate.** The 2,498
+bits/frame in the table is a 400 kB budget over 1,281 frames. The shipped album is
+**199 B/frame = 1,594 bits/frame**, and at that rate the cap binds on **3.5%** of a
+`cross` slice's 3,840 frames: the re-code is worth **0.02 dB to the reference**
+(28.78 → 28.80) and **0.01 to us** (28.80 → 28.81) on the same 60 s at the same
+764,500-byte budget. So "the high-rate gap was all of it" is true where the cap binds
+hard and false at the rate the product ships at — **S5's 0.41 dB `cross` residual is not
+cap-constrained, and S6 does not touch it.** The largest measured gap is therefore still
+the album-scale one, and its owner is not S6.
+
+**It does not fix the 0.16 dB, and that is measured too.** At `--budget 40000 --cap 74`
+the two arms are **byte-identical** (39,732 B, `80ab819a…572e51`, 0 frames re-coded): the
+cap does not bind at all there. At `--budget 120000 --cap 74` it binds on **9** frames, so
+the blob moves by 4 bytes (`17ed982e…6dd87` vs `4a0a224d…0dc11`) and the codec SNR does
+not: **31.19 dB both ways**. Those two SNRs are exactly S4's table (31.19 / 21.67), so the
+residual those rows carry is untouched, and the honest statement stays "0.16 dB,
+unattributed".
+
+**On the whole album it does something, and less of it.** `biomaster` (16,553 frames),
+`--budget 3294000 --cap 74 --threads 4`: musearch 0 → **31.43 dB, 3,293,656 B**
+(`6f4f3d66…82be51`), musearch 1 → **31.89 dB, 3,293,696 B** (`f4f3a52a…e095c8`), 1,766 of
+16,553 frames (10.7%) re-coded, cap 74.0% max in both. So the blob **does** change and
+quality rises 0.46 dB — but the cap binds on a tenth of the frames at this rate rather than
+a fifth, which is why the gain is a third of the slice's. The musearch-0 hash is S5's
+pinned blob, i.e. the price is a no-op when it is off — so **every S5 gate number in this
+file, the `cross` pin included, is the `--musearch 0` arm by construction**. Under the
+shipped default those blobs move wherever the cap binds, and no album has been re-pinned
+at `--musearch 1`: `cross` at four threads would run over two hours under the multiplier
+below, which is the cost argument rather than an oversight.
+
+**What it costs, because a knob that is free is a knob that is lying.** Same slice, same
+flags, wall clock: `--musearch 0` **18.1 s**, `--musearch 1` **73.2 s** — a 4.1×
+multiplier, against the reference's 7.5 s → 13.9 s (1.9×). Every over-cap candidate is
+re-quantised up to 22 times (the seed, fourteen doublings, six bisections) in both
+domains, and at a binding cap most fine-step candidates are over it. So S6 widens S5's
+E-R9 gap rather than narrowing it: `biomaster` took 3m46s rate-only, and 4× on the slice
+predicts ~15 min with the price on. That is a named follow-up of the same shape as the
+curve-pass estimate — "the bake is in the edit loop" is still not true — not a defect of
+the mechanism.
+
+**Four tests, and one print that refuses to overclaim.** `band_cycles_witness_the_reader_cycle_model`
+reconstructs `Ops::cycle_model()` from the mirrored constants and `band_cycles` for a real
+channel pair, so a constant that drifts becomes a failing test rather than a cap that
+quietly stopped binding; `a_larger_mu_never_costs_more_decoder_cycles` is the monotonicity
+the bisection assumes (and that it buys cycles at all); `an_over_cap_candidate_is_re_coded_not_refused`
+is the mechanism end to end; `musearch_is_inert_when_the_cap_does_not_bind` is the 40,000-
+budget row above. `tests/determinism.rs` now runs the RD path with the re-code at 1 vs 4
+threads. The CLI prints `musearch on` in the album line **and** a second line, `musearch: N
+of M frames re-coded under a cycle price (mu > 0)` — because "on" and "did something" are
+two claims and the second one is the measurement.
 
 #### S5 — assembly, the WAV layer, and the curves that had to move
 
@@ -1214,7 +1318,8 @@ that was encoded rather than a second conversion.
 time-domain SNR at pcm16 and int8, their means, the pooled album codec SNR that E-R7 is
 stated against, and every track is now also **seeked to its own preroll** and decoded — "every
 track decodes" as a claim about the track table, not merely about a linear walk. The album
-line prints `dacw off`: that pass is S6's, and printing `0` would claim a knob ran.
+line prints `dacw off`: that pass is not implemented, and printing `0` would claim a knob
+ran. (S6 landed as the decoder-cycle price, not as the DAC-weight pass.)
 
 **The gate, measured.** The 43.5-minute `cross` album (167,222 frames) at
 `--rd --budget 33292288 --cap 74 --threads 4` encodes to **33,291,896 bytes — 392 spare**
@@ -1254,9 +1359,11 @@ coefficients instead of refusing the candidate, which is what this encoder does 
 is worth more than the gap: with it disabled, this encoder is **0.33 dB ahead** of the oracle
 (39.87 against 39.54). Nothing else needs to move at high rate; S6 closes it.
 
-*The 0.16 dB at the two lower budgets has **no owner**.* `--musearch` is completely inactive
-there (identical output with and without), so S6 will not touch it, and no step S1–S7 claims
-it. It is 3.7% of a dB and may well be inside tolerance — but **E-R7 has never been measured
+*The 0.16 dB at the two lower budgets has **no owner**.* `--musearch` does not touch it —
+measured on 2026-11-20 (S6): byte-identical output at `--budget 40000`, and at
+`--budget 120000` it re-codes 9 of 1,281 frames, moves the blob 4 bytes and leaves the codec
+SNR at **31.19 dB** either way — so no step S1–S7 claims it. It is 3.7% of a dB and may
+well be inside tolerance — but **E-R7 has never been measured
 on either side**: the requirement is *codec-only* SNR at 32.29 mean / 25.78 worst, and every
 number in this section is full-band time-domain. So parity against the actual requirement is
 still unmeasured, and that measurement is S7's. Until then the honest statement is "0.16 dB,
@@ -1317,6 +1424,18 @@ charges `λ` for a coded band and nothing for the EOB symbol. Pricing it — as 
 implementation did at first — makes the search terminate earlier than the reference's:
 2.5% more distortion and 3 bits/frame at `g = 140`, versus exact agreement once the
 charge is dropped. It is the reference's quirk and S7 has to reproduce it.
+
+**Corrected 2026-11-20 (S6 review) — the first sentence is wrong about the reference.**
+`enc_core.c:317` charges `λ · le` for the terminator, `le = T.len_cb[s][EOB]`, and
+`git blame` dates that line to the reference's first codec commit — a fortnight *before*
+the `g = 140` measurement above. So that measurement established something narrower than
+the sentence claims: dropping the charge agreed better with the reference's *output* at
+that step, which is not the same fact as the reference omitting it. This search still
+omits it, so the two encoders price the spectrum end differently wherever context rows
+differ, i.e. on the **trained** tables S4 ships (the default set's 15 rows are identical,
+so the charge is a constant across termination candidates there and the argmin cannot see
+it). S7 must re-run this A/B before it treats the omission as a reproduction target: a
+mismatched cell explained by this sentence would otherwise be attributed to the codec.
 
 **Two silent failures, both of the same shape.** First, `--rd` parsed into a field that
 `encode` never read: the crate built, 45 tests passed, and the encoder emitted **S1

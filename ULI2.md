@@ -372,11 +372,11 @@ every track seeked to and decoded; a natively-32,768 Hz WAV reaches its PCM pair
 blob; `biomaster`'s blob is unchanged from S4's while the wall clock fell 12m16s → 3m46s
 at four threads. **E-R9 is met in mechanism, not in rationale:** that album takes 40m11s
 where the reference takes 14m30s on the same box, because every candidate is coded
-exactly rather than estimated — a named follow-up, not a claim. What remains is **S6** (the
-optional cycle-aware re-code, worth 1.48 dB to the reference at a binding cap) and
-**S7**, the acceptance matrix that holds this encoder to the C oracle's bytes — the
-hand-written C encoder is now the **oracle and the asset producer**, not the only
-encoder in existence. Requirements, slices and gates:
+exactly rather than estimated — a named follow-up, not a claim. **S6 is done:** the
+cycle-aware `--musearch` re-code is shipped on by default and worth 1.44 dB at a binding
+cap (the reference's 1.48). What remains is **S7**, the acceptance matrix that holds this
+encoder to the C oracle's bytes — the hand-written C encoder is now the **oracle and the
+asset producer**, not the only encoder in existence. Requirements, slices and gates:
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) -> "The
 encoder — the last missing piece".
 
@@ -810,7 +810,7 @@ entry is kept for the decision and its reasoning, not for its numbers.**
   same box and flags, because `measure` codes every `(g, ms)` candidate exactly
   (`write_chan` twice) while the reference's curve pass estimates — the mechanism is met, the
   "bake is in the edit loop" rationale is not. Making the curve pass cheaper is a new step;
-  S6 (cycle-aware re-code) and S7 (the acceptance matrix) remain open.
+  S6 (the cycle-aware re-code) has since landed; S7 (the acceptance matrix) remains open.
 
 - **2026-11-19 (later) — the encoder's shape is settled before it is written: plan-
   then-emit, four determinism rules, a byte budget that is an argument, and exactness

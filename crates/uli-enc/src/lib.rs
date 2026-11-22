@@ -58,8 +58,8 @@ pub use tables_default::{Codes, DefaultTables};
 
 /// Where an album comes from.
 ///
-/// Two shapes, one boundary. [`Input::Pcm`] **is** the boundary (E-R2): the
-/// reference's own pair, and the only shape the byte-exactness gate is stated
+/// Two shapes, one boundary. [`Input::Pcm`] **is** the boundary (E-R2): the pair the bake
+/// and the acceptance gate both speak, and the only shape the byte-exactness gate is stated
 /// over. [`Input::Wav`] is the convenience layer on top of it, and the variants
 /// are separate rather than one struct with an empty field because a caller that
 /// supplies both has not said which album it means — the CLI refuses that instead
@@ -119,14 +119,18 @@ pub struct Args {
     /// `Some(true)`/`Some(false)` pin the domain, which is what a fixed-step comparison
     /// needs in order to hold it constant.
     pub ms: Option<bool>,
+    /// Re-code an over-cap frame with the decoder-cycle price instead of leaving the
+    /// candidate for the allocation to exclude (S6, `--musearch`). Only the search uses it;
+    /// with `--g` there is no candidate set and no cap to meet.
+    pub musearch: bool,
     pub threads: usize,
 }
 
 /// What the encoder measured while producing the blob.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
-    /// Album length and track count, reported so the CLI can print the reference's
-    /// album line without re-reading the input.
+    /// Album length and track count, reported so the CLI can print the album line the
+    /// acceptance diff compares, without re-reading the input.
     pub n_samples: u32,
     pub n_tracks: usize,
     pub overhead_bytes: usize,
@@ -153,10 +157,10 @@ pub struct Report {
     /// column is [`Self::track_snr`]; the two differ on a heterogeneous album, and
     /// E-R7's 32.29/25.78 dB is stated against this pooled one.
     pub snr_db: Option<f64>,
-    /// The same SNR at int8, pooled; the reference's second verify column.
+    /// The same SNR at int8, pooled; the verify block's second column.
     pub snr8_db: Option<f64>,
-    /// Per-track time-domain SNR, pcm16 and int8, in track order — the reference's
-    /// `verify: per-track … pcm16 / int8` line. `None` per field when a track has
+    /// Per-track time-domain SNR, pcm16 and int8, in track order, for the verify block's
+    /// per-track line. `None` per field when a track has
     /// no signal energy to compare against (the ratio is 0/0 there).
     pub track_snr: Vec<TrackSnr>,
     /// `|X| >= 2^28` coefficients the reader counted: the encoder's `mmax` should
@@ -173,12 +177,20 @@ pub struct Report {
     /// all: on real stereo it should be most of them, and a search that silently never
     /// chose it would otherwise look merely mediocre.
     pub ms_frames: usize,
+    /// Whether the cycle-aware re-code ran (S6). `false` on every path where there is no
+    /// candidate search, whatever the flag said.
+    pub musearch: bool,
+    /// Frames whose winning candidate was re-coded under a positive `mu`, i.e. frames the
+    /// cycle cap actually bound. Zero is the honest answer on a non-binding cap, and the
+    /// CLI prints it so "musearch on" cannot be mistaken for "musearch did something".
+    pub mu_frames: usize,
 }
 
 /// How many times the search may re-try the bit target before refusing.
 const RETRY_ATTEMPTS: usize = 10;
 
-/// One track's measured SNR, in the reference's two output profiles.
+/// One track's measured SNR, in the two output profiles the DMA stage writes (pcm16 and
+/// int8).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrackSnr {
     pub pcm16: Option<f64>,
@@ -266,13 +278,14 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         fine_width,
         train,
         ms,
+        musearch,
         threads,
     } = input;
     // The parameter is `input`, not `args`, so there is no way to reach a field
     // through it and quietly bypass the bindings above. That is what the first
     // version of this guard missed: `args.rd` still resolved, so the exhaustive
     // pattern proved nothing.
-    let (budget, cap_pct, g, rd, kappa, stride, fine_width, train, ms, threads) = (
+    let (budget, cap_pct, g, rd, kappa, stride, fine_width, train, ms, musearch, threads) = (
         *budget,
         *cap_pct,
         *g,
@@ -282,6 +295,7 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         *fine_width,
         *train,
         *ms,
+        *musearch,
         *threads,
     );
     // S5's two input shapes meet here, and only here: below this point an album is
@@ -296,6 +310,7 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
     };
     let mut report_g: Option<Vec<i32>> = None;
     let mut report_lambda: Option<f64> = None;
+    let mut report_mu_frames = 0usize;
 
     // The premise is a property of the *final* tables, so serialise and re-parse
     // them first: a bound checked against the in-memory model would not prove
@@ -359,8 +374,13 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         let w = rd::weights(&pcm, &energy);
 
         // One search over a given table set, so training can run it twice: once to measure
-        // the album, once to code it with what the measurement produced.
-        let run = |tbl: &DefaultTables| -> Result<(Content, Vec<i32>, f64), Error> {
+        // the album, once to code it with what the measurement produced. The measurement
+        // pass never pays the cycle price: training reads only the plan's symbol counts and
+        // its reconstruction errors, so re-coding there would fit the tables to codings that
+        // never ship. The price belongs to the pass whose bands do.
+        let run = |tbl: &DefaultTables,
+                   musearch: bool|
+         -> Result<(Content, Vec<i32>, f64, usize), Error> {
             let params = rd::SearchParams {
                 tables: tbl,
                 n_frames: nf,
@@ -368,6 +388,7 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
                 fine_width,
                 kappa,
                 cap,
+                musearch,
                 force_ms: ms,
                 threads,
             };
@@ -383,7 +404,14 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
                 let (lambda, picks) = curves.allocate(&w, target, cap)?;
                 let content = curves.to_content(&picks, s, pcm.n_samples as usize, tbl, kappa)?;
                 match Plan::new(&pcm, tbl, &content, budget, cap_pct) {
-                    Ok(_) => return Ok((content, curves.chosen_g(&picks), lambda)),
+                    Ok(_) => {
+                        let mu_frames = picks
+                            .iter()
+                            .enumerate()
+                            .filter(|&(f, &i)| curves.per_frame[f].mu[i] > 0.0)
+                            .count();
+                        return Ok((content, curves.chosen_g(&picks), lambda, mu_frames));
+                    }
                     Err(Error::Refusal(r)) => {
                         if attempt + 1 == RETRY_ATTEMPTS {
                             return Err(Error::Refusal(r));
@@ -408,7 +436,7 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             ))
         };
 
-        let (first, _, _) = run(tables)?;
+        let (first, _, _, _) = run(tables, false)?;
         let effective = if train {
             // Pass one measured the album with the built-in tables. What it saw is only an
             // approximation of what the trained tables will see — lengths change which
@@ -432,10 +460,11 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         } else {
             tables.clone()
         };
-        let (content, gs, lambda) = run(&effective)?;
+        let (content, gs, lambda, mu_frames) = run(&effective, musearch)?;
         tables_effective = Some(effective);
         report_g = Some(gs);
         report_lambda = Some(lambda);
+        report_mu_frames = mu_frames;
         content
     } else if let Some(g) = g {
         Content::quantise(
@@ -561,6 +590,8 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             nonzero_coeffs: content.nonzero_coeffs(),
             trained: trained_used,
             ms_frames: content.ms_frames(),
+            musearch: rd && musearch,
+            mu_frames: report_mu_frames,
         },
         // Only a WAV front end has a boundary that is not already a file. Moving
         // the samples here is why `--emit-pcm` can promise the dump is the exact
@@ -582,7 +613,7 @@ pub struct Verify {
     /// Codec-only SNR against the input, or `None` if there were no samples to
     /// compare against (S1's silence path never loads them).
     pub snr_db: Option<f64>,
-    /// The int8 profile's pooled SNR, and the per-track columns the reference also
+    /// The int8 profile's pooled SNR, and the per-track columns the verify block also
     /// prints — both undefined when there is no input to compare against.
     pub snr8_db: Option<f64>,
     pub track_snr: Vec<TrackSnr>,
@@ -626,7 +657,7 @@ fn self_verify(
     let mut se = 0f64;
     let mut sx = 0f64;
     let mut se8 = 0f64;
-    // The same three sums per track, which is the reference's verify column.
+    // The same three sums per track, for the verify block's per-track column.
     let n_tracks = pcm.tracks.len();
     let mut se_t = vec![0f64; n_tracks];
     let mut sx_t = vec![0f64; n_tracks];
@@ -660,8 +691,8 @@ fn self_verify(
                     let x = f64::from(s.at(p, ch));
                     let y = f64::from(if ch == 0 { out16l[i] } else { out16r[i] });
                     // The int8 profile's scale is 256 PCM16 units per step; that is
-                    // the same number the reader writes to the DMA and the same one
-                    // the reference's verify line uses.
+                    // the same number the reader writes to the DMA, so this column reports
+                    // the DMA's scale rather than a second convention of its own.
                     let y8 = 256.0 * f64::from(if ch == 0 { out8l[i] } else { out8r[i] });
                     let d = x - y;
                     let d8 = x - y8;

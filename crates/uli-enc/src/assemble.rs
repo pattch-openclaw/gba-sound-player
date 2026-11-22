@@ -8,7 +8,8 @@
 //! samples are produced by the same code and cannot disagree.
 //!
 //! Titles and artists come from the file's `LIST/INFO` tags, falling back to the
-//! file stem and `?` — the reference's own order (`prep.py`). They are carried
+//! file stem and `?` — the order the album bake's preparation uses (`prep.py`), so this
+//! fallback has one owner rather than two. They are carried
 //! **verbatim**, including a non-ASCII one.
 //!
 //! **The encoder does not fold text, and that is deliberate.** §5.5's ASCII fold
@@ -26,7 +27,7 @@ use crate::wav;
 use crate::{Error, Pcm, Samples, TrackInput};
 use uli_lite::format::MAX_TRACKS;
 
-/// What an absent artist becomes, in the reference's own table.
+/// What an absent artist becomes: the placeholder the album bake also uses.
 const UNKNOWN: &str = "?";
 
 /// Assemble `paths` (in play order) into the encoder's PCM boundary.
@@ -119,8 +120,8 @@ fn to_stereo(samples: &[f32], channels: u16) -> Result<Vec<f32>, Error> {
 /// The `(title, artist)` pair: the file's tags, then its name, then `?`.
 ///
 /// Verbatim on purpose — see the module doc. The encoder carrying a title
-/// unchanged is what keeps it from owning a second copy of §5.5's fold; `?` is the
-/// reference's own placeholder for an absent artist.
+/// unchanged is what keeps it from owning a second copy of §5.5's fold; `?` is that same
+/// placeholder.
 fn tags(path: &Path, tags: &wav::Tags) -> (String, String) {
     let stem = path
         .file_stem()

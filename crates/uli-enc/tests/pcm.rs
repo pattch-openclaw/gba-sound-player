@@ -183,6 +183,7 @@ fn a_length_mismatch_refuses_before_any_frame_is_planned() {
         fine_width: 0,
         train: false,
         ms: None,
+        musearch: false,
         threads: 1,
     })
     .expect_err("a mismatched pair cannot encode");

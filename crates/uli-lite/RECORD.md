@@ -3255,6 +3255,77 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
+- **2026-11-20 — S6: the decoder-cycle price, and the high-rate gap it turns out to
+  be all of.** An over-cap candidate is no longer refused: it is re-coded under
+  `mu · (band symbol + decoded band work)` until the reader's cycle model fits
+  `--cap`, and the final encode re-codes at the price that bought it (the
+  reference's `point()`/`band_cyc`/stored-`mu` shape). `--musearch 1` is the
+  shipped default, `0` the A/B arm.
+
+  20 s of `bioluminescent` (655,360 samples, 1,281 frames), `--rd --budget 400000
+  --cap 74 --threads 4`, shipped `--stride 8 --fine 4`:
+
+  | | codec SNR | stream bits | blob | est. cycles max | SHA-256 |
+  |---|---|---:|---:|---:|---|
+  | ours `--musearch 0` | 39.57 dB | 3,154,706 | 399,736 B | 74.0% | `b32614c3…ab771d` |
+  | ours `--musearch 1` | **41.01** dB | 3,154,594 | 399,724 B | 74.0% | `7a63311f…b00ff42` |
+  | reference `--musearch 0` | 39.54 dB | 3,154,854 | 399,756 B | 74.0% (verify 74.2%) | `f994a199…e4c139` |
+  | reference `--musearch 1` | **41.02** dB | 3,156,681 | 399,984 B | 74.0% (verify 74.3%) | `a3e949fd…9965c1` |
+
+  The mechanism is worth **1.44 dB** here against the oracle's 1.48 dB, and our
+  re-coded output sits where the gate asks it to — between our own rate-only output
+  and the oracle's (39.57 < 41.01 < 41.02). 278 of 1,281 frames (22%) were
+  re-coded, and the `g` range moved the same direction as the oracle's (8..112 →
+  8..108). The residual at this budget is **0.01 dB**, but the honest reading is
+  not "S6 closed 1.15 dB": on this slice the rate-only search was already 0.03 dB
+  *ahead* of the oracle's (39.57 vs 39.54), so the re-code is a mechanism both
+  encoders either have or lack, worth ~1.45 dB to either.
+
+  **It is a high-rate mechanism, and the product album is not high rate.** At the
+  album's own 199 B/frame (1,594 bits/frame) the cap binds on **3.5%** of a 60 s
+  `cross` slice's 3,840 frames and the re-code is worth **0.02 dB to the reference**
+  (28.78 → 28.80) and **0.01 to us** (28.80 → 28.81), same 60 s, same 764,500-byte
+  budget. So "the high-rate gap was all of it" is true where the cap binds hard and
+  false at the rate the product ships at: S5's **0.41 dB `cross` residual is not
+  cap-constrained** and S6 does not touch it. That gap is still the largest measured,
+  and its owner is not this step.
+
+  **It does not touch the two lower budgets, and that was measured rather than
+  assumed.** `--budget 40000 --cap 74`: the two arms are **byte-identical**
+  (39,732 B, `80ab819a…572e51`, 0 frames re-coded) — the cap does not bind at all.
+  `--budget 120000 --cap 74`: it binds on **9** frames, the blob moves 4 bytes
+  (`17ed982e…6dd87` vs `4a0a224d…0dc11`) and the codec SNR does not — **31.19 dB
+  both ways**, which is exactly S4's number for that row. So the 0.16 dB residual
+  stays "0.16 dB, unattributed".
+
+  Whole album, `biomaster` (16,553 frames), `--budget 3294000 --cap 74 --threads
+  4`: `--musearch 0` → **31.43 dB, 3,293,656 B** (`6f4f3d66…82be51`), `--musearch 1`
+  → **31.89 dB, 3,293,696 B** (`f4f3a52a…e095c8`), 1,766 frames (10.7%) re-coded,
+  cap 74.0% max in both. The blob **does** change and quality rises 0.46 dB — a
+  third of the slice's gain, because the cap binds on a tenth of the frames at this
+  rate instead of a fifth. The `--musearch 0` hash is S5's pinned blob, so the
+  price is a no-op when it is off, which is the assertion the `mu = 0` guard exists
+  for — and which means **S5's gate numbers, `cross` included, are the
+  `--musearch 0` arm**; none were re-pinned at the shipped default.
+
+  **It costs 4.1× on a cap-binding album.** Same 20 s slice: 18.1 s rate-only
+  against 73.2 s with the price, where the reference goes 7.5 s → 13.9 s (1.9×).
+  Every over-cap candidate is re-quantised up to 22 times in both domains, and at a
+  binding cap most fine-step candidates are over it. `biomaster`'s 3m46s rate-only
+  therefore predicts ~15 min with the price on, and `cross` predicts over two
+  hours. That is the same shape of debt as the exact-curve pass already recorded
+  under E-R9 ("met in mechanism, not in rationale"), and it is a named follow-up,
+  not a claim.
+
+  Four new tests hold the mechanism: the mirrored `CY_*` constants reconstruct
+  `Ops::cycle_model()` exactly for a real channel pair, a rising `mu` never costs
+  more cycles (the ladder the bisection assumes), an over-cap candidate comes back
+  under the cap with a positive `mu`, and the 40,000-budget case is inert. Suite
+  and gate: `make uli-test` green at **88 tests**, `ULI_ENC_MIN_TESTS` moved 84 →
+  88, `cargo fmt --check` clean. The CLI's extra line — `musearch: N of M frames
+  re-coded under a cycle price (mu > 0)` — exists because "musearch on" and
+  "musearch did something" are two claims.
+
 - **2026-11-20 — S5: the 43.5-minute album fits a passed-in budget, and the search
   is frame-parallel.** The album is the `cross` corpus (12 tracks, 167,222 frames,
   85,616,716 samples = 2612.8 s), run at `--rd --budget 33292288 --cap 74

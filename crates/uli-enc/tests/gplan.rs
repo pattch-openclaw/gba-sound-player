@@ -218,6 +218,7 @@ fn e1s_own_content_is_legal() {
         fine_width: 0,
         train: false,
         ms: None,
+        musearch: false,
         threads: 2,
     })
     .expect("S1 still encodes");
