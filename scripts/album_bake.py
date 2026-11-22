@@ -931,7 +931,7 @@ def bake(config_path: Path) -> int:
     assets_rs_path = crate_dir / "src" / "assets.rs"
     layout_rs_path = crate_dir / "src" / "layout.rs"
 
-    # `album-layout-gen` (§9.0's owner of eight register rows) runs here, on
+    # `album-layout-gen` (§9.0's owner of nine register rows) runs here, on
     # purpose before any audio is touched: §6's reciprocal is computed against the
     # selected variant's declared cell count, so resolving the layout after the
     # packing would mean writing a manifest whose bar arithmetic describes a grid
@@ -1053,26 +1053,31 @@ def bake(config_path: Path) -> int:
             # is the folded string's advance sum at the face that element names.
             # The character-count box this replaces (`album_prep.title_fits`,
             # `TITLE_BOX_MAX`) is gone — D9's discharge says a count of
-            # characters is not a box. The bake still prints rather than
-            # refuses, exactly as §5.5 rules: an overflowing title is an album
-            # decision, not a build failure.
+            # characters is not a box.
             #
-            # What that leaves unpaid until 2a PR-(2) lands: nothing on either
-            # side bounds a title now. The measured fit is the bake's verdict on
-            # the album in front of it, the elision that would make an over-long
-            # title renderable in one line is the text module's (`measure`/`fit`/
-            # elide, PR-(2) — not in this tree yet), and the ROM draws the string
-            # it is handed. So a title longer than the declared box prints this
-            # note today and overflows on screen; §11's PR-(2) row is where the
-            # other half of §5.5's rule is discharged.
+            # What happens when a title is longer than the box is §5.5's rule, and
+            # since 2a PR-(2) both halves of it exist. The over-long title is
+            # elided to the last whole glyph that fits plus `...`, and the note in
+            # the log says what will actually be drawn; that stays printed rather
+            # than refused, exactly as §5.5 rules, because shortening somebody's
+            # album title is an album decision and a person should see it in the
+            # build output rather than be told to go change the file. The case
+            # that *is* refused is the one elision cannot serve — a box that will
+            # not hold the marker at all — and that is §9.0's `title-fit`, a spec
+            # describing a box too small to render any title. `keep=0` because what
+            # 2a's title band draws is the bare title: `meta.rs` stores the folded
+            # name with no number prefixed, so the "never cut the track number"
+            # half of the rule belongs to whichever scene composes `NN · Title`
+            # (2b's list), and it passes that prefix's length here.
             fits, width, unwritten, box_px = facts.title_fit(title)
+            rendered, whole = facts.title_render(title)
             if not fits:
                 print(
                     f"album_bake: note: track {track.index} title {title!r} measures {width:.0f} px at "
                     f"{facts.title_element.face}'s declared raster, over the {box_px} px the "
                     f"{facts.variant.id} variant declares for element {facts.title_element.id}"
                     + (f"; no glyph for {unwritten!r}" if unwritten else "")
-                    + " — printed, not refused (§5.5), and one-line elision is the text module's, PR (2)"
+                    + (f" — §5.5's one-line elision draws {rendered!r} instead" if not whole else "")
                 )
             longest_title = max(longest_title, (width, title))
             tracks.append(
@@ -1099,9 +1104,25 @@ def bake(config_path: Path) -> int:
 
         album_title = fold(config.title)
         album_artist = fold(config.artist)
-        for text in (album_title, album_artist):
-            if text:
-                longest_title = max(longest_title, facts.title_fit(text)[1:3])
+        # The same rule, and the same path, for the two strings the config declares
+        # rather than the tracks: they are drawn in the same element (§5.0's element
+        # table has one text span for the album's name), so they get the same verdict
+        # and the same elision. `longest_title` is the widest *unelided* string the
+        # album asked for, which is what the report's line is about.
+        for what, text in (("[album] title", album_title), ("[album] artist", album_artist)):
+            if not text:
+                continue
+            fits, width, unwritten, box_px = facts.title_fit(text)
+            rendered, whole = facts.title_render(text)
+            if not fits:
+                print(
+                    f"album_bake: note: {what} {text!r} measures {width:.0f} px at "
+                    f"{facts.title_element.face}'s declared raster, over the {box_px} px the "
+                    f"{facts.variant.id} variant declares for element {facts.title_element.id}"
+                    + (f"; no glyph for {unwritten!r}" if unwritten else "")
+                    + (f" — §5.5's one-line elision draws {rendered!r} instead" if not whole else "")
+                )
+            longest_title = max(longest_title, (width, text))
         if not album_title:
             raise Refusal("title", "[album] title folds to nothing")
         blob = build_albm1(
@@ -1275,10 +1296,12 @@ def print_census(
 #     cell count and the pack's reciprocals cannot drift apart (§6);
 #   * the tile-pool audit per variant, with **both bounds** printed (§5.1).
 #
-# And §9.0's eight refusals 2a owns, each asserted by `id` by `--layout-self-test`
+# And §9.0's nine refusals 2a owns, each asserted by `id` by `--layout-self-test`
 # on a spec written to be wrong about it. Seven read nothing but the spec and the
 # tracked face files; `bar-cells-disagree` also reads the manifest, which is the
-# whole point of that row.
+# whole point of that row; `title-fit` reads a *box* the spec declares, which is the
+# whole point of its row (§5.5's elision is what turns an over-long title into a note,
+# so the only title case left that is a build failure is a box too small to render one).
 
 DEFAULT_LAYOUT_SPEC = REPO / "examples/album_player/layout_spec.toml"
 DEFAULT_LAYOUT_RS = REPO / "examples/album_player/src" / "layout.rs"
@@ -1304,9 +1327,10 @@ LAYOUT_REGISTER = (
     ("scene-minimum", "a scene's own declared minimum cannot be met at the declared geometry"),
     ("bar-cells-out-of-range", "declared bar_cells is below §6's floor, or is not a whole number of pixels per cell in the box the variant declares. The third §6 range condition — a track so short its reciprocal would not fit the pack's u32 — is refused at the track, not at the grid, and so by the Phase-1 id `bar-reciprocal` (§9.0's `bar-cells-out-of-range` row says the same)"),
     ("bar-cells-disagree", "declared bar_cells is not the grid the ALBM1 reciprocals were computed for, or not the value in layout.rs"),
+    ("title-fit", "a title the one-line elision still cannot render: the box the variant declares for the element that draws titles is narrower than the protected prefix plus the ellipsis marker at the declared face and raster (§5.5, D9). An over-long title on a box that is merely small is elided and printed as a note, so the input this row refuses is a box, not a string — which is why its leg narrows a box"),
 )
 
-#: The ninth row of the same register, listed so it is never counted: 2a builds
+#: The tenth row of the same register, listed so it is never counted: 2a builds
 #: the validator and the derived list, 2b ships the `[art]` key it reads (D2 keeps
 #: that whole section a named refusal through 2a). It is reported named-and-
 #: skipped, in the idiom AP-3 uses for a non-product variant — "rather than
@@ -1407,6 +1431,15 @@ class FaceSpec:
             path = Path(name)
             out.append(path if path.is_absolute() else REPO / path)
         return out
+
+
+#: §5.5's one-line elision marker, and §5.5a's reason it is three periods rather than
+#: U+2026: a real ellipsis is a glyph the atlas has to carry, which is one more glyph ×
+#: two tile rows = 190 tiles and a distinct-pool cap of 190, moving §5.1's 444/488 to
+#: 446/490. Three periods cost three advances and no table entry, so every number in
+#: §5.1's tables stays exactly as printed. The marker travels into the generated text
+#: module as `ELLIPSIS`; the leg in `--layout-self-test` compares the two.
+ELLIPSIS = "..."
 
 
 class FaceMetrics:
@@ -1597,6 +1630,55 @@ class FaceMetrics:
         """
         units, missing = self.measure_text(text)
         return units * self.raster <= box_px * self.upem, units * self.raster / self.upem, missing
+
+    def fits_units(self, units: int, box_px: int) -> bool:
+        """The same verdict with the measuring already done.
+
+        `elide` needs it per candidate cut, and a cut is a prefix of a string it has
+        already measured — so the inequality lives here once and both callers use it.
+        """
+        return units * self.raster <= box_px * self.upem
+
+    def elide(self, text: str, box_px: int, keep: int = 0) -> str:
+        """§5.5's one-line elision: `text` as it can be drawn inside `box_px`, never wrapped.
+
+        The rule as §5.5 states it: *"measure, and if it does not fit, cut at the last whole
+        glyph that fits plus an ellipsis; **the track number is never cut**, because `NN ·` is
+        the part a listener uses to ask for the song"*. `keep` is that sentence as a number:
+        the count of leading code points that may not be cut. A caller drawing a bare title —
+        which is all 2a's title band draws — passes 0; a list row drawing `NN · Title` passes
+        the length of its prefix. Cutting at a code-point boundary is not a simplification:
+        cutting mid-glyph is what "the last whole glyph that fits" rules out.
+
+        Returns `""` when not even `keep` code points plus the marker fit the box. That is not
+        an album's fault, and it is the one condition §9.0's `title-fit` row refuses: a box
+        narrower than the ellipsis at the declared face and raster cannot render any title at
+        all, elided or not.
+
+        Code points the face has no glyph for are left in place at width zero, as
+        `measure_text` counts them: eliding is a decision about width, and §5.5 keeps "no
+        glyph" a separate verdict. `fits` still reports them.
+        """
+        chars = list(text)
+        # Prefix sums of the advances, so each candidate cut costs one addition. The empty
+        # prefix is index 0 and `cut[n]` is the width of the first n code points.
+        cut = [0]
+        for char in chars:
+            cut.append(cut[-1] + self.advance_units.get(char, 0))
+        if self.fits_units(cut[-1], box_px):
+            return text
+        keep = max(0, min(keep, len(chars)))
+        marker = sum(self.advance_units.get(char, 0) for char in ELLIPSIS)
+        if not self.fits_units(cut[keep] + marker, box_px):
+            return ""
+        # `cut[n]` is a prefix sum from 0, so for any n >= keep it already includes the
+        # protected prefix: the width of "prefix + the first n code points + marker" is one
+        # addition, and the first n from the top that fits is "the last whole glyph that
+        # fits plus an ellipsis".
+        for n in range(len(chars), keep - 1, -1):
+            if self.fits_units(cut[n] + marker, box_px):
+                return "".join(chars[:n]) + ELLIPSIS
+        return "".join(chars[:keep]) + ELLIPSIS
 
 
 class BandSpec:
@@ -2282,6 +2364,38 @@ class VariantFacts:
             return True, 0.0, "", 0
         fits, width, missing = self.title_element.metrics.fits(text, self.title_element.w)
         return fits, width, missing, self.title_element.w
+
+    def title_render(self, text: str, keep: int = 0) -> tuple[str, bool]:
+        """(the string the text module will be handed, whether that is `text` whole).
+
+        §5.5's other half, and the half PR-1 left unpaid: an over-long title is not drawn
+        overflowing and is not refused, it is *elided* — cut at the last whole glyph that
+        fits plus `ELLIPSIS`, with `keep` leading code points protected (§5.5: "the track
+        number is never cut"). The measuring is the same `FaceMetrics` path `title_fit`
+        uses, so the box the bake decides on and the box the device measures are one path
+        in two languages, and the atlas module's own suite is what pins that they agree.
+
+        Refuses with §9.0's `title-fit` id in the one case elision cannot serve: a box that
+        will not hold the protected prefix plus the marker at all. That is a spec describing
+        a box too small to render any title, so it is a build failure and not an album's
+        problem — which is exactly why it is the case the register's row names, and why an
+        over-long title on a sane box stays a note in the log (§5.5: an album decision).
+        """
+        if self.title_element is None or self.title_element.metrics is None:
+            return text, True
+        rendered = self.title_element.metrics.elide(text, self.title_element.w, keep)
+        if not rendered:
+            raise Refusal(
+                "title-fit",
+                f"element {self.title_element.id} of [[variant]] {self.variant.id} declares a "
+                f"{self.title_element.w} px box, and at {self.title_element.face}'s declared raster not "
+                f"even the {keep} protected leading code points plus the {len(ELLIPSIS)}-code-point "
+                f"elision marker {ELLIPSIS!r} fit it. §5.5's one-line rule has nothing to render at "
+                "this width, elided or not — a box narrower than the ellipsis is a spec error, not a "
+                "long title (a long title is elided and printed as a note; see the row of §9.0 this "
+                "refusal is)",
+            )
+        return rendered, rendered == text
 
     def face_lines(self) -> list[str]:
         lines = []
@@ -3285,6 +3399,17 @@ FIXTURE_LEGS = (
     ("bar-cells-out-of-range", "a grid that does not divide the declared box into whole pixels", ("bar_cells = 20", "bar_cells = 30")),
 )
 
+#: The §9.0 row this tool cannot reach from the fixture's own geometry, so its leg
+#: mutates a box: the title element of the fixture variant narrowed to a single tile
+#: column (8 px), which is narrower than the three-period marker at that face at that
+#: raster (12 px, measured in the leg). Held as data for the same reason the other legs
+#: are: `_fixture_text` refuses to apply a mutation whose left side has gone missing from
+#: the fixture, so a stale leg is an assertion rather than a silent no-op.
+TITLE_BOX_ONE_COLUMN = (
+    'band="title", x0=0, y0=0, x1=19, y1=1, face="fixture"',
+    'band="title", x0=0, y0=0, x1=0, y1=1, face="fixture"',
+)
+
 #: §5.1's measured table, transcribed from ALBUM-PLAYER.md and re-measured here from the
 #: font files themselves. The document says of that table that its numbers "were recomputed
 #: from the files, in one pass, with the method stated, and every derived number in this
@@ -3619,7 +3744,7 @@ def _write_spec(directory: Path, text: str, name: str = "layout_fixture.toml") -
 def layout_self_test() -> int:
     """`--layout-self-test`: the register's legs, asserted by id (§9.0).
 
-    AP-3's bake-leg rule, applied to this phase: each of §9.0's eight refusals is
+    AP-3's bake-leg rule, applied to this phase: each of §9.0's nine refusals is
     watched to fire, by id, on a spec written to be wrong about it — not that an
     error of some kind came out. Two of those rows need inputs 2a does not have
     yet, and §13's own rule is to name them and say why rather than let a count
@@ -3655,9 +3780,22 @@ def layout_self_test() -> int:
 
     # The two legs that are calls rather than specs.
     spec = LayoutSpec(DEFAULT_LAYOUT_SPEC)
+    # The one register row whose input is a *box* rather than a spec-wide structural
+    # fault: `title-fit`, reached by narrowing a declared title element to one tile column
+    # and asking for a title. Note what is *not* in this list — a long title on a real
+    # variant, which is elided and printed (§5.5: an album decision); the legs for that are
+    # in the reproduction section below, where the negative direction of this row is
+    # asserted too.
+    def title_box_narrower_than_the_marker() -> None:
+        with tempfile.TemporaryDirectory(prefix="album-title-fit-") as d:
+            tiny = LayoutSpec(_write_spec(Path(d), _fixture_text(TITLE_BOX_ONE_COLUMN),
+                                         "title-fit.toml"))
+        derive_variant(tiny, tiny.variants[0]).title_render("a title of any length at all")
+
     for refusal_id, how, call in (
         ("layout-variant-unknown", "asking for a variant the spec does not declare", lambda: spec.variant("Z")),
         ("bar-cells-disagree", "three artifacts carrying three different cell counts", lambda: assert_bar_grid_agrees(20, 32, 20, "the fixture's [layout]")),
+        ("title-fit", "a title element one tile column wide: no rendering, elided or not", title_box_narrower_than_the_marker),
     ):
         try:
             call()
@@ -4144,6 +4282,96 @@ def layout_self_test() -> int:
                 "between the font and the device — a missing entry would show as `unwritten` at "
                 "runtime and a spurious one would be a glyph this face does not have, and both are "
                 "invisible in a generated file a reviewer reads past")
+
+            # -- §5.5's one-line elision, measured against that same declared box -------
+            #
+            # PR-1 deliberately left this half unpaid (its own comment here said so), so these
+            # legs are 2a PR-(2)'s. The rule is stated in §5.5 with two parts — "cut at the last
+            # whole glyph that fits plus an ellipsis", and "the track number is never cut" — and
+            # each gets a leg that could actually fail. The first is checked by *maximality*, not
+            # by the result fitting: an elision that cut two glyphs early also fits its box, and a
+            # leg that only checks that would be satisfied by it. The second is checked by asking
+            # for a protected prefix and reading it back out of the answer.
+            box_px = facts.title_element.w
+            over_long = ("Bioluminescent Overdriven: An Unreasonably Long Album Title That "
+                         "Will Not Fit This Box")
+            renders_whole, whole_short = facts.title_render("Bioluminescent")
+            leg("variant B: a title that fits is returned whole, marker untouched",
+                "'Bioluminescent' unchanged", f"{'unchanged' if whole_short else 'elided'}",
+                renders_whole == "Bioluminescent" and whole_short,
+                f"arithmetic on the declared {box_px} px box: that title measures "
+                f"{metrics.width_px(renders_whole)[0]:.0f} px, which is inside it, so the elision "
+                "must be the identity on it. The fixture's shipped titles are all in this class, "
+                "which is why the over-long probe below is synthetic — §13's AP-3 row calls that "
+                "out for this row (`title-fit is 2a's box with 2b's fixture`)")
+            rendered, whole = facts.title_render(over_long)
+            cut_units = metrics.measure_text(rendered)[0]
+            leg("variant B: the over-long title comes back elided, and the elided string fits",
+                f"<= {box_px} px", f"{metrics.width_px(rendered)[0]:.0f} px", rendered.endswith(ELLIPSIS)
+                and metrics.fits_units(cut_units, box_px) and not whole,
+                f"arithmetic on the same measurement path: {over_long!r} measures "
+                f"{metrics.width_px(over_long)[0]:.0f} px against a {box_px} px box, and the elided "
+                "rendering must come in under it with the marker appended — the box is the declared "
+                "one (§5.0's element span), not a limit this tool invented (D9's whole point)")
+            prefix = rendered[:-len(ELLIPSIS)]
+            one_more = prefix + over_long[len(prefix)] + ELLIPSIS
+            leg("variant B: the cut is at the last whole glyph that fits, not an earlier one",
+                "one more glyph must not fit", f"+{over_long[len(prefix)]!r} -> "
+                f"{metrics.width_px(one_more)[0]:.0f} px", not metrics.fits_units(
+                    metrics.measure_text(one_more)[0], box_px),
+                "the maximality half of §5.5's sentence, checked by measuring the string that the "
+                "rule must have rejected: the same cut with one more glyph of the original added. "
+                "A leg that only checked that the answer fits is satisfied by an elision that gave "
+                "up early; this one is not")
+            marker_units = [metrics.advance_units.get(c) for c in ELLIPSIS]
+            leg("variant B: the marker is three ASCII periods, and this face carries every one of them",
+                "'...' all mapped", f"{ELLIPSIS!r} advances {marker_units}",
+                ELLIPSIS == "..." and all(u is not None for u in marker_units),
+                "plan §5.5a, which rules this marker rather than U+2026 because a real ellipsis is "
+                "a glyph the atlas has to carry: +1 glyph x 2 tile rows = 190 tiles and a distinct "
+                "pool cap of 190, moving §5.1's 444/488 to 446/490. Measured here for a second "
+                f"reason that figure does not cover: {Path(metrics.face.file).name} has no U+2026 in "
+                "its cmap at all, so a real ellipsis at this title face would be *unwritten* as well "
+                "as expensive — the leg below is that measurement")
+            _, ellipsis_missing = metrics.measure_text("\u2026")
+            leg("variant B: the real ellipsis would not draw at this face even if it were paid for",
+                "\u2026 unwritten", f"{ellipsis_missing!r} unwritten", ellipsis_missing == "\u2026",
+                "arithmetic on the read-back of the same cmap the device is given: the declared "
+                "title face is a latin-ASCII cut, and U+2026 is outside it. §5.5a's argument for "
+                "three periods is stated in tiles; this is the same answer in glyphs, from the file "
+                "rather than from the argument — and the reason the marker must never be written as "
+                "a single character in a source file, a config, or a generated string")
+            keep = 5
+            numbered = f"01 - {over_long}"
+            renders_numbered, _ = facts.title_render(numbered, keep=keep)
+            leg("variant B: the protected prefix survives the cut (§5.5: the track number is never cut)",
+                f"first {keep} code points kept", f"{renders_numbered[:keep]!r} kept",
+                renders_numbered.startswith(numbered[:keep]) and renders_numbered.endswith(ELLIPSIS)
+                and len(renders_numbered) < len(numbered)
+                and metrics.fits_units(metrics.measure_text(renders_numbered)[0], box_px),
+                "§5.5's sentence verbatim — \u201cthe track number is never cut, because `NN \u00b7` is the "
+                "part a listener uses to ask for the song\u201d — exercised as a `keep` argument, which is "
+                "what that sentence becomes in code. 2a's title band passes 0, because `meta.rs` "
+                "stores the folded name with no number on it; the scene that composes a numbered row "
+                "(2b's list) passes its own prefix length, and this is the leg that says the "
+                "mechanism is there for it to use")
+            leg("variant B: the separator §5.5's example uses is not a glyph this title face carries",
+                "\u00b7 unwritten", f"{metrics.measure_text('\u00b7')[1]!r} unwritten",
+                metrics.measure_text("\u00b7")[1] == "\u00b7",
+                "a fact about the row above, not a bug in it: §5.5 names `NN \u00b7` with a middle dot, and "
+                f"{Path(metrics.face.file).name}'s latin-ASCII cut does not carry U+00B7 (its cmap "
+                "stops at U+007E). A scene that composes a numbered row must therefore use an ASCII "
+                "separator or name a face that carries the dot; the prefix leg above uses `-` for "
+                "exactly that reason. 2b owns the choice, and this leg is what stops it being made "
+                "by accident — an unwritten separator draws nothing and changes no width")
+            never_refused = agree("a 4,000-character title at B's declared box",
+                                  lambda: facts.title_render("x" * 4000))
+            leg("variant B: no title, however long, is a refusal at a box this variant really declares",
+                "elided, never refused", "elided" if never_refused else "refused", never_refused,
+                "the negative direction of §9.0's `title-fit` row: the refusal's input is a box, not "
+                "a string, and the register leg that fires it narrows a box to one tile column. "
+                "Without this leg the register row would be satisfied by a tool that refuses every "
+                "title it has never seen")
         bar_box_px = ((facts.bar_element.spec.x1 - facts.bar_element.spec.x0 + 1) * spec.tile_px
                       if facts.bar_element else 0)
         if a_variant:
