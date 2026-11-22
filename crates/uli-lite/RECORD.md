@@ -3255,6 +3255,109 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
+- **2026-11-21 — S7: the acceptance matrix runs, and every cell is a DIFF.**
+  `make uli-accept` → `scripts/uli_accept.py`: our `uli-enc --rd` and the off-tree
+  reference on identical PCM and flags, four cells plus one oracle-only `--dacw 1` row,
+  byte-for-byte with region-localised diffs and a seek-entry `g` diagnostic. Exit 2 on
+  DIFF, 1 on a harness error; deliberately on no gate path (E-R1). **~41 min** on four
+  cores — the two runs' logs span 15:24:03 → 16:05:08 and 16:46:26 → 17:27:06 on
+  2026-11-21 (`stat` birth/mtime of `/tmp/pi-s7-accept{,2}.log`); the ~48 min this entry
+  first carried was never measured. Corpus at `ulc-gba/.../examples/uli_bench/assets`:
+
+  | cell | flags | ours B | ref B | ours SHA-256 | ref SHA-256 | est max @68 / mean @72 (ours → ref) | verdict |
+  |---|---|---:|---:|---|---|---|---|
+  | `tiny` | `--budget 300000 --threads 1` | 39,124 | 39,308 | `366673df6d5550a8d2d07af0d317a7ec476ce7ae998e820f0ae5a93f82f32051` | `68dca43a36dd9c61dead3d2409d91906a2eae3ed86ce42d850f2022101cb756d` | 193985/193977 → 180881/182108 | DIFF |
+  | `biomaster` | `--budget 3294000 --cap 74 --threads 8` | 3,293,696 | 3,293,048 | `f4f3a52aaa58299eb7feb2a6b574117f8eecdb972d4577d7d944f1d302e095c8` | `990da225efc18621dd5689fd378fc183c5f79e8b9f21c4ff580e4225df7f8a73` | 193986/193986 → 178159/177949 | DIFF |
+  | `cross60` | `--budget 764500 --cap 74 --threads 4` | 764,220 | 764,196 | `ad96e8b0aa6b4d1a9a5c8cd6686406b3b719aa83c7edb8f6a1d19c9da5874988` | `4fa22172cb421d41e5f4b5d8b51c49fc522b8c4bd6ec2f13a06c909c6617a3fe` | 193986/193986 → 176561/176876 | DIFF |
+  | `off-default` | `--budget 1647000 --cap 60 --threads 8` | 73,584 | 71,800 | `cf4f55620fa716848e3bee3e8dcf00eb0359fac40dbb71370e22f6e5669788bd` | `c8b94024a0d8e61fce3a0872cbd97e7746ce8e1d1fce5197dea33270350e9b5a` | 157285/157285 → 157191/157216 | DIFF |
+
+  The harness is measuring the shipped encoder, not itself: our `biomaster` blob is
+  byte-identical to S6's pinned `--musearch 1` blob (3,293,696 B, 31.89 dB,
+  `f4f3a52a…e095c8`), and our `cross60` mean 28.81 dB is S6's cross-slice number.
+
+  Localisation: the header differs only in derived size/cycle fields — offset 64
+  (`stream_halfwords`) and 72 (mean cycles) in every cell, plus 68 (`est_max_cycles`) on
+  `tiny` (193,985 vs 193,977) — which the harness counts as `header 5 of 88 bytes
+  differ` on `tiny` and `3 of 88` on the other three. The tables go next, one count per
+  cell out of 5,212 bytes: `tiny` 2,626, `biomaster` 1,971, `cross60` 2,204,
+  `off-default` 2,369; the harness's first-content-difference offset (first byte at or
+  after `tracks_off` that differs) is inside the tables in every cell — 156 / 155 / 158
+  / 155 — and past that the streams run out of step rather than differing in a trailing
+  byte: `biomaster`'s `stream geometry differs: 5864+3287832 vs 5864+3287184`, with
+  12,889 of the 3,287,184 stream bytes compared equal (3,277,088 differing bytes
+  overall, less the 648-byte length delta and the 2,145 header/table/seek bytes that
+  differ). The seek diagnostic's delta is **`ref − ours`**, and it says where the
+  drift starts, not why: at frame 256 the reference's bit position is **2,256 bits
+  ahead of ours** on `biomaster` (ours 172,479 vs ref 174,735), 1,795 ahead on `cross60`
+  (25,402
+  vs 27,197), and on `off-default` **ours is 1,144 bits ahead** (8,023 vs 6,879), while
+  `g_prev` moves in 30 of `biomaster`'s 65 entries (max |delta| 3) and 6 of `cross60`'s
+  16 (max 2) but 56 of `off-default`'s 65 (max **64**). So the divergence is localised
+  but **unattributed**. The `tiny` cell is not the counter-example it looks like: 129
+  frames at `SEEK_INTERVAL` 256 is **one** seek entry, at frame 0 with bit position 0, so
+  "every entry agrees" is the first frame's `g` and says nothing about the step sequence —
+  while its streams still differ by 184 bytes. The chosen step ranges differ at both ends
+  (`ours 8..123 / ref 19..124` on `tiny`, `8..119 / 89..135` on `biomaster`), because our
+  candidate set is the whole policy range and the reference's is a moving 20-step window
+  around its pass-1 guess; that is a lead, not a proven cause, and it is consistent with
+  the tables diverging first, since the tables are built from those very choices. The
+  delta's sign also flips between the cap-74 cells (reference ahead) and the cap-60 one
+  (ours ahead), but that cell moves the cap *and* halves the budget, so it cannot isolate
+  the cap — the EOB-pricing hypothesis is neither confirmed nor refuted, and no search
+  change was made.
+
+  SNR, full-band time-domain on both sides (never E-R7's codec-only 32.29 / 25.78):
+  `biomaster` ours **31.89 mean / 31.89 worst** dB (int8 30.89), oracle proxy 31.87
+  (min 31.87), oracle full-band worst 31.78; `cross60` ours 28.81 / 28.81, proxy 28.83;
+  `tiny` 21.26 / 21.26, proxy 21.67; `off-default` ours **2.06** against the oracle's
+  2.25 — the cell that hurts, where ours is also **1,784 bytes larger**. The worst-track
+  column is the new `verify: worst` line (min of per-track, asserted equal to
+  `min(per-track)` and, with the two ratios asserted distinct, strictly below the mean,
+  by a new test).
+
+  **A multi-track measurement, because every cell in the matrix is one track** (so mean
+  and worst coincide by construction, and the `--dacw` pin is untested). A 3,200-frame
+  corpus cut from the 12-track album — 30 s of track 01 (samples 0..983,040) then 20 s of
+  track 06 (28,253,515..28,908,875), `tracks.tsv` as two tracks — at
+  `--budget 637000 --cap 74 --threads 4`: ours **pooled codec 33.30, mean of tracks
+  33.74, worst track 33.21** (pcm16, full-band); oracle `--dacw 0` pooled 33.17, codec
+  proxy mean 33.64 (min 33.28); oracle `--dacw 1` (its default) pooled 33.27, proxy mean
+  33.60 (**min 33.37**). The two oracle arms differ from byte 65, so **`--dacw` is not
+  inert on multi-track input**: it trades 0.04 dB of mean proxy for **0.09 dB of worst
+  track**, which is the objective E-R7's second number is stated in — and the gap we have
+  is exactly there (we match `--dacw 0` on the worst track and sit ~0.07 dB behind the
+  DAC-weighted arm, after the ~0.09 dB proxy/full-band offset that `biomaster` calibrates
+  at 31.87 vs 31.78). On the mean we sit ~0.2 dB *ahead* of the plain arm. Every matrix
+  cell being single-track is therefore the matrix's real gap, and a multi-track cell is
+  its next addition.
+
+  Two measured pin decisions. The oracle runs `--dacw 0` (= `weights_plain`,
+  `uli_enc.c:230-232`) because our search has no DAC-weight iteration; that pin is inert
+  on all four single-track cells and live on the two-track corpus above. The `dacw1` row's command, on the generated fixture:
+
+  ```
+  /home/sam/Documents/coding/gba-audio/build/uli_enc --album <work>/tiny/tiny.f32 \
+    --tracks <work>/tiny/tiny.tsv --out <work>/tiny-dacw1.uli \
+    --dacw 1 --budget 300000 --threads 1
+  ```
+
+  gives 0 bytes differ from the `tiny` cell's `--dacw 0` blob (39,308 B). The same on the
+  album at `biomaster`'s flags:
+
+  ```
+  /home/sam/Documents/coding/gba-audio/build/uli_enc \
+    --album /home/sam/Documents/coding/ulc-gba/gba-sound-player/examples/uli_bench/assets/album.f32 \
+    --tracks /home/sam/Documents/coding/ulc-gba/gba-sound-player/examples/uli_bench/assets/tracks.tsv \
+    --out /tmp/s7-extra/biomaster-dacw1.uli \
+    --budget 3294000 --cap 74 --threads 8
+  ```
+
+  gives 3,293,048 B, SHA-256 `990da225…7f8a73` — byte-identical to the table's
+  `biomaster` reference blob. Both are 0-byte distances because the DAC weights are
+  constant within one track and every cell is single-track. So the row that exists to
+  price the objective we do not have measures 0 bytes here — the objective only
+  reweights *between* tracks.
+
 - **2026-11-20 — S6: the decoder-cycle price, and the high-rate gap it turns out to
   be all of.** An over-cap candidate is no longer refused: it is re-coded under
   `mu · (band symbol + decoded band work)` until the reader's cycle model fits

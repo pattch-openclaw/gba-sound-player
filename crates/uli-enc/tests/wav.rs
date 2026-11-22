@@ -396,6 +396,86 @@ fn the_cli_assembles_wavs_and_dumps_the_pair_it_encoded() {
 }
 
 #[test]
+fn the_verify_block_reports_the_worst_track_and_it_is_the_minimum() {
+    let dir = TempDir::new("wav-worst-track");
+    let a = dir.path().join("a.wav");
+    let b = dir.path().join("b.wav");
+    // Two tones an order of magnitude apart in level, so the per-track ratios are
+    // distinct and "worst" is a real choice rather than a tie.
+    let tone = |hz: f64, amp: f64, frames: usize| -> Vec<i32> {
+        (0..frames)
+            .flat_map(|i| {
+                let v = (amp * (std::f64::consts::TAU * hz * i as f64 / RATE as f64).sin()) as i32;
+                [v, v]
+            })
+            .collect()
+    };
+    std::fs::write(
+        &a,
+        wav_bytes(&WavSpec::pcm(2, RATE, 16), &tone(440.0, 12000.0, 4096)),
+    )
+    .unwrap();
+    std::fs::write(
+        &b,
+        wav_bytes(&WavSpec::pcm(2, RATE, 16), &tone(5500.0, 1800.0, 4096)),
+    )
+    .unwrap();
+    let out = dir.path().join("album.uli");
+
+    let encoded = encode(&args(
+        Input::Wav(vec![a.clone(), b.clone()]),
+        Some(100),
+        false,
+    ))
+    .expect("the two-tone pair encodes");
+    let report = &encoded.report;
+    assert_eq!(report.track_snr.len(), 2);
+    let per_track = |f: fn(&uli_enc::TrackSnr) -> Option<f64>| -> Vec<f64> {
+        report
+            .track_snr
+            .iter()
+            .map(|t| f(t).expect("both tones have signal energy"))
+            .collect()
+    };
+    let pcm16 = per_track(|t| t.pcm16);
+    let int8 = per_track(|t| t.int8);
+    let min = |v: &[f64]| v.iter().copied().fold(f64::INFINITY, f64::min);
+    assert_eq!(report.worst_pcm16_db, Some(min(&pcm16)));
+    assert_eq!(report.worst_int8_db, Some(min(&int8)));
+    // Non-vacuous: a tie between the tracks would make "worst" the mean for free, so
+    // the two ratios have to be distinct and the minimum has to sit strictly below it.
+    assert!(
+        (pcm16[0] - pcm16[1]).abs() > 0.5,
+        "the two tracks must not tie: {pcm16:?}"
+    );
+    let mean = pcm16.iter().sum::<f64>() / pcm16.len() as f64;
+    assert!(
+        min(&pcm16) < mean,
+        "worst {} must be strictly below the mean {mean}",
+        min(&pcm16)
+    );
+
+    // And the CLI prints the same figure, on its own line, so the acceptance harness
+    // can read it without recomputing the minimum from the per-track pairs.
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_uli-enc"))
+        .args(["--wav", a.to_str().unwrap(), "--wav", b.to_str().unwrap()])
+        .args(["--out", out.to_str().unwrap()])
+        .args(["--g", "100"])
+        .output()
+        .expect("the CLI runs");
+    assert!(
+        result.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        stdout.contains("verify: worst"),
+        "the verify block must carry the worst-track line: {stdout}"
+    );
+}
+
+#[test]
 fn the_cli_refuses_two_input_shapes_and_emit_pcm_without_wavs() {
     let dir = TempDir::new("wav-cli-refusals");
     let a = dir.path().join("a.wav");

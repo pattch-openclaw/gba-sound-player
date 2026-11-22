@@ -445,6 +445,22 @@ product codec.** mGBA, WAITCNT 4/2, 262,144-cycle period, both corpora pinned
   that proof's seed; `uli_lite` remains the checked oracle.
 - **The player ships** (U5 met on hardware for three ROMs, with one open defect:
   the 1 Hz text redraw delays the feeder on 104 of 16,553 periods).
+- **The acceptance matrix is measured (S7, 2026-11-21), and the answer is DIFF.**
+  `make uli-accept` runs our `--rd` encoder and the reference on identical PCM and
+  flags across four cells — the generated fixture, the whole `biomaster` album, a 60 s
+  `cross` slice, and the album at `--cap 60` — and no cell is byte-identical. The
+  **first content difference lands inside the trained tables** in every cell (1,971–2,626
+  of 5,212 bytes) and runs through the stream from there, while the container's strings and
+  `tiny`'s single seek entry (frame 0, bit position 0) are identical. So the divergence
+  begins in table training and is **unattributed**: the seek bit-position delta (printed as
+  `ref − ours`) has the reference **2,256 bits ahead** at frame 256 on `biomaster` and
+  **ours 1,144 ahead** on the cap-60 cell, and the chosen step ranges differ at both ends
+  (`8..119` against `89..135` on `biomaster`) because our search covers the whole policy
+  range while the reference's is a moving 20-step window around its pass-1 guess — a lead,
+  not a proven cause. Hashes, cell flags and the metric caveat
+  (E-R7's 32.29 / 25.78 is codec-only; the `verify:` columns are full-band time
+  domain) are in
+  [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) §S7.
 - **Still open:** the non-decode half of the gate (above); the dense-frame tail
   of the entropy path; the from-scratch Rust encoder/asset pipeline; and a
   licensing/publish decision (`publish = false`).

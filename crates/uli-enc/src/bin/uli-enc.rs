@@ -251,6 +251,11 @@ fn run() -> Result<(), ExitCode> {
             if let (Some(a), Some(b)) = (mean16(&report.track_snr), mean8(&report.track_snr)) {
                 println!("verify: mean {a:.2} / {b:.2} dB (mean of per-track)");
             }
+            if let (Some(a), Some(b)) = (report.worst_pcm16_db, report.worst_int8_db) {
+                println!(
+                    "verify: worst {a:.2} / {b:.2} dB (min of per-track, full-band time-domain)"
+                );
+            }
         }
         println!(
             "est. cycles mean {:.1}% max {:.1}% of the period",

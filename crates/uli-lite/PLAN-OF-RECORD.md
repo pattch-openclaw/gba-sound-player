@@ -987,7 +987,7 @@ the encoder writes the Huffman codebooks into the blob.
 | Prefix | Means | Cardinality |
 |---|---|---|
 | **E-R1 … E-R10** | **Requirements.** Permanent, testable claims about the encoder. An amendment changes the requirement; it never opens a ticket | 10 |
-| **S1 … S7** | **Steps.** Concrete work, each discharging named requirements, each with an exit gate. This is the only axis you can be *on* | 7 |
+| **S1 … S8** | **Steps.** Concrete work, each discharging named requirements, each with an exit gate. This is the only axis you can be *on* | 8 |
 | R5a … R5d | Determinism rules, internal to **E-R5** | 4 |
 
 Nothing else. In particular **observations, measurements and defects are not a
@@ -1020,7 +1020,7 @@ sentences in `RECORD.md`/`ULI2.md` that say "E1" about the encoder mean **S1**.
 Every requirement has a step that discharges it, and no step exists without one:
 E-R1/E-R3/E-R4/E-R10 → S1; E-R5 → S1 (ordering) and S7 (the claim itself);
 E-R2 → S1 (boundary) and S5 (WAV layer); E-R6 → S1 (arithmetic) and S5 (real sizes);
-E-R7 → S2/S3 measured, S7 accepted; E-R8 → S6.
+E-R7 → S2/S3 measured, S7 accepted, S8 the requirement it now sets; E-R8 → S6; E-R5 → S8.
 
 ### Five decisions
 
@@ -1156,11 +1156,223 @@ read-side, so this does not reopen the paragraph above.
 | **S4** | Two-pass table training: the album's own symbol counts into Huffman lengths, and its own reconstruction errors into `dq`, then a second search with the trained set | E-R4, E-R5, E-R7 | output byte-stable across runs; the trained set is a complete prefix code and stays inside E-R4; training measurably beats the built-in tables at a binding budget; and the band-class choice is a shortest path, since trained context codebooks differ | **done** |
 | **S5** | Album assembly (WAV front end, gapless join, tags verbatim), `--budget`/`--cap` on real sizes, frame-parallel search | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes (each seeked to its own preroll); hashes pinned; too small refuses **before the first frame**, citing both numbers; a 32,768 Hz WAV reaches the same blob its pre-resampled PCM does, and a resampled WAV is quoted by SNR; the CLI prints the reference's columns | **done** — see "S5" below for the numbers and the defaults-restored failure |
 | **S6** | `mu` (decoder-cycle-aware) search: re-code an over-cap frame by dropping its cheapest coefficients instead of refusing the candidate | E-R8 **discharged**; E-R7 **contributed to, not discharged** — its criterion is codec-only and unmeasured, and S7 accepts it | a knob that demonstrably trades SNR for decode cycles, measured on the bench — and, measured 2026-11-20, it closes the last high-rate gap: at `--budget 400000 --cap 74` the equivalent mechanism is worth **1.48 dB** to the oracle, against a 1.15 dB gap | **done** — `--musearch 1` by default; worth **1.44 dB** here (39.57 → 41.01 dB) and the oracle's 41.02 is 0.01 dB above, cap 74.0% max on both arms. See "S6" below |
-| **S7** | **The acceptance matrix, as a buildable target** | E-R2, E-R5, E-R7 (and E-R1's oracle posture) | the four cells below run in CI-shaped form and compare SHA-256s against the reference's blobs, including the two header cycle fields | not started |
+| **S7** | **The acceptance matrix, as a buildable target** | E-R2, E-R5, E-R7 (and E-R1's oracle posture) | the four cells below run in CI-shaped form and compare SHA-256s against the reference's blobs, including the two header cycle fields | **done** — `make uli-accept` runs the four cells and the `--dacw 1` row; every cell is a **DIFF**, whose first content difference is inside the **trained tables** in every cell, and which is **unattributed** (see "S7" below) |
+| **S8** | Reconcile the S7 DIFF: attribute it first — compare the plan and the symbol counts that feed training, not the bytes — then either reach byte-exactness or earn the difference with SNR | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R7 (SNR is the licence to differ), E-R2 | every cell byte-identical **or** every cell's mean and worst SNR above the oracle's at no more bytes, reported by `make uli-accept` | not started |
 
 S7 is a step rather than a property of the plan because it has work in it — a host
 target that builds nothing of ours from C, calls the off-tree binary, compares hashes
-— and it has been standing as prose since the gate was declared measurable.
+— and it stood as prose from the gate's declaration until it became that target.
+
+#### S8 — the ruling: exactness is the target, and SNR is the licence to differ
+
+**The premise.** The oracle is deterministic: R5b measured `--threads 1` and `--threads 8`
+byte-identical on the fixture, and every S7 run reproduces its own hashes. So "we cannot
+match its bytes" is not a property of the format or of the machine, and there is no reason
+to accept a difference that is neither an improvement nor required.
+
+**The test a difference has to pass.** If this encoder can genuinely improve on the oracle,
+the improvement shows up as SNR at equal rate. A non-exact blob is therefore acceptable
+exactly when it is *better* — mean and worst SNR above the oracle's, at no more bytes.
+**Not byte-exact and worse is not a stylistic difference; it is a deficiency.**
+
+**The current state fails that test.** Measured in S7: at `--cap 60` on half the budget ours
+is **1,784 bytes larger for 0.19 dB less** SNR; the S5 measurement of the 12-track album
+put us 0.41 dB behind (at `mu = 0`, never re-measured at the shipped default); and against
+E-R7's shape on a two-track corpus we match the oracle's plain arm on the worst track while
+sitting ~0.07 dB under its DAC-weighted one. The two cells where we are level or slightly
+ahead (`biomaster` +0.11 dB full-band, `cross60` +0.01) are consistent with the deficiency
+being masked by a favourable mix, not with it being absent. The working assumption is
+therefore a real deficiency until a cell shows otherwise.
+
+**Where to look first, and why not at the bytes.** Training is a pure function of the counts
+and errors it is handed, so a byte diff cannot separate "the trainer differs" from "the plan
+feeding it differs". Compare the **inputs** instead: the chosen `g`/M-S plan per frame and
+the symbol counts per class, ours against the oracle's, on one binding cell. If the counts
+agree and the tables still differ, the trainer is wrong; if the counts differ, the search is
+wrong and the tables are innocent. That is S8's first experiment and it needs no change to
+encoding behaviour. The two causes S7 already names are what to look for there: the
+**candidate window** (ours sweeps the whole policy range, the oracle a moving ~20-step window
+around its pass-1 allocation, so the two search different sets whenever the coarse guess is
+off — and the tables are built from those very choices) and the **unpriced terminator**
+(whose predicted sign holds on two cells of three: neither confirmed nor refuted).
+
+**One caveat before a verdict is trusted.** Every matrix cell is single-track, and `tiny`'s
+budget does not bind at all, so its mismatch is largely tie-breaking. A multi-track cell at
+a binding budget is the measurement this depends on.
+
+#### S7 — the acceptance matrix, and the answer it gives: DIFF
+
+**Three things S7 was not.** It was not a gate: the harness calls the off-tree reference
+binary, which E-R1 keeps off `make uli-test`, so `make uli-accept` sits on no gate path
+by construction — it is a host measurement to take when the search or the container
+changes. It was not an encoder change: not one line of `rd.rs`, `quant.rs`, `train.rs`,
+`plan.rs` or `frame.rs` moved, and the run reproduces S6's pins exactly, which is the
+evidence that the harness measures the shipped encoder. And it was not the quality
+question: every SNR it prints on our side is full-band time-domain, while E-R7's 32.29
+mean / 25.78 worst dB is a codec-only proxy (`gba-audio/docs/phase2/1-codec.md:12`,
+measured by `eval/batch.py --dac off`), so nothing in this section may be quoted
+against E-R7.
+
+**What it is.** `make uli-accept` → `scripts/uli_accept.py`: our `uli-enc --rd` and the
+reference on identical PCM and identical flags, comparing the two blobs byte for byte.
+Per cell it prints MATCH or DIFF, both sizes and full SHA-256s, the two header cycle
+fields at offsets 68 and 72 (raw and percent of 262,144), the oracle's codec proxy, our
+mean **and worst** time-domain SNR, and the searched `g` range. A DIFF is localised to a
+container region: the first differing byte, the first byte at or after `tracks_off` that
+differs, per-region counts, and — when the stream differs — how many seek entries move
+`g_prev` and by how much, plus the first five whose bit position or `g_prev` disagrees.
+Exit 2 is DIFF, 1 is a harness error; `--list` prints the cells and runs nothing.
+
+**The four cells**, measured 2026-11-21 by
+`make uli-accept ULI_ACCEPT_ASSETS=/home/sam/Documents/coding/ulc-gba/gba-sound-player/examples/uli_bench/assets`,
+every oracle invocation at `--dacw 0`:
+
+| cell | flags | ours B | ref B | ours SHA-256 | ref SHA-256 | est max @68 ours/ref | est mean @72 ours/ref | verdict |
+|---|---|---:|---:|---|---|---|---|---|
+| `tiny` | `--budget 300000 --threads 1` | 39,124 | 39,308 | `366673df6d5550a8d2d07af0d317a7ec476ce7ae998e820f0ae5a93f82f32051` | `68dca43a36dd9c61dead3d2409d91906a2eae3ed86ce42d850f2022101cb756d` | 193985 / 193977 | 180881 / 182108 | DIFF |
+| `biomaster` | `--budget 3294000 --cap 74 --threads 8` | 3,293,696 | 3,293,048 | `f4f3a52aaa58299eb7feb2a6b574117f8eecdb972d4577d7d944f1d302e095c8` | `990da225efc18621dd5689fd378fc183c5f79e8b9f21c4ff580e4225df7f8a73` | 193986 / 193986 | 178159 / 177949 | DIFF |
+| `cross60` | `--budget 764500 --cap 74 --threads 4` | 764,220 | 764,196 | `ad96e8b0aa6b4d1a9a5c8cd6686406b3b719aa83c7edb8f6a1d19c9da5874988` | `4fa22172cb421d41e5f4b5d8b51c49fc522b8c4bd6ec2f13a06c909c6617a3fe` | 193986 / 193986 | 176561 / 176876 | DIFF |
+| `off-default` | `--budget 1647000 --cap 60 --threads 8` | 73,584 | 71,800 | `cf4f55620fa716848e3bee3e8dcf00eb0359fac40dbb71370e22f6e5669788bd` | `c8b94024a0d8e61fce3a0872cbd97e7746ce8e1d1fce5197dea33270350e9b5a` | 157285 / 157285 | 157191 / 157216 | DIFF |
+
+`cross60` is a 60 s head slice of the 12-track album as one 1,966,080-sample track;
+the `adv` cell replaces it only when `adv/album.f32` exists (it does not in this
+corpus, so `cross60` ran). The whole matrix is **~41 min** on four cores: the second
+run's log spans 2026-11-21 16:46:26 → 17:27:06 and the first run's 15:24:03 → 16:05:08
+(`stat` birth/mtime of `/tmp/pi-s7-accept{,2}.log`). The ~48 min this section carried
+earlier was never measured.
+
+**Every cell DIFFs, and the divergence is one layer below the container.** In no cell
+did the blob match. The header differs only in its derived size and cycle fields —
+offset 64 (`stream_halfwords`) and offset 72 (mean cycles) in every cell, plus offset
+68 (`est_max_cycles`) on `tiny`, whose two totals round differently (193,985 vs
+193,977). The harness counts bytes rather than naming offsets, and the count differs
+with that: `header 5 of 88 bytes differ` on `tiny`, `3 of 88` on each of the other
+three. The tables region diverges next, one count per cell, all out of 5,212 bytes:
+`tiny` 2,626, `biomaster` 1,971, `cross60` 2,204, `off-default` 2,369. The harness's
+"first content difference" line — the first byte at or after `tracks_off` that
+disagrees — lands inside the tables in every cell: 156 on `tiny`, 155 on `biomaster`,
+158 on `cross60`, 155 on `off-default`; past that the two streams run out of step, not
+out of a trailing byte. The harness prints the geometry it compared — `biomaster`
+`stream geometry differs: 5864+3287832 vs 5864+3287184` — and on `biomaster` some
+12,889 of the 3,287,184 stream bytes compared are equal (3,277,088 differing bytes
+overall, less the 648-byte length delta and the 2,145 header/table/seek bytes that
+differ), so the streams are neither a copy nor unrelated.
+
+The seek diagnostic says where that drift starts, and its delta is **`ref − ours`**:
+at frame 256 the reference's bit position is **2,256 bits ahead of ours** on `biomaster`
+(ours 172,479 vs ref 174,735) and 1,795 ahead on `cross60` (25,402 vs 27,197), while on
+`off-default` **ours is 1,144 bits ahead** (8,023 vs 6,879). Where it reports entries,
+`g_prev` barely moves — 30 of `biomaster`'s 65 entries (max |delta| 3) and 6 of
+`cross60`'s 16 (max 2) — so the sampled step sequence is nearly the reference's. On
+`off-default` both move hard: 56 of 65 entries change `g_prev`, max |delta| **64**. But
+the divergence is **localised, not attributed**. The `tiny` cell looks like a
+counter-example to the step-choice story until its seek table is counted: 129 frames at
+`SEEK_INTERVAL` 256 gives **one** entry, at frame 0, bit position 0 — so its "every entry
+agrees" is the *first* frame's `g`, not a step-sequence comparison, and its two streams
+still differ by 184 bytes (33,768 against 33,952). Where the entries do diverge the
+per-frame step choice is one candidate, not a demonstrated cause — the trained tables,
+trained on those choices, sit downstream of whatever it is.
+
+**What does not look like a tie-break is the candidate window.** The chosen `g` ranges are
+`8..123` against the reference's `19..124` on `tiny`, and `8..119` against `89..135` on
+`biomaster`. Our candidate set is the whole policy range `G_MIN..G_MAX`; the reference's
+is a moving ~20-step window around its pass-1 allocation (`cv.NG = 20`, `lo = g[f] - 9`).
+The two therefore search *different sets* on any frame whose coarse guess is off, and on a
+frame where nothing is worth coding ours can take the tie-break to `G_MIN` where the
+reference's window cannot reach it. That is a policy difference the matrix can name, and
+it is consistent with the tables diverging first, because the tables are built from the
+symbol counts of those very choices. It is a **lead, not a cause**: no run here varied the
+window to see what it would buy.
+
+**The EOB-pricing hypothesis is neither confirmed nor refuted, and it is no longer the
+first thing to explain.** Its prediction — omitting the charge makes terminating look
+cheaper here than to the reference, so *we* spend fewer bits and the reference's bit
+position runs ahead — holds on both cap-74 cells and reverses on the cap-60 one. That
+cell moves **two** parameters at once (the cap falls to 60 *and* the budget halves to
+1,647,000 B, 2.06 dB of SNR against the other cells' 28–32), so it cannot isolate the
+cap, and the reversal is as consistent with the rate as with the cap. More decisive than
+either: the trained tables differ first in **every** cell, and the tables are trained on
+the plan's own choices, so a table divergence is upstream of any per-frame bit-position
+argument and sufficient on its own to explain the streams. Whatever fixes
+exactness starts at the table trainer, not at the terminator. The honest state of the
+DIFF is **unattributed**, and no search change was made to force it.
+
+**What the SNR columns say, and where they hurt.** `biomaster` (one track, so mean and
+worst coincide): ours **31.89 mean / 31.89 worst** dB, int8 30.89; the oracle's codec
+proxy 31.87 (min 31.87) and its full-band worst 31.78. `cross60`: ours 28.81 / 28.81,
+oracle proxy 28.83, oracle family worst 28.80. `tiny`: 21.26 / 21.26 against a 21.67
+proxy. The sharpest cell is `off-default`: at `--cap 60` ours is **1,784 bytes larger
+and 0.19 dB below** the oracle's full-band 2.25 dB (ours 2.06). The worst-track figure
+is the new `verify: worst` line — min over the per-track full-band time-domain SNRs,
+asserted equal to `min(per-track)` by a test that also asserts the two per-track ratios
+differ and that min is **strictly** below the mean, so a tie cannot pass it — and it is
+not E-R7's worst track.
+
+**A multi-track measurement, because every cell above is one track.** The mean and the
+worst coincide in all four cells by construction, so E-R7's *worst* was still unmeasured —
+and the `--dacw` pin was untested too, since its weights are constant within one track. A
+3,200-frame corpus cut from the 12-track album — 30 s of track 01 (samples 0..983,040)
+followed by 20 s of track 06 (28,253,515..28,908,875), `tracks.tsv` as two tracks — at
+`--budget 637000 --cap 74 --threads 4` measures:
+
+| | pooled codec | mean of tracks (pcm16) | worst track (pcm16) | oracle worst, codec proxy |
+|---|---:|---:|---:|---:|
+| ours, no DAC weighting | 33.30 | 33.74 | 33.21 | — |
+| oracle `--dacw 0` | 33.17 | — | — | 33.28 |
+| oracle `--dacw 1` (its default) | 33.27 | — | — | **33.37** |
+
+Three things this settles. **`--dacw` is not inert on multi-track input**: the two oracle
+arms differ from byte 65, and the pass trades 0.04 dB of mean proxy (33.64 → 33.60) for
+**0.09 dB of worst track** (33.28 → 33.37) — which is precisely the objective E-R7's
+second number is stated in. That is also the shape of what we lack: on the mean we sit
+with the plain arm and about 0.2 dB ahead of it once the proxy/full-band offset is allowed
+for (the proxy reads ~0.09 dB high — 31.87 against 31.78 on `biomaster`), but on the
+**worst** track we match `--dacw 0` and sit ~0.07 dB below the DAC-weighted arm. The
+matrix's real gap is therefore the one this paragraph works around by hand: every cell is
+single-track, and a multi-track cell — not a larger budget on the same track — is what it
+needs next.
+
+**Four decisions this step settles.**
+
+1. **`--dacw 0` on every oracle invocation**, because that is `alloc_full`'s
+   `weights_plain` path (`uli_enc.c:230-232`) and our search has no DAC-weight
+   iteration. Measured, the pin is inert on every cell here. The `dacw1` row runs, on
+   the generated fixture,
+
+   ```
+   /home/sam/Documents/coding/gba-audio/build/uli_enc --album <work>/tiny/tiny.f32 \
+     --tracks <work>/tiny/tiny.tsv --out <work>/tiny-dacw1.uli \
+     --dacw 1 --budget 300000 --threads 1
+   ```
+
+   and reports 0 bytes differ from the `tiny` cell's own `--dacw 0` blob (39,308 B,
+   `68dca43a…cb756d`). The same measurement on the album, at `biomaster`'s flags:
+
+   ```
+   /home/sam/Documents/coding/gba-audio/build/uli_enc \
+     --album /home/sam/Documents/coding/ulc-gba/gba-sound-player/examples/uli_bench/assets/album.f32 \
+     --tracks /home/sam/Documents/coding/ulc-gba/gba-sound-player/examples/uli_bench/assets/tracks.tsv \
+     --out /tmp/s7-extra/biomaster-dacw1.uli \
+     --budget 3294000 --cap 74 --threads 8
+   ```
+
+   yields 3,293,048 B, SHA-256 `990da225…7f8a73` — byte-identical to the matrix's
+   `biomaster` `--dacw 0` reference blob in the table above. Both are 0-byte distances
+   because the DAC weights are constant within one track and all four cells are
+   single-track. The pin matters on a multi-track album, which this matrix does not yet
+   include.
+2. **The `tiny` fixture is generated, never tracked.** The committed `tiny.uli` is a
+   decoder pin (the fixture README says the C encoder made it), not an encoder
+   expectation, so the `tiny` cell runs `gen_fixture.py` in a temp directory instead.
+3. **The `dacw1` row is oracle-only and labelled "not a match expectation — the dacw
+   objective we do not have".** It exists so the size of that unimplemented objective is
+   a number rather than a guess; on this matrix it measures 0 bytes, which is the
+   single-track finding above rather than a claim about the objective.
+4. **E-R7 stays not-discharged, and this is the instrument that says why.** The two
+   `verify:` columns are full-band time-domain; E-R7's 32.29 / 25.78 is codec-only. S7
+   prints the oracle's own codec proxy beside our mean and worst so the two metrics are
+   never interchanged, and the acceptance answer is recorded as a **DIFF**: the four
+   cells are not byte-identical to the reference, and that is the measured state.
 
 #### S6 — the cycle price, and the high-rate gap it turns out to be all of
 

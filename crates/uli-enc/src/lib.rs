@@ -163,6 +163,11 @@ pub struct Report {
     /// per-track line. `None` per field when a track has
     /// no signal energy to compare against (the ratio is 0/0 there).
     pub track_snr: Vec<TrackSnr>,
+    /// The minimum over the per-track time-domain SNRs, pcm16 and int8 — the verify
+    /// block's worst-track column. Undefined when no track has a defined ratio. Not
+    /// comparable with E-R7's worst track, which is codec-only.
+    pub worst_pcm16_db: Option<f64>,
+    pub worst_int8_db: Option<f64>,
     /// `|X| >= 2^28` coefficients the reader counted: the encoder's `mmax` should
     /// make this impossible, and it is the number that says whether it did.
     pub xover: u32,
@@ -585,6 +590,8 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             snr_db: verify.snr_db,
             snr8_db: verify.snr8_db,
             track_snr: verify.track_snr.clone(),
+            worst_pcm16_db: verify.worst_pcm16_db,
+            worst_int8_db: verify.worst_int8_db,
             xover: verify.xover,
             hfnz: verify.hfnz,
             nonzero_coeffs: content.nonzero_coeffs(),
@@ -617,6 +624,12 @@ pub struct Verify {
     /// prints — both undefined when there is no input to compare against.
     pub snr8_db: Option<f64>,
     pub track_snr: Vec<TrackSnr>,
+    /// The worst track's time-domain SNR in each profile: the minimum over the tracks
+    /// that have a defined ratio, not a codec-only figure. E-R7's "worst track" is a
+    /// different (codec proxy) measurement; this one is full-band time-domain like the
+    /// mean beside it.
+    pub worst_pcm16_db: Option<f64>,
+    pub worst_int8_db: Option<f64>,
     pub xover: u32,
     pub hfnz: u32,
 }
@@ -749,12 +762,17 @@ fn self_verify(
     } else {
         None
     };
-    let track_snr = (0..n_tracks)
+    let track_snr: Vec<TrackSnr> = (0..n_tracks)
         .map(|t| TrackSnr {
             pcm16: ratio(sx_t[t], se_t[t]),
             int8: ratio(sx_t[t], se8_t[t]),
         })
         .collect();
+    // The worst track is the min over the tracks that *have* a ratio: an inaudible
+    // track is undefined, not infinitely bad, so it must not drag the minimum down.
+    let worst = |f: fn(&TrackSnr) -> Option<f64>| track_snr.iter().filter_map(f).reduce(f64::min);
+    let worst_pcm16_db = worst(|t| t.pcm16);
+    let worst_int8_db = worst(|t| t.int8);
     Ok(Verify {
         max_cycles,
         mean_cycles: mean,
@@ -762,6 +780,8 @@ fn self_verify(
         snr_db,
         snr8_db,
         track_snr,
+        worst_pcm16_db,
+        worst_int8_db,
         xover,
         hfnz,
     })
