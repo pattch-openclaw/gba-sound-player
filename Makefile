@@ -5,7 +5,7 @@
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
-        uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-rd-ab \
+        uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-rd-ab uli-accept \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-playback-test uli-player uli-player-rom uli-player-speaker uli-player-speaker-rom \
@@ -254,12 +254,16 @@ ULI_OVERLAY_MANIFEST := $(abspath crates/uli-lite-gba/Cargo.toml)
 # it. Its gate is a round-trip through `uli-lite`: the decoder, not the encoder,
 # says whether the blob is real.
 ULI_ENC_MANIFEST := $(abspath crates/uli-enc/Cargo.toml)
+# The acceptance harness is told which binary to compare instead of globbing the target
+# tree: with a second host triple built, the lexicographic first is not necessarily
+# the one this recipe just built.
+ULI_ENC_BIN ?= crates/uli-enc/target/$(HOST_TRIPLE)/release/uli-enc
 # How many `uli-enc` tests must run for the gate to count as having run anything.
 # Raise it when tests are added; the gate refuses to pass below it, so a suite that
 # fails to compile, is renamed out of `tests/`, or is filtered away cannot quietly
 # vanish from the run. A count, not a per-suite shape check: the binary target and
 # the doc-tests legitimately report zero.
-ULI_ENC_MIN_TESTS := 88
+ULI_ENC_MIN_TESTS := 89
 # The ULI2 measurement vehicle (examples/uli_bench/): prove the corpus pins on the
 # measured image, then time full frames through both kernel sets. An mGBA
 # measurement; no playback or hardware claim. ULI2's plan, not FLAC's.
@@ -759,6 +763,9 @@ uli-band-rdo-fixture:
 ULI_RD_ALBUM ?= $(ULI_BENCH_DIR)/assets/album.f32
 ULI_RD_TRACKS ?= $(ULI_BENCH_DIR)/assets/tracks.tsv
 ULI_RD_BUDGETS ?= 400000,120000,40000
+# The S7 matrix's corpus. An env var of the same name is imported by make and so wins
+# over the `?=`, and an explicit `make uli-accept ULI_ACCEPT_ASSETS=...` wins outright.
+ULI_ACCEPT_ASSETS ?= $(ULI_BENCH_DIR)/assets
 uli-rd-ab:
 	@test -f $(ULI_RD_ALBUM) || { echo "uli-rd-ab: no album at $(ULI_RD_ALBUM) (set ULI_RD_ALBUM=)"; exit 1; }
 	@test -x $(GBA_AUDIO)/build/uli_enc || { echo "uli-rd-ab: no reference encoder (make -C $(GBA_AUDIO)/encoder)"; exit 1; }
@@ -768,6 +775,26 @@ uli-rd-ab:
 	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_rd_ab.py \
 	  --album $(ULI_RD_ALBUM) --tracks $(ULI_RD_TRACKS) --budgets $(ULI_RD_BUDGETS)
 	@echo "now: cd $(GATE_NEUTRAL_CWD) && $(CARGO) test --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE)"
+
+# S7's acceptance matrix: our --rd encoder and the reference on identical PCM and the
+# same flags, across four cells and one oracle-only `--dacw 1` row. Per cell: MATCH or
+# DIFF, both blobs' SHA-256 and size, the two header cycle fields, the oracle's codec
+# proxy, our mean and worst time-domain SNR, and the searched g range. A DIFF is
+# localised to a container region, and a stream DIFF to its first disagreeing seek
+# entry. Exits 2 on DIFF, 1 on a harness error.
+#
+# Deliberately NOT on any gate's path: it runs the off-tree reference binary, and E-R1
+# keeps that dependency out of `make uli-test`. It is a host measurement run — take it
+# when the search or the container changes, and record the verdict in
+# PLAN-OF-RECORD.md -> S7. The corpus defaults to examples/uli_bench/assets; pass
+# ULI_ACCEPT_ASSETS= when it lives elsewhere.
+uli-accept:
+	@test -x $(GBA_AUDIO)/build/uli_enc || { echo "uli-accept: no reference encoder (make -C $(GBA_AUDIO)/encoder)"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) build --release --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE) --bins
+	GBA_AUDIO=$(GBA_AUDIO) ULI_ACCEPT_ASSETS="$(ULI_ACCEPT_ASSETS)" \
+	  python3 scripts/uli_accept.py --ours $(ULI_ENC_BIN)
 
 uli-check: toolchain-check
 	cd crates/uli-lite && $(CARGO) fmt --check
@@ -1973,6 +2000,8 @@ help:
 	@echo "      uli-mdct-fixture     regenerate the reference forward-MDCT coefficients"
 	@echo "      uli-band-rdo-fixture regenerate the reference band_rdo differential"
 	@echo "      uli-rd-ab            S3 gate: ours vs the reference, same PCM and budgets"
+	@echo "      uli-accept           S7 matrix: four cells + a --dacw 1 row; MATCH, or DIFF"
+	@echo "                           localised to a container region (needs the off-tree oracle)"
 	@echo "      uli-overlay-test     product path vs the portable reference, both builds, + premise"
 	@echo "      uli-fixture          regenerate the committed expected-vector file"
 	@echo "      uli-bench            build + run + read PASS: 129-frame cycle/witness image"

@@ -107,17 +107,44 @@ on the codec.
 The CLI prints **the reference's columns** (`uli_enc.c`), because S7's acceptance matrix
 compares the two encoders and a diff has to be readable: the album summary, the container
 overhead and bit target, the written size against the budget, the `g` range and M/S share,
-the verify block's per-track `pcm16 / int8` SNR and mean, and the cycle estimates as
-percentages of the 262,144-cycle period. Two deliberate differences: it prints `dacw off`
+the verify block's per-track `pcm16 / int8` SNR with the mean and worst lines over them,
+and the cycle estimates as percentages of the 262,144-cycle period. Two deliberate differences: it prints `dacw off`
 where the reference prints its DAC-weight pass number (that pass does not exist here, and a
 made-up `0` would read as a knob that ran), and it reports **both** the pooled album codec
 SNR and the mean of the per-track column, because E-R7 is stated against the pooled number
 while the reference's `verify:` line is the mean.
 
+## The acceptance matrix (S7)
+
+`make uli-accept` runs `scripts/uli_accept.py`: this encoder with `--rd` and the C
+reference on identical PCM and identical flags, then compares the two blobs byte for
+byte. Four cells (the generated fixture; the whole `biomaster` album; a 60 s `cross`
+slice; the album at `--cap 60` and half its budget) plus one oracle-only `--dacw 1` row
+that exists to price the objective this encoder does not implement. Per cell: MATCH or
+DIFF, both SHA-256s and sizes, the header cycle fields at offsets 68/72, the oracle's
+codec proxy, our mean **and worst** SNR, the searched `g` range — and on a DIFF, the
+first differing offset with its region, the first content difference at or after
+`tracks_off`, per-region diff counts, how many seek entries move `g_prev` and by how
+much, and the first **five** seek entries whose bit position or `g_prev` disagrees.
+Exit 2 is DIFF, 1 is a harness error; `--list` runs nothing.
+
+Three things to know before reading its output. It needs the **off-tree reference
+binary** (`$GBA_AUDIO/build/uli_enc`), so it is deliberately on no gate path — run it
+when the search or the container changes. The corpus is not in this checkout: pass
+`ULI_ACCEPT_ASSETS=` (to make or in the environment) pointing at
+`examples/uli_bench/assets` in the sibling `ulc-gba` tree; the default is the local,
+gitignored path. The binary under test is named by the Makefile (`--ours`); without it
+the script globs `crates/uli-enc/target`, where a second host triple's build can sort
+first. And the oracle always gets `--dacw 0`, the `weights_plain` objective our search
+is written against — measured, that pin is inert on every cell here, because the DAC
+weights only reweight *between* tracks and every cell is single-track.
+
+The SNR columns are **full-band time-domain** on both sides. E-R7's 32.29 mean /
+25.78 worst dB is a **codec-only proxy** measured elsewhere; the oracle's own codec
+proxy is printed beside ours so the two are never interchanged.
+
 ## What it is not (yet)
 
-* **No acceptance matrix** — S7. The reference reproduces its own corpora byte for byte
-  (`RECORD.md`), and that is the gate this encoder is aimed at; it is not run yet.
 * **No in-place streaming**: the album's samples are held in memory (1.7 GB peak on the
   43.5-minute album), which is fine for the bake and is not a format property.
 
