@@ -192,6 +192,20 @@ __pycache__/
 # with the module linked into it — R11's stale-artifact failure, caught at boot rather than
 # in a host test that shares the artifact. Same fmt stub as assets.rs, same `make clean`.
 /examples/album_player/src/layout.rs
+# The generated `glyphs` module (2a PR-2, §5.5a step 5): the glyph atlas — the ASCII cut
+# of the ONE face the selected variant's text elements declare, walked out of that tracked
+# `.ttf` at the raster the spec declares. Never tracked, on the same two grounds as
+# layout.rs above: it is a function of tracked inputs (`layout_spec.toml`, the face file,
+# and `pyftsubset`, whose version §5.5a makes part of the record), and tracking it would
+# put 20 KB of glyph bytes in the diff for every change to a face — the exact reason the
+# subset source itself is not tracked either (§5.5a step 1). §9.0 duty (i) covers it the
+# same way: `make album-bake` regenerates it, `make album-glyphs-test` compares the bytes
+# on disk against a fresh generation, and the module's own `const _: ()` asserts refuse to
+# compile if it disagrees with the `layout` module generated beside it.
+/examples/album_player/src/glyphs.rs
+# `make album-glyphs-test`'s log (2a PR-2): the atlas tool's legs and the sources they
+# name, rewritten every run — the per-run rule as above.
+/album-glyphs-test.log
 # `make album-pack-check`'s log: per-run output, rewritten every run, with the
 # counts recorded per landing elsewhere (the playback-test.log/album-probe*.log rule).
 /album-pack-check.log
