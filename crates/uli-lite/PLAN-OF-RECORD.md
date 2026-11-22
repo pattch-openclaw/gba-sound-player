@@ -987,7 +987,7 @@ the encoder writes the Huffman codebooks into the blob.
 | Prefix | Means | Cardinality |
 |---|---|---|
 | **E-R1 … E-R10** | **Requirements.** Permanent, testable claims about the encoder. An amendment changes the requirement; it never opens a ticket | 10 |
-| **S1 … S7** | **Steps.** Concrete work, each discharging named requirements, each with an exit gate. This is the only axis you can be *on* | 7 |
+| **S1 … S8** | **Steps.** Concrete work, each discharging named requirements, each with an exit gate. This is the only axis you can be *on* | 8 |
 | R5a … R5d | Determinism rules, internal to **E-R5** | 4 |
 
 Nothing else. In particular **observations, measurements and defects are not a
@@ -1020,7 +1020,7 @@ sentences in `RECORD.md`/`ULI2.md` that say "E1" about the encoder mean **S1**.
 Every requirement has a step that discharges it, and no step exists without one:
 E-R1/E-R3/E-R4/E-R10 → S1; E-R5 → S1 (ordering) and S7 (the claim itself);
 E-R2 → S1 (boundary) and S5 (WAV layer); E-R6 → S1 (arithmetic) and S5 (real sizes);
-E-R7 → S2/S3 measured, S7 accepted; E-R8 → S6.
+E-R7 → S2/S3 measured, S7 accepted, S8 the requirement it now sets; E-R8 → S6; E-R5 → S8.
 
 ### Five decisions
 
@@ -1157,10 +1157,48 @@ read-side, so this does not reopen the paragraph above.
 | **S5** | Album assembly (WAV front end, gapless join, tags verbatim), `--budget`/`--cap` on real sizes, frame-parallel search | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes (each seeked to its own preroll); hashes pinned; too small refuses **before the first frame**, citing both numbers; a 32,768 Hz WAV reaches the same blob its pre-resampled PCM does, and a resampled WAV is quoted by SNR; the CLI prints the reference's columns | **done** — see "S5" below for the numbers and the defaults-restored failure |
 | **S6** | `mu` (decoder-cycle-aware) search: re-code an over-cap frame by dropping its cheapest coefficients instead of refusing the candidate | E-R8 **discharged**; E-R7 **contributed to, not discharged** — its criterion is codec-only and unmeasured, and S7 accepts it | a knob that demonstrably trades SNR for decode cycles, measured on the bench — and, measured 2026-11-20, it closes the last high-rate gap: at `--budget 400000 --cap 74` the equivalent mechanism is worth **1.48 dB** to the oracle, against a 1.15 dB gap | **done** — `--musearch 1` by default; worth **1.44 dB** here (39.57 → 41.01 dB) and the oracle's 41.02 is 0.01 dB above, cap 74.0% max on both arms. See "S6" below |
 | **S7** | **The acceptance matrix, as a buildable target** | E-R2, E-R5, E-R7 (and E-R1's oracle posture) | the four cells below run in CI-shaped form and compare SHA-256s against the reference's blobs, including the two header cycle fields | **done** — `make uli-accept` runs the four cells and the `--dacw 1` row; every cell is a **DIFF**, whose first content difference is inside the **trained tables** in every cell, and which is **unattributed** (see "S7" below) |
+| **S8** | Reconcile the S7 DIFF: attribute it first — compare the plan and the symbol counts that feed training, not the bytes — then either reach byte-exactness or earn the difference with SNR | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R7 (SNR is the licence to differ), E-R2 | every cell byte-identical **or** every cell's mean and worst SNR above the oracle's at no more bytes, reported by `make uli-accept` | not started |
 
 S7 is a step rather than a property of the plan because it has work in it — a host
 target that builds nothing of ours from C, calls the off-tree binary, compares hashes
 — and it stood as prose from the gate's declaration until it became that target.
+
+#### S8 — the ruling: exactness is the target, and SNR is the licence to differ
+
+**The premise.** The oracle is deterministic: R5b measured `--threads 1` and `--threads 8`
+byte-identical on the fixture, and every S7 run reproduces its own hashes. So "we cannot
+match its bytes" is not a property of the format or of the machine, and there is no reason
+to accept a difference that is neither an improvement nor required.
+
+**The test a difference has to pass.** If this encoder can genuinely improve on the oracle,
+the improvement shows up as SNR at equal rate. A non-exact blob is therefore acceptable
+exactly when it is *better* — mean and worst SNR above the oracle's, at no more bytes.
+**Not byte-exact and worse is not a stylistic difference; it is a deficiency.**
+
+**The current state fails that test.** Measured in S7: at `--cap 60` on half the budget ours
+is **1,784 bytes larger for 0.19 dB less** SNR; the S5 measurement of the 12-track album
+put us 0.41 dB behind (at `mu = 0`, never re-measured at the shipped default); and against
+E-R7's shape on a two-track corpus we match the oracle's plain arm on the worst track while
+sitting ~0.07 dB under its DAC-weighted one. The two cells where we are level or slightly
+ahead (`biomaster` +0.11 dB full-band, `cross60` +0.01) are consistent with the deficiency
+being masked by a favourable mix, not with it being absent. The working assumption is
+therefore a real deficiency until a cell shows otherwise.
+
+**Where to look first, and why not at the bytes.** Training is a pure function of the counts
+and errors it is handed, so a byte diff cannot separate "the trainer differs" from "the plan
+feeding it differs". Compare the **inputs** instead: the chosen `g`/M-S plan per frame and
+the symbol counts per class, ours against the oracle's, on one binding cell. If the counts
+agree and the tables still differ, the trainer is wrong; if the counts differ, the search is
+wrong and the tables are innocent. That is S8's first experiment and it needs no change to
+encoding behaviour. The two causes S7 already names are what to look for there: the
+**candidate window** (ours sweeps the whole policy range, the oracle a moving ~20-step window
+around its pass-1 allocation, so the two search different sets whenever the coarse guess is
+off — and the tables are built from those very choices) and the **unpriced terminator**
+(whose predicted sign holds on two cells of three: neither confirmed nor refuted).
+
+**One caveat before a verdict is trusted.** Every matrix cell is single-track, and `tiny`'s
+budget does not bind at all, so its mismatch is largely tie-breaking. A multi-track cell at
+a binding budget is the measurement this depends on.
 
 #### S7 — the acceptance matrix, and the answer it gives: DIFF
 
