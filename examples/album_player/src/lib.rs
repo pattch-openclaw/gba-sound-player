@@ -57,10 +57,10 @@
 //! kept on purpose (R11: a stale generated module linked against yesterday's
 //! manifest is invisible to every host test that shares the module).
 //!
-//! A fresh clone has no `src/assets.rs` or `src/layout.rs`, so `make check`
+//! A fresh clone has no `src/assets.rs`, `src/layout.rs` or `src/glyphs.rs`, so `make check`
 //! (rustfmt, which resolves `#[path]` modules statically) formats this crate
 //! through `scripts/fmt_with_generated_stub.sh`'s `GENERATED` override, which
-//! takes both paths.
+//! takes all three paths.
 
 #![cfg_attr(target_arch = "arm", no_std)]
 #![cfg_attr(not(target_arch = "arm"), forbid(unsafe_code))]
@@ -86,6 +86,14 @@ pub mod keys;
 // formats without the artifact ever existing.
 #[rustfmt::skip]
 pub mod layout;
+// `glyphs.rs` is the other generated module of the same bake (§5.5a): the ASCII cut of the ONE
+// face this variant's text elements declare, as 4bpp tiles. Same class as `layout.rs` — gitignored,
+// written by `make album-bake`, reached through the same fmt stub — and deliberately a separate
+// module rather than more tables in `layout.rs`: the two are generated independently, so the atlas
+// restates the layout module's face id, raster, line box and counts in `const _: () = assert!`
+// items below. That is where "one face per ROM" stops being a sentence in a document.
+#[rustfmt::skip]
+pub mod glyphs;
 pub mod meta;
 pub mod pcm;
 pub mod position;

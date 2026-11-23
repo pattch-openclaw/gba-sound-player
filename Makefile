@@ -13,7 +13,7 @@
         uli-player-cross uli-player-cross-rom \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
-        album-bake album-pack-check album-seam-test album-layout-test album-rom album-player-rom album-test \
+        album-bake album-pack-check album-seam-test album-layout-test album-glyphs-test album-rom album-player-rom album-test \
         clean clean-cache check help toolchain-check target-spec-check
 
 # ===========================================================================
@@ -199,6 +199,20 @@ ALBUM_ASSETS_RS := $(ALBUM_CRATE_DIR)/src/assets.rs
 ALBUM_LAYOUT_RS := $(ALBUM_CRATE_DIR)/src/layout.rs
 ALBUM_LAYOUT_SPEC := $(ALBUM_CRATE_DIR)/layout_spec.toml
 ALBUM_LAYOUT_GATE_LOG := album-layout-test.log
+# §5.5a's third generated module: the glyph atlas of the one face the selected variant declares.
+# Same class as the two above — gitignored, cleaned, reached through the same fmt stub, written by
+# `make album-bake` — and `make album-glyphs-test` is its gate.
+#
+# It is a SEPARATE emitter rather than another table inside `album_bake.py` (re-ruled at the start
+# of PR-2, against §5.5a step 5's wording; the reasoning is recorded there). Two things make the
+# split safe rather than a second source of truth, and both are machine-checked, not assumed:
+#   - it *imports* the face's numbers from `album_bake` (`FaceMetrics`, `layout_for`), so there is
+#     one parser of §5.0's `[face]` block and one rasteriser of the line box, not two; and
+#   - the module it writes re-asserts the layout module's face id, raster, line box, tile rows and
+#     glyph/atlas counts as Rust `const _: () = assert!` items — so any drift between the two
+#   generators is a compile error, which is a claim no Python leg can make.
+ALBUM_GLYPHS_RS := $(ALBUM_CRATE_DIR)/src/glyphs.rs
+ALBUM_GLYPHS_GATE_LOG := album-glyphs-test.log
 ALBUM_GATE_LOG := album-pack-check.log
 ALBUM_SEAM_GATE_LOG := album-seam-test.log
 # The playback ROM (PR-3a step iii): the binary cargo writes, and the fixed image
@@ -314,8 +328,8 @@ WORKSPACES := . crates/flac-lite crates/flac-lite-gba crates/gba-playback \
 
 # examples/album_player is deliberately NOT in WORKSPACES: its `src/lib.rs`
 # declares `pub mod assets;` from a GENERATED, gitignored `src/assets.rs` and
-# (from 2a) `pub mod layout;` from a GENERATED `src/layout.rs`, both of which only
-# `make album-bake` writes, so it cannot be a plain `cargo fmt` / `cargo
+# (from 2a) `pub mod layout;` and (§5.5a) `pub mod glyphs;` from GENERATED modules, all of which
+# only `make album-bake` writes, so it cannot be a plain `cargo fmt` / `cargo
 # clean` target on a fresh clone — rustfmt resolves `mod` statically and aborts.
 # Its fmt coverage comes from the `fmt_with_generated_stub.sh` call below (which
 # writes a comment-only stub for each GENERATED=<file> it is given, formats, and
@@ -344,7 +358,7 @@ ifeq ($(HAS_RUSTFMT),1)
 format:
 	@for d in $(WORKSPACES); do (cd $$d && $(CARGO) fmt) || exit 1; done
 	CARGO='$(CARGO)' sh scripts/fmt_with_generated_stub.sh $(FLAC_CRATE_DIR)
-	CARGO='$(CARGO)' GENERATED='$(abspath $(ALBUM_ASSETS_RS)):$(abspath $(ALBUM_LAYOUT_RS))' sh scripts/fmt_with_generated_stub.sh $(ALBUM_CRATE_DIR)
+	CARGO='$(CARGO)' GENERATED='$(abspath $(ALBUM_ASSETS_RS)):$(abspath $(ALBUM_LAYOUT_RS)):$(abspath $(ALBUM_GLYPHS_RS))' sh scripts/fmt_with_generated_stub.sh $(ALBUM_CRATE_DIR)
 else
 format:
 	@echo "format: skipping — no rustfmt for '$(TOOLCHAIN)' (build continues)."
@@ -1298,9 +1312,16 @@ album-probe: album-probe-rom
 
 # Bake the tracked fixture (or ALBUM=your.toml). A maintenance command: it
 # writes generated, gitignored files, so it is never part of `make test`.
+#
+# It writes THREE generated modules now: `album_bake.py` writes the blobs, `ALBM1` and
+# `src/assets.rs` + `src/layout.rs`, and `album_glyphs.py` writes `src/glyphs.rs`. The atlas runs
+# after the layout on purpose (§5.5a step 5): it resolves the face through the variant the bake just
+# selected, so `make album-bake ALBUM=<config>` gives one variant to both emitters and the pair
+# cannot be baked against different selections.
 album-bake: toolchain-check format
 	@test -f "$(ALBUM)" || { echo "album-bake: $(ALBUM) does not exist — pass ALBUM=<config> or check the tracked fixture is present"; exit 1; }
 	python3 scripts/album_bake.py "$(ALBUM)"
+	python3 scripts/album_glyphs.py
 
 # The Phase-1 pack gate. Five legs, all fail-closed:
 #   1. the inputs a clone must have (the tracked config, the host suite) and the
@@ -1318,6 +1339,12 @@ album-bake: toolchain-check format
 #      `build-std` are never inherited;
 #   5. a green that collected (nearly) nothing is refused: the count is read from
 #      the log only after the suite passed.
+#
+# Note on the third generated module: `src/glyphs.rs` is NOT compared here, because this target
+# calls `scripts/album_bake.py` directly, twice, and that emitter does not write the atlas — a copy
+# taken around a run that never writes the file is a `cmp` of a file against itself, which is the
+# exact vacuity the layout leg below was rewritten to avoid. The atlas's own reproducibility leg is
+# `album-glyphs-test`.
 #
 # Note on the two generated modules: both `assets.rs` and `layout.rs` are snapshotted into
 # `$$first` BEFORE the second bake runs, on purpose. A copy taken after it would be the second
@@ -1372,7 +1399,7 @@ album-pack-check: toolchain-check
 	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_GATE_LOG)) \
 	    || { echo "album-pack-check: the host suite did not pass — see $(ALBUM_GATE_LOG)"; exit 1; }; \
 	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_GATE_LOG))); \
-	  [ -n "$$n" ] && [ "$$n" -ge 51 ] || { echo "album-pack-check: collected '$$n' tests, needs >= 51 — a green that names nothing is not a green (the suite is 53 since 2a PR-1's review added the pinned-variant leg; two may vanish before this floor speaks, the same margin the 48 → 50 raise used)"; exit 1; }
+	  [ -n "$$n" ] && [ "$$n" -ge 51 ] || { echo "album-pack-check: collected '$$n' tests, needs >= 51 — a green that names nothing is not a green (the suite is 54 since 2a PR-(2) added the elided-title cross-check; three may vanish before this floor speaks, the same margin the 48 → 50 raise used)"; exit 1; }
 	@echo "album-pack-check passed: the four §9.0 Phase-1 refusals fired — (a) declared rate != product clock,"
 	@echo "  (b) frames outside the encode profile (inherited from gafp_pack.py), (c) ALBM1 n_samples vs the"
 	@echo "  container's total_samples, (d) the writer's output re-read through meta.rs — plus two bakes"
@@ -1471,7 +1498,7 @@ album-seam-test: toolchain-check
 #   1. the tracked spec exists exactly once, so the gate cannot be green against a spec that went
 #      missing or was duplicated (the same shape as the two host gates' input legs);
 #   2. `--layout-self-test` exits 0 AND the log names what it proved: every §9.0 register row fired
-#      by id (8 of 8), no failed summary line, and a floor on the reproduction legs — because an
+#      by id (9 of 9), no failed summary line, and a floor on the reproduction legs — because an
 #      exit status alone would be satisfied by a run that measured nothing. Each leg of that run
 #      prints where its expected number comes from (`plan` / `spec` / `arithmetic`), which is what
 #      D9 asks for; a leg whose two sides are the same path is not evidence;
@@ -1480,8 +1507,10 @@ album-seam-test: toolchain-check
 #   4. the Rust half — the three claims a Python tool cannot make: that `meta::parse` refuses a
 #      manifest whose grid is not the one the generated module declares (the boot backstop, run
 #      against the real baked blob), that the fixture's titles are measured against the declared
-#      box from the generated advance table rather than counted, and that the two generated
-#      modules name one variant (`assets::LAYOUT_VARIANT` ↔ `layout::LAYOUT_ID`) — the staleness a
+#      box from the generated advance table rather than counted, that none of them is drawn with
+#      §5.5's elision marker at that box while a synthetic over-long string is (both measurement
+#      paths, agreeing on the same strings), and that the two generated modules name one variant
+#      (`assets::LAYOUT_VARIANT` ↔ `layout::LAYOUT_ID`) — the staleness a
 #      compiling build cannot see, and the one `assets.rs`'s own comment promises a host test
 #      asserts. The filters are named so a leg that vanished from the suite fails here rather than
 #      passing for lack of a `--filter` match.
@@ -1496,7 +1525,7 @@ album-layout-test: toolchain-check album-bake
 	  tail -n 25 $(abspath $(ALBUM_LAYOUT_GATE_LOG)); \
 	  [ $$status -eq 0 ] \
 	    || { echo "album-layout-test: the layout self-test refused — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
-	  grep -q '^  register rows fired: 8 of 8$$' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) \
+	  grep -q '^  register rows fired: 9 of 9$$' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) \
 	    || { echo "album-layout-test: §9.0's register did not fire all of its 2a rows by id — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
 	  ! grep -q 'SELF-TEST FAILED' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) \
 	    || { echo "album-layout-test: a reproduction leg failed — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
@@ -1528,7 +1557,7 @@ album-layout-test: toolchain-check album-bake
 	  [ $$status -eq 0 ] \
 	    || { tail -n 40 $(abspath $(ALBUM_LAYOUT_GATE_LOG)); echo "album-layout-test: the measured-title host legs did not pass — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
 	  m=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) | tail -1); \
-	  [ -n "$$m" ] && [ "$$m" -ge 3 ] || { echo "album-layout-test: collected '$$m' title tests, needs >= 3 — a filter that matched nothing is a green that names nothing"; exit 1; }
+	  [ -n "$$m" ] && [ "$$m" -ge 4 ] || { echo "album-layout-test: collected '$$m' title tests, needs >= 4 — a filter that matched nothing is a green that names nothing"; exit 1; }
 	@cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) test --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) --test album_pack_host -- variant >> $(abspath $(ALBUM_LAYOUT_GATE_LOG)) 2>&1; \
 	  status=$$?; \
@@ -1536,15 +1565,128 @@ album-layout-test: toolchain-check album-bake
 	    || { tail -n 40 $(abspath $(ALBUM_LAYOUT_GATE_LOG)); echo "album-layout-test: the pinned-variant host leg did not pass — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
 	  v=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) | tail -1); \
 	  [ -n "$$v" ] && [ "$$v" -ge 1 ] || { echo "album-layout-test: collected '$$v' variant-agreement tests, needs >= 1 — the generated assets.rs names this leg in its own `LAYOUT_VARIANT` comment, so it may not vanish quietly"; exit 1; }
-	@echo "album-layout-test passed: §9.0's eight fireable 2a refusals each fired by id on a spec written"
+	@echo "album-layout-test passed: §9.0's nine fireable 2a refusals each fired by id on a spec written"
 	@echo "  to be wrong about it, the measured face/interaction geometry reproduces from the tracked files"
 	@echo "  with every expected number labelled by its source, the declared bar grid reaches the ALBM1 header"
 	@echo "  and the generated module and the three agree (and disagree by name when they do not), the two"
 	@echo "  generated modules name one variant, and none of the four retired character-count names survives"
-	@echo "  in the product or in its tests (the verdict line's measured `text::COLUMNS = 30` is a different"
+	@echo "  in the product or in its tests (the verdict line's measured \`text::COLUMNS = 30\` is a different"
 	@echo "  bound, and §5.5 says so). Every declared face is tracked with its licence, and src/layout.rs is"
 	@echo "  byte-identical across two runs, the comparison witnessed negatively."
 	@echo "  See $(ALBUM_LAYOUT_GATE_LOG) for the legs and their sources."
+
+# The glyph atlas's own gate (§5.5a PR-2: its steps 2-5, and the §9.0 register rows this tool adds).
+# Deliberately a target of its own rather than more legs inside `album-layout-test`, and the reason
+# is §9.0's own rule — a gate's critical path may not run through a tool it has not built. The
+# layout gate's inputs are all in-tree TOML and its own emitter; nothing there needs fontTools, and
+# adding a font dependency to it would make a layout refusal cost a font install. The atlas is a
+# second emitter over the same tracked face, so what it has to prove is not that the face resolves
+# (the layout gate proves that) but that the atlas and the layout table cannot drift. Four legs:
+#   1. the inputs are present and single: exactly one tracked `layout_spec.toml` (the atlas resolves
+#      the face through `album_bake.layout_for`, so that file is this gate's input too), and
+#      python3 with fontTools importable — reported by name, as everywhere else here;
+#   2. `--self-test` exits 0 AND says what it proved: the leg count is read out of the log and
+#      floored, no line may report FAIL, and the summary must report zero failures — an exit status
+#      alone would be satisfied by a run that measured nothing. Four of this tool's refusal ids are
+#      fired on fixture specs written to be wrong about them (a variant reaching for a second face in
+#      a static atlas; a raster off the tile grid; a contour that does not fit its cell; a bitmap
+#      face with no outlines to scanline); a fifth, `atlas-ink-not-matching-outline`, is the tool's
+#      own bug path and is printed as named-but-not-fired rather than hidden. The elision half of
+#      §5.5 is legged here too, on the things only this tool can see: that the px path (`measure`,
+#      summing the slots the pixels come from) and the font-unit path (`album_bake.FaceMetrics`) are
+#      one number on this face because every advance lands on the pixel grid; that the case table it
+#      writes into the module fits, is maximal, is labelled with the declared element each box belongs
+#      to, and actually reaches the box of the element that draws titles rather than only the widest
+#      text box in the variant; that a wider declared box never draws a shorter line, scanned 1 px at
+#      a time down to the point where the bake would refuse the box instead; and that no box this
+#      variant declares is that narrow.
+#   3. `--check` passes against the module `make album-bake` just wrote (§5.5a step 5's named
+#      check), and the module is byte-reproducible across two emits — copied BEFORE the second
+#      emit, compared after it, and witnessed negatively with one flipped byte;
+#   4. the Rust half, which no Python leg can make: the generated module COMPILES for the host, so
+#      its `const _: () = assert!` items run in the compiler — the atlas's own invariants (every
+#      slot index in range, the atlas length equal to cells × tiles-per-row × 8 words, the declared
+#      codepoints strictly increasing, the blank sentinel exactly at U+0020) and the six it restates
+#      from `src/layout.rs` (`FACES[0]`'s id and raster, `LINE_PX`, `TILE_ROWS`, `OUTLINED_GLYPHS`,
+#      `ATLAS_TILES`), plus the four text elements' pitch-vs-line-box check. A generator that
+#      changed the face, the cut or the line box and left the other module behind is a build
+#      failure, not a review finding. The ARM half of the module (`vram::tile_set`, the
+#      `TileSet::new` static-lifetime contract) is compiled by `album-rom`, where agb is in scope.
+#   5. the module's OWN suite runs, filtered to `glyphs::` with a floor on the count. The filter is
+#      what the floor is for: the generator writes `#[cfg(test)] mod tests` into the artifact,
+#      twelve of them, and a filter that matched none of them is green (§9.0's rule). They check the
+#      module's API, which is what a caller in surface.rs will rely on: that the fixture the 4bpp
+#      bit order is read through really is asymmetric (its mirror must NOT match), that no two
+#      glyphs share a cell, that the blank sentinel is agb's and that only space uses it, that a
+#      character outside the cut is a `None` and a count rather than a zero-width drawing, that
+#      `measure` and `tilemap_px` are different numbers for a proportional face, and — the §5.5
+#      half — that `elide` cuts exactly where `album_bake.FaceMetrics.elide` said it would on every
+#      pinned case (three real boxes: the title element's, the widest and the narrowest text box in
+#      the variant), that the cut is at the last whole glyph that fits rather than an earlier one,
+#      that the marker is three periods this cut carries and not a U+2026 this cut does not, that no
+#      declared box produces the degenerate answer, and that `fit` keeps "unwritten" and "overflows"
+#      two separate numbers.
+ALBUM_GLYPHS_TEST_FLOOR ?= 10
+album-glyphs-test: toolchain-check album-bake
+	@test $$(find $(ALBUM_CRATE_DIR) -maxdepth 1 -name 'layout_spec.toml' | wc -l) -eq 1 \
+	  || { echo "album-glyphs-test: $(ALBUM_LAYOUT_SPEC) is missing or duplicated — the atlas resolves its face through the same tracked spec, so this gate is measuring nothing without it"; exit 1; }
+	@command -v python3 >/dev/null 2>&1 \
+	  || { echo "album-glyphs-test: 'python3' is not on PATH — the atlas generator and its self-test are host tools"; exit 1; }
+	@python3 -c 'import fontTools' >/dev/null 2>&1 \
+	  || { echo "album-glyphs-test: fontTools is not importable — §5.5a step 1, and the generator reads the tracked .ttf through it"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	@cd $(GATE_NEUTRAL_CWD) && python3 $(abspath scripts/album_glyphs.py) --self-test > $(abspath $(ALBUM_GLYPHS_GATE_LOG)) 2>&1; \
+	  status=$$?; \
+	  tail -n 30 $(abspath $(ALBUM_GLYPHS_GATE_LOG)); \
+	  [ $$status -eq 0 ] \
+	    || { echo "album-glyphs-test: the atlas generator's self-test refused — see $(ALBUM_GLYPHS_GATE_LOG)"; exit 1; }; \
+	  ! grep -q 'FAIL' $(abspath $(ALBUM_GLYPHS_GATE_LOG)) \
+	    || { echo "album-glyphs-test: a self-test leg reported FAIL — see $(ALBUM_GLYPHS_GATE_LOG)"; exit 1; }; \
+	  n=$$(sed -n 's/^legs: \([0-9][0-9]*\), failures: 0$$/\1/p' $(abspath $(ALBUM_GLYPHS_GATE_LOG)) | tail -1); \
+	  [ -n "$$n" ] && [ "$$n" -ge 30 ] \
+	    || { echo "album-glyphs-test: '$$n' legs passed, needs >= 30 — a green that names nothing is not a green"; exit 1; }
+	@cd $(GATE_NEUTRAL_CWD) && python3 $(abspath scripts/album_glyphs.py) --check >> $(abspath $(ALBUM_GLYPHS_GATE_LOG)) 2>&1 \
+	  || { tail -n 20 $(abspath $(ALBUM_GLYPHS_GATE_LOG)); echo "album-glyphs-test: $(ALBUM_GLYPHS_RS) is not what this tree derives from its tracked face — §5.5a step 5's check"; exit 1; }
+	@first=$$(mktemp -d); \
+	  python3 scripts/album_glyphs.py --emit >/dev/null || { rm -rf $$first; exit 1; }; \
+	  cp $(ALBUM_GLYPHS_RS) $$first/glyphs.rs || { rm -rf $$first; exit 1; }; \
+	  python3 scripts/album_glyphs.py --emit >/dev/null || { rm -rf $$first; exit 1; }; \
+	  cmp -s $$first/glyphs.rs $(ALBUM_GLYPHS_RS) \
+	    || { echo "album-glyphs-test: the generated src/glyphs.rs differs between two runs — it is not reproducible"; rm -rf $$first; exit 1; }; \
+	  cp $$first/glyphs.rs $$first/glyphs.mutant.rs; \
+	  python3 -c 'import sys; p = sys.argv[1]; d = bytearray(open(p, "rb").read()); d[0] ^= 0xFF; open(p, "wb").write(d)' $$first/glyphs.mutant.rs; \
+	  cmp -s $$first/glyphs.mutant.rs $(ALBUM_GLYPHS_RS) \
+	    && { echo "album-glyphs-test: the atlas comparison passed two files that differ by one byte — the byte leg is not witnessing anything"; rm -rf $$first; exit 1; } \
+	    || echo "  atlas reproducibility leg: one flipped byte is reported as a difference (negative control)"; \
+	  rm -rf $$first
+	@cd $(GATE_NEUTRAL_CWD) && $(CARGO) build --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) >> $(abspath $(ALBUM_GLYPHS_GATE_LOG)) 2>&1; \
+	  status=$$?; \
+	  [ $$status -eq 0 ] \
+	    || { tail -n 40 $(abspath $(ALBUM_GLYPHS_GATE_LOG)); echo "album-glyphs-test: the generated atlas does not compile for the host, so its const asserts against src/layout.rs never ran — see $(ALBUM_GLYPHS_GATE_LOG)"; exit 1; } \
+	    || echo "  cross-module const asserts: compiled, against the src/layout.rs this bake wrote"
+	@cd $(GATE_NEUTRAL_CWD) && $(CARGO) test --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) --lib -- glyphs:: >> $(abspath $(ALBUM_GLYPHS_GATE_LOG)) 2>&1; \
+	  status=$$?; \
+	  [ $$status -eq 0 ] \
+	    || { tail -n 40 $(abspath $(ALBUM_GLYPHS_GATE_LOG)); echo "album-glyphs-test: the generated atlas's own suite failed — see $(ALBUM_GLYPHS_GATE_LOG)"; exit 1; }; \
+	  n=$$(grep -c '^test glyphs::tests::' $(abspath $(ALBUM_GLYPHS_GATE_LOG)) 2>/dev/null || echo 0); \
+	  [ "$$n" -ge $(ALBUM_GLYPHS_TEST_FLOOR) ] \
+	    || { echo "album-glyphs-test: $$n tests from src/glyphs.rs ran, needs >= $(ALBUM_GLYPHS_TEST_FLOOR) — the filter matched nothing"; exit 1; }; \
+	  echo "  the module's own suite: $$n tests, floor $(ALBUM_GLYPHS_TEST_FLOOR) — the bit-order fixture proved asymmetric, one cell per glyph, agb's blank tile, no slot outside the cut, measure against tilemap_px, and §5.5's elide cut where the bake's own elide cut"
+	@echo "album-glyphs-test passed: the atlas generator's self-test is green, and the log names every leg it"
+	@echo "  ran with the source of its expected number — the fontTools preamble, the scanline raster against a"
+	@echo "  hand-computed square at a scale no float would agree with, the 8×8 bit order both ends of the wire"
+	@echo "  read, the 4bpp word assembly, the even-odd/non-zero fill rules measured to agree on the tracked cut,"
+	@echo "  the pool term as max/present/absent, and four of §9.0's register ids fired on specs written to be"
+	@echo "  wrong about them. src/glyphs.rs is byte-identical across two emits, the comparison witnessed"
+	@echo "  negatively, and it matches what this tree's tracked face derives. The module compiles, which is"
+	@echo "  where its counts are tied to src/layout.rs's: one face id, one raster, one line box, one outlined"
+	@echo "  count, or the build fails. The module's own tests then run: the fixture the 4bpp bit"
+	@echo "  order is read through is named, and proved asymmetric by the mirror of it failing to match; and"
+	@echo "  §5.5's elision cuts where the bake's Python copy of the rule said, at the last whole glyph,"
+	@echo "  with a marker this cut carries. No cycle figure is claimed by this gate: the atlas's cost is"
+	@echo "  the 6,016 bytes of tile data its own length asserts, and a draw cost would be a measurement"
+	@echo "  of a draw path that PR-(3) has not written yet."
+	@echo "  See $(ALBUM_GLYPHS_GATE_LOG) for the legs and their sources."
 
 # The playback ROM (PR-3a step iii): `ALBM1` + the packed blobs → the app's own chain at 16,384 Hz.
 # It boots, verifies its own album (§D-C), plays track 1 end to end through the shipped feeder, and
@@ -1886,7 +2028,7 @@ clean-outputs:
 	@rm -f $(SPIKE_CRATE_DIR)/assets/rate_*.bin
 	@rm -f uli-bench*.log uli-attrib*.log
 	@rm -f album-probe*.log
-	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_LAYOUT_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_LAYOUT_GATE_LOG) $(ALBUM_ROM_RUN_LOG) $(ALBUM_TEST_LOG)
+	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_LAYOUT_RS) $(ALBUM_GLYPHS_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_LAYOUT_GATE_LOG) $(ALBUM_GLYPHS_GATE_LOG) $(ALBUM_ROM_RUN_LOG) $(ALBUM_TEST_LOG)
 	@find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} + 2>/dev/null || true
 
 # The caches: the fifteen workspaces' `target/` dirs, discovered from the tree.
@@ -1907,7 +2049,7 @@ clean-cache:
 check:
 	@for d in $(WORKSPACES); do (cd $$d && $(CARGO) fmt --check) || exit 1; done
 	CARGO='$(CARGO)' sh scripts/fmt_with_generated_stub.sh $(FLAC_CRATE_DIR) --check
-	CARGO='$(CARGO)' GENERATED='$(abspath $(ALBUM_ASSETS_RS)):$(abspath $(ALBUM_LAYOUT_RS))' sh scripts/fmt_with_generated_stub.sh $(ALBUM_CRATE_DIR) --check
+	CARGO='$(CARGO)' GENERATED='$(abspath $(ALBUM_ASSETS_RS)):$(abspath $(ALBUM_LAYOUT_RS)):$(abspath $(ALBUM_GLYPHS_RS))' sh scripts/fmt_with_generated_stub.sh $(ALBUM_CRATE_DIR) --check
 	@echo "check: all workspaces rustfmt-clean"
 
 # The target spec is an *instrument*, so it gets a witness like the toolchain pin
@@ -2028,11 +2170,19 @@ help:
 	@echo "      album-seam-test (the seam's host gate: derived geometry vs the shipped figures, both"
 	@echo "      backend arms, the FLAC arm's fnv_pcm and fnv_fifo_l/fnv_fifo_r pins, and a stub-only"
 	@echo "      build with no decoder linked),"
-	@echo "      album-layout-test (2a's layout gate: the generator's own self-test with §9.0's eight"
+	@echo "      album-layout-test (2a's layout gate: the generator's own self-test with §9.0's nine"
 	@echo "      fireable refusals fired by id and the [meta] pool guard asked at its own error case, the"
 	@echo "      generated src/layout.rs byte-identical across two emits, and the Rust half — meta.rs's"
-	@echo "      boot backstop, the measured title legs, and the two generated modules naming one variant;"
+	@echo "      boot backstop, the measured title legs and the elision legs, and the two generated modules naming one variant;"
 	@echo "      host-only, and not a prerequisite of album-rom, which gets its layout through album-bake),"
+	@echo "      album-glyphs-test (§5.5a's atlas gate: the generator's own self-test, four of §9.0's tool-"
+	@echo "      local refusal ids fired by name — a second face in a static atlas, an off-grid raster, a"
+	@echo "      contour outside its cell, a bitmap face — the generated src/glyphs.rs byte-identical across two"
+	@echo "      emits and matching this tree's tracked face, the module compiling so its const asserts tie"
+	@echo "      it to src/layout.rs (one face, one raster, one line box, one outlined count), and the module's"
+	@echo "      own floored suite, which is where §5.5's one-line elision is checked against the bake's copy of"
+	@echo "      the rule; host-only, and not"
+	@echo "      a prerequisite of album-rom, which gets its atlas through album-bake),"
 	@echo "      album-rom -> $(ALBUM_ROM) (bake + the audited ROM: all five verdict terms true; run it"
 	@echo "      with mgba-test-runner and read the [album-rom] ledger — exit 124 IS the pass),"
 	@echo "      album-player-rom -> $(ALBUM_FAST_ROM) (the same ROM built without deep-audit: no cold"

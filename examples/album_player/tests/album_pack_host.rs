@@ -11,7 +11,8 @@
 //!    (4 tracks, 16,384 Hz, the album length, title/artist/year, `flac`);
 //! 2. the track table is a contiguous timeline whose lengths sum to the album;
 //! 3. titles are §5.5's fold (ASCII, wrapped title stripped); the long one
-//!    is *kept and printed*, not truncated or refused — and every fixture title
+//!    is *kept and printed*, not truncated or refused — printed *elided* if it will not
+//!    fit a declared box (§5.5's one-line rule), never wrapped — and every fixture title
 //!    is *measured* against the box the selected variant declares for it, from
 //!    the face's own advance widths in the generated `src/layout.rs`, never a
 //!    character count (D9 item 2);
@@ -28,6 +29,7 @@
 //! the image.
 
 use album_player::assets::{self, TrackPin};
+use album_player::glyphs;
 use album_player::layout;
 use album_player::meta::{self, Album, Refusal};
 use album_player::nodiv;
@@ -223,7 +225,7 @@ fn track_lengths_alternate_full_and_clip() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. titles: §5.5's fold, and the overflow that is printed, not refused
+// 2. titles: §5.5's fold, and the overflow that is elided and printed, not refused
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -358,6 +360,83 @@ fn track_artists_are_empty_when_the_source_carries_none() {
     for index in 0..album.n_tracks() {
         assert_eq!(album.track_artist(index), "");
     }
+}
+
+/// §5.5's elision, run against the album this tree actually ships — through the atlas's
+/// `fit`, which is the entry point a draw path calls (2a PR-(3)), and against the
+/// `layout::Face::measure` path the two legs above use. The two paths read the same tracked
+/// `.ttf` through two generators, so agreeing here is a fact about the generated tree rather
+/// than about either generator's arithmetic; §5.5a step 5's "measures from the same advance
+/// table the pixels come from" is otherwise a property of one module, and the draw path uses
+/// both.
+///
+/// The elided half is the product-level statement: no title of this fixture is drawn with the
+/// marker in it at the box the product variant declares. An ellipsis on a shipped title would
+/// be a design failure printed as a feature, so this leg is about the shipped strings and not
+/// about a synthetic one — the synthetic one is here too, as the direction that proves the
+/// first half is not `elide` never cutting anything.
+#[test]
+fn no_shipped_title_is_elided_and_both_paths_measure_it_alike() {
+    let album = parsed();
+    let (element, face) = title_fit_box();
+    let mut checked = 0;
+    for index in 0..album.n_tracks() {
+        let title = album.track_title(index);
+        let measured = face.measure(title, element.w);
+        let fit = glyphs::fit(title, element.w, 0);
+        assert_eq!(
+            fit.width_px, measured.width_px,
+            "track {index}: {title:?} measures {} px through the atlas and {} px through the \
+             layout module — two generators, one tracked face, and no permission to disagree",
+            fit.width_px, measured.width_px
+        );
+        assert_eq!(
+            fit.unwritten, measured.unwritten,
+            "track {index}: {title:?} is unwritten in one path and not the other"
+        );
+        assert!(
+            !fit.draw.ellided,
+            "track {index}: {title:?} would be drawn with {} in it at the {} px box variant {} \
+             declares for {:?} — the fixture's titles fit, so an ellipsis here is the design \
+             failing and being printed as a feature",
+            glyphs::ELLIPSIS,
+            element.w,
+            layout::LAYOUT_ID,
+            element.id
+        );
+        assert!(
+            fit.width_px <= element.w,
+            "track {index}: {title:?} would be drawn {} px into a {} px box",
+            fit.width_px,
+            element.w
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 4,
+        "this leg is about the fixture's titles and found {checked} of them"
+    );
+
+    // The other direction, at the same declared box: the string the leg above refuses to fit
+    // comes back cut, and the cut is inside the box. §5.5's rule is a response to an
+    // overflow, so a leg that only ever sees fitting titles cannot tell whether the response
+    // exists.
+    let overlong = "An unreasonably long album title that will not fit anywhere";
+    let elided = glyphs::fit(overlong, element.w, 0);
+    assert!(
+        elided.draw.ellided,
+        "{overlong:?} measures {} px against a {} px box and came back without {} — the elision \
+         is not running",
+        elided.width_px,
+        element.w,
+        glyphs::ELLIPSIS
+    );
+    assert!(
+        elided.width_px <= element.w,
+        "{overlong:?} was cut to {} px, which is still outside the {} px box",
+        elided.width_px,
+        element.w
+    );
 }
 
 // ---------------------------------------------------------------------------
