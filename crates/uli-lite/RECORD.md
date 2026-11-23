@@ -3255,6 +3255,39 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
+- **2026-11-23 — S8-1: the frozen-plan probe, and the gate that says it measures what it
+  claims.** S7 could localise a blob difference to a *region* but not to a cause: the trained
+  tables are a function of a plan, the plan is a function of a search, and neither CLI can be
+  asked to hold one still. `scripts/uli_probe.py` (`make uli-probe`) does — it generates a C
+  probe into a temp directory that `#include`s the reference's `enc_core.c` and calls the
+  reference's own `frame_code` at a frozen `(g, ms, mu, tables)`, so our coding can be compared
+  at the level where a difference names a cause rather than a byte count. Same posture as the
+  three fixture generators: no C in this repository, nothing here builds C, no gate depends on
+  it (E-R1 forbids the dependency, not the oracle).
+
+  The probe is worthless unless it reproduces truth it did not produce, so the gate is that
+  reproduction: **all 2,400 frozen `band_rdo` cases, byte for byte** — the same file
+  `tests/quant.rs` holds the Rust side to. It also re-derives `fixtures/mdct_ref_coef.f32` from
+  `fixtures/mdct_in.f32` through the reference's `mdct_frame` (the PCM convenience path), and
+  shows frame mode deterministic and unmoved by `--stats`, which routes the same frame through
+  `chan_code`'s stats branch — a second code path that has to agree with the counting one.
+
+  What it emits is integers: `bits`, `D` as hex f64 bits, the reader cycle estimate, and the
+  frame's **bit stream** as hex halfwords, with the `g` delta included when `--g-prev` names
+  the predecessor — the stream being what "byte-identical at a frozen plan" actually means.
+  `--tables` loads a 5,212-byte table blob so the oracle's *trained* set (or ours) can be coded
+  with; two loader checks were run and both matter: the committed default blob codes
+  identically to `tables_default` (5,805 bits on `mdct_ref_coef.f32` frame 0 at g = 100), and
+  the trained tables sliced out of `uli2_tiny.uli` code differently (5,956 bits), so the flag
+  is a real input rather than a no-op.
+
+  Not emitted, deliberately: per-band magnitudes in frame mode. They are `band_rdo`'s answer,
+  but the per-band *choice* is made in `chan_code`, whose inputs come from `frame_code`'s
+  preamble (the M/S rotation, `step_D`, the magnitude clamp); duplicating that preamble in the
+  probe would be a second implementation of arithmetic that has to mean one thing, and a drift
+  in it would be silent. Magnitudes are reported where they are defined — band-rdo mode — and
+  a magnitude difference necessarily moves the stream.
+
 - **2026-11-21 — S7: the acceptance matrix runs, and every cell is a DIFF.**
   `make uli-accept` → `scripts/uli_accept.py`: our `uli-enc --rd` and the off-tree
   reference on identical PCM and flags, four cells plus one oracle-only `--dacw 1` row,

@@ -5,7 +5,7 @@
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
-        uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-rd-ab uli-accept \
+        uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-probe uli-rd-ab uli-accept \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-playback-test uli-player uli-player-rom uli-player-speaker uli-player-speaker-rom \
@@ -754,6 +754,18 @@ uli-mdct-fixture:
 # whisper in the bitstream. Same off-tree posture as the two goldens above.
 uli-band-rdo-fixture:
 	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/gen_uli_band_rdo_fixture.py
+
+# S8-1's frozen-plan probe: the reference's own `frame_code` and `band_rdo` driven at a
+# held-still (g, ms, tables), so our coding can be compared at the level where a difference
+# is a cause instead of a byte count. Self-checking before it is trusted: it must reproduce
+# all 2400 frozen band_rdo cases byte for byte. Deliberately NOT on any gate's path — it
+# compiles the off-tree reference's C, which E-R1 keeps out of `uli-test`; the posture is
+# `uli-band-rdo-fixture`'s. Run it bare for the gate, or with --coef/--g/--ms/--tables for a
+# measurement: PLAN-OF-RECORD.md -> S8-1, and the script's docstring for the formats.
+uli-probe:
+	@test -f $(GBA_AUDIO)/encoder/enc_core.c || \
+	  { echo "uli-probe: no reference encoder source at $(GBA_AUDIO)/encoder (set GBA_AUDIO=)"; exit 1; }
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_probe.py --self-check
 
 # S3's acceptance harness: our --rd encoder against the reference's, same PCM, same
 # budgets: bytes, fit, kbit/s, SNR, chosen g. Exits nonzero if any row overshoots.

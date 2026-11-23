@@ -1165,7 +1165,7 @@ read-side, so this does not reopen the paragraph above.
 | **S5** | Album assembly (WAV front end, gapless join, tags verbatim), `--budget`/`--cap` on real sizes, frame-parallel search | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes (each seeked to its own preroll); hashes pinned; too small refuses **before the first frame**, citing both numbers; a 32,768 Hz WAV reaches the same blob its pre-resampled PCM does, and a resampled WAV is quoted by SNR; the CLI prints the reference's columns | **done** — see "S5" below for the numbers and the defaults-restored failure |
 | **S6** | `mu` (decoder-cycle-aware) search: re-code an over-cap frame by dropping its cheapest coefficients instead of refusing the candidate | E-R8 **discharged**; E-R7 **contributed to, not discharged** — its criterion is codec-only and unmeasured, and S7 accepts it | a knob that demonstrably trades SNR for decode cycles, measured on the bench — and, measured 2026-11-20, it closes the last high-rate gap: at `--budget 400000 --cap 74` the equivalent mechanism is worth **1.48 dB** to the oracle, against a 1.15 dB gap | **done** — `--musearch 1` by default; worth **1.44 dB** here (39.57 → 41.01 dB) and the oracle's 41.02 is 0.01 dB above, cap 74.0% max on both arms. See "S6" below |
 | **S7** | **The acceptance matrix, as a buildable target** | E-R2, E-R5, E-R7 (and E-R1's oracle posture) | the four cells below run in CI-shaped form and compare SHA-256s against the reference's blobs, including the two header cycle fields | **done** — `make uli-accept` runs the four cells and the `--dacw 1` row; every cell is a **DIFF**, whose first content difference is inside the **trained tables** in every cell, and which is **unattributed** (see "S7" below) |
-| **S8** | **Byte-exactness on the reference's `--dacw 0` arm**: attribute the S7 DIFF with instruments rather than bytes (the pass-1 plan is not in the blob), then close every named divergence until the matrix matches — the SNR arm is **withdrawn from S8** and becomes S9 | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R2 (the boundary is PCM), E-R7 (moved to S9 — see "S8 — the plan") | every matrix cell byte-identical at `--dacw 0`, checked by `make uli-accept`, with the four instruments of S8-1…S8-4 in place and every pin re-recorded | **planned** — eight sub-steps, none started; the scope, the divergence inventory, the instruments and each sub-step's gate are in "S8 — the plan" below |
+| **S8** | **Byte-exactness on the reference's `--dacw 0` arm**: attribute the S7 DIFF with instruments rather than bytes (the pass-1 plan is not in the blob), then close every named divergence until the matrix matches — the SNR arm is **withdrawn from S8** and becomes S9 | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R2 (the boundary is PCM), E-R7 (moved to S9 — see "S8 — the plan") | every matrix cell byte-identical at `--dacw 0`, checked by `make uli-accept`, with the four instruments of S8-1…S8-4 in place and every pin re-recorded | **in progress** — S8-1 (the probe, `make uli-probe`) landed 2026-11-23; the other seven sub-steps are unstarted; the scope, the divergence inventory, the instruments and each sub-step's gate are in "S8 — the plan" below |
 
 S7 is a step rather than a property of the plan because it has work in it — a host
 target that builds nothing of ours from C, calls the off-tree binary, compares hashes
@@ -1382,9 +1382,30 @@ the two-stage sweep, because they would otherwise be false. *Gate:* `make uli-ch
 `make uli-test` green, `Args` loses the two fields, and **no output claim is made** — this
 sub-step changes bytes and is not expected to improve anything.
 
-**S8-1 — P1, the probe.** As described above, wired as `make uli-probe` (off every gate
-path, refusing without an off-tree reference build, like `uli-accept`). *Gate:* reproduces
-all 2,400 frozen `band_rdo` cases bit-exactly.
+**S8-1 — P1, the probe — landed 2026-11-23.** `scripts/uli_probe.py` + `make uli-probe`: a C
+probe generated into a temp dir that `#include`s the reference's `enc_core.c` and drives
+`frame_code` at a frozen `(g, ms, mu, tables)` and `band_rdo` at frozen per-band inputs. It
+takes a **binary f32 coefficient corpus** (`--coef`, `2·M` floats per frame — the layout
+`fixtures/mdct_ref_coef.f32` already has, and `--pcm`/`--dump-coef` derives one with the
+reference's own `mdct_frame`), a **tables blob** (`--tables`, so a *trained* set can be coded
+with), and emits integers only: `bits`, `D` as hex f64 bits, the reader cycle estimate, and
+the frame's **bit stream** as hex halfwords with the `g` delta from `--g-prev` — which is what
+"byte-identical at a frozen plan" means, and what S8-5's gate will diff. `--stats` writes the
+sparse per-class symbol counts for S8-6.
+
+*Gate, measured:* `make uli-probe` reproduces all **2,400** frozen `band_rdo` cases **byte for
+byte**, re-derives the committed MDCT coefficient golden from `fixtures/mdct_in.f32`, and
+shows frame mode deterministic and unchanged by `--stats`. Two loader checks, both run: the
+committed default-tables blob codes **identically** to `tables_default` (it is that table set),
+and the trained tables sliced out of `uli2_tiny.uli` code **differently** (5,805 → 5,956 bits
+on frame 0 at `g=100`), so `--tables` is a real input rather than a no-op.
+
+Deliberately **not** printed by frame mode: per-band magnitudes. `band_rdo` returns them, but
+the per-band *choice* is made inside `chan_code`, which is static and reaches its inputs
+through `frame_code`'s preamble; reproducing that preamble in the probe would be a second
+implementation of arithmetic that must mean one thing, and a drift in it would be silent. The
+magnitudes are reported at the level where they are defined (band-rdo mode), and any
+magnitude difference shows up in the stream.
 
 **S8-2 — P2, `--dump-plan`.** As described above, wired as `make uli-dump-plan` over a local
 reference build. *Gate:* dumped shipped plan == plan recovered from that run's blob.
