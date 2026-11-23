@@ -1297,7 +1297,7 @@ tree; C anchors are the off-tree reference `../gba-audio/encoder/`.
 | 11 | retry loop | 6 attempts; `tgt -= (size−budget)·8·1.02 + 2000` (`uli_enc.c:405`); re-allocates on the **same** curves | 10 attempts (`lib.rs:195`); re-runs coarse **and refine** on a failed attempt (`lib.rs:421-436`) | **differs** |
 | 12 | `--stride`/`--fine` themselves | no such knob; the sweep is fixed by the window | user-visible, defaults 8/4 (`bin/uli-enc.rs:67-68`) | **must go** (S8-0) |
 | 13 | container sizing arithmetic | `(budget − overhead)·8 − 64` (`uli_enc.c:316`) | believed equal; S7's size deltas are attributable to stream bytes alone | **to confirm** at S8-7 |
-| 14 | the cycle model on coded frames | `uli_cycle_model(&ops)` accumulated by the writer in `chan_code` (`enc_core.c:333,378`) | `frame_ops` + `Ops::cycle_model`, recomputed from the chosen bands | **differs**: every coded frame of the 24 frozen cases reads **higher** for us, `+0.09%…+0.85%`, and the delta is always a **multiple of 40** — `ULI_CY_CODEDBAND` — with **0** on the frames that code nothing. A per-coded-band term, not a per-symbol or per-coefficient one; localising it is the next investigation's first item |
+| 14 | the cycle model: **`long_codes`** | the *encoder* never increments `ops.long_codes` — its decoder does (`uli_dec_ref.c:32`), so `uli_cycle_model` is called with that term at zero | `frame_ops` counts every code longer than `LUTB` (`rd.rs:295`) | **localised 2026-11-23**: with the counters printed on both sides, **eight of the nine agree on every one of the 24 codings**, and the ninth is `long_codes` — ours 26/5/5/7 against the reference's **0/0/0/0** on the four frames at `g=100 ms=0`, which is `40 ×` each frame's cycle delta to the unit. (`escs` moves on exactly one frame, the one whose *coding* is the equal-cost tie above, so it is a consequence and not a second cause.) The reference's encoder simply omits a term its own decoder charges; matching it is S8-5 item 4 |
 
 Rows 1-4 are the coder, 5-13 the search and its constants. Row 8, and the trainer's
 algorithm in section 3's last row, are the two places we are already right — stated so that
@@ -1335,7 +1335,7 @@ on the default tables is mostly no. The committed 4-frame coefficient golden at
 | `bits` | **24 of 24 identical** | the coder emits the reference's exact bit count at a fixed `(g, ms)` |
 | `halfwords` | 24 of 24 | same stream length everywhere |
 | `stream` | **23 of 24 identical** | the one difference is frame 1 at `g=100 ms=1`: same 6,334 bits, different content — an equal-cost alternative (inventory row 4) |
-| `cycles` | 8 of 24 | the 8 agreements are exactly the frames that code nothing; every coded frame reads **higher** for us (inventory row 14) |
+| `cycles` | 8 of 24 | the 8 agreements are exactly the frames that code nothing; every coded frame reads **higher** for us, and printing the counters named why: `long_codes` (inventory row 14) |
 | `D` | 3 of 24 bitwise | worst 103 ULP, and **not fixable by matching order** — the reference derives `D` (inventory row 1) |
 
 Three things this changes about the plan. **The coder is not the first cause either**: at a
@@ -1525,6 +1525,16 @@ established that the reference charges it, so the omission was right by accident
 rows and is wrong on trained ones. This is where that correction is made. *Gate:* through P1,
 over a probe corpus that includes over-cap frames (so the μ path is exercised), our emitted
 bit stream is **byte-identical** for frozen `(g, ms, tables)`.
+4. **The cycle model (inventory #14) — localised 2026-11-23, and this is the fix.**
+`frame_ops` must leave `long_codes` at zero. The reference's *encoder* never increments it:
+the counter exists in `UliOps` for the decoder, which charges it (`uli_dec_ref.c:32`), and
+`frame_code` passes `uli_cycle_model` an ops struct whose `long_codes` is therefore always
+zero. Ours counts it, so every coded frame reads high by exactly `40 × long_codes` and
+`--cap` admits fewer candidates than the reference's. Dropping it in the **encoder's**
+counting is the matching change; the product decoder's model stays honest, because that path
+decodes real streams and its long codes are real. *Gate:* `make uli-frame-diff` reports
+`cycles` and `long_codes` **same** on every coding, and S7's two header cycle fields (offsets
+68/72) stop differing for this reason.
 
 **S8-6 — the trainer (inventory #9, #10).** Feed P2's pass-1 plan to `train::collect` +
 `train::build`. *Gate:* the table region is byte-identical to the blob's, `dq` included

@@ -136,7 +136,20 @@ fn main() {
                 for w in &dump.stream {
                     out.push_str(&format!("{w:04x}"));
                 }
-                out.push('\n');
+                let o = &dump.ops;
+                out.push_str(&format!(
+                    " bandsyms {} coded_bands {} pairs {} quads {} nz {} zc {} raws {} \
+                     escs {} long_codes {}\n",
+                    o.bandsyms,
+                    o.coded_bands,
+                    o.pairs,
+                    o.quads,
+                    o.nz,
+                    o.zc,
+                    o.raws,
+                    o.escs,
+                    o.long_codes
+                ));
             }
         }
     }

@@ -19,10 +19,16 @@ target that runs it is on no gate's path (E-R1 forbids the dependency, not the o
 Two modes, both integer/text, both diffable:
 
   frame      one line per (frame, g, ms): bits, distortion as hex f64 bits, the reader
-             cycle estimate, and the frame's own bit stream as hex halfwords. The stream is
+             cycle estimate, the frame's own bit stream as hex halfwords, and the nine
+             read-side operation counters the cycle model is a weighted sum of. The stream is
              the point: it is what "byte-identical at a frozen plan" means, and the g delta
              is included when `--g-prev` says what the previous frame's step was, so the
-             stream is the frame's on-wire bytes given that predecessor.
+             stream is the frame's on-wire bytes given that predecessor. The counters are the
+             other point: a cycle model that reads 0.5% high says nothing about *which* of its
+             twelve terms moved, and the counters name it (S8 inventory row 14 was found this
+             way). They come from a copy of `frame_code`'s body that is verified every frame
+             against `frame_code`'s own bits and cycle estimate, so the copy cannot drift
+             unnoticed.
   band-rdo   one line per frozen (coefficients, class, step, clamp, ncod) case, in exactly
              `tests/fixtures/band_rdo.txt`'s format. This mode is the probe's own
              verification: it must reproduce all 2,400 pinned cases byte for byte, or the
@@ -150,6 +156,44 @@ static int band_rdo_mode(const char *in_path, const char *out_path) {
 }
 
 /* ---------------------------------------------------------------- frame mode */
+/* `frame_code` keeps its `UliOps` to itself — it returns the cycle model, not the counts.
+ * These are the counts. The body below is a copy of `frame_code`'s (the M/S rotation,
+ * `step_D`, the magnitude clamp, the two `chan_code` calls) with the ops handed back, and the
+ * copy is **verified every frame rather than trusted**: the caller codes the frame through
+ * both paths and refuses to report if they disagree on `bits` or on the cycle model. Without
+ * that guard a drift in the copy would surface as a difference between the two encoders and
+ * be attributed to the wrong one — which is exactly the failure S8 exists to stop making.
+ *
+ * S8 added this because the *counts* are the only way to say which term of the cycle model
+ * differs: the model has twelve weights, and a 40-unit delta is `ULI_CY_CODEDBAND` only if
+ * `coded_bands` is what moved. */
+static FrameRes frame_code_ops(const float *coef, int g, int ms, double kappa, double mu,
+                               BW *bw, EncStats *st, UliOps *ops_out) {
+    float buf[2][M];
+    const float *X[2];
+    if (ms) {
+        const double r = M_SQRT1_2;
+        for (int i = 0; i < M; i++) {
+            buf[0][i] = (float)((coef[i] + coef[M + i]) * r);
+            buf[1][i] = (float)((coef[i] - coef[M + i]) * r);
+        }
+        X[0] = buf[0]; X[1] = buf[1];
+    } else { X[0] = coef; X[1] = coef + M; }
+    double D = step_D(g, ms), lam = kappa * D * D;
+    uint32_t S = uli_step[g - 4 * ms];
+    int mmax = (int)(((1u << 28) / S) / 16) - 1;
+    if (mmax > 65535) mmax = 65535;
+    if (mmax < 1) mmax = 1;
+    bw_put(bw, (uint32_t)ms, 1);
+    UliOps ops; memset(&ops, 0, sizeof ops); ops.ms = (uint32_t)ms;
+    double bits = 1, J = 0;
+    for (int ch = 0; ch < 2; ch++) { double b; J += chan_code(X[ch], D, mmax, lam, mu, &b, bw, st, &ops); bits += b; }
+    if (st) { st->frames += 1; st->ms_frames += ms; }
+    *ops_out = ops;
+    FrameRes r = { bits, J - lam * (bits - 1), uli_cycle_model(&ops) };
+    return r;
+}
+
 static void dump_stats(FILE *o, const EncStats *st) {
     fprintf(o, "frames %.0f\n", st->frames);
     fprintf(o, "ms_frames %.0f\n", st->ms_frames);
@@ -196,13 +240,31 @@ static int frame_mode(const char *coef_path, const char *stats_path, int g_prev,
             BW w = { buf, 0, cap + 8 };
             bw_put_eg(&w, zz(g - g_prev), 0);
             FrameRes r = frame_code(coef, g, ms, kappa, mu, &w, stf ? &st : NULL);
+            /* The counts, from the verified copy. `st` is NULL there because the
+             * authoritative call above already accumulated them. */
+            BW scratch = { NULL, 0, 0 };
+            UliOps ops;
+            FrameRes ro = frame_code_ops(coef, g, ms, kappa, mu, &scratch, NULL, &ops);
+            if (ro.bits != r.bits || ro.cycles != r.cycles) {
+                fprintf(stderr,
+                        "frame %lld g %d ms %d: the ops copy disagrees with frame_code "
+                        "(bits %.0f vs %.0f, cycles %u vs %u) — it is no longer a copy, so "
+                        "its counts are not the reference's\n",
+                        (long long)f, g, ms, ro.bits, r.bits, ro.cycles, r.cycles);
+                free(buf); fclose(in); if (stf) fclose(stf);
+                return 1;
+            }
             unsigned long long db;
             memcpy(&db, &r.D, 8);
             uint64_t hw = (w.pos + 15) / 16;
             fprintf(stdout, "frame %lld g %d ms %d bits %.0f D %016llx cycles %u halfwords %llu stream ",
                     (long long)f, g, ms, r.bits, db, r.cycles, (unsigned long long)hw);
             for (uint64_t i = 0; i < hw; i++) fprintf(stdout, "%04x", buf[i]);
-            fprintf(stdout, "\n");
+            fprintf(stdout,
+                    " bandsyms %u coded_bands %u pairs %u quads %u nz %u zc %u raws %u "
+                    "escs %u long_codes %u\n",
+                    ops.bandsyms, ops.coded_bands, ops.pairs, ops.quads, ops.nz, ops.zc,
+                    ops.raws, ops.escs, ops.long_codes);
             free(buf);
             /* The frame's own bit count must account for exactly the bits written, or the
              * probe is measuring a different coder than the one that emits. */
@@ -401,13 +463,16 @@ def self_check(exe: Path, tmpdir: Path) -> None:
     if len(lines) != 4:
         raise HarnessError(f"frame mode: {len(lines)} lines for 4 frames")
     # Shape: exactly the documented keys, in order, with a stream that fills its halfwords.
-    want = ["frame", "g", "ms", "bits", "D", "cycles", "halfwords", "stream"]
+    want = ["frame", "g", "ms", "bits", "D", "cycles", "halfwords", "stream",
+            "bandsyms", "coded_bands", "pairs", "quads", "nz", "zc", "raws", "escs",
+            "long_codes"]
     for i, line in enumerate(lines):
-        keys = line.split()[0::2]
+        toks = line.split()
+        keys = toks[0::2]
         if keys != want:
             raise HarnessError(f"frame mode: line {i + 1} keys {keys} != {want}")
-        hw = int(line.split()[line.split().index("halfwords") + 1])
-        stream = line.split()[-1]
+        hw = int(toks[toks.index("halfwords") + 1])
+        stream = toks[toks.index("stream") + 1]
         if len(stream) != 4 * hw:
             raise HarnessError(
                 f"frame mode: line {i + 1} declares {hw} halfwords but prints "

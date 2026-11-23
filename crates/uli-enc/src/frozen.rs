@@ -39,6 +39,10 @@ pub struct FrameDump {
     pub stream: Vec<u16>,
     /// Bits written to `stream`.
     pub stream_bits: u64,
+    /// The reader-operation counts the cycle model is a function of. Reported because the
+    /// model has twelve weighted terms, and "our estimate is 0.5% high" cannot say which one
+    /// moved; the counts can (S8's inventory row 14).
+    pub ops: uli_lite::Ops,
 }
 
 /// Code one frame at a frozen `(g, ms, mu, tables)`.
@@ -77,6 +81,9 @@ pub fn code_at(
     let mut bw = BitWriter::new();
     let mut prev = g_prev;
     frame::write_frame(&mut bw, tables, &mut prev, g, ms, FrameKind::Coded(&chans));
+    // Recomputed from the same `chans` the writer was handed, so the counts describe what
+    // was emitted rather than what was measured.
+    let ops = crate::rd::frame_ops(tables, &chans, ms != 0);
 
     Ok(FrameDump {
         // `measure` counts the bands only — its own comment explains why the `g` delta is
@@ -87,5 +94,6 @@ pub fn code_at(
         cycles: point.cycles,
         stream: bw.halfwords().to_vec(),
         stream_bits: bw.pos(),
+        ops,
     })
 }

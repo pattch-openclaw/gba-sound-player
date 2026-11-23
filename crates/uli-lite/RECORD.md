@@ -3284,8 +3284,20 @@ authoritative and this one carries the numbers.
   which retires them from the default-table question and leaves them for the trained rows.
   And **the cycle model is a new inventory row (#14)**, which matters beyond tidiness:
   `--cap` is derived from that number, so a systematically high reading excludes candidates
-  the reference would have admitted. That is now the first item of the next investigation, and
-  the differential is the instrument that will settle it.
+  the reference would have admitted.
+
+  That row was localised the same day, by printing the counters on both sides (the probe
+  reports `UliOps` from a copy of `frame_code`'s body that is *verified* each frame against
+  `frame_code`'s own bits and cycle model, so the copy cannot drift unnoticed): **eight of the
+  nine counters agree on every one of the 24 codings**, and the ninth is `long_codes`: ours
+  **26 / 5 / 5 / 7** against the reference's **0 / 0 / 0 / 0** on the four frames at
+  `g=100 ms=0` — `40 ×` each frame's cycle delta, to the unit. (`escs` moves on exactly one
+  frame, the one whose coding is the tie above; a consequence, not a second cause.) The cause is
+  an omission on the reference's side of the same kind as the EOB charge: `long_codes` exists
+  in `UliOps` for the **decoder**, which charges it (`uli_dec_ref.c:32`), and the reference's
+  **encoder** never increments it, so `frame_code` calls `uli_cycle_model` with that term
+  always zero. Matching it is S8-5 item 4; the product decoder's model stays as it is,
+  because there the counts are real.
 
 - **2026-11-23 — S8-3: the plan and the tables differ at *named* fields, and the first cause
   is the plan.** S7 could say "the tables diverge first (2,204 of 5,212 bytes) and the streams

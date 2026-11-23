@@ -38,7 +38,13 @@ DEFAULT_COEF = ROOT / "crates/uli-enc/tests/fixtures/mdct_ref_coef.f32"
 
 # The line the probe and `frame-dump` both print. Kept in one place so a format change
 # breaks the parser loudly instead of being silently skipped.
-FIELDS = ["frame", "g", "ms", "bits", "D", "cycles", "halfwords", "stream"]
+#
+# The `ops` counters are compared because the cycle model is a weighted sum of them (twelve
+# terms): "our estimate is 0.5% high" says nothing about *which* term moved, while the counts
+# do. `D` is separate — it is measured, not emitted, and the two sides derive it differently.
+OPS = ["bandsyms", "coded_bands", "pairs", "quads", "nz", "zc", "raws", "escs", "long_codes"]
+EMITTED = ["bits", "halfwords", "stream", "cycles"]
+FIELDS = ["frame", "g", "ms", "bits", "D", "cycles", "halfwords", "stream", *OPS]
 
 
 class HarnessError(Exception):
@@ -140,7 +146,7 @@ def main() -> int:
         )
 
     # Exact fields first, D on its own because it is derived differently on each side.
-    diffs = {f: 0 for f in ("bits", "cycles", "halfwords", "stream")}
+    diffs = {f: 0 for f in [*EMITTED, *OPS]}
     worst_d = (0, None)
     printed = 0
     for a, b in zip(mine, theirs):
@@ -165,20 +171,36 @@ def main() -> int:
 
     n = len(mine)
     print(f"\ncompared {n} frame(s)")
-    for f in diffs:
-        print(f"  {f:9} {'same' if diffs[f] == 0 else f'{diffs[f]} of {n} differ'}")
+    for f in [*EMITTED, *OPS]:
+        print(f"  {f:12} {'same' if diffs[f] == 0 else f'{diffs[f]} of {n} differ'}")
     total_d = sum(1 for a, b in zip(mine, theirs) if a["D"] != b["D"])
-    print(f"  {'D':9} bitwise same on {n - total_d} of {n}; "
+    print(f"  {'D':12} bitwise same on {n - total_d} of {n}; "
           f"worst ULP distance {worst_d[0]}" + (f" ({worst_d[1]})" if worst_d[1] else ""))
 
-    coding_same = all(v == 0 for v in diffs.values())
-    if coding_same and total_d == 0:
-        print("\nidentical: bits, stream, cycles and distortion all agree")
+    # A counters difference is the actionable half: name the term, because each one has its
+    # own weight in the cycle model and only one of them can explain a given delta.
+    ops_bad = [(f, a[f], b[f], f"frame {a['frame']} g={a['g']} ms={a['ms']}")
+               for a, b in zip(mine, theirs) for f in OPS if a[f] != b[f]]
+    if ops_bad:
+        seen = {}
+        for f, mine_v, theirs_v, where in ops_bad:
+            seen.setdefault(f, (mine_v, theirs_v, where))
+        print("\n  the read-side counters differ:")
+        for f, (mine_v, theirs_v, where) in seen.items():
+            print(f"    {f:12} ours {mine_v}, ref {theirs_v}   ({where})")
+
+    coding_same = all(diffs[f] == 0 for f in EMITTED)
+    if coding_same and total_d == 0 and not ops_bad:
+        print("\nidentical: bits, stream, cycles, counters and distortion all agree")
         return 0
-    if coding_same:
+    if coding_same and not ops_bad:
         print("\nthe coding agrees — bits, stream and cycles are identical; only the "
               "distortion's arithmetic differs (ours is a direct sum, the reference derives "
               "it as J - lam*(bits-1))")
+        return 2
+    if coding_same:
+        print("\nthe coding agrees — the same bits, the same stream — but the *counters* "
+              "differ, so the cycle model reads differently for the same frame")
         return 2
     return 2
 
