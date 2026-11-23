@@ -38,6 +38,7 @@ falsification — is the ledger, not this file; see "Where things live" below.
 | architecture, memory layout, the measurement *method*, the kernel table, **the encoder plan** | [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) |
 | the product path's architecture and its gates | [`crates/uli-lite-gba/README.md`](crates/uli-lite-gba/README.md) |
 | the reference/oracle crate's API and scope | [`crates/uli-lite/README.md`](crates/uli-lite/README.md) |
+| the encoder crate's own docs, and the acceptance matrix it is measured by | [`crates/uli-enc/README.md`](crates/uli-enc/README.md) |
 | how to run the measurement vehicle | [`examples/uli_bench/README.md`](examples/uli_bench/README.md) |
 
 **One owner per topic.** A fact lives in exactly one of these files and the others
@@ -194,10 +195,9 @@ The reference project's album is 43:32 for the same reason this table's largest
 row is: it was encoded with `--budget 33,292,288` (32 MiB less 256 KiB), so the
 encoder *fills the cart* and "an album" is
 whatever 43½ minutes at ~102 kbit/s is. **The C and Rust sides are the same
-number**: there is one bitstream format and one encoder (the C encoder of record,
-run off-tree to produce assets), and the Rust decoder is bit-exact, so a Rust
-build cannot store more or fewer minutes than the C one. There is no Rust encoder
-yet; when one lands it must honour the same rate contract, with the byte budget as
+number**: there is one bitstream format, and the Rust decoder is bit-exact, so a Rust
+build cannot store more or fewer minutes than the C one. The Rust encoder exists now
+(`crates/uli-enc`, S1–S7) and honours the same rate contract, with the byte budget as
 its knob.
 
 ### There is no sample-rate table, and in v1 there cannot be one
@@ -337,21 +337,30 @@ is stable.
 
 ### Encoder and asset generation: current vs target
 
-**Current.** The encoder of record is still the offline C/OpenMP tool from
-`gba-audio`. It produces the ULA2 blob used by the tests and measurements; it is
-never linked into the GBA image. The existing prep path (source decoding,
-resampling, track assembly) is external tooling for now; Python orchestration
-and `ffmpeg` are acceptable and are not what this isolation rule targets.
+**Current (2026-11-23).** The from-scratch Rust encoder exists in this repository:
+`crates/uli-enc` implements the whole target list below through **S7** — forward MDCT, the RD
+search with M/S, two-pass table training, album-wide allocation, the per-frame cycle cap and
+the ULA2 container/tables/seek/strings writer — and the blobs this tree measures now come
+from it, not from `gba-audio`. The offline C/OpenMP tool from `gba-audio` is now the
+**oracle**: `make uli-accept` holds our bytes against its, and `make uli-album-asset` still
+produces the bench corpus with it, by design (E-R1 forbids the dependency, not the oracle).
+It is never linked into the GBA image. The source-prep path (source decoding,
+resampling, track assembly) remains external Python tooling for now, which is acceptable
+under the rule below. **What the Rust encoder does not yet do is match the oracle's bytes** —
+that is S8, planned in [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md)
+§S8.
 
 **Target.** Reimplement any C-language tooling or source material in Rust and
 remove the dependency on `gba-audio` and its C sources. That means, at minimum:
 
 - a from-scratch Rust encoder: forward MDCT, quantisation/search, table
   training, album-wide allocation, the per-frame CPU cap, and the ULA2
-  container/tables/seek/strings writer;
+  container/tables/seek/strings writer; **met through S7** (`crates/uli-enc`);
 - Rust replacements for any other C-language asset-generation code that would
   otherwise be reused from `gba-audio`;
-- deterministic, documented encoder output and its own round-trip witness.
+- deterministic, documented encoder output and its own round-trip witness;
+  **met** — E-R5's four rules, `tests/determinism.rs`, and the round trip through
+  `uli_lite::Album` in `tests/roundtrip.rs`.
 
 General Python scripts remain fine: they may orchestrate source preparation,
 resampling, track assembly or fixture generation, and they may call reusable
@@ -363,8 +372,8 @@ committed expected-vector file remains the frozen C-pinned reference; the Rust
 tool is a maintenance/snapshot generator, not an independent oracle, so a
 failing decoder test must not be "fixed" by regenerating it.
 
-**Status (2026-11-20): the encoder exists in-repo, and what is left is acceptance,
-not capability.** S1–S5 have landed in `crates/uli-enc`: the PCM boundary and the
+**Status (2026-11-23): the encoder exists in-repo and S1–S7 have landed; what is left is
+byte-exactness, not capability.** S1–S5 have landed in `crates/uli-enc`: the PCM boundary and the
 container, the forward MDCT, the RD search with M/S, trained code tables, and album
 assembly with the WAV front end and a frame-parallel search. It encodes the
 43.5-minute, 12-track `cross` album inside a passed-in budget with 392 bytes to spare,
@@ -374,9 +383,15 @@ at four threads. **E-R9 is met in mechanism, not in rationale:** that album take
 where the reference takes 14m30s on the same box, because every candidate is coded
 exactly rather than estimated — a named follow-up, not a claim. **S6 is done:** the
 cycle-aware `--musearch` re-code is shipped on by default and worth 1.44 dB at a binding
-cap (the reference's 1.48). What remains is **S7**, the acceptance matrix that holds this
-encoder to the C oracle's bytes — the hand-written C encoder is now the **oracle and the
-asset producer**, not the only encoder in existence. Requirements, slices and gates:
+cap (the reference's 1.48). **S7 is done, and its answer is DIFF:** `make uli-accept` runs
+this encoder and the C reference on identical PCM and flags across four cells, and no cell is
+byte-identical — the first content difference lands inside the **trained tables** in every
+cell, and it is unattributed (the measured table is below, and in
+[`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) §S7). **S8 is
+planned and not started**, scoped to byte-exactness on the reference's `--dacw 0` arm, with
+four instruments, a 13-row divergence inventory and eight sub-steps (§S8). The hand-written
+C encoder is now the **oracle and the asset producer**, not the only encoder in existence.
+Requirements, slices and gates:
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) -> "The
 encoder — the last missing piece".
 
@@ -462,8 +477,10 @@ product codec.** mGBA, WAITCNT 4/2, 262,144-cycle period, both corpora pinned
   domain) are in
   [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) §S7.
 - **Still open:** the non-decode half of the gate (above); the dense-frame tail
-  of the entropy path; the from-scratch Rust encoder/asset pipeline; and a
-  licensing/publish decision (`publish = false`).
+  of the entropy path; the encoder's **acceptance** (S8 — S1–S7 have landed, but no matrix
+  cell is byte-identical yet); the app's asset path onto it (R7/Q3 — `make uli-album-asset`
+  still produces the bench corpus with the reference, by design); and a licensing/publish
+  decision (`publish = false`).
 
 The step-by-step ladder that produced these numbers — PRs A through E, the
 root-cause audit, the closed-world pass — is in
@@ -778,13 +795,16 @@ product codec without pretending one codec covers both jobs.
    12.6 points we are still behind on the gate total.
 
 6. **Encoder packaging and independence — v1 boundary set (2026-11-14).** For
-   v1 the encoder of record is used **off-tree** to produce assets; this project
+   v1 assets are produced **off-tree** with the C encoder; this project
    builds nothing from it and vendors no C source. That keeps the repo free of
    C while the decoder work proceeds, and it means ULI2 is still not the
    public-reuse answer: packaging a codec needs an in-repo encoder. **The Rust
    encoder milestone is scheduled as of 2026-11-19** — it is the last missing
    piece before ULI2 can be the album player's codec — under the same rule: no C
-   source, no dependency, every artefact in this repository. Requirements, slices
+   source, no dependency, every artefact in this repository. **Amended 2026-11-23:
+   the milestone landed** — `crates/uli-enc` covers S1–S7 under that rule, and what
+   this risk still holds is the acceptance half (S8: match the oracle's bytes) and
+   the app's asset path onto it. Requirements, slices
    and acceptance gates: `crates/uli-lite/PLAN-OF-RECORD.md` → "The encoder".
 7. **Rate flexibility — v1 fixed (2026-11-14).** 32,768 Hz, hop 512, stereo, no
    long-block. Higher rates (65,536 Hz) would be a format/encoder change and are
@@ -826,7 +846,8 @@ entry is kept for the decision and its reasoning, not for its numbers.**
   same box and flags, because `measure` codes every `(g, ms)` candidate exactly
   (`write_chan` twice) while the reference's curve pass estimates — the mechanism is met, the
   "bake is in the edit loop" rationale is not. Making the curve pass cheaper is a new step;
-  S6 (the cycle-aware re-code) has since landed; S7 (the acceptance matrix) remains open.
+  S6 (the cycle-aware re-code), S7 (the acceptance matrix, verdict **DIFF**) and S8 (byte-exactness,
+  planned) have since been added to the ladder — see `crates/uli-lite/PLAN-OF-RECORD.md` §S6–S8.
 
 - **2026-11-19 (later) — the encoder's shape is settled before it is written: plan-
   then-emit, four determinism rules, a byte budget that is an argument, and exactness

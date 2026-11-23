@@ -1,6 +1,6 @@
 # uli-enc
 
-The host-side ULI2 encoder — **steps S1 through S6**. It takes an album and writes one
+The host-side ULI2 encoder — **steps S1 through S7**. It takes an album and writes one
 ULA2 blob that `uli-lite` (and therefore the GBA decoder) accepts:
 
 * `album.f32` — float32 interleaved stereo at PCM16 scale (samples × 32768),
@@ -142,6 +142,13 @@ weights only reweight *between* tracks and every cell is single-track.
 The SNR columns are **full-band time-domain** on both sides. E-R7's 32.29 mean /
 25.78 worst dB is a **codec-only proxy** measured elsewhere; the oracle's own codec
 proxy is printed beside ours so the two are never interchanged.
+
+**Its verdict is DIFF on every cell**, and that is the measured state rather than a harness
+fault: the first content difference lands inside the **trained tables** in all four, and it is
+**unattributed**. Closing it is S8, whose plan — four instruments, a 13-row divergence
+inventory, eight sub-steps — is in
+[`../uli-lite/PLAN-OF-RECORD.md`](../uli-lite/PLAN-OF-RECORD.md) → "S8 — the plan". Until it
+closes, the encoder matches the reference's **`--dacw 0`** arm only in intent, never in bytes.
 
 ## What it is not (yet)
 
