@@ -3255,6 +3255,38 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
+- **2026-11-23 — S8-1's Rust half: the frozen-plan differential runs, and the coder is not the
+  first cause either.** S8-1's probe could only say what the *oracle* does. `uli_enc::frozen`
+  (`code_at`: one `rd::measure`, then one `write_frame` of exactly what it measured) plus
+  `src/bin/frame-dump.rs` is the same coding from this crate at the same frozen
+  `(g, ms, mu, tables)`, in the same units; `scripts/uli_frame_diff.py` (`make uli-frame-diff`)
+  runs both on one corpus and reports per field, because `bits`/`stream` are *emitted*, `D` is
+  *measured* and `cycles` is a *model* — three different findings if they disagree.
+  `DefaultTables::from_blob` makes a trained set an input, and round-trips the oracle's
+  committed default blob byte for byte.
+
+  The committed 4-frame coefficient golden, `g ∈ {60,100,140} × ms ∈ {0,1}`, `mu = 0` — 24
+  codings, default tables:
+
+  | field | agreement | reading |
+  |---|---|---|
+  | `bits` | **24 of 24 identical** | the coder emits the reference's exact bit count at a fixed `(g, ms)` |
+  | `halfwords` | 24 of 24 | same stream length |
+  | `stream` | **23 of 24 identical** | frame 1 at `g=100 ms=1`: same **6,334 bits**, different content from halfword 33 — an equal-cost alternative, the first concrete instance of the tie-order row |
+  | `cycles` | 8 of 24 — and the 8 are exactly the frames that code nothing | every coded frame reads **higher** for us: +0.09%…+0.85%, always a **multiple of 40** (`ULI_CY_CODEDBAND`), so a per-coded-band term rather than per-symbol or per-coefficient |
+  | `D` | 3 of 24 bitwise | worst **103 ULP**, and not fixable by matching order |
+
+  Three plan corrections, all recorded where they belong rather than only here. **The
+  distortion gate cannot be "bitwise"**: the reference derives `D` as `J − λ·(bits−1)`
+  (`enc_core.c:404`) and the cancellation grows with `J/D`, so S8-5's step 1 now states a ULP
+  bound instead of an unattainable identity. **Rows 2 and 3 (the EOB charge, the `allz`
+  guard) are confirmed inert on default tables** — the plan argued it, this measures it —
+  which retires them from the default-table question and leaves them for the trained rows.
+  And **the cycle model is a new inventory row (#14)**, which matters beyond tidiness:
+  `--cap` is derived from that number, so a systematically high reading excludes candidates
+  the reference would have admitted. That is now the first item of the next investigation, and
+  the differential is the instrument that will settle it.
+
 - **2026-11-23 — S8-3: the plan and the tables differ at *named* fields, and the first cause
   is the plan.** S7 could say "the tables diverge first (2,204 of 5,212 bytes) and the streams
   run out of step". `crates/uli-lite/examples/plan_diff.rs` (`make uli-plan-diff A=… B=…`)

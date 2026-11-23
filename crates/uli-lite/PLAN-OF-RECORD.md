@@ -1166,7 +1166,7 @@ read-side, so this does not reopen the paragraph above.
 | **S5** | Album assembly (WAV front end, gapless join, tags verbatim), `--budget`/`--cap` on real sizes, frame-parallel search | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes (each seeked to its own preroll); hashes pinned; too small refuses **before the first frame**, citing both numbers; a 32,768 Hz WAV reaches the same blob its pre-resampled PCM does, and a resampled WAV is quoted by SNR; the CLI prints the reference's columns | **done** — see "S5" below for the numbers and the defaults-restored failure |
 | **S6** | `mu` (decoder-cycle-aware) search: re-code an over-cap frame by dropping its cheapest coefficients instead of refusing the candidate | E-R8 **discharged**; E-R7 **contributed to, not discharged** — its criterion is codec-only and unmeasured, and S7 accepts it | a knob that demonstrably trades SNR for decode cycles, measured on the bench — and, measured 2026-11-20, it closes the last high-rate gap: at `--budget 400000 --cap 74` the equivalent mechanism is worth **1.48 dB** to the oracle, against a 1.15 dB gap | **done** — `--musearch 1` by default; worth **1.44 dB** here (39.57 → 41.01 dB) and the oracle's 41.02 is 0.01 dB above, cap 74.0% max on both arms. See "S6" below |
 | **S7** | **The acceptance matrix, as a buildable target** | E-R2, E-R5, E-R7 (and E-R1's oracle posture) | the four cells below run in CI-shaped form and compare SHA-256s against the reference's blobs, including the two header cycle fields | **done** — `make uli-accept` runs the four cells and the `--dacw 1` row; every cell is a **DIFF**, whose first content difference is inside the **trained tables** in every cell, and which is **unattributed** (see "S7" below) |
-| **S8** | **Byte-exactness on the reference's `--dacw 0` arm**: attribute the S7 DIFF with instruments rather than bytes (the pass-1 plan is not in the blob), then close every named divergence until the matrix matches — the SNR arm is **withdrawn from S8** and becomes S9 | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R2 (the boundary is PCM), E-R7 (moved to S9 — see "S8 — the plan") | every matrix cell byte-identical at `--dacw 0`, checked by `make uli-accept`, with the four instruments of S8-1…S8-4 in place and every pin re-recorded | **in progress** — S8-1 (the probe, `make uli-probe`) and S8-3 (the plan/table diff, `make uli-plan-diff`) landed 2026-11-23, and S8-3 attributed the first-order cause to the plan: the counts differ, so the tables are downstream; six sub-steps are unstarted; the scope, the divergence inventory, the instruments and each sub-step's gate are in "S8 — the plan" below |
+| **S8** | **Byte-exactness on the reference's `--dacw 0` arm**: attribute the S7 DIFF with instruments rather than bytes (the pass-1 plan is not in the blob), then close every named divergence until the matrix matches — the SNR arm is **withdrawn from S8** and becomes S9 | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R2 (the boundary is PCM), E-R7 (moved to S9 — see "S8 — the plan") | every matrix cell byte-identical at `--dacw 0`, checked by `make uli-accept`, with the four instruments of S8-1…S8-4 in place and every pin re-recorded | **in progress** — S8-1 (the probe, `make uli-probe`, now two-sided via `uli_enc::frozen` and `make uli-frame-diff`) and S8-3 (the plan/table diff, `make uli-plan-diff`) landed 2026-11-23. S8-3 took the first-order attribution — the plan differs, so the counts do, so the tables are downstream — and the frame differential narrowed it again: at a frozen plan the **coder** reproduces the reference's bits on 24 of 24 codings, so neither the coder nor the trainer is the first cause; the search is, plus the cycle model (inventory #14). Five sub-steps are unstarted, and S8-5's distortion gate was restated by measurement (§S8). The scope, the divergence inventory, the instruments and each sub-step's gate are in "S8 — the plan" below |
 
 S7 is a step rather than a property of the plan because it has work in it — a host
 target that builds nothing of ours from C, calls the off-tree binary, compares hashes
@@ -1284,10 +1284,10 @@ tree; C anchors are the off-tree reference `../gba-audio/encoder/`.
 
 | # | divergence | reference | ours | verdict |
 |---|---|---|---|---|
-| 1 | distortion accumulation order | inline per tuple; frame `D` derived as `J − λ·(bits−1)` (`enc_core.c:262,404`) | per tuple, then summed across tuples | **differs**, 1 ULP at 4e11, tolerated by own test |
+| 1 | distortion *derivation* (not just accumulation order) | frame `D` derived as `J − λ·(bits−1)` from its Lagrangian (`enc_core.c:404`), where `J` sums 32 bands of `D + λ·bits` | a direct sum of squared reconstruction errors | **differs out of construction**: measured 21 of 24 frozen cases, worst **103 ULP** — the derivation's cancellation scales with `J/D`, so bitwise equality is not attainable by fixing order |
 | 2 | EOB charge in the class Viterbi | `V + λ·len_cb[s][EOB] + μ·cyc + D_z[b]` (`enc_core.c:317`) | terminator bits **deliberately unpriced** (`quant.rs:823-825`) | **differs**; invisible on identical default rows, live on trained rows |
 | 3 | the `allz` guard | a band whose every `\|x\| < 0.4·D` may only take class 0 (`enc_core.c:301-307`) | **absent** — `grep -rn '0\.4'` in `crates/uli-enc/src` finds nothing | **differs** |
-| 4 | class-Viterbi tie order | `bestEnd` scanned inside the band loop, strict `<`, then the end-at-last-band pass (`enc_core.c:313-326`) | mirrored shape, tie order **unverified** | **to verify** |
+| 4 | class-Viterbi tie order | `bestEnd` scanned inside the band loop, strict `<`, then the end-at-last-band pass (`enc_core.c:313-326`) | mirrored shape, tie order **unverified** | **to verify** — and it has one concrete instance: frame 1 of the coefficient golden at `g=100 ms=1` emits the **same 6,334 bits** as the reference and a different stream from halfword 33, i.e. an equal-cost alternative was chosen differently |
 | 5 | `g_guess` rounding | `lrint` — ties to **even** (`uli_enc.c:48`) | `f64::round` — ties **away from zero** (`rd.rs:725`) | **differs** at exact halves; also documented as off the search path, which stops being true at S8-7 |
 | 6 | candidate window (pass 1) | `NG = 28` contiguous, `lo = g_guess(λ_train) − 7` (`uli_enc.c:326-339`) | stride-8 over `G_MIN..G_MAX`, then ±`fine_width` around our own argmin (`rd.rs:630-705`) | **differs** — different centre, width and grid |
 | 7 | candidate window (pass 2) | `NG = 20` contiguous, `lo = g_pass1 − 9` (`uli_enc.c:349-354`) | same coarse+fine on the second pass | **differs** |
@@ -1297,6 +1297,7 @@ tree; C anchors are the off-tree reference `../gba-audio/encoder/`.
 | 11 | retry loop | 6 attempts; `tgt -= (size−budget)·8·1.02 + 2000` (`uli_enc.c:405`); re-allocates on the **same** curves | 10 attempts (`lib.rs:195`); re-runs coarse **and refine** on a failed attempt (`lib.rs:421-436`) | **differs** |
 | 12 | `--stride`/`--fine` themselves | no such knob; the sweep is fixed by the window | user-visible, defaults 8/4 (`bin/uli-enc.rs:67-68`) | **must go** (S8-0) |
 | 13 | container sizing arithmetic | `(budget − overhead)·8 − 64` (`uli_enc.c:316`) | believed equal; S7's size deltas are attributable to stream bytes alone | **to confirm** at S8-7 |
+| 14 | the cycle model on coded frames | `uli_cycle_model(&ops)` accumulated by the writer in `chan_code` (`enc_core.c:333,378`) | `frame_ops` + `Ops::cycle_model`, recomputed from the chosen bands | **differs**: every coded frame of the 24 frozen cases reads **higher** for us, `+0.09%…+0.85%`, and the delta is always a **multiple of 40** — `ULI_CY_CODEDBAND` — with **0** on the frames that code nothing. A per-coded-band term, not a per-symbol or per-coefficient one; localising it is the next investigation's first item |
 
 Rows 1-4 are the coder, 5-13 the search and its constants. Row 8, and the trainer's
 algorithm in section 3's last row, are the two places we are already right — stated so that
@@ -1324,6 +1325,30 @@ not the first cause and the tables are downstream.** It does not yet say *which*
 change is first — the candidate window, the EOB charge and the `allz` guard all move counts —
 which is what the frozen-plan differential (S8-5) settles.
 
+**The frozen-plan differential, first run (2026-11-23).** With the plan held still, the
+question narrows from "does the search differ" to "does the *coder* differ", and the answer
+on the default tables is mostly no. The committed 4-frame coefficient golden at
+`g ∈ {60,100,140} × ms ∈ {0,1}` — 24 codings, `mu = 0`:
+
+| field | agreement | note |
+|---|---|---|
+| `bits` | **24 of 24 identical** | the coder emits the reference's exact bit count at a fixed `(g, ms)` |
+| `halfwords` | 24 of 24 | same stream length everywhere |
+| `stream` | **23 of 24 identical** | the one difference is frame 1 at `g=100 ms=1`: same 6,334 bits, different content — an equal-cost alternative (inventory row 4) |
+| `cycles` | 8 of 24 | the 8 agreements are exactly the frames that code nothing; every coded frame reads **higher** for us (inventory row 14) |
+| `D` | 3 of 24 bitwise | worst 103 ULP, and **not fixable by matching order** — the reference derives `D` (inventory row 1) |
+
+Three things this changes about the plan. **The coder is not the first cause either**: at a
+frozen plan with the default tables it reproduces the reference's bits on every case and its
+stream on all but a tie. So S8-5's sequence-term work (rows 2 and 3) is now expected to be
+inert on the default tables — which is what the plan claimed — and its remaining content is
+**row 14's cycle model**, because `--cap` is derived from it and a systematically high reading
+admits fewer candidates. **`D` cannot be compared bitwise**, so S8-5 step 1's gate is
+amended: compare `D` within a stated ULP bound and record the derivation, rather than
+"tighten the test to compare D bitwise" — that target was unattainable by construction and
+this measurement says so before the work started. And the equal-cost stream difference is the
+first *instance* row 4 has ever had, so its tie-break check now has a case to reproduce.
+
 **5. Why the blob is not enough, and the four instruments that fix it.**
 
 Training is a pure function of the counts and errors it is handed, so a byte diff cannot
@@ -1349,6 +1374,15 @@ It is built the way the two working generators are built: Python in `scripts/`, 
 a temp dir at run time, compiled against `$GBA_AUDIO`, no C in this repository and no
 build-time dependency. *Gate:* it reproduces all 2,400 `band_rdo` cases, proving the harness
 itself before it is trusted.
+
+**P1 is two-sided, and that half is what makes it a differential.** The probe alone can only
+say what the oracle does. `uli_enc::frozen::code_at` (with `crates/uli-enc/src/bin/frame-dump.rs`)
+is the same coding from this crate at the same frozen `(g, ms, mu, tables)`, in the same units
+— one `rd::measure` call, then a `write_frame` of exactly what it measured, so a difference
+between *measuring* and *emitting* cannot hide. `scripts/uli_frame_diff.py`
+(`make uli-frame-diff`) runs both on one corpus and reports per field, because the fields
+mean different things under disagreement: `bits`/`stream` are emitted, `D` is measured,
+`cycles` is a model of the decoder.
 
 **P2 — `--dump-plan`.** A local build of the reference with a flag that writes per-frame
 `(g, ms, mu, bits, D)` for **both** passes, plus the per-class symbol counts that
@@ -1417,7 +1451,17 @@ sparse per-class symbol counts for S8-6.
 
 *Gate, measured:* `make uli-probe` reproduces all **2,400** frozen `band_rdo` cases **byte for
 byte**, re-derives the committed MDCT coefficient golden from `fixtures/mdct_in.f32`, and
-shows frame mode deterministic and unchanged by `--stats`. Two loader checks, both run: the
+shows frame mode deterministic and unchanged by `--stats`.
+
+**The Rust half landed 2026-11-23** (`uli_enc::frozen` + `src/bin/frame-dump.rs`, paired by
+`scripts/uli_frame_diff.py` / `make uli-frame-diff`), because a one-sided probe can only say
+what the oracle does. `code_at` is one `rd::measure` and one `write_frame` of exactly what it
+measured, so a divergence between measuring and emitting cannot hide, and `DefaultTables::from_blob`
+makes a *trained* set an input (it round-trips the oracle's committed default blob, which is
+the witness that its layout reading is the format's and not its own). The four tests in
+`tests/frozen.rs` pin the frame-level **bit counts** to the reference's measured values — the
+one piece of frame-level ground truth this tree has — and `tests/tables_golden.rs` pins
+`from_blob` against the oracle's bytes. Two loader checks, both run: the
 committed default-tables blob codes **identically** to `tables_default` (it is that table set),
 and the trained tables sliced out of `uli2_tiny.uli` code **differently** (5,805 → 5,956 bits
 on frame 0 at `g=100`), so `--tables` is a real input rather than a no-op.
@@ -1456,15 +1500,26 @@ be inside the reader's window.
 **S8-5 — the coder: FP and tie parity, then the sequence terms.** In this order, and the
 order matters:
 
-1. **Distortion parity (inventory #1).** Change `band_rdo`/`quantise_chan_rd` to accumulate
-the way the oracle does, then **tighten the frozen test to compare `D` bitwise** rather than
-at 1e-12 relative. *Gate:* all 2,400 cases pass with `D` compared exactly, and P1 shows
-frame-level `bits`/`D` exact over a probe corpus of whole frames.
+1. **Distortion parity (inventory #1) — restated by measurement 2026-11-23.** The original
+gate said "compare `D` bitwise". The differential shows that is **unattainable by
+construction**: the reference does not sum its distortion, it *derives* it as
+`J − λ·(bits − 1)`, and that subtraction's cancellation grows with `J/D` (measured worst: 103
+ULP on a frame whose coding matches). What remains actionable is that the 2,400-case
+`band_rdo` test still compares `D` at 1e-12 *relative*, so a real accumulation-order
+difference and a derivation artefact are indistinguishable there. *Revised gate:* compare
+`D` on **ULP distance** with the bound stated in the test (the fixture's own cases decide the
+number, since they are the reference's answers), assert the *magnitudes and bits* stay exact
+as they already are, and record in the test why bitwise equality is not the target. Then the
+frame-level reading comes from `make uli-frame-diff` rather than from a second assertion.
 2. **Tie parity (inventory #4).** Assert the Viterbi's tie winner explicitly, as R5d already
 requires of the search (lower `g`, then L/R over M/S): here, the lowest band endpoint and
 the lowest class index. *Gate:* a test that constructs the tie and names the winner.
 3. **The sequence terms (inventory #2, #3).** Restore the EOB charge `λ·len_cb[s][EOB]` and
-the `allz` `0.4·D` guard. Note that S3's record says we dropped the charge *because* it
+the `allz` `0.4·D` guard. *Measured expectation for the default tables, 2026-11-23:* the
+frozen-plan differential already reproduces the reference's bits on all 24 cases and its
+stream on 23 of 24, so these two rows should be **inert** on default tables — as the plan
+claimed and as `quant.rs`'s comment argues. They are restored for the **trained** rows, and
+the gate below is what proves both halves: unchanged at default, exact at trained. Note that S3's record says we dropped the charge *because* it
 agreed better with the oracle at `g = 140` on the default tables; the S6 review already
 established that the reference charges it, so the omission was right by accident on identical
 rows and is wrong on trained ones. This is where that correction is made. *Gate:* through P1,

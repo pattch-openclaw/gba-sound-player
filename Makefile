@@ -5,7 +5,8 @@
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
-        uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-probe uli-plan-diff uli-rd-ab uli-accept \
+        uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-probe uli-plan-diff uli-frame-diff \
+        uli-rd-ab uli-accept \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-playback-test uli-player uli-player-rom uli-player-speaker uli-player-speaker-rom \
@@ -766,6 +767,21 @@ uli-probe:
 	@test -f $(GBA_AUDIO)/encoder/enc_core.c || \
 	  { echo "uli-probe: no reference encoder source at $(GBA_AUDIO)/encoder (set GBA_AUDIO=)"; exit 1; }
 	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_probe.py --self-check
+
+# S8-5's frozen-plan differential: the same corpus, the same held-still (g, ms, tables), our
+# frame coding against the reference's — P1 from both sides (`scripts/uli_frame_diff.py`,
+# which pairs `uli_enc::frozen` with `scripts/uli_probe.py`). Deliberately NOT on any gate's
+# path: it compiles the off-tree reference's C. The default corpus is the committed 4-frame
+# coefficient golden, so it runs without an album; pass ULI_FRAME_DIFF_ARGS= for others.
+ULI_FRAME_DIFF_ARGS ?= --coef $(abspath crates/uli-enc/tests/fixtures/mdct_ref_coef.f32)
+uli-frame-diff: toolchain-check
+	@test -f $(GBA_AUDIO)/encoder/enc_core.c || \
+	  { echo "uli-frame-diff: no reference encoder source at $(GBA_AUDIO)/encoder (set GBA_AUDIO=)"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) build --release --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE) --bins
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_frame_diff.py \
+	  --ours $(dir $(ULI_ENC_BIN))frame-dump $(ULI_FRAME_DIFF_ARGS)
 
 # S8-3's plan/table diff: between two blobs, *which* table field and *which* frame's step
 # differ — the question S7 can only answer at region granularity. Needs no reference build
