@@ -176,12 +176,15 @@ mod rom {
 
     use album_player::assets;
     use album_player::backend;
+    use album_player::chrome;
     use album_player::geometry;
+    use album_player::glyphs;
     use album_player::keys;
     use album_player::layout;
     use album_player::meta::{Album, Track};
     use album_player::pcm::{PcmSource, SourceError};
     use album_player::position;
+    use album_player::surface;
     use album_player::text;
     use album_player::transport::{
         SKIP_PRIME_CHUNKS, State, Step, Transport, pause_to_freeze_bound, take_to_handoff_bound,
@@ -301,12 +304,13 @@ mod rom {
 
     // ------------------------------------------------------------------ colors
 
-    /// "Still working", and the boot screen: **full white**, with no text yet.
-    ///
-    /// The caller reads full red against full blue without trouble; what they cannot separate is
-    /// violet from blue. So the running screen is not a verdict hue, and it is bright enough that a
-    /// cart sitting on it is unmistakably booted rather than hung.
-    const COLOR_RUNNING: Rgb15 = Rgb::new(255, 255, 255).to_rgb15();
+    // The boot screen used to be `COLOR_RUNNING` — full white, "still working", with no text. 2a
+    // PR-(3) replaced it with the surface itself: §5.2's option (c) puts the chrome, the title band
+    // and the `blank` region in front of a person before the first sample, so a cart that reached the
+    // surface is unmistakably booted by what it *says* rather than by how bright it is. The two
+    // verdict hues below are unchanged, and §5.6's rule is why they are the only colours a verdict
+    // uses: the verifier cannot separate violet from blue, and both judgements ride the blue/yellow
+    // axis on a screen whose word is the signal.
     /// PASSED: **full blue**. Against [`COLOR_FAIL`]'s full red, the pair rides the blue/yellow axis
     /// that deuteranopia and protanopia preserve — and the screen says `PASSED` either way, so the
     /// colour is decoration and the word is the signal.
@@ -1237,8 +1241,12 @@ mod rom {
         /// not part of any track. `committed - base` is therefore the visit's own position, which is
         /// what makes §4.4's "0 at a track start" true again once a run can skip.
         base: u32,
-        /// The last painted position.
+        /// The last painted position: §6's bar cell, `0..=BAR_CELLS`.
         last: u32,
+        /// Samples played inside this visit, which is what the surface's clock counts. Kept here
+        /// rather than re-read by the UI so the clock and the bar can never disagree about where
+        /// the track is (§4.4's "0 at a track start", once per visit).
+        visit: u32,
         /// The latch this reader last served; the ISR owns the sampler's own cursor.
         served: u32,
         /// Frames this was read on.
@@ -1253,6 +1261,7 @@ mod rom {
                 total: 0,
                 base: 0,
                 last: 0,
+                visit: 0,
                 served: 0,
                 frames: 0,
                 regressions: 0,
@@ -1267,6 +1276,7 @@ mod rom {
             self.total = total;
             self.base = base;
             self.last = 0;
+            self.visit = 0;
         }
 
         /// Whether a video frame has been latched since this reader last served one — §4.5's
@@ -1286,7 +1296,53 @@ mod rom {
                 self.regressions = self.regressions.saturating_add(1);
             }
             self.last = paint;
+            self.visit = visit;
             self.frames = self.frames.saturating_add(1);
+        }
+    }
+
+    /// One frame's surface update: build the view, and apply and commit **only if a cell changed**
+    /// (§5.1's rule 2 — "partial map rewrites, changed cells only" — and §5.2's cadence rule, which
+    /// is why there is no timer here: a frame that changed nothing writes nothing).
+    ///
+    /// Called from both places a frame is served — the playback loop and the drain — so the clock and
+    /// the bar keep moving through a track's ending rather than freezing one second early.
+    fn refresh_surface(
+        paint: &Paint,
+        album: &Album<'static>,
+        track: usize,
+        state: State,
+        ui: &mut surface::Surface,
+        writes: &mut surface::Writes,
+        ui_bg: &mut surface::Painted,
+        gfx: &mut Graphics<'_>,
+        tiles: &agb::display::tiled::TileSet,
+    ) {
+        let view = surface::View {
+            title: album.track_title(track as u32),
+            elapsed_samples: paint.visit,
+            total_samples: paint.total,
+            bar_cell: paint.last,
+            state_word: transport_word(state),
+        };
+        if ui.update(&view, writes) {
+            ui_bg.apply(writes, tiles);
+            ui_bg.commit(gfx);
+        }
+    }
+
+    /// The transport state as the word beside the control art (§5.6: a state is carried by more than
+    /// hue; until §5.3's `PAUSED` badge lands in 2b, the word is the whole of it). Every one of these
+    /// fits `keylabels`' nine cells, and the host gate measures that rather than trusting an eye.
+    fn transport_word(state: State) -> &'static str {
+        match state {
+            State::Playing => "PLAYING",
+            State::Pausing => "PAUSING",
+            State::Paused => "PAUSED",
+            State::Resuming => "RESUME",
+            State::Skipping => "SKIP",
+            State::Repriming => "PRIME",
+            State::Buffering => "BUFFER",
         }
     }
 
@@ -3691,11 +3747,36 @@ mod rom {
     fn main(mut gba: agb::Gba) -> ! {
         agb::println!("[album-rom] entry — the album player's playback path (PR-3a step iii)");
 
-        // The screen first, before any work that can be slow: white says "booting", and a cart left
-        // white is a boot that never reached a verdict. `gfx` and `timers` are disjoint fields of
-        // `gba`, so both handles live for the whole run.
+        // The screen first, before any work that can be slow: the surface's own bands say "booting",
+        // and a cart left showing them is a boot that never reached a verdict. `gfx` and `timers` are
+        // disjoint fields of `gba`, so both handles live for the whole run.
+        //
+        // §5.2's boot option (c): chrome + title band + `blank`, drawn before the first sample. The
+        // audio path below is byte-identical to the gate ROM's — nothing is pressed to get here — so
+        // AP-1's "audio begins within 1.5 s of boot" measures the same run it always did.
+        // ---- the boot clock (R10's counter lift): timer0 at /1 cascading into timer1, started
+        // BEFORE anything a human waits through — the surface's first frame included — and stopped
+        // before `arm_audio_chain` reprograms the same pair. `CycleCounter` borrows the two timers,
+        // so "read the boot total first" is enforced by the borrow checker rather than by this
+        // comment. The unit is the CPU cycle; ÷ 16,777,216 is seconds on any GBA, which wall time on
+        // an emulator is not. 2a PR-(3) moved the start above the surface fill: a figure that named
+        // "boot" while excluding 600 tile writes would be the kind of measurement this file spends
+        // its comments refusing to make.
         let mut gfx = gba.graphics.get();
-        text::show(&mut gfx, "", COLOR_RUNNING);
+        let mut timers = unsafe { gba.timers.all_timers() }; // SAFETY: no agb::sound::mixer::Mixer is instantiated in this ROM.
+        let mut clock = CycleCounter::start(&mut timers);
+        let boot_start = clock.read();
+        let chrome_tiles = chrome::vram::tile_set();
+        let glyph_tiles = glyphs::vram::tile_set();
+        let mut ui_bg = surface::Painted::new(&mut gfx, &chrome_tiles);
+        let mut ui = surface::Surface::new();
+        let mut ui_writes = surface::Writes::new();
+        ui_bg.commit(&mut gfx);
+        let after_surface = clock.read();
+        // `glyph_tiles` is the atlas the text draws from; it lives as long as the run, and `ui_bg`
+        // holds the backgrounds. Both are kept for the whole of `main` so no frame can show a
+        // background whose tileset has been dropped.
+        let _ = &glyph_tiles;
 
         // `make album-player-rom` builds without `deep-audit`: it plays the same album but proves no
         // decoded content. Say so at boot as well as in the verdict, so an unverified image cannot be
@@ -3732,15 +3813,6 @@ mod rom {
             REPLAY_SCRIPT.len()
         );
 
-        // ---- the boot clock (R10's counter lift): timer0 at /1 cascading into timer1, started
-        // BEFORE the manifest is read and stopped before `arm_audio_chain` reprograms the same pair.
-        // `CycleCounter` borrows the two timers, so "read the boot total first" is enforced by the
-        // borrow checker rather than by this comment. The unit is the CPU cycle; ÷ 16,777,216 is
-        // seconds on any GBA, which wall time on an emulator is not.
-        let mut timers = unsafe { gba.timers.all_timers() }; // SAFETY: no agb::sound::mixer::Mixer is instantiated in this ROM.
-        let mut clock = CycleCounter::start(&mut timers);
-        let boot_start = clock.read();
-
         // §D-C rule 1: the manifest is authoritative and is read before anything it describes is
         // believed. A refusal names the rule and its payload (`meta::Refusal`'s `Display`).
         let album = match Album::parse(assets::ALBUM1) {
@@ -3767,6 +3839,36 @@ mod rom {
             layout::BAR_PX,
             layout::BAR_CELL_PX
         );
+        // §5.0's attribution rule for the surface: the layout id above is enough to name a *geometry*,
+        // but 2a's report also has to name what was drawn with it — the band stack, the one scene, the
+        // authored chrome — or "the title band looked wrong" is a statement about nothing in particular.
+        agb::println!(
+            "[album-rom] surface: bands={} elements={} region={}x{} scenes=1 icons={} chrome_tiles={} atlas_tiles={} (generated: ALBUM-PLAYER.md §5.0, §5.1, §5.2, §5.3)",
+            layout::BANDS.len(),
+            layout::ELEMENTS.len(),
+            layout::REGION.cols,
+            layout::REGION.rows,
+            chrome::ICON_TILES,
+            chrome::TILE_COUNT,
+            glyphs::ATLAS_TILES
+        );
+        // The first frame with content in it: the record's own first title, the clock at 0:00 and the
+        // bar at its first cell. Written here rather than through `refresh_surface` because `paint`
+        // does not exist yet — the visit it tracks starts below — and this is the one frame whose view
+        // is a constant rather than a reading. Element-addressed like every other frame, so it is
+        // about forty cells rather than a screen: the title's 20 columns and the clock's 10.
+        let boot_view = surface::View {
+            title: album.track_title(START_TRACK as u32),
+            elapsed_samples: 0,
+            total_samples: assets::TRACKS[START_TRACK].n_samples,
+            bar_cell: 0,
+            state_word: transport_word(transport_state()),
+        };
+        if ui.update(&boot_view, &mut ui_writes) {
+            ui_bg.apply(&ui_writes, &chrome_tiles);
+            ui_bg.commit(&mut gfx);
+        }
+        let after_ui = clock.read();
         agb::println!(
             "[album-rom] start_track={} (this gate starts at track 1; the product plays the record from its first track)",
             START_TRACK
@@ -3882,9 +3984,11 @@ mod rom {
         clock.stop();
         drop(clock);
         agb::println!(
-            "[album-rom] boot: parse={}c open={}c gate={}c prefill={}c total={}c",
-            after_parse.wrapping_sub(boot_start),
-            after_open.wrapping_sub(after_parse),
+            "[album-rom] boot: surface={}c parse={}c ui={}c open={}c gate={}c prefill={}c total={}c",
+            after_surface.wrapping_sub(boot_start),
+            after_parse.wrapping_sub(after_surface),
+            after_ui.wrapping_sub(after_parse),
+            after_open.wrapping_sub(after_ui),
             after_gate.wrapping_sub(after_open),
             after_prefill.wrapping_sub(after_gate),
             boot_total
@@ -4142,6 +4246,20 @@ mod rom {
             if paint.due() {
                 paint.sample();
                 idle = 0;
+                // §5.1's rule 2: only the cells that changed, and only when something changed. A
+                // still frame writes nothing and does not commit, which is what keeps the surface off
+                // this loop's critical path (§5.2's cadence rule).
+                refresh_surface(
+                    &paint,
+                    &album,
+                    producer.track,
+                    transport_state(),
+                    &mut ui,
+                    &mut ui_writes,
+                    &mut ui_bg,
+                    &mut gfx,
+                    &chrome_tiles,
+                );
             }
             // A skip's or an advance's measurement closes as soon as the wire has carried **its own** new
             // track: every open record's own slot is read here, and each resolved one frees its slot, so
@@ -4321,6 +4439,19 @@ mod rom {
             let _ = take_action();
             if paint.due() {
                 paint.sample();
+                // The last ~1.2 s of a track are served here, so the clock and the bar keep moving
+                // through a track's ending instead of freezing one second early.
+                refresh_surface(
+                    &paint,
+                    &album,
+                    producer.track,
+                    transport_state(),
+                    &mut ui,
+                    &mut ui_writes,
+                    &mut ui_bg,
+                    &mut gfx,
+                    &chrome_tiles,
+                );
             }
             let (done, seen) = critical_section::with(|cs| {
                 let feed = FEED.borrow_ref(cs);
@@ -4787,6 +4918,10 @@ mod rom {
         } else {
             (text::FAILED, COLOR_FAIL, "RED")
         };
+        // The verdict is a full-screen takeover, and §5.2 makes that legal only because the audio path
+        // has stopped. Give the display back first, so the takeover owns the frame it commits rather
+        // than painting over two backgrounds it left enabled.
+        drop(ui_bg);
         text::show(&mut gfx, &words, backdrop);
         // The audited image's line names what is on screen, not only a hue: "screen BLUE" alone was a
         // promise the caller could not check, since violet against blue is exactly the pair they
