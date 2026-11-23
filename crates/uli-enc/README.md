@@ -170,6 +170,17 @@ cargo run --bin uli-enc -- --wav a.wav --wav b.wav --out album.uli --rd \
     [--emit-pcm DIR]
 ```
 
+There is a second binary, `frame-dump`, which exists for one purpose: coding frames at a
+**frozen** `(g, ms, tables)` and printing the reference's own units, so this coder can be
+compared against the oracle with the *search* held out of the picture (`make uli-frame-diff`
+does that comparison; `PLAN-OF-RECORD.md` → S8-1 and S8-5 are why it exists). It is a
+diagnostic, not a product path:
+
+```sh
+cargo run --bin frame-dump -- --coef coef.f32 [--g 60 --g 100] [--ms 0] \
+    [--tables trained.bin] [--mu X] [--g-prev N]
+```
+
 It prints the album line and the sizing line
 (`container overhead N bytes; stream target N bits = N.N bits/frame`) and exits
 nonzero, citing needed and allowed bytes, if the album does not fit the budget —

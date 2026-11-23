@@ -467,7 +467,10 @@ product codec.** mGBA, WAITCNT 4/2, 262,144-cycle period, both corpora pinned
   **first content difference lands inside the trained tables** in every cell (1,971–2,626
   of 5,212 bytes) and runs through the stream from there, while the container's strings and
   `tiny`'s single seek entry (frame 0, bit position 0) are identical. So the divergence
-  begins in table training and is **unattributed**: the seek bit-position delta (printed as
+  begins in table training and is **unattributed** *(superseded at first order by S8-3's plan
+  diff: on `biomaster` the plan itself differs at frame 0 and 7,059 frames differ in `g`, so
+  the tables are downstream; `PLAN-OF-RECORD.md` §S8 → "First attribution")*: the seek
+  bit-position delta (printed as
   `ref − ours`) has the reference **2,256 bits ahead** at frame 256 on `biomaster` and
   **ours 1,144 ahead** on the cap-60 cell, and the chosen step ranges differ at both ends
   (`8..119` against `89..135` on `biomaster`) because our search covers the whole policy

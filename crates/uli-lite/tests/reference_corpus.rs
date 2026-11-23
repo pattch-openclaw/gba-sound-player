@@ -225,3 +225,52 @@ fn short_output_is_rejected_before_mutating_the_frame_position() {
             .is_ok()
     );
 }
+
+/// `FrameInfo::g` is the plan the stream declares, and the fixture's plan is pinned: S7
+/// measured the *reference's* `tiny` cell as searching `g ∈ 19..124`, from the seek
+/// diagnostic rather than from this field. Reading 19 and 124 out of the decoder is
+/// therefore a cross-check of the field against a number it did not produce.
+///
+/// The stronger check — every seek entry's `g_prev` is the step of the frame before it —
+/// cannot run here: 129 frames at `SEEK_INTERVAL` 256 gives exactly one entry, at frame 0.
+/// That pairing is what `examples/plan_diff.rs` does on a real album, where the entries are.
+#[test]
+fn the_declared_step_is_the_pinned_plan_and_stays_in_the_readers_window() {
+    use uli_lite::format::NSTEP;
+
+    let album = Album::parse(BLOB).unwrap();
+    let mut state = new_state();
+    let mut decoder = Decoder::new(album, &mut state).unwrap();
+    let mut l8 = [0i8; M];
+    let mut r8 = [0i8; M];
+    let mut gs = Vec::new();
+    let mut distinct = std::collections::BTreeSet::new();
+    for f in 0..album.n_frames() {
+        let info = decoder.decode_frame(&mut l8, &mut r8, None, None).unwrap();
+        let geff = info.g - 4 * info.ops.ms as i32;
+        assert!(
+            (0..NSTEP as i32).contains(&geff),
+            "frame {f}: g = {} with ms = {} is step {geff}, outside the reader's window",
+            info.g,
+            info.ops.ms
+        );
+        distinct.insert(info.g);
+        gs.push(info.g);
+    }
+    let lo = *gs.iter().min().unwrap();
+    let hi = *gs.iter().max().unwrap();
+    assert_eq!(
+        (lo, hi),
+        (19, 124),
+        "the fixture's declared plan is {lo}..{hi}; S7 measured the reference's `tiny` cell \
+         as 19..124 (PLAN-OF-RECORD.md -> S7), so a change here means this field or the \
+         decoder moved"
+    );
+    assert!(
+        distinct.len() > 8,
+        "only {} distinct steps across {} frames — the plan is degenerate, so the range \
+         above would be a coincidence",
+        distinct.len(),
+        gs.len()
+    );
+}

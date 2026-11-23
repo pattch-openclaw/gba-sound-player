@@ -236,3 +236,43 @@ fn the_frozen_golden_is_the_measured_size() {
     assert_eq!(REF.len(), 5212);
     assert_eq!(DefaultTables::build().to_blob().len(), 5212);
 }
+
+/// `from_blob` is `to_blob`'s inverse, and the **oracle's** bytes are the testimony that
+/// matters — a round trip through our own writer would only prove the two halves of one
+/// file agree with each other.
+///
+/// This is also what makes a *trained* table set usable here: S8's differential codes frames
+/// with the reference's trained tables (`scripts/uli_frame_diff.py --tables`), so a parser
+/// that silently dropped or shifted a row would show up as a coding difference attributed to
+/// the coder.
+#[test]
+fn from_blob_reads_the_oracles_default_set_back() {
+    let parsed = DefaultTables::from_blob(REF).expect("the committed default set parses");
+    assert_eq!(parsed.k, 14, "the default set declares 14 classes");
+    assert_eq!(
+        parsed.to_blob(),
+        REF,
+        "from_blob(to_blob(x)) is not REF: the blob is not the set this crate builds"
+    );
+    assert_eq!(
+        parsed.to_blob(),
+        DefaultTables::build().to_blob(),
+        "the oracle's default set and ours differ — the S1 golden says they must not"
+    );
+    // The shape that made the row leak invisible: each class has one coefficient row and
+    // the other shape's is zeros. `from_blob` must leave the unused one empty rather than
+    // build a codebook out of it.
+    for c in 0..parsed.k {
+        let used = match parsed.ctype[c] {
+            CT_QUAD => 81,
+            CT_PAIR => 256,
+            _ => 0,
+        };
+        assert_eq!(
+            parsed.cls[c].len.len(),
+            used,
+            "class {c} is ctype {} so its codebook must hold {used} lengths",
+            parsed.ctype[c]
+        );
+    }
+}

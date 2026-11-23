@@ -29,6 +29,7 @@ pub mod assemble;
 pub mod bitwriter;
 pub mod container;
 pub mod frame;
+pub mod frozen;
 pub mod mdct;
 pub mod mdct_tables;
 pub mod pcm;
