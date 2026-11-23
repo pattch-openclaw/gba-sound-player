@@ -275,22 +275,24 @@ pub fn frame_ops(tables: &DefaultTables, chans: &[Chan; 2], ms: bool) -> Ops {
             let r = tables.rbits[band.class];
             let pair = tables.ctype[band.class] == CT_PAIR;
             for group in band.m.chunks(if pair { 2 } else { 4 }) {
-                let heads: Vec<u32> = group
-                    .iter()
-                    .map(|m| {
-                        let a = m.unsigned_abs();
-                        if pair { (a >> r).min(15) } else { a.min(2) }
-                    })
-                    .collect();
-                let sym = if pair {
-                    (heads[0] * 16 + heads[1]) as usize
-                } else {
-                    (27 * heads[0] + 9 * heads[1] + 3 * heads[2] + heads[3]) as usize
-                };
-                let cls = &tables.cls[band.class];
-                if cls.symbol_len(sym) as usize > uli_lite::format::LUTB {
-                    ops.long_codes += 1;
-                }
+                // `ops.long_codes` is deliberately **not** counted here, and not because it
+                // does not matter: the reference's *encoder* never sets that field.
+                // `long_codes` exists in `UliOps` for the reader, which charges it whenever a
+                // Huffman code is longer than `LUTB` (`uli_dec_ref.c:32`), and `frame_code`
+                // passes `uli_cycle_model` an ops struct whose field is therefore always zero
+                // — `grep long_codes encoder/*.c` finds no writer. Counting it made every
+                // coded frame's estimate read high by exactly `40 * long_codes` (`40` is
+                // `ULI_CY_LONGCODE`'s weight), which put our `--cap` admission above the
+                // reference's. Measured, `cycles - 40*long_codes` **is** the reference's number
+                // on 23 of 24 frozen codings, and the one residual is the equal-cost tie whose
+                // coding genuinely differs (S8 inventory row 14, `PLAN-OF-RECORD.md`).
+                //
+                // Dropping it is what matching means, and it is no claim that the estimate is
+                // now honest: our count was never the reader's either, because it counted
+                // coefficient symbols and never band symbols. A faithful estimate would count
+                // every code read — which is a better number, so it belongs behind the S9
+                // licence test rather than inside the exactness gate. The *decoder* keeps
+                // counting: `tables.rs` charges them on real streams, where they are real.
                 if pair {
                     ops.pairs += 1;
                 } else {

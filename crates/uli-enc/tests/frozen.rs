@@ -11,15 +11,26 @@
 //! (`tests/fixtures/mdct_ref_coef.f32`), default tables, `--kappa 0.13`, `mu = 0`:
 //!
 //! ```text
-//! frame 0 g 60  ms 0  bits 11205
-//! frame 0 g 100 ms 0  bits 5805
-//! frame 0 g 140 ms 0  bits 7
-//! frame 0 g 100 ms 1  bits 5920
-//! frame 1 g 100 ms 1  bits 6334
+//! frame 0 g 60  ms 0  bits 11205  cycles 219754
+//! frame 0 g 100 ms 0  bits 5805   cycles 209437
+//! frame 0 g 140 ms 0  bits 7      cycles 156806
+//! frame 0 g 100 ms 1  bits 5920   cycles 212103
+//! frame 2 g 60  ms 0  bits 12214  cycles 226504
+//! frame 3 g 100 ms 0  bits 6349   cycles 212964
+//! frame 3 g 60  ms 1  bits 12176  cycles 228246
 //! ```
 //!
 //! They are the reference's *emitted* bit counts (`FrameRes.bits`: the `ms` bit counted, the
-//! `g` delta not), which is exactly what `FrameDump::bits` reports. Distortion is deliberately
+//! `g` delta not), which is exactly what `FrameDump::bits` reports, and its cycle estimate,
+//! which is what `FrameDump::cycles` reports.
+//!
+//! The cycles are pinned because they stopped being merely close: the reference's *encoder*
+//! never sets `ops.long_codes` (its decoder does), so `uli_cycle_model` runs with that term at
+//! zero, and `rd::frame_ops` now leaves it at zero too (`PLAN-OF-RECORD.md` → inventory row
+//! 14). Measured over the 24 codings, the estimate agrees on 23 and the one residual is the
+//! equal-cost tie, whose `escs` genuinely differs by one (`45` cycles). Frame 1 at `g=100
+//! ms=1` is that frame and is therefore **not** pinned: it is the one case where our coding
+//! and the reference's cost the same and differ. Distortion is deliberately
 //! **not** pinned: ours is a direct sum of squared errors and the reference derives its `D`
 //! as `J − λ·(bits − 1)`, so the two cannot agree bit for bit even where the coding does
 //! (measured: 23 of 24 frame/step/flag combinations emit identical streams, and the
@@ -51,20 +62,34 @@ fn frame(f: usize) -> [f32; 2 * M] {
 #[test]
 fn the_frozen_plan_bits_are_the_references() {
     let tables = DefaultTables::build();
-    let pinned: &[(usize, i32, u32, u64)] = &[
-        (0, 60, 0, 11205),
-        (0, 100, 0, 5805),
-        (0, 140, 0, 7),
-        (0, 100, 1, 5920),
-        (1, 100, 1, 6334),
+    let pinned: &[(usize, i32, u32, u64, u32)] = &[
+        (0, 60, 0, 11205, 219754),
+        (0, 100, 0, 5805, 209437),
+        (0, 140, 0, 7, 156806),
+        (0, 100, 1, 5920, 212103),
+        (2, 60, 0, 12214, 226504),
+        (3, 100, 0, 6349, 212964),
+        (3, 60, 1, 12176, 228246),
     ];
-    for &(f, g, ms, want) in pinned {
+    for &(f, g, ms, want, want_cycles) in pinned {
         let dump = code_at(&tables, &frame(f), g, ms, KAPPA, 0.0, 0).expect("codeable");
         assert_eq!(
             dump.bits, want,
             "frame {f} at g={g} ms={ms}: we emit {} bits, the reference {want} — the coder \
              has moved away from the only frame-level ground truth we have at a frozen plan",
             dump.bits
+        );
+        assert_eq!(
+            dump.cycles, want_cycles,
+            "frame {f} at g={g} ms={ms}: our cycle estimate is {} where the reference's is \
+             {want_cycles}. These agree because `ops.long_codes` is left at zero, which is \
+             what the reference's encoder does (its decoder charges it) — if this moves, the \
+             estimate stopped matching and `--cap` admission moved with it",
+            dump.cycles
+        );
+        assert_eq!(
+            dump.ops.long_codes, 0,
+            "frame {f}: `long_codes` must stay uncounted in the encoder's model"
         );
         // The stream must be the bits it claims: `bits` is the frame minus the `g` delta,
         // and the writer must have written exactly that much more.
