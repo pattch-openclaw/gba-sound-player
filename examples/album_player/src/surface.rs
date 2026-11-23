@@ -73,6 +73,21 @@ pub struct Write {
     pub y: u8,
     pub tile: u16,
     pub bank: u8,
+    /// Which tileset the index refers to. **Not optional, and not inferred**: two tilesets share one
+    /// 10-bit index space (§5.5a's atlas and §5.3's authored chrome), so a tile number alone cannot
+    /// say what it draws. A host renderer that guessed by index range would draw an icon where a
+    /// glyph belongs whenever the two happen to collide, and the ROM would be right while the
+    /// picture was wrong — so the plan carries the fact the device needs anyway.
+    pub source: Source,
+}
+
+/// The two tilesets a 2a surface draws from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    /// §5.3's authored chrome and §6's bar patterns (`chrome::TILES`).
+    Chrome,
+    /// §5.5a's glyph atlas (`glyphs::GLYPHS`).
+    Glyph,
 }
 
 /// A batch of [`Write`]s: what changed, in map coordinates. Fixed capacity because the ROM has no
@@ -91,6 +106,7 @@ impl Writes {
             y: 0,
             tile: 0xFFFF,
             bank: 0,
+            source: Source::Chrome,
         };
         Self {
             buf: [BLANK; MAX_WRITES],
@@ -148,6 +164,7 @@ impl Writes {
                     y: (y0 + row) as u8,
                     tile,
                     bank,
+                    source: Source::Chrome,
                 });
                 col += 1;
             }
@@ -402,6 +419,9 @@ struct Cells {
     rows: usize,
     tiles: [u16; MAX_CELLS],
     banks: [u8; MAX_CELLS],
+    /// Which tileset each cell names. Compared as part of the diff: a glyph and a band fill can share
+    /// an index, and a redraw that changed only the tileset would otherwise be invisible here.
+    sources: [Source; MAX_CELLS],
     seeded: bool,
 }
 
@@ -412,6 +432,7 @@ impl Cells {
             rows: 0,
             tiles: [0xFFFF; MAX_CELLS],
             banks: [0; MAX_CELLS],
+            sources: [Source::Chrome; MAX_CELLS],
             seeded: false,
         }
     }
@@ -424,6 +445,7 @@ impl Cells {
         for i in 0..cols * rows {
             self.tiles[i] = fill;
             self.banks[i] = bank;
+            self.sources[i] = Source::Chrome;
         }
         self.seeded = true;
     }
@@ -507,6 +529,7 @@ impl Surface {
                     y: (s.px_y / chrome::TILE_PX) as u8,
                     tile,
                     bank: chrome::BANK_CHROME,
+                    source: Source::Chrome,
                 });
                 self.icons[slot] = tile;
             }
@@ -618,6 +641,7 @@ impl Surface {
                     y: base_y as u8,
                     tile,
                     bank: chrome::BANK_CHROME,
+                    source: Source::Chrome,
                 });
                 self.bar[col] = tile;
             }
@@ -671,25 +695,36 @@ fn draw_text(cells: &mut Cells, element: usize, text: &str, writes: &mut Writes)
     while row < rows {
         let mut col = 0;
         while col < cols {
-            let (tile, bank) = match bytes.get(index).copied() {
+            // `col`, not `index`: the character for a cell is decided by its column, and the same
+            // character occupies every tile row of its cell (§5.5a's glyph is one 8 px column wide
+            // and `TILE_ROWS_PER_LINE` tall). Indexing the string by the row-major cell index was
+            // the bug 2a PR-(3)'s first hardware run found: row 0 drew the line correctly and row 1
+            // read past its end, so every glyph lost its bottom half and the screen showed
+            // unreadable fragments in the right places.
+            let (tile, bank, source) = match bytes.get(col).copied() {
                 Some(byte) => match glyphs::tile_for(byte as char, row) {
                     // A glyph this cut does not carry, and the blank sentinel (space): the band's
                     // own fill, so a cleared cell keeps the band instead of punching a hole through
                     // a blank map entry to the backdrop.
-                    Some(t) if t != glyphs::BLANK_TILE => (t, chrome::BANK_TEXT),
-                    _ => (fill, band_bank),
+                    Some(t) if t != glyphs::BLANK_TILE => (t, chrome::BANK_TEXT, Source::Glyph),
+                    _ => (fill, band_bank, Source::Chrome),
                 },
-                None => (fill, band_bank),
+                None => (fill, band_bank, Source::Chrome),
             };
-            if cells.tiles[index] != tile || cells.banks[index] != bank {
+            if cells.tiles[index] != tile
+                || cells.banks[index] != bank
+                || cells.sources[index] != source
+            {
                 writes.push(Write {
                     x: (e.x / chrome::TILE_PX + col as u32) as u8,
                     y: (e.y / chrome::TILE_PX + row as u32) as u8,
                     tile,
                     bank,
+                    source,
                 });
                 cells.tiles[index] = tile;
                 cells.banks[index] = bank;
+                cells.sources[index] = source;
             }
             index += 1;
             col += 1;
@@ -744,7 +779,7 @@ fn fmt_mmss(seconds: u32, buf: &mut [u8]) -> usize {
 // ---------------------------------------------------------------------------------------------
 
 #[cfg(target_arch = "arm")]
-pub use arm::Painted;
+pub use arm::{Painted, Tilesets};
 
 #[cfg(target_arch = "arm")]
 mod arm {
@@ -774,7 +809,7 @@ mod arm {
 
     impl Painted {
         #[must_use]
-        pub fn new(gfx: &mut Graphics<'_>, tiles: &TileSet) -> Self {
+        pub fn new(gfx: &mut Graphics<'_>, tiles: &Tilesets) -> Self {
             let mut surface = RegularBackground::new(
                 Priority::P1,
                 RegularBackgroundSize::Background32x32,
@@ -806,7 +841,7 @@ mod arm {
         }
 
         /// Apply a batch of writes to the surface's own map (the chrome and the title band).
-        pub fn apply(&mut self, writes: &Writes, tiles: &TileSet) {
+        pub fn apply(&mut self, writes: &Writes, tiles: &Tilesets) {
             apply_to(&mut self.surface, writes, tiles);
         }
 
@@ -819,11 +854,49 @@ mod arm {
         }
     }
 
-    fn apply_to(bg: &mut RegularBackground, writes: &Writes, tiles: &TileSet) {
+    /// The two tilesets a surface draws from, as values that live for the run.
+    ///
+    /// **A write names which one it means, and this is why the plan carries `Source` at all.** agb's
+    /// `set_tile` takes the tileset *by reference* and copies the tile's bytes from it with a raw
+    /// pointer, bounds check included only in `TileSet::get_tile_data` — which `set_tile` does not
+    /// call (`display/tiled/vram_manager.rs:962-1000`, `tile_set.tiles.as_ptr().add(offset)`). So a
+    /// glyph index handed to the chrome tileset reads past its end in ROM, silently and without a
+    /// panic: 2a PR-(3)'s first run sent every glyph tile to the 18-tile chrome set, which is exactly
+    /// the "correct positions, garbage glyphs" the screen showed. The type now makes that a compile
+    /// error rather than a picture.
+    pub struct Tilesets {
+        pub chrome: TileSet,
+        pub glyphs: TileSet,
+    }
+
+    impl Tilesets {
+        #[must_use]
+        pub fn new() -> Self {
+            Self {
+                chrome: chrome::vram::tile_set(),
+                glyphs: glyphs::vram::tile_set(),
+            }
+        }
+
+        const fn for_source(&self, source: Source) -> &TileSet {
+            match source {
+                Source::Chrome => &self.chrome,
+                Source::Glyph => &self.glyphs,
+            }
+        }
+    }
+
+    impl Default for Tilesets {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    fn apply_to(bg: &mut RegularBackground, writes: &Writes, tiles: &Tilesets) {
         for w in writes.as_slice() {
             bg.set_tile(
                 (w.x as i32, w.y as i32),
-                tiles,
+                tiles.for_source(w.source),
                 TileSetting::new(w.tile, TileEffect::new(false, false, w.bank)),
             );
         }

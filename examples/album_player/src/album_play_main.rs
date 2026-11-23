@@ -1316,7 +1316,7 @@ mod rom {
         writes: &mut surface::Writes,
         ui_bg: &mut surface::Painted,
         gfx: &mut Graphics<'_>,
-        tiles: &agb::display::tiled::TileSet,
+        tiles: &surface::Tilesets,
     ) {
         let view = surface::View {
             title: album.track_title(track as u32),
@@ -3766,17 +3766,14 @@ mod rom {
         let mut timers = unsafe { gba.timers.all_timers() }; // SAFETY: no agb::sound::mixer::Mixer is instantiated in this ROM.
         let mut clock = CycleCounter::start(&mut timers);
         let boot_start = clock.read();
-        let chrome_tiles = chrome::vram::tile_set();
-        let glyph_tiles = glyphs::vram::tile_set();
-        let mut ui_bg = surface::Painted::new(&mut gfx, &chrome_tiles);
+        // Both tilesets, kept for the whole run: agb copies a tile's bytes out of the tileset a write
+        // names, so the atlas and the authored chrome have to outlive every frame that draws them.
+        let tilesets = surface::Tilesets::new();
+        let mut ui_bg = surface::Painted::new(&mut gfx, &tilesets);
         let mut ui = surface::Surface::new();
         let mut ui_writes = surface::Writes::new();
         ui_bg.commit(&mut gfx);
         let after_surface = clock.read();
-        // `glyph_tiles` is the atlas the text draws from; it lives as long as the run, and `ui_bg`
-        // holds the backgrounds. Both are kept for the whole of `main` so no frame can show a
-        // background whose tileset has been dropped.
-        let _ = &glyph_tiles;
 
         // `make album-player-rom` builds without `deep-audit`: it plays the same album but proves no
         // decoded content. Say so at boot as well as in the verdict, so an unverified image cannot be
@@ -3865,7 +3862,7 @@ mod rom {
             state_word: transport_word(transport_state()),
         };
         if ui.update(&boot_view, &mut ui_writes) {
-            ui_bg.apply(&ui_writes, &chrome_tiles);
+            ui_bg.apply(&ui_writes, &tilesets);
             ui_bg.commit(&mut gfx);
         }
         let after_ui = clock.read();
@@ -4258,7 +4255,7 @@ mod rom {
                     &mut ui_writes,
                     &mut ui_bg,
                     &mut gfx,
-                    &chrome_tiles,
+                    &tilesets,
                 );
             }
             // A skip's or an advance's measurement closes as soon as the wire has carried **its own** new
@@ -4450,7 +4447,7 @@ mod rom {
                     &mut ui_writes,
                     &mut ui_bg,
                     &mut gfx,
-                    &chrome_tiles,
+                    &tilesets,
                 );
             }
             let (done, seen) = critical_section::with(|cs| {

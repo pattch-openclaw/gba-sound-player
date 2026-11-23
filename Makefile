@@ -14,6 +14,7 @@
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
         album-bake album-pack-check album-seam-test album-layout-test album-glyphs-test album-rom album-player-rom album-test \
+        album-preview \
         clean clean-cache check help toolchain-check target-spec-check
 
 # ===========================================================================
@@ -213,6 +214,9 @@ ALBUM_LAYOUT_GATE_LOG := album-layout-test.log
 #   generators is a compile error, which is a claim no Python leg can make.
 ALBUM_GLYPHS_RS := $(ALBUM_CRATE_DIR)/src/glyphs.rs
 ALBUM_GLYPHS_GATE_LOG := album-glyphs-test.log
+# §9.1's `make album-preview`: the surface as pictures, without a cart (2a PR-(3)). The prefix the
+# 1x and 4x PNGs and their `.txt` grids are written under.
+ALBUM_PREVIEW := album-preview
 ALBUM_GATE_LOG := album-pack-check.log
 ALBUM_SEAM_GATE_LOG := album-seam-test.log
 # The playback ROM (PR-3a step iii): the binary cargo writes, and the fixed image
@@ -1571,7 +1575,7 @@ album-layout-test: toolchain-check album-bake
 	  [ $$status -eq 0 ] \
 	    || { tail -n 60 $(abspath $(ALBUM_LAYOUT_GATE_LOG)); echo "album-layout-test: the surface's host legs did not pass — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
 	  s=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) | tail -1); \
-	  [ -n "$$s" ] && [ "$$s" -ge 9 ] || { echo "album-layout-test: collected '$$s' surface tests, needs >= 9 — the boot frame, the redraw rule, the clock, the bar, the line cut, the tiles, the palettes and the two rectangles are the whole of what 2a draws"; exit 1; }
+	  [ -n "$$s" ] && [ "$$s" -ge 11 ] || { echo "album-layout-test: collected '$$s' surface tests, needs >= 11 — the boot frame, the redraw rule, the clock, the bar, the line cut, the tile indices, the tiles, the palettes and the two rectangles are the whole of what 2a draws"; exit 1; }
 	@echo "album-layout-test passed: §9.0's nine fireable 2a refusals each fired by id on a spec written"
 	@echo "  to be wrong about it, the measured face/interaction geometry reproduces from the tracked files"
 	@echo "  with every expected number labelled by its source, the declared bar grid reaches the ALBM1 header"
@@ -2040,6 +2044,7 @@ clean-outputs:
 	@rm -f uli-bench*.log uli-attrib*.log
 	@rm -f album-probe*.log
 	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_LAYOUT_RS) $(ALBUM_GLYPHS_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_LAYOUT_GATE_LOG) $(ALBUM_GLYPHS_GATE_LOG) $(ALBUM_ROM_RUN_LOG) $(ALBUM_TEST_LOG)
+	@rm -f $(ALBUM_PREVIEW)-*.png $(ALBUM_PREVIEW)-*.png.txt
 	@find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} + 2>/dev/null || true
 
 # The caches: the fifteen workspaces' `target/` dirs, discovered from the tree.
@@ -2201,6 +2206,10 @@ help:
 	@echo "      album-test -> $(ALBUM_REPLAY_ROM) (AP-1's gate: the REPLAY arm run headless to the album's"
 	@echo "      end; every gated term, skip, pause and track-end advance asserted from $(ALBUM_TEST_LOG),"
 	@echo "      exit 124 being the pass path)."
+	@echo "      album-preview -> $(ALBUM_PREVIEW)-1x.png + -4x.png (the surface composited on the host: band"
+	@echo "      stack, title, clock, bar, the blank region and the five authored icons, from the same Write"
+	@echo "      list the ROM's map gets. An instrument for §5.6's human witness, not a gate),"
+	@echo "      and the same again as a 30x20 character grid in the .txt beside each."
 	@echo "  Tests/format:  test (test-rom + flac-test + uli-test), test-rom, check, format"
 	@echo "  Housekeeping:  clean (outputs only; caches kept), clean-deep (+ every"
 	@echo "                 workspace's target/), clean-cache (container volumes),"
@@ -2213,3 +2222,23 @@ help:
 	@echo ""
 	@echo "  Toolchain: $(TOOLCHAIN) via $(RUSTC)"
 	@echo "  Container: $(CONTAINER)  image: $(IMAGE)  Host triple: $(HOST_TRIPLE)"
+
+# §9.1's `make album-preview LAYOUT=… TITLE=…`: one variant's surface, composited on the host at 1x
+# and 4x, as PNG plus the 30x20 character grid beside each.
+#
+# **Why it exists now, in this phase** (2a PR-(3)): §5.6 makes the legibility witness a person, and
+# the first hardware run of this phase found a bug a picture would have shown in a second — every
+# glyph lost its bottom tile row, and the map sent glyph indices to the chrome tileset, so the screen
+# held correct positions with garbage glyphs. Neither was visible in a log. This target renders the
+# same `Write` list the ROM's map gets, from the same tiles and the same palette table, so a layout
+# mistake costs a host run rather than a flashing session.
+#
+# It is an *instrument*, not a witness: §5.6's rule is judged on a real screen by a colourblind
+# reader, and AP-3's host snapshot remains the geometry leg. What it shares with the ROM is the code
+# that decides the cells, so a picture that is wrong here is wrong on hardware for the same reason.
+album-preview: album-bake
+	@cd $(GATE_NEUTRAL_CWD) && $(CARGO) run --quiet --release --manifest-path $(ALBUM_MANIFEST) \
+	  --target $(HOST_TRIPLE) --bin album-preview -- $(abspath $(ALBUM_PREVIEW))
+	@ls -l $(abspath $(ALBUM_PREVIEW))-1x.png $(abspath $(ALBUM_PREVIEW))-4x.png
+	@echo "  look: 1x is the screen as a person sees it (240x160); 4x is the same frame for judging"
+	@echo "  a glyph. The .txt beside each is the map, one character per cell. Not tracked, not gated."

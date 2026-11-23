@@ -78,7 +78,14 @@ fn glyph_char(tile: u16) -> char {
     for code in 0x20u32..=0x7e {
         let c = char::from_u32(code).unwrap();
         if let Some(slot) = glyphs::slot(c) {
-            if slot.tile0 != glyphs::BLANK_TILE && slot.tile0 == tile {
+            if slot.tile0 == glyphs::BLANK_TILE {
+                continue;
+            }
+            // Both rows of a glyph answer the character, so a line renders as the same text on its
+            // two tile rows — which is what a 16 px line box over an 8 px cell looks like, and what
+            // makes "the bottom half went missing" a visible difference rather than an assumed one.
+            let rows = glyphs::TILE_ROWS_PER_LINE as u16;
+            if tile >= slot.tile0 && tile < slot.tile0 + rows {
                 return c;
             }
         }
@@ -150,22 +157,31 @@ fn the_boot_frame_is_the_declared_band_stack_with_a_title_in_it() {
     );
     assert_eq!(canvas.row(layout::REGION.rows - 1), "_".repeat(30));
     // The title band is two rows: the text on the upper, §6's bar along the lower (§5.0's B row).
+    // Both rows are asserted in full, because the bug this leg was tightened after drew row 0
+    // correctly and row 1 from the wrong offset — and a substring assertion could not see it.
     let title_row = layout::BANDS[1].screen_row;
-    let title = canvas.row(title_row);
-    assert!(
-        title.starts_with("Bioluminescent------"),
-        "the title is not at the left of its band: {title:?}"
+    // Built rather than typed: a hand-counted row of thirty characters is how a test ends up
+    // asserting its own arithmetic instead of the screen's. `TITLE_TEXT` is 20 cells, `BAR` 10.
+    let title_cells = (layout::ELEMENTS[surface::TITLE].w / chrome::TILE_PX) as usize;
+    let bar_cells = (layout::ELEMENTS[surface::BAR].w / chrome::TILE_PX) as usize;
+    let title = "Bioluminescent";
+    assert_eq!(
+        canvas.row(title_row),
+        format!(
+            "{title}{}{}",
+            "-".repeat(title_cells - title.len()),
+            "-".repeat(bar_cells)
+        ),
+        "the title band's upper row is not the title then its fill"
     );
     assert_eq!(
-        &title[20..],
-        "----------",
-        "the title band's own fill is not its lower cells"
-    );
-    let bar_row = canvas.row(title_row + 1);
-    assert_eq!(
-        &bar_row[20..],
-        "::::::::::",
-        "the bar is not the band's last ten cells: {bar_row:?}"
+        canvas.row(title_row + 1),
+        format!(
+            "{title}{}{}",
+            "-".repeat(title_cells - title.len()),
+            ":".repeat(bar_cells)
+        ),
+        "the title's lower tile row is missing, or the bar is not the band's last ten cells"
     );
     // The chrome band, two rows down: the clock, the state word, then five icons in their slots.
     let chrome_row = canvas.row(layout::BANDS[0].screen_row);
@@ -200,6 +216,13 @@ fn the_boot_frame_is_the_declared_band_stack_with_a_title_in_it() {
         &chrome_row[26..],
         "====",
         "the chrome band's tail is not its own fill"
+    );
+    // And the chrome's second tile row: the same text, and the icons' columns are band fill because
+    // an icon is one tile tall while a line box is two.
+    assert_eq!(
+        canvas.row(layout::BANDS[0].screen_row + 1),
+        format!("0:00/9:36===PLAYING=={}", "=".repeat(9)),
+        "the chrome band's lower row is not the glyphs' second tile row then fill"
     );
 
     canvas.print("boot frame");
@@ -239,7 +262,10 @@ fn a_still_frame_writes_nothing_and_a_track_change_writes_one_element() {
     ));
     let label_row = (layout::ELEMENTS[surface::KEYLABELS].y / 8) as u8;
     for w in writes.as_slice() {
-        assert_eq!(w.y, label_row, "the state word wrote outside its element");
+        assert!(
+            w.y == label_row || w.y == label_row + 1,
+            "the state word wrote outside its element's two tile rows"
+        );
     }
 }
 
@@ -549,4 +575,73 @@ fn the_composite_is_printable_for_a_human() {
     );
     canvas.apply(&writes);
     canvas.print("1:01, paused (bar at 30/80 > one third)");
+}
+
+/// **Every write names a tile that exists in the tileset it names.** The leg this file was missing.
+///
+/// agb copies a tile's bytes out of the tileset a `set_tile` names with a raw pointer
+/// (`vram_manager.rs:962-1000`), and its bounds check lives in `TileSet::get_tile_data`, which that
+/// path never calls. So an index that is valid for one tileset and not the other does not fault and
+/// does not panic — it copies whatever follows the smaller tileset in ROM into VRAM. That is what
+/// 2a PR-(3)'s first ROM did to every glyph: the atlas index went to the 18-tile chrome set, and the
+/// screen showed correct positions with garbage glyphs. A picture cannot see this (both tilesets are
+/// the same size in the picture); only the index can.
+#[test]
+fn every_write_names_a_tile_that_exists_in_the_tileset_it_names() {
+    let mut ui = surface::Surface::new();
+    let mut writes = surface::Writes::new();
+    let mut check = |writes: &surface::Writes, what: &str| {
+        for w in writes.as_slice() {
+            match w.source {
+                surface::Source::Glyph => {
+                    assert!(
+                        w.tile < glyphs::ATLAS_TILES as u16,
+                        "{what}: glyph tile {} is past the atlas's {} tiles",
+                        w.tile,
+                        glyphs::ATLAS_TILES
+                    );
+                    assert_ne!(
+                        w.tile,
+                        glyphs::BLANK_TILE,
+                        "{what}: a glyph write names the blank sentinel"
+                    );
+                }
+                surface::Source::Chrome => {
+                    assert!(
+                        w.tile < chrome::TILE_COUNT as u16,
+                        "{what}: chrome tile {} is past the {} authored tiles",
+                        w.tile,
+                        chrome::TILE_COUNT
+                    );
+                }
+            }
+        }
+    };
+
+    surface::Surface::paint_blank(&mut writes);
+    check(&writes, "the scene's backing");
+    ui.paint_static(&mut writes);
+    check(&writes, "the static layer");
+
+    // A boot frame, a long title, every second of a minute, every bar cell, and every state word: the
+    // four things whose tile indices are computed rather than declared.
+    for (title, word) in [
+        ("Bioluminescent", "PLAYING"),
+        (
+            "Bioluminescent Overdriven: An Unreasonably Long Album Title",
+            "PAUSED",
+        ),
+        ("iiiiiiiiiiiiiiiiiiiiiiiiiiii", "BUFFER"),
+        ("", "SKIP"),
+    ] {
+        for second in [0u32, 7, 59, 61, 599] {
+            for bar_cell in [0u32, 1, 40, layout::BAR_CELLS] {
+                ui.update(
+                    &view(title, second * geometry::RATE_HZ, TOTAL, bar_cell, word),
+                    &mut writes,
+                );
+                check(&writes, "a frame");
+            }
+        }
+    }
 }
