@@ -1787,7 +1787,10 @@ The two copies are not allowed to drift: the generated module ships a table of c
 answers the *Python* path derived, and its own test suite re-runs them through the Rust `elide`
 (§5.5a's gate runs that suite with a floor on the count). The marker is three ASCII periods for
 the reason §5.5a states in tiles, and — a fact about this face rather than an argument — a single
-U+2026 is not in the declared title face's cmap at all, which the layout gate prints.
+U+2026 is not in the declared title face's cmap at all, which the layout gate prints. The marker's
+*width* is never written down: it is the measured sum of the three periods' advances, so a face
+change moves it — §5.5a records what is parameterized and what is not, and the raster probes that
+say which faces this model can and cannot pack.
 
 **Non-title text is legged by the same mechanism, and the honest split is between boxes and
 strings.** The *boxes* of every declared text element are walked in both languages: the generator
@@ -2051,6 +2054,92 @@ measurement, not L4's measurement *plus* the one field that would make it self-c
 per-element faces, 8bpp, a one-cell ellipsis, wrapping, kerning, sub-pixel placement, OBJ text, and any
 use of agb's `Layout` for a list. Each is a declared field or a later phase, and none of them is on
 2a's critical path.
+
+**How far this generalizes, and the one premise that is a premise (measured 2026-11-22).** Written
+down because the obvious next question is "what if we change the font?", and the answer is split
+cleanly in two — the *rule* is parameterized, the *drawing model* is not — with one silent gap
+between them. Everything below is from probes run against the two tracked faces at several rasters,
+not from reading the code.
+
+**Parameterized, and it regenerates: every number the elision and the fit depend on.** The rule takes
+`(text, box_px, keep)` and nothing else (`glyphs::elide`, `glyphs::fit`; `FaceMetrics.elide`), so the
+box is a caller's number and `keep` is a code-point count. What fills those in comes out of the file
+the spec names, on every emit: `unitsPerEm` and `hhea` → `line_box_px`, `tile_rows_per_line`,
+`min_row_px` (`album_bake.py:1494-1601`); `hmtx` → each `advance_px` and therefore `measure`, plus
+`cells_per_row = floor(w / avg_advance)` (`album_bake.py:2132`); the marker's width as the sum of the
+three periods' advances (`album_glyphs.py:985` — nothing states 12 px, it is measured, and it would
+become 9.6 px or 24 px without a code change); every case-table box from the declared elements' `w`
+in `layout_spec.toml`; and the degenerate rows as `marker_px - 1`. Change the face or the raster and
+the marker, the cut points, the case table, the pool terms and the boot line all move together.
+
+**Three constraints, checked, each with its own refusal.** The atlas needs, at the declared raster:
+(1) a line box that is a whole number of 8 px tile rows — `pitch-not-tileable`, because a glyph cell
+is the line box and there is no such thing as a partial tile row; (2) every contour coordinate and
+every `hmtx` advance on a whole pixel — `atlas-not-on-pixel-grid`, which is §5.5a step 3's "at the
+design size every contour coordinate is already an integer" as a check rather than an assumption;
+(3) every glyph's ink inside **one 8 px column** and the line box — `atlas-glyph-outside-cell`
+(`album_glyphs.py:422`). The measured chain for the tracked 10 px face, which is the demonstration
+that the three are independent and fire in order:
+
+| the same `.ttf` at | line box | advances on grid | verdict |
+|---|---|---|---|
+| 8 px | 13 px | 60 of 95 off | `pitch-not-tileable` (13 is not 8 × n) |
+| **10 px (design size, shipped)** | **16 px = 2 rows** | **all 95** | **emits: 188 tiles, 6,016 B, marker 12 px** |
+| 12 px | 20 px | 60 of 95 off | `pitch-not-tileable` (the grid failure behind it would be next) |
+| 15 px | 24 px = 3 rows | 38 of 95 off | `atlas-not-on-pixel-grid` |
+| 20 px | 32 px = 4 rows | all 95 | `atlas-glyph-outside-cell` (ink is 2 cells wide) |
+| 30 px | 48 px = 6 rows | all 95 | `atlas-glyph-outside-cell` |
+
+The 8 px instrument face (`fusion8`, §5.0's variant A) **cannot have an atlas at any raster tried**:
+at design size its line box is 12 px, at 12 px raster 18 px, and at 16 px raster 24 px (tile-aligned)
+but its ink then spans two cells. `atlas_for("A")` refuses with `pitch-not-tileable`, which is why the
+atlas exists for the product variant only and why A's title band carries no text element at all.
+**That limit is this model's, and it is worth naming precisely because it is the first thing an 8 px
+product face would hit:** the cell height *is* `hhea`'s line box, so the box must divide into tile
+rows exactly — there is no path that pads a 12 px line box up to a 16 px pitch, even though the
+layout side already rounds a pitch that way (`min_row_px = tile_px × ⌈line_box / tile_px⌉`,
+`album_bake.py:1600`). Padding the cell to the declared pitch and offsetting the baseline inside it
+is the change such a face would need, and it is a smaller change than a second rasteriser — but it
+moves every glyph's row count, the atlas size and the pool term at once.
+
+**What "one 8 px column per glyph" means, and the gap in it.** The module addresses a glyph as
+`tile0 + row` (`glyphs.rs:392`, `tile_for`) and spends `TILE_PX` of map per character
+(`tilemap_px`, `glyphs.rs:431`) — one cell, always. That is the premise the *pool* arithmetic rests
+on (§5.1's "upper bound = one allocation per character cell" times the tile rows a line box spans),
+so a glyph two cells wide would not be a bigger atlas, it would be a different sum. **Ink** is
+checked against it; **advance is not.** On the tracked cut that omission is invisible: the widest
+advance is exactly 8 px (`%`), so `measure` and `tilemap_px` can never contradict each other on the
+product face. On a face with generous sidebearings they would: bumping `M` and `W` to a 10 px
+advance on a scratch copy of the same file **emits a 188-tile atlas with no complaint**, and that
+table answers `measure("MW") = 20 px` against `tilemap_px("MW") = 16 px` — the fit rule would
+approve a line the cell-addressed draw path then places 8 px per character, which is not the line
+that was measured, and the pool term (cells × rows) would be an undercount for it. Nothing catches
+that today, and it is the one place where "it happens to be true of this face" is doing the work
+of a refusal. Closing it is small and belongs to the first PR that changes the face, not to a
+refactor for its own sake: refuse an advance wider than `TILE_PX`
+(`atlas-glyph-outside-cell`, or a sibling id if the message reads better), add the matching
+`const _: () = assert!` over `SLOT` so it is a compile error in the ROM build too, and add
+the self-test leg — `album_glyphs.py:1732` currently bounds ink alone.
+
+**If the face changes, in this order.** (i) `layout_spec.toml`'s `[[face]]` entry (`:60-88`) — `file`,
+`raster`, `licence`, `parent` are the whole switch; (ii) the `pyftsubset --unicodes=U+0020-007E` cut
+committed under `assets/fonts/` beside its licence rows (`assets/fonts/README.md:51-59`), which is
+what makes the entry resolvable at all; (iii) `make album-bake`, which regenerates `src/layout.rs`
+**and** `src/glyphs.rs` from that one spec entry — and the atlas module's six `const _` asserts
+refuse to compile if `layout.rs` was left behind, which is the drift this arrangement exists to
+catch; (iv) `make album-glyphs-test`. **A 10 px replacement is close to free** if it lands on the
+grid and keeps ink inside a cell: it is the same shape of face as `ark10`, and the entire elision
+mechanism follows the measured marker width. **A 20 px face is a model change, not a swap**: with
+ink 10–16 px wide it cannot live in one 8 px column, so either the cut is redrawn to fit a cell
+(what `ark10` is — its ink is 7 px wide at raster 10) or the atlas grows a per-face `cell_cols`,
+which moves `tile0 + row` addressing, `tilemap_px`, the pool upper bound in §5.1 and §5.5a step 6's
+write cost, and it would want `fit` to satisfy the cell bound as well as the advance bound. Two
+literal numbers test that boundary from the spec side: `MEASURED_FACE_TABLE`
+(`album_bake.py:3421`) keys §5.1's measured table by `(face, raster)` — a new pair is a new row, and
+a face absent from it is simply unlegged by that table — and a layout leg asserts
+`facts.text_distinct == 188` (`album_bake.py:4173`), so a font change fails a gate by number rather
+than by nobody noticing. The prose that quotes `94 glyphs × 2 tile rows, 6,016 B` (§5.1, here, and
+§11's 2a row) is the third copy, and this file's own rule about numbers in prose applies to it.
 
 ### 5.6 Every on-screen state must be readable by the person who reads it (ruled 2026-11-16, corrected the same day)
 
