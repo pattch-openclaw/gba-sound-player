@@ -56,5 +56,8 @@ cargo run --manifest-path crates/uli-lite/Cargo.toml \
 
 The fixture is committed so `cargo test` / `make uli-test` do not need a C
 compiler or the encoder. `gen_fixture.py` is general Python tooling and remains
-allowed; the C encoder is the temporary encoder of record until the Rust encoder
-lands. See [`ULI2.md`](../../../../ULI2.md).
+allowed. The C encoder made this fixture and is still the one that must
+regenerate it: the in-repo Rust encoder has since landed through S7, but it does
+not yet reproduce the reference's bytes (S8), and this file is a *decoder* pin —
+not an expectation our encoder is measured against. See
+[`ULI2.md`](../../../../ULI2.md).
