@@ -1565,6 +1565,13 @@ album-layout-test: toolchain-check album-bake
 	    || { tail -n 40 $(abspath $(ALBUM_LAYOUT_GATE_LOG)); echo "album-layout-test: the pinned-variant host leg did not pass — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
 	  v=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) | tail -1); \
 	  [ -n "$$v" ] && [ "$$v" -ge 1 ] || { echo "album-layout-test: collected '$$v' variant-agreement tests, needs >= 1 — the generated assets.rs names this leg in its own `LAYOUT_VARIANT` comment, so it may not vanish quietly"; exit 1; }
+	@cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) --test album_surface_host >> $(abspath $(ALBUM_LAYOUT_GATE_LOG)) 2>&1; \
+	  status=$$?; \
+	  [ $$status -eq 0 ] \
+	    || { tail -n 60 $(abspath $(ALBUM_LAYOUT_GATE_LOG)); echo "album-layout-test: the surface's host legs did not pass — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
+	  s=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) | tail -1); \
+	  [ -n "$$s" ] && [ "$$s" -ge 9 ] || { echo "album-layout-test: collected '$$s' surface tests, needs >= 9 — the boot frame, the redraw rule, the clock, the bar, the line cut, the tiles, the palettes and the two rectangles are the whole of what 2a draws"; exit 1; }
 	@echo "album-layout-test passed: §9.0's nine fireable 2a refusals each fired by id on a spec written"
 	@echo "  to be wrong about it, the measured face/interaction geometry reproduces from the tracked files"
 	@echo "  with every expected number labelled by its source, the declared bar grid reaches the ALBM1 header"
@@ -1572,7 +1579,11 @@ album-layout-test: toolchain-check album-bake
 	@echo "  generated modules name one variant, and none of the four retired character-count names survives"
 	@echo "  in the product or in its tests (the verdict line's measured \`text::COLUMNS = 30\` is a different"
 	@echo "  bound, and §5.5 says so). Every declared face is tracked with its licence, and src/layout.rs is"
-	@echo "  byte-identical across two runs, the comparison witnessed negatively."
+	@echo "  byte-identical across two runs, the comparison witnessed negatively. The surface's own legs read"
+	@echo "  the map writes a frame produces: the boot frame is the declared band stack with the title, the"
+	@echo "  clock, the state word and five icons in their slots; a still frame writes nothing and a track"
+	@echo "  change writes one element; the clock bumps on whole seconds and restarts on a new visit; every"
+	@echo "  bar fill position draws its own pixel count; and no drawn line is longer than its box."
 	@echo "  See $(ALBUM_LAYOUT_GATE_LOG) for the legs and their sources."
 
 # The glyph atlas's own gate (§5.5a PR-2: its steps 2-5, and the §9.0 register rows this tool adds).
