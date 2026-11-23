@@ -3255,6 +3255,44 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
+- **2026-11-23 — S8-3: the plan and the tables differ at *named* fields, and the first cause
+  is the plan.** S7 could say "the tables diverge first (2,204 of 5,212 bytes) and the streams
+  run out of step". `crates/uli-lite/examples/plan_diff.rs` (`make uli-plan-diff A=… B=…`)
+  says which field and which frame. It needs no reference build — it parses the container,
+  derives the tables layout from `k` so a differing byte is reported as `len_cb[4][9]: 5 vs
+  4`, and decodes every frame of both blobs to compare the plan the stream *declares*
+  (`FrameInfo` now carries `g`; `ms` was already `Ops::ms`).
+
+  On `biomaster`, ours 3,293,696 B (`f4f3a52a…e095c8`, byte-identical to S6's pin — the
+  instrument measures the shipped encoder) against the reference's 3,293,048 B
+  (`990da225…f8a73`, from `examples/uli_bench/assets/biomaster.uli`), exit 2:
+
+  | reading | value |
+  |---|---|
+  | first divergent frame, `g` | **frame 0**: ours **8**, reference **135** |
+  | frames whose `g` differs | **7,059 of 16,553**; widest `|Δg|` **127**, at frame 0 |
+  | first divergent frame, `ms` | frame 4 (ours 0, reference 1); **725** frames differ |
+  | searched `g` ranges | ours **8..119**, reference **89..135** (S7's sample agreed) |
+  | tables | **1,971 of 5,212 bytes**; first at **byte 43 = `len_cb[0][0]`, 2 vs 1** |
+  | table divergence by field | `len_p` 1,616, `len_cb` 154, `len_q` 128, `dq` 73 |
+
+  **This settles the question S8 was built to ask.** The plan diverges at frame 0 and 7,059
+  frames differ, so the symbol counts the trainer was handed differ, so the trainer is not the
+  first cause and the trained tables are downstream — the branch the plan named as "counts
+  differ ⇒ the search is wrong and the tables are innocent". It does **not** isolate *which*
+  search difference is first (window, EOB charge, `allz` guard all move counts); that is
+  S8-5's frozen-plan differential. Frame 0's `g = 8` against `135` is the inventory's row-6
+  effect observed directly: a frame with nothing worth coding, where our full-range candidate
+  set reaches `G_MIN` and the reference's 20-step window around its pass-1 guess cannot.
+
+  Two smaller checks. A `dq[0][5]` byte flipped by hand on the committed `tiny` fixture is
+  reported as `dq[0][5]: 3 vs 2 (byte 4991)` with the plan agreeing and exit 2, so the field
+  naming is exercised rather than assumed. And a new test,
+  `reference_corpus.rs::the_declared_step_is_the_pinned_plan_and_stays_in_the_readers_window`,
+  holds the new field to a number it did not produce: the fixture's declared plan must read
+  **19..124** (S7's measured reference range for that cell) with more than eight distinct
+  steps, and every frame's `g - 4·ms` must be inside the reader's window.
+
 - **2026-11-23 — S8-1: the frozen-plan probe, and the gate that says it measures what it
   claims.** S7 could localise a blob difference to a *region* but not to a cause: the trained
   tables are a function of a plan, the plan is a function of a search, and neither CLI can be

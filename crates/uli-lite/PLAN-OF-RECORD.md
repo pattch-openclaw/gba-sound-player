@@ -38,7 +38,8 @@ mGBA, WAITCNT 4/2, 262,144-cycle period, no UI. Both corpora pinned
   scoped to byte-exactness on the reference's `--dacw 0` arm.** `make uli-accept` compares our
   `--rd` encoder against the off-tree reference on identical PCM and flags across four cells,
   and no cell is byte-identical: the first content difference lands inside the **trained
-  tables** in every cell, and it is **unattributed**. S8's plan — four instruments, a 13-row
+  tables** in every cell, and it is **unattributed** — since attributed at first order by S8-3,
+  which finds the plan itself differs at frame 0 (§S8 "First attribution"). S8's plan — four instruments, a 13-row
   divergence inventory, eight sub-steps each with its exit gate, and the pin ledger — is in
   "S8 — the plan" below; **none of it is started**. The SNR licence test S7 left open moves
   to S9, so that S8 has exactly one target. See "S7" for the measured table.
@@ -1165,7 +1166,7 @@ read-side, so this does not reopen the paragraph above.
 | **S5** | Album assembly (WAV front end, gapless join, tags verbatim), `--budget`/`--cap` on real sizes, frame-parallel search | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes (each seeked to its own preroll); hashes pinned; too small refuses **before the first frame**, citing both numbers; a 32,768 Hz WAV reaches the same blob its pre-resampled PCM does, and a resampled WAV is quoted by SNR; the CLI prints the reference's columns | **done** — see "S5" below for the numbers and the defaults-restored failure |
 | **S6** | `mu` (decoder-cycle-aware) search: re-code an over-cap frame by dropping its cheapest coefficients instead of refusing the candidate | E-R8 **discharged**; E-R7 **contributed to, not discharged** — its criterion is codec-only and unmeasured, and S7 accepts it | a knob that demonstrably trades SNR for decode cycles, measured on the bench — and, measured 2026-11-20, it closes the last high-rate gap: at `--budget 400000 --cap 74` the equivalent mechanism is worth **1.48 dB** to the oracle, against a 1.15 dB gap | **done** — `--musearch 1` by default; worth **1.44 dB** here (39.57 → 41.01 dB) and the oracle's 41.02 is 0.01 dB above, cap 74.0% max on both arms. See "S6" below |
 | **S7** | **The acceptance matrix, as a buildable target** | E-R2, E-R5, E-R7 (and E-R1's oracle posture) | the four cells below run in CI-shaped form and compare SHA-256s against the reference's blobs, including the two header cycle fields | **done** — `make uli-accept` runs the four cells and the `--dacw 1` row; every cell is a **DIFF**, whose first content difference is inside the **trained tables** in every cell, and which is **unattributed** (see "S7" below) |
-| **S8** | **Byte-exactness on the reference's `--dacw 0` arm**: attribute the S7 DIFF with instruments rather than bytes (the pass-1 plan is not in the blob), then close every named divergence until the matrix matches — the SNR arm is **withdrawn from S8** and becomes S9 | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R2 (the boundary is PCM), E-R7 (moved to S9 — see "S8 — the plan") | every matrix cell byte-identical at `--dacw 0`, checked by `make uli-accept`, with the four instruments of S8-1…S8-4 in place and every pin re-recorded | **in progress** — S8-1 (the probe, `make uli-probe`) landed 2026-11-23; the other seven sub-steps are unstarted; the scope, the divergence inventory, the instruments and each sub-step's gate are in "S8 — the plan" below |
+| **S8** | **Byte-exactness on the reference's `--dacw 0` arm**: attribute the S7 DIFF with instruments rather than bytes (the pass-1 plan is not in the blob), then close every named divergence until the matrix matches — the SNR arm is **withdrawn from S8** and becomes S9 | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R2 (the boundary is PCM), E-R7 (moved to S9 — see "S8 — the plan") | every matrix cell byte-identical at `--dacw 0`, checked by `make uli-accept`, with the four instruments of S8-1…S8-4 in place and every pin re-recorded | **in progress** — S8-1 (the probe, `make uli-probe`) and S8-3 (the plan/table diff, `make uli-plan-diff`) landed 2026-11-23, and S8-3 attributed the first-order cause to the plan: the counts differ, so the tables are downstream; six sub-steps are unstarted; the scope, the divergence inventory, the instruments and each sub-step's gate are in "S8 — the plan" below |
 
 S7 is a step rather than a property of the plan because it has work in it — a host
 target that builds nothing of ours from C, calls the off-tree binary, compares hashes
@@ -1302,6 +1303,27 @@ algorithm in section 3's last row, are the two places we are already right — s
 a later diff is not attributed to them. Note the distinction that makes row 9 a different
 claim: the trainer's *algorithm* matches; the *plan it is handed* does not.
 
+**First attribution, measured (P3, 2026-11-23).** On `biomaster` — ours 3,293,696 B
+(`f4f3a52a…`, byte-identical to S6's pin, which is how we know the instrument measures the
+shipped encoder) against the reference's 3,293,048 B (`990da225…`) — `make uli-plan-diff`
+reads both containers and decodes every frame's declared plan. It reports:
+
+- **the plan diverges at frame 0**: ours declares `g = 8` where the reference declares
+  `135`. That is row 6's predicted effect observed directly — a frame with nothing worth
+  coding, where our full-range candidate set can take the tie-break to `G_MIN` and the
+  reference's window around its pass-1 guess cannot reach it;
+- across the album **7,059 of 16,553 frames differ in `g`** (widest `|Δg| = 127`, at frame
+  0) and **725 differ in the M/S flag** (first at frame 4); the searched ranges are
+  `8..119` against `89..135`, the same pair S7's seek diagnostic reported from a
+  sample every 256 frames;
+- the tables differ in **1,971 of 5,212 bytes, starting at byte 43 = `len_cb[0][0]`
+  (2 vs 1)**, of which `len_p` is 1,616 bytes, `len_cb` 154, `len_q` 128 and `dq` 73.
+
+That settles the branch this section could only name: **the counts differ, so the trainer is
+not the first cause and the tables are downstream.** It does not yet say *which* search
+change is first — the candidate window, the EOB charge and the `allz` guard all move counts —
+which is what the frozen-plan differential (S8-5) settles.
+
 **5. Why the blob is not enough, and the four instruments that fix it.**
 
 Training is a pure function of the counts and errors it is handed, so a byte diff cannot
@@ -1410,8 +1432,23 @@ magnitude difference shows up in the stream.
 **S8-2 — P2, `--dump-plan`.** As described above, wired as `make uli-dump-plan` over a local
 reference build. *Gate:* dumped shipped plan == plan recovered from that run's blob.
 
-**S8-3 — P3, in-tree instrumentation.** As described above. *Gate:* on `biomaster`, the
-report names the first divergent frame and the first divergent table field.
+**S8-3 — P3, in-tree instrumentation — landed 2026-11-23.** `FrameInfo` now carries the
+frame's declared `g` (`crates/uli-lite/src/frame.rs`; `ms` was already surfaced as
+`Ops::ms`), both decoders fill it, and `crates/uli-lite/examples/plan_diff.rs`
+(`make uli-plan-diff A=… B=…`) diffs two blobs: the tables **by field** — `field_at(k, off)`
+derives the format's layout from `k`, so a differing byte is reported as
+`len_cb[4][9]: 5 vs 4` rather than as an offset — and the plan **by frame**, with the first
+divergent frame and step for `g` and for `ms`, the counts, the widest `|Δg|`, and both
+searched ranges. It needs no reference build, so it works on any pair, and it exits 2 on a
+difference (the `uli_accept.py` convention).
+
+*Gate, measured on `biomaster`:* it names **frame 0** as the first divergent frame (ours
+`g = 8`, reference `135`) and **`len_cb[0][0]` at byte 43** as the first divergent table
+field. The numbers and what they settle are under "First attribution" above. A new test
+(`reference_corpus.rs::the_declared_step_is_the_pinned_plan_and_stays_in_the_readers_window`)
+holds the field to something it did not produce: the fixture's declared plan must read
+19..124, the range S7 measured from the seek diagnostic, and every frame's `g - 4·ms` must
+be inside the reader's window.
 
 **S8-4 — P4, the fast cell.** Defined, wired into `make uli-accept` as a fifth cell
 (oracle-only `dacw1` row unchanged), and measured once. *Gate:* seconds, budget binds.
@@ -1622,6 +1659,13 @@ the plan's own choices, so a table divergence is upstream of any per-frame bit-p
 argument and sufficient on its own to explain the streams. Whatever fixes
 exactness starts at the table trainer, not at the terminator. The honest state of the
 DIFF is **unattributed**, and no search change was made to force it.
+
+*Superseded 2026-11-23 by S8-3, in place rather than deleted.* The paragraph above reads
+"whatever fixes exactness starts at the table trainer", and that is the one thing the
+attribution has since ruled out: on `biomaster` the **plan** differs at frame 0 and 7,059
+frames differ in `g`, so the counts fed to the trainer differ and the tables are downstream
+of the search. See "First attribution" under §S8. What S7 got right, and this step kept, is
+that a byte diff could not say so — it took an instrument that reads the plan.
 
 **What the SNR columns say, and where they hurt.** `biomaster` (one track, so mean and
 worst coincide): ours **31.89 mean / 31.89 worst** dB, int8 30.89; the oracle's codec

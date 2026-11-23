@@ -5,7 +5,7 @@
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
-        uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-probe uli-rd-ab uli-accept \
+        uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-probe uli-plan-diff uli-rd-ab uli-accept \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-playback-test uli-player uli-player-rom uli-player-speaker uli-player-speaker-rom \
@@ -766,6 +766,19 @@ uli-probe:
 	@test -f $(GBA_AUDIO)/encoder/enc_core.c || \
 	  { echo "uli-probe: no reference encoder source at $(GBA_AUDIO)/encoder (set GBA_AUDIO=)"; exit 1; }
 	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_probe.py --self-check
+
+# S8-3's plan/table diff: between two blobs, *which* table field and *which* frame's step
+# differ — the question S7 can only answer at region granularity. Needs no reference build
+# (it reads the container), so it works on ours against the oracle's or ours against ours.
+# Exit 2 = the blobs differ, 0 = identical, 1 = usage/parse error — uli_accept.py's
+# convention, so `make uli-plan-diff A=... B=...` fails loudly on a difference.
+# Usage: make uli-plan-diff A=ours.uli B=ref.uli [ENTRIES=8]
+uli-plan-diff: toolchain-check
+	@test -n "$(A)" -a -n "$(B)" || { echo "uli-plan-diff: pass A=<blob> B=<blob>"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) run --release --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE) \
+	    --example plan_diff -- $(abspath $(A)) $(abspath $(B)) --entries $(or $(ENTRIES),8)
 
 # S3's acceptance harness: our --rd encoder against the reference's, same PCM, same
 # budgets: bytes, fit, kbit/s, SNR, chosen g. Exits nonzero if any row overshoots.

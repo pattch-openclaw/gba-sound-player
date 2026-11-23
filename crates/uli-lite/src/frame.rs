@@ -91,6 +91,10 @@ impl Ops {
 pub struct FrameInfo {
     /// Frame index that was decoded (0 is the preroll frame).
     pub frame: u32,
+    /// The global step `g` this frame declares, after the delta is added to the
+    /// previous frame's value. Surfaced because a step-by-step plan comparison is
+    /// how an encoder difference is attributed; a decoder never needs it.
+    pub g: i32,
     /// Bits consumed by this frame.
     pub bits: u32,
     /// Stream bit position after the frame.
@@ -379,6 +383,7 @@ impl<'a, 's, K: Kernels> Decoder<'a, 's, K> {
         self.state.frame = self.state.frame.wrapping_add(1);
         Ok(FrameInfo {
             frame,
+            g,
             bits: self.state.bitpos.wrapping_sub(start),
             bitpos: self.state.bitpos,
             ops,
