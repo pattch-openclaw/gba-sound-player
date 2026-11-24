@@ -1437,23 +1437,37 @@ Not on the table: booting into a scene 2a does not have. **If 2a's row still nam
 is a decision worth making in words rather than inheriting from a phase table.**
 
 **Landed: option (c), 2a PR-(3), 2026-11-23.** The surface is `src/surface.rs` and `src/chrome.rs`.
-What the ROM draws, and nothing else: the two always-shown bands from `layout::BANDS` (the clock
+What the ROM draws, and nothing else: the always-shown bands from `layout::BANDS` (the clock
 `m:ss/m:ss`, the state word, the five authored control icons on the chrome row; the title line and
 §6's bar on the title band) and the scene region filled flat by `blank`. The audio path is unchanged
 — nothing is pressed before the first sample — so AP-1's term still measures what it measured.
 
-Three things about the implementation that belong in the plan rather than in a diff:
+**The display is three backgrounds, not one composite.** BG0 is the chrome/title art, BG1 the scene
+region, BG2 the foreground (glyphs, control icons and the bar). The split is what lets text sit *over*
+a coloured/textured chrome rather than punching backdrop-coloured holes through it: a glyph or icon
+tile is mostly transparent, and a transparent pixel reveals the layer below. It also gives 2b's scene
+switch the separate region layer §5.2 already required. Every visible cell of all three backgrounds is
+written explicitly with the transparent `chrome::FILL_PAGE` before content, because a map cell left at
+agb's reserved blank tile index reads whatever VRAM held — mGBA initialises it to zero, while a
+Quick-Boot loader does not (agb's own entrypoint clears `.bss` for that reason and leaves VRAM alone).
+The diagnostic `no-page-fill` feature omits that fill for a hardware A/B (`make album-diff-rom`).
+
+Four things about the implementation that belong in the plan rather than in a diff:
 
 - **Text is placed one glyph per 8 px cell**, from §5.5a's static atlas (`tile_for(c, row)`), which
   is the addressing §5.1's pool audit and §10.2's write costs already assume. That is sound only
   while every advance in the declared face is ≤ one cell, and `surface.rs` makes that a
-  `const _: () = assert!` on `layout::FACES[0].max_advance_permyriad` — so a future face that trips
-  it is a build failure rather than a line whose glyphs overlap.
+  `const _: () = assert!` over **every face a declared text element names**, not just `FACES[0]` —
+  so a future face that trips it is a build failure rather than a line whose glyphs overlap.
 - **The draw path's cut is a cell cut, not an advance cut.** For a face with advances ≤ 8 px the
   cell bound is the stricter of §5.5's two bounds, so "characters ≤ cells" is what a drawn line
   must satisfy; `surface::line_for` implements that and the host gate pins its relationship to
   `glyphs::elide` (the advance verdict the bake prints notes from) on the shipped face. §5.5a's
   generalization note is where the premise lives.
+- **The bar's cell is a distinct type.** `BarCell` is derived from the painted sample position and the
+  track's §6 reciprocal; it cannot be constructed from a bare `u32` sample count, which is how the
+  first ROM filled the bar on its first frame. The foreground's transparent padding is
+  `chrome::FILL_PAGE`, so the band art below it shows through.
 - **The reference is `chrome.rs`'s authored tile table**, a `u8`-per-row bitmap block in the spirit
   of `ui_probe.rs`'s hand-written tiles, not a font glyph and not an image file: five placeholder
   icons (diamond, play triangle, `|<`, `>|`, a return glyph) that differ in **shape** as §5.6
@@ -1477,6 +1491,19 @@ it means** (`surface::Source`) rather than leaving it to the caller, `apply_to` 
 an image) and the device cannot report it (the path is unchecked by design). The row bug is caught by
 the same file's composite: the title's two rows are now asserted *in full*, which is what would have
 shown it.
+
+**Follow-up fixes in the same PR (review, 2026-11-24), because the same class kept appearing:**
+the progress bar was handed `position::paint_position`'s **sample** count as if it were a §6 cell, so
+it filled every column on the first frame; it is now a distinct `surface::BarCell` derived from the
+track's reciprocal, and a sample count cannot compile in its place. The icon packer wrote the left
+pixel of each pair in the **high** nibble while every other authoring function and the atlas used the
+low one; the five placeholders were pair-swapped, and the distinctness check and the ASCII composite
+could not see it because both read the packed bytes — a unit test now unpacks every icon row against
+its bitmap. The gate's composite read `w.tile` without `w.source`, so an early-punctuation glyph whose
+atlas index collides with a chrome index was printed as a fill; the composite and the preview's layer
+fall-through are source-aware. And the display is **three backgrounds** (art / scene / foreground)
+with an explicit transparent page fill over every visible cell, plus the `no-page-fill` diagnostic
+and `make album-diff-rom` for the hardware question below.
 
 **And the instrument behind that choice, so it is not made blind (re-checked 2026-11-20 — the first
 version of this paragraph invented the mechanism it described).** Boot-to-audio **is** measured and
@@ -2159,8 +2186,8 @@ complaint**, and that table answers `measure("MW") = 20 px` against `tilemap_px(
 fit verdict would approve a line the cell-addressed draw path then places 8 px per character, which
 is not the line that was measured, and the pool term (cells × rows) would be an undercount for it.
 **Where that stands after 2a PR-(3):** the draw path now refuses to *compile* such a face —
-`surface.rs` asserts `FACES[0].max_advance_permyriad <= TILE_PX × 10,000`, because one glyph per cell
-is only sound while every advance fits one — so the failure is loud at the consumer. What is still
+`surface.rs` asserts `max_advance_permyriad <= TILE_PX × 10,000` for every face a declared text
+element names, because one glyph per cell is only sound while every advance fits one — so the failure is loud at the consumer. What is still
 missing is the emitter-side half, and it belongs to the first PR that changes the face rather than
 to a refactor: refuse an advance wider than `TILE_PX` in `album_glyphs.py`
 (`atlas-glyph-outside-cell`, or a sibling id if the message reads better), which also makes the
@@ -2833,7 +2860,7 @@ as a pre-step and never gating on tests):
 | `make album-seam-test` | AP-2/AP-9's host leg: the derived geometry against the shipped FLAC figures, every track's `ALBM1`-vs-pin agreement, the eight `AUDITED_MUTATIONS` refusals, `PcmSource` on both arms, and the shipped track folded to its **FIFO pins on the host** — plus a stub-only build that must link no decoder | **1 (landed, PR-3a)** — a name §9.1 did not plan; it is the seam's gate, and `album-test` is the ROM's |
 | `make album-probe-rom` | the Phase 0 throwaway probes | 0 (landed) |
 | `make album-test` | AP-1/AP-2: scripted-key playback ROM in headless mGBA + audio-capture diff | **1 — not landed by PR-3a** (no keys yet; deferred to PR-3b). Its audio-capture leg also has no tool today: the installed `mgba-test-runner` (agb v0.25.0) takes a ROM and nothing else, so AP-1's content witness is on-ROM — the ring ledger plus the pins PR-3a folds — and the sample-for-sample capture diff is owed where it is genuinely needed (AP-6/AP-8, §12.2) |
-| `make album-layout-test` | AP-3: host snapshots and fit verdicts for **every product-eligible declared variant** (§5.0's `product` field; a variant whose declared face cannot be resolved is reported as **skipped, by name with its reason**, never silently omitted — §13's AP-3 rule) — band tiling, the derived box list, the `bar_cells` ↔ `ALBM1` reciprocals agreement, one-line elision, the row counts derived from `row_px` (§5.0), and the per-element/switch cost record — **plus, from 2a PR-(3), the surface's own host legs** (`tests/album_surface_host.rs`, floored at 9): the boot frame read back as a 30×20 composite (the band stack, the title, the clock, the state word, five icons in their slots, the bar's ten columns), §5.1's redraw rule as a write count (a still frame writes nothing; a track change writes one element), the clock bumping on whole seconds and restarting on a new visit, every bar fill position drawing its own pixel count, and the drawn line never exceeding its box | **2a** |
+| `make album-layout-test` | AP-3: host snapshots and fit verdicts for **every product-eligible declared variant** (§5.0's `product` field; a variant whose declared face cannot be resolved is reported as **skipped, by name with its reason**, never silently omitted — §13's AP-3 rule) — band tiling, the derived box list, the `bar_cells` ↔ `ALBM1` reciprocals agreement, one-line elision, the row counts derived from `row_px` (§5.0), and the per-element/switch cost record — **plus, from 2a PR-(3), the surface's own host legs** (`tests/album_surface_host.rs`, floored at 18): the boot frame read back as a 30×20 composite (the band stack, the title, the clock, the state word, five icons in their slots, the bar's ten columns), §5.1's redraw rule as a write count (a still frame writes nothing; a track change writes one element), the clock bumping on whole seconds and restarting on a new visit, every bar fill position drawing its own pixel count, a painted sample position converting to a `BarCell`, the icon tiles packing left-pixel-low-nibble, the composite reading the tileset a write names, a full batch reporting its drops, the page fill covering every visible cell, the text layer falling through to the band art, and the drawn line never exceeding its box | **2a** |
 | `make album-glyphs-test` | **§5.5a's atlas gate, 2a PR-(2).** The generator's own self-test at a leg floor; four of §9.0's five `atlas-*` ids fired by name on fixture specs, the fifth printed as named-not-fired with its reason; the generated `src/glyphs.rs` byte-identical across two emits and equal to what is on disk, with one flipped pixel as the negative control for that comparison; the module compiling for the host so its `const _: () = assert!` legs run and tie it to `src/layout.rs` (one face, one raster, one line box, one outlined count); and that module's **own floored suite** — the bit-order leg proved non-vacuous by its mirror failing to match, one cell per glyph, agb's blank tile used by nothing but space, no slot outside the cut, `measure` against `tilemap_px`, and §5.5's elision re-run against the answers the bake's Python copy derived. **Host-only, and not a prerequisite of `album-rom`**: the ROM gets the atlas through `album-bake`, and a ROM build should not depend on a font library | **2a PR-(2)** — a name this file proposes rather than one §9.1 planned, and deliberately **separate from `album-layout-test`**: §5.5a's critical path runs through fontTools, and a geometry-only layout refusal has no business depending on one |
 | `make album-preview LAYOUT=… TITLE=… ART=cover.png` | a **host composite** of one variant at 1× and 4× (ASCII + PNG), from the same code that bakes (§5.0, §12.1) — the tool that makes layout taste a config change instead of a rewrite, and the 1× image §5.6's legibility rule requires | **2a — the surface half landed 2026-11-23** (`album-preview-1x.png`, `-4x.png`, and a `.txt` grid beside each, from `src/preview.rs`: the same `Write` list the ROM's map takes, the same tile bytes both tilesets upload, the same palette table; `LAYOUT`/`TITLE`/`ART` arguments are 2b's, since 2a has no art and one variant's worth of text) — and at 2a it composites **the surface**: bands, chrome, control slots and the `blank` region, plus the declared art boxes and any `TITLE=` string as *host instruments* the 2a ROM never draws. That is deliberate, and it is the line §11's 2a note states: the preview checks the generated geometry, the fit boxes and the bands before any of them is on hardware, and a composite of region content 2a does not render is **an instrument, not a witness** — AP-3's variant snapshots are the geometry witness and AP-4's the art one |
 | `make album-art-check` / `album-bake-check` / `album-viz-test` | AP-4 / AP-5 / AP-6 | 2 / 3 / 4 |

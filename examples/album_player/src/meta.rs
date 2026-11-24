@@ -183,7 +183,7 @@ pub enum Refusal {
         /// The asset region's length.
         asset_len: u32,
     },
-    /// The stored §6 reciprocal is not `floor(2^32 × 32 / n_samples)`.
+    /// The stored §6 reciprocal is not `floor(2^32 × layout::BAR_CELLS / n_samples)`.
     ReciprocalInconsistent {
         /// Track index.
         track: u32,
@@ -411,7 +411,7 @@ pub struct Track<'a> {
     pub start_sample: u32,
     /// Samples in the track.
     pub n_samples: u32,
-    /// §6's progress reciprocal, `floor(2^32 × 32 / n_samples)`.
+    /// §6's progress reciprocal, `floor(2^32 × layout::BAR_CELLS / n_samples)`.
     pub recip: u32,
     /// Frames in the backend's packed blob.
     pub frames: u32,

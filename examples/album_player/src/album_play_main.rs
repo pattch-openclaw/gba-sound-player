@@ -24,9 +24,10 @@
 //! and a measured `to_new` per skip rather than an asserted one ([`Skips`]). A skip while paused is
 //! refused and counted, by design: see [`transport`]'s docs.
 //!
-//! What this ROM *does* show is a screen: white while it is working, and then the verdict —
-//! `PASSED` on blue or `FAILED` on red, in words, through the same renderer the shipped product ROM
-//! uses (this crate's [`text`]). See "The verdict is a word" below.
+//! What this ROM *does* show is a screen: the surface while it is working (the chrome/title art,
+//! the blank scene, the clock, the title and the control icons), and then the verdict — `PASSED` on
+//! blue or `FAILED` on red, in words, through the same renderer the shipped product ROM uses (this
+//! crate's [`text`]). See "The verdict is a word" below.
 //!
 //! ## Where every ordering choice comes from
 //!
@@ -40,7 +41,8 @@
 //! ## The run, in the order hardware settled it
 //!
 //! ```text
-//! running        backdrop = white, presented with no glyphs (`text::show(gfx, "", white)`)
+//! booting        the surface: the chrome/title art, the blank scene and the control icons, then
+//!                the start track's title, `0:00` and an empty bar (boot option (c), §5.2)
 //! vblank         every frame: increment the latch. While the chain is armed, also: read
 //!                REG_KEYINPUT, run keys::Sampler, post the newest Action with its frame, and
 //!                bracket the body with REG_TM1_DATA → the handler's cost in samples of audio time
@@ -86,7 +88,7 @@
 //!
 //! | state | backdrop | text |
 //! |---|---|---|
-//! | running (boot → verdict) | white | *(none yet)* |
+//! | running (boot → verdict) | the surface | the track's title, clock and state word |
 //! | PASSED | blue | `PASSED` |
 //! | FAILED | red | `FAILED <TERM>` — the first false term's name (`text::TERMS`) |
 //! | *(paused at teardown)* | either | `… PAUSED` appended, whatever the verdict |
@@ -1241,7 +1243,10 @@ mod rom {
         /// not part of any track. `committed - base` is therefore the visit's own position, which is
         /// what makes §4.4's "0 at a track start" true again once a run can skip.
         base: u32,
-        /// The last painted position: §6's bar cell, `0..=BAR_CELLS`.
+        /// The last painted position, in **samples**, from `position::paint_position`. The bar cell
+        /// is derived from it by `surface::BarCell::from_samples` with this track's §6 reciprocal;
+        /// it is not itself a cell (the two are both `u32`, which is how 2a PR-(3) filled the bar
+        /// on its first frame by passing this value straight to the draw path).
         last: u32,
         /// Samples played inside this visit, which is what the surface's clock counts. Kept here
         /// rather than re-read by the UI so the clock and the bar can never disagree about where
@@ -1305,6 +1310,12 @@ mod rom {
     /// (§5.1's rule 2 — "partial map rewrites, changed cells only" — and §5.2's cadence rule, which
     /// is why there is no timer here: a frame that changed nothing writes nothing).
     ///
+    /// "Changed cells only" bounds the `set_tile`/map work, not the VRAM copy: agb 0.25's
+    /// `RegularBackground::show` includes a background's map only when it is dirty, but a dirty map
+    /// is copied **whole** (2,048 B) by `frame.commit()`; clean backgrounds cost no map copy. At
+    /// this cadence (clock 1 Hz, title/bar on events) that is bounded and is documented at
+    /// `surface::Painted::commit`; AP-3b prices it. There is no partial-map commit API.
+    ///
     /// Called from both places a frame is served — the playback loop and the drain — so the clock and
     /// the bar keep moving through a track's ending rather than freezing one second early.
     fn refresh_surface(
@@ -1322,7 +1333,7 @@ mod rom {
             title: album.track_title(track as u32),
             elapsed_samples: paint.visit,
             total_samples: paint.total,
-            bar_cell: paint.last,
+            bar_cell: surface::BarCell::from_samples(paint.last, album.track(track as u32).recip),
             state_word: transport_word(state),
         };
         if ui.update(&view, writes) {
@@ -3849,16 +3860,16 @@ mod rom {
             chrome::TILE_COUNT,
             glyphs::ATLAS_TILES
         );
-        // The first frame with content in it: the record's own first title, the clock at 0:00 and the
-        // bar at its first cell. Written here rather than through `refresh_surface` because `paint`
-        // does not exist yet — the visit it tracks starts below — and this is the one frame whose view
-        // is a constant rather than a reading. Element-addressed like every other frame, so it is
-        // about forty cells rather than a screen: the title's 20 columns and the clock's 10.
+        // The first frame with content in it: the gate's start track's title, the clock at 0:00 and
+        // the bar at its first cell. Written here rather than through `refresh_surface` because
+        // `paint` does not exist yet — the visit it tracks starts below — and this is the one frame
+        // whose view is a constant rather than a reading. Element-addressed like every other frame,
+        // so it is about forty cells rather than a screen: the title's 20 columns and the clock's 10.
         let boot_view = surface::View {
             title: album.track_title(START_TRACK as u32),
             elapsed_samples: 0,
             total_samples: assets::TRACKS[START_TRACK].n_samples,
-            bar_cell: 0,
+            bar_cell: surface::BarCell::new(0),
             state_word: transport_word(transport_state()),
         };
         if ui.update(&boot_view, &mut ui_writes) {
@@ -4917,7 +4928,7 @@ mod rom {
         };
         // The verdict is a full-screen takeover, and §5.2 makes that legal only because the audio path
         // has stopped. Give the display back first, so the takeover owns the frame it commits rather
-        // than painting over two backgrounds it left enabled.
+        // than painting over the three backgrounds it left enabled.
         drop(ui_bg);
         text::show(&mut gfx, &words, backdrop);
         // The audited image's line names what is on screen, not only a hue: "screen BLUE" alone was a

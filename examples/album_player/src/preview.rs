@@ -24,26 +24,51 @@ use crate::surface::{Source, Write, Writes};
 /// is a fact the generated module already guarantees rather than a number this file chose.
 const GLYPH_WORDS_PER_TILE: usize = 8;
 
-/// A 30×20 map of what a frame left on screen: `None` is an untouched cell, which shows the
-/// background's backdrop colour.
+/// The three layers the ROM shows: the scene region, the chrome/title art, and the foreground
+/// (glyphs, icons and bar). Bottom to top, matching the BG numbers in `surface::Painted`.
+pub const LAYER_SCENE: usize = 0;
+pub const LAYER_CHROME: usize = 1;
+pub const LAYER_TEXT: usize = 2;
+pub const LAYERS: usize = 3;
+
+/// A 30×20 stack of what a frame left on screen. `None` is an untouched cell; a transparent pixel
+/// in a top layer falls through to the layer below, exactly as a GBA background does.
 pub struct Canvas {
-    cells: [[Option<Write>; layout::SCREEN_COLS as usize]; layout::SCREEN_ROWS as usize],
+    cells: [[[Option<Write>; layout::SCREEN_COLS as usize]; layout::SCREEN_ROWS as usize]; LAYERS],
 }
 
 impl Canvas {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            cells: [[None; layout::SCREEN_COLS as usize]; layout::SCREEN_ROWS as usize],
+            cells: [[[None; layout::SCREEN_COLS as usize]; layout::SCREEN_ROWS as usize]; LAYERS],
         }
     }
 
-    /// Apply a batch of writes, exactly as the ROM's map would take them. Later writes win, which is
-    /// how the two static layers and a frame compose.
-    pub fn apply(&mut self, writes: &Writes) {
+    /// Apply a batch of writes to one layer, exactly as the ROM's map for that background would take
+    /// them. Later writes win within a layer; layers are composited by [`pixel`](Self::pixel).
+    pub fn apply_layer(&mut self, layer: usize, writes: &Writes) {
+        assert!(layer < LAYERS, "layer {layer} is outside the three shown");
         for w in writes.as_slice() {
-            self.cells[w.y as usize][w.x as usize] = Some(*w);
+            self.cells[layer][w.y as usize][w.x as usize] = Some(*w);
         }
+    }
+
+    /// The topmost write in a cell whose tile is not the transparent page fill. A padding cell on
+    /// the text layer therefore reads as the chrome fill beneath it, which is the picture the
+    /// layered ROM shows.
+    fn cell_at(&self, y: usize, x: usize) -> Option<&Write> {
+        for layer in (0..LAYERS).rev() {
+            if let Some(w) = &self.cells[layer][y][x] {
+                // The page fill is a *chrome* tile 0; a glyph tile 0 is a different tileset and
+                // must not be mistaken for transparency. Same rule as `tile_char`.
+                let page = w.source == Source::Chrome && w.tile == chrome::FILL_PAGE;
+                if !page && w.tile != 0xFFFF {
+                    return Some(w);
+                }
+            }
+        }
+        None
     }
 
     /// The map as characters, one per cell: fills as rules, icons by initial, the bar by fill, and a
@@ -51,9 +76,12 @@ impl Canvas {
     /// character, because that is what a 16 px line box over an 8 px cell looks like.
     #[must_use]
     pub fn ascii(&self) -> Vec<String> {
-        self.cells
-            .iter()
-            .map(|row| row.iter().map(|c| cell_char(c.as_ref())).collect())
+        (0..layout::SCREEN_ROWS as usize)
+            .map(|y| {
+                (0..layout::SCREEN_COLS as usize)
+                    .map(|x| cell_char(self.cell_at(y, x)))
+                    .collect()
+            })
             .collect()
     }
 
@@ -81,23 +109,28 @@ impl Canvas {
         out
     }
 
-    /// The colour index and bank at a pixel.
+    /// The colour index and bank at a pixel: the topmost layer whose pixel is not transparent, or
+    /// the backdrop. This is the composition the hardware performs, per pixel.
     #[must_use]
     pub fn pixel(&self, px: u32, py: u32) -> (u8, u8) {
         let cell_x = (px / chrome::TILE_PX) as usize;
         let cell_y = (py / chrome::TILE_PX) as usize;
         let tx = px % chrome::TILE_PX;
         let ty = py % chrome::TILE_PX;
-        match &self.cells[cell_y][cell_x] {
-            None => (0, chrome::BANK_TEXT),
-            Some(w) => {
-                // A blank entry is transparent: the backdrop, whatever bank it names.
-                if w.tile == 0xFFFF {
-                    return (0, w.bank);
-                }
-                (tile_pixel(w.source, w.tile, tx, ty), w.bank)
+        for layer in (0..LAYERS).rev() {
+            let Some(w) = &self.cells[layer][cell_y][cell_x] else {
+                continue;
+            };
+            let page = w.source == Source::Chrome && w.tile == chrome::FILL_PAGE;
+            if w.tile == 0xFFFF || page {
+                continue;
+            }
+            let value = tile_pixel(w.source, w.tile, tx, ty);
+            if value != 0 {
+                return (value, w.bank);
             }
         }
+        (0, chrome::BANK_TEXT)
     }
 
     /// Write the frame as a PNG at `scale`, plus a 30×20 ASCII companion beside it.

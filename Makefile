@@ -14,7 +14,7 @@
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
         album-bake album-pack-check album-seam-test album-layout-test album-glyphs-test album-rom album-player-rom album-test \
-        album-preview \
+        album-preview album-diff-rom \
         clean clean-cache check help toolchain-check target-spec-check
 
 # ===========================================================================
@@ -228,6 +228,11 @@ ALBUM_ROM := album-player.gba
 # does not verify decoded content, which is what takes the ~75 s of CPU out of a run a human sits in
 # front of. `*.gba` in `clean-outputs` covers this name — checked, not assumed.
 ALBUM_FAST_ROM := album-player-fast.gba
+# The hardware differential pair (§13 AP-7a's Quick-Boot question): the same unaudited player built
+# with the explicit page fill (default) and with `no-page-fill`, which leaves agb's reserved blank VRAM
+# tile in the visible map. Flash both and read which one lights up; see `album-diff-rom`.
+ALBUM_DIFF_FILL_ROM := album-player-fill.gba
+ALBUM_DIFF_NOFILL_ROM := album-player-nofill.gba
 ALBUM_ROM_RUN_LOG := album-rom-run.log
 # AP-1's gate arm (PR-3b-iii-B): the same audited bin with `input-replay`'s compiled-in key script,
 # because a headless run cannot press a key. Its own image and log, so `album-rom`'s stay untouched.
@@ -1575,7 +1580,7 @@ album-layout-test: toolchain-check album-bake
 	  [ $$status -eq 0 ] \
 	    || { tail -n 60 $(abspath $(ALBUM_LAYOUT_GATE_LOG)); echo "album-layout-test: the surface's host legs did not pass — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
 	  s=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) | tail -1); \
-	  [ -n "$$s" ] && [ "$$s" -ge 11 ] || { echo "album-layout-test: collected '$$s' surface tests, needs >= 11 — the boot frame, the redraw rule, the clock, the bar, the line cut, the tile indices, the tiles, the palettes and the two rectangles are the whole of what 2a draws"; exit 1; }
+	  [ -n "$$s" ] && [ "$$s" -ge 18 ] || { echo "album-layout-test: collected '$$s' surface tests, needs >= 18 — the boot frame, the redraw rule, the clock, the bar, the line cut, the tile indices, the tiles, the palettes, the two rectangles, the bar-cell conversion, the icon packing, the source-aware composite, the batch's overflow count, the page fill and the layered fall-through are the whole of what 2a draws"; exit 1; }
 	@echo "album-layout-test passed: §9.0's nine fireable 2a refusals each fired by id on a spec written"
 	@echo "  to be wrong about it, the measured face/interaction geometry reproduces from the tracked files"
 	@echo "  with every expected number labelled by its source, the declared bar grid reaches the ALBM1 header"
@@ -1587,7 +1592,10 @@ album-layout-test: toolchain-check album-bake
 	@echo "  the map writes a frame produces: the boot frame is the declared band stack with the title, the"
 	@echo "  clock, the state word and five icons in their slots; a still frame writes nothing and a track"
 	@echo "  change writes one element; the clock bumps on whole seconds and restarts on a new visit; every"
-	@echo "  bar fill position draws its own pixel count; and no drawn line is longer than its box."
+	@echo "  bar fill position draws its own pixel count; a painted sample position converts to a bar cell;"
+	@echo "  the icon tiles pack left-pixel-low-nibble; the composite reads the tileset a write names; a"
+	@echo "  full batch reports its drops; the page fill covers every visible cell; the text layer falls"
+	@echo "  through to the band art; and no drawn line is longer than its box."
 	@echo "  See $(ALBUM_LAYOUT_GATE_LOG) for the legs and their sources."
 
 # The glyph atlas's own gate (§5.5a PR-2: its steps 2-5, and the §9.0 register rows this tool adds).
@@ -1745,6 +1753,25 @@ album-player-rom: album-bake
 	@size -A $(ALBUM_ROM_BIN) | grep -E '^(File|\.text|\.iwram|\.bss)'
 	@echo "  run: timeout -k 5 600 $(GBA_TEST_RUNNER) $(ALBUM_FAST_ROM) 2>&1 | grep '^\[album-rom\]'"
 	@echo "  this build does not verify decoded content: pcm/fifo/assets are SKIPPED, by design."
+
+# The hardware differential pair for the page-fill hypothesis (ALBUM-PLAYER.md §5.2's note; §13 AP-7a).
+# `album-player-fill.gba` is the fast player with the explicit transparent page fill over every visible
+# cell of the three backgrounds; `album-player-nofill.gba` is the same source built with
+# `no-page-fill`, which leaves agb's reserved blank VRAM tile in the visible map. On mGBA both look the
+# same (mGBA initialises VRAM to zero); on a Quick-Boot loader that does not, only the fill build is
+# guaranteed to show the intended art instead of whatever VRAM held. Flash both; the one that boots
+# tells you whether the page fill was the hardware difference. Neither image is a gate artifact.
+album-diff-rom: album-bake
+	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --bin album-play \
+	  --no-default-features --features "backend-flac arm-kernel"
+	agb-gbafix $(ALBUM_ROM_BIN) -o $(ALBUM_DIFF_FILL_ROM)
+	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --bin album-play \
+	  --no-default-features --features "backend-flac arm-kernel no-page-fill"
+	agb-gbafix $(ALBUM_ROM_BIN) -o $(ALBUM_DIFF_NOFILL_ROM)
+	@ls -l $(ALBUM_DIFF_FILL_ROM) $(ALBUM_DIFF_NOFILL_ROM)
+	@echo "  flash BOTH: $(ALBUM_DIFF_FILL_ROM) has the explicit page fill (the fix);"
+	@echo "  $(ALBUM_DIFF_NOFILL_ROM) omits it (the old reserved-blank-tile behaviour)."
+	@echo "  If only the fill image shows the surface, the loader did not initialise VRAM."
 
 # AP-1's gate (PR-3b-iii-B): the album plays **through** its tracks — two or more visits, every skip,
 # every pause, and every track-end advance — and the run's own log is the verdict.
@@ -2206,6 +2233,9 @@ help:
 	@echo "      album-test -> $(ALBUM_REPLAY_ROM) (AP-1's gate: the REPLAY arm run headless to the album's"
 	@echo "      end; every gated term, skip, pause and track-end advance asserted from $(ALBUM_TEST_LOG),"
 	@echo "      exit 124 being the pass path)."
+	@echo "      album-diff-rom -> $(ALBUM_DIFF_FILL_ROM) + $(ALBUM_DIFF_NOFILL_ROM) (the same player with and"
+	@echo "      without the explicit page fill; a hardware A/B for a Quick-Boot loader that leaves VRAM"
+	@echo "      uninitialised. Flash both; neither is a gate artifact),"
 	@echo "      album-preview -> $(ALBUM_PREVIEW)-1x.png + -4x.png (the surface composited on the host: band"
 	@echo "      stack, title, clock, bar, the blank region and the five authored icons, from the same Write"
 	@echo "      list the ROM's map gets. An instrument for §5.6's human witness, not a gate),"

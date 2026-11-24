@@ -168,7 +168,12 @@ const fn pack_row(row: u8) -> [u8; 4] {
     while i < 4 {
         let left = (row >> (7 - 2 * i)) & 1;
         let right = (row >> (6 - 2 * i)) & 1;
-        out[i] = (left << 4) | right;
+        // GBA 4bpp: the low nibble is the left pixel of the pair. Writing this the
+        // other way round swaps every adjacent pair, which is invisible in the
+        // tileset's distinctness check and in the ASCII composite (both read the
+        // same packed bytes) but obvious on a screen; the unit test below unpacks
+        // every icon row against its authored bitmap.
+        out[i] = left | (right << 4);
         i += 1;
     }
     out
@@ -470,5 +475,56 @@ pub mod vram {
             i += 1;
         }
         Palette16::new(colours)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The packing rule and its witness. These are unit tests rather than host-gate legs because
+// they read the authored bitmaps directly; the layout gate also checks one known row of
+// `TILES` so a change to the packing cannot reach a ROM without a gate seeing it.
+// ---------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ICONS: [([u8; 8], u16); 5] = [
+        (SELECT_BITS, ICON_SELECT),
+        (START_BITS, ICON_START),
+        (PREV_BITS, ICON_PREV),
+        (NEXT_BITS, ICON_NEXT),
+        (RESTART_BITS, ICON_RESTART),
+    ];
+
+    /// Unpack a 4bpp tile row the way the hardware does: low nibble is the left pixel.
+    fn unpack(tile: u16, y: usize) -> u8 {
+        let mut row = 0u8;
+        for x in 0..8 {
+            let byte = TILES[tile as usize][y * 4 + x / 2];
+            let value = if x % 2 == 0 { byte & 0x0F } else { byte >> 4 };
+            row |= value << (7 - x);
+        }
+        row
+    }
+
+    #[test]
+    fn every_icon_row_packs_low_nibble_left() {
+        for (bits, tile) in ICONS {
+            for y in 0..8 {
+                assert_eq!(
+                    unpack(tile, y),
+                    bits[y],
+                    "icon tile {tile} row {y} does not round-trip through the packed bytes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pack_row_puts_the_left_pixel_in_the_low_nibble() {
+        // SELECT row 0 is `0b00011000`: pixels 3 and 4 lit.
+        assert_eq!(pack_row(0b00011000), [0x00, 0x10, 0x01, 0x00]);
+        // SELECT row 2 is `0b01111110`, whose first and last pairs are asymmetric.
+        assert_eq!(pack_row(0b01111110), [0x10, 0x11, 0x11, 0x01]);
     }
 }

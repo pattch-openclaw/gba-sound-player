@@ -13,59 +13,89 @@
 
 use album_player::{chrome, geometry, glyphs, layout, surface};
 
-/// A 30×20 picture built by applying batches of writes in order, the way the two backgrounds plus a
-/// frame compose on the device. `.` is an unwritten cell, which draws the band fill beneath it.
+/// A 30×20 picture built by applying batches of writes in layer order, the way the three
+/// backgrounds plus a frame compose on the device. `None` is an untouched cell; the layered apply
+/// (`apply_stacked`) skips the text layer's transparent page fill so the band art beneath it shows,
+/// which is the composition the ROM now performs.
 struct Canvas {
-    grid: Vec<Vec<char>>,
+    grid: Vec<Vec<Option<surface::Write>>>,
 }
 
 impl Canvas {
     fn new() -> Self {
         Self {
-            grid: vec![vec!['.'; layout::SCREEN_COLS as usize]; layout::SCREEN_ROWS as usize],
+            grid: vec![vec![None; layout::SCREEN_COLS as usize]; layout::SCREEN_ROWS as usize],
         }
     }
 
+    /// Apply a layer whose cells are all visible (the scene's blank and the chrome/title bands).
     fn apply(&mut self, writes: &surface::Writes) {
         for w in writes.as_slice() {
-            self.grid[w.y as usize][w.x as usize] = tile_char(w.tile);
+            self.grid[w.y as usize][w.x as usize] = Some(*w);
+        }
+    }
+
+    /// Apply the foreground layer, leaving the cell beneath in place where the foreground writes the
+    /// transparent page tile. This is why the chrome fill still shows through the clock's padding.
+    fn apply_stacked(&mut self, writes: &surface::Writes) {
+        for w in writes.as_slice() {
+            // Only the *chrome* page tile is transparent; a glyph tile 0 is a different tileset.
+            if w.source == surface::Source::Chrome && w.tile == chrome::FILL_PAGE {
+                continue;
+            }
+            self.grid[w.y as usize][w.x as usize] = Some(*w);
         }
     }
 
     fn row(&self, y: u32) -> String {
-        self.grid[y as usize].iter().collect()
+        self.grid[y as usize]
+            .iter()
+            .map(|c| tile_char(c.as_ref()))
+            .collect()
     }
 
     fn print(&self, label: &str) {
         println!("--- {label} ---");
         for (y, row) in self.grid.iter().enumerate() {
-            println!("{y:02}|{}|", row.iter().collect::<String>());
+            let line: String = row.iter().map(|c| tile_char(c.as_ref())).collect();
+            println!("{y:02}|{line}|");
         }
     }
 }
 
-/// One character per tile, chosen so the bands, the icons, the bar and the glyphs are all
-/// distinguishable at a glance. A glyph shows the character itself, which is the point: this is how a
-/// reviewer checks that the title band holds the title and not, say, the clock.
-fn tile_char(tile: u16) -> char {
-    match tile {
-        chrome::FILL_PAGE => ' ',
-        chrome::FILL_SCENE => '_',
-        chrome::FILL_CHROME => '=',
-        chrome::FILL_TITLE => '-',
-        chrome::ICON_SELECT => 'S',
-        chrome::ICON_START => 'P',
-        chrome::ICON_PREV => '<',
-        chrome::ICON_NEXT => '>',
-        chrome::ICON_RESTART => 'R',
-        t if (chrome::BAR_FIRST..chrome::BAR_FIRST + chrome::BAR_TILES as u16).contains(&t) => {
-            match t - chrome::BAR_FIRST {
-                0 => ':',
-                8 => '#',
-                _ => '|',
+/// One character per cell, chosen so the bands, the icons, the bar and the glyphs are all
+/// distinguishable at a glance. **The source is checked first**: a glyph and a chrome tile share one
+/// 10-bit index space, so reading the tile number alone garbles any glyph whose atlas index falls in
+/// the chrome range — which the early punctuation glyphs do. The picture must name the tileset the
+/// write names, not guess by index.
+fn tile_char(cell: Option<&surface::Write>) -> char {
+    let Some(w) = cell else {
+        return '.';
+    };
+    if w.tile == 0xFFFF {
+        return '.';
+    }
+    match w.source {
+        surface::Source::Glyph => glyph_char(w.tile),
+        surface::Source::Chrome => match w.tile {
+            chrome::FILL_PAGE => ' ',
+            chrome::FILL_SCENE => '_',
+            chrome::FILL_CHROME => '=',
+            chrome::FILL_TITLE => '-',
+            chrome::ICON_SELECT => 'S',
+            chrome::ICON_START => 'P',
+            chrome::ICON_PREV => '<',
+            chrome::ICON_NEXT => '>',
+            chrome::ICON_RESTART => 'R',
+            t if (chrome::BAR_FIRST..chrome::BAR_FIRST + chrome::BAR_TILES as u16).contains(&t) => {
+                match t - chrome::BAR_FIRST {
+                    0 => ':',
+                    8 => '#',
+                    _ => '|',
+                }
             }
-        }
-        t => glyph_char(t),
+            _ => '?',
+        },
     }
 }
 
@@ -104,7 +134,7 @@ fn view<'a>(
         title,
         elapsed_samples: elapsed,
         total_samples: total,
-        bar_cell,
+        bar_cell: surface::BarCell::new(bar_cell),
         state_word: word,
     }
 }
@@ -112,14 +142,16 @@ fn view<'a>(
 /// The fixture album's length in samples: 576 s at 16,384 Hz, which is the `9:36` the clock prints.
 const TOTAL: u32 = 576 * geometry::RATE_HZ;
 
-/// The two static layers, in the order `Painted::new` composes them: the scene's backing into the
-/// scene background, then the bands and the icons into the surface's.
+/// The three static layers, in the order `Painted::new` composes them: the scene's backing into the
+/// scene background, the band fills into the art background, and the icons into the foreground.
 fn paint_static(ui: &mut surface::Surface, canvas: &mut Canvas) {
     let mut writes = surface::Writes::new();
     surface::Surface::paint_blank(&mut writes);
     canvas.apply(&writes);
     ui.paint_static(&mut writes);
     canvas.apply(&writes);
+    ui.paint_icons(&mut writes);
+    canvas.apply_stacked(&writes);
 }
 
 /// The boot frame: the band stack, the region, the five icons, the first title, `0:00` and a bar at
@@ -140,14 +172,20 @@ fn the_boot_frame_is_the_declared_band_stack_with_a_title_in_it() {
     ui.paint_static(&mut writes);
     assert_eq!(
         writes.len(),
-        120 + 5,
-        "two always-shown bands of 60 cells, plus five icons"
+        120,
+        "two always-shown bands of 60 cells compose the background layer"
+    );
+    ui.paint_icons(&mut writes);
+    assert_eq!(
+        writes.len(),
+        5,
+        "the foreground layer's static content is the five control icons"
     );
     assert_eq!(writes.dropped(), 0);
 
     paint_static(&mut ui, &mut canvas);
     assert!(ui.update(&view("Bioluminescent", 0, TOTAL, 0, "PLAYING"), &mut writes));
-    canvas.apply(&writes);
+    canvas.apply_stacked(&writes);
 
     // The bands: the region on top, the title band with a title and a bar, the chrome beneath.
     assert_eq!(
@@ -162,7 +200,8 @@ fn the_boot_frame_is_the_declared_band_stack_with_a_title_in_it() {
     let title_row = layout::BANDS[1].screen_row;
     // Built rather than typed: a hand-counted row of thirty characters is how a test ends up
     // asserting its own arithmetic instead of the screen's. `TITLE_TEXT` is 20 cells, `BAR` 10.
-    let title_cells = (layout::ELEMENTS[surface::TITLE].w / chrome::TILE_PX) as usize;
+    let title_element = surface::TITLE.expect("variant B declares title_text");
+    let title_cells = (layout::ELEMENTS[title_element].w / chrome::TILE_PX) as usize;
     let bar_cells = (layout::ELEMENTS[surface::BAR].w / chrome::TILE_PX) as usize;
     let title = "Bioluminescent";
     assert_eq!(
@@ -308,7 +347,7 @@ fn a_new_visit_restarts_the_clock() {
     let rate = geometry::RATE_HZ;
 
     ui.update(&view("T", 30 * rate, TOTAL, 30, "PLAYING"), &mut writes);
-    canvas.apply(&writes);
+    canvas.apply_stacked(&writes);
     assert_eq!(ui.shown_seconds(), 30);
     assert!(
         canvas
@@ -318,7 +357,7 @@ fn a_new_visit_restarts_the_clock() {
 
     // A skip: the visit's sample count restarts at 0 rather than continuing.
     ui.update(&view("T", 0, TOTAL, 0, "PLAYING"), &mut writes);
-    canvas.apply(&writes);
+    canvas.apply_stacked(&writes);
     assert_eq!(ui.shown_seconds(), 0);
     let chrome_row = canvas.row(layout::BANDS[0].screen_row);
     assert!(
@@ -423,7 +462,7 @@ fn a_drawn_line_never_exceeds_its_box_and_the_marker_is_three_periods() {
 /// restating it.
 #[test]
 fn the_drawing_bound_is_the_stricter_of_the_two_fit_bounds() {
-    let title = &layout::ELEMENTS[surface::TITLE];
+    let title = &layout::ELEMENTS[surface::TITLE.expect("variant B declares title_text")];
     let cols = (title.w / chrome::TILE_PX) as usize;
     let mut cell_bound_won = 0;
     for text in [
@@ -539,13 +578,14 @@ fn the_scene_region_and_the_chrome_bands_cannot_overlap() {
 
     let mut ui = surface::Surface::new();
     ui.paint_static(&mut writes);
+    ui.paint_icons(&mut writes);
     let chrome_row = layout::BANDS[0].screen_row;
     let title_row = layout::BANDS[1].screen_row;
     for w in writes.as_slice() {
         let y = w.y as u32;
         assert!(
             y == chrome_row || y == chrome_row + 1 || y == title_row || y == title_row + 1,
-            "the surface wrote outside its two bands: row {y}"
+            "the surface wrote outside the two bands it owns: row {y}"
         );
     }
 }
@@ -560,7 +600,7 @@ fn the_composite_is_printable_for_a_human() {
     paint_static(&mut ui, &mut canvas);
     let mut writes = surface::Writes::new();
     ui.update(&view("Bioluminescent", 0, TOTAL, 0, "PLAYING"), &mut writes);
-    canvas.apply(&writes);
+    canvas.apply_stacked(&writes);
     canvas.print("0:00, playing");
 
     ui.update(
@@ -573,7 +613,7 @@ fn the_composite_is_printable_for_a_human() {
         ),
         &mut writes,
     );
-    canvas.apply(&writes);
+    canvas.apply_stacked(&writes);
     canvas.print("1:01, paused (bar at 30/80 > one third)");
 }
 
@@ -590,7 +630,7 @@ fn the_composite_is_printable_for_a_human() {
 fn every_write_names_a_tile_that_exists_in_the_tileset_it_names() {
     let mut ui = surface::Surface::new();
     let mut writes = surface::Writes::new();
-    let mut check = |writes: &surface::Writes, what: &str| {
+    let check = |writes: &surface::Writes, what: &str| {
         for w in writes.as_slice() {
             match w.source {
                 surface::Source::Glyph => {
@@ -618,10 +658,14 @@ fn every_write_names_a_tile_that_exists_in_the_tileset_it_names() {
         }
     };
 
+    surface::Surface::paint_page(&mut writes);
+    check(&writes, "the page fill");
     surface::Surface::paint_blank(&mut writes);
     check(&writes, "the scene's backing");
     ui.paint_static(&mut writes);
-    check(&writes, "the static layer");
+    check(&writes, "the background layer");
+    ui.paint_icons(&mut writes);
+    check(&writes, "the foreground icons");
 
     // A boot frame, a long title, every second of a minute, every bar cell, and every state word: the
     // four things whose tile indices are computed rather than declared.
@@ -644,4 +688,189 @@ fn every_write_names_a_tile_that_exists_in_the_tileset_it_names() {
             }
         }
     }
+}
+
+/// The bar's cell is **derived from the painted sample position**, not that position itself.
+///
+/// The two are both `u32`, and 2a PR-(3)'s first ROM passed a sample count straight to the draw
+/// path: `paint_position` returns samples, `draw_bar` reads cells, so the bar filled every column
+/// within one frame and stayed full. `BarCell` is a distinct type now, and this leg pins the
+/// conversion's shape independently of any ROM wiring.
+#[test]
+fn the_bar_cell_is_derived_from_a_sample_position() {
+    let recip = (((layout::BAR_CELLS as u64) << 32) / TOTAL as u64) as u32;
+    let one_second = surface::BarCell::from_samples(geometry::RATE_HZ, recip).get();
+    assert!(
+        one_second <= 2,
+        "one second of a {TOTAL}-sample track is {one_second} bar cells, not a sample count"
+    );
+    let half = surface::BarCell::from_samples(TOTAL / 2, recip).get();
+    assert!(
+        half.abs_diff(layout::BAR_CELLS / 2) <= 1,
+        "half the track is {half} of {} cells",
+        layout::BAR_CELLS
+    );
+    let end = surface::BarCell::from_samples(TOTAL, recip).get();
+    assert!(
+        end >= layout::BAR_CELLS - 1,
+        "the end of the track is {end} of {} cells",
+        layout::BAR_CELLS
+    );
+    // A cell a caller already has is clamped, never read as samples.
+    assert_eq!(surface::BarCell::new(u32::MAX).get(), layout::BAR_CELLS);
+}
+
+/// The authored icons use the GBA's packing order: the **low** nibble is the left pixel of each
+/// pair. This leg checks a known row of `TILES`; `chrome.rs`'s unit test unpacks every icon row
+/// against its authored bitmap. Neither the distinctness check nor the ASCII composite can see a
+/// pair swap, because both read the packed bytes.
+#[test]
+fn authored_icon_tiles_pack_the_left_pixel_in_the_low_nibble() {
+    let select = &chrome::TILES[chrome::ICON_SELECT as usize];
+    // SELECT row 0 is 0b00011000: pixels 3 and 4 lit -> 00 10 01 00.
+    assert_eq!(&select[0..4], &[0x00, 0x10, 0x01, 0x00]);
+    // SELECT row 2 is 0b01111110, whose first and last pairs are asymmetric.
+    assert_eq!(&select[8..12], &[0x10, 0x11, 0x11, 0x01]);
+}
+
+/// The composite names the tileset a write names. A glyph and a chrome tile share one 10-bit index
+/// space; reading the index alone would turn the early punctuation glyphs into fills, bars and
+/// icons. This is the picture's half of the `Source` fix.
+#[test]
+fn the_composite_names_the_tileset_a_write_names() {
+    let glyph = surface::Write {
+        x: 0,
+        y: 0,
+        tile: 0,
+        bank: 0,
+        source: surface::Source::Glyph,
+    };
+    let chrome = surface::Write {
+        x: 0,
+        y: 0,
+        tile: 0,
+        bank: 0,
+        source: surface::Source::Chrome,
+    };
+    assert_ne!(
+        tile_char(Some(&glyph)),
+        tile_char(Some(&chrome)),
+        "a glyph at tile 0 and the page fill at tile 0 must not draw the same cell"
+    );
+
+    // The layered renderer must apply the same rule: the page fill is a *chrome* tile 0, so a glyph
+    // tile 0 is not transparent and its ink must survive the composite.
+    let mut writes = surface::Writes::new();
+    assert!(writes.push(surface::Write {
+        x: 0,
+        y: 0,
+        tile: glyph.tile,
+        bank: glyph.bank,
+        source: glyph.source,
+    }));
+    let mut canvas = album_player::preview::Canvas::new();
+    canvas.apply_layer(album_player::preview::LAYER_TEXT, &writes);
+    let mut ink = false;
+    for py in 0..8 {
+        for px in 0..8 {
+            if canvas.pixel(px, py).0 == 1 {
+                ink = true;
+            }
+        }
+    }
+    assert!(
+        ink,
+        "a glyph tile 0 was skipped as if it were the chrome page fill"
+    );
+}
+
+/// A dropped write is counted, and the batch's overflow counter belongs to the batch. A caller that
+/// records a cell's new tile after a failed push would leave the map permanently behind, because the
+/// next frame's diff would believe the cell was already written.
+#[test]
+fn a_full_batch_reports_what_it_dropped_and_clear_resets_the_count() {
+    let mut writes = surface::Writes::new();
+    let write = surface::Write {
+        x: 0,
+        y: 0,
+        tile: chrome::FILL_PAGE,
+        bank: 0,
+        source: surface::Source::Chrome,
+    };
+    for _ in 0..surface::MAX_WRITES {
+        assert!(
+            writes.push(write),
+            "a write inside the capacity was refused"
+        );
+    }
+    assert_eq!(writes.len(), surface::MAX_WRITES);
+    assert_eq!(writes.dropped(), 0);
+    assert!(
+        !writes.push(write),
+        "an over-capacity write reported success"
+    );
+    assert_eq!(writes.dropped(), 1);
+    writes.clear();
+    assert!(writes.is_empty());
+    assert_eq!(writes.dropped(), 0, "clear did not reset the batch's count");
+}
+
+/// The page fill writes every visible cell with a **real** zero tile (`FILL_PAGE`), not with agb's
+/// reserved blank index. This is the host-side half of the Quick-Boot fix: the ROM no longer asks
+/// VRAM to have been initialised before it ran.
+#[test]
+fn the_page_fill_covers_every_visible_cell_with_a_real_tile() {
+    let mut writes = surface::Writes::new();
+    surface::Surface::paint_page(&mut writes);
+    assert_eq!(
+        writes.len(),
+        (layout::SCREEN_COLS * layout::SCREEN_ROWS) as usize
+    );
+    assert_eq!(writes.dropped(), 0);
+    let mut seen = [[false; layout::SCREEN_COLS as usize]; layout::SCREEN_ROWS as usize];
+    for w in writes.as_slice() {
+        assert_eq!(w.tile, chrome::FILL_PAGE);
+        assert_eq!(w.source, surface::Source::Chrome);
+        assert!(!seen[w.y as usize][w.x as usize], "a cell was filled twice");
+        seen[w.y as usize][w.x as usize] = true;
+    }
+    assert!(seen.iter().all(|row| row.iter().all(|seen| *seen)));
+}
+
+/// The foreground is transparent where it has no ink. The clock's spare cells are the page tile on
+/// the text layer, so the pixel there is the chrome band's checker — not the backdrop, and not a
+/// hole punched through the art. This is the layered composition the three-background split exists
+/// for, checked at the one place a picture can see it cheaply.
+#[test]
+fn the_foreground_padding_shows_the_band_art_beneath() {
+    let mut ui = surface::Surface::new();
+    let mut canvas = album_player::preview::Canvas::new();
+    let mut writes = surface::Writes::new();
+
+    surface::Surface::paint_page(&mut writes);
+    canvas.apply_layer(album_player::preview::LAYER_SCENE, &writes);
+    surface::Surface::paint_blank(&mut writes);
+    canvas.apply_layer(album_player::preview::LAYER_SCENE, &writes);
+
+    surface::Surface::paint_page(&mut writes);
+    canvas.apply_layer(album_player::preview::LAYER_CHROME, &writes);
+    ui.paint_static(&mut writes);
+    canvas.apply_layer(album_player::preview::LAYER_CHROME, &writes);
+
+    surface::Surface::paint_page(&mut writes);
+    canvas.apply_layer(album_player::preview::LAYER_TEXT, &writes);
+    ui.paint_icons(&mut writes);
+    canvas.apply_layer(album_player::preview::LAYER_TEXT, &writes);
+
+    ui.update(&view("Bioluminescent", 0, TOTAL, 0, "PLAYING"), &mut writes);
+    canvas.apply_layer(album_player::preview::LAYER_TEXT, &writes);
+
+    // The clock is 9 characters in a 12-cell box; its 10th cell (x = 80, y = 144) is padding. The
+    // chrome checker starts at value 2 on an even pixel, so the background must be visible there.
+    let (value, bank) = canvas.pixel(80, 144);
+    assert_eq!(bank, chrome::BANK_CHROME, "the band fill's bank was lost");
+    assert_eq!(
+        value, 2,
+        "the text layer's transparent padding did not fall through to the band art"
+    );
 }

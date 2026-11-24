@@ -15,12 +15,32 @@
 //! the reason R1b's measured failure (a full-row 1 Hz redraw reaching a DMA's grace window, 104 late
 //! of 16,553 periods) cannot recur here.
 //!
+//! **Why three layers, and what each one owns.** The display is a background for the chrome/title
+//! art, a background for the scene region, and a foreground for everything drawn *over* that art
+//! (the glyphs, the five control icons, and the bar). They are separate `RegularBackground`s because
+//! a transparent pixel reveals the layer below: glyph and icon tiles are mostly transparent, so
+//! keeping them on the same background as the band fill would punch backdrop-coloured holes in the
+//! art instead of letting it show through. BG0 is the art background, BG1 the scene region, BG2 the
+//! foreground — §5.1's own BG0/BG1/BG2 allocation, with the controls treated as foreground art
+//! rather than as part of the fill they sit on.
+//!
+//! **"Changed cells only" is a statement about the plan, not about the VRAM copy.** The write list is
+//! element-addressed and agb's `set_tile` is called only for cells whose tile, bank or tileset
+//! changed. agb 0.25 has no partial-map commit: `RegularBackground::show` includes a background's
+//! map only when `Tiles::is_dirty` says it changed, but a dirty map is then copied **whole**
+//! (2,048 B) by `frame.commit()`; a clean background costs no map copy. So a clock tick pays one
+//! dirty foreground screenblock (2 KB), a title/bar or scene change pays its own, and a still frame
+//! pays none. At 2a's cadence (clock 1 Hz, title/bar on events) that is bounded, and AP-3b is where
+//! the commit cost is priced. The phrase must not be reread later as "only changed cells reach
+//! VRAM": a changed cell costs its background's whole map, and no agb API on this path makes it
+//! smaller.
+//!
 //! ## Two halves, and the reason for the split
 //!
 //! The *decision* half is platform-free: which cells should hold which tiles, and which of those
 //! differ from what is on the map. It produces a list of [`Write`]s, so the host gate can assert a
 //! track change's cost in cells rather than in prose. The *applying* half is
-//! `#[cfg(target_arch = "arm")]`: two agb `RegularBackground`s and one commit. This is `keys.rs`'s
+//! `#[cfg(target_arch = "arm")]`: three agb `RegularBackground`s and one commit. This is `keys.rs`'s
 //! arrangement and `text.rs`'s, for the same reason: the checks that matter are on the host.
 //!
 //! ## One glyph per cell, and the bound that makes it sound
@@ -37,9 +57,10 @@
 //! line never exceeds its cell span, so cutting a line at a cell boundary is the stricter of §5.5's
 //! two bounds (a drawn line must satisfy both `measure` and `tilemap_px`). §5.5a's generalization
 //! note records the case where that stops holding — a face with generous sidebearings, where the
-//! atlas still builds and `measure` exceeds `tilemap_px` — and [`ADVANCE_FITS_A_CELL`] turns that
-//! from a silent mis-draw into a build failure. When a future face trips it the fix is that note's
-//! refusal, not a second renderer here.
+//! atlas still builds and `measure` exceeds `tilemap_px` — and [`FACES_FIT_A_CELL`] turns that
+//! from a silent mis-draw into a build failure on **every face a declared text element actually
+//! names**, not just the first face in the generated table. When a future face trips it the fix is
+//! that note's refusal, not a second renderer here.
 //!
 //! ## What 2a draws, and what it deliberately does not
 //!
@@ -52,16 +73,21 @@ use crate::chrome;
 use crate::geometry;
 use crate::glyphs;
 use crate::layout;
+use crate::nodiv;
 
-/// The most cells any declared text element spans (the list window: 30 columns × 2 tile rows).
+/// The most cells a single-line text element can hold. 2a's largest is the title's 20×2 = 40; the
+/// bound leaves headroom for a clock or label box. A multi-row text window (2b's `list`, 30×16) is
+/// not a line and is not drawn through [`draw_text`], which addresses one line box at a time.
 pub const MAX_CELLS: usize = 60;
 
 /// The most characters a drawn line can hold: the widest declared text element, in cells.
 pub const MAX_LINE: usize = layout::SCREEN_COLS as usize;
 
-/// The most cells one batch of writes carries: the scene region, the largest single element a 2a
-/// variant declares. `Writes::push` counts an overflow instead of dropping it silently.
-pub const MAX_WRITES: usize = layout::REGION.cols as usize * layout::REGION.rows as usize;
+/// The most cells one batch of writes carries: the whole visible screen, because a page fill must
+/// cover every cell. The region (480), the bands (120) and a frame's elements (≤92) all fit inside
+/// it. [`Writes::push`] returns whether the write fit, so a caller never records state for a cell
+/// that was dropped.
+pub const MAX_WRITES: usize = layout::SCREEN_COLS as usize * layout::SCREEN_ROWS as usize;
 
 /// The most 8 px columns a declared bar can span. B's is 10; the bound is generous and asserted.
 pub const MAX_BAR_COLS: usize = 16;
@@ -90,8 +116,45 @@ pub enum Source {
     Glyph,
 }
 
+/// §6's progress cell, in `0..=BAR_CELLS`.
+///
+/// A distinct type because the painted position it is derived from is **samples**, and the two are
+/// both `u32`. Handing a sample count to [`View::bar_cell`] was 2a PR-(3)'s progress-bar bug: a
+/// 4.2-million-sample position passed as if it were 0..80 filled every column on the first frame.
+/// The only constructors are [`BarCell::new`] for a cell a caller already has (a test, a fixture)
+/// and [`BarCell::from_samples`], which applies the track's §6 reciprocal. There is deliberately no
+/// `From<u32>`: the compiler, not a reader, should have to be convinced a cell is a cell.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+pub struct BarCell(u32);
+
+impl BarCell {
+    /// A cell a caller already has, clamped to the declared grid.
+    #[must_use]
+    pub const fn new(cell: u32) -> Self {
+        if cell > layout::BAR_CELLS {
+            Self(layout::BAR_CELLS)
+        } else {
+            Self(cell)
+        }
+    }
+
+    /// The cell a sample position falls in, through the track's §6 reciprocal (`floor(2^32 ×
+    /// BAR_CELLS / n_samples)`). This is the only conversion from samples to a cell.
+    #[must_use]
+    pub const fn from_samples(pos_in_track: u32, recip: u32) -> Self {
+        // `new` clamps: a stale or corrupt reciprocal must not index a bar column that is not
+        // declared, and the draw path treats a cell as a position rather than a bound.
+        Self::new(nodiv::bar_cell(pos_in_track, recip))
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
 /// A batch of [`Write`]s: what changed, in map coordinates. Fixed capacity because the ROM has no
-/// allocator on this path, and bounded by the largest declared element — a generated fact.
+/// allocator on this path, and bounded by the full visible screen because a page fill must cover it.
 pub struct Writes {
     buf: [Write; MAX_WRITES],
     len: usize,
@@ -115,9 +178,11 @@ impl Writes {
         }
     }
 
-    /// Forget the batch. Capacity is fixed, so this is the only reuse path.
+    /// Forget the batch and its overflow count. Capacity is fixed, so this is the only reuse path;
+    /// resetting `dropped` here makes the count a property of the batch a caller is about to inspect.
     pub fn clear(&mut self) {
         self.len = 0;
+        self.dropped = 0;
     }
 
     #[must_use]
@@ -130,9 +195,9 @@ impl Writes {
         self.len == 0
     }
 
-    /// Writes that did not fit. Zero for every geometry this tree declares; a non-zero count is a
-    /// spec that outgrew the buffer, and the host gate refuses it by name rather than letting a
-    /// partial draw look like a complete one.
+    /// Writes that did not fit in this batch. Zero for every geometry this tree declares; a non-zero
+    /// count is a spec that outgrew the buffer, and the host gate refuses it by name rather than
+    /// letting a partial draw look like a complete one.
     #[must_use]
     pub fn dropped(&self) -> usize {
         self.dropped
@@ -143,12 +208,18 @@ impl Writes {
         &self.buf[..self.len]
     }
 
-    pub fn push(&mut self, w: Write) {
+    /// Append one write, returning whether it fit. A caller that keeps a shadow of the map
+    /// ([`Cells`], the bar's column tiles, the icons) must update that shadow **only on `true`**: a
+    /// dropped write means the map did not change, so recording it would make the next frame's diff
+    /// skip the cell forever. `false` is also the signal the host gate reads through [`dropped`].
+    pub fn push(&mut self, w: Write) -> bool {
         if self.len < MAX_WRITES {
             self.buf[self.len] = w;
             self.len += 1;
+            true
         } else {
             self.dropped += 1;
+            false
         }
     }
 
@@ -230,7 +301,7 @@ pub const ELLIPSIS: &str = glyphs::ELLIPSIS;
 ///
 /// **This is the drawing rule, and it is a cell rule.** A cell-addressed renderer's real bound is
 /// "characters ≤ cells", which for a face whose advances are ≤ 8 px is *stricter* than §5.5's
-/// advance-sum bound — see the module docs and [`ADVANCE_FITS_A_CELL`]. The bake's verdict
+/// advance-sum bound — see the module docs and [`FACES_FIT_A_CELL`]. The bake's verdict
 /// (`glyphs::elide`, advance-based) decides whether an album's wording is a note, and it is never
 /// stricter than this; `tests/album_surface_host.rs` pins that relationship on the shipped face, so
 /// the two rules cannot drift into disagreeing about a drawn line.
@@ -293,28 +364,39 @@ const fn streq(a: &str, b: &str) -> bool {
     true
 }
 
-/// The index of the declared element with id `id`, at compile time.
+/// The index of the declared element with id `id`, at compile time, if the variant declares it.
 ///
-/// A missing id is a compile error naming the id, which is the point: §5.3 keys things by identity,
-/// so a spec that renames `title_text` should fail the build rather than draw the title into whatever
-/// element happens to sit at index 3 (the drift D9 is about).
-const fn element_index(id: &str) -> usize {
+/// Variant A declares no title line (§5.0's A row: its title band is art/bar only), so the lookup is
+/// optional and [`TITLE`] is the one element a variant may omit. The required elements keep
+/// [`element_index`], whose missing id is a compile error: §5.3 keys things by identity, so a spec
+/// that renames `clock` should fail the build rather than draw the clock into whatever element
+/// happens to sit at index 3 (the drift D9 is about).
+const fn element_index_opt(id: &str) -> Option<usize> {
     let mut i = 0;
     while i < layout::ELEMENTS.len() {
         if streq(layout::ELEMENTS[i].id, id) {
-            return i;
+            return Some(i);
         }
         i += 1;
     }
-    panic!("this variant declares no element with this id");
+    None
+}
+
+/// The index of a declared element a variant must carry.
+const fn element_index(id: &str) -> usize {
+    match element_index_opt(id) {
+        Some(index) => index,
+        None => panic!("this variant declares no element with this id"),
+    }
 }
 
 /// The chrome band's clock: `elapsed / total` (§5.5, A6).
 pub const CLOCK: usize = element_index("clock");
 /// The word beside the control icons: §5.6's "a control's drawn state plus a word".
 pub const KEYLABELS: usize = element_index("keylabels");
-/// The title line in the title band: one line, elided, never wrapped (§5.5).
-pub const TITLE: usize = element_index("title_text");
+/// The title line in the title band: one line, elided, never wrapped (§5.5). `None` on variant A,
+/// whose 1-row title band deliberately carries no text line.
+pub const TITLE: Option<usize> = element_index_opt("title_text");
 /// §6's progress bar, in the title band's lower row.
 pub const BAR: usize = element_index("bar");
 /// The authored control art's element; the five slots sit inside it (§5.3).
@@ -349,17 +431,60 @@ const _: () = assert!(
 // The precondition of one-glyph-per-cell, as a compile-time fact
 // ---------------------------------------------------------------------------------------------
 
-/// Whether the declared face's widest advance fits in one cell — the premise the module docs state.
+/// Whether every face a declared text element actually names has advances that fit in one cell —
+/// the premise the module docs state.
 ///
 /// `max_advance_permyriad` is ten-thousandths of a pixel, generated from the same `hmtx` read the
-/// atlas packs from, so this is the face's own number rather than a copy of one.
-const ADVANCE_FITS_A_CELL: bool = {
-    let face = &layout::FACES[0];
-    face.max_advance_permyriad <= chrome::TILE_PX * 10_000
-};
+/// atlas packs from, so this is the face's own number rather than a copy of one. It walks the
+/// elements rather than checking `FACES[0]`: the face order is the spec's declaration order, not a
+/// promise that index 0 is the face the text draws in, and a variant whose first face is not its
+/// text face would otherwise pass a check about the wrong file.
+const fn faces_fit_a_cell() -> bool {
+    let mut element = 0;
+    while element < layout::ELEMENTS.len() {
+        let e = &layout::ELEMENTS[element];
+        if streq(e.kind, "text") {
+            let mut face = 0;
+            let mut found = false;
+            while face < layout::FACES.len() {
+                if streq(layout::FACES[face].id, e.face) {
+                    found = true;
+                    if layout::FACES[face].max_advance_permyriad > chrome::TILE_PX * 10_000 {
+                        return false;
+                    }
+                }
+                face += 1;
+            }
+            if !found {
+                return false;
+            }
+        }
+        element += 1;
+    }
+    true
+}
+const FACES_FIT_A_CELL: bool = faces_fit_a_cell();
 const _: () = assert!(
-    ADVANCE_FITS_A_CELL,
-    "the declared face advances more than one 8 px cell per glyph: a one-glyph-per-cell drawing would overlap glyphs and clip the line, so the atlas's cell model is not this face's model"
+    FACES_FIT_A_CELL,
+    "a declared text element's face advances more than one 8 px cell per glyph: a one-glyph-per-cell drawing would overlap glyphs and clip the line, so the atlas's cell model is not this face's model"
+);
+
+/// Whether every single-line text element fits [`MAX_CELLS`]. A multi-row window (2b's list) is not
+/// drawn by [`draw_text`] and is deliberately exempt.
+const fn text_elements_fit_max_cells() -> bool {
+    let mut i = 0;
+    while i < layout::ELEMENTS.len() {
+        let e = &layout::ELEMENTS[i];
+        if streq(e.kind, "text") && e.text_rows == 1 && (e.wt * e.ht) as usize > MAX_CELLS {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+const _: () = assert!(
+    text_elements_fit_max_cells(),
+    "a single-line text element has more cells than MAX_CELLS can hold"
 );
 
 /// The fill tile and palette bank a band's background uses, by the band's declared id.
@@ -389,9 +514,22 @@ const fn band_row(band: &str) -> u32 {
 /// assumed.
 pub const REGION_ROW: u32 = band_row(layout::REGION.band);
 
+/// Rows occupied by the always-shown bands below the region, derived from the generated table.
+const fn always_band_rows() -> u32 {
+    let mut total = 0;
+    let mut i = 0;
+    while i < layout::BANDS.len() {
+        if layout::BANDS[i].always {
+            total += layout::BANDS[i].rows;
+        }
+        i += 1;
+    }
+    total
+}
+
 const _: () = assert!(
-    REGION_ROW == 0 && layout::REGION.rows + 4 == layout::SCREEN_ROWS,
-    "the region is not the top of the screen with two bands beneath it"
+    REGION_ROW == 0 && layout::REGION.rows + always_band_rows() == layout::SCREEN_ROWS,
+    "the region is not the top of the screen with the always-shown bands beneath it"
 );
 
 // ---------------------------------------------------------------------------------------------
@@ -406,8 +544,9 @@ pub struct View<'a> {
     pub elapsed_samples: u32,
     /// This track's length in samples.
     pub total_samples: u32,
-    /// §6's progress cell, `0..=BAR_CELLS`, from `position::paint_position`.
-    pub bar_cell: u32,
+    /// §6's progress cell, `0..=BAR_CELLS`, from [`BarCell::from_samples`] and the track's §6
+    /// reciprocal. **Never a sample count**; the type exists so that mistake cannot compile.
+    pub bar_cell: BarCell,
     /// The transport state as a word (`.5.6`: shape *and* a word; until §5.3's `PAUSED` badge lands
     /// in 2b, the word is the whole of the state's signal).
     pub state_word: &'a str,
@@ -490,14 +629,35 @@ impl Surface {
         }
     }
 
-    /// The static layer for the *surface* background: the always-shown bands' fills and §5.3's five
-    /// control icons. Written once at boot.
+    /// The transparent page fill: every visible cell of a background set to `chrome::FILL_PAGE`,
+    /// which is a real zero tile, not agb's reserved blank tile.
     ///
-    /// The scene region's backing is the other background's static layer (see the ARM half), because
-    /// §5.2's switch mechanism needs the region to be a layer of its own. The bands tile the screen
-    /// exactly (§5.0's first refusal, asserted in `layout.rs`), so `chrome::FILL_PAGE` — the declared
-    /// fourth fill — is the one 2a never writes: it is what a variant with a gap between its bands
-    /// would draw, and the declared count is asserted either way in `chrome.rs`.
+    /// This is the hardware-robustness layer. An agb `RegularBackground` map starts as tile index 0,
+    /// the *reserved* blank tile agb never writes; after a normal BIOS boot VRAM is zero and that
+    /// reads as transparent, but agb's own entrypoint says Quick Boot on an Everdrive does not
+    /// initialise RAM, and it clears `.bss` for that reason while leaving VRAM alone. A ROM that
+    /// leaves visible cells unwritten therefore shows whatever VRAM held on such a loader. Writing
+    /// `FILL_PAGE` over every cell makes each visible cell point at a tile this ROM uploaded, so the
+    /// surface no longer depends on the loader's VRAM state. The diagnostic `no-page-fill` feature
+    /// omits this deliberately, to A/B that hypothesis on hardware (`make album-diff-rom`).
+    pub fn paint_page(writes: &mut Writes) {
+        writes.clear();
+        writes.fill(
+            0,
+            0,
+            layout::SCREEN_COLS,
+            layout::SCREEN_ROWS,
+            chrome::FILL_PAGE,
+            chrome::BANK_TEXT,
+        );
+    }
+
+    /// The background layer's static content: the always-shown bands' fills. Written once at boot.
+    ///
+    /// The scene region is its own background and the foreground is its own background (see the ARM
+    /// half), because §5.2's switch mechanism needs the region to be a layer of its own and because
+    /// glyphs and icons must show the band art through their transparent pixels. `FILL_PAGE` is the
+    /// page fill [`paint_page`](Self::paint_page) writes *under* these cells.
     pub fn paint_static(&mut self, writes: &mut Writes) {
         writes.clear();
         let mut i = 0;
@@ -517,21 +677,30 @@ impl Surface {
             }
             i += 1;
         }
+    }
 
-        // §5.3's control art, in the slots the variant declares: positions from the generated
-        // table, drawings from `chrome.rs`, neither transcribed into the other.
+    /// The foreground layer's static content: §5.3's five control icons, in the slots the variant
+    /// declares. Written once at boot, above the band art so the icon's negative space shows it.
+    ///
+    /// Positions come from the generated table and drawings from `chrome.rs`; neither is transcribed
+    /// into the other.
+    pub fn paint_icons(&mut self, writes: &mut Writes) {
+        writes.clear();
         let mut slot = 0;
         while slot < layout::CONTROL_SLOTS.len() {
             let s = &layout::CONTROL_SLOTS[slot];
             if let Some(tile) = chrome::icon_for_slot(s.key) {
-                writes.push(Write {
+                // Only record the icon as painted if the write fit; otherwise the next frame would
+                // believe a tile was on the map that never got there.
+                if writes.push(Write {
                     x: (s.px_x / chrome::TILE_PX) as u8,
                     y: (s.px_y / chrome::TILE_PX) as u8,
                     tile,
                     bank: chrome::BANK_CHROME,
                     source: Source::Chrome,
-                });
-                self.icons[slot] = tile;
+                }) {
+                    self.icons[slot] = tile;
+                }
             }
             slot += 1;
         }
@@ -552,7 +721,10 @@ impl Surface {
         );
     }
 
-    /// Bring the map up to date with `view`, appending only the cells that changed.
+    /// Bring the foreground map up to date with `view`, appending only the cells that changed.
+    ///
+    /// The writes go to the foreground background: glyphs, the bar, and the transparent page tile in
+    /// the cells a line does not use, so the band art on the background below shows through.
     ///
     /// Returns whether anything was written. A frame with no change writes nothing and the caller
     /// must not commit — §5.1's rule 2 and §5.2's cadence rule in one return value.
@@ -561,7 +733,9 @@ impl Surface {
         self.advance_clock(view);
         self.draw_clock(view, writes);
         draw_text(&mut self.labels, KEYLABELS, view.state_word, writes);
-        draw_text(&mut self.title, TITLE, view.title, writes);
+        if let Some(title) = TITLE {
+            draw_text(&mut self.title, title, view.title, writes);
+        }
         self.draw_bar(view, writes);
         !writes.is_empty()
     }
@@ -621,13 +795,14 @@ impl Surface {
         let base_x = e.x / chrome::TILE_PX;
         let base_y = e.y / chrome::TILE_PX;
         let cell_px = layout::BAR_CELL_PX;
+        let bar_cell = view.bar_cell.get();
         let mut col = 0;
         while col < cols {
             let column_start = (col as u32) * chrome::TILE_PX;
-            let filled = if view.bar_cell.saturating_mul(cell_px) <= column_start {
+            let filled = if bar_cell.saturating_mul(cell_px) <= column_start {
                 0
             } else {
-                let inside = view.bar_cell.saturating_mul(cell_px) - column_start;
+                let inside = bar_cell.saturating_mul(cell_px) - column_start;
                 if inside > chrome::TILE_PX {
                     chrome::TILE_PX
                 } else {
@@ -636,27 +811,30 @@ impl Surface {
             };
             let tile = chrome::bar_tile(filled);
             if self.bar[col] != tile {
-                writes.push(Write {
+                // The shadow records a cell only when the write fit; a dropped write must be
+                // retried by a later frame rather than believed.
+                if writes.push(Write {
                     x: (base_x + col as u32) as u8,
                     y: base_y as u8,
                     tile,
                     bank: chrome::BANK_CHROME,
                     source: Source::Chrome,
-                });
-                self.bar[col] = tile;
+                }) {
+                    self.bar[col] = tile;
+                }
             }
             col += 1;
         }
     }
 
-    /// The five control icons, which never change after boot: written by [`paint_static`], exposed so
+    /// The five control icons, which never change after boot: written by [`paint_icons`], exposed so
     /// a future state-carrying icon (2b's `PAUSED` badge) has one place to change.
     #[must_use]
     pub fn icons(&self) -> &[u16; chrome::ICON_TILES] {
         &self.icons
     }
 
-    /// Whether the static layer has been written.
+    /// Whether the foreground's static layer (the control icons) has been written.
     #[must_use]
     pub fn static_painted(&self) -> bool {
         self.icons_seeded
@@ -684,7 +862,10 @@ fn draw_text(cells: &mut Cells, element: usize, text: &str, writes: &mut Writes)
     let e = &layout::ELEMENTS[element];
     let cols = (e.w / chrome::TILE_PX) as usize;
     let rows = (e.h / chrome::TILE_PX) as usize;
-    let (fill, band_bank) = band_fill(e.band);
+    // Text lives on the foreground layer, so its padding is the *transparent* page tile rather than
+    // the band fill. The band fill is on the background below it; writing it here would paint the
+    // text layer opaque and hide the art the user wants behind the words.
+    let (fill, band_bank) = (chrome::FILL_PAGE, chrome::BANK_TEXT);
     if !cells.seeded || cells.cols != cols || cells.rows != rows {
         cells.seed(cols, rows, fill, band_bank);
     }
@@ -703,9 +884,8 @@ fn draw_text(cells: &mut Cells, element: usize, text: &str, writes: &mut Writes)
             // unreadable fragments in the right places.
             let (tile, bank, source) = match bytes.get(col).copied() {
                 Some(byte) => match glyphs::tile_for(byte as char, row) {
-                    // A glyph this cut does not carry, and the blank sentinel (space): the band's
-                    // own fill, so a cleared cell keeps the band instead of punching a hole through
-                    // a blank map entry to the backdrop.
+                    // A glyph this cut does not carry, and the blank sentinel (space): the
+                    // transparent page tile, so the background below shows through.
                     Some(t) if t != glyphs::BLANK_TILE => (t, chrome::BANK_TEXT, Source::Glyph),
                     _ => (fill, band_bank, Source::Chrome),
                 },
@@ -715,16 +895,17 @@ fn draw_text(cells: &mut Cells, element: usize, text: &str, writes: &mut Writes)
                 || cells.banks[index] != bank
                 || cells.sources[index] != source
             {
-                writes.push(Write {
+                if writes.push(Write {
                     x: (e.x / chrome::TILE_PX + col as u32) as u8,
                     y: (e.y / chrome::TILE_PX + row as u32) as u8,
                     tile,
                     bank,
                     source,
-                });
-                cells.tiles[index] = tile;
-                cells.banks[index] = bank;
-                cells.sources[index] = source;
+                }) {
+                    cells.tiles[index] = tile;
+                    cells.banks[index] = bank;
+                    cells.sources[index] = source;
+                }
             }
             index += 1;
             col += 1;
@@ -775,7 +956,7 @@ fn fmt_mmss(seconds: u32, buf: &mut [u8]) -> usize {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The ARM half: the two backgrounds, the palettes, and one commit
+// The ARM half: the three backgrounds, the palettes, and one commit
 // ---------------------------------------------------------------------------------------------
 
 #[cfg(target_arch = "arm")]
@@ -790,33 +971,44 @@ mod arm {
         RegularBackground, RegularBackgroundSize, TileEffect, TileFormat, TileSet, TileSetting,
     };
 
-    /// The surface as the display sees it: §5.1's BG0 (chrome + title band) and BG1 (the scene
-    /// region), both always shown.
+    /// The surface as the display sees it: BG0 the chrome/title art, BG1 the scene region, BG2 the
+    /// foreground (glyphs, control icons and the bar). All three are always shown.
     ///
-    /// **Two backgrounds, not one.** The scene's rectangle is its own background because §5.2's
-    /// switch mechanism is a priority write, and a switch needs the incoming scene to be a layer of
-    /// its own. 2a has one scene, so nothing switches yet — but the *shape* is what 2b builds into,
-    /// and a single background would have to be re-cut to get there.
+    /// **Three backgrounds, and why each is separate.** §5.2's switch mechanism is a priority write,
+    /// so the scene region needs to be a layer of its own. The foreground is a layer of its own for a
+    /// different reason: glyph and icon tiles are mostly transparent, and a transparent pixel reveals
+    /// the layer below. On one background with the band fills, every character and icon would punch a
+    /// backdrop-coloured hole in the art instead of letting it show through; on separate layers the
+    /// text sits *over* the fill, which is the composition the plan's BG0/BG2 split exists for.
     ///
-    /// Both are shown into every frame. agb derives DISPCNT's enable mask from the backgrounds shown
-    /// into *that* frame (`display/tiled.rs:372-377`), so dropping one from a frame does not merely
-    /// skip it — it disables it. That is the trap `text.rs` documents, and the reason [`commit`]
-    /// takes `&mut self` and shows both.
+    /// All three are shown into every frame. agb derives DISPCNT's enable mask from the backgrounds
+    /// shown into *that* frame (`display/tiled.rs:372-377`), so dropping one from a frame does not
+    /// merely skip it — it disables it. That is the trap `text.rs` documents, and the reason
+    /// [`commit`](Self::commit) takes `&mut self` and shows all three.
     pub struct Painted {
-        surface: RegularBackground,
+        /// BG0: the always-shown bands' fills and, later, their art.
+        background: RegularBackground,
+        /// BG1: the scene region.
         scene: RegularBackground,
+        /// BG2: the glyphs, the five control icons and the bar, drawn over BG0.
+        foreground: RegularBackground,
     }
 
     impl Painted {
         #[must_use]
         pub fn new(gfx: &mut Graphics<'_>, tiles: &Tilesets) -> Self {
-            let mut surface = RegularBackground::new(
+            let mut background = RegularBackground::new(
                 Priority::P1,
                 RegularBackgroundSize::Background32x32,
                 TileFormat::FourBpp,
             );
             let mut scene = RegularBackground::new(
                 Priority::P2,
+                RegularBackgroundSize::Background32x32,
+                TileFormat::FourBpp,
+            );
+            let mut foreground = RegularBackground::new(
+                Priority::P0,
                 RegularBackgroundSize::Background32x32,
                 TileFormat::FourBpp,
             );
@@ -830,27 +1022,68 @@ mod arm {
             );
 
             let mut writes = Writes::new();
+
+            page_fill(&mut background, &mut writes, tiles);
+            let mut s = Surface::new();
+            s.paint_static(&mut writes);
+            apply_to(&mut background, &writes, tiles);
+
+            page_fill(&mut scene, &mut writes, tiles);
             Surface::paint_blank(&mut writes);
             apply_to(&mut scene, &writes, tiles);
 
-            let mut s = Surface::new();
-            s.paint_static(&mut writes);
-            apply_to(&mut surface, &writes, tiles);
+            page_fill(&mut foreground, &mut writes, tiles);
+            s.paint_icons(&mut writes);
+            apply_to(&mut foreground, &writes, tiles);
 
-            Self { surface, scene }
+            Self {
+                background,
+                scene,
+                foreground,
+            }
         }
 
-        /// Apply a batch of writes to the surface's own map (the chrome and the title band).
+        /// Apply a batch of writes to the foreground map (the glyphs, icons and bar).
         pub fn apply(&mut self, writes: &Writes, tiles: &Tilesets) {
-            apply_to(&mut self.surface, writes, tiles);
+            apply_to(&mut self.foreground, writes, tiles);
         }
 
-        /// Show both backgrounds into one frame and commit it.
+        /// Show the three backgrounds into one frame and commit it.
+        ///
+        /// The show order fixes the BG numbers: background BG0, scene BG1, foreground BG2 — the
+        /// allocation §5.1's layer table names, so the comment above and the commit agree.
+        ///
+        /// **The commit is not element-addressed.** The write plan is, but agb has no partial-map
+        /// commit: `show()` includes a background's map only when it is dirty, and a dirty map is
+        /// copied whole (2,048 B). A clean background costs no map copy, so a clock tick pays one
+        /// foreground screenblock and a still frame pays none; OAM's own commit still runs on every
+        /// `frame.commit()` (it copies the object count and clears the unused entries), a small
+        /// fixed cost even with no objects. At 2a's cadence this is bounded; AP-3b prices it.
+        /// Nothing here writes VRAM cell by cell.
         pub fn commit(&mut self, gfx: &mut Graphics<'_>) {
             let mut frame = gfx.frame();
+            self.background.show(&mut frame);
             self.scene.show(&mut frame);
-            self.surface.show(&mut frame);
+            self.foreground.show(&mut frame);
             frame.commit();
+        }
+    }
+
+    /// Write the transparent page fill over every visible cell of `bg`, unless the hardware
+    /// diagnostic feature `no-page-fill` deliberately omits it.
+    ///
+    /// The default (fill present) is the robust build: every visible cell points at a tile this ROM
+    /// uploaded, so a Quick-Boot loader that leaves VRAM uninitialised cannot show through agb's
+    /// reserved blank tile. The `no-page-fill` build is the A/B half of `make album-diff-rom`.
+    fn page_fill(bg: &mut RegularBackground, writes: &mut Writes, tiles: &Tilesets) {
+        #[cfg(not(feature = "no-page-fill"))]
+        {
+            Surface::paint_page(writes);
+            apply_to(bg, writes, tiles);
+        }
+        #[cfg(feature = "no-page-fill")]
+        {
+            let _ = (bg, writes, tiles);
         }
     }
 
