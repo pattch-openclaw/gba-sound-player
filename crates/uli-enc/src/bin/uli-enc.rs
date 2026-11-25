@@ -4,10 +4,16 @@
 //! acceptance harness drives this binary and an external one with identical arguments, so
 //! `--budget`, `--cap` and `--kappa` cannot be renamed freely. The rest are this encoder's
 //! own knobs — `--g` for a fixed step, `--rd` for the search, `--train` for the two-pass
-//! tables, `--stride`/`--fine` for the candidate grid, `--ms` to pin the stereo domain
-//! for a fixed-step comparison, and `--musearch 0|1` to control the cycle-aware re-code
-//! (S6; on by default, because the cap is a playback constraint and meeting it is the
-//! shipping behaviour — `0` is the A/B arm).
+//! tables, `--ms` to pin the stereo domain for a fixed-step comparison, and `--musearch 0|1`
+//! to control the cycle-aware re-code (S6; on by default, because the cap is a playback
+//! constraint and meeting it is the shipping behaviour — `0` is the A/B arm).
+//!
+//! **The candidate grid has no flag (S8-0).** `--stride` and `--fine` were this encoder's
+//! own invention and are deleted rather than defaulted off: the acceptance target is the
+//! reference's flag surface, and on that surface the search's shape is not a setting. Its
+//! replacement is one contiguous sweep of the policy window, whose window is S8-7's work to
+//! reproduce. A caller that still passes either flag now gets `unknown argument` instead of
+//! a silently different grid.
 //!
 //! **Two input shapes, one boundary.** `--album`/`--tracks` *is* the boundary E-R2 fixes;
 //! `--wav` is the convenience layer on top of it (S5), and `--emit-pcm DIR` writes back the
@@ -34,8 +40,7 @@ use uli_lite::format::{M, NCODED, RATE};
 
 const USAGE: &str = "usage: uli-enc {--album F --tracks TSV | --wav F [--wav F ...]} --out U \
                      [--budget BYTES] [--cap PCT] [--threads N] [--g N] [--rd] [--no-train] \
-                     [--kappa X] [--stride N] [--fine N] [--ms] [--musearch 0|1] \
-                     [--emit-pcm DIR]";
+                     [--kappa X] [--ms] [--musearch 0|1] [--emit-pcm DIR]";
 
 fn main() -> ExitCode {
     match run() {
@@ -64,8 +69,6 @@ fn run() -> Result<(), ExitCode> {
     // Training is the shipped path (S4) and `--no-train` is the A/B arm, as before.
     let mut train = true;
     let mut kappa = uli_enc::DEFAULT_KAPPA;
-    let mut stride = 8i32;
-    let mut fine_width = 4i32;
     // `--ms` forces M/S; absent, the encoder chooses per frame.
     let mut ms: Option<bool> = None;
     // The cycle-aware re-code is the shipped default (S6): the cap is a playback constraint,
@@ -87,8 +90,6 @@ fn run() -> Result<(), ExitCode> {
             "--rd" => rd = true,
             "--no-train" => train = false,
             "--kappa" => kappa = parse(&mut it, "--kappa")?,
-            "--stride" => stride = parse(&mut it, "--stride")?,
-            "--fine" => fine_width = parse(&mut it, "--fine")?,
             "--musearch" => {
                 let v: u32 = parse(&mut it, "--musearch")?;
                 musearch = match v {
@@ -146,8 +147,6 @@ fn run() -> Result<(), ExitCode> {
         g,
         rd,
         kappa,
-        stride,
-        fine_width,
         train,
         ms,
         musearch,

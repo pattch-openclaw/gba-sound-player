@@ -103,12 +103,6 @@ pub struct Args {
     /// The search's Lagrangian distortion-to-bits scale (`--kappa`): the price of one bit
     /// in squared-error units, before `λ` scales it by the step.
     pub kappa: f64,
-    /// Spacing of the coarse sweep across `GMIN..=GMAX`, in step indices.
-    pub stride: i32,
-    /// Half-width of the fine sweep around each frame's coarse optimum, in steps. `0`
-    /// leaves the coarse grid alone; ~4 buys one-step resolution for a few extra
-    /// candidates rather than `stride` times as many.
-    pub fine_width: i32,
     /// Train the code tables on the album before coding it (S4). Two passes: code once with
     /// the built-in tables to measure the album's own statistics, rebuild the lengths and
     /// reconstruction offsets from those counts, then search again with the trained set.
@@ -193,7 +187,12 @@ pub struct Report {
 }
 
 /// How many times the search may re-try the bit target before refusing.
-const RETRY_ATTEMPTS: usize = 10;
+///
+/// Six, which is the reference's own count (`uli_enc.c:405`). It was ten: an invented
+/// number, and one of S8's divergences (inventory row 11) rather than a safety margin —
+/// every retry re-allocates on the same curves, so the sixth attempt and the tenth differ
+/// only in how long a refusal takes to arrive.
+const RETRY_ATTEMPTS: usize = 6;
 
 /// One track's measured SNR, in the two output profiles the DMA stage writes (pcm16 and
 /// int8).
@@ -280,8 +279,6 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         g,
         rd,
         kappa,
-        stride,
-        fine_width,
         train,
         ms,
         musearch,
@@ -291,18 +288,8 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
     // through it and quietly bypass the bindings above. That is what the first
     // version of this guard missed: `args.rd` still resolved, so the exhaustive
     // pattern proved nothing.
-    let (budget, cap_pct, g, rd, kappa, stride, fine_width, train, ms, musearch, threads) = (
-        *budget,
-        *cap_pct,
-        *g,
-        *rd,
-        *kappa,
-        *stride,
-        *fine_width,
-        *train,
-        *ms,
-        *musearch,
-        *threads,
+    let (budget, cap_pct, g, rd, kappa, train, ms, musearch, threads) = (
+        *budget, *cap_pct, *g, *rd, *kappa, *train, *ms, *musearch, *threads,
     );
     // S5's two input shapes meet here, and only here: below this point an album is
     // a `Pcm` and (when it has content) a `Samples`, whichever door it came in by.
@@ -390,21 +377,16 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             let params = rd::SearchParams {
                 tables: tbl,
                 n_frames: nf,
-                stride,
-                fine_width,
                 kappa,
                 cap,
                 musearch,
                 force_ms: ms,
                 threads,
             };
-            let coarse = Curves::compute(s, pcm.n_samples as usize, &params)?;
-            let (lam_coarse, _) = coarse.allocate(&w, sizing.target_bits as f64, cap)?;
-            let mut curves = if fine_width > 0 {
-                coarse.refine(s, pcm.n_samples as usize, &params, &w, lam_coarse)?
-            } else {
-                coarse.clone()
-            };
+            // One curve set, measured once. The retry loop below re-allocates on these
+            // same curves, as the reference does (inventory row 11): re-measuring would
+            // move the curves underneath a target that is only being squeezed.
+            let curves = Curves::compute(s, pcm.n_samples as usize, &params)?;
             let mut target = sizing.target_bits as f64;
             for attempt in 0..RETRY_ATTEMPTS {
                 let (lambda, picks) = curves.allocate(&w, target, cap)?;
@@ -428,10 +410,6 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
                             // The album cannot be coded that cheaply; say so with the
                             // numbers rather than looping into a degenerate target.
                             return Err(Error::Refusal(r));
-                        }
-                        if fine_width > 0 {
-                            let (lam2, _) = coarse.allocate(&w, target, cap)?;
-                            curves = coarse.refine(s, pcm.n_samples as usize, &params, &w, lam2)?;
                         }
                     }
                     Err(e) => return Err(e),
