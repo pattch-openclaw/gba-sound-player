@@ -348,11 +348,12 @@ It is never linked into the GBA image. The source-prep path (source decoding,
 resampling, track assembly) remains external Python tooling for now, which is acceptable
 under the rule below. **What the Rust encoder does not yet do is match the oracle's bytes** —
 that is S8, in progress in [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md)
-§S8 (S8-0, S8-1, S8-3, S8-4 and S8-5 item 4 landed; §S8's sub-step table is the status of
-record). And one thing S8 found that is not about this encoder at all: **the oracle is a
-binary, not a specification** — its build fuses multiply-adds on the search's decision path,
-so the oracle of record is a contraction-free rebuild — **`sha256 1991ee6c…`, zero fused
-sites** — whose identity `make uli-oracle-check` checks (§Decision log, 2026-11-25).
+§S8 (S8-0, S8-1, **S8-2**, S8-3, S8-4, S8-4b and S8-5 landed; §S8's sub-step table is the
+status of record, and what remains there is the plan's reproduction: S8-6 and S8-7). And one
+thing S8 found that is not about this encoder at all: **the oracle is a binary, not a
+specification** — its build fuses multiply-adds on the search's decision path, so the oracle
+of record is a contraction-free rebuild — **`sha256 1991ee6c…`, zero fused sites** — whose
+identity `make uli-oracle-check` checks (§Decision log, 2026-11-25).
 
 **Target.** Reimplement any C-language tooling or source material in Rust and
 remove the dependency on `gba-audio` and its C sources. That means, at minimum:
@@ -394,10 +395,13 @@ cell, and it is unattributed (the measured table is below, and in
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) §S7). **S8 is in
 progress**, scoped to byte-exactness on the reference's `--dacw 0` arm: S8-0 (the flag surface
 equals the reference's — `--stride`/`--fine` deleted, not defaulted off), S8-1 (the two-sided
-frozen probe), S8-3 (the plan/table diff), S8-4 (the `fast` cell, 2.4 s against our 12.2 s)
-and S8-5 item 4 (the cycle model) have landed; the 16-row divergence inventory, the sub-step
-table with its `needs` and the four instruments are in §S8. The hand-written C encoder is now
-the **oracle and the asset producer**, not the only encoder in existence.
+frozen probe), **S8-2 (P2: `make uli-dump-plan`, the reference's own both-pass plan and the
+counts the trainer consumed, gated against the plan its blob declares)**, S8-3 (the plan/table
+diff), S8-4 (the `fast` cell, 2.4 s against our 12.2 s), S8-4b (the contraction-free oracle of
+record) and S8-5 (the frozen coder: identical on 24 of 24) have landed; the 18-row divergence
+inventory, the sub-step table with its `needs` and the four instruments are in §S8. The
+hand-written C encoder is now the **oracle and the asset producer**, not the only encoder in
+existence.
 Requirements, slices and gates:
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) -> "The
 encoder — the last missing piece".
@@ -848,8 +852,9 @@ entry is kept for the decision and its reasoning, not for its numbers.**
   "equal-cost tie" at frame 1 `g=100 ms=1` was the unpriced terminator, not a tie rule. The
   suite is 97 tests; the clean `band_rdo` golden (`fixtures/band_rdo_clean.txt`,
   `make uli-band-rdo-fixture-clean`) is the fixture that makes a *bitwise* `D` claim possible,
-  and the committed fused one stays as a pin at 2 ULP. What remains in S8 is the plan, not the
-  coder: S8-2 (P2), S8-6 (the trainer) and S8-7 (the search).
+  and the committed fused one stays as a pin at 2 ULP. What remained in S8 after that entry was
+  the plan, not the coder — S8-2 (P2, the `--dump-plan` instrument, **landed 2026-11-25**), S8-6
+  (the trainer) and S8-7 (the search).
 
 - **2026-11-25 — the oracle is a binary, not a specification: byte-exactness is pinned to a
   build, and the prerequisites before the search are landed.** Three rulings, all from

@@ -6,7 +6,7 @@
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
         uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-band-rdo-fixture-clean \
-        uli-probe uli-plan-diff uli-frame-diff \
+        uli-probe uli-plan-diff uli-frame-diff uli-dump-plan \
         uli-rd-ab uli-accept uli-oracle-check \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
@@ -822,6 +822,25 @@ uli-frame-diff: toolchain-check
 	  $(CARGO) build --release --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE) --bins
 	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_frame_diff.py \
 	  --ours $(dir $(ULI_ENC_BIN))frame-dump $(ULI_FRAME_DIFF_ARGS)
+
+# S8-2's P2: a patched local build of the reference with `--dump-plan`, which writes the
+# per-frame plan the reference *chose* for both passes (the pass-1 plan is the trainer's
+# input and is not in the blob), plus the per-class counts `tables_from_stats` consumed.
+# The patch is generated into a temp dir at run time, so no C enters this tree; the gate
+# is that the dumped shipped plan equals the plan recovered from that run's own blob.
+# The default cell is S8-4's generated `fast` cell (no corpus); pass
+# ULI_DUMP_PLAN_ARGS="--album A --tracks T --out B --budget N --cap P --threads N" for a
+# measurement. Deliberately NOT on any gate's path: it builds the off-tree reference.
+ULI_DUMP_PLAN_ARGS ?=
+ULI_PLAN_DUMP ?= crates/uli-lite/target/$(HOST_TRIPLE)/release/examples/plan_dump
+uli-dump-plan: toolchain-check
+	@test -f $(GBA_AUDIO)/encoder/uli_enc.c || \
+	  { echo "uli-dump-plan: no reference encoder source at $(GBA_AUDIO)/encoder (set GBA_AUDIO=)"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) build --release --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE) --example plan_dump
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_dump_plan.py \
+	  --plan-dump $(abspath $(ULI_PLAN_DUMP)) $(ULI_DUMP_PLAN_ARGS)
 
 # S8-3's plan/table diff: between two blobs, *which* table field and *which* frame's step
 # differ — the question S7 can only answer at region granularity. Needs no reference build
@@ -2301,6 +2320,8 @@ help:
 	@echo "      uli-rd-ab            S3 gate: ours vs the reference, same PCM and budgets"
 	@echo "      uli-accept           S7 matrix: four cells + a --dacw 1 row; MATCH, or DIFF"
 	@echo "                           localised to a container region (needs the off-tree oracle)"
+	@echo "      uli-dump-plan        S8-2: the reference's own pass-1/pass-2 plan and counts;"
+	@echo "                           the dumped shipped plan must equal the plan decoded from its blob"
 	@echo "      uli-overlay-test     product path vs the portable reference, both builds, + premise"
 	@echo "      uli-fixture          regenerate the committed expected-vector file"
 	@echo "      uli-bench            build + run + read PASS: 129-frame cycle/witness image"

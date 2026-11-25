@@ -189,6 +189,13 @@ It prints the album line and the sizing line
 nonzero, citing needed and allowed bytes, if the album does not fit the budget —
 before writing `--out`.
 
+A third diagnostic is the reference's own plan, not ours: `make uli-dump-plan` builds a patched
+copy of the oracle's driver off-tree (in a temp directory, no C in this repository) and writes
+its **pass-1** plan, every **pass-2** attempt and the per-class counts `tables_from_stats`
+consumed. Its gate is that the dumped shipped plan equals the plan decoded from that run's own
+blob, so the instrument is checked against the artefact it explains. It is S8-2's instrument
+and the input S8-6 needs — `PLAN-OF-RECORD.md` → S8-2 — and it does not change this crate.
+
 ## Test
 
 ```sh

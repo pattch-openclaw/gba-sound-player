@@ -3255,6 +3255,46 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
+- **2026-11-25 (latest) — S8-2: the reference's own plan becomes readable, and its gate is the
+  plan its own blob declares.** P2 exists because the trainer's real input — the pass-1 plan —
+  is not in the artefact: a blob carries the emitted plan and the table set trained on the
+  *previous* pass. `scripts/uli_dump_plan.py` (`make uli-dump-plan`) mirrors the off-tree
+  reference's encoder tree into a temp directory, patches `uli_enc.c` with a `--dump-plan`
+  flag, builds it with the oracle of record's float flags (`-ffp-contract=off
+  -march=armv8-a`), and writes the pass-1 plan before `retrain` sees it, every pass-2 attempt
+  before it is encoded and sized (the last one is the shipped plan), and every `EncStats` set
+  `tables_from_stats` consumed — the four `train-itN` rounds and the `retrain` whose counts
+  produce the blob's table region. Per frame: `g`, `ms`, `mu`, `bits`, `D`, cycles; counts and
+  distortions as hex `f64`, so a comparison is bitwise. No C enters the repository and nothing
+  here builds C; the patch asserts each anchor occurs exactly once and refuses if the
+  reference moved, rather than dumping the wrong site.
+
+  **The blob half** is `crates/uli-lite/examples/plan_dump.rs` — a plain decode of one blob
+  (the plan is a g delta and a flag bit, so it cannot be read off the container), printing the
+  header, the seek entries and one `frame F g G ms M ...` line per frame.
+
+  **Gate, measured on this host** — the reference source was a local clone of the public
+  `gba-audio` at `51f6e77…`, whose `Makefile` rebuild with the oracle flags reproduces `sha256
+  1991ee6c…`, so the arithmetic is the oracle of record's; the instrument itself is that
+  source *plus* the dump patch, and the gate compares its dump against the blob that same
+  patched build wrote. On S8-4's generated `fast` cell (`--budget 20000 --cap 74 --threads 4
+  --dacw 0 --musearch 1`, shipped attempt 1 after attempt 0 missed the size): **g and ms
+  identical on 257 of 257 frames**, `est_max_cycles` **193,984** and `est_mean_cycles`
+  **165,214** equal to the blob's, both seek entries' `g_prev` equal, 4 train rounds of 33
+  frames and a retrain of 129. On the generated `tiny` fixture (`--budget 300000 --threads 1`):
+  **129 of 129** frames, header **193,977 / 181,822**, one seek entry. The script also asserts
+  the sampling (`ceil(n/8)` and `ceil(n/2)`), so a missing section fails instead of reading as
+  a short file, and after a green it mutates copies of the dump — one plan step, one header
+  cycle field and one seek entry, each moved by one — and requires all three to be refused, so
+  the gate cannot pass by having stopped comparing. The cell runs in seconds, which is why P2
+  can be the gate S8-6 needs rather than a matrix.
+
+  **What it does *not* claim.** That the dumped plan is *right* — that is S8-6/S8-7's
+  question. The blob carries no per-frame `bits` or `D`, so those dump columns are not compared
+  here; they are the differential's inputs. And the gate says nothing about the oracle binary
+  itself: `make uli-oracle-check` remains the instrument for that (row 15), and the two are
+  deliberately separate.
+
 - **2026-11-25 (last) — S8-5 items 1-3: the frozen coder is the reference's, bit for bit.**
   The step the whole inventory was aimed at, and it closed in three changes rather than the
   eighteen the inventory listed.

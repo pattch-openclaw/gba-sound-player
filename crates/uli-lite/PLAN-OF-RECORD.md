@@ -40,19 +40,24 @@ mGBA, WAITCNT 4/2, 262,144-cycle period, no UI. Both corpora pinned
   no cell is byte-identical. The cause is **attributed at first order**: the plan differs
   (S8-3 finds it at frame 0 of `biomaster`), so the counts differ, so the tables are
   downstream; at a frozen plan the coder reproduces the reference's bits on 24 of 24 codings.
-  **Landed in S8 so far:** S8-1 (the two-sided frozen probe), S8-3 (the plan/table diff),
-  S8-5 item 4 (the cycle model), **S8-0 (the flag surface: `--stride`/`--fine` and the refine
-  stage deleted, ties-to-even, 6 retries)**, **S8-4 (the `fast` cell:
-  `make uli-accept ULI_ACCEPT_ONLY=fast`, 2.4 s against our 12.2 s)** and **S8-4b (the oracle
-  of record: rebuilt `-ffp-contract=off -march=armv8-a`, `sha256 1991ee6c…`, zero fused
-  multiply-adds, with `scripts/uli_probe.py` moved to the same flags)**, and **S8-5 (the
-  coder: `D` derived from the incurred `J`, the terminator charged, the `allz` guard in
-  place, every term added in the reference's order)**. The frozen differential is now
-  **identical on 24 of 24 codings** — bits, stream, cycles, counters and distortion — where it
-  began with 76 ULP of `D`, one divergent stream and one divergent cycle count. Row 18 came
-  with it (`fixtures/band_rdo_clean.txt`, bitwise on all 2,400 cases). **What is left in S8 is
-  the plan**, not the coder: S8-2, S8-6 and S8-7. §S8's sub-step table is the single answer to
-  "what is next". The SNR licence test S7 left
+  **Landed in S8 so far:** S8-1 (the two-sided frozen probe), **S8-2 (P2: `make
+  uli-dump-plan`, the reference's own pass-1/pass-2 plan and the per-class counts
+  `tables_from_stats` consumed; its gate is the dumped shipped plan against the plan decoded
+  from that run's own blob — 257 of 257 frames, both header cycle fields and every seek entry
+  on the `fast` cell, and 129 of 129 on the generated `tiny` fixture)**, S8-3 (the plan/table
+  diff), **S8-0 (the flag surface: `--stride`/`--fine` and the refine stage deleted,
+  ties-to-even, 6 retries)**, **S8-4 (the `fast` cell: `make uli-accept
+  ULI_ACCEPT_ONLY=fast`, 2.4 s against our 12.2 s)** and **S8-4b (the oracle of record:
+  rebuilt `-ffp-contract=off -march=armv8-a`, `sha256 1991ee6c…`, zero fused multiply-adds,
+  with `scripts/uli_probe.py` moved to the same flags)**, and **S8-5 (the coder: `D` derived
+  from the incurred `J`, the terminator charged, the `allz` guard in place, every term added
+  in the reference's order)**. The frozen differential is now **identical on 24 of 24
+  codings** — bits, stream, cycles, counters and distortion — where it began with 76 ULP of
+  `D`, one divergent stream and one divergent cycle count. Row 18 came with it
+  (`fixtures/band_rdo_clean.txt`, bitwise on all 2,400 cases). **What is left in S8 is the
+  plan's reproduction, not the coder or the instrument: S8-6 (the trainer, fed a matching
+  pass-1 plan) and S8-7 (the search).** §S8's sub-step table is the single answer to "what is
+  next". The SNR licence test S7 left
   open moves to S9, so that S8 has exactly one target. See "S7" for the measured table.
 - **The encoder: S6 (the decoder-cycle price) is done, and it was the whole of the high-rate
   gap — but only where the cap binds hard.** An over-cap candidate is re-coded under
@@ -1177,7 +1182,7 @@ read-side, so this does not reopen the paragraph above.
 | **S5** | Album assembly (WAV front end, gapless join, tags verbatim), `--budget`/`--cap` on real sizes, frame-parallel search | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes (each seeked to its own preroll); hashes pinned; too small refuses **before the first frame**, citing both numbers; a 32,768 Hz WAV reaches the same blob its pre-resampled PCM does, and a resampled WAV is quoted by SNR; the CLI prints the reference's columns | **done** — see "S5" below for the numbers and the defaults-restored failure |
 | **S6** | `mu` (decoder-cycle-aware) search: re-code an over-cap frame by dropping its cheapest coefficients instead of refusing the candidate | E-R8 **discharged**; E-R7 **contributed to, not discharged** — its criterion is codec-only and unmeasured, and S7 accepts it | a knob that demonstrably trades SNR for decode cycles, measured on the bench — and, measured 2026-11-20, it closes the last high-rate gap: at `--budget 400000 --cap 74` the equivalent mechanism is worth **1.48 dB** to the oracle, against a 1.15 dB gap | **done** — `--musearch 1` by default; worth **1.44 dB** here (39.57 → 41.01 dB) and the oracle's 41.02 is 0.01 dB above, cap 74.0% max on both arms. See "S6" below |
 | **S7** | **The acceptance matrix, as a buildable target** | E-R2, E-R5, E-R7 (and E-R1's oracle posture) | the four cells below run in CI-shaped form and compare SHA-256s against the reference's blobs, including the two header cycle fields | **done** — `make uli-accept` runs the four cells and the `--dacw 1` row; every cell is a **DIFF**, whose first content difference is inside the **trained tables** in every cell, and which is **unattributed** (see "S7" below) |
-| **S8** | **Byte-exactness on the reference's `--dacw 0` arm**: attribute the S7 DIFF with instruments rather than bytes (the pass-1 plan is not in the blob), then close every named divergence until the matrix matches — the SNR arm is **withdrawn from S8** and becomes S9 | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R2 (the boundary is PCM), E-R7 (moved to S9 — see "S8 — the plan") | every matrix cell byte-identical at `--dacw 0`, checked by `make uli-accept` with the oracle's sha256 recorded, `make uli-oracle-check ULI_ORACLE_EXPECT=clean` green, and every pin re-recorded | **in progress** — S8-1, S8-3 and (2026-11-25) **S8-0**, **S8-4**, **S8-4b** and **S8-5** are landed; `make uli-frame-diff` is identical on 24 of 24, so **what is left is the plan: S8-2, S8-6, S8-7**. The sub-step table at the head of "S8 — the plan" carries each row's `needs`, its status and what it unblocks, so no prerequisite is prose elsewhere |
+| **S8** | **Byte-exactness on the reference's `--dacw 0` arm**: attribute the S7 DIFF with instruments rather than bytes (the pass-1 plan is not in the blob), then close every named divergence until the matrix matches — the SNR arm is **withdrawn from S8** and becomes S9 | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R2 (the boundary is PCM), E-R7 (moved to S9 — see "S8 — the plan") | every matrix cell byte-identical at `--dacw 0`, checked by `make uli-accept` with the oracle's sha256 recorded, `make uli-oracle-check ULI_ORACLE_EXPECT=clean` green, and every pin re-recorded | **in progress** — S8-1, S8-3 and (2026-11-25) **S8-0**, **S8-2**, **S8-4**, **S8-4b** and **S8-5** are landed; `make uli-frame-diff` is identical on 24 of 24 and `make uli-dump-plan` reproduces the blob's plan from the reference's own dump, so **what is left is the plan's reproduction: S8-6, S8-7**. The sub-step table at the head of "S8 — the plan" carries each row's `needs`, its status and what it unblocks, so no prerequisite is prose elsewhere |
 
 S7 is a step rather than a property of the plan because it has work in it — a host
 target that builds nothing of ours from C, calls the off-tree binary, compares hashes
@@ -1198,7 +1203,7 @@ other document.
 |---|---|---|---|---|
 | **S8-0** | prune the flag surface (delete `--stride`/`--fine` and the refine stage, `RETRY_ATTEMPTS` 6, `g_guess` ties-to-even) | — | **landed 2026-11-25** | S8-7 (rows 5, 6, 7, 11, 12) |
 | **S8-1** | P1, the frozen `frame_code` probe, both sides | — | **landed 2026-11-23** | S8-5's gate |
-| **S8-2** | P2, `--dump-plan` on a local reference build | an oracle build | **not started** | S8-6's attribution (its gate), and S8-7's diagnosis when a cell refuses |
+| **S8-2** | P2, `--dump-plan` on a local reference build | an oracle build | **landed 2026-11-25** — `make uli-dump-plan`; the dumped shipped plan is the blob's plan on 257 of 257 `fast`-cell frames (and 129 of 129 `tiny` frames), both header cycle fields included | S8-6's attribution (its gate), and S8-7's diagnosis when a cell refuses |
 | **S8-3** | P3, the in-tree plan/table diff (`make uli-plan-diff`) | — | **landed 2026-11-23** | S8-6, S8-7's progress signal |
 | **S8-4** | P4, the `fast` cell (`make uli-accept ULI_ACCEPT_ONLY=fast`) | — | **landed 2026-11-25** | the progress signal for S8-5…S8-7 |
 | **S8-4b** | the oracle of record: rebuilt contraction-free, its sha256 and fused-multiply map recorded (`make uli-oracle-check`) | — | **landed 2026-11-25** — sha256 `1991ee6c…`, **zero** fused sites | S8-5 items 1–3 arithmetic parity, and the S8 gate's MATCH claim |
@@ -1587,8 +1592,40 @@ implementation of arithmetic that must mean one thing, and a drift in it would b
 magnitudes are reported at the level where they are defined (band-rdo mode), and any
 magnitude difference shows up in the stream.
 
-**S8-2 — P2, `--dump-plan`.** As described above, wired as `make uli-dump-plan` over a local
-reference build. *Gate:* dumped shipped plan == plan recovered from that run's blob.
+**S8-2 — P2, `--dump-plan` — landed 2026-11-25.** `scripts/uli_dump_plan.py` +
+`make uli-dump-plan`: a copy of the reference's own `uli_enc.c`, patched in a temp directory at
+run time (no C in the repository, the `uli_probe.py` posture), built with the oracle of
+record's float flags, and given `--dump-plan FILE`. It writes the **pass-1** plan before
+`retrain` sees it, every **pass-2** attempt before it is encoded and sized (so the last one is
+the shipped plan), and every `EncStats` set `tables_from_stats` consumed — the four
+`train-itN` rounds and the `retrain` whose counts produce the blob's table region. Per frame
+it records `g`, `ms`, `mu`, `bits`, `D` and the cycle estimate; counts and distortions are hex
+`f64` so a comparison is bitwise rather than through a printed decimal. The dump also names
+the oracle path, the compile flags and the full `argv` that produced it, because "the
+reference's plan" was never a well-formed phrase until the binary was named (S8-4b).
+
+The blob half is `crates/uli-lite/examples/plan_dump.rs`: a plain decode of one blob (the plan
+is a g delta and a flag bit, so it cannot be read off the container), printing the header, the
+seek entries and one `frame F g G ms M ...` line per frame.
+
+*Gate, measured 2026-11-25:* the dumped **shipped** plan equals the plan recovered from that
+run's own blob — `g` and `ms` on **257 of 257** `fast`-cell frames, with `est_max_cycles`
+193,984 and `est_mean_cycles` 165,214 equal to the blob's, and both seek entries' `g_prev`
+equal. Re-run on the generated `tiny` fixture (`--budget 300000 --threads 1`): **129 of 129**
+frames, header `193,977` / `181,822`, one seek entry. The instrument also asserts the sampling
+the reference uses — four `train` rounds of `ceil(n/8)` frames and one `retrain` of
+`ceil(n/2)` — so a section silently missing from the dump fails rather than being noticed
+later as a short file. After a green it **proves the comparison bites**: copies with one plan
+step, one header cycle field and one seek entry each moved by one must all be refused, so a
+gate that had stopped comparing cannot report OK (the same self-check habit `uli_probe.py`
+uses). The patch asserts every anchor occurs exactly once and refuses otherwise: if the
+reference moves, the dump would describe the wrong site, and the instrument is not allowed to
+guess.
+
+*What the gate is and is not.* It proves the dump is the artefact's plan; it says nothing about
+whether the plan is right, which is S8-6's and S8-7's question. It also does not compare a
+per-frame `bits`/`D` against the blob, because the blob carries neither — those columns are
+for the trainer/search differential, not for this gate.
 
 **S8-3 — P3, in-tree instrumentation — landed 2026-11-23.** `FrameInfo` now carries the
 frame's declared `g` (`crates/uli-lite/src/frame.rs`; `ms` was already surfaced as
