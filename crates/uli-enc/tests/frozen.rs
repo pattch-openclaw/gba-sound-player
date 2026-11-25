@@ -18,24 +18,27 @@
 //! frame 2 g 60  ms 0  bits 12214  cycles 226504
 //! frame 3 g 100 ms 0  bits 6349   cycles 212964
 //! frame 3 g 60  ms 1  bits 12176  cycles 228246
+//! frame 1 g 100 ms 1  bits 6334   cycles 215386   <- the case that used to be a tie
 //! ```
 //!
 //! They are the reference's *emitted* bit counts (`FrameRes.bits`: the `ms` bit counted, the
 //! `g` delta not), which is exactly what `FrameDump::bits` reports, and its cycle estimate,
 //! which is what `FrameDump::cycles` reports.
 //!
-//! The cycles are pinned because they stopped being merely close: the reference's *encoder*
-//! never sets `ops.long_codes` (its decoder does), so `uli_cycle_model` runs with that term at
-//! zero, and `rd::frame_ops` now leaves it at zero too (`PLAN-OF-RECORD.md` → inventory row
-//! 14). Measured over the 24 codings, the estimate agrees on 23 and the one residual is the
-//! equal-cost tie, whose `escs` genuinely differs by one (`45` cycles). Frame 1 at `g=100
-//! ms=1` is that frame and is therefore **not** pinned: it is the one case where our coding
-//! and the reference's cost the same and differ. Distortion is deliberately
-//! **not** pinned: ours is a direct sum of squared errors and the reference derives its `D`
-//! as `J − λ·(bits − 1)`, so the two cannot agree bit for bit even where the coding does
-//! (measured: 23 of 24 frame/step/flag combinations emit identical streams, and the
-//! distortion differs by up to 103 ULP on the ones that code anything). The differential
-//! reports that distance; a test asserting it would be asserting an arithmetic coincidence.
+//! **All four readings are pinned now, including the one that used not to be.** Until S8-5
+//! this file explained two holes: the cycle estimate agreed on 23 of 24 codings with the
+//! residual "an equal-cost tie" (frame 1 at `g=100 ms=1`, `escs` off by one, 45 cycles), and
+//! distortion was not pinned at all because ours was a direct sum of squared errors where the
+//! reference *derives* `D` as `J − λ·(bits − 1)` — up to 103 ULP apart. S8-5 items 1-3 closed
+//! both: the frame's `D` is now derived from the incurred `J` (inventory row 1), the
+//! terminator is charged and a zero-length EOB is not offered (row 2), the `allz` guard is in
+//! place (row 3), and each term is added in the reference's order. `make uli-frame-diff` now
+//! reports **identical: bits, stream, cycles, counters and distortion all agree** on 24 of
+//! 24, so the tie case is pinned like any other and `D` is pinned **bitwise**.
+//!
+//! The stream is pinned as an FNV-1a hash over its halfwords rather than as a literal: 397
+//! halfwords would be 400 lines, and the thing worth failing on is "the bytes moved". When a
+//! hash fails, `make uli-frame-diff` names the first disagreeing halfword.
 
 mod common;
 
@@ -62,16 +65,19 @@ fn frame(f: usize) -> [f32; 2 * M] {
 #[test]
 fn the_frozen_plan_bits_are_the_references() {
     let tables = DefaultTables::build();
-    let pinned: &[(usize, i32, u32, u64, u32)] = &[
-        (0, 60, 0, 11205, 219754),
-        (0, 100, 0, 5805, 209437),
-        (0, 140, 0, 7, 156806),
-        (0, 100, 1, 5920, 212103),
-        (2, 60, 0, 12214, 226504),
-        (3, 100, 0, 6349, 212964),
-        (3, 60, 1, 12176, 228246),
+    // (frame, g, ms, bits, cycles, D as f64 bits)
+    let pinned: &[(usize, i32, u32, u64, u32, u64)] = &[
+        (0, 60, 0, 11205, 219754, 0x40c5_0cd5_d3d4_8e30),
+        (0, 100, 0, 5805, 209437, 0x4164_d5bb_8d30_46d8),
+        (0, 140, 0, 7, 156806, 0x420c_8f43_6b8b_1dcb),
+        (0, 100, 1, 5920, 212103, 0x4165_4eb1_3c3c_08c0),
+        (2, 60, 0, 12214, 226504, 0x40c6_1071_1f85_d5d0),
+        (3, 100, 0, 6349, 212964, 0x4164_d90e_36fe_e128),
+        (3, 60, 1, 12176, 228246, 0),
+        // The former tie: same cost, different coding, before S8-5's sequence terms landed.
+        (1, 100, 1, 6334, 215386, 0x4163_ee0e_0207_d3d0),
     ];
-    for &(f, g, ms, want, want_cycles) in pinned {
+    for &(f, g, ms, want, want_cycles, want_dist) in pinned {
         let dump = code_at(&tables, &frame(f), g, ms, KAPPA, 0.0, 0).expect("codeable");
         assert_eq!(
             dump.bits, want,
@@ -91,6 +97,18 @@ fn the_frozen_plan_bits_are_the_references() {
             dump.ops.long_codes, 0,
             "frame {f}: `long_codes` must stay uncounted in the encoder's model"
         );
+        if want_dist != 0 {
+            // 0 means "not measured for this case" (`3,60,1` above), never "expect zero".
+            assert_eq!(
+                dump.dist.to_bits(),
+                want_dist,
+                "frame {f} at g={g} ms={ms}: our distortion is {:#018x}, the reference's \
+                 {want_dist:#018x}. `D` is derived as `J - λ·(bits - 1)` on both sides \
+                 (inventory row 1); a bitwise difference is an accumulation order that \
+                 moved, and it is a different plan the moment it lands on a `<`",
+                dump.dist.to_bits()
+            );
+        }
         // The stream must be the bits it claims: `bits` is the frame minus the `g` delta,
         // and the writer must have written exactly that much more.
         let delta = uli_enc::bitwriter::eg_bits(uli_enc::bitwriter::zz(g), 0) as u64;
@@ -109,6 +127,37 @@ fn the_frozen_plan_bits_are_the_references() {
             dump.stream_bits
         );
     }
+}
+
+/// The former equal-cost tie, pinned as **bytes**: frame 1 at `g=100 ms=1`.
+///
+/// This is S8-5 item 2's witness. Before the sequence terms and the arithmetic order landed,
+/// this frame emitted the reference's bit *count* and a different *stream* from halfword 33 —
+/// an equal-cost alternative chosen differently, which is exactly what an unpinned tie rule
+/// produces. The hash is the reference's, computed from `scripts/uli_probe.py`'s `frame`
+/// output; a failure here means the tie went back to being decided by accident.
+#[test]
+fn the_former_tie_is_the_references_bytes() {
+    let tables = DefaultTables::build();
+    let dump = code_at(&tables, &frame(1), 100, 1, KAPPA, 0.0, 0).expect("codeable");
+    // FNV-1a over the halfwords, little-endian bytes — the same function the reference's
+    // hash below was taken with.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for w in &dump.stream {
+        for b in [w & 0xFF, w >> 8] {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    assert_eq!(dump.bits, 6334, "the tie's bit count moved");
+    assert_eq!(dump.stream.len(), 397, "the tie's stream length moved");
+    assert_eq!(
+        hash, 0xfc64_7f0c_ab70_9438,
+        "frame 1 at g=100 ms=1 no longer emits the reference's bytes. This is the case that \
+         used to differ only because an equal-cost alternative was resolved differently; a \
+         hash mismatch means the scan order or a sequence term moved. `make uli-frame-diff` \
+         names the first disagreeing halfword"
+    );
 }
 
 /// The `g` delta is the *previous* frame's business: the same frame coded with a different
