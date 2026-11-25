@@ -14,6 +14,7 @@
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
         album-bake album-pack-check album-seam-test album-layout-test album-glyphs-test album-rom album-player-rom album-test \
+        album-preview album-diff-rom \
         clean clean-cache check help toolchain-check target-spec-check
 
 # ===========================================================================
@@ -213,6 +214,9 @@ ALBUM_LAYOUT_GATE_LOG := album-layout-test.log
 #   generators is a compile error, which is a claim no Python leg can make.
 ALBUM_GLYPHS_RS := $(ALBUM_CRATE_DIR)/src/glyphs.rs
 ALBUM_GLYPHS_GATE_LOG := album-glyphs-test.log
+# §9.1's `make album-preview`: the surface as pictures, without a cart (2a PR-(3)). The prefix the
+# 1x and 4x PNGs and their `.txt` grids are written under.
+ALBUM_PREVIEW := album-preview
 ALBUM_GATE_LOG := album-pack-check.log
 ALBUM_SEAM_GATE_LOG := album-seam-test.log
 # The playback ROM (PR-3a step iii): the binary cargo writes, and the fixed image
@@ -224,6 +228,11 @@ ALBUM_ROM := album-player.gba
 # does not verify decoded content, which is what takes the ~75 s of CPU out of a run a human sits in
 # front of. `*.gba` in `clean-outputs` covers this name — checked, not assumed.
 ALBUM_FAST_ROM := album-player-fast.gba
+# The hardware differential pair (§13 AP-7a's Quick-Boot question): the same unaudited player built
+# with the explicit page fill (default) and with `no-page-fill`, which leaves agb's reserved blank VRAM
+# tile in the visible map. Flash both and read which one lights up; see `album-diff-rom`.
+ALBUM_DIFF_FILL_ROM := album-player-fill.gba
+ALBUM_DIFF_NOFILL_ROM := album-player-nofill.gba
 ALBUM_ROM_RUN_LOG := album-rom-run.log
 # AP-1's gate arm (PR-3b-iii-B): the same audited bin with `input-replay`'s compiled-in key script,
 # because a headless run cannot press a key. Its own image and log, so `album-rom`'s stay untouched.
@@ -1565,6 +1574,13 @@ album-layout-test: toolchain-check album-bake
 	    || { tail -n 40 $(abspath $(ALBUM_LAYOUT_GATE_LOG)); echo "album-layout-test: the pinned-variant host leg did not pass — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
 	  v=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) | tail -1); \
 	  [ -n "$$v" ] && [ "$$v" -ge 1 ] || { echo "album-layout-test: collected '$$v' variant-agreement tests, needs >= 1 — the generated assets.rs names this leg in its own `LAYOUT_VARIANT` comment, so it may not vanish quietly"; exit 1; }
+	@cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) --test album_surface_host >> $(abspath $(ALBUM_LAYOUT_GATE_LOG)) 2>&1; \
+	  status=$$?; \
+	  [ $$status -eq 0 ] \
+	    || { tail -n 60 $(abspath $(ALBUM_LAYOUT_GATE_LOG)); echo "album-layout-test: the surface's host legs did not pass — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
+	  s=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) | tail -1); \
+	  [ -n "$$s" ] && [ "$$s" -ge 18 ] || { echo "album-layout-test: collected '$$s' surface tests, needs >= 18 — the boot frame, the redraw rule, the clock, the bar, the line cut, the tile indices, the tiles, the palettes, the two rectangles, the bar-cell conversion, the icon packing, the source-aware composite, the batch's overflow count, the page fill and the layered fall-through are the whole of what 2a draws"; exit 1; }
 	@echo "album-layout-test passed: §9.0's nine fireable 2a refusals each fired by id on a spec written"
 	@echo "  to be wrong about it, the measured face/interaction geometry reproduces from the tracked files"
 	@echo "  with every expected number labelled by its source, the declared bar grid reaches the ALBM1 header"
@@ -1572,7 +1588,14 @@ album-layout-test: toolchain-check album-bake
 	@echo "  generated modules name one variant, and none of the four retired character-count names survives"
 	@echo "  in the product or in its tests (the verdict line's measured \`text::COLUMNS = 30\` is a different"
 	@echo "  bound, and §5.5 says so). Every declared face is tracked with its licence, and src/layout.rs is"
-	@echo "  byte-identical across two runs, the comparison witnessed negatively."
+	@echo "  byte-identical across two runs, the comparison witnessed negatively. The surface's own legs read"
+	@echo "  the map writes a frame produces: the boot frame is the declared band stack with the title, the"
+	@echo "  clock, the state word and five icons in their slots; a still frame writes nothing and a track"
+	@echo "  change writes one element; the clock bumps on whole seconds and restarts on a new visit; every"
+	@echo "  bar fill position draws its own pixel count; a painted sample position converts to a bar cell;"
+	@echo "  the icon tiles pack left-pixel-low-nibble; the composite reads the tileset a write names; a"
+	@echo "  full batch reports its drops; the page fill covers every visible cell; the text layer falls"
+	@echo "  through to the band art; and no drawn line is longer than its box."
 	@echo "  See $(ALBUM_LAYOUT_GATE_LOG) for the legs and their sources."
 
 # The glyph atlas's own gate (§5.5a PR-2: its steps 2-5, and the §9.0 register rows this tool adds).
@@ -1730,6 +1753,25 @@ album-player-rom: album-bake
 	@size -A $(ALBUM_ROM_BIN) | grep -E '^(File|\.text|\.iwram|\.bss)'
 	@echo "  run: timeout -k 5 600 $(GBA_TEST_RUNNER) $(ALBUM_FAST_ROM) 2>&1 | grep '^\[album-rom\]'"
 	@echo "  this build does not verify decoded content: pcm/fifo/assets are SKIPPED, by design."
+
+# The hardware differential pair for the page-fill hypothesis (ALBUM-PLAYER.md §5.2's note; §13 AP-7a).
+# `album-player-fill.gba` is the fast player with the explicit transparent page fill over every visible
+# cell of the three backgrounds; `album-player-nofill.gba` is the same source built with
+# `no-page-fill`, which leaves agb's reserved blank VRAM tile in the visible map. On mGBA both look the
+# same (mGBA initialises VRAM to zero); on a Quick-Boot loader that does not, only the fill build is
+# guaranteed to show the intended art instead of whatever VRAM held. Flash both; the one that boots
+# tells you whether the page fill was the hardware difference. Neither image is a gate artifact.
+album-diff-rom: album-bake
+	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --bin album-play \
+	  --no-default-features --features "backend-flac arm-kernel"
+	agb-gbafix $(ALBUM_ROM_BIN) -o $(ALBUM_DIFF_FILL_ROM)
+	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --bin album-play \
+	  --no-default-features --features "backend-flac arm-kernel no-page-fill"
+	agb-gbafix $(ALBUM_ROM_BIN) -o $(ALBUM_DIFF_NOFILL_ROM)
+	@ls -l $(ALBUM_DIFF_FILL_ROM) $(ALBUM_DIFF_NOFILL_ROM)
+	@echo "  flash BOTH: $(ALBUM_DIFF_FILL_ROM) has the explicit page fill (the fix);"
+	@echo "  $(ALBUM_DIFF_NOFILL_ROM) omits it (the old reserved-blank-tile behaviour)."
+	@echo "  If only the fill image shows the surface, the loader did not initialise VRAM."
 
 # AP-1's gate (PR-3b-iii-B): the album plays **through** its tracks — two or more visits, every skip,
 # every pause, and every track-end advance — and the run's own log is the verdict.
@@ -2029,6 +2071,7 @@ clean-outputs:
 	@rm -f uli-bench*.log uli-attrib*.log
 	@rm -f album-probe*.log
 	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_LAYOUT_RS) $(ALBUM_GLYPHS_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_LAYOUT_GATE_LOG) $(ALBUM_GLYPHS_GATE_LOG) $(ALBUM_ROM_RUN_LOG) $(ALBUM_TEST_LOG)
+	@rm -f $(ALBUM_PREVIEW)-*.png $(ALBUM_PREVIEW)-*.png.txt
 	@find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} + 2>/dev/null || true
 
 # The caches: the fifteen workspaces' `target/` dirs, discovered from the tree.
@@ -2190,6 +2233,13 @@ help:
 	@echo "      album-test -> $(ALBUM_REPLAY_ROM) (AP-1's gate: the REPLAY arm run headless to the album's"
 	@echo "      end; every gated term, skip, pause and track-end advance asserted from $(ALBUM_TEST_LOG),"
 	@echo "      exit 124 being the pass path)."
+	@echo "      album-diff-rom -> $(ALBUM_DIFF_FILL_ROM) + $(ALBUM_DIFF_NOFILL_ROM) (the same player with and"
+	@echo "      without the explicit page fill; a hardware A/B for a Quick-Boot loader that leaves VRAM"
+	@echo "      uninitialised. Flash both; neither is a gate artifact),"
+	@echo "      album-preview -> $(ALBUM_PREVIEW)-1x.png + -4x.png (the surface composited on the host: band"
+	@echo "      stack, title, clock, bar, the blank region and the five authored icons, from the same Write"
+	@echo "      list the ROM's map gets. An instrument for §5.6's human witness, not a gate),"
+	@echo "      and the same again as a 30x20 character grid in the .txt beside each."
 	@echo "  Tests/format:  test (test-rom + flac-test + uli-test), test-rom, check, format"
 	@echo "  Housekeeping:  clean (outputs only; caches kept), clean-deep (+ every"
 	@echo "                 workspace's target/), clean-cache (container volumes),"
@@ -2202,3 +2252,23 @@ help:
 	@echo ""
 	@echo "  Toolchain: $(TOOLCHAIN) via $(RUSTC)"
 	@echo "  Container: $(CONTAINER)  image: $(IMAGE)  Host triple: $(HOST_TRIPLE)"
+
+# §9.1's `make album-preview LAYOUT=… TITLE=…`: one variant's surface, composited on the host at 1x
+# and 4x, as PNG plus the 30x20 character grid beside each.
+#
+# **Why it exists now, in this phase** (2a PR-(3)): §5.6 makes the legibility witness a person, and
+# the first hardware run of this phase found a bug a picture would have shown in a second — every
+# glyph lost its bottom tile row, and the map sent glyph indices to the chrome tileset, so the screen
+# held correct positions with garbage glyphs. Neither was visible in a log. This target renders the
+# same `Write` list the ROM's map gets, from the same tiles and the same palette table, so a layout
+# mistake costs a host run rather than a flashing session.
+#
+# It is an *instrument*, not a witness: §5.6's rule is judged on a real screen by a colourblind
+# reader, and AP-3's host snapshot remains the geometry leg. What it shares with the ROM is the code
+# that decides the cells, so a picture that is wrong here is wrong on hardware for the same reason.
+album-preview: album-bake
+	@cd $(GATE_NEUTRAL_CWD) && $(CARGO) run --quiet --release --manifest-path $(ALBUM_MANIFEST) \
+	  --target $(HOST_TRIPLE) --bin album-preview -- $(abspath $(ALBUM_PREVIEW))
+	@ls -l $(abspath $(ALBUM_PREVIEW))-1x.png $(abspath $(ALBUM_PREVIEW))-4x.png
+	@echo "  look: 1x is the screen as a person sees it (240x160); 4x is the same frame for judging"
+	@echo "  a glyph. The .txt beside each is the map, one character per cell. Not tracked, not gated."

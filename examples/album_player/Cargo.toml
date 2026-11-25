@@ -97,6 +97,12 @@ input-replay = []
 replay-script-a = ["input-replay"]
 replay-script-b = ["input-replay"]
 replay-script-c = ["input-replay"]
+# Hardware diagnostic, never a product image: omit the explicit transparent page fill that
+# `Painted::new` writes over every visible cell of the three backgrounds. With the fill, no visible
+# cell depends on agb's reserved blank VRAM tile; without it, a Quick-Boot loader that leaves VRAM
+# uninitialised shows whatever was there. `make album-diff-rom` builds the pair so the two can be
+# flashed side by side. Off by default; a default build always includes the fill.
+no-page-fill = []
 
 [[test]]
 name = "album_pack_host"

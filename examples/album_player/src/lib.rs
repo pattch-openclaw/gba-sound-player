@@ -13,6 +13,9 @@
 //! | [`backend`] | the only module that knows an implementor exists — `flac` (shipped) or `stub` (synthetic, codec-free) |
 //! | [`nodiv`] | `crates/gba-playback` (path dependency) — §6's no-divide arithmetic, the same implementation the probe and its host gate paint from |
 //! | [`text`] | the verdict screen — two words, the tracked OFL font, one commit (§4.1) |
+//! | [`chrome`] | §5.1's BG0: the band fills, §5.3's authored control art, §6's bar patterns |
+//! | [`surface`] | the one surface (§5.2): the band stack, element-addressed redraw, the `blank` scene |
+//! | [`preview`] | host-only: the surface's map as a 30×20 character grid and a PNG (§5.6's witness) |
 //! | [`keys`] | the input seam (§5.3): edges, autorepeat, debounce and the control map, platform-free, with a keypad source and a scripted-replay one |
 //! | [`position`] | the 32-bit session clock (§10.4, ruled) and §4.4's `paint_position` |
 //! | [`transport`] | the playback transport: §4.4's pause / resume contract and the hand-off gain's schedule |
@@ -24,6 +27,11 @@
 //! its own per-backend [`geometry`] rather than borrowing the FLAC track's — so
 //! [`meta::PRODUCT_RATE_HZ`] and [`geometry::RATE_HZ`] are one fact asserted
 //! against each other in `geometry.rs`.
+//!
+//! 2a PR-(3) adds [`chrome`] and [`surface`]: the screen the player actually draws, from the two
+//! generated modules. Both keep the crate's split — the decision half (what cells hold what tiles,
+//! and which of those changed) is platform-free and host-tested; only the `RegularBackground`s and
+//! the commit are `#[cfg(target_arch = "arm")]`, as in [`keys`] and [`text`].
 //!
 //! PR-2 landed the manifest half; PR-3 step (ii) landed this seam and its geometry, and step (iii)
 //! adds the ROM main (`src/album_play_main.rs`, `[[bin]] album-play`, `make album-rom`). PR-3b-i
@@ -78,6 +86,7 @@ pub use gba_playback::nodiv;
 
 pub mod assets;
 pub mod backend;
+pub mod chrome;
 pub mod geometry;
 pub mod keys;
 // `layout.rs` is `make album-bake`'s output, not source (§2.3): its advance tables are packed
@@ -97,5 +106,10 @@ pub mod glyphs;
 pub mod meta;
 pub mod pcm;
 pub mod position;
+// The host renderer for the surface: the picture §5.6's human witness looks at, and the one the
+// gate's assertions are about. Host-only because it allocates and the ROM never draws a preview.
+#[cfg(not(target_arch = "arm"))]
+pub mod preview;
+pub mod surface;
 pub mod text;
 pub mod transport;

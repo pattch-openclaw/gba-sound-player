@@ -1050,7 +1050,7 @@ rule that makes A14's web UI a skin rather than a rewrite.
 | BG1 | album art (§7), scene `art` | 120×120 px → 15×15 = 225 tiles ≈ 7.2 KB; a region canvas is 480–510 tiles; `bleed = true` full-screen 600 tiles ≈ 19.2 KB | the mode is picked per album at bake time from the variant's derived list, and the **tile-pool** arithmetic below is what makes full-bleed the expensive one — a paragraph later, corrected 2026-11-20, because the reason this row used to give (a character-block count) was wrong |
 | BG2 | text + progress-bar fill + list rows (scene `list`, `title_card`) | **not a constant, and not the face's glyph count either.** agb's text renderer allocates tile data *per rendered glyph* from the same pool (§5.1, R14), so this row's standing term is the glyph tiles a single frame can display — the declared boxes divided by the declared face's advance widths — plus whatever a hidden scene's map still points at. A face's *inventory* is a compile-time and ROM-size cost, not a standing tile cost (§5.5, Q19), so the number comes from the face the variant declares read at bake time, and neither 96 (the shipped development subset, `assets/fonts/README.md`) nor 64 is ever it | agb's text renderer + dynamic tiles. **The one row of this table that cannot be settled from the plan**, and the reason a per-variant `tile_budget` must be a declared field (§5.1, below) |
 | BG3 | reserved (viz bars / a second scene held resident) | ≤ 256 tiles | see the switch mechanism below: a scene held here costs **a whole map, 2,048 B** — agb allocates a full 32×32 screenblock per background whatever region is drawn into it (`SCREENBLOCK_SIZE = 0x800`, `display/tiled.rs:293`; **eight such maps exist in total**, `:299`) — plus tile residency, and buys a switch that is a **priority** write. That figure was "1,200 B/screen" until this review; both numbers were wrong, in opposite directions |
-| OBJ | cursor, sprite animation frames, "PAUSED" badge | second VRAM half | **new for this tree**: nothing shipped has drawn a sprite. AP-0 proves the *plumbing* (the OAM shadow and one object tile are allocated and counted) — **that is not the same as a product using OBJ, and Phase 2a does not** (§5.3, §11) |
+| OBJ | cursor, sprite animation frames, "PAUSED" badge, and the §5.7 chrome candidate | second VRAM half | **new for this tree**: nothing shipped has drawn a sprite. AP-0 proves the *plumbing* (the OAM shadow and one object tile are allocated and counted) — **that is not the same as a product using OBJ, and Phase 2a's product does not** (§5.3, §11). §5.7's OBJ Chrome plan is the first candidate: ~56 OAM / ~202–206 OBJ tiles (~6.3–6.6 KiB of the separate 32 KiB pool) / 1 VPAL bank; the list stays BG. AP-6 owns the viz budget; AP-3c is the presentation probe. |
 | palettes | 16 BG palettes × 15 usable colours, 16 OBJ palettes | — | allocation in §5.4 |
 
 **What the tile pools actually are (corrected 2026-11-20 at review — that paragraph's
@@ -1436,6 +1436,75 @@ Not on the table: booting into a scene 2a does not have. **If 2a's row still nam
 (b), (c), the phase ships (a) by default and the title-card flow stays untested until 2b — which
 is a decision worth making in words rather than inheriting from a phase table.**
 
+**Landed: option (c), 2a PR-(3), 2026-11-23.** The surface is `src/surface.rs` and `src/chrome.rs`.
+What the ROM draws, and nothing else: the always-shown bands from `layout::BANDS` (the clock
+`m:ss/m:ss`, the state word, the five authored control icons on the chrome row; the title line and
+§6's bar on the title band) and the scene region filled flat by `blank`. The audio path is unchanged
+— nothing is pressed before the first sample — so AP-1's term still measures what it measured.
+
+**The display is three backgrounds, not one composite.** BG0 is the chrome/title art, BG1 the scene
+region, BG2 the foreground (glyphs, control icons and the bar). The split is what lets text sit *over*
+a coloured/textured chrome rather than punching backdrop-coloured holes through it: a glyph or icon
+tile is mostly transparent, and a transparent pixel reveals the layer below. It also gives 2b's scene
+switch the separate region layer §5.2 already required. Every visible cell of all three backgrounds is
+written explicitly with the transparent `chrome::FILL_PAGE` before content, because a map cell left at
+agb's reserved blank tile index reads whatever VRAM held — mGBA initialises it to zero, while a
+Quick-Boot loader does not (agb's own entrypoint clears `.bss` for that reason and leaves VRAM alone).
+The diagnostic `no-page-fill` feature omits that fill for a hardware A/B (`make album-diff-rom`).
+
+Four things about the implementation that belong in the plan rather than in a diff:
+
+- **Text is placed one glyph per 8 px cell**, from §5.5a's static atlas (`tile_for(c, row)`), which
+  is the addressing §5.1's pool audit and §10.2's write costs already assume. That is sound only
+  while every advance in the declared face is ≤ one cell, and `surface.rs` makes that a
+  `const _: () = assert!` over **every face a declared text element names**, not just `FACES[0]` —
+  so a future face that trips it is a build failure rather than a line whose glyphs overlap.
+- **The draw path's cut is a cell cut, not an advance cut.** For a face with advances ≤ 8 px the
+  cell bound is the stricter of §5.5's two bounds, so "characters ≤ cells" is what a drawn line
+  must satisfy; `surface::line_for` implements that and the host gate pins its relationship to
+  `glyphs::elide` (the advance verdict the bake prints notes from) on the shipped face. §5.5a's
+  generalization note is where the premise lives.
+- **The bar's cell is a distinct type.** `BarCell` is derived from the painted sample position and the
+  track's §6 reciprocal; it cannot be constructed from a bare `u32` sample count, which is how the
+  first ROM filled the bar on its first frame. The foreground's transparent padding is
+  `chrome::FILL_PAGE`, so the band art below it shows through.
+- **The reference is `chrome.rs`'s authored tile table**, a `u8`-per-row bitmap block in the spirit
+  of `ui_probe.rs`'s hand-written tiles, not a font glyph and not an image file: five placeholder
+  icons (diamond, play triangle, `|<`, `>|`, a return glyph) that differ in **shape** as §5.6
+  requires. Until §5.3's `PAUSED` badge lands in 2b, **the transport state is carried by the word**
+  in `keylabels` (`PLAYING`, `PAUSED`, `BUFFER`, …) — the alternative §5.6 names in its own
+  sentence — and the icon is the *affordance*, not the state.
+
+**Two bugs the first run of that surface had, both now caught on the host — recorded because each is a
+class, not an incident (2026-11-23).** The first ROM built from it drew correct *positions* with
+garbage tile content, and the host gate passed. *(i)* `draw_text` indexed the line's characters by the
+row-major cell index instead of by the column, so tile row 0 drew the text and tile row 1 read past
+its end: every glyph lost its bottom half. *(ii)* Every write was sent to the **chrome** tileset,
+including glyph indices — and agb copies a tile's bytes out of the tileset a write names with a raw
+pointer whose bounds check lives in `TileSet::get_tile_data`, which `set_tile` never calls
+(`vram_manager.rs:962-1000`). So an atlas index into an 18-tile set read past the end of that set in
+ROM and uploaded whatever followed it, silently: no panic, no refusal, just wrong pixels. Three
+things came out of it, and the third is the one that generalises: a `Write` now carries the **tileset
+it means** (`surface::Source`) rather than leaving it to the caller, `apply_to` dispatches on it, and
+`tests/album_surface_host.rs` has a leg that walks every planned write and asserts the index exists
+**in the set it names** — because a picture cannot see this one (both tilesets look the same size in
+an image) and the device cannot report it (the path is unchecked by design). The row bug is caught by
+the same file's composite: the title's two rows are now asserted *in full*, which is what would have
+shown it.
+
+**Follow-up fixes in the same PR (review, 2026-11-24), because the same class kept appearing:**
+the progress bar was handed `position::paint_position`'s **sample** count as if it were a §6 cell, so
+it filled every column on the first frame; it is now a distinct `surface::BarCell` derived from the
+track's reciprocal, and a sample count cannot compile in its place. The icon packer wrote the left
+pixel of each pair in the **high** nibble while every other authoring function and the atlas used the
+low one; the five placeholders were pair-swapped, and the distinctness check and the ASCII composite
+could not see it because both read the packed bytes — a unit test now unpacks every icon row against
+its bitmap. The gate's composite read `w.tile` without `w.source`, so an early-punctuation glyph whose
+atlas index collides with a chrome index was printed as a fill; the composite and the preview's layer
+fall-through are source-aware. And the display is **three backgrounds** (art / scene / foreground)
+with an explicit transparent page fill over every visible cell, plus the `no-page-fill` diagnostic
+and `make album-diff-rom` for the hardware question below.
+
 **And the instrument behind that choice, so it is not made blind (re-checked 2026-11-20 — the first
 version of this paragraph invented the mechanism it described).** Boot-to-audio **is** measured and
 printed, with its decomposition: the ROM starts a timer-pair clock before it reads the manifest and
@@ -1510,6 +1579,11 @@ DMA's grace window** (§14's R1b — 104 late of 16,553 periods), and an element
 fixes that cheaply by touching only the digit cells whose glyph differs; and every cost row
 §10.2 carries is meaningless unless it names the cadence it is priced at, because a per-tile
 figure multiplied by the wrong frequency is the same class of error as the one R1b measured.
+
+**Presentation has its own cadence, and it is §5.7's.** The draw decision is element-addressed;
+while audio is playing it should be presented from VBlank (OAM DMA or a dirty screenblock), not by a
+blocking main-loop `commit`. The 2a 1 Hz event commit is the measured interim exception, not the
+model.
 
 ### 5.3 The control map (A2: "on the cartridge itself")
 
@@ -1590,15 +1664,15 @@ character.
   in AP-4's existing shape ("reproducible byte-for-byte from the source, and re-reads
   through the shipping parser"), which is the shape the ART1 probe already uses: checksum
   and sha256 recorded with the blob.
-- **Tiles now; OBJ when motion earns it** (`obj = true` stays a legal variant field).
-  For a static control row, tiles in the chrome's BG add nothing new, stay inside banks
-  1–2 (§5.4), and keep the always-shown BG the model depends on. OBJ would buy
-  overlay-anywhere, movement and per-object semi-transparency at the price of the OAM path
-  — **AP-0 proved the plumbing is there, and no product ROM in this tree has drawn a
-  sprite** — plus an interaction with the character-block arithmetic when an album also
-  wants large art (§5.1). So the source is authored once and the generator emits tiles for
-  2a; the first real use of OBJ should be the thing that moves (Phase 4's beat-driven
-  badge, §8), not a static icon row.
+- **Tiles now; OBJ when motion *or presentation latency* earns it** (`obj = true` stays a
+  legal variant field). For a static control row, tiles in the chrome's BG add nothing new,
+  stay inside banks 1–2 (§5.4), and keep the always-shown BG the model depends on. OBJ
+  would buy overlay-anywhere, movement, per-object semi-transparency and — the new reason —
+  a VBlank-presented chrome that does not block the main loop at `commit`; the presentation
+  policy and the chrome-only plan are §5.7. **AP-0 proved the plumbing is there, and no
+  product ROM in this tree has drawn a sprite**, so the first OBJ is still an audited step
+  (AP-3c/AP-6), not a free one. The full list remains a tile scene (30×8 = 240 cells > 128
+  OAM entries); the chrome is the candidate, the list is not.
 - **Judged at 1×.** §5.6's added rule applies to icons as much as to faces.
 
 ### 5.4 Palette allocation (the constraint that shapes the art)
@@ -2055,7 +2129,9 @@ tree builds, `vram_manager.rs:398`) and there is no accessor for it: the leg wil
 measurement, not L4's measurement *plus* the one field that would make it self-checking. **Not in the baseline:**
 per-element faces, 8bpp, a one-cell ellipsis, wrapping, kerning, sub-pixel placement, OBJ text, and any
 use of agb's `Layout` for a list. Each is a declared field or a later phase, and none of them is on
-2a's critical path.
+2a's critical path. **The one qualified exception is §5.7's chrome-only OBJ candidate**: it keeps
+this cell model and the list's BG path, and if AP-3c lands it the exclusion above is amended to
+"the chrome may be OBJ; the list stays cell-addressed", not to a second line-layout rule.
 
 **How far this generalizes, and the one premise that is a premise (measured 2026-11-22).** Written
 down because the obvious next question is "what if we change the font?", and the answer is split
@@ -2109,19 +2185,24 @@ moves every glyph's row count, the atlas size and the pool term at once.
 (`tilemap_px`, `glyphs.rs:431`) — one cell, always. That is the premise the *pool* arithmetic rests
 on (§5.1's "upper bound = one allocation per character cell" times the tile rows a line box spans),
 so a glyph two cells wide would not be a bigger atlas, it would be a different sum. **Ink** is
-checked against it; **advance is not.** On the tracked cut that omission is invisible: the widest
-advance is exactly 8 px (`%`), so `measure` and `tilemap_px` can never contradict each other on the
-product face. On a face with generous sidebearings they would: bumping `M` and `W` to a 10 px
-advance on a scratch copy of the same file **emits a 188-tile atlas with no complaint**, and that
-table answers `measure("MW") = 20 px` against `tilemap_px("MW") = 16 px` — the fit rule would
-approve a line the cell-addressed draw path then places 8 px per character, which is not the line
-that was measured, and the pool term (cells × rows) would be an undercount for it. Nothing catches
-that today, and it is the one place where "it happens to be true of this face" is doing the work
-of a refusal. Closing it is small and belongs to the first PR that changes the face, not to a
-refactor for its own sake: refuse an advance wider than `TILE_PX`
-(`atlas-glyph-outside-cell`, or a sibling id if the message reads better), add the matching
-`const _: () = assert!` over `SLOT` so it is a compile error in the ROM build too, and add
-the self-test leg — `album_glyphs.py:1732` currently bounds ink alone.
+checked against it; **the atlas does not check advance.** On the tracked cut that omission is
+invisible: the widest advance is exactly 8 px (`%`), so `measure` and `tilemap_px` can never
+contradict each other on the product face. On a face with generous sidebearings they would: bumping
+`M` and `W` to a 10 px advance on a scratch copy of the same file **emits a 188-tile atlas with no
+complaint**, and that table answers `measure("MW") = 20 px` against `tilemap_px("MW") = 16 px` — a
+fit verdict would approve a line the cell-addressed draw path then places 8 px per character, which
+is not the line that was measured, and the pool term (cells × rows) would be an undercount for it.
+**Where that stands after 2a PR-(3):** the draw path now refuses to *compile* such a face —
+`surface.rs` asserts `max_advance_permyriad <= TILE_PX × 10,000` for every face a declared text
+element names, because one glyph per cell is only sound while every advance fits one — so the failure is loud at the consumer. What is still
+missing is the emitter-side half, and it belongs to the first PR that changes the face rather than
+to a refactor: refuse an advance wider than `TILE_PX` in `album_glyphs.py`
+(`atlas-glyph-outside-cell`, or a sibling id if the message reads better), which also makes the
+atlas's own case table honest for such a face, and add the self-test leg —
+`album_glyphs.py:1732` bounds ink alone. A `const _: () = assert!` over `SLOT` inside the generated
+module is the third form of the same sentence and is *not* written, because the generated module
+does not know which cell model its consumer uses; the consumer's assert is the one that cannot be
+forgotten.
 
 **If the face changes, in this order.** (i) `layout_spec.toml`'s `[[face]]` entry (`:60-88`) — `file`,
 `raster`, `licence`, `parent` are the whole switch; (ii) the `pyftsubset --unicodes=U+0020-007E` cut
@@ -2188,6 +2269,168 @@ exactly 1×, and never on a host mock scaled up.** `make album-preview` (§5.0) 
 scales for exactly this reason: the 1× image is the legibility test, and the 4× image is for
 checking dither and tile alignment. The three-inventions history above is the cautionary
 precedent, and it transfers to shapes and sizes as directly as it applied to colour.
+
+### 5.7 Presentation first, and what OBJ is for *(ruled 2026-11-24)*
+
+**The rule, as a constraint rather than a preference.** While audio is playing, the main loop may not
+block on presenting the display. Audio is the first-class citizen; the visuals are not allowed to make
+the audio producer miss a period. There are exactly two legitimate `commit` sites: the boot scene
+upload (before the chain starts) and the verdict takeover (after it stops). An **event-scoped**
+main-loop commit is an *interim* exception — allowed only where §10.2's measured cadence keeps it away
+from the DMA grace, and never for a per-frame UI. The 2a surface's 1 Hz clock commit is the current
+example; AP-3c measures whether it can stay.
+
+**Why `commit` is the wrong primitive for the steady state.** agb 0.25's
+`GraphicsFrame::commit` calls `VBlank::wait_for_vblank` before it presents anything
+(`display/mod.rs:314-337`). That call has a fast path, and it is **one VBlank narrower than "not more
+than one commit per frame"**: the previous call leaves `last_waited_number` at the vblank count then
+plus one, and the fast path is that value being strictly below the count now (`interrupt.rs:417-427`),
+so **two** VBlanks must have elapsed since the last commit for this one to return without halting.
+Otherwise it executes `swi 0x05` — `VBlankIntrWait`, a BIOS **halt** until the next VBlank, not a busy
+spin (`syscall.rs:25-29`). One commit per video frame therefore halts every time, for up to
+`VIDEO_PERIOD_CYCLES` = 280,896 c; a commit every few seconds therefore never halts at all. The Timer1
+audio ISR still runs while the CPU is halted, so the audio chain is not the thing being paused; the
+**main-loop producer** is. It waits once per commit, not once per changed cell. And the wait does not
+depend on the renderer: `Object`/`OamFrame` are shown into the same frame, and `oam_frame.commit()`
+runs *inside* `GraphicsFrame::commit`, after the wait (`object/unmanaged/object.rs:48-66`). Objects
+alone do not remove it.
+
+**What that does and does not put at risk, since the answer decides 2a.** The halt stops the producer
+for up to one video period, which is 274 samples of a 560-sample feeder period — 0.49 of the period
+whose cycles are `PERIOD_CYCLES` = 573,440, the same arithmetic as §5.2's "one period = 2.04 video
+frames". It cannot delay the audio ISR (the ISR is an interrupt, and agb's display path masks no
+interrupts and takes no lock the feeder holds — checked against 0.25.0), so the exposure is the
+**ring's** slack, absorbed by the 546 ms prefill, not the `REARM_GRACE_SAMPLES` = 16-sample window —
+that window is the *vblank handler's* bound, because the handler and the feeder are two IRQs at one
+priority on a core with no nesting (§4.5). So a 2a commit at its declared cadence is not a splice
+waiting to happen, and the honest statement of the rule is two clauses rather than one:
+
+- **the steady state is the problem, not the call site.** `PASS_MARGIN_CYCLES` reserves exactly one
+  video period for the whole frame slice a pass serves — take, position read, transport tick, record
+  scan, one paint sample, and one possible commit halt. One worst-case halt spends that reservation by
+  itself. Move the chrome to per-frame and every pass starts needing that slack, which is the same
+  sentence as "the display schedules the producer"; that is what §5.7 forbids, and it is why the
+  bound is written as *at most one commit per pass* in `Paint::sample`'s and `refresh_surface`'s docs
+  rather than left as a rate that happens to be low.
+- **"it is only 1 Hz" is a measurement, not an argument.** R1b's single 1 Hz text redraw on the
+  sibling player came out 104 late of 16,553 periods on real hardware — audible splices, no underruns,
+  and every headless term green. Nothing about the album surface's cadence reproduces *that* mechanism
+  (this draw path holds no lock the feeder needs and dirties one background at a time), but the reason
+  the 2a commit is called an exception in the first place is that this tree has one hardware witness
+  that a low-frequency main-loop redraw is not automatically free.
+
+**So, should 2a be committing from the loop at all?** Yes, and only as the control arm: it is the
+cheapest thing that satisfies §5.2's cadence rule and §5.6's legibility need, it is gated to one
+commit per pass by the latch compare, and it is what AP-3c's arm **A** exists to measure against arm
+**B**. 2b's chrome — a badge, a scroll, a beat-driven bar — must not inherit this call site; it is
+presented from VBlank. If AP-3c shows arm A costing the producer anything worth naming, the exception
+is retired inside 2a and §11's 2a row is amended there; if it comes back clean, the OBJ chrome stays
+2b's first commit and this paragraph is where the shipped 2a behaviour is justified rather than
+apologised for.
+
+**The path that removes it is VBlank-driven presentation.** The draw decision writes a shadow; the
+VBlank ISR or a VBlank-started DMA copies it while the main loop continues. For OAM that is one 1 KiB
+shadow (128 × 8 B), double-buffered and swapped before the VBlank DMA; for a BG it is the dirty
+screenblock (2 KiB, or a set of changed entries). The CPU still spends the copy cycles — a 1 KiB OAM
+DMA is ~256 cycles at 32-bit — but the producer is not blocked. `embassy-agb` is the async equivalent.
+That is the policy this plan adopts: **present from VBlank where the hardware and agb allow it, and
+treat a main-loop `commit` as a measured exception, not the model.**
+
+**Two independent axes, which the earlier "OBJ vs BG" question conflated.** The scheduling win is the
+first row; OBJ is one storage choice that makes the first row clean for the chrome and the viz.
+
+| axis | choices | what it decides |
+|---|---|---|
+| **presentation timing** | main-loop `commit` vs VBlank DMA/ISR | whether the producer can be paused by the display |
+| **storage/renderer** | BG cells + map vs OBJ sprites | where the pixels live; the tile pools, OAM, fit model |
+
+**2a today, as the control.** Three backgrounds — BG0 art, BG1 scene, BG2 foreground — with the
+runtime committing only when a cell changed. agb's `RegularBackground::show` includes a map only when
+`Tiles::is_dirty` says it changed, but a dirty map is copied **whole** (2,048 B) by `commit`; clean
+backgrounds cost no map copy (`regular_background.rs:401-416`). `OamFrame::commit` also runs on every
+commit and clears the unused OAM entries, a small fixed cost even with no objects. A clock tick
+therefore pays one dirty foreground screenblock (2 KiB) plus the VBlank wait (usually the fast path);
+a still frame pays neither. The three-background split is the layering baseline; §5.7 does not change
+it until AP-3c says the presentation path should.
+
+**OBJ Chrome — the first candidate, and the plan.** The scope is the chrome, not the list: title (20 cells),
+clock (12), state word (9), five icons, bar (10) — **~56 OAM entries of 128**, an 8×16 sprite for each
+text column and an 8×8 sprite for each icon/bar cell. The chrome rows carry at most 26 sprites on a
+line, well inside any sane per-line budget. The list is deliberately not in this plan: its 30 × 8 =
+240-cell window cannot be 128 sprites, and §5.2 already says it scrolls as a tile.
+
+What it needs:
+
+- the glyph atlas and the icon/bar tiles copied into **OBJ VRAM**: 188 glyph tiles + 14 icon/bar
+  tiles = **202 tiles ≈ 6.3 KiB** of the separate 32 KiB / 1,024-tile pool (206 / ≈6.6 KiB if the
+  four fills are duplicated for a chrome-art variant). The OBJ tile index is the atlas's own tile
+  index; the 8×16 sprite uses `tile0` and `tile0+1`;
+- one **OBJ palette bank** (16 colours) for the same white/slate/amber values, separate from the BG
+  palettes (§5.4);
+- a **double-buffered OAM shadow** (2 KiB) and a VBlank-started DMA3 source swap; unused entries
+  hidden; the OAM DMA stopped and the chrome entries hidden before the verdict's `text::show`;
+- the **cell geometry and `Write` plan stay**: the chrome's `Write` x/y are the cells, the sprite is
+  placed at `x*8, y*8`; the `draw_text`/`draw_bar` diff and the host geometry legs are unchanged.
+  This is not a proportional-layout change; sub-pixel placement is a separate, later decision;
+- **the list, title-card and art scenes stay BG**. The freed foreground BG is exactly the layer 2b's
+  list text needs over the scene art; the chrome OAM sits above BG0/BG1 by priority. One atlas, two
+  consumers (OBJ chrome, BG list), not two faces or two atlases.
+
+What it buys: no main-loop commit for chrome; OAM-shadow writes of 8 B per changed cell; a 1 KiB OAM
+DMA at VBlank instead of a 2 KiB dirty screenblock copy plus the wait; the producer keeps running.
+What it costs: the OAM/atlas/VPAL/DMA subsystem, the double-buffer race rules, the VBlank DMA's bus
+contention with the sound DMA1/2, a preview/host-gate OBJ compositor, and the plan's §5.3/§5.5
+"OBJ text" exclusion amended for the chrome (the list's cell model is untouched).
+
+**Memory pressure today: none on the OBJ side.** The product images draw no sprites: OBJ VRAM 0 / 32
+KiB, OAM 0 / 128, VPAL 0 / 16 banks (AP-0's probe is the only sprite this tree has ever drawn). The
+tight pool is the BG side: variant B's audit is `POOL_DISTINCT = 462 / 512` at its declared ceiling,
+with the runtime used-glyph set smaller. The chrome plan above is ~202–206 / 1,024 OBJ tiles,
+56 / 128 OAM and 1 / 16 VPAL; a viz has ~72 entries and ~25 KiB left. **The scarce shared resource is
+the OAM/per-line budget, not OBJ VRAM.** The chrome OBJ does not free the 188-tile glyph atlas from
+the BG pool (the list still draws from it); it frees the foreground map and the icon/bar BG tiles, and
+the OBJ atlas is a duplicate. That is the price of the presentation path.
+
+**OBJ Scenes and the viz — the second dimension.** A scene or visualization can choose BG or OBJ, and
+the choice is a pool/budget question rather than a style one:
+
+| | BG tiles/map | OBJ sprites |
+|---|---|---|
+| memory | the shared 512-slot BG pool; a region canvas is 480–510 tiles | the separate 32 KiB / 1,024-tile OBJ pool |
+| motion | map rewrites (dirty screenblock, 2 KiB) | per-object x/y/tile; no map dirty |
+| per-frame | a commit if the map changes | OAM DMA, ~1 KiB/VBlank if dirty |
+| limits | `tile_budget`, residency (R14) | 128 OAM, per-line OBJ budget, VPAL banks |
+| good for | full-bleed/static art, list rows, repeated bands | moving bars, particles, a beat-driven badge |
+
+The chrome's 56 OAM and ~6.3 KiB leave **~72 OAM and ~25 KiB** for a visualization, before any BG
+side is considered; the scarce shared resource is the **OAM/per-line budget**, not OBJ VRAM. AP-6
+declares and audits that ceiling (tiles, OAM, VPAL) before A9's first moving sprite is designed, and
+the chrome reservation is part of the same audit. The BG pool remains the tight one: variant B's
+`POOL_DISTINCT` is 462/512 at its declared ceiling, and moving the chrome to OBJ frees the foreground
+map and the icon/bar BG tiles, **not** the 188-tile glyph atlas (the list still draws from it); the OBJ
+copy is a duplicate, not a relief. That is the honest trade: the chrome OBJ is affordable in OBJ VRAM
+and pays in duplicated atlas bytes, while the BG pool keeps the text atlas for 2b's list.
+
+**Where this is scoped, investigated, and implemented.**
+
+| phase | what | why here |
+|---|---|---|
+| **2a** | **this section** (the policy), and **AP-3c**: a paired L1 probe — (A) the current BG foreground + event commit, (B) the chrome as OBJ + double-buffered OAM shadow + VBlank DMA3, (C) B under a 60 Hz synthetic chrome load. Measure main-loop pass cycles, `paint.due` cadence, `late`/`underflows`, VBlank/ISR/DMA cost, and the dirty-screenblock commit cost. **The 2a product still draws no OBJ**; the probe is an instrument. If AP-3c shows the 1 Hz/event commit is already a producer risk, the chrome OBJ + VBlank path is a **2a follow-up** (AP-3b/AP-3c) and the 2a row and §5.1 note are amended in that PR. Otherwise it waits for 2b. | 2a owns the chrome and AP-3b's render-leg instrument; the question is measurable now; the product phase does not get a new renderer without the measurement. |
+| **2b** | **implement the chrome OBJ + VBlank OAM DMA at the start** (unless 2a already did): the list, title-card and art scenes stay BG; the freed foreground BG becomes the list's text layer over the scene art; the scene/list map changes are presented from VBlank too (dirty screenblock), the same policy; the scene switch; no viz. | 2b adds the scenes and needs the freed BG; the chrome is already there; the OAM/DMA path is shared infrastructure. |
+| **4** | the **viz (A9) may use OBJ**; AP-6 declares/audits the OBJ tile/OAM/VPAL budget, including the chrome's 56-entry reservation; the first *moving* OBJ is Phase 4's beat-driven thing; the BG-vs-OBJ trade-off above is decided per viz, not for the list. | the viz is the first thing that actually moves; the chrome is static-ish and is the presentation-path proof, not the motion proof. |
+| **6** | the game (A15) reuses the same OBJ budget; AP-8 owns its arm. | same rule. |
+
+Not scoped here: the **list as OBJ** (240 cells > 128 entries); **full-bleed art as OBJ** (a BG is the
+right tool); the **viz in 2b** (Phase 4, AP-6); the **chrome OBJ as a 2a product feature** unless
+AP-3c forces it. The VBlank **policy** applies from 2a onward; the current 1 Hz event commit is the
+interim exception the policy names, not a precedent to copy.
+
+**The measurement is the gate.** AP-3c's paired arms use the existing probe feeder and
+`[album-probe] PASS` shape (`examples/album_probe`), headless on mGBA and on AP-7a's cart; the
+control and OBJ arms print the same cycle columns and the same `late`/`underflows` terms, so the claim
+"the main loop no longer waits" is a number rather than an inference. If the probe wins, the 2b
+implementation is the same `Write` plan with an OAM applier; if it does not, the plan has saved a
+renderer.
 
 ---
 
@@ -2786,9 +3029,9 @@ as a pre-step and never gating on tests):
 | `make album-seam-test` | AP-2/AP-9's host leg: the derived geometry against the shipped FLAC figures, every track's `ALBM1`-vs-pin agreement, the eight `AUDITED_MUTATIONS` refusals, `PcmSource` on both arms, and the shipped track folded to its **FIFO pins on the host** — plus a stub-only build that must link no decoder | **1 (landed, PR-3a)** — a name §9.1 did not plan; it is the seam's gate, and `album-test` is the ROM's |
 | `make album-probe-rom` | the Phase 0 throwaway probes | 0 (landed) |
 | `make album-test` | AP-1/AP-2: scripted-key playback ROM in headless mGBA + audio-capture diff | **1 — not landed by PR-3a** (no keys yet; deferred to PR-3b). Its audio-capture leg also has no tool today: the installed `mgba-test-runner` (agb v0.25.0) takes a ROM and nothing else, so AP-1's content witness is on-ROM — the ring ledger plus the pins PR-3a folds — and the sample-for-sample capture diff is owed where it is genuinely needed (AP-6/AP-8, §12.2) |
-| `make album-layout-test` | AP-3: host snapshots and fit verdicts for **every product-eligible declared variant** (§5.0's `product` field; a variant whose declared face cannot be resolved is reported as **skipped, by name with its reason**, never silently omitted — §13's AP-3 rule) — band tiling, the derived box list, the `bar_cells` ↔ `ALBM1` reciprocals agreement, one-line elision, the row counts derived from `row_px` (§5.0), and the per-element/switch cost record | **2a** |
+| `make album-layout-test` | AP-3: host snapshots and fit verdicts for **every product-eligible declared variant** (§5.0's `product` field; a variant whose declared face cannot be resolved is reported as **skipped, by name with its reason**, never silently omitted — §13's AP-3 rule) — band tiling, the derived box list, the `bar_cells` ↔ `ALBM1` reciprocals agreement, one-line elision, the row counts derived from `row_px` (§5.0), and the per-element/switch cost record — **plus, from 2a PR-(3), the surface's own host legs** (`tests/album_surface_host.rs`, floored at 18): the boot frame read back as a 30×20 composite (the band stack, the title, the clock, the state word, five icons in their slots, the bar's ten columns), §5.1's redraw rule as a write count (a still frame writes nothing; a track change writes one element), the clock bumping on whole seconds and restarting on a new visit, every bar fill position drawing its own pixel count, a painted sample position converting to a `BarCell`, the icon tiles packing left-pixel-low-nibble, the composite reading the tileset a write names, a full batch reporting its drops, the page fill covering every visible cell, the text layer falling through to the band art, and the drawn line never exceeding its box | **2a** |
 | `make album-glyphs-test` | **§5.5a's atlas gate, 2a PR-(2).** The generator's own self-test at a leg floor; four of §9.0's five `atlas-*` ids fired by name on fixture specs, the fifth printed as named-not-fired with its reason; the generated `src/glyphs.rs` byte-identical across two emits and equal to what is on disk, with one flipped pixel as the negative control for that comparison; the module compiling for the host so its `const _: () = assert!` legs run and tie it to `src/layout.rs` (one face, one raster, one line box, one outlined count); and that module's **own floored suite** — the bit-order leg proved non-vacuous by its mirror failing to match, one cell per glyph, agb's blank tile used by nothing but space, no slot outside the cut, `measure` against `tilemap_px`, and §5.5's elision re-run against the answers the bake's Python copy derived. **Host-only, and not a prerequisite of `album-rom`**: the ROM gets the atlas through `album-bake`, and a ROM build should not depend on a font library | **2a PR-(2)** — a name this file proposes rather than one §9.1 planned, and deliberately **separate from `album-layout-test`**: §5.5a's critical path runs through fontTools, and a geometry-only layout refusal has no business depending on one |
-| `make album-preview LAYOUT=… TITLE=… ART=cover.png` | a **host composite** of one variant at 1× and 4× (ASCII + PNG), from the same code that bakes (§5.0, §12.1) — the tool that makes layout taste a config change instead of a rewrite, and the 1× image §5.6's legibility rule requires | **2a** — and at 2a it composites **the surface**: bands, chrome, control slots and the `blank` region, plus the declared art boxes and any `TITLE=` string as *host instruments* the 2a ROM never draws. That is deliberate, and it is the line §11's 2a note states: the preview checks the generated geometry, the fit boxes and the bands before any of them is on hardware, and a composite of region content 2a does not render is **an instrument, not a witness** — AP-3's variant snapshots are the geometry witness and AP-4's the art one |
+| `make album-preview LAYOUT=… TITLE=… ART=cover.png` | a **host composite** of one variant at 1× and 4× (ASCII + PNG), from the same code that bakes (§5.0, §12.1) — the tool that makes layout taste a config change instead of a rewrite, and the 1× image §5.6's legibility rule requires | **2a — the surface half landed 2026-11-23** (`album-preview-1x.png`, `-4x.png`, and a `.txt` grid beside each, from `src/preview.rs`: the same `Write` list the ROM's map takes, the same tile bytes both tilesets upload, the same palette table; `LAYOUT`/`TITLE`/`ART` arguments are 2b's, since 2a has no art and one variant's worth of text) — and at 2a it composites **the surface**: bands, chrome, control slots and the `blank` region, plus the declared art boxes and any `TITLE=` string as *host instruments* the 2a ROM never draws. That is deliberate, and it is the line §11's 2a note states: the preview checks the generated geometry, the fit boxes and the bands before any of them is on hardware, and a composite of region content 2a does not render is **an instrument, not a witness** — AP-3's variant snapshots are the geometry witness and AP-4's the art one |
 | `make album-art-check` / `album-bake-check` / `album-viz-test` | AP-4 / AP-5 / AP-6 | 2 / 3 / 4 |
 | `make album-web` | AP-8's local config server (never a build dependency) | 6 |
 | **`make album-check`** | the app's aggregate, the way `flac-check` is the FLAC track's | grows with the phases |
@@ -3154,13 +3397,40 @@ mechanism — landed 2026-11-22:** `scripts/album_glyphs.py` → generated `src/
 it, plus the gate §5.5a step 5 asks for (`make album-glyphs-test`, a separate target for the reason
 that row gives), plus the §9.0 rows and the `title-fit` refusal that came with the elision. What
 building it turned up and belongs to (3): `text.rs`'s `COLUMNS = 30` cannot be replaced by a
-measured fit until the verdict row is a declared element with a box (§5.5). **(3) The surface:**
+measured fit until the verdict row is a declared element with a box (§5.5) — and (3) then found
+that even with a box it should not be, which is item 1 below. **(3) The surface —
+landed 2026-11-23, except for the two items named below:**
 `surface.rs`,
-`chrome.rs`, the `blank` scene and §5.2's scene contract, boot option (c) as ruled above,
-`layout=<id>` on the boot line, and AP-3b's legs as a fourth probe bin. Nothing in that order
-defers a gate: AP-3's legs are host-side and landed with (1) and (2), AP-3b's need a ROM and land
-with (3), and the register rows that do not fire at 2a are the two §9.0's note under its register
-names — each printed by the gate that would have fired it, with its reason.
+`chrome.rs`, the `blank` scene and §5.2's scene contract, boot option (c) as ruled above, and the
+surface's own host legs inside `make album-layout-test` (the boot frame, the redraw rule, the
+clock, the bar, the line cut, the tiles, the palettes, the two rectangles). `layout=<id>` on the
+boot line was already printed from PR-(1), so this PR owed the surface's facts beside it rather
+than the id again, and prints them. Nothing in that order
+defers a gate: AP-3's legs are host-side and landed with (1) and (2), and the register rows that do
+not fire at 2a are the two §9.0's note under its register names — each printed by the gate that
+would have fired it, with its reason.
+
+**Two items in that list did not land, and each is a ruling rather than an omission.**
+
+1. **`text.rs`'s `COLUMNS = 30` stays, and this row's earlier promise to convert it was wrong about
+   the cost.** PR-(2) reassigned it here on the grounds that `surface.rs` would declare the verdict
+   row as an element with a box. Looking at it from the drawing side, both routes are worse than
+   leaving it: the verdict takes the screen *after* the audio has stopped (§5.2's takeover rule) and
+   draws in the **fusion8** instrument face, so declaring it as an element of the product variant
+   would either make the variant declare **two faces** — which §5.5a refuses as
+   `atlas-face-ambiguous`, because the atlas is one face per variant — or move the verdict onto the
+   product face, which re-baselines **AP-7a's witnessed** legibility of `PASSED` on fusion8. It is
+   a bound on a face this phase does not draw from, in a takeover this phase does not own, so it
+   stays a measured cell count with its own line of explanation (`text.rs:65`, cited in
+   `--layout-self-test`'s banned-name leg as a *different* bound). The honest version of the
+   promise: **the mechanism now exists for every declared element; the verdict row is not one.**
+2. **AP-3b's fourth probe bin did not land either.** Its three legs need a ROM measurement harness
+   (`examples/album_probe`'s fourth bin), and they measure §10.2's element and switch costs — which
+   is a *measurement* PR rather than the drawing PR this one is. The surface they would measure is
+   now on screen and playable, which is what they were waiting for; the legs are the next PR in
+   this phase and their row (§13 AP-3b) still says so. Stated here because "landed with the surface"
+   is what this row said, and a row that moves a dependency should say it moved.
+
 
 **Two re-homings that come with the split, named rather than slipped:** **A7 (the progress
 bar) moves from Phase 3 to 2a** — the reciprocal arithmetic has been generated and host-tested
@@ -3653,11 +3923,12 @@ the rule that a gate touching a non-default configuration runs as its own target
 | **AP-1** | **the ROM under test was built by `make album-rom ALBUM=examples/album_player/album.toml` from a fresh clone, with no untracked input and nothing fetched (§2.3)**; ≥2 tracks play to the end of the album, pause/resume and next/prev work **from a scripted key log replayed at the keys layer**, `underflows = 0`, `old = 0` and `dropped > 0` on every pressed skip and `dropped = 0` on every track-end advance, a skip's cover is `SKIP_PRIME_CHUNKS + 1` periods, the boundary gap is printed with its decomposition (§4.4), and **audio begins within 1.5 s of boot** (564 ms and 580 ms on the 4-track fixture, in the two logs this tree keeps — `album-test.log:9-10` and `album-rom-run.log:9-10`; ~36 KiB per track of that, so a 32-track album needs the tripwire windows shrunk) | `make album-test` (**landed PR-3b**): the REPLAY arm (`--features "input-replay deep-audit"`) run headless, every assertion read off the **log** with a named refusal per failed term; exit 124 is the pass path, ~2m27s, deterministic (two runs' logs `cmp` byte-identical), and 21 doctored logs tried against it — 19 refused by name. **Two of this row's original promises are not deliverable by this harness, and are re-stated rather than quietly dropped:** *(i)* "scripted button presses" cannot mean the emulator's input layer — `mgba-test-runner` exposes no key-log, stdin, env or socket path (verified on the installed binary) — so the script is replayed through `keys.rs` via `update_with_state`, the ROM prints which source it used, and **a green here is never evidence that a physical press reaches a cartridge** (that leg is AP-7a); *(ii)* "a captured-audio comparison against a reference decode" has **no tool** — the runner records no audio — so the witness is on-ROM and in the model: per-track `pcm`/`fifo` folds against **each visit's own** pins, the whole-region `assets` fold, the ring ledger, and a host model that records the **post-gain bytes handed to `rearm_dma`** and asserts contiguity across a pause (§4.4). The folds are a *decoder* witness only — they were cited as a transport one, wrongly, and that claim is retracted here as well as in the code. **What AP-1 still cannot claim: that a transition is click-free to an ear, or that a real press works.** Until AP-7a listens, this gate is green on the emulator's terms only. **Also runs here, because the packer does: two consecutive packs → byte-identical blobs, and `ALBM1` re-read through the shipping `meta.rs` agrees with `album.toml` field by field.** **One term of this row is at risk from 2a, and it is named here rather than discovered inside the gate:** "audio begins within 1.5 s of boot" is measured today on a run where *nothing is pressed*, and §5.2's boot option (b) — surface up, transport waiting for Start — would put a human press inside that interval. If 2a chooses (b), this term splits into an auto-start arm and a Start-gated arm, and that belongs in this row's text at the moment the choice is made; choosing (a) leaves the term exactly as it is, which is a legitimate answer — but it should be an answer, not a silence. **The measuring half of "within 1.5 s" already exists; what does not exist is a gate** (2026-11-20): the ROM prints boot-to-audio, decomposed, on its own boot line (`album_play_main.rs:3866-3877` — `parse/open/gate/prefill/total` in cycles, then the total in ms; `album-test.log:9-10` records 564 ms, `album-rom-run.log:9-10` records 580 ms), and **nothing in the tree compares that number against anything**: no 1,500 ms constant, no `BOOT_BUDGET`, no `Refusal::BootTooSlow` — that grep is empty. (This row also carried two wrong log references: `album_play_main.rs:3880` for `:3877`, and `album-test.log:350` in a file that is 92 lines long.) So (b)'s 1.5 s is already being produced for a human and never asserted; if the ceiling is to be a gate, say whose job it is (AP-7a's report reads the printed number — AP-7's own row already says the 1.5 s ceiling is not machine-enforced) |
 | **AP-1 status** | **PASSING — and it was closed on the instrument that opened it (2026-11-19; the row read MIXED from 2026-11-17).** `make album-test` is green and deterministic headless, and a property fuzz over 2,048 randomised interactive sessions finds no transport or ledger violation. What made it MIXED was the caller's cartridge run: heavy Left/Right/pause use ended `FAILED` while calm playthroughs passed, and the emulator never reproduced it. That run has now been repeated on a build carrying R13's fixes — `album-player-fast.gba` sha256 `76bfbba6…31755`, built by `make album-player-rom` from a throwaway merge of `main` (`e952a1c`) at this PR's head (`1676608`), the same target that found it — and the caller **cycled hard between tracks, played and paused repeatedly, then let the final track run to the end: no failure, the run passes** (AP-7a (4)). | **What that closes and what it does not.** It closes R13's observed instance, and it is why this row's discipline was worth keeping rather than softening a bound: all three mechanisms found were *verdict* bugs (ledgers summed over capped print arrays; `dropped >= 1` demanded of a press that legitimately drops nothing; a pass bound saturated exactly at mGBA's own 3-period measurement, which guaranteed a cart would fail what a cart got right), each fixed and proven in the model, and the durable part is that every bound now derives from the run's own measurement rather than from an instrument's frame count or a hand-picked constant. **It is not a claim of hardware correctness**: one unit, one session, no map-file memory report, and the emulator still does not reproduce the symptom — so this closure rests on the caller's report, which is exactly why the row stays. AP-7 (both units, two runs each, the `none`/`bar`/`skyline`/`game` arms, the memory report, a verdict legible without colour vision) remains open, as does AP-1's captured-audio promise, which still has no tool |
 | **AP-2** | mm:ss elapsed + **total** match the durations **the same build's pack step printed** to ≤1 s (§6; the tool is Phase 1's as of §9.0, so this differential exists from the first album build rather than waiting for Phase 3); bar and time never disagree by more than one cell and never move backwards; no `__aeabi_*div*` in the playback/UI path | host twin on `position.rs`/`layout.rs` + objdump/symbol fact on the linked `.gba` + the bake's printed track table. **(Claim text amended 2026-11-20 from "elapsed + remaining" — §6's display re-rule. The witness is unchanged and does not need re-running, and the reason is narrower than the first one given here: text *over live audio* is not new in this tree and was never the questionable part — AP-0's probe drew text with audio running in every arm, and §14's R1b is precisely a measurement of a text redraw under live playback. So this row has no premise that a screen without words is the norm; what was wrong was the claim's pair. What has genuinely never happened anywhere in this application is the **elapsed / total pair** being displayed: the gate ROM prints verdict words only and its own header comment says it deliberately has no bar, no title text and no menu (`album_play_main.rs`). Two consequences this row should stop glossing over: the on-screen half of this witness is **owed, not passed** — it is A6's wording on the real layout, 2a's chrome (§11's 2a row), and a green host-side leg proves nothing about a screen; and there is no on-screen wording in this app for a relabelled claim to disagree with, which is why the host leg genuinely needs no re-run. `layout.rs` in this row's witness is 2a's, not today's — D9 records where the fit guard actually lives now.)** |
-| **AP-3** | **Every product-eligible declared layout variant** composes to the expected host snapshot (**relaxed at the second review from "every declared variant": §5.0's `product` field and §9.0's `face-not-resolvable` refusal mean a variant can exist for another purpose — a development instrument, an art-only experiment — and be un-gateable by fit or by pool arithmetic because its declared face cannot be resolved from this tree. Those are reported as **skipped, by name with the reason printed**, so a green AP-3 always says what it did not look at. The instruments that *do* gate a non-product variant are its own: `album-preview`'s 1× composite for a face question, AP-4 for an art question.** from the same generated `src/layout.rs` — 2a: the chrome bands, the clock/bar/title elements and the `blank` scene; 2b adds the list, title-card and art scenes — **and every string fits the box that variant declares for it**, `Fit` measured from the face's real advance widths rather than a cell count (§5.5). Three records it owes, all in cycles — **and those three render legs now have their own row (AP-3b, below), because they need a ROM and this row's legs are host-side**; the geometry, fit and pool-audit legs stay here: **first, a bake-leg check that every row of §9.0's register owned by 2a fires on a spec written to be wrong about it** — **nine** of the register's rows fire on 2a's own layout instrument (`layout-variant-unknown`, `bands-not-tiling`, `pitch-not-tileable`, `face-not-resolvable`, `image-tiles-over-budget`, `scene-minimum`, `bar-cells-disagree`, `bar-cells-out-of-range`, and **`title-fit`, which arrived with 2a PR-(2)'s one-line elision** — its leg narrows a title element to one tile column against a marker that measures wider, and a leg beside it proves no title, however long, is refused at a box the variant really declares); the tenth layout row, `art-box-not-derived`, is a 2a validator waiting on a 2b key — 2a derives the box list and takes the pool term at that ceiling, but the value it refuses lives in `[art]`, which D2 keeps a named refusal through 2a (§9.0's note under its register, §11's note (iii)) — so this row reports it **named and skipped with its reason**, in the same idiom it uses for non-product variants, rather than claiming ten. **The atlas half of the register is a second instrument and a second gate: `make album-glyphs-test` fires four of the five `atlas-*` ids by name and prints the fifth (`atlas-ink-not-matching-outline`, the rasteriser's own bug path) as named-not-fired with its reason** (§5.5a step 5, §9.0's rows). Every one of those legs is checkable from `layout_spec.toml`, the tracked face files and the atlas generator's own fixture specs, with no image, no palette and no ROM in sight — which is what §11's rule "no phase's critical path may run through a tool it has not built" looks like as a test rather than as a sentence; **the per-element** redraw costs (§10.2's element rows), the **scene switch** with scenes resident against a partial map rewrite (§5.1) — **named by residency option** (§5.1's four, which differ by two orders of magnitude at that row) **and measured in the live-audio arm**, because every UI figure in §5.2, §5.5, §7 and §10.2 is arithmetic on AP-0's single-tile legs and none of them measures a renderer: this is the plan's first rough ROM leg of rendering bandwidth, and §10.2's caveat says what it is there for. and a **tile-pool audit per variant** — written against agb's pools rather than against character blocks, because that framing in §5.1 was wrong: the regular (BG) pool is **512 4bpp slots in total**, the affine pool is 510 more with a fallback path between them, maps are one whole 2,048 B screenblock per background with **eight of them in all**, and the sum being audited is the per-variant `tile_budget` the bake refuses on (§5.0, §5.1). **It also used to owe a question about sprites that is now closed by reading agb (2026-11-20):** OBJ tile data has **its own pool** — 32 KiB at `0x0601_0000` (`sprite_allocator/sprite.rs:18-24`, `TILE_SPRITE + 1024 * 8 * 4`) = **1,024 4bpp tiles / 512 at 8bpp** — agb itself selects hardware mapping mode 1 (`object.rs:30`, `set_obj_character_mapping(true)`), and its BG maps end at `0x0600_C000`, **not** at the OBJ base as this file used to claim. Three consequences carried into the plan: sprites never compete with the BG pools (so §7's refusal to buy back a full-bleed image with a sprite is right for the real reason); a sprite has a ceiling of its own that no BG-side audit sees, which is now AP-6's (§13) and Phase 4's rather than a question first met there; and **DISPCNT bit 6 must never be touched by this app**, because mode 0 would put OBJ tile data at `0x600_4000`, squarely on top of agb's regular BG pool (§5.1). The layout rows of **§9.0's refusal register** fire here, before a line of Rust compiles — this row no longer restates them, because the restatement was the drifted one (it counted an `[art] box` refusal as one of "five" that §9.0 also assigned to 2b, and it predated `pitch-not-tileable`/`face-not-resolvable` entirely). What is *this* row's, not the register's, is that the pool row must print **both bounds** of the text term (§5.1's measured table): the visible-cell bound and the distinct-glyph bound, with the declared face's line box and advances named, so a reviewer can see which bound a variant is being refused on. **The title leg is a test, not a sixth refusal:** the bake has refused an overflowing title since Phase 1, and 2a's version measures against the derived span with §5.5's one-line elision applied first — **landed with PR-(2)**: `FaceMetrics.elide`/`title_render` on the bake side, `glyphs::elide`/`fit` on the generated side, and the two copies compared through the case table the generator pins (§5.5, §5.5a) — so an album is still *fixed at bake time*, and what the host test proves is that the elision itself fits **and that it cuts at the last whole glyph that fits, not an earlier one** | `make album-layout-test` and `make album-glyphs-test` (**2a** — names this file proposes rather than ones §9.1 planned; §9.1 now carries both rows). Host snapshot + fit tests over **every** variant in `layout_spec.toml`, built on `examples/flac_integration/src/text.rs:65`'s `measure(text) -> Fit` precedent, plus the generated module's own floored suite over the atlas and the elision (§5.5a step 5), plus `make album-preview`'s **1×** composite — which is a *human* leg, not a machine one: a matching snapshot says the layout is what the spec says, and says nothing about whether anyone can read it (§5.6). The ROM's boot line prints `layout=<id>`, so every later hardware report is attributable to a geometry (AP-7a legs inherit that requirement) |
+| **AP-3** | **Every product-eligible declared layout variant** composes to the expected host snapshot (**relaxed at the second review from "every declared variant": §5.0's `product` field and §9.0's `face-not-resolvable` refusal mean a variant can exist for another purpose — a development instrument, an art-only experiment — and be un-gateable by fit or by pool arithmetic because its declared face cannot be resolved from this tree. Those are reported as **skipped, by name with the reason printed**, so a green AP-3 always says what it did not look at. The instruments that *do* gate a non-product variant are its own: `album-preview`'s 1× composite for a face question, AP-4 for an art question.** from the same generated `src/layout.rs` — 2a: the chrome bands, the clock/bar/title elements and the `blank` scene; 2b adds the list, title-card and art scenes — **and every string fits the box that variant declares for it**, `Fit` measured from the face's real advance widths rather than a cell count (§5.5). Three records it owes, all in cycles — **and those three render legs now have their own row (AP-3b, below), because they need a ROM and this row's legs are host-side**; the geometry, fit and pool-audit legs stay here: **first, a bake-leg check that every row of §9.0's register owned by 2a fires on a spec written to be wrong about it** — **nine** of the register's rows fire on 2a's own layout instrument (`layout-variant-unknown`, `bands-not-tiling`, `pitch-not-tileable`, `face-not-resolvable`, `image-tiles-over-budget`, `scene-minimum`, `bar-cells-disagree`, `bar-cells-out-of-range`, and **`title-fit`, which arrived with 2a PR-(2)'s one-line elision** — its leg narrows a title element to one tile column against a marker that measures wider, and a leg beside it proves no title, however long, is refused at a box the variant really declares); the tenth layout row, `art-box-not-derived`, is a 2a validator waiting on a 2b key — 2a derives the box list and takes the pool term at that ceiling, but the value it refuses lives in `[art]`, which D2 keeps a named refusal through 2a (§9.0's note under its register, §11's note (iii)) — so this row reports it **named and skipped with its reason**, in the same idiom it uses for non-product variants, rather than claiming ten. **The atlas half of the register is a second instrument and a second gate: `make album-glyphs-test` fires four of the five `atlas-*` ids by name and prints the fifth (`atlas-ink-not-matching-outline`, the rasteriser's own bug path) as named-not-fired with its reason** (§5.5a step 5, §9.0's rows). Every one of those legs is checkable from `layout_spec.toml`, the tracked face files and the atlas generator's own fixture specs, with no image, no palette and no ROM in sight — which is what §11's rule "no phase's critical path may run through a tool it has not built" looks like as a test rather than as a sentence; **the per-element** redraw costs (§10.2's element rows), the **scene switch** with scenes resident against a partial map rewrite (§5.1) — **named by residency option** (§5.1's four, which differ by two orders of magnitude at that row) **and measured in the live-audio arm**, because every UI figure in §5.2, §5.5, §7 and §10.2 is arithmetic on AP-0's single-tile legs and none of them measures a renderer: this is the plan's first rough ROM leg of rendering bandwidth, and §10.2's caveat says what it is there for. and a **tile-pool audit per variant** — written against agb's pools rather than against character blocks, because that framing in §5.1 was wrong: the regular (BG) pool is **512 4bpp slots in total**, the affine pool is 510 more with a fallback path between them, maps are one whole 2,048 B screenblock per background with **eight of them in all**, and the sum being audited is the per-variant `tile_budget` the bake refuses on (§5.0, §5.1). **It also used to owe a question about sprites that is now closed by reading agb (2026-11-20):** OBJ tile data has **its own pool** — 32 KiB at `0x0601_0000` (`sprite_allocator/sprite.rs:18-24`, `TILE_SPRITE + 1024 * 8 * 4`) = **1,024 4bpp tiles / 512 at 8bpp** — agb itself selects hardware mapping mode 1 (`object.rs:30`, `set_obj_character_mapping(true)`), and its BG maps end at `0x0600_C000`, **not** at the OBJ base as this file used to claim. Three consequences carried into the plan: sprites never compete with the BG pools (so §7's refusal to buy back a full-bleed image with a sprite is right for the real reason); a sprite has a ceiling of its own that no BG-side audit sees, which is now AP-6's (§13) and Phase 4's rather than a question first met there; and **DISPCNT bit 6 must never be touched by this app**, because mode 0 would put OBJ tile data at `0x600_4000`, squarely on top of agb's regular BG pool (§5.1). The layout rows of **§9.0's refusal register** fire here, before a line of Rust compiles — this row no longer restates them, because the restatement was the drifted one (it counted an `[art] box` refusal as one of "five" that §9.0 also assigned to 2b, and it predated `pitch-not-tileable`/`face-not-resolvable` entirely). What is *this* row's, not the register's, is that the pool row must print **both bounds** of the text term (§5.1's measured table): the visible-cell bound and the distinct-glyph bound, with the declared face's line box and advances named, so a reviewer can see which bound a variant is being refused on. **The title leg is a test, not a sixth refusal:** the bake has refused an overflowing title since Phase 1, and 2a's version measures against the derived span with §5.5's one-line elision applied first — **landed with PR-(2)**: `FaceMetrics.elide`/`title_render` on the bake side, `glyphs::elide`/`fit` on the generated side, and the two copies compared through the case table the generator pins (§5.5, §5.5a) — so an album is still *fixed at bake time*, and what the host test proves is that the elision itself fits **and that it cuts at the last whole glyph that fits, not an earlier one** | `make album-layout-test` and `make album-glyphs-test` (**2a** — names this file proposes rather than ones §9.1 planned; §9.1 now carries both rows). Host snapshot + fit tests over **every** variant in `layout_spec.toml`, built on `examples/flac_integration/src/text.rs:65`'s `measure(text) -> Fit` precedent, plus the generated module's own floored suite over the atlas and the elision (§5.5a step 5), plus the surface's own floored host legs (`tests/album_surface_host.rs`: the boot frame as a 30×20 composite, §5.1's redraw rule as a write count, the clock, the bar, and the drawn line's box — PR-(3)), plus `make album-preview`'s **1×** composite — which is a *human* leg, not a machine one: a matching snapshot says the layout is what the spec says, and says nothing about whether anyone can read it (§5.6). The ROM's boot line prints `layout=<id>`, so every later hardware report is attributable to a geometry (AP-7a legs inherit that requirement) |
 | **AP-3b** | **Three render legs measured in the harness this tree can actually run — mGBA, in the probe ROMs' arms — at the frame cadence of the app rather than of a benchmark; the hardware leg for each is AP-7's, and this row said "on hardware" until 2026-11-20, which asked a claim of the wrong instrument (R3)** — added 2026-11-20 because §5.1, §5.5, §7 and §10.2 are arithmetic on AP-0's single-tile legs and the plan keeps saying so; this is where those tags come off. **(L1) per-element redraw, changed cells only**, live audio running: one bar cell, one changed clock digit cell, and a re-show of an *unchanged* text run (which must be near-free — `set_tile_at_pos` early-outs when the map entry is unchanged, `regular_background.rs:375-378`, and agb's text path hands each drawn cell a `DynamicTile16` through `set_tile_dynamic16` (`font/tiled.rs:126-140`), so identical content dedupes; the early-out path has never been timed and the plan's per-cell figures are upper bounds taken from legs where the content *did* change). **(L2) a whole scene-region change**, ~600 cells, in the live-audio arm, which is what §7's full-bleed and §10.2's partial-map rows assume. **(L3) a scene switch by `set_priority` with both backgrounds resident**, timed across a commit boundary (§5.1: the priority value lands in the control word at the next `show()`), plus **one pool leg (L4), which is a text-pool leg specifically**: stand up the declared scene set — art or region image, the chrome art, and **the list's glyph cells at the declared `row_px` with real repeated text**, not a synthetic distinct-glyph fill — then read what agb actually allocated: (i) the number of live tile references, (ii) the reference counts on the shared glyph tiles, and (iii) whether the *hidden* scene's map still resolves. That single leg is not there to discover which of §5.1's two bounds is real — source settles that (§5.1's bullet: per-cell `DynamicTile16`s cannot share, so the *dynamic* path is the upper bound by construction) — it is there to prove that the **shared-glyph atlas actually dedupes in the real allocation**: the reference count on a repeated glyph's tile must be greater than 1, because a count of 1 on every glyph tile is what an atlas that silently fell back to per-cell allocation looks like, and it would read as a pass in a total-only check. It then prints the standing total (with the atlas: ≤188 glyph tiles + 256 for a 128×128 cover = 444 of 512, §5.1's interaction table) and whether the *hidden* scene's map still resolves. **The fallback ladder is corrected here, because the first version of this row offered "cut the window to six visible rows" as a pool fix and arithmetic says that does not work: six rows × 44 cells × 2 tile rows = 528 slots, still over 512 with no art at all, and five rows (440) only fits with no resident cover.** So the ranked ladder is (1) the atlas, which is the plan and needs nothing new measured to be affordable; (2) if it does not land, five rows *and* no resident art, which is a product cost paid in rows rather than cycles; (3) take residency option (c)/(d) and re-point on scene entry at the event price below. **At the declared 16 px pitch a whole-window repaint is 8 rows × 44 columns × 2 tile rows = 704 tile writes ≈ 874 k c at AP-0's measured 1,242 c/tile mean — 3.3 lossy periods (262,144 c), 1.5 FLAC periods (573,440 c), or 3.1 of mGBA's measured 280,896 c video frames.** That is an **event** price, not a frame price: it is paid at a boundary where the audio is re-primed anyway (a scene entry, a boot, a track change), and §10.2's upload row is where the figure lives — L4 measures it instead of taking the arithmetic. Then over-fill deliberately past the declared `tile_budget` and record that R14's panic is what fires and what the bake would have had to catch. **No new harness**: `art_probe.rs:94-135` already times per-cell `set_tile` with and without live audio, through the `Fold` accumulator (`probe_hw.rs:307-345`) and the timer2/3 `Counter` (`examples/e5_fetch/src/timer.rs`, `#[path]`-shared into `probe_hw`), with an 8-frame warmup and a discarded first pass (`art_probe.rs:57,196-202`); the every-frame producer shape is `ui_probe.rs:251-285`; a leg is a new `src/bin/*.rs` + a `[[bin]]` entry (`examples/album_probe/Cargo.toml:45-66`) + the two Makefile lines (`:1149-1154`, `:1164-1172`), and the verdict is the existing `[album-probe] PASS` shape. What has **no precedent anywhere in the tree**: a `set_priority` call in code (§5.1: no `.rs` in the tree calls it), a ~600-cell region change, and an intentional pool over-fill. **The row prints §10.2-style cycle columns and the `≥20 %` reserve (§10.2's reserve row) is what it is judged against**; the `tile_budget` sum (§5.0) takes its glyph term from L1/L2's face, from the declared face's own metrics read at bake (§5.5) | **`make album-probe`'s leg list gets a fourth probe bin** (the plumbing is Makefile `:1149-1154` and `:1164-1172`, the feature gate is `probe-roms` in `examples/album_probe/Cargo.toml:45-66`): legs print `[album-probe] render …` columns in §10.2's cycle form, and the row's own pass conditions are that the live-audio legs are inside the reserve §10.2 sets, that the unchanged-content leg comes back near-free (proving §5.1's "changed cells only" rule rather than assuming it), and that the pool leg shows the bake refusal firing *before* any panic exists to fire. Nothing here needs a new harness (§5.1 lists what is already built). |
+| **AP-3c** | **Presentation path (2a investigation, 2b implementation unless AP-3c forces it earlier): while audio is playing, the main loop does not block on a display `commit`.** §5.7 is the policy; this row is the witness. Paired L1 arms: **(A)** the current BG foreground + event-scoped `commit`; **(B)** the chrome as OBJ (title/clock/state word/icons/bar, ~56 OAM) with a double-buffered OAM shadow presented by DMA3 at VBlank; **(C)** B under a 60 Hz synthetic chrome load. Measure main-loop pass cycles and `paint.due` cadence, `late`/`underflows`, the VBlank/ISR/DMA cost, and the dirty-screenblock commit cost; the same feeder and `[album-probe] PASS` shape, headless on mGBA and on AP-7a's cart. The list stays BG (30×8 = 240 > 128 OAM); the chrome OBJ is the first candidate, the list is not. **2a's product ROM still draws no OBJ**; if AP-3c shows the 1 Hz/event commit is already a producer risk, the chrome OBJ + VBlank path is a 2a follow-up and the 2a row/§5.1 note are amended there; otherwise the implementation is 2b's first commit. | `make album-probe`'s paired arms (the feeder, the `[album-probe]` columns and the `PASS` shape exist; the probe bin is the new part). A green is the control/OBJ difference in the log, not a screenshot. The OBJ tile/OAM/VPAL total is printed and AP-6 audits the viz share. |
 | **AP-4** | `ART1` is reproducible byte-for-byte from the source PNG, re-reads through the shipping parser, never exceeds its tile/palette allocation (linker map + VRAM audit — **naming the `bleed=true` arm, whose 600 tiles agb's regular pool cannot serve at all, so the audit is of pool state and of the variant's `tile_budget` — §5.1, R14**), and refuses an off-palette source image. From **2b** it carries two more fixtures: **control art** (every declared icon slot has authored pixel art in it, and Play/Pause are distinguishable by shape alone with colour removed, §5.3, §5.6) and the **occlusion report** for full-bleed (which rows sit under the bands, what fraction of the pixels are never seen, and a refusal if a declared safe area is cut, §7) | `make album-art-check` (**2b**). `make album-preview`'s **4×** image for tile/dither inspection, with its **1×** image as the legibility leg (§5.6); the 8bpp alternative judged side-by-side on a real screen, not a diagram (§7). **The machinery this row witnesses is already built and pinned in probe form** — `ART1.md`'s byte spec and 5-art golden corpus, `art1.rs`'s reader, `art_pin.rs`'s pins, `art_probe.rs`'s decode/paint legs, `scripts/album_probe_art.py`'s generator — so the byte-for-byte and round-trip legs are extensions of what `art_pin` already does; **what has no witness at all is a real cover** (no image file outside `target/`; `album.toml` has no cover field — R15), and the 600-tile leg is new work for the same reason |
 | **AP-5** | `album.toml` + WAVs → ROM end to end; two runs → identical bytes; every refusal in §9 fires with its message — **the Phase 3 set; the four §9.0 refusals that land in Phase 1 are witnessed by AP-1** | `make album-bake-check` |
-| **AP-6** | Each viz, alone and paired with art, holds `underflows = 0`, stays inside its §10.2 line, and leaves the audio cost breakdown unchanged vs the `none` control arm | `make album-viz-test` + on-target timing, `none` as control. **The pool a sprite spends from is not the pool this file budgets** (2026-11-20, §5.1): OBJ tile data has its own 32 KiB run-time-allocated pool at `0x0601_0000` — **1,024 4bpp tiles, 512 at 8bpp** — and agb selects hardware mapping mode 1 for it (`object.rs:30`). Nothing in the plan declares an OBJ-side budget, and no BG-side `tile_budget` refusal (§5.0, R14) would ever see a sprite overrun: **declaring that ceiling and auditing against it is this row's**, done before A9's badge is designed rather than after, and its cost is counted per sprite frame rather than per map cell |
+| **AP-6** | Each viz, alone and paired with art, holds `underflows = 0`, stays inside its §10.2 line, and leaves the audio cost breakdown unchanged vs the `none` control arm | `make album-viz-test` + on-target timing, `none` as control. **The pool a sprite spends from is not the pool this file budgets** (2026-11-20, §5.1): OBJ tile data has its own 32 KiB run-time-allocated pool at `0x0601_0000` — **1,024 4bpp tiles, 512 at 8bpp** — and agb selects hardware mapping mode 1 for it (`object.rs:30`). Nothing in the plan declares an OBJ-side budget, and no BG-side `tile_budget` refusal (§5.0, R14) would ever see a sprite overrun: **declaring that ceiling and auditing against it is this row's**, done before A9's badge is designed rather than after, and its cost is counted per sprite frame rather than per map cell. **The §5.7 chrome reservation is part of this audit:** ~56 OAM entries, ~202–206 OBJ tiles (~6.3–6.6 KiB), one VPAL bank, leaving ~72 entries and ~25 KiB for the viz; the per-line OBJ budget is the scarce number, not OBJ VRAM. |
 | **AP-7** | Hardware: GBA 001 + GBA SP, two runs each, `none`/`bar`/`skyline`/`game`, with the map-file memory report attached and `.iwram` growth flagged; **and the run's verdict must be legible without colour vision (§5.6)** — a pass a verifier cannot perceive is not a witnessed pass | two units, a notebook, and a `flac-docs/history.md`-style record. **Partial witness already held (2026-11-16, PR-3a):** one unit, `album-player.gba`, track 1 end to end — audio played clean, no stutter and no non-encoder artifacts, reported by the caller from hardware. That is the first time this application's path has been heard; it is not AP-7, which needs both units, the viz/game arms and the memory report |
 | **AP-7a** (informal, but name it) | **Hardware legs already witnessed by a human, one unit.** (1) PR-3a, `album-player.gba` sha256 `62271aa2…33e1c5` — 30 s of track 1, audio clean, no stutter, no non-encoder artifacts. (2) PR-3a fix 4, `album-player-fast.gba` sha256 `3fc1f184…310a25` — audio correct, **then a blue screen reading `PASSED`**: the §5.6 scheme witnessed on hardware by the colourblind verifier it was revised for. Both are one unit, one track, no keys, no UI — a listen and a legible verdict, not a gate closure | the caller's notebook, 2026-11-16. **(3) PR-3b, 2026-11-17, first hardware session with the keys live** — on `album-player-fast.gba`: a full unpressed playthrough of tracks 1→2→3 ending in `PASSED`; **Left/Right skip between tracks as expected**; **Start pauses without a click, at roughly the instant it was pressed**; **Down restarts the current track**; audio clean throughout with no glitches. That is the first witness this application has had of the two legs §13 AP-1 declared unwitnessable — *a physical press works* and *a fade is click-free to an ear* — and it is why the fade-deferral bug (§4.4's "a fade must be served, not merely handed over") was worth a red-proofed test rather than a comment. **The same session found R13**: heavy interactive use (repeated Left/Right, more than three Right skips, repeated pause) ends the run in `FAILED`, while the two calmer patterns pass. Still one unit, and the 214/229 ms boundary question is still the caller's to judge, not a gate's. Recorded here rather than only in a PR body, because "did a human hear it / read it" is the one claim this repository's emulator cannot make for itself (§10.5, R3). **(4) R13's fixes, 2026-11-19, third hardware session with the keys live** — on `album-player-fast.gba` sha256 `76bfbba6…31755`, built by `make album-player-rom` from a throwaway merge of `main` (`e952a1c`) with this PR's head (`1676608`): the caller **cycled aggressively between tracks and played/paused repeatedly, then let the final track play through to the end** — the pattern that had *consistently* ended `FAILED` in leg (3) — and reports that it **now passes**. That is the cart witness AP-1's status row was waiting for, and the reason its status changed on the same day it was asked for; the ROM was chosen to be the one that found the bug (same target, `make album-player-rom`), and the earlier build that reproduced it is preserved with its sha at `/home/sam/tmp/r13-hardware-roms-2026-11-17/` (`1617ed2d…0fcb`) so the before/after pair is auditable rather than asserted. Still one unit, still no memory report, and the emulator never reproduced the symptom: **AP-7 stays open, and so does the judgement call about what a human-perceptible pause→resume gap is** (R13's timing question, Q18's audible one) |
 | **AP-8** | Reach: the web config produces an `album.toml` the CLI bakes unchanged; the game under the watermark rule never admits an underrun | `make album-web-check` (headless, config diff) + AP-6's arms with `game = on` |

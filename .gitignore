@@ -215,6 +215,11 @@ __pycache__/
 # rewritten every run. The counts that matter are recorded in the commit that changes
 # them, not here.
 /album-layout-test.log
+# `make album-preview`'s pictures (2a PR-3): the surface rendered at 1x and 4x, plus the
+# character grid written beside each. An instrument for a human, regenerated on demand —
+# the same class as the ROMs above, and not a gate artifact.
+/album-preview-*.png
+/album-preview-*.png.txt
 # `make album-rom`'s headless run log: the same per-run rule again. The run is the
 # record (`[album-rom] verdict`), never a committed artifact.
 /album-rom-run.log
