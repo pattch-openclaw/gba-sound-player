@@ -58,10 +58,13 @@ what lets a coefficient be *dropped* rather than coded — the difference betwee
 rate at a fixed step and the rate a distortion-only quantiser spends. `--cap` constrains
 it: a candidate whose reader cycle model exceeds it is not offered. The bit target is then
 solved by bisecting λ, and the plan is rebuilt until the *real* stream fits the budget.
-The candidate grid is swept **coarse, then fine**: a uniform sweep across the window locates
-each frame's neighbourhood, then one-step resolution is spent inside it. That recovers ~96%
-of a full one-step sweep for ~20% of its cost, because a step is ~0.75 dB of SNR and eight
-steps of coarseness can leave a frame up to ±3 dB off its operating point.
+The candidate grid is a **single uniform sweep, and it has no flag** (S8-0). The two-stage
+sweep this README used to describe — a coarse grid, then one-step resolution around each
+frame's coarse optimum — is deleted rather than defaulted off: it was a repair for a coarse
+grid this encoder invented, and the acceptance target is the reference's flag surface, on
+which the candidate set is not a setting. It returns at S9 only as a labelled arm admitted by
+the SNR licence test. The sweep's *shape* is S8-7's work: the reference searches contiguous
+windows of 28 and then 20 steps, and reproducing them is what byte-exactness needs.
 
 **`--train` is the shipped path and `--no-train` the A/B arm (S4).** One pass measures the
 album's own symbol counts and reconstruction errors, which rebuild the Huffman lengths and
@@ -69,7 +72,7 @@ album's own symbol counts and reconstruction errors, which rebuild the Huffman l
 that ships. It costs a second search and buys ~0.9 dB at a binding budget.
 
 **`--threads N` covers the search, not just the emit.** Frame bodies were already
-independent (`Curves` was not): `Curves::compute` and `refine` are now frame-parallel, and
+independent (`Curves` was not): `Curves::compute` is now frame-parallel, and
 that is where a 43-minute album's minutes go. Assembly is by frame index and each frame's
 float sums stay in their written order, so `--threads 1` and `--threads N` produce the same
 bytes (R5a/R5b) — `tests/determinism.rs` witnesses it for the RD path as well as emit.
@@ -164,7 +167,7 @@ decodes — its amplitude is the quantiser's business, not an audio claim.
 ```sh
 cargo run --bin uli-enc -- --album album.f32 --tracks tracks.tsv --out album.uli \
     [--budget 33292288] [--cap 74] [--threads N] [--rd] [--no-train] [--musearch 0|1] \
-    [--stride 8] [--fine 4] [--g 100] [--kappa X] [--ms]
+    [--g 100] [--kappa X] [--ms]
 
 cargo run --bin uli-enc -- --wav a.wav --wav b.wav --out album.uli --rd \
     [--emit-pcm DIR]

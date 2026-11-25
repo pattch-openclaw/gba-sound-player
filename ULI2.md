@@ -347,8 +347,12 @@ produces the bench corpus with it, by design (E-R1 forbids the dependency, not t
 It is never linked into the GBA image. The source-prep path (source decoding,
 resampling, track assembly) remains external Python tooling for now, which is acceptable
 under the rule below. **What the Rust encoder does not yet do is match the oracle's bytes** —
-that is S8, planned in [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md)
-§S8.
+that is S8, in progress in [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md)
+§S8 (S8-0, S8-1, S8-3, S8-4 and S8-5 item 4 landed; §S8's sub-step table is the status of
+record). And one thing S8 found that is not about this encoder at all: **the oracle is a
+binary, not a specification** — its build fuses multiply-adds on the search's decision path,
+so the oracle of record is a contraction-free rebuild whose sha256 is recorded (§Decision
+log, 2026-11-25).
 
 **Target.** Reimplement any C-language tooling or source material in Rust and
 remove the dependency on `gba-audio` and its C sources. That means, at minimum:
@@ -387,10 +391,13 @@ cap (the reference's 1.48). **S7 is done, and its answer is DIFF:** `make uli-ac
 this encoder and the C reference on identical PCM and flags across four cells, and no cell is
 byte-identical — the first content difference lands inside the **trained tables** in every
 cell, and it is unattributed (the measured table is below, and in
-[`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) §S7). **S8 is
-planned and not started**, scoped to byte-exactness on the reference's `--dacw 0` arm, with
-four instruments, a 13-row divergence inventory and eight sub-steps (§S8). The hand-written
-C encoder is now the **oracle and the asset producer**, not the only encoder in existence.
+[`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) §S7). **S8 is in
+progress**, scoped to byte-exactness on the reference's `--dacw 0` arm: S8-0 (the flag surface
+equals the reference's — `--stride`/`--fine` deleted, not defaulted off), S8-1 (the two-sided
+frozen probe), S8-3 (the plan/table diff), S8-4 (the `fast` cell, 2.4 s against our 12.2 s)
+and S8-5 item 4 (the cycle model) have landed; the 16-row divergence inventory, the sub-step
+table with its `needs` and the four instruments are in §S8. The hand-written C encoder is now
+the **oracle and the asset producer**, not the only encoder in existence.
 Requirements, slices and gates:
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) -> "The
 encoder — the last missing piece".
@@ -480,8 +487,9 @@ product codec.** mGBA, WAITCNT 4/2, 262,144-cycle period, both corpora pinned
   domain) are in
   [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) §S7.
 - **Still open:** the non-decode half of the gate (above); the dense-frame tail
-  of the entropy path; the encoder's **acceptance** (S8 — S1–S7 have landed, but no matrix
-  cell is byte-identical yet); the app's asset path onto it (R7/Q3 — `make uli-album-asset`
+  of the entropy path; the encoder's **acceptance** (S8 — S1–S7 and S8-0/S8-1/S8-3/S8-4 have
+  landed, but no matrix cell is byte-identical yet, and the oracle-of-record rebuild is owed
+  before the remaining work can be attributed); the app's asset path onto it (R7/Q3 — `make uli-album-asset`
   still produces the bench corpus with the reference, by design); and a licensing/publish
   decision (`publish = false`).
 
@@ -806,8 +814,9 @@ product codec without pretending one codec covers both jobs.
    piece before ULI2 can be the album player's codec — under the same rule: no C
    source, no dependency, every artefact in this repository. **Amended 2026-11-23:
    the milestone landed** — `crates/uli-enc` covers S1–S7 under that rule, and what
-   this risk still holds is the acceptance half (S8: match the oracle's bytes) and
-   the app's asset path onto it. Requirements, slices
+   this risk still holds is the acceptance half (S8: match the oracle's bytes, against a
+   *named* oracle binary — see the 2026-11-25 decision below) and the app's asset path onto
+   it. Requirements, slices
    and acceptance gates: `crates/uli-lite/PLAN-OF-RECORD.md` → "The encoder".
 7. **Rate flexibility — v1 fixed (2026-11-14).** 32,768 Hz, hop 512, stereo, no
    long-block. Higher rates (65,536 Hz) would be a format/encoder change and are
@@ -825,6 +834,40 @@ product codec without pretending one codec covers both jobs.
 numbers *of that day* and are superseded by the current state at the top of
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md); each
 entry is kept for the decision and its reasoning, not for its numbers.**
+
+- **2026-11-25 — the oracle is a binary, not a specification: byte-exactness is pinned to a
+  build, and the prerequisites before the search are landed.** Three rulings, all from
+  measurement taken while doing S8's prerequisites.
+  1. **The oracle of record is a contraction-free rebuild, recorded by sha256.** The shipped
+  C encoder is built with `-O2 -march=native` (`gba-audio/encoder/Makefile:10`), and GCC's
+  default `-ffp-contract=fast` fused **35 multiply-adds in ten functions, 13 of them on the
+  decision path** — `frame_code`, `band_rdo`, `curves_compute`, `allocate`. Those values are
+  compared, branched on and tie-broken in `f64`, and Rust does not fuse at all, so
+  byte-exactness against that binary was never attainable by construction; the frozen-plan
+  differential's 24-of-24 bit agreement was luck, not parity. S8's oracle is therefore the
+  `--dacw 0` arm rebuilt with `-ffp-contract=off -march=armv8-a`, its **sha256 recorded with
+  the gate's MATCH table**, and `make uli-oracle-check` (S8-4b) is the instrument that says
+  which binary is in play and where its fused sites are. The alternative — reproducing GCC's
+  fusion in Rust with `mul_add` — is rejected: it buys parity with one compiler's choices and
+  loses it on the next rebuild. **The rebuild itself is the one prerequisite this tree cannot
+  discharge itself**: the binary lives off-tree by E-R1 and changing it changes the artefact
+  `uli-probe`, `uli-frame-diff` and `uli-accept` all measure, so it is a deliberate step with
+  its own command (in §S8), not a side effect of `make`.
+  2. **`D` parity means bitwise, and it is arrived at by reproducing the derivation.** The
+  reference *derives* a frame's distortion as `J − λ·(bits − 1)` (`enc_core.c:404`) where we
+  sum it directly; the resulting 103 ULP is a derivation mismatch, not accumulation noise.
+  Since `D` lands on a `<` in the class Viterbi and in `allocate`, a ULP bound leaves a latent
+  plan divergence in place — so "compare within a ULP" is kept only as a diagnostic, and
+  S8-5's gate is bitwise equality once the derivation and the frame-order reduction match.
+  3. **The prerequisites went in before the search, and the sequence is now a table.**
+  S8-0 deleted `--stride`/`--fine` and the whole coarse-then-refine stage (bytes change, no
+  output claim; `stride = 1` was measured and rejected as an 8x cost around a 12.2 s cell for
+  a claim this sub-step is not allowed to make), and S8-4 added the generated `fast` cell that
+  makes S8-5…S8-7 iterable at all (seconds per run on a checkout with no corpus). §S8 now
+  opens with a sub-step table giving each row's `needs`, status and what it unblocks, and two
+  rules — **a prerequisite is a row there, not a sentence elsewhere**, and **a row is landed
+  only when its own gate has been measured** — because S8-1…S8-4 had been floating as prose
+  and two of them were already landed while the status of the others was unstated.
 
 - **2026-11-20 — S5 lands, and two small things turn out to be load-bearing: the
   CLI's defaults and the resampler's corner.** The WAV front end is a *second input shape*

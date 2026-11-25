@@ -3255,6 +3255,73 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
+- **2026-11-25 — S8-0 and S8-4 land, and the oracle turns out to have a float surface of its
+  own.** The day's work was the prerequisites S8-5…S8-7 needed, and the third finding was not
+  on the list.
+
+  **S8-0 — the flag surface is the reference's.** `--stride`/`--fine` and the whole
+  coarse-then-refine split are deleted: `Curves::refine`, `refine_curve`, the `Curves.stride`
+  field, the refine-on-retry branch in `lib.rs`, and the two `Args` fields. `g_guess` rounds
+  ties-to-even (`lrint`'s rule, inventory row 5) and `RETRY_ATTEMPTS` is 6 (`uli_enc.c:405`,
+  row 11). Deleting the knobs left a choice of what shape survives, and **`stride = 1` was
+  measured and rejected**: it can only lower distortion, so it is an output claim in a
+  sub-step that makes none, and it costs ~8x on every album encode in the tree — 12.2 s → 82 s
+  on the 4 s fast cell at four threads, against the oracle's 2.4 s. What survives is a
+  constant (`rd::CANDIDATE_STRIDE = 8`) with no flag, and S8-7 replaces it with the
+  reference's contiguous 28/20-step windows. Green: `make uli-check`, and `make uli-test`
+  with **93 tests in 17 suites**. Two test facts moved with it, both measured:
+  `tests/train.rs`'s binding budget went 8,000 → 6,600 bytes because 8,000 was the *least*
+  rate-limited budget that fits that 4-frame album (+0.43 dB against the test's own 0.25 dB
+  bar at 8,000; **+1.11 dB** at 6,600, which is 309 B/frame, the product-like regime), and
+  `refining_the_grid_never_costs_quality` went with the grid it measured — its 2.6 dB was
+  against our own coarse baseline, it stays here, and it returns at S9.
+
+  **S8-4 — the fast cell is a cell.** `scripts/gen_uli_fast_cell.py` generates a 4 s,
+  two-track, 257-frame album (fixed seed, pure Python) into its own `album.f32` +
+  `tracks.tsv` pair; `make uli-accept ULI_ACCEPT_ONLY=fast` runs it alone in **2.4 s
+  (reference) against 12.2 s (ours)** at four threads, with the budget binding on both sides
+  (19,976 vs 19,904 bytes, ~454 bits/frame, ~5,412 of overhead) and the cap binding on 19 of
+  257 frames. The harness grew `--only` (comma-separated or repeated) and per-cell input
+  requirements, so the cell runs on a checkout with **no generated corpus** — that is what
+  makes it a loop rather than a matrix. First finding, recorded before it was explained: the
+  fast cell's **first content difference is the track table** (2 of 48 bytes), which no S7
+  cell showed. It is `TrackEntry::g_prev` on track 1 — ours 128, the reference 119 — and
+  `container.rs` writes `frames[preroll_frame].g_prev`, i.e. frame 127's step, so the writer's
+  index is right (it is the reference's `g[preroll_frame - 1]`) and the difference is
+  downstream of the plan. 128 happening to equal the preroll frame's index is this cell's
+  coincidence, and it is why the finding was chased rather than assumed.
+
+  **The finding that was not on the list — the oracle's own float surface (inventory rows
+  15-17).** `make uli-oracle-check` (`scripts/check_uli_oracle.py`) reads the off-tree binary
+  and prints its sha256, the flags its Makefile claims (`-O2 -march=native`, so it is
+  ISA-specific) and its fused-multiply map. **35 fused multiply-add sites in ten functions,
+  and 13 of them on the decision path**: `frame_code` 6, `band_rdo` 3,
+  `curves_compute._omp_fn.0` 2, `allocate._omp_fn.0` 1, `allocate._omp_fn.1` 1. GCC's default
+  `-ffp-contract=fast` fused expressions that are compared, branched on and tie-broken in
+  `f64`, and Rust does not fuse at all — so exactness against *this* binary cannot follow from
+  arithmetic parity, and the frozen-plan differential's 24/24 bit agreement on the default
+  tables is agreement that happened, not parity that is guaranteed. Two earlier readings are
+  corrected here: an initial grep found only `fmla` in `dct4_ortho` and concluded contraction
+  was confined to the MDCT (it is not — the dominant mnemonic is scalar `fmadd`, spread across
+  the search), and the MDCT entry is benign only because `mdct_frame` narrows to `f32`
+  (`enc_core.c:186`), which is why `tests/mdct.rs` can pass bitwise while the two sides do not
+  agree at `f64` precision. Decision recorded in `PLAN-OF-RECORD.md` §S8 decision 4 and
+  sub-step **S8-4b**: the oracle of record is the `--dacw 0` arm **rebuilt with
+  `-ffp-contract=off -march=armv8-a`**, its sha256 recorded, and every S8 measurement re-taken
+  against it — the one prerequisite this tree cannot discharge itself, because the binary
+  lives off-tree by E-R1. `make uli-oracle-check ULI_ORACLE_EXPECT=clean` is the check that
+  the rebuild did what it claims. Two further rows are added with it: row 16, `allocate`'s
+  `reduction(+:tot)` compared to `target` in `f64` (ours sums in frame order; the two totals
+  are not the same double, and R5b's 1-vs-8 identical hashes are evidence rather than proof),
+  and row 17, the same-host boundary stated as a row so the gate cannot drift from it.
+
+  **Sequence coherence, since that was half the point.** §S8 now opens with a sub-step table
+  carrying each row's `needs`, its status and what it unblocks, and two rules: a prerequisite
+  is a row there and not a sentence elsewhere, and a row is landed only when its own gate has
+  been measured (partial rows say which items). S8-0 and S8-4 are marked landed; S8-4b is the
+  one row with an instrument in place and a decision outstanding; the answer to "what is next"
+  is now the first row whose `needs` are met — S8-4b's rebuild, then S8-5 items 1-3.
+
 - **2026-11-23 — S8-5 item 4: the cycle model matches, and the plan divergence does not care.**
   `rd::frame_ops` stopped counting `long_codes` — the reference's *encoder* never sets that
   field (its decoder charges it, `uli_dec_ref.c:32`), so `uli_cycle_model` ran with it at zero
