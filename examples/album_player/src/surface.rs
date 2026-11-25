@@ -30,10 +30,50 @@
 //! map only when `Tiles::is_dirty` says it changed, but a dirty map is then copied **whole**
 //! (2,048 B) by `frame.commit()`; a clean background costs no map copy. So a clock tick pays one
 //! dirty foreground screenblock (2 KB), a title/bar or scene change pays its own, and a still frame
-//! pays none. At 2a's cadence (clock 1 Hz, title/bar on events) that is bounded, and AP-3b is where
-//! the commit cost is priced. The phrase must not be reread later as "only changed cells reach
+//! pays none. At 2a's cadence (clock 1 Hz, title/bar on events) that is bounded, and AP-3b (the
+//! per-element legs) and AP-3c (the presentation path, which owns the dirty-screenblock cost) are
+//! where it is priced. The phrase must not be reread later as "only changed cells reach
 //! VRAM": a changed cell costs its background's whole map, and no agb API on this path makes it
 //! smaller.
+//!
+//! ## The chrome's hot elements: what an update costs, and where OBJ would change the answer
+//!
+//! Four chrome elements move while audio is playing, and every one of them lives on the **foreground**
+//! background (BG2): the clock when a displayed second changes, the state word on a transport event,
+//! the bar when a §6 cell advances, the title on a track change. The five control icons move once,
+//! at boot, and never again. What each costs *per update*, as the cells the diff emits — every figure
+//! below is the declared box in `layout::ELEMENTS` and `draw_text`'s per-cell diff, not an estimate:
+//!
+//! | element | declared box | cells one update writes |
+//! |---|---|---|
+//! | clock | 12 × 2 | the digits whose glyph differs — one most seconds, two to four across a carry; the `/total` half is static within a track |
+//! | state word | 9 × 2 | every column whose glyph differs — `PLAYING`→`PAUSED` is most of them |
+//! | bar | 10 × 1 | the one column the fill boundary sits in — §6's grid is `BAR_CELLS = 80` at `BAR_CELL_PX = 1`, so one cell moves it one pixel |
+//! | title | 20 × 2 | the columns whose glyph differs, plus the elision marker and the padding cells a shorter line frees |
+//!
+//! The title row is absent on a variant that declares no title (`TITLE` is `Option`), and the icons
+//! are not in this table because they never appear in an update batch after boot.
+//!
+//! **What those cell counts do not decide.** There is no partial-map commit, so one changed cell and
+//! forty changed cells cost the *same* `commit`: the foreground's whole 2,048 B map cloned into the
+//! frame and copied again into VRAM (`regular_background.rs:401-416` → `tiled.rs:410`), while the two
+//! untouched backgrounds cost nothing. The BG path's cost is therefore **quantised by background, not
+//! by cell**. That quantisation is the whole of §5.7's chrome-OBJ argument as a storage question: an
+//! OAM shadow write is 8 B for the one sprite that moved, and the frame's OAM DMA is a fixed 1 KiB
+//! whether one sprite moved or fifty. BG wins when many cells move together or when the layer is
+//! static (the art, the region, the icons — all BG today and all BG in 2b's plan); OBJ wins when a
+//! *few* cells move *often*, which is exactly the clock-digit and bar-boundary case above.
+//!
+//! **And the axis that actually bites is not storage.** `Painted::commit` is a rendezvous with the
+//! display before it is a memory copy: agb waits for a VBlank *first* (`display/mod.rs:314-337`), and
+//! that wait is a BIOS halt whose length the screen's cadence sets, not the audio's. Moving the chrome
+//! to sprites does not remove it — `oam_frame.commit()` runs inside the same call, after the wait
+//! (`object/unmanaged/object.rs:48-66`). So a frequently updated chrome is an argument for
+//! VBlank-driven presentation **first**, and for OBJ only because OBJ is the renderer that makes that
+//! presentation easy: a shadow to write, a DMA to start, no map to invalidate. §5.7 keeps the two
+//! axes separate because the 2a answer is "BG, and spaced so the wait is not taken", and the 2b answer
+//! is "either renderer, presented from VBlank" — two different questions that one sentence about
+//! "OBJ vs BG" would have blurred.
 //!
 //! ## Two halves, and the reason for the split
 //!
@@ -547,7 +587,7 @@ pub struct View<'a> {
     /// §6's progress cell, `0..=BAR_CELLS`, from [`BarCell::from_samples`] and the track's §6
     /// reciprocal. **Never a sample count**; the type exists so that mistake cannot compile.
     pub bar_cell: BarCell,
-    /// The transport state as a word (`.5.6`: shape *and* a word; until §5.3's `PAUSED` badge lands
+    /// The transport state as a word (§5.6: shape *and* a word; until §5.3's `PAUSED` badge lands
     /// in 2b, the word is the whole of the state's signal).
     pub state_word: &'a str,
 }
@@ -1058,8 +1098,42 @@ mod arm {
         /// copied whole (2,048 B). A clean background costs no map copy, so a clock tick pays one
         /// foreground screenblock and a still frame pays none; OAM's own commit still runs on every
         /// `frame.commit()` (it copies the object count and clears the unused entries), a small
-        /// fixed cost even with no objects. At 2a's cadence this is bounded; AP-3b prices it.
+        /// fixed cost even with no objects. At 2a's cadence this is bounded; AP-3b (per-element) and
+        /// AP-3c (the presentation path, whose row names the dirty-screenblock cost) price it.
         /// Nothing here writes VRAM cell by cell.
+        ///
+        /// **The first thing this call does is wait, and that is why the main loop is not supposed to
+        /// call it while audio is running (§5.7).** `GraphicsFrame::commit` runs
+        /// `VBlank::wait_for_vblank()` before it copies anything (`display/mod.rs:317`), and that is
+        /// `swi 0x05` — `VBlankIntrWait`, a BIOS **halt**, not a spin (`syscall.rs:25-29`). Its fast
+        /// path is narrower than it looks (`interrupt.rs:417-427`): the previous call leaves
+        /// `last_waited_number = n + 1` where `n` was the vblank count then, and the fast path is
+        /// `last_waited_number < n'` — so **two** vblanks must have elapsed since the last commit for
+        /// this one to return without halting. One commit per video frame therefore halts every time,
+        /// for up to `VIDEO_PERIOD_CYCLES` = 280,896 c, which is AP-0's measured number and
+        /// 0.49 of the 573,440-cycle feeder period: exactly the shape a per-frame chrome would be,
+        /// and the reason that is 2b's VBlank-presentation work rather than a rate this call site
+        /// can raise. Commits seconds apart — 2a's cadence — take the fast path as a matter of
+        /// arithmetic.
+        ///
+        /// **What the halt pauses, and what it cannot.** The audio chain is not the thing being
+        /// paused: the Timer1 ISR still fires during the halt, and agb's display path masks no
+        /// interrupts and holds no lock the ISR needs (checked against 0.25.0 — no `critical_section`
+        /// or `interrupt::disable` anywhere under `src/display/`), so the period's `take_chunk` +
+        /// `rearm_dma` stay the ISR's business (`album_play_main.rs`'s handler). What stops is the
+        /// **producer**, for up to one video period, and the ring's prefill is what absorbs that.
+        /// `PASS_MARGIN_CYCLES` is the same reservation written down as a bound: one video frame per
+        /// main-loop pass, which is enough for one worst-case commit and is spent by it — so the
+        /// invariant this call site has to keep is *at most one commit per pass*, and
+        /// `Paint::due`'s latch compare is what keeps it (`sample()` stamps the latch before the
+        /// commit, so a second serve cannot happen in the same frame).
+        ///
+        /// **So: an exception, measured, not a model.** §5.7's rule names two unconditional commit
+        /// sites — this surface's boot upload and the verdict takeover, neither of which has a live
+        /// producer to starve — and treats a main-loop commit during playback as an interim exception
+        /// that AP-3c either retires (arm B, chrome as OBJ presented by a VBlank DMA) or keeps with a
+        /// number on it (arm A, this path). Nothing here should be read as licensed to commit per
+        /// frame: the fix for a chrome that needs 60 Hz is never a tighter loop around this call.
         pub fn commit(&mut self, gfx: &mut Graphics<'_>) {
             let mut frame = gfx.frame();
             self.background.show(&mut frame);

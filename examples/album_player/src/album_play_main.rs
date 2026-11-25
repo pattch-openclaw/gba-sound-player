@@ -1293,6 +1293,14 @@ mod rom {
         /// One frame's read: the committed samples, the painted position, and the monotonicity
         /// check. No critical section — an aligned 32-bit load is atomic on ARM7TDMI
         /// (`position::committed_samples`).
+        ///
+        /// The latch is stamped **here**, before the caller draws, which is what bounds the surface to
+        /// at most one commit per pass: `refresh_surface` can only be reached once per latch value, and
+        /// `PASS_MARGIN_CYCLES` reserves exactly one video period for the whole frame slice — the take,
+        /// the position read, the transport's tick, the record scan, one paint sample *and* one
+        /// possible commit halt. A worst-case halt spends that reservation by itself, so a second
+        /// serve in the same pass, or a heavy take beside it, is outside a bound that is already tight.
+        /// The ordering of these two statements is a budget, not a style.
         fn sample(&mut self) {
             self.served = frame_latch();
             let visit = position::committed_samples().saturating_sub(self.base);
@@ -1314,7 +1322,39 @@ mod rom {
     /// `RegularBackground::show` includes a background's map only when it is dirty, but a dirty map
     /// is copied **whole** (2,048 B) by `frame.commit()`; clean backgrounds cost no map copy. At
     /// this cadence (clock 1 Hz, title/bar on events) that is bounded and is documented at
-    /// `surface::Painted::commit`; AP-3b prices it. There is no partial-map commit API.
+    /// `surface::Painted::commit`; AP-3b prices the per-element legs and AP-3c the commit itself.
+    /// There is no partial-map commit API.
+    ///
+    /// **This is §5.7's interim exception, so it is written down where someone would extend it.** What
+    /// is being excused is not the copy, it is the *wait* inside `Painted::commit` — a BIOS halt whose
+    /// length a VBlank sets — and §5.7's rule is that the main loop may not be paused by the display
+    /// while the audio producer is live. Three things keep this call site inside the exception rather
+    /// than outside it, and all three are checkable here rather than in prose:
+    ///
+    /// - **at most one commit per pass.** `paint.due()` is a latch compare and `sample()` stamps the
+    ///   latch before this runs, so a second serve cannot happen in the same frame. One commit's
+    ///   worst-case halt is one video period, and `PASS_MARGIN_CYCLES` reserves exactly one video
+    ///   period for the whole frame slice — which that halt would spend by itself. The bound is tight
+    ///   against precisely this call, and that is the quantitative form of "2a's cadence is
+    ///   affordable, a per-frame chrome is not".
+    /// - **nothing here delays the audio ISR.** The draw path takes no critical section and holds no
+    ///   lock the feeder owns (`position::committed_samples` is an aligned load), and agb's display
+    ///   code masks no interrupts; the period's `take_chunk` + `rearm_dma` stay the ISR's, and the
+    ///   `REARM_GRACE_SAMPLES` budget is the *handler's* bound, not this one's. So the exposure of a
+    ///   stall here is producer time absorbed by the ring's prefill, not a late re-arm — and R1b's
+    ///   measured 1 Hz redraw (104 late of 16,553 periods, on the sibling player) is why the exception
+    ///   is worded as a rule instead of shrugging at that arithmetic.
+    /// - **it is gated on the thing that changed**, so a still frame — the overwhelming majority of
+    ///   frames, at this cadence — writes nothing and commits nothing.
+    ///
+    /// Should this path ever be asked to do more? No, and the "no" is the plan rather than a limit of
+    /// the moment: a chrome that wants 60 Hz (2b's badge, a viz, a scrolling list) does not get it by
+    /// committing harder here. It gets presented from VBlank — a shadow the ISR or a DMA copies while
+    /// the producer keeps running — which is AP-3c's arm B, and the chrome-as-OBJ storage choice in
+    /// §5.7 exists because it makes that presentation cheap. If AP-3c's arm A comes back clean, this
+    /// stays the shipped path and the OBJ work is 2b's; if it comes back as a producer risk, the
+    /// exception is retired early and §11's 2a row says so. Either way the decision is a measurement,
+    /// and this paragraph is the pointer to it, not an argument that the measurement is unnecessary.
     ///
     /// Called from both places a frame is served — the playback loop and the drain — so the clock and
     /// the bar keep moving through a track's ending rather than freezing one second early.

@@ -30,6 +30,33 @@
 //! is a pool undercount, and it is a build failure rather than a rounding error someone finds on
 //! hardware. Same arrangement as `glyphs.rs`'s cross-module asserts, and for the same reason.
 //!
+//! ## What this module's tiles do while the album plays
+//!
+//! Two of the three groups here are static after boot and one is the most frequently rewritten art in
+//! the product, and the difference is the reason §5.7's chrome-OBJ plan is scoped the way it is:
+//!
+//! - **the four fills** ([`FILL_PAGE`], [`FILL_SCENE`], [`FILL_CHROME`], [`FILL_TITLE`]) are written
+//!   once per band by `surface::Surface::paint_static` and never touched again; they live on the
+//!   *background* layer (BG0), which is what makes them free at commit — a clean background's map is
+//!   not copied at all.
+//! - **the five icons** are likewise written once (`paint_icons`), but on the *foreground* (BG2), so
+//!   they share a map with things that move. That costs them nothing extra — they never dirty it
+//!   themselves — and it is the reason the foreground has to be its own background rather than part
+//!   of the band fill: an icon is mostly transparent pixels, and a transparent pixel has to reveal
+//!   art rather than punch a hole in it.
+//! - **the nine bar patterns** are the opposite case: `surface::draw_bar` rewrites the column the fill
+//!   boundary sits in on every §6 cell, which at `BAR_CELLS = 80` over a 4-minute track is a write
+//!   every couple of seconds, forever. Same for anything drawn from `glyphs.rs` — the clock's digits
+//!   and the state word are rewritten on the foreground too.
+//!
+//! So the chrome's *hot* set is: bar columns, clock digits, the state word, and the title on a track
+//! change — all of them BG2 cells, all of them paying a whole 2,048 B map copy per change because agb
+//! has no partial-map commit. That is the exact list §5.7 moves to sprites (~56 OAM entries, one 8×16
+//! sprite per text column and one 8×8 per icon/bar cell), and the exact reason the *fills and the
+//! scene stay BG*: a layer that changes once per boot has nothing for an OAM shadow to offer it. The
+//! per-update arithmetic, and why the presentation axis matters more than this one, is in
+//! `surface`'s module doc.
+//!
 //! ## Palette
 //!
 //! §5.4 assigns bank 0 to text and banks 1–2 to the chrome and the bar. Two banks is all this

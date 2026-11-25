@@ -25,7 +25,21 @@ use crate::surface::{Source, Write, Writes};
 const GLYPH_WORDS_PER_TILE: usize = 8;
 
 /// The three layers the ROM shows: the scene region, the chrome/title art, and the foreground
-/// (glyphs, icons and bar). Bottom to top, matching the BG numbers in `surface::Painted`.
+/// (glyphs, icons and bar). **These indices are stacking order, bottom to top, and stacking order is
+/// agb's *priority* field** — `Priority::P2` scene, `P1` art, `P0` foreground (`surface::Painted::new`)
+/// — **not the BG numbers those same three carry.** `surface::Painted` names the art BG0, the scene
+/// BG1 and the foreground BG2, because agb hands out the hardware background index in `show` order
+/// (`tiled.rs:341-346`, control word at `0x0400_0008 + i * 2` at `:400`) and the ROM shows art, scene,
+/// foreground in that order. So scene and art are swapped between the two namings, and an earlier
+/// version of this comment claimed they agreed: the numbers answer "which `BGxCNT` register", the
+/// indices answer "what covers what", and only the priority field decides the second question. §5.7
+/// keeps those two questions apart for exactly this reason; a compositor that quietly merged them is
+/// how a layer bug becomes a comment bug.
+///
+/// All three layers here are **backgrounds**, which is what the ROM draws today: no cell of any 2a
+/// product image is an OBJ, and §5.7's chrome-OBJ plan is 2b's (or AP-3c's, if that probe forces it
+/// earlier). So a picture from this canvas is evidence about the map path — the whole-screenblock
+/// copy, the transparent fall-through — and none about sprites.
 pub const LAYER_SCENE: usize = 0;
 pub const LAYER_CHROME: usize = 1;
 pub const LAYER_TEXT: usize = 2;

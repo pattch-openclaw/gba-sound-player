@@ -2282,14 +2282,51 @@ example; AP-3c measures whether it can stay.
 
 **Why `commit` is the wrong primitive for the steady state.** agb 0.25's
 `GraphicsFrame::commit` calls `VBlank::wait_for_vblank` before it presents anything
-(`display/mod.rs:314-337`). That call has a fast path: it returns immediately when a VBlank has
-occurred since the previous wait. Otherwise it executes `swi 0x05` — `VBlankIntrWait`, a BIOS **halt**
-until the next VBlank, not a busy spin (`interrupt.rs:417-427`, `syscall.rs:25-29`). The Timer1 audio
-ISR still runs while the CPU is halted, so the audio chain is not the thing being paused; the
+(`display/mod.rs:314-337`). That call has a fast path, and it is **one VBlank narrower than "not more
+than one commit per frame"**: the previous call leaves `last_waited_number` at the vblank count then
+plus one, and the fast path is that value being strictly below the count now (`interrupt.rs:417-427`),
+so **two** VBlanks must have elapsed since the last commit for this one to return without halting.
+Otherwise it executes `swi 0x05` — `VBlankIntrWait`, a BIOS **halt** until the next VBlank, not a busy
+spin (`syscall.rs:25-29`). One commit per video frame therefore halts every time, for up to
+`VIDEO_PERIOD_CYCLES` = 280,896 c; a commit every few seconds therefore never halts at all. The Timer1
+audio ISR still runs while the CPU is halted, so the audio chain is not the thing being paused; the
 **main-loop producer** is. It waits once per commit, not once per changed cell. And the wait does not
 depend on the renderer: `Object`/`OamFrame` are shown into the same frame, and `oam_frame.commit()`
 runs *inside* `GraphicsFrame::commit`, after the wait (`object/unmanaged/object.rs:48-66`). Objects
 alone do not remove it.
+
+**What that does and does not put at risk, since the answer decides 2a.** The halt stops the producer
+for up to one video period, which is 274 samples of a 560-sample feeder period — 0.49 of the period
+whose cycles are `PERIOD_CYCLES` = 573,440, the same arithmetic as §5.2's "one period = 2.04 video
+frames". It cannot delay the audio ISR (the ISR is an interrupt, and agb's display path masks no
+interrupts and takes no lock the feeder holds — checked against 0.25.0), so the exposure is the
+**ring's** slack, absorbed by the 546 ms prefill, not the `REARM_GRACE_SAMPLES` = 16-sample window —
+that window is the *vblank handler's* bound, because the handler and the feeder are two IRQs at one
+priority on a core with no nesting (§4.5). So a 2a commit at its declared cadence is not a splice
+waiting to happen, and the honest statement of the rule is two clauses rather than one:
+
+- **the steady state is the problem, not the call site.** `PASS_MARGIN_CYCLES` reserves exactly one
+  video period for the whole frame slice a pass serves — take, position read, transport tick, record
+  scan, one paint sample, and one possible commit halt. One worst-case halt spends that reservation by
+  itself. Move the chrome to per-frame and every pass starts needing that slack, which is the same
+  sentence as "the display schedules the producer"; that is what §5.7 forbids, and it is why the
+  bound is written as *at most one commit per pass* in `Paint::sample`'s and `refresh_surface`'s docs
+  rather than left as a rate that happens to be low.
+- **"it is only 1 Hz" is a measurement, not an argument.** R1b's single 1 Hz text redraw on the
+  sibling player came out 104 late of 16,553 periods on real hardware — audible splices, no underruns,
+  and every headless term green. Nothing about the album surface's cadence reproduces *that* mechanism
+  (this draw path holds no lock the feeder needs and dirties one background at a time), but the reason
+  the 2a commit is called an exception in the first place is that this tree has one hardware witness
+  that a low-frequency main-loop redraw is not automatically free.
+
+**So, should 2a be committing from the loop at all?** Yes, and only as the control arm: it is the
+cheapest thing that satisfies §5.2's cadence rule and §5.6's legibility need, it is gated to one
+commit per pass by the latch compare, and it is what AP-3c's arm **A** exists to measure against arm
+**B**. 2b's chrome — a badge, a scroll, a beat-driven bar — must not inherit this call site; it is
+presented from VBlank. If AP-3c shows arm A costing the producer anything worth naming, the exception
+is retired inside 2a and §11's 2a row is amended there; if it comes back clean, the OBJ chrome stays
+2b's first commit and this paragraph is where the shipped 2a behaviour is justified rather than
+apologised for.
 
 **The path that removes it is VBlank-driven presentation.** The draw decision writes a shadow; the
 VBlank ISR or a VBlank-started DMA copies it while the main loop continues. For OAM that is one 1 KiB

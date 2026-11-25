@@ -7,7 +7,7 @@
 //! the two states that change cells can be compared.
 //!
 //! **The title, the length and the bar cell come from the album**, not from a string typed here:
-//! `assets::ALBM1` is the same manifest the ROM parses, `assets::TRACKS` the same pins, and the bar
+//! `assets::ALBUM1` is the same manifest the ROM parses (ALBM1 is the format), `assets::TRACKS` the same pins, and the bar
 //! cell is `surface::BarCell::from_samples` on that track's own §6 reciprocal. A preview with a
 //! literal length would agree with itself and with nothing else.
 //!
@@ -46,6 +46,16 @@ fn main() {
     let mut writes = surface::Writes::new();
 
     // The three layers, bottom to top: scene, chrome/title art, foreground (glyphs, icons, bar).
+    // Bottom-to-top is agb's *priority* order (P2, P1, P0); the BG numbers the same three carry are
+    // BG1, BG0, BG2, because agb assigns the hardware BG index by `show` order — see
+    // `preview::LAYER_SCENE`, which spells out why the two namings are not the same list.
+    //
+    // All three are backgrounds, and this compositor has no OBJ path at all — which is the point: the
+    // preview is the BG model, so what it can show is the map's layering and the transparent
+    // fall-through, and what it cannot show is §5.7's chrome-as-sprites plan for the hot elements
+    // (clock, state word, bar, title). That plan buys a presentation path, not a picture: the same
+    // cells, the same geometry, a different way of getting them to VRAM. Nothing in 2a draws a sprite.
+    //
     // The page fill is transparent and is what stops any visible cell depending on agb's reserved
     // blank tile; the preview draws it and then falls through it, which is what the hardware does.
     surface::Surface::paint_page(&mut writes);
