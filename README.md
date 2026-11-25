@@ -266,13 +266,23 @@ Through a series of recent refactors and debugging sessions, we:
      on the host needs the pinned nightly toolchain, plus the toolchain that
      builds libmgba (a C library) for `mgba-test-runner`. The channel is pinned in
      [`rust-toolchain.toml`](rust-toolchain.toml) — rustup installs it on the first
-     build — so these commands only matter if you want it pre-staged:
+     build. The supported root-free setup for this host is one script:
+     ```sh
+     .agents/skills/gba-build-and-test/scripts/setup-native-toolchain.sh
+     . .agents/env.sh          # every fresh shell: PATH + GBA_AUDIO + ULI_ALBUM_PY
+     ```
+     It installs the pinned nightly + `rust-src`/`rustfmt`, `agb-gbafix` 0.25.0,
+     static `ffmpeg`, `flac`/`metaflac` **1.5.0** (the version the committed FLAC
+     fixtures were made with), the Python venv for album/prep, and
+     `mgba-test-runner` built from agb v0.25.0 with the aarch64 patches. The manual
+     commands below are the subset for a host that already has the C dependencies:
      ```sh
      rustup toolchain install nightly-2026-09-04      # the pinned channel
-     rustup component add rust-src --toolchain nightly-2026-09-04
+     rustup component add rust-src rustfmt --toolchain nightly-2026-09-04
      brew install cmake pkg-config libelf make   # the last one for the pin read: use gmake
      cargo install agb-gbafix --version 0.25.0 --locked
-     cargo install --git https://github.com/agbrs/agb.git --tag v0.25.0 --locked mgba-test-runner
+     # agb v0.25.0's test-runner needs three aarch64 patches; use the setup script
+     # rather than `cargo install --git` on Linux arm64.
      ```
    - **Running Tests natively** (the Makefile sets this runner itself; shown for
      a raw `cargo` invocation — through rustup, so it works even when a non-shim
