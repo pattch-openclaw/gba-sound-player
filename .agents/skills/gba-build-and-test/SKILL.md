@@ -9,8 +9,8 @@ description: >-
   master encoding), and the measured gotchas of this repo — the Tier-3 target has no
   prebuilt core, cargo's config inheritance breaks host tests, agb v0.25.0 needs aarch64
   patches, the root ROM #[test_case] suite collects zero tests, a playback ROM's PASS exits
-  124, and the historical FLAC instruments (6a-3/6a-5/6a-7 arms, the 10,512 Hz rate flow,
-  arm-kernels, e5_fetch) no longer have Make targets. Use when building any .gba in this
+  124, and the historical FLAC instruments (6a-3/6a-5/6a-7 arms, arm-kernels, e5_fetch)
+  no longer have Make targets. Use when building any .gba in this
   repo, running or extending its test gates, touching crates/flac-lite or the Makefile, or
   deciding whether to use the podman-* container targets here.
 ---
