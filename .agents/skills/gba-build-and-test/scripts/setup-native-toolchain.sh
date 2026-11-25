@@ -241,6 +241,11 @@ if ! have mgba-test-runner && [ ! -x "$MGBA_ROOT/bin/mgba-test-runner" ]; then
     export PKG_CONFIG_PATH="$ROOTLESS/usr/lib/aarch64-linux-gnu/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
     export PKG_CONFIG_SYSROOT_DIR="$ROOTLESS"
     export CMAKE_PREFIX_PATH="$ROOTLESS/usr"
+    # bindgen (mgba-sys's build script) dlopens libclang at *build* time, and
+    # libclang in turn needs libLLVM.so.18.1. LDFLAGS' rpath below only reaches the
+    # final link, so without this the build dies with "Unable to find libclang"
+    # even though the tree has both. Measured on Ubuntu 24.04 arm64, 2026-11-25.
+    export LD_LIBRARY_PATH="$ROOTLESS/usr/lib/aarch64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     export CFLAGS="-I$ROOTLESS/usr/include${CFLAGS:+ $CFLAGS}"
     export CXXFLAGS="$CFLAGS"
     export LDFLAGS="-L$ROOTLESS/usr/lib/aarch64-linux-gnu -Wl,-rpath,$ROOTLESS/usr/lib/aarch64-linux-gnu${LDFLAGS:+ $LDFLAGS}"
