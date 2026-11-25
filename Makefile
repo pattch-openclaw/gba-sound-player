@@ -6,7 +6,7 @@
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
         uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-band-rdo-fixture-clean \
-        uli-probe uli-plan-diff uli-frame-diff uli-dump-plan \
+        uli-probe uli-plan-diff uli-frame-diff uli-dump-plan uli-train-diff \
         uli-rd-ab uli-accept uli-oracle-check \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
@@ -841,6 +841,28 @@ uli-dump-plan: toolchain-check
 	  $(CARGO) build --release --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE) --example plan_dump
 	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_dump_plan.py \
 	  --plan-dump $(abspath $(ULI_PLAN_DUMP)) $(ULI_DUMP_PLAN_ARGS)
+
+# S8-6: the trainer, fed the reference's own pass-1 plan. P2's dump supplies the four
+# train rounds' stats (which build the initial tables) and the retrain stats; `train-dump`
+# rebuilds the initial tables, checks `train::build` on the dumped retrain stats, then codes
+# the pass-1 plan every second frame through `train::collect_frames` and checks the final
+# table region. Gate: the blob's 5,212-byte table region, `dq` included, byte for byte, and
+# the integer stats counts exact. `--work-dir` keeps the cell/blob/dump for inspection.
+# Deliberately NOT on any gate's path: it builds and runs the off-tree reference.
+ULI_TRAIN_DUMP_BIN ?= crates/uli-enc/target/$(HOST_TRIPLE)/release/train-dump
+ULI_TRAIN_DIFF_DIR ?= $(GATE_NEUTRAL_CWD)/uli-train-diff
+uli-train-diff: toolchain-check
+	@test -f $(GBA_AUDIO)/encoder/uli_enc.c || \
+	  { echo "uli-train-diff: no reference encoder source at $(GBA_AUDIO)/encoder (set GBA_AUDIO=)"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) build --release --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE) --bins && \
+	  $(CARGO) build --release --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE) --example plan_dump
+	rm -rf $(ULI_TRAIN_DIFF_DIR)
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_dump_plan.py \
+	  --work-dir $(ULI_TRAIN_DIFF_DIR) \
+	  --plan-dump $(abspath $(ULI_PLAN_DUMP)) \
+	  --train-dump $(abspath $(ULI_TRAIN_DUMP_BIN))
 
 # S8-3's plan/table diff: between two blobs, *which* table field and *which* frame's step
 # differ — the question S7 can only answer at region granularity. Needs no reference build
@@ -2322,6 +2344,8 @@ help:
 	@echo "                           localised to a container region (needs the off-tree oracle)"
 	@echo "      uli-dump-plan        S8-2: the reference's own pass-1/pass-2 plan and counts;"
 	@echo "                           the dumped shipped plan must equal the plan decoded from its blob"
+	@echo "      uli-train-diff       S8-6: the trainer on that pass-1 plan; the table region"
+	@echo "                           must equal the reference blob's, dq included"
 	@echo "      uli-overlay-test     product path vs the portable reference, both builds, + premise"
 	@echo "      uli-fixture          regenerate the committed expected-vector file"
 	@echo "      uli-bench            build + run + read PASS: 129-frame cycle/witness image"

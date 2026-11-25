@@ -45,9 +45,14 @@ Usage:
 
 `--plan-dump` is the path to the built example. The Makefile target builds it; when you run
 the script by hand, build it once (the target's recipe is the exact command) or pass
-`--no-verify` to get the dump by itself. `CC` and `DUMP_CFLAGS` override the compiler and the
-flags for a deliberate *different* oracle — say so where you record the result, because the
-flags are part of what a dump means. Exit status: 0 when the gate passes; 2 when the dump
+`--no-verify` to get the dump by itself. `--train-dump PATH` additionally runs S8-6's
+`train-dump` on the same dump, blob and PCM: it rebuilds the initial tables from the train
+rounds, feeds the pass-1 plan to `train::collect_frames` every second frame, and requires the
+reference blob's 5,212-byte table region. `--work-dir DIR` keeps the generated cell, blob and
+dump for inspection instead of a temp directory (the `make uli-train-diff` target uses it).
+`CC` and `DUMP_CFLAGS` override the compiler and the flags for a deliberate *different*
+oracle — say so where you record the result, because the flags are part of what a dump
+means. Exit status: 0 when the gate passes; 2 when the dump
 and the blob disagree on the plan, the header cycle fields or a seek entry (the
 `uli_accept.py` DIFF convention); 1 on a harness error (missing reference source, build
 failure, missing dump section, unparseable dump/blob).
@@ -576,7 +581,7 @@ def gate_inputs(tmpdir: Path) -> tuple[Path, Path, list[str]]:
     """S8-4's fast cell, generated into `tmpdir`; no corpus required."""
     fail_if(not GEN_FAST.exists(), f"missing {GEN_FAST}")
     cell = tmpdir / "fast"
-    cell.mkdir()
+    cell.mkdir(parents=True, exist_ok=True)
     cp = subprocess.run(
         [sys.executable, str(GEN_FAST)], cwd=cell, capture_output=True, text=True
     )
@@ -595,13 +600,24 @@ def main() -> int:
     ap.add_argument("--out", type=Path, help="blob to write (required with --album)")
     ap.add_argument("--dump-plan", type=Path, help="plan dump to write (default: <out>.plan)")
     ap.add_argument("--plan-dump", type=Path, help="the built uli-lite plan_dump example")
+    ap.add_argument(
+        "--train-dump",
+        type=Path,
+        help="the built uli-enc train-dump binary; runs S8-6's trainer gate on the dump",
+    )
     ap.add_argument("--budget", type=int, help="--budget for the reference")
     ap.add_argument("--cap", type=float, help="--cap for the reference (percent)")
     ap.add_argument("--threads", type=int, default=4, help="--threads (default 4)")
     ap.add_argument("--dacw", type=int, default=0, help="--dacw (default 0: S8's arm)")
     ap.add_argument("--musearch", type=int, default=1, help="--musearch (default 1)")
+    ap.add_argument("--kappa", type=float, default=0.13, help="kappa (default 0.13)")
     ap.add_argument("--no-verify", action="store_true", help="write the dump, skip the blob gate")
     ap.add_argument("--keep", action="store_true", help="keep the temp directory and print it")
+    ap.add_argument(
+        "--work-dir",
+        type=Path,
+        help="write the cell, blob and dump here instead of a temp dir (implies --keep)",
+    )
     args = ap.parse_args()
 
     if args.album is not None:
@@ -622,14 +638,34 @@ def main() -> int:
             not args.plan_dump.exists(),
             f"--plan-dump {args.plan_dump} does not exist — build it first",
         )
+    if args.train_dump is not None:
+        fail_if(
+            not args.train_dump.exists(),
+            f"--train-dump {args.train_dump} does not exist — build it first",
+        )
 
-    keep = args.keep
-    td = tempfile.mkdtemp(prefix="uli-dump-plan-") if keep else tempfile.TemporaryDirectory()
+    if args.work_dir is not None:
+        args.work_dir.mkdir(parents=True, exist_ok=True)
+        tmpdir = args.work_dir
+        temp = None
+    elif args.keep:
+        tmpdir = Path(tempfile.mkdtemp(prefix="uli-dump-plan-"))
+        temp = None
+    else:
+        temp = tempfile.TemporaryDirectory()
+        tmpdir = Path(temp.name)
     try:
-        tmpdir = Path(td if keep else td.name)
         if args.album is None:
             album, tracks, base_flags = gate_inputs(tmpdir)
-            flags = [*base_flags, "--dacw", str(args.dacw), "--musearch", str(args.musearch)]
+            flags = [
+                *base_flags,
+                "--dacw",
+                str(args.dacw),
+                "--musearch",
+                str(args.musearch),
+                "--kappa",
+                str(args.kappa),
+            ]
             out = tmpdir / "fast.uli"
             plan = tmpdir / "fast.plan"
             label = "fast (generated)"
@@ -649,6 +685,7 @@ def main() -> int:
                 flags += ["--budget", str(args.budget)]
             if args.cap is not None:
                 flags += ["--cap", str(args.cap)]
+            flags += ["--kappa", str(args.kappa)]
             label = f"{album}"
 
         print(f"uli-dump-plan: P2, the reference's own plan ({label})")
@@ -671,21 +708,47 @@ def main() -> int:
 
         if args.no_verify:
             print("uli-dump-plan: --no-verify, the blob gate was not run")
-            return 0
-        if args.album is not None and args.plan_dump is None:
+        elif args.album is not None and args.plan_dump is None:
             print("uli-dump-plan: no --plan-dump, the blob gate was not run", file=sys.stderr)
-            return 0
+        else:
+            cp = subprocess.run(
+                [str(args.plan_dump), str(out)], capture_output=True, text=True
+            )
+            if cp.returncode != 0:
+                raise HarnessError(f"plan_dump exited {cp.returncode}:\n{cp.stderr.strip()}")
+            blob = parse_blob(cp.stdout)
+            print("uli-dump-plan: verifying the dumped shipped plan against the blob's own plan")
+            verify(dump, blob)
+            prove_the_gate_bites(dump, blob)
+            print("uli-dump-plan: OK — the dump is the blob's plan, both passes and the counts")
 
-        cp = subprocess.run(
-            [str(args.plan_dump), str(out)], capture_output=True, text=True
-        )
-        if cp.returncode != 0:
-            raise HarnessError(f"plan_dump exited {cp.returncode}:\n{cp.stderr.strip()}")
-        blob = parse_blob(cp.stdout)
-        print("uli-dump-plan: verifying the dumped shipped plan against the blob's own plan")
-        verify(dump, blob)
-        prove_the_gate_bites(dump, blob)
-        print("uli-dump-plan: OK — the dump is the blob's plan, both passes and the counts")
+        if args.train_dump is not None:
+            print("uli-dump-plan: S8-6, feeding the pass-1 plan to the trainer")
+            cp = subprocess.run(
+                [
+                    str(args.train_dump),
+                    "--dump",
+                    str(plan),
+                    "--blob",
+                    str(out),
+                    "--album",
+                    str(album),
+                    "--tracks",
+                    str(tracks),
+                    "--kappa",
+                    str(args.kappa),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if cp.stdout:
+                print(cp.stdout, end="")
+            if cp.stderr:
+                print(cp.stderr, end="", file=sys.stderr)
+            if cp.returncode == 2:
+                return 2
+            if cp.returncode != 0:
+                raise HarnessError(f"train-dump exited {cp.returncode}")
         return 0
     except DumpMismatch as e:
         print(f"uli-dump-plan: DIFF — {e}", file=sys.stderr)
@@ -694,10 +757,12 @@ def main() -> int:
         print(f"uli-dump-plan: {e}", file=sys.stderr)
         return 1
     finally:
-        if keep:
-            print(f"uli-dump-plan: kept {td}")
+        if temp is not None:
+            temp.cleanup()
+        elif args.work_dir is not None:
+            print(f"uli-dump-plan: wrote {args.work_dir}")
         else:
-            td.cleanup()
+            print(f"uli-dump-plan: kept {tmpdir}")
 
 
 if __name__ == "__main__":

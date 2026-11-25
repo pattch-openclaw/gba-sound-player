@@ -148,8 +148,8 @@ proxy is printed beside ours so the two are never interchanged.
 
 **Its verdict is DIFF on every cell**, and that is the measured state rather than a harness
 fault: the first content difference lands inside the **trained tables** in all four, and it is
-**unattributed**. Closing it is S8, whose plan — four instruments, a 13-row divergence
-inventory, eight sub-steps — is in
+**unattributed**. Closing it is S8, whose plan — five instruments, a 21-row divergence
+inventory, nine sub-steps — is in
 [`../uli-lite/PLAN-OF-RECORD.md`](../uli-lite/PLAN-OF-RECORD.md) → "S8 — the plan". Until it
 closes, the encoder matches the reference's **`--dacw 0`** arm only in intent, never in bytes.
 
@@ -194,7 +194,10 @@ copy of the oracle's driver off-tree (in a temp directory, no C in this reposito
 its **pass-1** plan, every **pass-2** attempt and the per-class counts `tables_from_stats`
 consumed. Its gate is that the dumped shipped plan equals the plan decoded from that run's own
 blob, so the instrument is checked against the artefact it explains. It is S8-2's instrument
-and the input S8-6 needs — `PLAN-OF-RECORD.md` → S8-2 — and it does not change this crate.
+and it does not change this crate. S8-6 consumes it: `make uli-train-diff` rebuilds the initial
+tables from the dumped train rounds, feeds the pass-1 plan to `train::collect_frames` every
+second frame, and requires the reference blob's 5,212-byte table region — `PLAN-OF-RECORD.md`
+→ S8-6. It is the trainer the search work (S8-7) will wire in, not a product path.
 
 ## Test
 

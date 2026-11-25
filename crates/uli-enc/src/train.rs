@@ -27,7 +27,7 @@
 //! tables that come from floats. The *counts* are integer and the merge is deterministic, so
 //! the same host reproduces the same tables byte for byte.
 
-use uli_lite::format::{BANDW, CT_PAIR, CT_QUAD, CT_ZERO, M, MAXK, MAXLEN};
+use uli_lite::format::{BANDW, CT_PAIR, CT_QUAD, CT_ZERO, M, MAXK, MAXLEN, NBANDS};
 
 use crate::frame;
 use crate::plan::Content;
@@ -90,7 +90,24 @@ pub fn collect(
     content: &Content,
     kappa: f64,
 ) -> Stats {
-    let n_frames = content.len();
+    let frames: Vec<usize> = (0..content.len()).collect();
+    collect_frames(samples, n_samples, tables, content, kappa, &frames)
+}
+
+/// Collect statistics from a *subset* of a finished plan, in the given frame order.
+///
+/// The reference's `retrain(g, ms, 2)` samples every second frame (`fr[i] = i*sub`), so
+/// the trainer's input is not the whole album; `train()` samples every eighth. Sharing the
+/// collector with a frame list is what lets the two samplings be the same code (inventory
+/// row 10) rather than two implementations that have to agree.
+pub fn collect_frames(
+    samples: &crate::pcm::Samples,
+    n_samples: usize,
+    tables: &DefaultTables,
+    content: &Content,
+    kappa: f64,
+    frames: &[usize],
+) -> Stats {
     let mut st = Stats::default();
     let k = tables.k;
     for (c, slot) in st.cls.iter_mut().enumerate().take(k) {
@@ -98,7 +115,7 @@ pub fn collect(
         *slot = vec![0.0; n];
     }
     let mut coef = [0f32; M * 2];
-    for f in 0..n_frames {
+    for &f in frames {
         crate::mdct::mdct_frame(samples, f, n_samples, &mut coef);
         let ms = content.ms(f) != 0;
         let rot = quant::rotate(&coef, ms);
@@ -139,8 +156,15 @@ pub fn collect(
                     }
                 }
             }
-            // The terminator, from the context of the last band coded.
-            st.cb[ctx][k] += 1.0;
+            // The terminator is conditional, exactly as `frame::write_chan` emits it: a
+            // channel that codes all `NBANDS` bands gives the reader no chance to read an
+            // EOB, and the reference's `frame_code` does not charge one. Counting it here
+            // would train the context table on symbols the stream never carries — measured
+            // on S8-4's `fast` cell as 10 extra terminators in context 1 and 9 in context
+            // 2 (S8-6, inventory row 19).
+            if chans[f][ch].bands.len() < NBANDS {
+                st.cb[ctx][k] += 1.0;
+            }
         }
         st.frames += 1;
     }
@@ -150,18 +174,23 @@ pub fn collect(
 
 /// Rebuild the tables from counts, keeping every structural row of `base`.
 ///
-/// A class with no observations keeps the base's lengths rather than being given a degenerate
-/// table: an album that never uses a class still has to be able to code a frame that would.
+/// **Context rows are always rebuilt, even when they have no counts.** The reference's
+/// `tables_from_stats` calls `huff_lengths` for every `st->cb[a]` unconditionally, so an
+/// unobserved context gets the balanced code the 0.2 floor implies (14 symbols at four
+/// bits and the terminator at three), not the base's model lengths. Retaining the base
+/// there is invisible on a rich album and differs from the oracle on a small one — measured
+/// on S8-4's `fast` cell as 21 bytes of `len_cb` (S8-6, inventory row 9's trainer side).
+///
+/// A *class* row with no observations keeps the base's lengths, which is the reference's
+/// rule too (`if (s > 0) huff_lengths(...)`): an album that never uses a class still has to
+/// be able to code a frame that would.
 pub fn build(base: &DefaultTables, st: &Stats) -> DefaultTables {
     let mut t = base.clone();
     let k = t.k;
 
     for s in 0..=k {
-        let counts = &st.cb[s];
-        if counts.iter().any(|&c| c > 0.0) {
-            let len = huff_lengths(&counts[..=k], FLOOR);
-            t.cb[s] = Codes::from_lengths(&len);
-        }
+        let len = huff_lengths(&st.cb[s][..=k], FLOOR);
+        t.cb[s] = Codes::from_lengths(&len);
     }
 
     for c in 0..k {

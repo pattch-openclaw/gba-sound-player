@@ -20,6 +20,8 @@
 mod common;
 
 use common::{TempDir, materialise, write_tracks};
+use uli_enc::pcm::Samples;
+use uli_enc::plan::{Content, GPlan};
 use uli_enc::{Args, DEFAULT_CAP_PCT, DefaultTables, Input, train};
 use uli_lite::CodeTables;
 
@@ -177,5 +179,82 @@ fn training_actually_changes_the_tables() {
         parsed.tables(),
         &base[..],
         "the shipped tables are byte-identical to the built-in ones, so nothing was trained"
+    );
+}
+
+/// S8-6: an unobserved context is still rebuilt, to the balanced code the 0.2 floor implies.
+///
+/// The reference's `tables_from_stats` calls `huff_lengths` for every `st->cb[a]`
+/// unconditionally, so a context a small album never visits does **not** keep the built-in
+/// row. Measured on S8-4's `fast` cell, retaining the base row left 21 bytes of `len_cb`
+/// different from the oracle's table region; this test is the regression, on the fifteen
+/// evenly-weighted symbols of a 14-class set (fourteen at four bits, the terminator at
+/// three).
+#[test]
+fn an_unobserved_context_is_rebuilt_to_the_balanced_code() {
+    // The default rows are already balanced, so a base-only test cannot see the difference.
+    // Model the sequence that exposed it: a round observes context 9, a later round has no
+    // counts for it. The later `build` must revert the row to the balanced code rather than
+    // keep the observed one — which is what the reference's unconditional `huff_lengths`
+    // does, and what left 21 bytes of `len_cb` different from the oracle before S8-6.
+    let base = DefaultTables::build();
+    let mut observed = train::Stats::default();
+    observed.cb[9][0] = 100.0;
+    let skewed = train::build(&base, &observed);
+    assert_ne!(
+        skewed.cb[9].len, base.cb[9].len,
+        "the observed row should be skewed, not the balanced default"
+    );
+
+    let rebuilt = train::build(&skewed, &train::Stats::default());
+    assert_eq!(
+        rebuilt.cb[9].len, base.cb[9].len,
+        "a zero-count context kept the previous row instead of being rebuilt"
+    );
+    let mut lengths: Vec<u8> = (0..=base.k).map(|b| rebuilt.cb[9].symbol_len(b)).collect();
+    assert_eq!(rebuilt.cb[9].symbol_len(base.k), 3);
+    lengths.sort_unstable();
+    assert_eq!(lengths, [3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]);
+}
+
+#[test]
+fn the_terminator_is_charged_only_when_it_is_written() {
+    use uli_enc::quant::{Band, Chan};
+    use uli_lite::format::NBANDS;
+
+    let tables = DefaultTables::build();
+    let samples = Samples::from_interleaved(vec![0.0; N_SAMPLES * 2]);
+    let g = 100;
+    let ms = false;
+
+    let collect = |bands: usize| {
+        let chan = Chan {
+            bands: vec![Band::zero(); bands],
+        };
+        let content = Content::coded(GPlan::new(vec![g], vec![ms]), vec![[chan.clone(), chan]]);
+        train::collect_frames(&samples, N_SAMPLES, &tables, &content, 0.13, &[0])
+    };
+
+    let full = collect(NBANDS);
+    assert_eq!(full.frames, 1);
+    assert_eq!(
+        full.cb[0][tables.k], 0.0,
+        "a full-band channel must not be charged a terminator"
+    );
+    assert_eq!(full.cb[0][0], 2.0 * (NBANDS as f64 - 1.0));
+    assert_eq!(
+        full.cb[tables.k][0], 2.0,
+        "the first band of each channel is context k"
+    );
+
+    let short = collect(NBANDS - 1);
+    assert_eq!(
+        short.cb[0][tables.k], 2.0,
+        "a channel that ends early is charged one terminator per channel"
+    );
+    assert_eq!(short.cb[0][0], 2.0 * (NBANDS as f64 - 2.0));
+    assert_eq!(
+        short.cb[tables.k][0], 2.0,
+        "the first band of each channel is context k"
     );
 }

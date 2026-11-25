@@ -3255,7 +3255,59 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
-- **2026-11-25 (latest) — S8-2: the reference's own plan becomes readable, and its gate is the
+- **2026-11-25 (latest) — S8-6: the trainer, fed the reference's own pass-1 plan, reproduces
+  the table region.** The row the S8-2 instrument was built for, and it closed with two trainer
+  bugs that reading the code had not found — both visible only because the gate compares the
+  reference's *counts*, not just the bytes.
+
+  **The instrument.** `crates/uli-enc/src/bin/train-dump.rs` + `make uli-train-diff` (which
+  drives `scripts/uli_dump_plan.py --work-dir … --train-dump …`). It reads P2's dump, rebuilds
+  the initial tables with `train::build` over the four `train-itN` stat sets, then checks the
+  final table region two ways: (a) `train::build` from the dumped `retrain` stats, isolating
+  the construction; (b) code the dumped pass-1 plan ourselves — every second frame, at its
+  `(g, ms)`, with the initial tables — then `train::collect_frames` + `train::build`, which
+  adds the coder and the collector. One new public function, `train::collect_frames`, is the
+  sampler the reference's `retrain(…, 2)` and `train(…, 8)` both are (row 10); `collect` is now
+  the all-frames call.
+
+  **Two trainer divergences, found by the counts.**
+  1. **A zero-count context row was kept, not rebuilt** (inventory row 19). The reference calls
+     `huff_lengths` for every `st->cb[a]`, observed or not; `train::build` only rebuilt rows
+     with a positive count. From P2's dumped stats this left **21 bytes of `len_cb`** different
+     (contexts 9 and 11, which `fast`'s retrain sample never visits). `build` now rebuilds every
+     context row, which gives an unobserved context the balanced 0.2-floor code (fourteen
+     symbols at four bits, the terminator at three). **Measured: 21 → 0 differing bytes.**
+  2. **The terminator was charged on a full-band channel** (inventory row 20). `frame_code`
+     adds `cb[ctx][EOB]` only when `endB < nb`; `collect` added it for every channel, including
+     the ones that code all 32 bands and therefore give the reader no EOB to read. Against the
+     dumped `retrain` stats: **10 extra terminators in context 1 and 9 in context 2** on `fast`.
+     Guarded on `bands.len() < NBANDS`, matching `frame::write_chan`; **counts exact after**.
+
+  **The third finding is a diagnostic, not a defect (inventory row 21).** The reference's
+  `count_frames` accumulates into thread-local `EncStats` and `stats_add`s them in thread order,
+  so its `cen_s` sum order is the OpenMP chunk assignment — not a stable order to reproduce.
+  Ours sums in frame order. On `fast` (4 threads) **12 `cen_s` values differ, worst 6 ULP**;
+  every integer count and `cen_n` are exact, and the consumer is `round(16·cen_s/cen_n)`, so
+  `dq` and the table region are identical. On `tiny` (`--threads 1`, one thread, frame order)
+  **0 ULP**. It is named so S8-7 can confirm it on all cells, where a half-integer mean could
+  flip a `dq`.
+
+  **Gate, measured.** The **5,212-byte table region, `dq` included, is byte-identical** to the
+  reference blob's on S8-4's `fast` cell (257 frames; 129 sampled) and the generated `tiny`
+  fixture (129; 65), from **both** (a) and (b). The integer counts match the dumped `retrain`
+  stats exactly. `make uli-check` and `make uli-test` (18 suites / 99 tests) pass; the new
+  regression tests are `an_unobserved_context_is_rebuilt_to_the_balanced_code` and
+  `the_terminator_is_charged_only_when_it_is_written`.
+
+  **What it does not claim.** The initial tables are reconstructed from P2's *dumped* train
+  stats, not from a Rust reproduction of `train()`'s shape — the analytic allocation, the nine
+  λ probes and the every-4th-frame sampling are **S8-7's** (`#9·shape`). What S8-6 closes is row
+  10's sampling and the trainer's construction. The shipped encoder's fast-cell blob is
+  byte-identical to the pre-change one (the fixes are inert on our S4 plan path), and the
+  acceptance cell remains DIFF at 19,780 vs 19,744 B with 2,081 table bytes differing — S8-7's
+  work.
+
+- **2026-11-25 (later) — S8-2: the reference's own plan becomes readable, and its gate is the
   plan its own blob declares.** P2 exists because the trainer's real input — the pass-1 plan —
   is not in the artefact: a blob carries the emitted plan and the table set trained on the
   *previous* pass. `scripts/uli_dump_plan.py` (`make uli-dump-plan`) mirrors the off-tree
