@@ -13,7 +13,10 @@ scene, and a ROM a person can play on it); 2b is what goes in the region (A8, A1
 art, the track-list scene, the title-card scene)**, which also carries the
 two things PR-3c handed it (§5.3). **2a's first PR is scoped in the note under §11's phase table
 (2026-11-20), and the one refusal inside AP-3 whose *input* 2a does not parse — `art-box-not-derived`
-— is named there, in §9.0's register and in §13's AP-3 row rather than left to be rediscovered.**
+— is named there, in §9.0's register and in §13's AP-3 row rather than left to be rediscovered.
+2b's tool-first ladder was scoped 2026-11-25, and its **PR-(1) — the per-scene schema, the
+resident-set walk and the machine-readable report, with no new pixels — has landed** (§11's 2b
+note); the next unclaimed step is PR-(2), AP-3b's missing render probe bin.**
 It is a plan to be argued with, a scope
 statement, and a budget the first probe ROM has to contradict usefully — and it did:
 AP-0 refuted one row of §4.4's observable table, and the fix is recorded there rather
@@ -2881,7 +2884,7 @@ quoting a message.
 | `atlas-ink-not-matching-outline` | the pixels this tool filled do not have the bounding box the same outline's control points describe — the ±1 class of mistake in a stem or a counter. **This one is the tool's own bug path, not a fact about any input**, and it is printed as *named and not fired*: the comparison runs for every outlined glyph of the tracked cut, and a second font invented to trip it would be a second font in a tree that has enough of them | `scripts/album_glyphs.py` | **2a PR-(2)** | atlas gate log, printed as named-not-fired rather than hidden |
 | `rate-bridge` / `frames-out-of-profile` / `n-samples-mismatch` | Q14's rate rule; frames outside the encode profile; `ALBM1`'s totals ≠ the packed container's | `album_bake.py` / `album_prep.py` / `gafp_pack.py` | **Phase 1, shipped** | bake log (AP-1, AP-5) |
 | `art-palette-count` / `art-off-palette-source` / `art-image-tiles-exceed` | an actual image needs more palettes than §5.4 allocates, carries an off-palette source colour, or exceeds the variant's image term | `album_art.py` — the only tool that reads an image | **2b** (AP-4) | bake log |
-| `over-budget` / `over-track-count` / `unused-viz-streams` / `audit-ceiling` | cart budget (album + art + viz + code reserve), the track ceiling, `ALVZ1` streams the chosen animation never reads, §10.4's 16-bit period ceiling (37.4 min at 16,384 Hz) | `album_bake.py` | **Phase 3** (A3b) for `unused-viz-streams` / `audit-ceiling`; **2b PR-(1)** for `over-budget` / `over-track-count`, re-homed 2026-11-25 (§11's 2b note: a generator that cannot say "this album does not fit" is not a budget tool, and the two `[viz]` rows keep their Phase-3 home because they read `[viz]`). `over-track-count` was claimed by both 2a and Phase 3 until the 2026-11-20 review | bake log (AP-5) |
+| `over-budget` / `over-track-count` / `unused-viz-streams` / `audit-ceiling` | cart budget (album + art + viz + code reserve), the track ceiling, `ALVZ1` streams the chosen animation never reads, §10.4's 16-bit period ceiling (37.4 min at 16,384 Hz) | `album_bake.py` | **Phase 3** (A3b) for `unused-viz-streams` / `audit-ceiling`; **2b PR-(1)** for `over-budget` / `over-track-count`, re-homed 2026-11-25 (§11's 2b note: a generator that cannot say "this album does not fit" is not a budget tool, and the two `[viz]` rows keep their Phase-3 home because they read `[viz]`). `over-track-count` was claimed by both 2a and Phase 3 until the 2026-11-20 review. **Landed 2026-11-25:** `over-budget` is `code reserve + ALBM1 + art` refused before any byte is written, and `over-track-count` is the Phase-1 `track-count` refusal under its register name; both fire by id in `--layout-self-test` (`budget rows fired: 2 of 2`) | bake log (AP-5) |
 
 Four refusals are Phase 1's and already fire (AP-5's row counts the same four — that count is
 unchanged); **fifteen are 2a's** — ten about the spec and the layout it generates, five about the
@@ -3029,7 +3032,7 @@ as a pre-step and never gating on tests):
 | `make album-seam-test` | AP-2/AP-9's host leg: the derived geometry against the shipped FLAC figures, every track's `ALBM1`-vs-pin agreement, the eight `AUDITED_MUTATIONS` refusals, `PcmSource` on both arms, and the shipped track folded to its **FIFO pins on the host** — plus a stub-only build that must link no decoder | **1 (landed, PR-3a)** — a name §9.1 did not plan; it is the seam's gate, and `album-test` is the ROM's |
 | `make album-probe-rom` | the Phase 0 throwaway probes | 0 (landed) |
 | `make album-test` | AP-1/AP-2: scripted-key playback ROM in headless mGBA + audio-capture diff | **1 — not landed by PR-3a** (no keys yet; deferred to PR-3b). Its audio-capture leg also has no tool today: the installed `mgba-test-runner` (agb v0.25.0) takes a ROM and nothing else, so AP-1's content witness is on-ROM — the ring ledger plus the pins PR-3a folds — and the sample-for-sample capture diff is owed where it is genuinely needed (AP-6/AP-8, §12.2) |
-| `make album-layout-test` | AP-3: host snapshots and fit verdicts for **every product-eligible declared variant** (§5.0's `product` field; a variant whose declared face cannot be resolved is reported as **skipped, by name with its reason**, never silently omitted — §13's AP-3 rule) — band tiling, the derived box list, the `bar_cells` ↔ `ALBM1` reciprocals agreement, one-line elision, the row counts derived from `row_px` (§5.0), and the per-element/switch cost record — **plus, from 2a PR-(3), the surface's own host legs** (`tests/album_surface_host.rs`, floored at 18): the boot frame read back as a 30×20 composite (the band stack, the title, the clock, the state word, five icons in their slots, the bar's ten columns), §5.1's redraw rule as a write count (a still frame writes nothing; a track change writes one element), the clock bumping on whole seconds and restarting on a new visit, every bar fill position drawing its own pixel count, a painted sample position converting to a `BarCell`, the icon tiles packing left-pixel-low-nibble, the composite reading the tileset a write names, a full batch reporting its drops, the page fill covering every visible cell, the text layer falling through to the band art, and the drawn line never exceeding its box | **2a** |
+| `make album-layout-test` | AP-3: host snapshots and fit verdicts for **every product-eligible declared variant** (§5.0's `product` field; a variant whose declared face cannot be resolved is reported as **skipped, by name with its reason**, never silently omitted — §13's AP-3 rule) — band tiling, the derived box list, the `bar_cells` ↔ `ALBM1` reciprocals agreement, one-line elision, the row counts derived from `row_px` (§5.0), and the per-element/switch cost record — **plus, from 2a PR-(3), the surface's own host legs** (`tests/album_surface_host.rs`, floored at 18): the boot frame read back as a 30×20 composite (the band stack, the title, the clock, the state word, five icons in their slots, the bar's ten columns), §5.1's redraw rule as a write count (a still frame writes nothing; a track change writes one element), the clock bumping on whole seconds and restarting on a new visit, every bar fill position drawing its own pixel count, a painted sample position converting to a `BarCell`, the icon tiles packing left-pixel-low-nibble, the composite reading the tileset a write names, a full batch reporting its drops, the page fill covering every visible cell, the text layer falling through to the band art, and the drawn line never exceeding its box — **plus, from 2b PR-(1), the resident-set walk's legs and the two budget rows**: the per-scene `kind`/`resident` schema (a scene's own tiles derived from its kind, the shared atlas/chrome/bar terms counted once, `resident + projection` printed), `over-budget` and `over-track-count` fired by id with a negative direction each, and `examples/album_player/layout_report.txt` byte-identical across two `--emit-report` runs with a one-flipped-byte negative control, holding the per-scene terms, the ROM addends and the cycle terms (all tagged `arithmetic` until PR-(2)) | **2a, extended 2b PR-(1)** |
 | `make album-glyphs-test` | **§5.5a's atlas gate, 2a PR-(2).** The generator's own self-test at a leg floor; four of §9.0's five `atlas-*` ids fired by name on fixture specs, the fifth printed as named-not-fired with its reason; the generated `src/glyphs.rs` byte-identical across two emits and equal to what is on disk, with one flipped pixel as the negative control for that comparison; the module compiling for the host so its `const _: () = assert!` legs run and tie it to `src/layout.rs` (one face, one raster, one line box, one outlined count); and that module's **own floored suite** — the bit-order leg proved non-vacuous by its mirror failing to match, one cell per glyph, agb's blank tile used by nothing but space, no slot outside the cut, `measure` against `tilemap_px`, and §5.5's elision re-run against the answers the bake's Python copy derived. **Host-only, and not a prerequisite of `album-rom`**: the ROM gets the atlas through `album-bake`, and a ROM build should not depend on a font library | **2a PR-(2)** — a name this file proposes rather than one §9.1 planned, and deliberately **separate from `album-layout-test`**: §5.5a's critical path runs through fontTools, and a geometry-only layout refusal has no business depending on one |
 | `make album-preview LAYOUT=… TITLE=… ART=cover.png` | a **host composite** of one variant at 1× and 4× (ASCII + PNG), from the same code that bakes (§5.0, §12.1) — the tool that makes layout taste a config change instead of a rewrite, and the 1× image §5.6's legibility rule requires | **2a — the surface half landed 2026-11-23** (`album-preview-1x.png`, `-4x.png`, and a `.txt` grid beside each, from `src/preview.rs`: the same `Write` list the ROM's map takes, the same tile bytes both tilesets upload, the same palette table; `LAYOUT`/`TITLE`/`ART` arguments are 2b's, since 2a has no art and one variant's worth of text) — and at 2a it composites **the surface**: bands, chrome, control slots and the `blank` region, plus the declared art boxes and any `TITLE=` string as *host instruments* the 2a ROM never draws. That is deliberate, and it is the line §11's 2a note states: the preview checks the generated geometry, the fit boxes and the bands before any of them is on hardware, and a composite of region content 2a does not render is **an instrument, not a witness** — AP-3's variant snapshots are the geometry witness and AP-4's the art one |
 | `make album-art-check` / `album-bake-check` / `album-viz-test` | AP-4 / AP-5 / AP-6 | 2 / 3 / 4 |
@@ -3037,7 +3040,7 @@ as a pre-step and never gating on tests):
 | **`make album-check`** | the app's aggregate, the way `flac-check` is the FLAC track's | grows with the phases |
 
 `make clean` removes every generated album path (blobs, `ALBM1`, `ART1`, `ALVZ1`,
-`src/assets.rs`, **`src/layout.rs` (2a)**, `album-player.gba`) and keeps the tracked fixture
+`src/assets.rs`, **`src/layout.rs` (2a)**, **`layout_report.txt` (2b PR-(1), the machine-readable form of the same derivation)**, `album-player.gba`) and keeps the tracked fixture
 config and the tracked `layout_spec.toml` — the same division
 the master and rate assets already obey (§2.3). A user's own album folder and its config are
 never in the tree either; the thing tracked is a gate fixture, not an album.
@@ -3442,7 +3445,7 @@ than a review, and none of them exists today**: per-scene residency (`resident_s
 vocabulary (a kind is a Rust function in `surface.rs`, not a declared term); a resident-set pool
 audit (the sum is one image-at-ceiling plus one text bound, `album_bake.py:2300-2335`, B's
 `462/512`); and a per-album budget verdict (`over-budget` is Phase 3's today, §9.0; (1) is where it moves). Each is a fact
-about the *spec*, which is why they are (1)'s and not a scene's.
+about the *spec*, which is why they are (1)'s and not a scene's. (After PR-(1) all four exist; the list is kept as the account of what the ladder had to build, not as a still-open checklist.)
 
 **(1) The schema, the residency walk, and the report — no new pixels.** `layout_spec.toml` gains
 a per-scene `kind` (`fill` / `text` / `art` / `composite`) and `resident`, and per-kind tile terms
@@ -3456,6 +3459,26 @@ while `unused-viz-streams` and `audit-ceiling` stay Phase 3's because they read 
 spec self-tests plus a leg that the report is byte-identical across two runs. Must not re-baseline:
 `layout.rs`'s existing constants, AP-3's snapshots, the boot log, or any cycle figure — they stay
 tagged arithmetic until (2).
+
+**Landed 2026-11-25.** What the PR did, in the order it did it: `[[variant]]` lost its
+`resident_scenes` count (a count cannot say *which* scene holds tiles), and every `[[scene]]` now
+declares a required `kind` (`fill` / `text` / `art` / `composite`, the closed
+vocabulary `SCENE_KINDS` in `scripts/album_bake.py`) and `resident`; the audit became a walk over
+those terms — `resident + projection`, where a scene's *own* tiles are its kind's term and the
+glyph atlas, the chrome art and the bar's pattern tiles stay the variant's shared terms, counted
+once; the report is the sorted `key=value` rendering (`examples/album_player/layout_report.txt`,
+gitignored build output) beside the existing prose; and `over-budget` / `over-track-count` fire by
+their §9.0 ids (`over-track-count` is the Phase-1 `track-count` refusal renamed at last). **The
+residency flags at 2a are `blank = true` and the other three `false`, deliberately**: 2a's ROM
+holds no art or list scene, so claiming one resident would be a claim about a ROM that does not
+exist. Their terms are audited as the projection, which keeps the pool sum at **B's 462/512 and
+A's 425/512 — the generated `layout.rs` is byte-identical before and after this PR**, and that is
+the no-re-baseline leg, not a slogan. When PR-(4) lands the art scene it moves from projection to
+resident and changes no total; the same for PR-(6)'s list. Two things were not invented to fill
+gaps: the scene switch is **named as excluded** from the cycle estimate (§5.1 calls "tens of
+cycles" an assumption, and PR-(2)'s L3 is the leg that replaces it), and the ROM addends are
+`not computed` in a standalone report because there is no album in that invocation — the bake is
+where `over-budget` is asked and refused.
 
 **(2) The render probe bin — AP-3b's missing L1–L4, and the estimator's coefficients.**
 `examples/album_probe`'s fourth bin: per-element redraw, a ~600-cell region change, a

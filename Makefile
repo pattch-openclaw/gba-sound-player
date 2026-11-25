@@ -200,6 +200,11 @@ ALBUM_ASSETS_RS := $(ALBUM_CRATE_DIR)/src/assets.rs
 # through the same fmt stub, and `make album-layout-test` is its own gate.
 ALBUM_LAYOUT_RS := $(ALBUM_CRATE_DIR)/src/layout.rs
 ALBUM_LAYOUT_SPEC := $(ALBUM_CRATE_DIR)/layout_spec.toml
+# 2b PR-(1)'s second rendering: the machine-readable layout report, written by the same
+# bake from the same derivation as the prose audit (sorted `key=value`). Build output, so
+# gitignored and cleaned with the modules; `make album-layout-test` holds it byte-identical
+# across two emits and witnesses that comparison negatively.
+ALBUM_LAYOUT_REPORT := $(ALBUM_CRATE_DIR)/layout_report.txt
 ALBUM_LAYOUT_GATE_LOG := album-layout-test.log
 # §5.5a's third generated module: the glyph atlas of the one face the selected variant declares.
 # Same class as the two above — gitignored, cleaned, reached through the same fmt stub, written by
@@ -1573,7 +1578,9 @@ album-seam-test: toolchain-check
 #      by id (9 of 9), no failed summary line, and a floor on the reproduction legs — because an
 #      exit status alone would be satisfied by a run that measured nothing. Each leg of that run
 #      prints where its expected number comes from (`plan` / `spec` / `arithmetic`), which is what
-#      D9 asks for; a leg whose two sides are the same path is not evidence;
+#      D9 asks for; a leg whose two sides are the same path is not evidence. From 2b PR-(1) it
+#      also requires the two budget rows re-homed from Phase 3 (`over-budget`, `over-track-count`)
+#      to fire by id, each with its negative direction;
 #   3. the generated module is byte-reproducible, the same way `album-pack-check` holds assets.rs:
 #      emit twice, compare, and witness the comparison negatively with one flipped byte;
 #   4. the Rust half — the three claims a Python tool cannot make: that `meta::parse` refuses a
@@ -1585,7 +1592,12 @@ album-seam-test: toolchain-check
 #      (`assets::LAYOUT_VARIANT` ↔ `layout::LAYOUT_ID`) — the staleness a
 #      compiling build cannot see, and the one `assets.rs`'s own comment promises a host test
 #      asserts. The filters are named so a leg that vanished from the suite fails here rather than
-#      passing for lack of a `--filter` match.
+#      passing for lack of a `--filter` match;
+#   5. from 2b PR-(1), the machine-readable report is the spec's second rendering and is held to the
+#      same rule as `layout.rs`: `--emit-report` twice must produce identical bytes, the comparison
+#      is witnessed negatively with one flipped byte, and the report must actually carry the
+#      per-scene `kind`/`resident` fields, the resident-set split, a labelled cycle term and the ROM
+#      verdict — a deterministic file that omitted them would pass a byte comparison and say nothing.
 album-layout-test: toolchain-check album-bake
 	@test $$(find $(ALBUM_CRATE_DIR) -maxdepth 1 -name 'layout_spec.toml' | wc -l) -eq 1 \
 	  || { echo "album-layout-test: $(ALBUM_LAYOUT_SPEC) is missing or duplicated — one tracked layout spec, or this gate is measuring nothing"; exit 1; }
@@ -1599,10 +1611,14 @@ album-layout-test: toolchain-check album-bake
 	    || { echo "album-layout-test: the layout self-test refused — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
 	  grep -q '^  register rows fired: 9 of 9$$' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) \
 	    || { echo "album-layout-test: §9.0's register did not fire all of its 2a rows by id — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
+	  grep -q '^  budget rows fired: 2 of 2$$' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) \
+	    || { echo "album-layout-test: the two budget rows 2b PR-(1) re-homed (over-budget, over-track-count) did not both fire by id — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
+	  grep -q '^  scene schema legs fired: 3 of 3$$' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) \
+	    || { echo "album-layout-test: the per-scene kind/resident schema did not refuse its three wrong specs (unknown kind, missing resident, the retired count) — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
 	  ! grep -q 'SELF-TEST FAILED' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) \
 	    || { echo "album-layout-test: a reproduction leg failed — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
 	  n=$$(grep -c '  ok   <-' $(abspath $(ALBUM_LAYOUT_GATE_LOG))); \
-	  [ "$$n" -ge 100 ] || { echo "album-layout-test: '$$n' legs passed, needs >= 100 — a green that names nothing is not a green"; exit 1; }
+	  [ "$$n" -ge 110 ] || { echo "album-layout-test: '$$n' legs passed, needs >= 110 — a green that names nothing is not a green (2b PR-(1) raised the floor with the resident-set walk and the two budget legs)"; exit 1; }
 	@first=$$(mktemp -d); \
 	  python3 scripts/album_bake.py --emit-layout >/dev/null || { rm -rf $$first; exit 1; }; \
 	  cp $(ALBUM_LAYOUT_RS) $$first/layout.rs || { rm -rf $$first; exit 1; }; \
@@ -1614,6 +1630,25 @@ album-layout-test: toolchain-check album-bake
 	  cmp -s $$first/layout.mutant.rs $(ALBUM_LAYOUT_RS) \
 	    && { echo "album-layout-test: the layout comparison passed two files that differ by one byte — the byte leg is not witnessing anything"; rm -rf $$first; exit 1; } \
 	    || echo "  layout reproducibility leg: one flipped byte is reported as a difference (negative control)"; \
+	  rm -rf $$first
+	@first=$$(mktemp -d); \
+	  python3 scripts/album_bake.py --emit-report $$first/report-1.txt >/dev/null \
+	    || { echo "album-layout-test: --emit-report failed"; rm -rf $$first; exit 1; }; \
+	  python3 scripts/album_bake.py --emit-report $$first/report-2.txt >/dev/null \
+	    || { rm -rf $$first; exit 1; }; \
+	  cmp -s $$first/report-1.txt $$first/report-2.txt \
+	    || { echo "album-layout-test: the layout report differs between two emits — the spec -> report pipeline is not deterministic"; rm -rf $$first; exit 1; }; \
+	  for key in 'schema=album-layout-report/1' 'scene_art_kind=art' 'scene_blank_resident=true' \
+	             'pool_scene_resident=0' 'pool_scene_projection=256' 'cycles_bar_cell_tag=arithmetic' \
+	             'rom_verdict=not computed'; do \
+	    grep -qF "$$key" $$first/report-1.txt \
+	      || { echo "album-layout-test: the report does not carry '$$key' — the machine-readable half is not saying what it must (per-scene kind/resident, the resident-set split, a labelled cycle term, the ROM verdict)"; rm -rf $$first; exit 1; }; \
+	  done; \
+	  cp $$first/report-1.txt $$first/report.mutant.txt; \
+	  python3 -c 'import sys; p = sys.argv[1]; d = bytearray(open(p, "rb").read()); d[0] ^= 0xFF; open(p, "wb").write(d)' $$first/report.mutant.txt; \
+	  cmp -s $$first/report.mutant.txt $$first/report-1.txt \
+	    && { echo "album-layout-test: the report comparison passed two files that differ by one byte — that leg is not witnessing anything"; rm -rf $$first; exit 1; } \
+	    || echo "  layout report reproducibility leg: one flipped byte is reported as a difference (negative control)"; \
 	  rm -rf $$first
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	@cd $(GATE_NEUTRAL_CWD) && \
@@ -1658,7 +1693,11 @@ album-layout-test: toolchain-check album-bake
 	@echo "  bar fill position draws its own pixel count; a painted sample position converts to a bar cell;"
 	@echo "  the icon tiles pack left-pixel-low-nibble; the composite reads the tileset a write names; a"
 	@echo "  full batch reports its drops; the page fill covers every visible cell; the text layer falls"
-	@echo "  through to the band art; and no drawn line is longer than its box."
+	@echo "  through to the band art; and no drawn line is longer than its box. From 2b PR-(1) the scene"
+	@echo "  schema is echoed as per-scene kind/resident/own-tile terms, the pool audit is a resident-set"
+	@echo "  walk (resident + projection, so a scene landing moves a term and changes no total), the two"
+	@echo "  re-homed cart verdicts fire by id, and the machine-readable report is byte-identical across"
+	@echo "  two emits."
 	@echo "  See $(ALBUM_LAYOUT_GATE_LOG) for the legs and their sources."
 
 # The glyph atlas's own gate (§5.5a PR-2: its steps 2-5, and the §9.0 register rows this tool adds).
@@ -2133,7 +2172,7 @@ clean-outputs:
 	@rm -f $(SPIKE_CRATE_DIR)/assets/rate_*.bin
 	@rm -f uli-bench*.log uli-attrib*.log
 	@rm -f album-probe*.log
-	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_LAYOUT_RS) $(ALBUM_GLYPHS_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_LAYOUT_GATE_LOG) $(ALBUM_GLYPHS_GATE_LOG) $(ALBUM_ROM_RUN_LOG) $(ALBUM_TEST_LOG)
+	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_LAYOUT_RS) $(ALBUM_LAYOUT_REPORT) $(ALBUM_GLYPHS_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_LAYOUT_GATE_LOG) $(ALBUM_GLYPHS_GATE_LOG) $(ALBUM_ROM_RUN_LOG) $(ALBUM_TEST_LOG)
 	@rm -f $(ALBUM_PREVIEW)-*.png $(ALBUM_PREVIEW)-*.png.txt
 	@find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} + 2>/dev/null || true
 

@@ -31,8 +31,23 @@
 # a rule the generator enforces: a pitch that is not a whole tile row or is below
 # the declared face's line box (`pitch-not-tileable`), a face that is not a
 # tracked, licensed asset (`face-not-resolvable`), a scene region that holds fewer
-# than four text rows (`scene-minimum`), a `resident_scenes` above the hardware
-# cap of 3, and a pool sum over `tile_budget` (`image-tiles-over-budget`).
+# than four text rows (`scene-minimum`), a resident set above the hardware cap of 3
+# (declared per scene as `resident = true`, refused by name), and a resident-set
+# pool sum over `tile_budget` (`image-tiles-over-budget`).
+#
+# From 2b PR-(1) a scene declares two more fields, and they are required:
+#   kind      — `fill` / `text` / `art` / `composite`, the closed vocabulary that
+#               derives the scene's own tile term (`SCENE_KINDS` in
+#               `scripts/album_bake.py`). A name-keyed rule would make a second
+#               album's scene set a code change, so the kind is declared and the
+#               generator sums what it implies.
+#   resident  — whether the ROM this variant describes keeps the scene's tiles (and
+#               its map) in VRAM. This replaces the old variant-level count: a count
+#               could not say *which* scene was resident, so the audit had to assume
+#               one scene's terms. At 2a only `blank` is resident, because only it is
+#               built; the other declared scenes are audited as a *projection* at the
+#               same terms, so landing one moves its term between two columns of the
+#               same total instead of quietly raising the budget.
 
 # --- hardware facts the spec is checked against, not fields to tune ----------
 # `album-layout-gen` refuses a spec that disagrees with these (§5.0: the screen is
@@ -96,7 +111,8 @@ product = false
 # text line (art/bar only), and a 17-row scene region — 240x136 px, which is 510
 # tiles if filled edge to edge. The region is not the budget: `image_tiles` is.
 tile_budget = 512
-resident_scenes = 1          # 2a has one scene: `blank`. 2b's projection is printed, not claimed.
+# 2a has one resident scene: `blank`. 2b's art + list + blank is exactly the cap of
+# 3, and the projection is printed, not claimed (2b PR-(1)).
 
 # 15x15 tiles = 120x120 px: §5.0's A ceiling, and the number the pool audit takes
 # the image term at. A's region would physically hold a 17x17 box (289 tiles) and
@@ -185,26 +201,38 @@ always = false               # the region: 240x136 px
 name = "art"
 phase = "2b"
 band = "scene"
+kind = "art"
+resident = false
 min_boxes = 1                # §5.2's art row: a box outside its own region, and nothing smaller than one box
 
 [[variant.scene]]
 name = "list"
 phase = "2b"
 band = "scene"
+kind = "text"
+resident = false
 min_visible_rows = 4         # §5.2: "a variant whose region holds under ~4 rows at its declared pitch, where a list has stopped being a list"
 
 [[variant.scene]]
 name = "title_card"
 phase = "2b"
 band = "scene"
+kind = "composite"
+# Not resident, and permanently so: §5.1's cap is three content layers and
+# art + list + blank are them, so a card reachable mid-album is re-pointed or
+# uploaded on entry (2b's PR-(3) answers Q20(ii)/(iii)).
+resident = false
 # No element declared at 2a: 2a's ROM draws the chrome and `blank` and nothing
-# else, so there is no geometry here to derive. The generator reports that as a
-# named-and-skipped row rather than inventing spans for a scene 2b owns.
+# else, so there is no geometry here to derive. A `composite` scene's own term is
+# the image of the art elements it declares, of which there are none yet, so it
+# contributes 0 and is reported rather than skipped silently.
 
 [[variant.scene]]
 name = "blank"
 phase = "2a"
 band = "scene"
+kind = "fill"
+resident = true              # the one scene 2a's ROM actually holds: a flat region fill
 # §5.2's `blank` row: a flat fill of the region at a declared palette entry. Its
 # whole purpose is that 2a needs no asset, no art tool and no new font.
 
@@ -344,7 +372,8 @@ product = true
 # the lower row, and a 16-row scene region — 240x128 px, 480 tiles edge to edge,
 # which is 8 text rows at the 16 px pitch and nothing else.
 tile_budget = 512
-resident_scenes = 1          # 2a: `blank` only. 2b's art + list + blank is exactly the cap of 3, and that is printed.
+# 2a: `blank` only. 2b's art + list + blank is exactly the cap of 3, and the
+# projection is printed, not claimed (2b PR-(1)).
 
 # 16x16 tiles = 128x128 px: the largest box this region can hold, and §5.0's B
 # ceiling ("it fills the region's rows and takes 7 columns of margin each side").
@@ -414,23 +443,31 @@ always = false
 name = "art"
 phase = "2b"
 band = "scene"
+kind = "art"
+resident = false
 min_boxes = 1
 
 [[variant.scene]]
 name = "list"
 phase = "2b"
 band = "scene"
+kind = "text"
+resident = false
 min_visible_rows = 4
 
 [[variant.scene]]
 name = "title_card"
 phase = "2b"
 band = "scene"
+kind = "composite"
+resident = false             # §5.1's cap is art + list + blank; a mid-album card is re-pointed on entry
 
 [[variant.scene]]
 name = "blank"
 phase = "2a"
 band = "scene"
+kind = "fill"
+resident = true              # the one scene 2a actually holds: a flat region fill
 
 [[variant.element]]
 id = "clock"
