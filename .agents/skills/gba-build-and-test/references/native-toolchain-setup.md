@@ -4,6 +4,33 @@ Host: Ubuntu 26.04.1 arm64 guest (Parallels), **no passwordless sudo**, Linuxbre
 `/home/linuxbrew/.linuxbrew`. Date: 2026-11-06. `scripts/setup-native-toolchain.sh`
 automates everything below and is idempotent.
 
+## 2026-11-25: rootless Ubuntu 24.04 arm64, no Linuxbrew
+
+`scripts/setup-native-toolchain.sh` was rewritten for a host with **no sudo and no
+brew**; it is the recipe to follow. What it adds beyond the 2026-11-06 notes below:
+
+- **Rootless C deps from `ports.ubuntu.com`.** The host had no `apt` lists and no
+  `/usr/include/{zlib,libelf,png}.h`. The script downloads the noble arm64 `-dev`
+  packages (`zlib1g-dev`, `libelf-dev`, `libelf1t64`, `libpng-dev`,
+  `libpng16-16t64`, `libzstd-dev`, `libclang1-18`, `libclang-common-18-dev`,
+  `libllvm18`), extracts them with `dpkg-deb -x` into `~/.local/rootless`, and
+  points the libmgba build at that prefix. No `apt-get update` and no root needed.
+- **flac/metaflac 1.5.0 built from source.** Ubuntu 24.04 ships 1.4.3; the committed
+  `crates/flac-lite/tests/gfp/*.gfp` fixtures are 1.5.0 bytes and 1.4.3 re-encodes
+  `p2_fixed0_stereo_*` differently, so `make gafp-pack-check` fails. The script
+  downloads `flac-1.5.0.tar.xz`, builds static with `--disable-ogg`, and installs
+  wrappers in `~/.local/bin`.
+- **ffmpeg 7.0.2 static** from johnvansickle.com (arm64), plus a Python venv with
+  numpy/scipy/soundfile (gba-audio `prep.py`) and fonttools/pillow (album glyphs).
+- **`mgba-test-runner` from agb v0.25.0** with the same three aarch64 patches below,
+  built with `PKG_CONFIG_SYSROOT_DIR`/`LIBCLANG_PATH` pointing at the rootless prefix.
+- **`.agents/env.sh`** is the session entry point (`PATH`, `GBA_AUDIO`,
+  `ULI_ALBUM_PY`); a fresh harness shell does not inherit the install paths.
+
+`make test` (ROM boot + flac + uli), `make flac-check`, `make gafp-pack-check`,
+`make album-bake` + `make album-pack-check`, `make uli-check`/`uli-test`/`uli-probe`/
+`uli-overlay-test`, and `make uli-bench` were all green on that host on 2026-11-25.
+
 ## What each gate needs
 
 | Gate | Mechanism | Extra tooling |

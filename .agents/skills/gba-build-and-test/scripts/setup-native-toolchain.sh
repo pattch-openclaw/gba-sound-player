@@ -1,131 +1,283 @@
 #!/usr/bin/env bash
-# Native toolchain setup for gba-sound-player: the minimum that makes every native
-# Make target and test gate run on a Linux host WITHOUT root. Idempotent; run it, then
-# use `make native-rom`, `make test`, `make flac-gates` as usual.
+# One-shot, idempotent, root-free agent toolchain for gba-sound-player.
 #
-# Verified on Ubuntu 26.04 arm64, no passwordless sudo, 2026-11-06 (see
-# references/native-toolchain-setup.md for the measured output and the failure modes
-# this script exists to avoid).
+# Installs everything the native Make targets and gates need on a Linux host
+# without sudo:
+#   * the pinned Rust channel from rust-toolchain.toml, with rust-src + rustfmt
+#   * agb-gbafix 0.25.0 (part of the ROM bytes records compare by sha)
+#   * ffmpeg 7.0.2 (static build) for album/master packing
+#   * flac + metaflac 1.5.0 (the version the committed fixtures were made with;
+#     Ubuntu 24.04's 1.4.3 regenerates different bytes and fails gafp-pack-check)
+#   * a Python 3 venv with numpy/scipy/soundfile (gba-audio prep.py) and
+#     fonttools/pillow (album glyphs)
+#   * rootless zlib/libelf/libpng/libclang/libllvm headers + libs, and
+#     mgba-test-runner built from agb v0.25.0 with the aarch64 patches
+#
+# Everything lands under $HOME: ~/.cargo, ~/.local/opt, ~/.local/rootless,
+# ~/.local/venvs, ~/.local/mgba-runner, ~/.local/bin. After it finishes:
+#
+#   . .agents/env.sh          # from the repo root
+#   make toolchain-check
+#   make test
+#
+# Verified on Ubuntu 24.04 arm64, 2026-11-25. The script is safe to re-run.
 set -uo pipefail
 
-AGB_REF="${AGB_REF:-v0.25.0}"     # MUST match the `agb` version in Cargo.toml
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)
+cd "$REPO_ROOT" || exit 1
+
+HOME_PREFIX="${HOME_PREFIX:-$HOME/.local}"
+BIN="$HOME_PREFIX/bin"
+OPT="$HOME_PREFIX/opt"
+VENV="${VENV:-$HOME/.local/venvs/gba-audio}"
+ROOTLESS="${ROOTLESS:-$HOME/.local/rootless}"
+MGBA_ROOT="${MGBA_ROOT:-$HOME/.local/mgba-runner}"
 WORK="${WORK:-/tmp/agb-runner-build}"
-BINDEST="${BINDEST:-$HOME/.cargo/bin}"
-TOOLCHAIN="${TOOLCHAIN:-nightly}"
-BREW_PREFIX="${BREW_PREFIX:-/home/linuxbrew/.linuxbrew}"
+
+AGB_REF="${AGB_REF:-v0.25.0}"
+FLAC_VER="${FLAC_VER:-1.5.0}"
+FFMPEG_VER="${FFMPEG_VER:-7.0.2}"
+
+PY_PINS="${PY_PINS:-numpy==2.5.5 scipy==1.18.1 soundfile==0.14.0 fonttools==4.68.0 pillow==13.0.0}"
 
 say() { printf '== %s\n' "$*"; }
+warn() { printf '!! %s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# --- 0. sanity: run from the repo so the agb pin can be read -------------------
-if [ -f Cargo.toml ] && grep -q 'agb *=' Cargo.toml 2>/dev/null; then
-  want=$(grep -m1 -E '^agb *=' Cargo.toml | tr -d '"' | sed -E 's/.*= *([0-9.]+).*/\1/')
-  if [ -n "$want" ] && [ "v$want" != "$AGB_REF" ]; then
-    echo "warning: Cargo.toml pins agb $want but AGB_REF=$AGB_REF; set AGB_REF=v$want" >&2
+mkdir -p "$BIN" "$OPT" "$ROOTLESS"
+export PATH="$HOME/.cargo/bin:$BIN:$PATH"
+
+# ---------------------------------------------------------------------------
+# 0. sanity: GNU make >= 4.2 (the Makefile reads rust-toolchain.toml with $(file))
+# ---------------------------------------------------------------------------
+if have make; then
+  v=$(make --version | sed -n '1s/.* //p')
+  case "$v" in
+    4.[2-9]*|[5-9].*) ;;
+    *) warn "GNU make $v is too old; 4.2+ is required (macOS: brew install make, call gmake)" ;;
+  esac
+fi
+
+# ---------------------------------------------------------------------------
+# 1. Rust: the pinned dated channel + rust-src (-Zbuild-std on Tier-3) + rustfmt
+# ---------------------------------------------------------------------------
+TOOLCHAIN=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml 2>/dev/null | head -1)
+TOOLCHAIN="${TOOLCHAIN:-nightly-2026-09-04}"
+if ! have rustup; then
+  say "rust: installing rustup (no default toolchain)"
+  curl -sSf https://sh.rustup.rs -o /tmp/rustup-init.sh || exit 1
+  sh /tmp/rustup-init.sh -y --no-modify-path --default-toolchain none --profile minimal || exit 1
+fi
+export PATH="$HOME/.cargo/bin:$BIN:$PATH"
+if ! rustup toolchain list | grep -q "^$TOOLCHAIN"; then
+  say "rust: installing $TOOLCHAIN"
+  rustup toolchain install "$TOOLCHAIN" --profile minimal || exit 1
+fi
+for c in rust-src rustfmt; do
+  rustup component list --installed --toolchain "$TOOLCHAIN" | grep -qx "$c" \
+    || rustup component add "$c" --toolchain "$TOOLCHAIN" || exit 1
+done
+say "rust: $(rustup run "$TOOLCHAIN" rustc -V)"
+
+# ---------------------------------------------------------------------------
+# 2. agb-gbafix 0.25.0 (must match the agb pin; it rewrites the ROM header)
+# ---------------------------------------------------------------------------
+if ! cargo install --list 2>/dev/null | grep -q "^agb-gbafix v0.25.0:"; then
+  say "agb-gbafix 0.25.0: cargo install"
+  cargo install agb-gbafix --version 0.25.0 --locked || exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 3. ffmpeg (static) — album/master packing and gba-audio prep.py
+# ---------------------------------------------------------------------------
+ffmpeg_ok() { have ffmpeg && ffmpeg -version 2>/dev/null | head -1 | grep -q "version $FFMPEG_VER"; }
+if ! ffmpeg_ok; then
+  case "$(uname -m)" in
+    aarch64|arm64) ff_arch=arm64 ;;
+    x86_64|amd64)  ff_arch=amd64 ;;
+    *) warn "no static ffmpeg mapping for $(uname -m); install ffmpeg manually"; ff_arch= ;;
+  esac
+  if [ -n "$ff_arch" ]; then
+    say "ffmpeg $FFMPEG_VER: downloading static build ($ff_arch)"
+    tmp=$(mktemp -d)
+    curl -sSL "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${ff_arch}-static.tar.xz" \
+      -o "$tmp/ffmpeg.tar.xz" || exit 1
+    mkdir -p "$OPT/ffmpeg"
+    tar -xf "$tmp/ffmpeg.tar.xz" -C "$OPT/ffmpeg" --strip-components=1 || exit 1
+    rm -rf "$tmp"
+    ln -sf "$OPT/ffmpeg/ffmpeg" "$BIN/ffmpeg"
+    ln -sf "$OPT/ffmpeg/ffprobe" "$BIN/ffprobe"
   fi
 fi
+have ffmpeg && say "ffmpeg: $(ffmpeg -version | head -1)"
 
-# --- 1. Rust: nightly + rust-src (-Zbuild-std for the Tier-3 target) + rustfmt --
-if have rustup; then
-  say "rust: rustup present; ensuring $TOOLCHAIN + rust-src + rustfmt"
-  rustup toolchain list | grep -q "^$TOOLCHAIN" || rustup toolchain install "$TOOLCHAIN"
-  rustup component list --installed --toolchain "$TOOLCHAIN" | grep -qx rust-src \
-    || rustup component add rust-src --toolchain "$TOOLCHAIN"
-  rustup component list --installed --toolchain "$TOOLCHAIN" | grep -qx rustfmt \
-    || rustup component add rustfmt --toolchain "$TOOLCHAIN"
-else
-  say "rust: no rustup - a nightly rustc/cargo on PATH must already provide -Zbuild-std"
+# ---------------------------------------------------------------------------
+# 4. flac + metaflac 1.5.0 — pinned: the committed fixtures are its bytes
+# ---------------------------------------------------------------------------
+flac_ok() { have flac && flac --version 2>/dev/null | grep -q "^flac $FLAC_VER"; }
+if ! flac_ok; then
+  say "flac $FLAC_VER: building from source (--disable-ogg, static)"
+  tmp=$(mktemp -d)
+  curl -sSL "https://downloads.xiph.org/releases/flac/flac-${FLAC_VER}.tar.xz" \
+    -o "$tmp/flac.tar.xz" || exit 1
+  tar -xf "$tmp/flac.tar.xz" -C "$tmp" || exit 1
+  (
+    cd "$tmp/flac-${FLAC_VER}" || exit 1
+    ./configure --prefix="$OPT/flac-$FLAC_VER" \
+      --disable-shared --enable-static --disable-ogg \
+      --disable-doxygen-docs --disable-examples --disable-cpplibs >/dev/null || exit 1
+    make -j"$(nproc 2>/dev/null || echo 2)" >/dev/null || exit 1
+    make install >/dev/null || exit 1
+  ) || exit 1
+  rm -rf "$tmp"
+  for b in flac metaflac; do
+    printf '#!/bin/sh\nexec "%s/opt/flac-%s/bin/%s" "$@"\n' "$HOME_PREFIX" "$FLAC_VER" "$b" > "$BIN/$b"
+    chmod +x "$BIN/$b"
+  done
 fi
+have flac && say "flac: $(flac --version) (metaflac: $(metaflac --version 2>/dev/null || echo missing))"
 
-# --- 2. agb-gbafix (ROM fixing: `rom`, `flac-rom`, `*-rom` targets) -----------
-if have agb-gbafix; then say "agb-gbafix: already present ($(command -v agb-gbafix))"
-else say "agb-gbafix: cargo install agb-gbafix"; cargo install agb-gbafix || exit 1; fi
-
-# --- 3. C build deps for libmgba (only the ROM test suite needs these) --------
-# Ask functionally: what does the libmgba build actually need and is it already there?
-need=()
-have cmake     || need+=(cmake)
-have pkg-config || have pkgconf || need+=(pkg-config)
-[ -f /usr/include/zlib.h ]   || [ -f "$BREW_PREFIX/opt/zlib/include/zlib.h" ]   || need+=(zlib)
-[ -f /usr/include/libelf.h ] || [ -f "$BREW_PREFIX/opt/elfutils/include/libelf.h" ] || need+=(elfutils)
-if [ "${#need[@]}" -gt 0 ]; then
-  if [ -x "$BREW_PREFIX/bin/brew" ] || have brew; then
-    b="$BREW_PREFIX/bin/brew"; [ -x "$b" ] || b=brew
-    say "libmgba deps missing (${need[*]}): brew install ${need[*]}"
-    HOMEBREW_NO_AUTO_UPDATE=1 "$b" install "${need[@]}" || exit 1
+# ---------------------------------------------------------------------------
+# 5. Python 3 venv: numpy/scipy/soundfile for gba-audio prep; fonttools/pillow
+#    for album_glyphs.py. `python3` on PATH must be this venv for album-bake.
+# ---------------------------------------------------------------------------
+if [ ! -x "$VENV/bin/python" ]; then
+  say "python: creating $VENV"
+  mkdir -p "$(dirname "$VENV")"
+  if python3 -m venv "$VENV" >/dev/null 2>&1; then
+    :
   else
-    say "libmgba deps missing (${need[*]}): with root use:"
-    echo "  apt-get install -y build-essential cmake pkg-config zlib1g-dev libelf-dev libpng-dev"
+    # Debian/Ubuntu without python3-venv: virtualenv bundles pip/ensurepip.
+    python3 -m pip install --user --break-system-packages --quiet virtualenv || exit 1
+    python3 -m virtualenv "$VENV" >/dev/null || exit 1
   fi
-else
-  say "libmgba deps: all present"
 fi
-if [ -d "$BREW_PREFIX/opt" ]; then
-  export PATH="$BREW_PREFIX/bin:$PATH"
-  export CMAKE_PREFIX_PATH="$BREW_PREFIX/opt/zlib;$BREW_PREFIX/opt/elfutils;$BREW_PREFIX/opt/libpng"
-  export PKG_CONFIG_PATH="$BREW_PREFIX/opt/zlib/lib/pkgconfig:$BREW_PREFIX/opt/elfutils/lib/pkgconfig:$BREW_PREFIX/opt/libpng/lib/pkgconfig"
-  export LDFLAGS="-L$BREW_PREFIX/opt/zlib/lib -L$BREW_PREFIX/opt/elfutils/lib -L$BREW_PREFIX/opt/libpng/lib"
-  export CPPFLAGS="-I$BREW_PREFIX/opt/zlib/include -I$BREW_PREFIX/opt/elfutils/include -I$BREW_PREFIX/opt/libpng/include"
-fi
+"$VENV/bin/python" -m pip install --quiet --upgrade pip || exit 1
+# shellcheck disable=SC2086
+"$VENV/bin/python" -m pip install --quiet $PY_PINS || exit 1
+"$VENV/bin/python" - <<'PY' || exit 1
+import fontTools, numpy, PIL, scipy, soundfile
+print("python:", "numpy", numpy.__version__, "scipy", scipy.__version__,
+      "soundfile", soundfile.__version__, "fonttools", fontTools.version,
+      "pillow", PIL.__version__)
+PY
 
-# --- 4. libclang for bindgen (mgba-sys generates bindings) -------------------
-# Prefer a complete clang install. If only the distro *runtime* libclang exists
-# (no clang-c/Index.h, no resource headers), assemble the pieces root-free.
-CLANG_RES=$(ls -d /usr/lib/llvm-*/lib/clang/*/include 2>/dev/null | head -1)
-if have clang || [ -n "$CLANG_RES" ]; then
-  say "libclang: a complete clang install is present"
-else
-  runtime=$(ls /usr/lib/*/libclang-*.so.1 /usr/lib/llvm-*/lib/libclang-*.so.1 2>/dev/null | head -1)
-  if [ -z "$runtime" ]; then
-    echo "warning: no libclang at all. With root: apt-get install -y clang libclang-dev" >&2
+# ---------------------------------------------------------------------------
+# 6. Rootless C development headers/libs for mgba-test-runner (Ubuntu arm64)
+#    Uses the ports.ubuntu.com package index when the host has no -dev packages
+#    and no root. Harmless on hosts that already have them.
+# ---------------------------------------------------------------------------
+need_rootless=0
+[ -f /usr/include/zlib.h ] || need_rootless=1
+[ -f /usr/include/libelf.h ] || need_rootless=1
+[ -f /usr/include/png.h ] || need_rootless=1
+[ -n "$(ls /usr/lib/*/libclang-*.so.1 /usr/lib/llvm-*/lib/libclang-*.so.1 2>/dev/null | head -1)" ] || need_rootless=1
+
+if [ "$need_rootless" = 1 ] && ! have mgba-test-runner; then
+  . /etc/os-release 2>/dev/null || true
+  codename="${VERSION_CODENAME:-noble}"
+  if [ "$(uname -m)" = aarch64 ] || [ "$(uname -m)" = arm64 ]; then
+    say "rootless headers: fetching Ubuntu $codename arm64 -dev packages into $ROOTLESS"
+    cache="$ROOTLESS/.cache"
+    mkdir -p "$cache/debs" "$cache/lists"
+    base="https://ports.ubuntu.com/ubuntu-ports"
+    for comp in main universe; do
+      idx="$cache/lists/$codename-$comp.gz"
+      [ -s "$idx" ] || curl -sSL "$base/dists/$codename/$comp/binary-arm64/Packages.gz" -o "$idx" || exit 1
+    done
+    # package -> filename, parsed once from the two indexes
+    python3 - "$cache/lists" "$codename" > "$cache/packages.tsv" <<'PY'
+import gzip, os, sys
+want = {
+    "zlib1g-dev", "libelf-dev", "libelf1t64", "libpng-dev", "libpng16-16t64",
+    "libzstd-dev", "libclang1-18", "libclang-common-18-dev", "libllvm18",
+}
+d = sys.argv[1]
+for comp in ("main", "universe"):
+    p = os.path.join(d, "%s-%s.gz" % (sys.argv[2], comp))
+    if not os.path.exists(p):
+        continue
+    with gzip.open(p, "rt") as fh:
+        for para in fh.read().split("\n\n"):
+            fields = {}
+            for line in para.splitlines():
+                if ": " in line:
+                    k, v = line.split(": ", 1)
+                    fields.setdefault(k, v)
+            if fields.get("Package") in want:
+                print("%s\t%s" % (fields["Package"], fields["Filename"]))
+PY
+    while IFS=$'\t' read -r pkg path; do
+      [ -n "$pkg" ] || continue
+      f="$cache/debs/$(basename "$path")"
+      [ -s "$f" ] || curl -sSL "$base/$path" -o "$f" || exit 1
+      dpkg-deb -x "$f" "$ROOTLESS" || exit 1
+    done < "$cache/packages.tsv"
+    # clang-sys looks for libclang.so; the runtime package ships the versioned one.
+    clanglib=$(ls "$ROOTLESS"/usr/lib/*/libclang-*.so.1 2>/dev/null | head -1)
+    [ -n "$clanglib" ] && ln -sf "$clanglib" "$(dirname "$clanglib")/libclang.so"
+    say "rootless headers: $(find "$ROOTLESS/usr/include" -maxdepth 1 -type f 2>/dev/null | wc -l) headers, libs in $ROOTLESS/usr/lib"
   else
-    say "libclang: runtime-only ($runtime); assembling a rootless bindgen host"
-    ver=$(basename "$runtime" | sed -E 's/libclang-([0-9]+)\.so.*/\1/')
-    root="$HOME/.local/llvm-bindgen"
-    mkdir -p "$root/usr/lib/llvm-$ver/lib" "$root/lib"
-    ln -sf "$runtime" "$root/lib/libclang.so"
-    if [ ! -d "$root/usr/lib/llvm-$ver/lib/clang/$ver/include" ]; then
-      tmp=$(mktemp -d); ( cd "$tmp" && apt-get download "libclang-common-$ver-dev" \
-        && dpkg-deb -x libclang-common-$ver-dev_*.deb "$root" ) || \
-        echo "warning: could not fetch libclang-common-$ver-dev; with root: apt-get install -y libclang-dev" >&2
-      rm -rf "$tmp"
-    fi
-    export LIBCLANG_PATH="$root/lib"
-    # The distro runtime libclang does not add GCC's own include dir, so glibc's
-    # limits.h `#include_next` has nowhere to land: point bindgen at it explicitly.
-    gccinc=$(gcc -print-file-name=include)
-    export BINDGEN_EXTRA_CLANG_ARGS="-idirafter $gccinc"
-    CLANG_RES="$root/usr/lib/llvm-$ver/lib/clang/$ver"
+    warn "rootless C deps only scripted for Ubuntu arm64; install zlib/libelf/libpng/libclang dev packages by hand"
   fi
 fi
 
-# --- 5. mgba-test-runner (the headless mGBA that `make test-rom` needs) ------
-if have mgba-test-runner; then
-  say "mgba-test-runner: already present ($(command -v mgba-test-runner))"
-else
+# ---------------------------------------------------------------------------
+# 7. mgba-test-runner from agb v0.25.0 (the agb pin), patched for aarch64
+# ---------------------------------------------------------------------------
+if ! have mgba-test-runner && [ ! -x "$MGBA_ROOT/bin/mgba-test-runner" ]; then
   say "mgba-test-runner: building agb $AGB_REF's test runner"
-  # agb v0.25.0 mis-builds emulator/mgba on aarch64 Linux (assumes c_char == i8 and
-  # uses an x86 __va_list_tag). Same three patches the project Dockerfile applies -
-  # this host is aarch64 Linux, so they are needed natively too.
   if [ ! -d "$WORK/repo/.git" ]; then
-    rm -rf "$WORK/repo" && mkdir -p "$WORK" \
-      && git clone --depth 1 --branch "$AGB_REF" https://github.com/agbrs/agb.git "$WORK/repo" || exit 1
+    rm -rf "$WORK/repo" && mkdir -p "$WORK"
+    git clone --depth 1 --branch "$AGB_REF" https://github.com/agbrs/agb.git "$WORK/repo" || exit 1
   fi
-  cd "$WORK/repo" || exit 1
-  sed -i 's/not(target_os = "macos")/not(any(target_os = "macos", target_arch = "aarch64"))/' emulator/mgba/src/log.rs
-  sed -i 's/any(windows, target_os = "macos")/any(windows, target_os = "macos", target_arch = "aarch64")/' emulator/mgba/src/log.rs
-  sed -i 's/\*const i8/*const libc::c_char/g' emulator/mgba/src/log.rs
-  # --git cannot be combined with --path, and --git cannot carry these patches.
-  cargo install --path emulator/test-runner --locked --root "$HOME/.local/mgba-runner" || exit 1
-  mkdir -p "$BINDEST"
-  cp -v "$HOME/.local/mgba-runner/bin/mgba-test-runner" "$BINDEST/" || exit 1
+  (
+    cd "$WORK/repo" || exit 1
+    # agb v0.25.0 assumes c_char == i8 and an x86 __va_list_tag; same patches as
+    # the project Dockerfile. Only needed on aarch64, harmless elsewhere.
+    sed -i 's/not(target_os = "macos")/not(any(target_os = "macos", target_arch = "aarch64"))/' emulator/mgba/src/log.rs
+    sed -i 's/any(windows, target_os = "macos")/any(windows, target_os = "macos", target_arch = "aarch64")/' emulator/mgba/src/log.rs
+    sed -i 's/\*const i8/*const libc::c_char/g' emulator/mgba/src/log.rs
+    export PKG_CONFIG_PATH="$ROOTLESS/usr/lib/aarch64-linux-gnu/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    export PKG_CONFIG_SYSROOT_DIR="$ROOTLESS"
+    export CMAKE_PREFIX_PATH="$ROOTLESS/usr"
+    export CFLAGS="-I$ROOTLESS/usr/include${CFLAGS:+ $CFLAGS}"
+    export CXXFLAGS="$CFLAGS"
+    export LDFLAGS="-L$ROOTLESS/usr/lib/aarch64-linux-gnu -Wl,-rpath,$ROOTLESS/usr/lib/aarch64-linux-gnu${LDFLAGS:+ $LDFLAGS}"
+    if [ -n "$(ls "$ROOTLESS"/usr/lib/*/libclang-*.so.1 2>/dev/null | head -1)" ]; then
+      export LIBCLANG_PATH="$(dirname "$(ls "$ROOTLESS"/usr/lib/*/libclang-*.so.1 | head -1)")"
+      res=$(ls -d "$ROOTLESS"/usr/lib/llvm-*/lib/clang/*/ 2>/dev/null | head -1)
+      [ -n "$res" ] && export BINDGEN_EXTRA_CLANG_ARGS="-resource-dir ${res%/} -idirafter $(gcc -print-file-name=include)"
+    fi
+    cargo install --path emulator/test-runner --locked --force --root "$MGBA_ROOT" || exit 1
+  ) || exit 1
+  ln -sf "$MGBA_ROOT/bin/mgba-test-runner" "$BIN/mgba-test-runner"
+fi
+if [ -x "$MGBA_ROOT/bin/mgba-test-runner" ]; then
+  ln -sf "$MGBA_ROOT/bin/mgba-test-runner" "$BIN/mgba-test-runner"
+  say "mgba-test-runner: $MGBA_ROOT/bin/mgba-test-runner"
 fi
 
+# ---------------------------------------------------------------------------
+# 8. the sibling oracle (optional): build the reference encoder/decoder
+# ---------------------------------------------------------------------------
+if [ -f "$REPO_ROOT/../gba-audio/encoder/Makefile" ]; then
+  say "gba-audio oracle: building build/uli_enc and build/uli_dec"
+  make -C "$REPO_ROOT/../gba-audio/encoder" >/dev/null 2>&1 \
+    && say "gba-audio oracle: ready" \
+    || warn "gba-audio oracle: build failed (run make -C ../gba-audio/encoder to see it)"
+fi
+
+# ---------------------------------------------------------------------------
+# result
+# ---------------------------------------------------------------------------
 echo
 say "result"
-for c in rustc cargo agb-gbafix mgba-test-runner cmake pkg-config clang cc; do
+for c in rustc cargo agb-gbafix ffmpeg ffprobe flac metaflac mgba-test-runner; do
   printf '  %-18s %s\n' "$c" "$(command -v "$c" 2>/dev/null || echo '-')"
 done
-[ -n "$CLANG_RES" ] && printf '  %-18s %s\n' "clang resource hdrs" "$CLANG_RES"
+printf '  %-18s %s\n' "python (album)" "$VENV/bin/python"
+printf '  %-18s %s\n' "rootless libs" "$ROOTLESS"
 echo
-echo "Next: make native-rom && make test && make flac-gates"
+echo "Next:  . .agents/env.sh"
+echo "       make toolchain-check && make test"
