@@ -24,6 +24,8 @@
 
 use uli_lite::format::{CT_PAIR, CT_QUAD, CT_ZERO, MAXK, MAXLEN};
 
+use crate::Error;
+
 /// The default set's class types: one ZERO, two QUAD, eleven PAIR.
 const CTYPE: [u8; 14] = [0, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2];
 /// Raw-field widths per class. Zero for everything that codes small magnitudes cheaply;
@@ -241,6 +243,73 @@ impl DefaultTables {
             out.push(0);
         }
         out
+    }
+
+    /// Read a tables blob — the inverse of [`Self::to_blob`], and the way a *trained*
+    /// set (the oracle's or ours) becomes a table set this encoder can code with.
+    ///
+    /// The layout knowledge lives here rather than in a second parser because it already
+    /// lives in `to_blob`: one file that both writes and reads a format is a file whose
+    /// halves can be tested against each other, and the test that does it
+    /// (`tests/tables_default.rs`) round-trips the **oracle's** committed blob, not ours.
+    ///
+    /// The blob is validated by the decoder first ([`uli_lite::CodeTables::parse_into`] and
+    /// `premise`), because the reader is the authority on what a usable table set is — the
+    /// same discipline the trained path in `lib.rs` applies. An encoder that coded with a
+    /// set the reader would reject could produce a stream nothing can decode.
+    pub fn from_blob(blob: &[u8]) -> Result<Self, Error> {
+        use uli_lite::format::{CT_PAIR, CT_QUAD, MAXK as LITE_MAXK};
+        let mut checked = uli_lite::CodeTables::new();
+        checked.parse_into(blob).map_err(Error::Tables)?;
+        checked.premise().map_err(Error::Premise)?;
+
+        let k = blob[0] as usize;
+        if !(2..=MAXK).contains(&k) || k > LITE_MAXK {
+            return Err(Error::Plan(format!(
+                "the table blob declares {k} classes, outside the encoder's 2..={MAXK}"
+            )));
+        }
+        let mut t = Self {
+            k,
+            ctype: [0; MAXK],
+            rbits: [0; MAXK],
+            esck: [0; MAXK],
+            dq: [[0; 16]; MAXK],
+            cb: std::array::from_fn(|_| Codes::default()),
+            cls: std::array::from_fn(|_| Codes::default()),
+        };
+        let mut o = 1;
+        t.ctype[..k].copy_from_slice(&blob[o..o + k]);
+        o += k;
+        t.rbits[..k].copy_from_slice(&blob[o..o + k]);
+        o += k;
+        t.esck[..k].copy_from_slice(&blob[o..o + k]);
+        o += k;
+        for a in 0..=k {
+            t.cb[a] = Codes::from_lengths(&blob[o..o + k + 1]);
+            o += k + 1;
+        }
+        // Each class carries one coefficient row, selected by `ctype`; the other shape's
+        // row is present but all zeros, and `parse_into` never reads it (the row-leak
+        // invariant `to_blob` documents). Skipping it here is what keeps the two halves
+        // agreeing about *which* row is the class's.
+        let q = o;
+        let p = q + 81 * k;
+        for c in 0..k {
+            t.cls[c] = match t.ctype[c] {
+                CT_QUAD => Codes::from_lengths(&blob[q + 81 * c..q + 81 * (c + 1)]),
+                CT_PAIR => Codes::from_lengths(&blob[p + 256 * c..p + 256 * (c + 1)]),
+                _ => Codes::default(),
+            };
+        }
+        o = p + 256 * k;
+        for c in 0..k {
+            for j in 0..16 {
+                t.dq[c][j] = blob[o] as i8;
+                o += 1;
+            }
+        }
+        Ok(t)
     }
 
     /// The class's `len_q` row (shape `CT_QUAD`, 81 wide) or `len_p` row

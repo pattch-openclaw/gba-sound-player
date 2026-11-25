@@ -3255,6 +3255,121 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
+- **2026-11-23 — S8-1's Rust half: the frozen-plan differential runs, and the coder is not the
+  first cause either.** S8-1's probe could only say what the *oracle* does. `uli_enc::frozen`
+  (`code_at`: one `rd::measure`, then one `write_frame` of exactly what it measured) plus
+  `src/bin/frame-dump.rs` is the same coding from this crate at the same frozen
+  `(g, ms, mu, tables)`, in the same units; `scripts/uli_frame_diff.py` (`make uli-frame-diff`)
+  runs both on one corpus and reports per field, because `bits`/`stream` are *emitted*, `D` is
+  *measured* and `cycles` is a *model* — three different findings if they disagree.
+  `DefaultTables::from_blob` makes a trained set an input, and round-trips the oracle's
+  committed default blob byte for byte.
+
+  The committed 4-frame coefficient golden, `g ∈ {60,100,140} × ms ∈ {0,1}`, `mu = 0` — 24
+  codings, default tables:
+
+  | field | agreement | reading |
+  |---|---|---|
+  | `bits` | **24 of 24 identical** | the coder emits the reference's exact bit count at a fixed `(g, ms)` |
+  | `halfwords` | 24 of 24 | same stream length |
+  | `stream` | **23 of 24 identical** | frame 1 at `g=100 ms=1`: same **6,334 bits**, different content from halfword 33 — an equal-cost alternative, the first concrete instance of the tie-order row |
+  | `cycles` | 8 of 24 — and the 8 are exactly the frames that code nothing | every coded frame reads **higher** for us: +0.09%…+0.85%, always a **multiple of 40** (`ULI_CY_CODEDBAND`), so a per-coded-band term rather than per-symbol or per-coefficient |
+  | `D` | 3 of 24 bitwise | worst **103 ULP**, and not fixable by matching order |
+
+  Three plan corrections, all recorded where they belong rather than only here. **The
+  distortion gate cannot be "bitwise"**: the reference derives `D` as `J − λ·(bits−1)`
+  (`enc_core.c:404`) and the cancellation grows with `J/D`, so S8-5's step 1 now states a ULP
+  bound instead of an unattainable identity. **Rows 2 and 3 (the EOB charge, the `allz`
+  guard) are confirmed inert on default tables** — the plan argued it, this measures it —
+  which retires them from the default-table question and leaves them for the trained rows.
+  And **the cycle model is a new inventory row (#14)**, which matters beyond tidiness:
+  `--cap` is derived from that number, so a systematically high reading excludes candidates
+  the reference would have admitted.
+
+  That row was localised the same day, by printing the counters on both sides (the probe
+  reports `UliOps` from a copy of `frame_code`'s body that is *verified* each frame against
+  `frame_code`'s own bits and cycle model, so the copy cannot drift unnoticed): **eight of the
+  nine counters agree on every one of the 24 codings**, and the ninth is `long_codes`: ours
+  **26 / 5 / 5 / 7** against the reference's **0 / 0 / 0 / 0** on the four frames at
+  `g=100 ms=0` — `40 ×` each frame's cycle delta, to the unit. (`escs` moves on exactly one
+  frame, the one whose coding is the tie above; a consequence, not a second cause.) The cause is
+  an omission on the reference's side of the same kind as the EOB charge: `long_codes` exists
+  in `UliOps` for the **decoder**, which charges it (`uli_dec_ref.c:32`), and the reference's
+  **encoder** never increments it, so `frame_code` calls `uli_cycle_model` with that term
+  always zero. Matching it is S8-5 item 4; the product decoder's model stays as it is,
+  because there the counts are real.
+
+- **2026-11-23 — S8-3: the plan and the tables differ at *named* fields, and the first cause
+  is the plan.** S7 could say "the tables diverge first (2,204 of 5,212 bytes) and the streams
+  run out of step". `crates/uli-lite/examples/plan_diff.rs` (`make uli-plan-diff A=… B=…`)
+  says which field and which frame. It needs no reference build — it parses the container,
+  derives the tables layout from `k` so a differing byte is reported as `len_cb[4][9]: 5 vs
+  4`, and decodes every frame of both blobs to compare the plan the stream *declares*
+  (`FrameInfo` now carries `g`; `ms` was already `Ops::ms`).
+
+  On `biomaster`, ours 3,293,696 B (`f4f3a52a…e095c8`, byte-identical to S6's pin — the
+  instrument measures the shipped encoder) against the reference's 3,293,048 B
+  (`990da225…f8a73`, from `examples/uli_bench/assets/biomaster.uli`), exit 2:
+
+  | reading | value |
+  |---|---|
+  | first divergent frame, `g` | **frame 0**: ours **8**, reference **135** |
+  | frames whose `g` differs | **7,059 of 16,553**; widest `|Δg|` **127**, at frame 0 |
+  | first divergent frame, `ms` | frame 4 (ours 0, reference 1); **725** frames differ |
+  | searched `g` ranges | ours **8..119**, reference **89..135** (S7's sample agreed) |
+  | tables | **1,971 of 5,212 bytes**; first at **byte 43 = `len_cb[0][0]`, 2 vs 1** |
+  | table divergence by field | `len_p` 1,616, `len_cb` 154, `len_q` 128, `dq` 73 |
+
+  **This settles the question S8 was built to ask.** The plan diverges at frame 0 and 7,059
+  frames differ, so the symbol counts the trainer was handed differ, so the trainer is not the
+  first cause and the trained tables are downstream — the branch the plan named as "counts
+  differ ⇒ the search is wrong and the tables are innocent". It does **not** isolate *which*
+  search difference is first (window, EOB charge, `allz` guard all move counts); that is
+  S8-5's frozen-plan differential. Frame 0's `g = 8` against `135` is the inventory's row-6
+  effect observed directly: a frame with nothing worth coding, where our full-range candidate
+  set reaches `G_MIN` and the reference's 20-step window around its pass-1 guess cannot.
+
+  Two smaller checks. A `dq[0][5]` byte flipped by hand on the committed `tiny` fixture is
+  reported as `dq[0][5]: 3 vs 2 (byte 4991)` with the plan agreeing and exit 2, so the field
+  naming is exercised rather than assumed. And a new test,
+  `reference_corpus.rs::the_declared_step_is_the_pinned_plan_and_stays_in_the_readers_window`,
+  holds the new field to a number it did not produce: the fixture's declared plan must read
+  **19..124** (S7's measured reference range for that cell) with more than eight distinct
+  steps, and every frame's `g - 4·ms` must be inside the reader's window.
+
+- **2026-11-23 — S8-1: the frozen-plan probe, and the gate that says it measures what it
+  claims.** S7 could localise a blob difference to a *region* but not to a cause: the trained
+  tables are a function of a plan, the plan is a function of a search, and neither CLI can be
+  asked to hold one still. `scripts/uli_probe.py` (`make uli-probe`) does — it generates a C
+  probe into a temp directory that `#include`s the reference's `enc_core.c` and calls the
+  reference's own `frame_code` at a frozen `(g, ms, mu, tables)`, so our coding can be compared
+  at the level where a difference names a cause rather than a byte count. Same posture as the
+  three fixture generators: no C in this repository, nothing here builds C, no gate depends on
+  it (E-R1 forbids the dependency, not the oracle).
+
+  The probe is worthless unless it reproduces truth it did not produce, so the gate is that
+  reproduction: **all 2,400 frozen `band_rdo` cases, byte for byte** — the same file
+  `tests/quant.rs` holds the Rust side to. It also re-derives `fixtures/mdct_ref_coef.f32` from
+  `fixtures/mdct_in.f32` through the reference's `mdct_frame` (the PCM convenience path), and
+  shows frame mode deterministic and unmoved by `--stats`, which routes the same frame through
+  `chan_code`'s stats branch — a second code path that has to agree with the counting one.
+
+  What it emits is integers: `bits`, `D` as hex f64 bits, the reader cycle estimate, and the
+  frame's **bit stream** as hex halfwords, with the `g` delta included when `--g-prev` names
+  the predecessor — the stream being what "byte-identical at a frozen plan" actually means.
+  `--tables` loads a 5,212-byte table blob so the oracle's *trained* set (or ours) can be coded
+  with; two loader checks were run and both matter: the committed default blob codes
+  identically to `tables_default` (5,805 bits on `mdct_ref_coef.f32` frame 0 at g = 100), and
+  the trained tables sliced out of `uli2_tiny.uli` code differently (5,956 bits), so the flag
+  is a real input rather than a no-op.
+
+  Not emitted, deliberately: per-band magnitudes in frame mode. They are `band_rdo`'s answer,
+  but the per-band *choice* is made in `chan_code`, whose inputs come from `frame_code`'s
+  preamble (the M/S rotation, `step_D`, the magnitude clamp); duplicating that preamble in the
+  probe would be a second implementation of arithmetic that has to mean one thing, and a drift
+  in it would be silent. Magnitudes are reported where they are defined — band-rdo mode — and
+  a magnitude difference necessarily moves the stream.
+
 - **2026-11-21 — S7: the acceptance matrix runs, and every cell is a DIFF.**
   `make uli-accept` → `scripts/uli_accept.py`: our `uli-enc --rd` and the off-tree
   reference on identical PCM and flags, four cells plus one oracle-only `--dacw 1` row,

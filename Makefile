@@ -5,7 +5,8 @@
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
-        uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-rd-ab uli-accept \
+        uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-probe uli-plan-diff uli-frame-diff \
+        uli-rd-ab uli-accept \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-playback-test uli-player uli-player-rom uli-player-speaker uli-player-speaker-rom \
@@ -777,6 +778,46 @@ uli-mdct-fixture:
 # whisper in the bitstream. Same off-tree posture as the two goldens above.
 uli-band-rdo-fixture:
 	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/gen_uli_band_rdo_fixture.py
+
+# S8-1's frozen-plan probe: the reference's own `frame_code` and `band_rdo` driven at a
+# held-still (g, ms, tables), so our coding can be compared at the level where a difference
+# is a cause instead of a byte count. Self-checking before it is trusted: it must reproduce
+# all 2400 frozen band_rdo cases byte for byte. Deliberately NOT on any gate's path — it
+# compiles the off-tree reference's C, which E-R1 keeps out of `uli-test`; the posture is
+# `uli-band-rdo-fixture`'s. Run it bare for the gate, or with --coef/--g/--ms/--tables for a
+# measurement: PLAN-OF-RECORD.md -> S8-1, and the script's docstring for the formats.
+uli-probe:
+	@test -f $(GBA_AUDIO)/encoder/enc_core.c || \
+	  { echo "uli-probe: no reference encoder source at $(GBA_AUDIO)/encoder (set GBA_AUDIO=)"; exit 1; }
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_probe.py --self-check
+
+# S8-5's frozen-plan differential: the same corpus, the same held-still (g, ms, tables), our
+# frame coding against the reference's — P1 from both sides (`scripts/uli_frame_diff.py`,
+# which pairs `uli_enc::frozen` with `scripts/uli_probe.py`). Deliberately NOT on any gate's
+# path: it compiles the off-tree reference's C. The default corpus is the committed 4-frame
+# coefficient golden, so it runs without an album; pass ULI_FRAME_DIFF_ARGS= for others.
+ULI_FRAME_DIFF_ARGS ?= --coef $(abspath crates/uli-enc/tests/fixtures/mdct_ref_coef.f32)
+uli-frame-diff: toolchain-check
+	@test -f $(GBA_AUDIO)/encoder/enc_core.c || \
+	  { echo "uli-frame-diff: no reference encoder source at $(GBA_AUDIO)/encoder (set GBA_AUDIO=)"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) build --release --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE) --bins
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_frame_diff.py \
+	  --ours $(dir $(ULI_ENC_BIN))frame-dump $(ULI_FRAME_DIFF_ARGS)
+
+# S8-3's plan/table diff: between two blobs, *which* table field and *which* frame's step
+# differ — the question S7 can only answer at region granularity. Needs no reference build
+# (it reads the container), so it works on ours against the oracle's or ours against ours.
+# Exit 2 = the blobs differ, 0 = identical, 1 = usage/parse error — uli_accept.py's
+# convention, so `make uli-plan-diff A=... B=...` fails loudly on a difference.
+# Usage: make uli-plan-diff A=ours.uli B=ref.uli [ENTRIES=8]
+uli-plan-diff: toolchain-check
+	@test -n "$(A)" -a -n "$(B)" || { echo "uli-plan-diff: pass A=<blob> B=<blob>"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) run --release --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE) \
+	    --example plan_diff -- $(abspath $(A)) $(abspath $(B)) --entries $(or $(ENTRIES),8)
 
 # S3's acceptance harness: our --rd encoder against the reference's, same PCM, same
 # budgets: bytes, fit, kbit/s, SNR, chosen g. Exits nonzero if any row overshoots.

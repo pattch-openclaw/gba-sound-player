@@ -1619,6 +1619,7 @@ impl<'a, 's> GbaDecoder<'a, 's> {
         self.frame = self.frame.wrapping_add(1);
         Ok(FrameInfo {
             frame,
+            g: self.g_prev,
             bits: self.bitpos.wrapping_sub(start),
             bitpos: self.bitpos,
             ops: info_ops,
