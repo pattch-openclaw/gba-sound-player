@@ -120,6 +120,15 @@ def main() -> int:
         print(f"gen_uli_band_rdo_fixture: no reference encoder at {enc}", file=sys.stderr)
         return 1
     cc = os.environ.get("CC", "cc")
+    # These defaults are the ones that produced the committed fixture, and they are kept so a
+    # regeneration reproduces it (the fixture is a pin: if it moves, the regeneration is the
+    # bug). Note what that set is: GCC's default float contraction is `fast`, so the
+    # committed `D` column is a *fused* build's answer, while the oracle of record since
+    # S8-4b is contraction-free. Measured 2026-11-25: the clean build agrees on every
+    # magnitude and every bit count and differs in `D` by at most 2 ULP. A fixture from the
+    # clean oracle is S8-5's decision and would be an *additional* file, not a movement of
+    # this one (PLAN-OF-RECORD §S8-4b, inventory row 18). Override with `CFLAGS=` to make
+    # one, deliberately.
     flags = os.environ.get("CFLAGS", "-O2 -std=gnu11 -w").split()
     with tempfile.TemporaryDirectory() as td:
         probe = Path(td) / "probe.c"
