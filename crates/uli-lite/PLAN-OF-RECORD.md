@@ -4,7 +4,7 @@
 the licensing and encoder risks). **This file owns the phases, gates, the
 measurement ledger and the order of work.**
 
-## Current state (2026-11-19)
+## Current state (decode 2026-11-19; encoder 2026-11-25)
 
 mGBA, WAITCNT 4/2, 262,144-cycle period, no UI. Both corpora pinned
 (`xover=0 hfnz=0`), two runs per image identical to the cycle.
@@ -34,15 +34,21 @@ mGBA, WAITCNT 4/2, 262,144-cycle period, no UI. Both corpora pinned
 - **Open:** the non-decode gate half; the dense-frame tail of entropy (the
   sub-frame partition needs re-measuring on the product reader first — see "The
   entropy path against the C+ASM reference"); a licensing/publish decision.
-- **The encoder: S7 (the acceptance matrix) is done, and its answer is DIFF; S8 is planned and
-  scoped to byte-exactness on the reference's `--dacw 0` arm.** `make uli-accept` compares our
-  `--rd` encoder against the off-tree reference on identical PCM and flags across four cells,
-  and no cell is byte-identical: the first content difference lands inside the **trained
-  tables** in every cell, and it is **unattributed** — since attributed at first order by S8-3,
-  which finds the plan itself differs at frame 0 (§S8 "First attribution"). S8's plan — four instruments, a 13-row
-  divergence inventory, eight sub-steps each with its exit gate, and the pin ledger — is in
-  "S8 — the plan" below; **none of it is started**. The SNR licence test S7 left open moves
-  to S9, so that S8 has exactly one target. See "S7" for the measured table.
+- **The encoder: S7 (the acceptance matrix) is done, and its answer is DIFF; S8 (byte-exactness
+  on the reference's `--dacw 0` arm) is in progress as of 2026-11-25.** `make uli-accept`
+  compares our `--rd` encoder against the off-tree reference on identical PCM and flags, and
+  no cell is byte-identical. The cause is **attributed at first order**: the plan differs
+  (S8-3 finds it at frame 0 of `biomaster`), so the counts differ, so the tables are
+  downstream; at a frozen plan the coder reproduces the reference's bits on 24 of 24 codings.
+  **Landed in S8 so far:** S8-1 (the two-sided frozen probe), S8-3 (the plan/table diff),
+  S8-5 item 4 (the cycle model), **S8-0 (the flag surface: `--stride`/`--fine` and the refine
+  stage deleted, ties-to-even, 6 retries)** and **S8-4 (the `fast` cell:
+  `make uli-accept ULI_ACCEPT_ONLY=fast`, 2.4 s against our 12.2 s)**. **Added 2026-11-25 and
+  not yet discharged:** rows 15-17 of the divergence inventory — the oracle binary's own
+  float surface — with S8-4b's instrument (`make uli-oracle-check`) landed and the oracle
+  rebuild itself still pending. The next row is **S8-4b's rebuild**, then **S8-5 items 1-3**;
+  §S8's sub-step table is the single answer to "what is next". The SNR licence test S7 left
+  open moves to S9, so that S8 has exactly one target. See "S7" for the measured table.
 - **The encoder: S6 (the decoder-cycle price) is done, and it was the whole of the high-rate
   gap — but only where the cap binds hard.** An over-cap candidate is re-coded under
   `mu · (band symbol + decoded work)` instead of being refused, and the final encode re-codes
@@ -1166,7 +1172,7 @@ read-side, so this does not reopen the paragraph above.
 | **S5** | Album assembly (WAV front end, gapless join, tags verbatim), `--budget`/`--cap` on real sizes, frame-parallel search | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes (each seeked to its own preroll); hashes pinned; too small refuses **before the first frame**, citing both numbers; a 32,768 Hz WAV reaches the same blob its pre-resampled PCM does, and a resampled WAV is quoted by SNR; the CLI prints the reference's columns | **done** — see "S5" below for the numbers and the defaults-restored failure |
 | **S6** | `mu` (decoder-cycle-aware) search: re-code an over-cap frame by dropping its cheapest coefficients instead of refusing the candidate | E-R8 **discharged**; E-R7 **contributed to, not discharged** — its criterion is codec-only and unmeasured, and S7 accepts it | a knob that demonstrably trades SNR for decode cycles, measured on the bench — and, measured 2026-11-20, it closes the last high-rate gap: at `--budget 400000 --cap 74` the equivalent mechanism is worth **1.48 dB** to the oracle, against a 1.15 dB gap | **done** — `--musearch 1` by default; worth **1.44 dB** here (39.57 → 41.01 dB) and the oracle's 41.02 is 0.01 dB above, cap 74.0% max on both arms. See "S6" below |
 | **S7** | **The acceptance matrix, as a buildable target** | E-R2, E-R5, E-R7 (and E-R1's oracle posture) | the four cells below run in CI-shaped form and compare SHA-256s against the reference's blobs, including the two header cycle fields | **done** — `make uli-accept` runs the four cells and the `--dacw 1` row; every cell is a **DIFF**, whose first content difference is inside the **trained tables** in every cell, and which is **unattributed** (see "S7" below) |
-| **S8** | **Byte-exactness on the reference's `--dacw 0` arm**: attribute the S7 DIFF with instruments rather than bytes (the pass-1 plan is not in the blob), then close every named divergence until the matrix matches — the SNR arm is **withdrawn from S8** and becomes S9 | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R2 (the boundary is PCM), E-R7 (moved to S9 — see "S8 — the plan") | every matrix cell byte-identical at `--dacw 0`, checked by `make uli-accept`, with the four instruments of S8-1…S8-4 in place and every pin re-recorded | **in progress** — S8-1 (the probe, `make uli-probe`, now two-sided via `uli_enc::frozen` and `make uli-frame-diff`) and S8-3 (the plan/table diff, `make uli-plan-diff`) landed 2026-11-23. S8-3 took the first-order attribution — the plan differs, so the counts do, so the tables are downstream — and the frame differential narrowed it again: at a frozen plan the **coder** reproduces the reference's bits on 24 of 24 codings, so neither the coder nor the trainer is the first cause; the search is, plus the cycle model (inventory #14). Five sub-steps are unstarted, S8-5 has begun (item 4 — the cycle model's `long_codes` — is done and its distortion gate was restated by measurement), and the next open question is the search (§S8). The scope, the divergence inventory, the instruments and each sub-step's gate are in "S8 — the plan" below |
+| **S8** | **Byte-exactness on the reference's `--dacw 0` arm**: attribute the S7 DIFF with instruments rather than bytes (the pass-1 plan is not in the blob), then close every named divergence until the matrix matches — the SNR arm is **withdrawn from S8** and becomes S9 | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R2 (the boundary is PCM), E-R7 (moved to S9 — see "S8 — the plan") | every matrix cell byte-identical at `--dacw 0`, checked by `make uli-accept` with the oracle's sha256 recorded, `make uli-oracle-check ULI_ORACLE_EXPECT=clean` green, and every pin re-recorded | **in progress** — S8-1, S8-3, S8-5·item 4 and (2026-11-25) **S8-0** and **S8-4** are landed; S8-4b's oracle rebuild and S8-5 items 1-3 are next, then S8-2/S8-6/S8-7. The sub-step table at the head of "S8 — the plan" carries each row's `needs`, its status and what it unblocks, so no prerequisite is prose elsewhere |
 
 S7 is a step rather than a property of the plan because it has work in it — a host
 target that builds nothing of ours from C, calls the off-tree binary, compares hashes
@@ -1181,10 +1187,46 @@ eight sub-steps, each exit gate, the pin discipline and the eight decisions that
 otherwise be relitigated are all below; a reader picking S8 up cold should not need any
 other document.
 
+**Where the sub-steps stand (2026-11-25), and this table is the answer to "what is next".**
+
+| sub-step | what it is | needs | status | unblocks |
+|---|---|---|---|---|
+| **S8-0** | prune the flag surface (delete `--stride`/`--fine` and the refine stage, `RETRY_ATTEMPTS` 6, `g_guess` ties-to-even) | — | **landed 2026-11-25** | S8-7 (rows 5, 6, 7, 11, 12) |
+| **S8-1** | P1, the frozen `frame_code` probe, both sides | — | **landed 2026-11-23** | S8-5's gate |
+| **S8-2** | P2, `--dump-plan` on a local reference build | an oracle build | **not started** | S8-6's attribution (its gate), and S8-7's diagnosis when a cell refuses |
+| **S8-3** | P3, the in-tree plan/table diff (`make uli-plan-diff`) | — | **landed 2026-11-23** | S8-6, S8-7's progress signal |
+| **S8-4** | P4, the `fast` cell (`make uli-accept ULI_ACCEPT_ONLY=fast`) | — | **landed 2026-11-25** | the progress signal for S8-5…S8-7 |
+| **S8-4b** | the oracle of record: its build flags pinned, its fused-multiply map recorded (`make uli-oracle-check`) | a decision to rebuild it off-tree | **instrument landed; rebuild pending** | S8-5 items 1–3 arithmetic parity, and the S8 gate's MATCH claim |
+| **S8-5** | the coder: distortion parity, tie parity, the sequence terms, the cycle model | S8-1, S8-4, S8-4b | **in progress** — item 4 landed 2026-11-23; items 1–3 open | S8-6 |
+| **S8-6** | the trainer, fed a *matching* pass-1 plan | S8-2, S8-5 | **not started** | S8-7 |
+| **S8-7** | the search: the reference's windows, training shape and retry | S8-0 … S8-6 | **not started** | the S8 gate |
+
+Two rules keep this list from producing dangling prerequisites, which is what happened to
+S8-1…S8-4 while they were described only as prose in §7:
+
+1. **A prerequisite is a row here, not a sentence elsewhere.** If a sub-step needs an
+   instrument, a cell or an oracle, that thing has its own row and this table names it in
+   `needs`. A row may be started only when every row in its `needs` is landed — S8-5 is the
+   live example: its item 4 landed early because it needed nothing, and items 1–3 wait on
+   S8-4b.
+2. **A row is landed when its own gate has been measured, and the measurement is recorded**
+   in the prose below and in the landing log. Partial rows say which items are done (S8-5),
+   so "in progress" is never mistaken for "nearly finished" or for "not started".
+
 **The premise.** The oracle is deterministic: R5b measured `--threads 1` and `--threads 8`
 byte-identical on the fixture, and every S7 run reproduces its own hashes. So "we cannot
 match its bytes" is not a property of the format or of the machine, and there is no reason
 to accept a difference that is neither an improvement nor required.
+
+**Amended 2026-11-25: "deterministic" means deterministic *for a given oracle binary*.**
+The premise was read as a property of the encoder, and S8-4b measured that it is not:
+the shipped oracle's float arithmetic depends on how its C was compiled, and it fuses
+multiply-adds on the search's own decision path. Two consequences this section now carries:
+the target is a *binary* whose sha256 and fused-multiply map are recorded (`make
+uli-oracle-check`, inventory row 15), and every claim below is same-host by construction
+(E-R5's float clause) rather than by caution. Nothing about determinism is lost — a fixed
+binary at a fixed thread count reproduces its own bytes, which is all a target needs — but
+"the reference's bytes" was never a well-formed phrase until the binary was named.
 
 **The test a difference has to pass.** If this encoder can genuinely improve on the oracle,
 the improvement shows up as SNR at equal rate. A non-exact blob is therefore acceptable
@@ -1288,21 +1330,51 @@ tree; C anchors are the off-tree reference `../gba-audio/encoder/`.
 | 2 | EOB charge in the class Viterbi | `V + λ·len_cb[s][EOB] + μ·cyc + D_z[b]` (`enc_core.c:317`) | terminator bits **deliberately unpriced** (`quant.rs:823-825`) | **differs**; invisible on identical default rows, live on trained rows |
 | 3 | the `allz` guard | a band whose every `\|x\| < 0.4·D` may only take class 0 (`enc_core.c:301-307`) | **absent** — `grep -rn '0\.4'` in `crates/uli-enc/src` finds nothing | **differs** |
 | 4 | class-Viterbi tie order | `bestEnd` scanned inside the band loop, strict `<`, then the end-at-last-band pass (`enc_core.c:313-326`) | mirrored shape, tie order **unverified** | **to verify** — and it has one concrete instance: frame 1 of the coefficient golden at `g=100 ms=1` emits the **same 6,334 bits** as the reference and a different stream from halfword 33, i.e. an equal-cost alternative was chosen differently |
-| 5 | `g_guess` rounding | `lrint` — ties to **even** (`uli_enc.c:48`) | `f64::round` — ties **away from zero** (`rd.rs:725`) | **differs** at exact halves; also documented as off the search path, which stops being true at S8-7 |
-| 6 | candidate window (pass 1) | `NG = 28` contiguous, `lo = g_guess(λ_train) − 7` (`uli_enc.c:326-339`) | stride-8 over `G_MIN..G_MAX`, then ±`fine_width` around our own argmin (`rd.rs:630-705`) | **differs** — different centre, width and grid |
-| 7 | candidate window (pass 2) | `NG = 20` contiguous, `lo = g_pass1 − 9` (`uli_enc.c:349-354`) | same coarse+fine on the second pass | **differs** |
+| 5 | `g_guess` rounding | `lrint` — ties to **even** (`uli_enc.c:48`) | `round_ties_even` (S8-0) | **closed at S8-0.** It was `f64::round` — ties away from zero — and was documented as off the search path, which stops being true at S8-7; that is why it was fixed while the flag surface was being pruned rather than with the window |
+| 6 | candidate window (pass 1) | `NG = 28` contiguous, `lo = g_guess(λ_train) − 7` (`uli_enc.c:326-339`) | `rd::CANDIDATE_STRIDE = 8` across the whole policy window, no refinement (S8-0) | **differs** — different centre, width and grid. S8-0 removed the second stage, so what remains to reproduce is the window, not the grid |
+| 7 | candidate window (pass 2) | `NG = 20` contiguous, `lo = g_pass1 − 9` (`uli_enc.c:349-354`) | the same sweep on the second pass (S8-0 deleted the refine stage) | **differs** |
 | 8 | pass-1 curves | computed with **`musearch = 0`** (`uli_enc.c:341`) | `run(tables, false)` — musearch off | **matches** |
 | 9 | initial training | `train()`: analytic `g = g_guess(λ,w)`, **M/S forced to 1**, 4 outer iterations, each a 9-step λ bisection over `±3` in log, every **4th** frame, target `target/NF × 0.985` (`uli_enc.c:85-115,322`) | a full search with the *built-in* tables, all frames (`lib.rs:432-441`) | **differs** — different initial plan, so different initial tables |
 | 10 | retrain sampling | every **2nd** frame (`uli_enc.c:349`) | every frame (`train::collect` over the whole content) | **differs** |
-| 11 | retry loop | 6 attempts; `tgt -= (size−budget)·8·1.02 + 2000` (`uli_enc.c:405`); re-allocates on the **same** curves | 10 attempts (`lib.rs:195`); re-runs coarse **and refine** on a failed attempt (`lib.rs:421-436`) | **differs** |
-| 12 | `--stride`/`--fine` themselves | no such knob; the sweep is fixed by the window | user-visible, defaults 8/4 (`bin/uli-enc.rs:67-68`) | **must go** (S8-0) |
+| 11 | retry loop | 6 attempts; `tgt -= (size−budget)·8·1.02 + 2000` (`uli_enc.c:405`); re-allocates on the **same** curves | 6 attempts on the **same** curves (S8-0) | **matches** (S8-0) — it was 10 attempts that re-measured the curves |
+| 12 | `--stride`/`--fine` themselves | no such knob; the sweep is fixed by the window | **gone** (S8-0): the flags, the refine stage and the two `Args` fields are deleted, and the surviving spacing is a constant | **closed at S8-0** |
 | 13 | container sizing arithmetic | `(budget − overhead)·8 − 64` (`uli_enc.c:316`) | believed equal; S7's size deltas are attributable to stream bytes alone | **to confirm** at S8-7 |
 | 14 | the cycle model: **`long_codes`** | the *encoder* never increments `ops.long_codes` — its decoder does (`uli_dec_ref.c:32`), so `uli_cycle_model` is called with that term at zero | `frame_ops` counts every code longer than `LUTB` (`rd.rs:295`) | **localised and matched 2026-11-23**: with the counters printed on both sides, **eight of the nine agreed on every one of the 24 codings**, and the ninth was `long_codes` — ours 26/5/5/7 against the reference's **0/0/0/0** on the four frames at `g=100 ms=0`, which is `40 ×` each frame's cycle delta to the unit. The reference's encoder omits a term its own decoder charges, so `rd::frame_ops` no longer counts it (S8-5 item 4, done): the differential now reads **`cycles` same on 23 of 24**, and the one residual is the equal-cost tie's `escs` (one escape, `45` cycles) — the tie, not the model |
+| 15 | **float contraction in the oracle binary** | not a source difference: GCC's default `-ffp-contract=fast` fused 35 multiply-adds at `-O2 -march=native`, **13 of them on the decision path** (`frame_code` 6, `band_rdo` 3, `curves_compute` 2, `allocate` 2) | Rust does not fuse (`fmul`+`fadd`) | **differs out of construction; not fixable in Rust.** Measured 2026-11-25 by `make uli-oracle-check`; remedy is S8-4b's `-ffp-contract=off` oracle rebuild and re-taken measurements, and until then our 24/24 bit agreement on the default tables is luck, not parity |
+| 16 | **`allocate`'s λ bisection totals** | `reduction(+:tot)` over frames inside a `#pragma omp parallel for` (`uli_enc.c:188`), compared to `target` in `f64` | a frame-index-order sum (R5b) | **to verify at S8-7**: the two totals are not the same double, and it bites only within an ULP of the target. R5b's 1-vs-8 identical hashes are evidence, not proof — re-run on the `fast` cell at two thread counts |
+| 17 | **the oracle is ISA-specific** | `CFLAGS ?= -O2 -march=native` (`encoder/Makefile:10`) | n/a | **the claim's boundary, not a defect**: exactness is same-host, same-binary (E-R5's float clause). The S8 gate names the binary's sha256, which `make uli-oracle-check` prints |
 
-Rows 1-4 are the coder, 5-13 the search and its constants. Row 8, and the trainer's
-algorithm in section 3's last row, are the two places we are already right — stated so that
-a later diff is not attributed to them. Note the distinction that makes row 9 a different
-claim: the trainer's *algorithm* matches; the *plan it is handed* does not.
+
+Rows 1-4 are the coder, 5-13 the search and its constants, 15-17 the oracle's own float
+surface — a layer the inventory did not have until S8-4b measured it, and the one layer this
+tree cannot fix by editing Rust. Row 8, and the trainer's algorithm in section 3's last row,
+are the two places we are already right — stated so that a later diff is not attributed to
+them. Note the distinction that makes row 9 a different claim: the trainer's *algorithm*
+matches; the *plan it is handed* does not.
+
+**Rows 15-17, added 2026-11-25, and the reason the inventory needed a layer.** All three are
+properties of the oracle *binary* rather than of its logic, and all three were invisible
+until `make uli-oracle-check` printed the map. They are the argument for S8-4b: a divergence
+you cannot reproduce is not attributable, and "our search differs" would have absorbed them
+one at a time as a mystery.
+
+- **Row 15 is the first-order one.** 13 of the oracle's 35 fused multiply-add sites are on
+  the decision path. Every rule in this inventory about matching `J`, `D`, `bits` and
+  `cycles` presupposes both sides evaluate the same expression the same way; with the oracle
+  fusing and Rust not, they do not, and no amount of search reproduction closes that. The
+  remedy is the oracle build, not our code.
+- **Row 16 is narrower and survives the rebuild.** `allocate`'s λ bisection compares an
+  `f64` total against the target, and that total is an OpenMP `reduction(+:tot)` over
+  frames — associated by thread, not by frame index. R5b's `--threads 1` vs `8` agreement is
+  evidence that no straddle happened on the fixture, not proof that none can. Ours sums in
+  frame order (R5a/R5b), so the two totals are not the same double; it only bites if the
+  comparison lands within an ULP. *To verify at S8-7* by running the oracle at two thread
+  counts on the `fast` cell and checking the bisection's outcome agrees.
+- **Row 17 is the claim's boundary, stated as a row so it cannot be forgotten in the gate
+  wording.** `-march=native` makes the oracle ISA-specific, and `g_guess` crosses `log2`
+  (row 5's neighbourhood). Exactness is therefore a same-host, same-binary claim (E-R5's
+  float clause). This is not a defect to fix; it is what "byte-identical" means here, and
+  the S8 gate says so.
 
 **First attribution, measured (P3, 2026-11-23).** On `biomaster` — ours 3,293,696 B
 (`f4f3a52a…`, byte-identical to S6's pin, which is how we know the instrument measures the
@@ -1367,8 +1439,8 @@ dir that `#include`s `enc_core.c` and drives `frame_code` at a **frozen** `(g, m
 **given** table set, printing bits, the magnitude vector, ops, cycles and the derived `D`.
 This is the like-for-like A/B that S3 relied on, and its instrument has been lost:
 `scripts/uli_rd_ab.py`'s own docstring points at a fixed-step A/B in `tools/rd_ab`, and there
-is no `tools/` directory in this tree — so S8-5's gate currently has nothing to run. That is
-the gap P1 fills, and it fills it as a probe over **frozen** `(g, ms, tables)`, which is
+is no `tools/` directory in this tree — so S8-5's gate had nothing to run until P1 landed
+(2026-11-23). That was the gap P1 fills, and it fills it as a probe over **frozen** `(g, ms, tables)`, which is
 what S8-5 actually needs (the whole point is to hold the plan still and vary nothing).
 It is built the way the two working generators are built: Python in `scripts/`, C written to
 a temp dir at run time, compiled against `$GBA_AUDIO`, no C in this repository and no
@@ -1409,12 +1481,15 @@ tables**, so a small cell is not a shortcut to a big cell's answer, it is a cell
 right — and it can be a *better* one, because S7 records that `tiny`'s budget does not bind
 and its mismatch is therefore largely tie-breaking.
 
-The cell is **`fast`**: a short album (≈4 s, ≈256 frames) given as its own `album.f32` +
-`tracks.tsv` pair, so neither side needs a new flag, at a budget chosen to **bind**
-(`--cap 74`), both encoders invoked with identical flags. Rationale for files rather than
-`--frames`: `--frames` rewrites the track table, and a purpose-built pair keeps the cell
-comparable to the other cells' contract (E-R2) instead of making it a special case in the
-harness.
+The cell is **`fast`** — **landed 2026-11-25 (S8-4)**: a 4 s, two-track, 257-frame album
+given as its own `album.f32` + `tracks.tsv` pair, generated by `scripts/gen_uli_fast_cell.py`
+at a fixed seed, at `--budget 20000 --cap 74`, both encoders invoked with identical flags.
+Rationale for files rather than `--frames`: `--frames` rewrites the track table, and a
+purpose-built pair keeps the cell comparable to the other cells' contract (E-R2) instead of
+making it a special case in the harness. Measured: the reference 2.4 s, ours 12.2 s, and the
+budget binds on both sides (19,976 vs 19,904 bytes against ~5,412 of overhead) with the cap
+binding on 19 of 257 frames. `make uli-accept ULI_ACCEPT_ONLY=fast` runs it alone and needs
+no corpus, which is what makes it an iteration loop rather than a matrix.
 
 Roles: `fast` is the **progress signal** during S8-5…S8-7 and the first PASS/FAIL gate;
 the four S7 cells stay the **confirmation**. During S8-5…S8-7 the cell runs *unpinned* and
@@ -1423,20 +1498,45 @@ the hashes are expected to differ while the work is in flight. It is pinned at S
 
 **7. The sub-steps.**
 
-Eight, in this order. **They are sub-steps of S8, not new steps**: the step namespace stays
-`S1 … S8` (S3b set the precedent for a labelled sub-part of a step), and no sub-step is a
-place you can be *instead of* S8. S8-1…S8-4 are **prerequisites**: they measure, they change
-no encoding behaviour, and S8-5…S8-7 cannot be verified without them. S8-0 is deletion and
-can be taken at any point before S8-7. Each sub-step lands as its own commit with its own
-gate recorded.
+Nine rows — S8-0 … S8-7 plus **S8-4b** — and the table at the head of this section is their
+order, their dependencies and their status. **They are sub-steps of S8, not new steps**: the
+step namespace stays `S1 … S8` (S3b set the precedent for a labelled sub-part of a step, and
+S8-4b is the second use of it), and no sub-step is a place you can be *instead of* S8. What
+each row is *for* is in its `needs` and `unblocks` columns rather than in a class named here,
+because naming classes ("prerequisites", "deletion, any time before S8-7") is what let S8-1…
+S8-4 float outside the sequence while two of them were already landed. The one thing kept
+from that formulation: **S8-1 … S8-4b measure or pin and change no encoding behaviour**; only
+S8-0, S8-5 and S8-7 change bytes. Each sub-step lands as its own commit with its own gate
+recorded, and a partial row says which items are done.
 
-**S8-0 — prune the flag surface.** Delete `--stride`/`--fine` and the coarse-then-refine
-split they parameterise (`rd.rs::coarse_curve`, `rd.rs::refine_curve`, and the refine-on-retry
-branch at `lib.rs:421-436`); fix `g_guess` to ties-to-even (`rd.rs:725` → `round_ties_even`);
-`RETRY_ATTEMPTS` 10 → 6 (`lib.rs:195`); and rewrite the `rd.rs` module docs that advertise
-the two-stage sweep, because they would otherwise be false. *Gate:* `make uli-check` and
-`make uli-test` green, `Args` loses the two fields, and **no output claim is made** — this
-sub-step changes bytes and is not expected to improve anything.
+**S8-0 — prune the flag surface — landed 2026-11-25.** `--stride`/`--fine` and the
+coarse-then-refine split they parameterised are **deleted**: `rd.rs::refine_curve` and
+`Curves::refine` are gone, `Curves` no longer carries a stride, the refine-on-retry branch
+in `lib.rs` is gone, `g_guess` rounds ties-to-even (`rd.rs` → `round_ties_even`, which is
+`lrint`'s rule and inventory row 5), and `RETRY_ATTEMPTS` is 6 (`uli_enc.c:405`). `Args`
+lost the two fields, so a caller that still passes either flag gets `unknown argument`
+instead of a silently different grid. The `rd.rs` module docs and the crate README that
+advertised the two-stage sweep are rewritten, because after the deletion they were false.
+
+*What replaced the grid, and why not `stride = 1`.* What survives is one uniform sweep at a
+**constant** spacing (`rd::CANDIDATE_STRIDE = 8`) with no flag and no refinement — the
+minimum deletion, because the grid's *shape* is S8-7's (rows 6 and 7 replace it with the
+reference's contiguous 28- and 20-step windows). Sweeping `stride = 1` was tried and
+rejected: it can only lower distortion, so it would be an output claim in a sub-step that
+makes none (decision 3), and it costs ~8x on **every** album encode in the tree — measured
+on the `fast` cell at four threads, 12.2 s → 82 s against the oracle's 2.4 s, which would
+turn `make uli-accept`'s ~41-minute matrix into hours before S8-7 lands.
+
+*Gate, measured:* `make uli-check` green; `make uli-test` green with **93 tests in 17
+suites**, of which the uli-enc half is the whole encoder suite. One test moved rather than
+broke: `tests/train.rs`'s binding budget went 8,000 → 6,600 bytes, because 8,000 is the
+*least* rate-limited budget that fits that 4-frame album and its trained-vs-built-in gap had
+shrunk to +0.43 dB against the test's own 0.25 dB bar; at 6,600 (309 B/frame, the
+product-like regime) the same claim measures **+1.11 dB**. The threshold did not move and the
+measured table is in the test. The `refining_the_grid_never_costs_quality` test went with the
+grid it measured: its 2.6 dB claim was against our own coarse baseline, it stays in
+`RECORD.md`, and it returns at S9 as a labelled arm. **No output claim is made**, as the
+sub-step required: bytes changed and nothing improved.
 
 **S8-1 — P1, the probe — landed 2026-11-23.** `scripts/uli_probe.py` + `make uli-probe`: a C
 probe generated into a temp dir that `#include`s the reference's `enc_core.c` and drives
@@ -1494,23 +1594,91 @@ holds the field to something it did not produce: the fixture's declared plan mus
 19..124, the range S7 measured from the seek diagnostic, and every frame's `g - 4·ms` must
 be inside the reader's window.
 
-**S8-4 — P4, the fast cell.** Defined, wired into `make uli-accept` as a fifth cell
-(oracle-only `dacw1` row unchanged), and measured once. *Gate:* seconds, budget binds.
+**S8-4 — P4, the fast cell — landed 2026-11-25.** `scripts/gen_uli_fast_cell.py` +
+`make uli-accept ULI_ACCEPT_ONLY=fast`: a generated 4 s, two-track, 257-frame album given as
+its own `album.f32` + `tracks.tsv` pair (never a truncated big album — that has different
+trained tables, and `--frames` rewrites the track table, which is a different input rather
+than a different setting). It is the matrix's first cell and the tests' progress signal.
+
+*Gate, measured at four threads:* **the reference 2.4 s, ours 12.2 s** — seconds, and the
+budget binds on both sides: at `--budget 20000 --cap 74` the oracle writes 19,976 bytes and
+ours 19,904 against ~5,412 bytes of container overhead, ~454 bits/frame, and the cap binds
+too (the μ re-code ran on 19 of 257 frames), so one cell exercises the budget, the cap and
+the trained tables. The harness gained `--only` (comma-separated or repeated) and each
+cell now requires its own inputs, so the fast cell runs on a checkout with no generated
+corpus at all; `--list` names the cells, and `dacw1` pulls in its tiny input.
+
+*First finding, recorded before it was explained:* on the fast cell the **first content
+difference is the track table** (2 of 48 bytes, offset 124), which no S7 cell showed. It is
+`TrackEntry::g_prev` on track 1 — ours 128, the reference 119 — and it is **downstream, not
+a new divergence**: `container.rs` writes `frames[preroll_frame].g_prev`, which is frame
+127's step, so the two values differ because our frame 127's step differs. The 128 coinciding
+with the preroll frame's own index is a coincidence of this cell, and the writer's index is
+right (the reference's `e.preroll_frame ? g[e.preroll_frame - 1] : 0` is the same frame).
+The cell's plan diff is the row-6 story again, compressed into 15 seconds.
+
+**S8-4b — the oracle of record.** Byte-exactness is a claim about a *binary*, and the shipped
+one's float arithmetic is not reproducible from Rust. `make uli-oracle-check`
+(`scripts/check_uli_oracle.py`) reads the off-tree binary and prints three things: its
+sha256, the flags its Makefile claims (`CFLAGS ?= -O2 -march=native -std=gnu11 ...`, so
+the oracle is ISA-specific), and its fused-multiply map, function by function.
+
+*Measured 2026-11-25 on this aarch64 box:* **35 fused multiply-add sites in ten functions**
+(31 scalar `fmadd`, 3 `fmla`, 1 mixed), and **13 of them on the decision path** —
+`frame_code` 6, `band_rdo` 3, `curves_compute._omp_fn.0` 2, `allocate._omp_fn.0` 1,
+`allocate._omp_fn.1` 1. Those are the coder, the per-band price, the curve pass and the
+Lagrangian that picks the plan: values that are compared, branched on and tie-broken in
+`f64`, where one ULP is a different plan. Rust does not fuse (`a*b + c` is `fmul`+`fadd` on
+the pinned toolchain), so arithmetic parity with this binary **cannot follow from
+construction**; the frozen-plan differential's 24/24 agreement on the default tables is
+agreement that happened, not parity that is guaranteed. The MDCT's 3 sites are the benign
+case (`mdct_frame` narrows to `f32` at `enc_core.c:186`, so a one-ULP double difference
+almost never survives), and `main`/`proxy_report`/`now` only print or time.
+
+*Decision.* S8's oracle of record is the `--dacw 0` arm **rebuilt with contraction off and
+a fixed ISA**:
+
+```sh
+rm -f "$GBA_AUDIO/build/uli_enc"
+make -C "$GBA_AUDIO/encoder" CFLAGS='-O2 -std=gnu11 -Wall -Wno-unused-function \
+  -ffp-contract=off -march=armv8-a' "$GBA_AUDIO/build/uli_enc"
+make uli-oracle-check ULI_ORACLE_EXPECT=clean   # must exit 0: no fused site on the path
+```
+
+Then that binary's sha256 is recorded here and **every S8 measurement is re-taken** against
+it. The cost is zero in claims — nothing has matched yet, and S7's DIFF table already
+carries a superseding note — and the prize is that the remaining divergences are search
+logic rather than float luck. **This is the one prerequisite this tree cannot discharge
+itself**: the binary lives off-tree by E-R1 and rebuilding it changes the artefact that
+`uli-probe`, `uli-frame-diff` and `uli-accept` all measure, so it is a deliberate step, not
+a side effect. Until it is taken, every reading below carries this caveat explicitly, and
+`make uli-oracle-check` (no `--expect`) keeps reporting the fusing map it was built on.
+
+*Why not match the fusion in Rust instead.* `f64::mul_add` would reproduce a fused expression
+exactly, but only at the sites GCC happened to fuse — a compiler-version artifact, not a
+documented property of the reference. That would make our arithmetic a function of someone
+else's optimiser decisions and would break on the next oracle rebuild. Turning contraction
+off is one flag, is stable across compilers, and leaves the oracle's *source* untouched.
 
 **S8-5 — the coder: FP and tie parity, then the sequence terms.** In this order, and the
 order matters:
 
-1. **Distortion parity (inventory #1) — restated by measurement 2026-11-23.** The original
-gate said "compare `D` bitwise". The differential shows that is **unattainable by
-construction**: the reference does not sum its distortion, it *derives* it as
-`J − λ·(bits − 1)`, and that subtraction's cancellation grows with `J/D` (measured worst: 103
-ULP on a frame whose coding matches). What remains actionable is that the 2,400-case
-`band_rdo` test still compares `D` at 1e-12 *relative*, so a real accumulation-order
-difference and a derivation artefact are indistinguishable there. *Revised gate:* compare
-`D` on **ULP distance** with the bound stated in the test (the fixture's own cases decide the
-number, since they are the reference's answers), assert the *magnitudes and bits* stay exact
-as they already are, and record in the test why bitwise equality is not the target. Then the
-frame-level reading comes from `make uli-frame-diff` rather than from a second assertion.
+1. **Distortion parity (inventory #1) — restated twice, and the second restatement is the
+target.** The original gate said "compare `D` bitwise"; the 2026-11-23 measurement restated
+it as "compare `D` on ULP distance", because the differential showed 103 ULP on a frame whose
+coding matches. **That restatement was a diagnostic mistaken for a target, and this is the
+amendment (2026-11-25).** `D` is not a report field: it lands on a `<` in the class Viterbi
+and in `allocate`, so a 103-ULP difference is a latent plan divergence that no bound can
+retire — and row 1's own text says where it comes from. The reference does not *sum* its
+distortion, it *derives* it as `J − λ·(bits − 1)` (`enc_core.c:404`), where `J` sums 32 bands
+of `D + λ·bits`. The gap is a derivation mismatch, not accumulation noise, so reproducing the
+derivation — the same per-tuple inline accumulation and the same fixed-order `J` reduction
+(R5b) — makes `D` bitwise equal, which is what the Viterbi needs. *Gate:* `band_rdo`'s
+magnitudes and `bits` stay exact (they already are, 2,400 cases) and `D` is **bitwise**
+equal to the reference's on that corpus; a ULP-distance assertion may remain in the test only
+as a labelled diagnostic with the reason written down. Frame-level reading stays with `make
+uli-frame-diff`. Note the ordering this creates: row 15 must be closed first, because on a
+fusing oracle a "bitwise `D`" gate would be measuring the compiler.
 2. **Tie parity (inventory #4).** Assert the Viterbi's tie winner explicitly, as R5d already
 requires of the search (lower `g`, then L/R over M/S): here, the lowest band endpoint and
 the lowest class index. *Gate:* a test that constructs the tie and names the winner.
@@ -1569,7 +1737,21 @@ then all four S7 cells MATCH, and the claim in this section is recorded with the
 **S8 gate (the step's exit).** Every cell of `make uli-accept` reports MATCH with `--dacw 0`
 and the `dacw1` row is still a recorded difference; P1/P2/P3 all still pass; the pin ledger
 below is discharged; and the S7 section keeps its DIFF table with a superseded note rather
-than a deletion (nothing in this record is deleted).
+than a deletion (nothing in this record is deleted). Four additions from 2026-11-25, so the
+gate names what it actually claims:
+
+- **the oracle binary is named.** `make uli-oracle-check ULI_ORACLE_EXPECT=clean` exits 0
+  (no fused multiply-add on the decision path) and the binary's **sha256** is recorded here
+  with the MATCH table, because "byte-identical to the reference" is a claim about that
+  artifact (rows 15-17).
+- **the fast cell is a gate cell**, not only a progress signal: `make uli-accept
+  ULI_ACCEPT_ONLY=fast` must MATCH, and it is the first thing to check after any change to
+  the search.
+- **rows 16 and 17 are discharged in words**: the λ-total question is answered either way
+  (agrees at two thread counts, or a row that does not bite on any cell), and the gate text
+  says the claim is same-host, same-binary.
+- **`make uli-test` still passes with its test floor**, because S8-0 through S8-7 change
+  bytes and the tree's own suite is what says they changed only what they claim.
 
 **8. Decisions this step settles.**
 
@@ -1583,10 +1765,25 @@ Stated so that no sub-step relitigates them.
 3. **The improvements leave the shipped path until exactness lands.** `--stride`/`--fine`
   are deleted, not defaulted off, so they cannot silently re-enter as "obviously better" and
   re-break the gate. Their measured 2.6 dB was against our own coarse baseline, not against
-  the reference, which is exactly the measurement error S9 must not repeat.
+  the reference, which is exactly the measurement error S9 must not repeat. **Closed
+  2026-11-25 at S8-0**; the one shape constant that survived (`rd::CANDIDATE_STRIDE`) is a
+  constant with an owner (S8-7) and no flag.
 4. **FP parity is retired first, not last**, because a 1-ULP tie flip is indistinguishable
   from a search bug and would poison every later attribution. The existing 2,400-case fixture
-  is the instrument; it only needs its tolerance removed.
+  is the instrument; it only needs its tolerance removed. **Amended 2026-11-25, twice, and
+  both amendments were forced by measurement:**
+  - **Parity is measured against a named binary, so the oracle is pinned like a flag
+    (S8-4b).** It is rebuilt with `-ffp-contract=off` and a fixed `-march`, and its sha256 is
+    recorded with the gate's MATCH table. The shipped binary fuses 13 multiply-adds on the
+    decision path and Rust fuses none (row 15), so exactness against it was never attainable
+    by construction. Reproducing GCC's fusion in Rust with `mul_add` is rejected: it makes our
+    arithmetic a function of someone else's optimiser decisions, and it breaks on the next
+    oracle rebuild.
+  - **`D` parity means bitwise, arrived at by reproducing the derivation (S8-5 step 1).** A
+    ULP bound is a diagnostic, not a target: `D` is compared in the class Viterbi and in
+    `allocate`, so a bound leaves a latent plan divergence in place. The 103 ULP measured on
+    2026-11-23 comes from the reference *deriving* `D` as `J − λ·(bits − 1)`
+    (`enc_core.c:404`) where we sum it directly, so it is closable by construction.
 5. **Tie-break parity is an explicit check, not an emergent property** — inventory #4, with a
   test that constructs the tie.
 6. **The blob is not evidence about the trainer.** P2 exists because the pass-1 plan is not

@@ -56,49 +56,65 @@ Run with `. .agents/env.sh`:
 | `make test-rom` | build + link + boot in mGBA, 0 tests collected (expected) |
 | `make check` | all workspaces rustfmt-clean |
 | `make uli-check` | pass |
-| `make uli-test` | uli-lite corpus 6 tests; uli-enc **17 suites / 94 tests** |
+| `make uli-test` | uli-lite corpus 6 tests; uli-enc **17 suites / 93 tests** |
 | `make uli-overlay-test` | pass (product + `verify` builds) |
 | `make uli-probe` | 2,400 `band_rdo` cases byte-for-byte; MDCT golden matches |
 | `make uli-frame-diff` | **exits 2 by design** while it has findings (PR #192/#193 work) |
 | `make uli-plan-diff A=… B=…` | exit 0 identical / 2 different, as documented |
+| `make uli-oracle-check` | exit 0: the oracle's sha256 and fused-multiply map are the recorded ones (`--expect clean` exits 2 until the oracle is rebuilt contraction-free) |
+| `make uli-accept ULI_ACCEPT_ONLY=fast` | ~15 s, **exits 2 (DIFF)**, which is the expected S8 answer today; the fast cell needs no corpus |
 | `make uli-bench` | ROM built and ran headless: `[uli-bench] PASS` |
 | `make flac-check` | pass (gates + overlay + product + playback + spike) |
 | `make gafp-pack-check` | 4 fixtures byte-identical, 9 host facts |
 | `make album-bake` then `make album-pack-check` | bake writes assets; gate passes 54 tests |
 | `make uli-album-asset ULI_ALBUM_PY="$ULI_ALBUM_PY"` | available (runs `prep.py` + the C oracle encoder; not run here) |
 
-`make uli-accept` (the S7 matrix) and the album-level ULI2 numbers still need
+`make uli-accept` (the full S7 matrix) and the album-level ULI2 numbers still need
 the generated corpus (`make uli-album-asset`) plus the reference encoder; the
 encoder is built at `$GBA_AUDIO/build/uli_enc`, the corpus is not generated here.
+The `fast` cell is the exception by design: it is generated, so
+`make uli-accept ULI_ACCEPT_ONLY=fast` is the one acceptance measurement that runs
+on a bare checkout.
 
 ## Gotchas found the hard way
 
-1. **flac/metaflac must be 1.5.0.** Ubuntu 24.04 ships 1.4.3, which regenerates
+1. **The ULI2 oracle is a binary, not a specification — and it fuses.** Byte-exactness
+   against `$GBA_AUDIO/build/uli_enc` is a claim about *that build*: its Makefile says
+   `-O2 -march=native` and GCC defaults to `-ffp-contract=fast`, so the shipped binary has
+   **35 fused multiply-adds, 13 of them on the encoder's decision path** (`frame_code`,
+   `band_rdo`, `curves_compute`, `allocate`). Rust does not fuse, so a byte-identical blob
+   cannot be derived from that binary by arithmetic parity — only approximated. Run
+   `make uli-oracle-check` before any S8 measurement and read it; the oracle of record is
+   meant to be rebuilt with `-ffp-contract=off` (PLAN-OF-RECORD §S8-4b). Do not "fix" a map
+   difference by re-pinning the script.
+2. **flac/metaflac must be 1.5.0.** Ubuntu 24.04 ships 1.4.3, which regenerates
    `crates/flac-lite/tests/gfp/p2_fixed0_stereo_16384_b2048.gfp` as different
    bytes (13,577 vs 13,898). `make gafp-pack-check` then fails inside
    `gen_gafp_fixtures.py` (which also has a pre-existing formatting bug that
    turns the mismatch into a `TypeError` instead of a message). The committed
    fixtures are libFLAC 1.5.0 bytes; do not "fix" them by regenerating with 1.4.3.
-2. **`python3` must be the venv for album work.** `make album-bake` calls plain
+3. **`python3` must be the venv for album work.** `make album-bake` calls plain
    `python3`, and `album_glyphs.py` needs `fontTools`. `.agents/env.sh` puts the
    venv first. `gba-audio/encoder/prep.py` needs `numpy` (and ffmpeg).
-3. **`make album-pack-check` on a fresh clone needs `make album-bake` first.**
+4. **`make album-pack-check` on a fresh clone needs `make album-bake` first.**
    The crate has an unconditional `pub mod glyphs;`, but `album-pack-check` runs
    only `album_bake.py` (which writes `assets.rs` and `layout.rs`), not
    `album_glyphs.py` (which writes `glyphs.rs`). `album-glyphs-test` depends on
    `album-bake`; the pack gate does not. Bake once, then the pack gate compiles.
-4. **Host gates run from `/tmp/gba-sound-player-host-gate`.** The root
+5. **Host gates run from `/tmp/gba-sound-player-host-gate`.** The root
    `.cargo/config.toml` sets the GBA target and `build-std`; cargo merges config
    upward, so host tests must run with `--target <host triple>` from outside the
    repo. The Makefile already does this — copy the shape for new gates.
-5. **mGBA runner must match the `agb` pin.** `agb = "0.25.0"` → `AGB_REF=v0.25.0`;
+6. **mGBA runner must match the `agb` pin.** `agb = "0.25.0"` → `AGB_REF=v0.25.0`;
    agb v0.25.0 needs the three aarch64 patches in the setup script (same as the
    Dockerfile). A mismatched runner is a confusing boot failure, not a build error.
-6. **The ULI2 S8 instruments are off the gate path on purpose.** `uli-probe`,
-   `uli-frame-diff`, and `uli-accept` compile/run the off-tree oracle; E-R1
-   forbids the dependency, not the oracle. `uli-frame-diff` exits 2 while it has
-   findings; that is not a broken harness.
-7. **`make clean` is shallow.** It removes ROMs/assets/logs but keeps every
+7. **The ULI2 S8 instruments are off the gate path on purpose.** `uli-probe`,
+   `uli-frame-diff`, `uli-accept` and `uli-oracle-check` compile, run or read the
+   off-tree oracle; E-R1 forbids the dependency, not the oracle. `uli-frame-diff`
+   and `uli-accept` exit 2 while they have findings; that is not a broken harness.
+   `uli-accept ULI_ACCEPT_ONLY=fast` is the one acceptance cell that needs no
+   corpus, and it is the S8 iteration loop.
+8. **`make clean` is shallow.** It removes ROMs/assets/logs but keeps every
    workspace's `target/`. `make clean-deep` drops ~4.5 GB of caches and makes the
    next full build ~135 s (cold) instead of ~22 s (warm). Don't deep-clean to
    "make sure".

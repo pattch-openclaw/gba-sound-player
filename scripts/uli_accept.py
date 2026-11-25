@@ -17,8 +17,13 @@ runs it is deliberately on no gate path. It is also not a quality comparison: th
 proxy (`pass2 proxy mean codec ... (min ...)`) is printed beside it so the two
 metrics are never confused for one another.
 
-The cells, and why these four:
+The cells, and why these five:
 
+  fast        a generated 4 s, two-track album at a binding budget (`--cap 74`) — S8's
+              progress signal: small enough to iterate on, and given as its own
+              `album.f32` + `tracks.tsv` pair so neither side needs a flag to truncate an
+              album (a truncated album has different trained tables, so it would be a
+              different cell rather than a smaller one)
   tiny        the committed fixture generator, `--threads 1` — the smallest blob
               whose every region is non-empty
   biomaster   the one-track reference album, the S3/S4 measurement input
@@ -35,11 +40,19 @@ has a visible alternative.
 
 Usage:
     scripts/uli_accept.py                 # full matrix
+    scripts/uli_accept.py --only fast     # one cell (repeatable, or comma-separated)
     scripts/uli_accept.py --list          # cells and flags, runs nothing
     scripts/uli_accept.py --ours PATH     # which uli-enc to compare (default: the
                                           # newest build under crates/uli-enc/target)
 
-ULI_ACCEPT_ASSETS points at the corpus (default: examples/uli_bench/assets).
+`fast` is first because S8-5…S8-7 are iterated on it: during those sub-steps it runs
+unpinned and the signal is the diff (first divergent frame, first divergent table field),
+not a hash. The other four cells are the confirmation, and every cell is pinned at S8's
+gate.
+
+ULI_ACCEPT_ASSETS points at the corpus (default: examples/uli_bench/assets). It is
+required only by the cells that use it, so `--only fast` runs on a checkout with no
+generated corpus — which is possible precisely because the fast cell is generated.
 
 Exit status: 0 when every cell MATCHes, 2 when any cell DIFFs, 1 on a harness error
 (missing input, encoder failure, unparseable container).
@@ -62,6 +75,10 @@ REF = GBA_AUDIO / "build/uli_enc"
 OURS = ROOT / "crates/uli-enc/target"
 ASSETS = Path(os.environ.get("ULI_ACCEPT_ASSETS", ROOT / "examples/uli_bench/assets"))
 GEN_FIXTURE = ROOT / "crates/uli-lite/tests/fixtures/gen_fixture.py"
+# S8-4's cell. Generated, never truncated: `--frames` rewrites the track table, which is a
+# different input rather than a different setting, and a truncated album's trained tables
+# are not a small cell's answer. See scripts/gen_uli_fast_cell.py.
+GEN_FAST = ROOT / "scripts/gen_uli_fast_cell.py"
 
 PROXY = re.compile(r"pass2 proxy mean codec (-?[\d.]+) \(min (-?[\d.]+)\)")
 MEAN = re.compile(r"verify: mean (-?[\d.]+) / (-?[\d.]+) dB")
@@ -73,6 +90,13 @@ CYCLE_PERIOD = 262_144  # rd.rs: the cycle model's period, the denominator of th
 SEEK_INTERVAL = 256
 
 # Flags are identical on both sides except for `--rd` (ours) and `--dacw 0` (theirs).
+#
+# `fast` binds: 20,000 bytes against 5,412 bytes of container overhead leaves ~454
+# bits/frame for 257 frames, both encoders write within a hundred bytes of it, and
+# `--cap 74` binds on a handful of frames as well (the μ re-code ran on 19 of 257), so the
+# cell exercises the budget, the cap and the trained tables at once. Wall clock at four
+# threads, measured 2026-11-25: reference 2.4 s, ours 12.2 s.
+FAST_FLAGS = ["--budget", "20000", "--cap", "74", "--threads", "4"]
 TINY_FLAGS = ["--budget", "300000", "--threads", "1"]
 BIOMASTER_FLAGS = ["--budget", "3294000", "--cap", "74", "--threads", "8"]
 CROSS_FLAGS = ["--budget", "764500", "--cap", "74", "--threads", "4"]
@@ -369,6 +393,7 @@ def print_row(name: str, row: dict, flags: list[str]) -> None:
 # ------------------------------------------------------------------ inputs
 
 def make_tiny(work: Path) -> tuple[Path, Path]:
+    require(GEN_FIXTURE, " (the committed fixture generator)")
     d = work / "tiny"
     d.mkdir()
     say(f"  generating the fixture (seed 12345) in {d}")
@@ -396,43 +421,81 @@ def make_cross_slice(work: Path) -> tuple[Path, Path]:
     return d / "album.f32", d / "tracks.tsv"
 
 
-def build_cells(work: Path) -> list[dict]:
-    tiny_album, tiny_tracks = make_tiny(work)
-    cells = [
-        {"name": "tiny", "album": tiny_album, "tracks": tiny_tracks,
-         "flags": TINY_FLAGS, "note": "generated fixture, 2 s, one track, seed 12345"},
-    ]
-    album = require(ASSETS / "album.f32", " (the biomaster input)")
-    tracks = require(ASSETS / "tracks.tsv", " (the biomaster track table)")
-    cells.append({"name": "biomaster", "album": album, "tracks": tracks,
-                  "flags": BIOMASTER_FLAGS,
-                  "note": "assets/album.f32 + tracks.tsv (one track, 8,474,224 samples)"})
-    if (ASSETS / "adv/album.f32").exists():
-        cells.append({"name": "adv", "album": ASSETS / "adv/album.f32",
-                      "tracks": require(ASSETS / "adv/tracks.tsv"),
-                      "flags": ADV_FLAGS,
-                      "note": "adv/album.f32 + tracks.tsv (regenerated adversarial corpus)"})
-        say("  adv/album.f32 exists: running the adv cell instead of cross60")
-    else:
-        cross_album, cross_tracks = make_cross_slice(work)
-        cells.append({"name": "cross60", "album": cross_album, "tracks": cross_tracks,
-                      "flags": CROSS_FLAGS,
-                      "note": "60 s head slice of cross/album.f32, one 1,966,080-sample track"})
-    cells.append({"name": "off-default", "album": album, "tracks": tracks,
-                  "flags": OFF_DEFAULT_FLAGS,
-                  "note": "the biomaster input at --cap 60 and half its budget"})
+def make_fast(work: Path) -> tuple[Path, Path]:
+    require(GEN_FAST, " (the committed fast-cell generator)")
+    d = work / "fast"
+    d.mkdir()
+    say(f"  generating the fast cell (seed 20261123) in {d}")
+    p = subprocess.run([sys.executable, str(GEN_FAST)], cwd=d,
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        fail(f"gen_uli_fast_cell.py exited {p.returncode}: {p.stderr.strip()}")
+    return d / "fast.f32", d / "fast.tsv"
+
+
+def cell_names() -> list[str]:
+    """The cells that would run here, in matrix order. `cross60` becomes `adv` when the
+    regenerated adversarial corpus is present, which is how the matrix has always
+    behaved: two corpora, one slot, and the slot's name says which one ran."""
+    has_adv = (ASSETS / "adv/album.f32").exists()
+    return ["fast", "tiny", "biomaster", "adv" if has_adv else "cross60", "off-default"]
+
+
+def build_cells(work: Path, wanted: list[str]) -> list[dict]:
+    """Build only the selected cells, so `--only fast` needs neither the corpus nor the
+    fixture generator: an input is required by the cell that uses it, not by the matrix."""
+    has_adv = (ASSETS / "adv/album.f32").exists()
+    cells: list[dict] = []
+    if "fast" in wanted:
+        album, tracks = make_fast(work)
+        cells.append({"name": "fast", "album": album, "tracks": tracks,
+                      "flags": FAST_FLAGS,
+                      "note": "generated 4 s, two tracks, 257 frames — S8's progress signal"})
+    if "tiny" in wanted:
+        tiny_album, tiny_tracks = make_tiny(work)
+        cells.append({"name": "tiny", "album": tiny_album, "tracks": tiny_tracks,
+                      "flags": TINY_FLAGS,
+                      "note": "generated fixture, 2 s, one track, seed 12345"})
+    if "biomaster" in wanted or "off-default" in wanted:
+        album = require(ASSETS / "album.f32", " (the biomaster input)")
+        tracks = require(ASSETS / "tracks.tsv", " (the biomaster track table)")
+        if "biomaster" in wanted:
+            cells.append({"name": "biomaster", "album": album, "tracks": tracks,
+                          "flags": BIOMASTER_FLAGS,
+                          "note": "assets/album.f32 + tracks.tsv (one track, "
+                                  "8,474,224 samples)"})
+        if "off-default" in wanted:
+            cells.append({"name": "off-default", "album": album, "tracks": tracks,
+                          "flags": OFF_DEFAULT_FLAGS,
+                          "note": "the biomaster input at --cap 60 and half its budget"})
+    if "adv" in wanted or "cross60" in wanted:
+        if has_adv:
+            cells.append({"name": "adv", "album": ASSETS / "adv/album.f32",
+                          "tracks": require(ASSETS / "adv/tracks.tsv"),
+                          "flags": ADV_FLAGS,
+                          "note": "adv/album.f32 + tracks.tsv (regenerated adversarial "
+                                  "corpus)"})
+        else:
+            require(ASSETS / "cross/album.f32", " (the 12-track album)")
+            cross_album, cross_tracks = make_cross_slice(work)
+            cells.append({"name": "cross60", "album": cross_album, "tracks": cross_tracks,
+                          "flags": CROSS_FLAGS,
+                          "note": "60 s head slice of cross/album.f32, one "
+                                  "1,966,080-sample track"})
     return cells
 
 
 def describe_cells() -> list[str]:
     return [
+        f"fast        generated 4 s, two tracks, {' '.join(FAST_FLAGS)}"
+        "  - S8's progress signal",
         f"tiny        generated fixture (seed 12345), {' '.join(TINY_FLAGS)}",
         f"biomaster   assets/album.f32 + tracks.tsv, {' '.join(BIOMASTER_FLAGS)}",
         f"cross60     60 s head slice of cross/album.f32, {' '.join(CROSS_FLAGS)}"
         f"  (adv/album.f32, if present: {' '.join(ADV_FLAGS)})",
         f"off-default assets/album.f32 at {' '.join(OFF_DEFAULT_FLAGS)}",
         f"dacw1       oracle only, tiny input, {' '.join(DACW_FLAGS)}"
-        "  — not a match expectation",
+        "  - not a match expectation",
     ]
 
 
@@ -445,20 +508,41 @@ def main() -> int:
     ap.add_argument("--ours", type=Path, default=None, metavar="PATH",
                     help="the uli-enc binary to compare (default: the first build "
                          "found under crates/uli-enc/target)")
+    ap.add_argument("--only", default=None, metavar="NAMES",
+                    help="run only these cells (comma-separated or repeated). `cross60` "
+                         "and `adv` name the same slot; `dacw1` names the oracle-only row "
+                         "and pulls in its tiny input")
     args = ap.parse_args()
 
     if args.list:
         say(f"assets {ASSETS}")
+        say(f"cells  {', '.join(cell_names())}  (then the dacw1 row)")
         for line in describe_cells():
             say(f"  {line}")
         return 0
 
     ours = find_ours(args.ours)
-    require(GEN_FIXTURE, " (the committed fixture generator)")
-    require(ASSETS / "album.f32", " (the biomaster input)")
-    require(ASSETS / "tracks.tsv", " (the biomaster track table)")
     if not REF.exists():
         fail(f"no reference encoder at {REF} (make -C {GBA_AUDIO}/encoder)")
+
+    wanted = cell_names()
+    with_dacw = True
+    if args.only:
+        asked = [n for part in args.only.split(",") for n in [part.strip()] if n]
+        known = set(cell_names()) | {"cross60", "adv", "dacw1"}
+        unknown = [n for n in asked if n not in known]
+        if unknown:
+            fail(f"unknown cell(s) {', '.join(unknown)}; known: "
+                 + ", ".join(sorted(known)))
+        with_dacw = "dacw1" in asked
+        # `dacw1` is a row over the tiny input, so asking for it asks for tiny.
+        if with_dacw and "tiny" not in asked:
+            asked.append("tiny")
+        wanted = [n for n in wanted if n in asked]
+        # The one corpus slot: either name selects it, and the slot reports which ran.
+        if ("cross60" in asked or "adv" in asked) and not any(
+                n in wanted for n in ("cross60", "adv")):
+            wanted.append("cross60")
 
     work = Path(tempfile.mkdtemp(prefix="uli-accept-"))
     errors: list[str] = []
@@ -468,7 +552,7 @@ def main() -> int:
         say(f"assets {ASSETS}")
         say(f"ours   {ours}")
         say(f"ref    {REF}")
-        cells = build_cells(work)
+        cells = build_cells(work, wanted)
         for cell in cells:
             name = cell["name"]
             say("")
@@ -503,6 +587,9 @@ def main() -> int:
                 tiny_ref = ref_out
 
         # The dacw row: oracle only, on the tiny input, and explicitly not a match.
+        if tiny_ref is None and not with_dacw:
+            say("")
+            say("dacw1 row skipped: this run did not select it (and it needs the tiny cell)")
         if tiny_ref is not None:
             say("")
             say("== dacw1: oracle only on the tiny input, --dacw 1")

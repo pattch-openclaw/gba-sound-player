@@ -6,7 +6,7 @@
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
         uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-probe uli-plan-diff uli-frame-diff \
-        uli-rd-ab uli-accept \
+        uli-rd-ab uli-accept uli-oracle-check \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
         uli-playback-test uli-player uli-player-rom uli-player-speaker uli-player-speaker-rom \
@@ -851,14 +851,30 @@ uli-rd-ab:
 # keeps that dependency out of `make uli-test`. It is a host measurement run — take it
 # when the search or the container changes, and record the verdict in
 # PLAN-OF-RECORD.md -> S7. The corpus defaults to examples/uli_bench/assets; pass
-# ULI_ACCEPT_ASSETS= when it lives elsewhere.
+# ULI_ACCEPT_ASSETS= when it lives elsewhere. `ULI_ACCEPT_ONLY=fast` runs one cell (the
+# S8 progress signal) and needs no corpus at all.
+ULI_ACCEPT_ONLY ?=
 uli-accept:
 	@test -x $(GBA_AUDIO)/build/uli_enc || { echo "uli-accept: no reference encoder (make -C $(GBA_AUDIO)/encoder)"; exit 1; }
 	@mkdir -p $(GATE_NEUTRAL_CWD)
 	cd $(GATE_NEUTRAL_CWD) && \
 	  $(CARGO) build --release --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE) --bins
 	GBA_AUDIO=$(GBA_AUDIO) ULI_ACCEPT_ASSETS="$(ULI_ACCEPT_ASSETS)" \
-	  python3 scripts/uli_accept.py --ours $(ULI_ENC_BIN)
+	  python3 scripts/uli_accept.py --ours $(ULI_ENC_BIN) \
+	    $(if $(ULI_ACCEPT_ONLY),--only $(ULI_ACCEPT_ONLY))
+
+# S8's oracle-shape instrument (inventory row 15): the reference binary's identity, the
+# flags its Makefile claims, and its fused-multiply map, function by function. Byte
+# exactness is a claim about *this binary*: `-march=native` plus GCC's default
+# `-ffp-contract=fast` put 35 FMA sites in the shipped oracle, 13 of them on the decision
+# path (frame_code, band_rdo, curves_compute, allocate) where our non-fusing Rust cannot
+# match by construction. Exits 2 when the map is not the recorded one, or (with
+# `--expect clean`) when a rebuilt oracle still fuses on the decision path.
+# Deliberately NOT on any gate's path: it reads an off-tree binary.
+ULI_ORACLE_EXPECT ?= native
+uli-oracle-check:
+	@test -x $(GBA_AUDIO)/build/uli_enc || { echo "uli-oracle-check: no reference encoder (make -C $(GBA_AUDIO)/encoder)"; exit 1; }
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/check_uli_oracle.py --expect $(ULI_ORACLE_EXPECT)
 
 uli-check: toolchain-check
 	cd crates/uli-lite && $(CARGO) fmt --check

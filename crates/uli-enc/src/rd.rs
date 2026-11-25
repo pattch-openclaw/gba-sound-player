@@ -19,15 +19,30 @@
 //! the album on its loudest passage; the weights make the trade relative to each track's
 //! own scale, and are normalised to a geometric mean of one so that `λ` keeps its units.
 //!
-//! **The candidate grid is uniform, and that costs resolution.** One step of `g` changes
-//! the step size by `2^(1/8) ≈ 1.09`, which is ~0.75 dB of SNR, so a grid `stride` steps
-//! apart can only place a frame within `±(stride-1)/2` steps of its ideal operating point.
-//! At `stride = 8` that is up to ~3 dB, and it is measurable: on a rate-limited album,
-//! refining the grid from 8 to 1 bought 2.6 dB at one budget. The uniform sweep is kept
-//! for now because it is cheap to reason about and makes the curves `λ`-independent, but
-//! the fix is a two-stage sweep — coarse across the window, then fine around each frame's
-//! best point — which buys one-step resolution for a fraction of the candidates. That is
-//! a cost/quality trade to be settled by measurement, not a stylistic choice.
+//! **The candidate grid is one uniform sweep, and there is no knob for it.** Every frame is
+//! measured every `CANDIDATE_STRIDE` steps across `G_MIN..=G_MAX` (S8-0). The two-stage sweep
+//! this file used to advertise — a coarse grid, then a fine window around each frame's coarse
+//! optimum — is **deleted rather than defaulted off**, because it was a repair for a coarse
+//! grid this encoder invented and the reference has no equivalent flag (S8's inventory rows 6,
+//! 7 and 12). Its measured 2.6 dB was against our own coarse baseline, not against the
+//! reference, so it is not evidence of an improvement; it returns at S9 only as a labelled
+//! arm admitted by the SNR licence test.
+//!
+//! **The grid is a shape, not a decision, and S8-7 owns it.** The reference does not sweep a
+//! grid at all: it searches `NG = 28` *contiguous* steps centred on `g_guess(λ_train, w) − 7`
+//! on its first pass and `NG = 20` contiguous steps centred on its pass-1 answer on the
+//! second. Reproducing those windows is S8-7 (inventory rows 6 and 7), and until it lands
+//! this sweep is our shape: it reaches steps the reference's window cannot — exactly what
+//! S8-3 measured at frame 0 of `biomaster` (ours `g = 8`, the reference `135`). What S8-0
+//! removed is only the *knob* and the refinement stage; the grid spacing itself is a constant
+//! here on purpose, because the flag surface has to equal the reference's and on that surface
+//! the candidate set is not a setting.
+//!
+//! Sweeping `stride = 1` instead would be a quieter improvement and it is deliberately not
+//! taken: it can only lower distortion, so it would be an *output claim* in a step that makes
+//! none, and it costs ~8x on every album encode in the tree (measured: the 4 s `fast` cell at
+//! four threads goes 12 s → 82 s, against the oracle's 2.4 s). A finer grid is S8-7's, arrived at
+//! from the reference's own windows rather than from this constant.
 //!
 //! **A candidate's measured cost excludes the frame header.** The `g` delta and the M/S
 //! bit belong to the *sequence*: the delta depends on the previous frame's `g`, so
@@ -64,6 +79,12 @@ use crate::{Error, FrameKind, frame};
 /// range wastes bits on precision nothing can hear, the top leaves audible error.
 pub const G_MIN: i32 = 8;
 pub const G_MAX: i32 = 187;
+/// The spacing of the candidate sweep, in step indices. **A shape, not a setting** (S8-0):
+/// there is no flag for it, because the acceptance target is the reference's flag surface and
+/// on that surface the candidate set is not a knob. S8-7 replaces this sweep with the
+/// reference's contiguous windows; until then this is what stays (see the module doc for why
+/// `stride = 1` is not taken in the meantime).
+const CANDIDATE_STRIDE: i32 = 8;
 /// The default `--kappa`: the price of a bit in units of squared error, before `λ` scales
 /// it by the step. Chosen so that at a typical rate the search sits near the knee of the
 /// rate/distortion curve rather than on either flat end of it.
@@ -88,11 +109,6 @@ pub const CYCLE_PERIOD: u32 = 262_144;
 pub struct SearchParams<'a> {
     pub tables: &'a DefaultTables,
     pub n_frames: usize,
-    /// Spacing of the coarse sweep across `GMIN..=GMAX`, in step indices.
-    pub stride: i32,
-    /// Half-width, in steps, of the fine sweep around each frame's coarse optimum. Zero
-    /// disables refinement and leaves the coarse grid alone.
-    pub fine_width: i32,
     /// The distortion-to-bits scale, `--kappa`.
     pub kappa: f64,
     /// `--cap PCT` expressed as cycles.
@@ -110,7 +126,8 @@ pub struct SearchParams<'a> {
     pub threads: usize,
 }
 
-/// One frame's RD curve: `stride`-spaced candidates, cheapest-rate-last order.
+/// One frame's RD curve: one candidate every [`CANDIDATE_STRIDE`] steps across the policy
+/// window, cheapest-rate-last order.
 #[derive(Clone, Debug)]
 pub struct Curve {
     /// Candidate step indices, ascending.
@@ -381,7 +398,6 @@ pub fn frame_energy(coef: &[f32; 2 * M]) -> f64 {
 #[derive(Clone, Debug)]
 pub struct Curves {
     pub per_frame: Vec<Curve>,
-    pub stride: i32,
 }
 
 impl Curves {
@@ -389,50 +405,19 @@ impl Curves {
     /// and, measured at S5's sizes, the part that made a 43-minute album take tens of
     /// minutes on one thread: it is now frame-parallel (`p.threads`), with the same
     /// ordered-assembly rule as the emit pass (R5a).
+    ///
+    /// Since S8-0 this is one uniform sweep per frame with no refinement stage, so it costs
+    /// what the deleted coarse grid cost on its own — the fine pass's ~9 extra candidates per
+    /// frame are gone and the grid spacing is unchanged.
     pub fn compute(
         samples: &Samples,
         n_samples: usize,
         p: &SearchParams<'_>,
     ) -> Result<Self, Error> {
         let n_frames = p.n_frames;
-        let stride = p.stride.max(1);
-        let per_frame = map_frames(samples, n_samples, p, |_f, coef| coarse_curve(coef, p))?;
+        let per_frame = map_frames(samples, n_samples, p, |_f, coef| curve(coef, p))?;
         debug_assert_eq!(per_frame.len(), n_frames, "one curve per frame");
-        Ok(Self { per_frame, stride })
-    }
-
-    /// Re-measure each frame on a **fine** grid inside a window around its coarse optimum.
-    ///
-    /// A single uniform sweep forces one trade for the whole search: a coarse grid is cheap
-    /// and loses up to `±(stride-1)/2` steps of resolution, a fine one costs `stride` times
-    /// as much. Neither is necessary. Coarse points locate each frame's neighbourhood for a
-    /// given price, and only that neighbourhood needs one-step resolution — so the second
-    /// sweep is `2*width+1` candidates per frame instead of `stride` times the whole window.
-    ///
-    /// `lambda` is the price the first allocation settled on. Re-using it is what makes this
-    /// a *refinement* rather than a second search: the neighbourhood is chosen where the
-    /// final answer is expected, and the allocation is then re-run on the finer curves, so
-    /// the price can still move once the rates are better known.
-    pub fn refine(
-        &self,
-        samples: &Samples,
-        n_samples: usize,
-        p: &SearchParams<'_>,
-        w: &[f64],
-        lambda: f64,
-    ) -> Result<Self, Error> {
-        let width = p.fine_width;
-        if width <= 0 {
-            return Ok(self.clone());
-        }
-        debug_assert_eq!(w.len(), self.per_frame.len(), "one weight per frame");
-        let per_frame = map_frames(samples, n_samples, p, |f, coef| {
-            refine_curve(coef, &self.per_frame[f], p, w[f], lambda)
-        })?;
-        Ok(Self {
-            per_frame,
-            stride: 1,
-        })
+        Ok(Self { per_frame })
     }
 
     /// Measure one `(g, ms)` candidate: re-code each domain under the cycle price if it is
@@ -616,7 +601,7 @@ where
     Ok(out)
 }
 
-/// One frame's coarse curve: a point every `stride` steps across `GMIN..=GMAX`.
+/// One frame's curve: a point every [`CANDIDATE_STRIDE`] steps across `GMIN..=GMAX`, ascending.
 ///
 /// Two rules decide which domain each candidate is in, and both matter:
 ///
@@ -629,8 +614,7 @@ where
 ///
 /// A candidate over the cycle cap loses to one that is not before `J` is consulted
 /// at all: the cap is a constraint, not a term.
-fn coarse_curve(coef: &[f32; 2 * M], p: &SearchParams<'_>) -> Result<Curve, Error> {
-    let stride = p.stride.max(1);
+fn curve(coef: &[f32; 2 * M], p: &SearchParams<'_>) -> Result<Curve, Error> {
     let mut c = Curve {
         g: Vec::new(),
         r: Vec::new(),
@@ -651,62 +635,7 @@ fn coarse_curve(coef: &[f32; 2 * M], p: &SearchParams<'_>) -> Result<Curve, Erro
         if g == G_MAX {
             break;
         }
-        g = (g + stride).min(G_MAX);
-    }
-    Ok(c)
-}
-
-/// One frame's fine curve around where the coarse grid says it wants to be at the
-/// price `lambda`. Coarse points inside the window are reused rather than re-coded.
-fn refine_curve(
-    coef: &[f32; 2 * M],
-    coarse: &Curve,
-    p: &SearchParams<'_>,
-    wf: f64,
-    lambda: f64,
-) -> Result<Curve, Error> {
-    let mut best_j = f64::INFINITY;
-    let mut centre = G_MIN;
-    for i in 0..coarse.g.len() {
-        if coarse.c[i] > p.cap {
-            continue;
-        }
-        let j = wf * coarse.d[i] + lambda * coarse.r[i];
-        if j < best_j {
-            best_j = j;
-            centre = coarse.g[i];
-        }
-    }
-    let lo = (centre - p.fine_width).max(G_MIN);
-    let hi = (centre + p.fine_width).min(G_MAX);
-    let mut c = Curve {
-        g: Vec::new(),
-        r: Vec::new(),
-        d: Vec::new(),
-        c: Vec::new(),
-        ms: Vec::new(),
-        mu: Vec::new(),
-    };
-    let mut g = lo;
-    while g <= hi {
-        if let Some(i) = coarse.g.iter().position(|&cg| cg == g) {
-            // Already measured on the coarse sweep; re-measuring would be waste.
-            c.g.push(g);
-            c.r.push(coarse.r[i]);
-            c.d.push(coarse.d[i]);
-            c.c.push(coarse.c[i]);
-            c.ms.push(coarse.ms[i]);
-            c.mu.push(coarse.mu[i]);
-        } else {
-            let (point, useb, mu) = Curves::measure_g(coef, p, g)?;
-            c.g.push(g);
-            c.r.push(point.bits as f64);
-            c.d.push(point.dist);
-            c.c.push(point.cycles);
-            c.ms.push(useb);
-            c.mu.push(mu);
-        }
-        g += 1;
+        g = (g + CANDIDATE_STRIDE).min(G_MAX);
     }
     Ok(c)
 }
@@ -720,11 +649,15 @@ pub fn cap_cycles(cap_pct: f64) -> u32 {
 ///
 /// Inverting `J = w·D + λ·R` for a `D ∝ step²` model gives `step = √(λ/(w·κ))`, and
 /// `g = 32 + 8·log₂(step)` is the inverse of the step table's `step = 2^(g/8)` scaling
-/// about its midpoint. Useful for saying *where* an allocation landed without running the
-/// search; it is not on the search path.
+/// about its midpoint. Today it says *where* an allocation landed without running the
+/// search; S8-7 puts it on the search path, where it centres the reference's pass-1 window,
+/// and that is why its rounding is stated rather than inherited: `lrint` (`uli_enc.c:48`)
+/// resolves an exact half to **even**, so copying C's arithmetic with a ties-away-from-zero
+/// `round` (inventory row 5) would move the window by one step on exactly the frames whose
+/// guess is a half — and a one-step window shift changes the plan.
 pub fn g_guess(lambda: f64, w: f64, kappa: f64) -> i32 {
     let d = (lambda / (w * kappa)).sqrt();
-    let g = (32.0 + 8.0 * d.log2()).round() as i32;
+    let g = (32.0 + 8.0 * d.log2()).round_ties_even() as i32;
     g.clamp(G_MIN, G_MAX)
 }
 
