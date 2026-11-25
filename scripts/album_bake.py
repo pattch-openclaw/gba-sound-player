@@ -248,9 +248,15 @@ class Config:
 
         tracks = doc.get("track") or []
         if not 1 <= len(tracks) <= MAX_TRACKS:
+            # §9.0's `over-track-count` row, re-homed to this tool by 2b PR-(1). It was
+            # `track-count` in Phase 1 — the refusal existed, the register row had no
+            # owner — and the re-homing is where it gets its register name. The ceiling is
+            # ALBM1's own u8 track count, not a taste call: §4.3's header carries it.
             raise Refusal(
-                "track-count",
-                f"{path}: {len(tracks)} tracks, ALBM1 carries 1..{MAX_TRACKS}",
+                "over-track-count",
+                f"{path}: {len(tracks)} tracks, ALBM1 carries 1..{MAX_TRACKS} (§9.0's over-track-count, "
+                "re-homed from Phase 3 by 2b PR-(1): a manifest that cannot name its tracks is not a "
+                "budget verdict, it is a writer that will truncate)",
             )
         self.tracks = [TrackConfig(spec, index) for index, spec in enumerate(tracks)]
 
@@ -930,6 +936,11 @@ def bake(config_path: Path) -> int:
     assets_dir = crate_dir / "assets"
     assets_rs_path = crate_dir / "src" / "assets.rs"
     layout_rs_path = crate_dir / "src" / "layout.rs"
+    # 2b PR-(1)'s second rendering: the same derivation as sorted `key=value`. Build
+    # output like the two generated modules, written by the same bake, and never tracked
+    # (§2.3's rule: a report is regenerated, not committed). It sits beside the tracked
+    # spec rather than in `src/` because nothing links it.
+    report_path = crate_dir / "layout_report.txt"
 
     # `album-layout-gen` (§9.0's owner of nine register rows) runs here, on
     # purpose before any audio is touched: §6's reciprocal is computed against the
@@ -1142,6 +1153,13 @@ def bake(config_path: Path) -> int:
             raise Refusal("audit", "; ".join(problems))
 
         written = {f"track{entry['index']:02d}.gfp" for entry in packed_cache.values()}
+        # 2b PR-(1)'s cart verdict, asked before the artifacts land: the code reserve is
+        # reserved *before* the encoder sizes the audio (§10.1), so the only honest moment
+        # to say "this album does not fit" is after the manifest's size is known and before
+        # a byte is written. `over-budget` and `over-track-count` are this tool's now
+        # (§9.0's register row, re-homed from Phase 3 by the same PR).
+        budget = rom_budget(facts, albm1_bytes=len(blob), audio_bytes=len(asset_region),
+                            cart_bytes=config.cart_bytes)
         for entry in packed_cache.values():
             write_atomic(assets_dir / f"track{entry['index']:02d}.gfp", entry["blob"])
         write_atomic(assets_dir / "albm1.bin", blob)
@@ -1167,6 +1185,8 @@ def bake(config_path: Path) -> int:
                 "written for (§5.0)",
             )
         write_atomic(assets_rs_path, assets_rs(config, tracks, cursor, facts, longest_title).encode("utf-8"))
+        write_atomic(report_path, report_text(spec, [facts], budget=budget,
+                                              budget_variant=facts.id).encode("utf-8"))
         # A track that left the config leaves its blob behind otherwise, and the
         # determinism leg would then be comparing a directory that carries a
         # track the manifest no longer names. `assets/` is generated (§2.3), so
@@ -1213,7 +1233,8 @@ def bake(config_path: Path) -> int:
         print(
             f"album_bake: layout: wrote {_relative(layout_rs_path)} "
             f"({len(layout_rs_text(facts).splitlines())} lines, untracked build output — §9.0's duty (i): "
-            ".gitignore and `make clean` both name it)"
+            ".gitignore and `make clean` both name it) and {_relative(report_path)} (the same "
+            "derivation as sorted key=value; `make album-layout-test` holds it byte-identical across two runs)"
         )
         print_census(config, tracks, bytes(asset_region), cursor, assets_dir, assets_rs_path)
         return 0
@@ -1323,11 +1344,23 @@ LAYOUT_REGISTER = (
     ("bands-not-tiling", "the band table does not tile exactly the declared screen rows, or a declared box falls outside its region"),
     ("pitch-not-tileable", "an element's row_px is not a whole number of tile rows or is below the declared face's line box at its declared raster, or that raster is neither a design size nor a whole multiple of one"),
     ("face-not-resolvable", "a declared face is not a tracked asset, or its licence rows are absent"),
-    ("image-tiles-over-budget", "image_tiles (at the derived ceiling) + the text term + authored chrome art exceed the declared tile_budget / resident_scenes"),
+    ("image-tiles-over-budget", "the resident-set pool sum — every declared scene's own tiles (resident, plus a projection for scenes not yet built) + the shared text term + authored chrome art — exceeds the declared tile_budget, or the declared resident set is above §5.1's layer cap"),
     ("scene-minimum", "a scene's own declared minimum cannot be met at the declared geometry"),
     ("bar-cells-out-of-range", "declared bar_cells is below §6's floor, or is not a whole number of pixels per cell in the box the variant declares. The third §6 range condition — a track so short its reciprocal would not fit the pack's u32 — is refused at the track, not at the grid, and so by the Phase-1 id `bar-reciprocal` (§9.0's `bar-cells-out-of-range` row says the same)"),
     ("bar-cells-disagree", "declared bar_cells is not the grid the ALBM1 reciprocals were computed for, or not the value in layout.rs"),
     ("title-fit", "a title the one-line elision still cannot render: the box the variant declares for the element that draws titles is narrower than the protected prefix plus the ellipsis marker at the declared face and raster (§5.5, D9). An over-long title on a box that is merely small is elided and printed as a note, so the input this row refuses is a box, not a string — which is why its leg narrows a box"),
+)
+
+#: §9.0's two cart-budget rows, **re-homed from Phase 3 by 2b PR-(1)** (§11's 2b note:
+#: "a generator that cannot say 'this album does not fit' is not a budget tool"). They
+#: are a separate register because their inputs are an album and a track list, not
+#: `layout_spec.toml` — and because the 2a register's count (nine) is a claim §13's
+#: AP-3 row makes and this one must not silently inflate. `over-track-count` is the
+#: Phase-1 `track-count` refusal under its §9.0 name: the row always existed, the
+#: register is what had it unowned.
+BUDGET_REGISTER = (
+    ("over-budget", "code reserve (§10.1's 256 KiB) + ALBM1 (with its audio asset region inside it) + the art term exceeds the declared cart"),
+    ("over-track-count", "more tracks than ALBM1 can carry (more than 32), refused at the config before a byte is packed"),
 )
 
 #: The tenth row of the same register, listed so it is never counted: 2a builds
@@ -1345,8 +1378,45 @@ ART_ROW_NOT_FIREABLE_YET = (
 #: Element kinds the spec may declare. Anything else is a spec error: §5.0's
 #: element table is small on purpose, so a kind not in it is a typo.
 ELEMENT_KINDS = ("text", "art", "bar")
+#: §5.2's scene table as a **closed vocabulary** (2b PR-(1), ALBUM-PLAYER.md §11's
+#: 2b note). A scene's `kind` is how its tile terms are derived, and it is declared
+#: rather than read off the scene's name: the audit sums a *resident set*, so a
+#: name-keyed rule ("a scene called `art` holds an image") would make a second
+#: album's scene set a code change instead of a config one. The terms below are the
+#: scene's *own* tiles — what it adds to the variant:
+#:   * `fill`      — nothing: a flat region fill is the shared region-backing tile,
+#:                   already counted in the chrome term;
+#:   * `text`      — nothing: glyphs come from the variant's one shared atlas (§5.5a's
+#:                   one face per variant), which is a variant term and not a scene's;
+#:   * `art`       — the image term at the variant's derived ceiling (no album-side box
+#:                   exists until `[art]` lands in 2b, §5.0);
+#:   * `composite` — the sum of the image terms of the art elements it declares, and
+#:                   the shared atlas if it declares text.
+SCENE_KINDS = ("fill", "text", "art", "composite")
 ATLAS_MODES = ("static", "per-cell")
 PALETTE_ROLES = ("text", "chrome", "art", "viz", "game")
+
+#: §10.1's cart budget, re-homed to this tool by 2b PR-(1) (§9.0's register row:
+#: "a generator that cannot say 'this album does not fit' is not a budget tool").
+#: The code reserve is the 256 KiB §10.1 reserves *before* the encoder sizes audio;
+#: a 4 bpp tile is 32 B, which is what prices an art box until `album_art.py` exists.
+CODE_RESERVE_BYTES = 256 * 1024
+ART_TILE_BYTES = 32
+REPORT_SCHEMA = "album-layout-report/1"
+
+#: The report's cycle estimates are arithmetic on one *measured* coefficient, named
+#: with its source. AP-0 measured the per-tile upload at 726 c with audio disarmed and
+#: a live-arm floor/mean of 1,096 / 1,242 c (`examples/album_probe/README.md:169-207`).
+#: The mean is the coefficient a cadence estimate wants, and the terms below are
+#: arithmetic on it — 2b PR-(2) replaces them with numbers measured at the app's own
+#: cadence and flips their tag from `arithmetic` to `measured`. Nothing here is a new
+#: figure: every cycle count is `tiles x this`, printed with both numbers.
+CYCLE_PER_TILE_LIVE = 1_242
+CYCLE_COEFFICIENT_SOURCE = (
+    "AP-0's upload leg, live audio: 1,096 c floor / 1,242 c mean per tile "
+    "(examples/album_probe/README.md:202-207), measured; the terms below are "
+    "arithmetic on it and are tagged accordingly"
+)
 
 
 def git_tracked(path: Path) -> bool:
@@ -1701,7 +1771,7 @@ class BandSpec:
 
 
 class SceneSpec:
-    KEYS = ("name", "phase", "band", "min_visible_rows", "min_boxes")
+    KEYS = ("name", "phase", "band", "kind", "resident", "min_visible_rows", "min_boxes")
 
     def __init__(self, doc: dict, where: str) -> None:
         _checked(doc, self.KEYS, where)
@@ -1710,6 +1780,27 @@ class SceneSpec:
         self.band = str(doc.get("band", ""))
         if not self.name or not self.band or not self.phase:
             raise Refusal("spec", f"{where}: name, phase and band are required (§5.2's scene registry; `phase` is which phase builds it)")
+        # 2b PR-(1): the two fields that turn §5.2's scene table into something the
+        # audit can sum. Both are required, because a default would be the count-shaped
+        # assumption this PR exists to remove: a scene with no declared kind has no
+        # derivable tile term, and silence about residency is how a scene's tiles get
+        # discovered at run time instead of refused at bake time (R14).
+        self.kind = str(doc.get("kind", ""))
+        if self.kind not in SCENE_KINDS:
+            raise Refusal(
+                "spec",
+                f"{where}: kind {self.kind!r} is not one of {', '.join(SCENE_KINDS)} — §5.2's scene "
+                "vocabulary is closed, because the resident-set audit derives a scene's tile term from "
+                "this field (ALBUM-PLAYER.md §11's 2b PR-(1))",
+            )
+        resident = doc.get("resident")
+        if not isinstance(resident, bool):
+            raise Refusal(
+                "spec",
+                f"{where}: resident must be a boolean. §5.1's residency is per scene: a count cannot say "
+                "*which* scene holds tiles, and the audit sums the scenes a ROM actually keeps resident",
+            )
+        self.resident = resident
         self.min_visible_rows = None
         self.min_boxes = None
         for field in ("min_visible_rows", "min_boxes"):
@@ -1789,7 +1880,7 @@ class VariantSpec:
     """One `[[variant]]`: §5.0's two mock rows, written as fields instead of prose."""
 
     KEYS = (
-        "id", "product", "tile_budget", "resident_scenes", "image_tiles", "bar_cells",
+        "id", "product", "tile_budget", "image_tiles", "bar_cells",
         "chrome_art_tiles", "glyph_atlas", "band", "scene", "element", "control", "palette",
     )
 
@@ -1803,13 +1894,21 @@ class VariantSpec:
         if not isinstance(product, bool):
             raise Refusal("spec", f"{where}: product must be a boolean (§5.0's field: which variant a ROM ships and which is an instrument — AP-3's snapshot rule reads it)")
         self.product = product
-        for field in ("tile_budget", "resident_scenes", "image_tiles", "bar_cells", "chrome_art_tiles"):
+        for field in ("tile_budget", "image_tiles", "bar_cells", "chrome_art_tiles"):
             setattr(self, field, _int(doc, field, where, 0))
         self.glyph_atlas = str(doc.get("glyph_atlas", ""))
         if self.glyph_atlas not in ATLAS_MODES:
             raise Refusal("spec", f"{where}: glyph_atlas must be one of {', '.join(ATLAS_MODES)} — §5.1's two bounds are these two builds, and the audit reads which one is claimed")
         self.bands = [BandSpec(item, f"{where} [[band]] #{i}") for i, item in enumerate(doc.get("band") or [])]
         self.scenes = [SceneSpec(item, f"{where} [[scene]] #{i}") for i, item in enumerate(doc.get("scene") or [])]
+        # 2b PR-(1): residency is declared per scene (`SceneSpec.resident`) and the
+        # count is *derived*. The old `resident_scenes = N` field was the count-shaped
+        # assumption the ladder names: it could not say which scene was resident, so
+        # the audit had to assume one scene's terms and could not be walked. This
+        # attribute survives as the derived count because §5.1's hardware cap is a
+        # limit on the number of content layers, and `layout.rs` carries it as
+        # `RESIDENT_SCENES` for the compile-time assert.
+        self.resident_scenes = sum(1 for scene in self.scenes if scene.resident)
         self.elements = [ElementSpec(item, f"{where} [[element]] #{i}") for i, item in enumerate(doc.get("element") or [])]
         self.controls = [ControlSpec(item, f"{where} [[control]] #{i}") for i, item in enumerate(doc.get("control") or [])]
         self.palettes = [PaletteSpec(item, f"{where} [[palette]] #{i}") for i, item in enumerate(doc.get("palette") or [])]
@@ -1944,6 +2043,42 @@ class ArtBox:
         return f"{self.width_px}x{self.height_px} ({self.tiles} tiles)"
 
 
+class SceneTerm:
+    """One scene's own tile term, derived from its declared kind (2b PR-(1)).
+
+    "Own" is the word that carries the arithmetic: the band backdrops and the glyph
+    atlas belong to the *variant*, shared by every scene that draws over or from them,
+    so pricing them per scene would charge one 188-tile atlas twice the moment a second
+    text scene was declared. A scene owns only what its kind adds — an image at the
+    variant's derived ceiling for `art`, the art elements it declares for `composite`,
+    and nothing for `fill`/`text` (the region backing tile and the atlas are the
+    variant's shared terms, counted once).
+
+    `audited_as` is the second half of the schema: a declared scene that is not resident
+    is still *audited*, as a projection. The budget is the variant's, so landing a scene
+    moves its term from `projection` to `resident` and changes no total — which is the
+    property that lets 2b's scenes land one PR at a time without re-opening the budget
+    (and the reason the audit is not "only what is resident today").
+    """
+
+    def __init__(self, scene: SceneSpec, own_tiles: int, terms: dict[str, int], shares_atlas: bool) -> None:
+        self.scene = scene
+        self.name = scene.name
+        self.kind = scene.kind
+        self.resident = scene.resident
+        self.own_tiles = own_tiles
+        self.terms = terms
+        self.shares_atlas = shares_atlas
+
+    @property
+    def audited_as(self) -> str:
+        return "resident" if self.resident else "projection"
+
+    def __str__(self) -> str:
+        detail = " + ".join(f"{name} {tiles}" for name, tiles in self.terms.items()) or "no own tiles"
+        return f"{self.name} [{self.kind}] {detail} = {self.own_tiles}, audited as {self.audited_as}"
+
+
 class VariantFacts:
     """Everything derived about one variant, and the pool audit its sum gets."""
 
@@ -1974,12 +2109,17 @@ class VariantFacts:
         self.pool_image = 0
         self.pool_distinct = 0
         self.pool_upper = 0
+        self.scene_terms: list[SceneTerm] = []
+        self.resident_own = 0
+        self.projection_own = 0
+        self.audited_own = 0
         self.notes: list[str] = []
         self._bands()
         self._resolve_faces()
         self._elements()
         self._bar()
         self._art()
+        self._scene_terms()
         self._scenes()
         self._controls()
         self._pool()
@@ -2268,6 +2408,41 @@ class VariantFacts:
                         f"image_tiles {self.variant.image_tiles} is what bounds it, not the region",
                     )
 
+    def _scene_terms(self) -> None:
+        """The resident-set walk: one own-tile term per declared scene (2b PR-(1)).
+
+        Each scene's term comes from its declared `kind` and the elements it owns — never
+        from its name, and never from a count. §5.1's residency ruling holds *every* scene
+        the variant may show at once, so the audit's job is to sum that set; the projection
+        half keeps a declared-but-not-yet-built scene in the sum, because a budget that
+        only counted today's scenes would let the next one's tiles be discovered at run
+        time, which is R14's panic.
+        """
+        for scene in self.variant.scenes:
+            elements = [element for element in self.elements if element.scene == scene.name]
+            terms: dict[str, int] = {}
+            if scene.kind in ("art", "composite"):
+                image = 0
+                for element in elements:
+                    if element.kind != "art":
+                        continue
+                    side = min(element.wt, element.ht, math.isqrt(self.variant.image_tiles))
+                    image += max(side, 0) ** 2
+                if not elements and scene.kind == "art":
+                    self.notes.append(
+                        f"scene {scene.name}: kind `art` but it declares no art element, so its own tile "
+                        "term is 0 — the image term is only ever a box the scene can actually draw"
+                    )
+                if image:
+                    terms["image"] = image
+            # `fill`: 0 — the flat fill is the region backing tile, already in the chrome
+            # term. `text`: 0 — glyphs are the variant's shared atlas, one face per variant
+            # (§5.5a), and counting it per scene would double it.
+            self.scene_terms.append(
+                SceneTerm(scene, sum(terms.values()), terms,
+                          shares_atlas=any(element.kind == "text" for element in elements))
+            )
+
     def _controls(self) -> None:
         slots = {element.id: element for element in self.elements if element.kind == "art"}
         for control in self.variant.controls:
@@ -2317,25 +2492,39 @@ class VariantFacts:
         # number a reviewer argued with); the derived count is printed beside it, so
         # a disagreement is visible rather than assumed away.
         self.chrome_derived = len(variant.bands) + 1 + len(self.control_slots)
-        self.pool_distinct = self.pool_image + self.text_distinct + variant.chrome_art_tiles + self.bar_pattern_tiles
-        self.pool_upper = self.pool_image + self.text_upper + variant.chrome_art_tiles + self.bar_pattern_tiles
+        # 2b PR-(1)'s resident-set walk. The scene terms are the only addend that is
+        # per scene; the atlas, the chrome art and the bar's pattern tiles are the
+        # variant's shared tiles and are counted once, because they are shared by
+        # whichever scenes draw over them (a second text scene must not buy a second
+        # 188-tile atlas). `resident + projection` is the audited set: a scene that has
+        # not landed yet is still priced, and landing it moves the term and changes no
+        # total — the property that lets 2b land its scenes one PR at a time.
+        self.resident_own = sum(term.own_tiles for term in self.scene_terms if term.resident)
+        self.projection_own = sum(term.own_tiles for term in self.scene_terms if not term.resident)
+        self.audited_own = self.resident_own + self.projection_own
+        self.pool_distinct = self.audited_own + self.text_distinct + variant.chrome_art_tiles + self.bar_pattern_tiles
+        self.pool_upper = self.audited_own + self.text_upper + variant.chrome_art_tiles + self.bar_pattern_tiles
         if variant.resident_scenes > self.spec.resident_scene_max:
+            resident = ", ".join(term.name for term in self.scene_terms if term.resident) or "none"
             raise Refusal(
                 "image-tiles-over-budget",
-                f"[[variant]] {variant.id} declares resident_scenes {variant.resident_scenes}, above the cap of "
-                f"{self.spec.resident_scene_max} this spec's own [meta] states: Mode 0 has four layers and one "
-                "of them belongs to the chrome permanently, so the cap is a hardware fact and not a preference "
-                "(§5.0). Residency is one of that row's two terms",
+                f"[[variant]] {variant.id} declares {variant.resident_scenes} resident scene(s) ({resident}) "
+                f"by their per-scene `resident` flags, above the cap of {self.spec.resident_scene_max} this "
+                "spec's own [meta] states: Mode 0 has four layers and one of them belongs to the chrome "
+                "permanently, so the cap is a hardware fact and not a preference (§5.0, §5.1). Residency is "
+                "one of that row's two terms, and it is now a declared set rather than a count",
             )
         if self.pool_distinct > variant.tile_budget:
             raise Refusal(
                 "image-tiles-over-budget",
                 f"[[variant]] {variant.id}: the distinct pool sum {self.pool_distinct} exceeds the declared "
-                f"tile_budget {variant.tile_budget} — image {self.pool_image} at the derived ceiling "
-                f"({self.art_ceiling if self.art_ceiling else 'none'}), text {self.text_distinct} at the "
-                f"distinct bound, chrome {variant.chrome_art_tiles} declared plus {self.bar_pattern_tiles} bar "
-                "pattern tiles. This is the bound a build cannot buy back (§5.1): the upper bound is printed too, "
-                "and both are in the report",
+                f"tile_budget {variant.tile_budget} — scenes resident {self.resident_own} + projection "
+                f"{self.projection_own} (the audited set, {self.audited_own}), shared text {self.text_distinct} "
+                "at the distinct bound, chrome "
+                f"{variant.chrome_art_tiles} declared plus {self.bar_pattern_tiles} bar pattern tiles. "
+                "This is the bound a build cannot buy back (§5.1): the upper bound is printed too, and both "
+                "are in the report. The per-scene terms are in the walk above, so a scene that cannot be "
+                "held is named rather than summed into a total",
             )
         if self.pool_upper > variant.tile_budget and variant.glyph_atlas != "static":
             raise Refusal(
@@ -2484,12 +2673,21 @@ class VariantFacts:
                 " — said rather than assumed (§5.0's A carries a text-free title band)"
             )
         out.append(
-            f"  pool audit at the variant's own ceiling, both bounds (§5.1, R14): image {self.pool_image}"
-            f" + text distinct {self.text_distinct} / upper {self.text_upper}"
+            f"  pool audit at the variant's own ceiling, both bounds (§5.1, R14): scenes resident "
+            f"{self.resident_own} + projection {self.projection_own} (the audited set, {self.audited_own})"
+            f" + shared text distinct {self.text_distinct} / upper {self.text_upper}"
             f" + chrome {variant.chrome_art_tiles} declared ({self.chrome_derived} derived:"
             f" {len(variant.bands)} band backdrops + 1 region backing + {len(self.control_slots)} control tiles)"
             f" + bar pattern {self.bar_pattern_tiles}  =>  distinct {self.pool_distinct}, upper {self.pool_upper}"
             f"  against tile_budget {variant.tile_budget} of a {self.spec.pool_slots}-slot regular pool"
+        )
+        out.append(
+            "    the scene addend is walked, not assumed (§11's 2b PR-(1)): a scene's own tiles are its "
+            "declared kind — `art` is the image at the derived ceiling, `composite` the art elements it "
+            "declares, `fill` and `text` own nothing because the region backing tile and the glyph atlas "
+            "are the variant's shared terms. The audit is resident + projection on purpose: the budget "
+            "belongs to the variant, so a scene landing moves its term between those two columns and "
+            "changes no total — which is what lets 2b's scenes land one PR at a time"
         )
         if self.pool_upper > variant.tile_budget and variant.glyph_atlas == "static":
             out.append(
@@ -2499,19 +2697,26 @@ class VariantFacts:
                 f" {variant.tile_budget - self.pool_distinct} slots remain, and a second scene's tiles and the chrome's"
                 " art come out of those"
             )
-        for scene in variant.scenes:
-            mine = [element.id for element in self.elements if element.scene == scene.name]
+        for term in self.scene_terms:
+            mine = [element.id for element in self.elements if element.scene == term.name]
             out.append(
-                f"  scene {scene.name} (phase {scene.phase}, band {scene.band}):"
-                f" {' '.join(mine) or 'no element declared at this phase'}"
+                f"  scene {term.name} (phase {term.scene.phase}, band {term.scene.band}, kind {term.kind}, "
+                f"resident={str(term.resident).lower()}): own tiles {term.own_tiles}"
+                f" ({' + '.join(f'{name} {tiles}' for name, tiles in term.terms.items()) or 'none: shared'}),"
+                f" audited as {term.audited_as}"
+                + (", shares the variant's glyph atlas" if term.shares_atlas else "")
+                + f": {' '.join(mine) or 'no element declared at this phase'}"
             )
         phases = sorted({scene.phase for scene in variant.scenes})
+        resident_names = ", ".join(term.name for term in self.scene_terms if term.resident) or "none"
+        projection_names = ", ".join(term.name for term in self.scene_terms if not term.resident) or "none"
         out.append(
-            f"  residency: declared resident_scenes {variant.resident_scenes}, hardware cap "
-            f"{self.spec.resident_scene_max} (one of four layers belongs to the chrome); the scenes this spec registers "
-            f"span phases {', '.join(phases)} — {len(variant.scenes)} scenes, which is a projection printed not "
-            "claimed, and §5.1's four residency options differ by two orders of magnitude so the *option* is what "
-            "a report names"
+            f"  residency: {variant.resident_scenes} scene(s) declared resident ({resident_names}) by their "
+            f"`resident` flags, hardware cap {self.spec.resident_scene_max} (one of four layers belongs to the "
+            f"chrome); the declared scene set also projects {projection_names}, and the pool audit prices both "
+            "(resident + projection). The scenes this spec registers span phases "
+            f"{', '.join(phases)} — {len(variant.scenes)} scenes, and §5.1's four residency options differ by "
+            "two orders of magnitude so the *option* is what a report names"
         )
         for note in self.notes:
             out.append(f"  note: {note}")
@@ -2716,6 +2921,9 @@ def numbers_block(facts: VariantFacts) -> list[str]:
         f"bar_pattern_tiles={facts.bar_pattern_tiles}",
         f"bar_precision_permyriad={round(1_000_000 / variant.bar_cells) if variant.bar_cells else 0}",
         f"pool_image={facts.pool_image}",
+        f"pool_scene_resident={facts.resident_own}",
+        f"pool_scene_projection={facts.projection_own}",
+        f"pool_scene_audited={facts.audited_own}",
         f"pool_text_distinct={facts.text_distinct}",
         f"pool_text_upper={facts.text_upper}",
         f"pool_chrome_declared={variant.chrome_art_tiles}",
@@ -2775,13 +2983,169 @@ def numbers_block(facts: VariantFacts) -> list[str]:
     for scene in variant.scenes:
         rows.append(f"scene_{scene.name}_phase={scene.phase}")
         rows.append(f"scene_{scene.name}_band={scene.band}")
+        rows.append(f"scene_{scene.name}_kind={scene.kind}")
+        rows.append(f"scene_{scene.name}_resident={str(scene.resident).lower()}")
         if scene.min_visible_rows is not None:
             rows.append(f"scene_{scene.name}_min_visible_rows={scene.min_visible_rows}")
         if scene.min_boxes is not None:
             rows.append(f"scene_{scene.name}_min_boxes={scene.min_boxes}")
+    for term in facts.scene_terms:
+        rows.append(f"scene_{term.name}_own_tiles={term.own_tiles}")
+        rows.append(f"scene_{term.name}_audited_as={term.audited_as}")
+        rows.append(f"scene_{term.name}_shares_glyph_atlas={str(term.shares_atlas).lower()}")
+        for name, tiles in term.terms.items():
+            rows.append(f"scene_{term.name}_term_{name}={tiles}")
     for control in facts.control_slots:
         rows.append(f"control_{control.key}_slot={control.slot}@{control.x0},{control.y0}")
     return sorted(rows)
+
+
+def cycles_block(facts: VariantFacts) -> list[str]:
+    """The report's cost estimate, every term tagged `arithmetic` until 2b PR-(2).
+
+    §10.2's element rows are arithmetic on AP-0's measured per-tile figure, and the plan
+    says so at every use. The same discipline here: the coefficient is named with its
+    measurement, every term is `tiles x coefficient`, and each line carries its tag — so
+    PR-(2)'s render bin can flip the terms it measured from `arithmetic` to `measured`
+    without changing the shape of this block. The scene switch is *named and not
+    estimated*: §5.1 calls "tens of cycles" an assumption, and PR-(2)'s L3 is the leg that
+    replaces it. Inventing a number here would be the thing the plan keeps warning about.
+    """
+    rows = [
+        f"cycles_coefficient_per_tile={CYCLE_PER_TILE_LIVE}",
+        f"cycles_coefficient_source={CYCLE_COEFFICIENT_SOURCE}",
+    ]
+
+    def term(what: str, tiles: int, source: str) -> None:
+        rows.append(f"cycles_{what}_tiles={tiles}")
+        rows.append(f"cycles_{what}_cycles={tiles * CYCLE_PER_TILE_LIVE}")
+        rows.append(f"cycles_{what}_tag=arithmetic")
+        rows.append(f"cycles_{what}_source={source}")
+
+    # One changed bar cell: at most two 8 px tiles for a cell that straddles a boundary
+    # (§10.2's bar row, priced as 1-2 tiles).
+    term("bar_cell", 2 if facts.bar_element is not None else 0,
+         "§10.2's per-element bar row (a changed cell is 1-2 tiles); declared bar element "
+         f"{facts.bar_element.id if facts.bar_element else 'none'}")
+    # One changed clock digit: the digit's cell across the tile rows the line box spans.
+    clock = next((element for element in facts.elements if element.kind == "text" and element.id == "clock"), None)
+    clock_tiles = 2 * clock.metrics.tile_rows_per_line if clock is not None and clock.metrics else 0
+    term("clock_digit", clock_tiles,
+         "§10.2's clock row: at most two cells x the tile rows the declared line box spans "
+         f"({clock.metrics.tile_rows_per_line if clock is not None and clock.metrics else 0})")
+    # A title line on a track change: the element's whole box, because the fill cost is
+    # the element's cells and not the string's length (§10.2's title row, re-cut at the
+    # product pitch).
+    title_tiles = facts.title_element.wt * facts.title_element.ht if facts.title_element is not None else 0
+    term("title_line", title_tiles,
+         "§10.2's title row: the declared element's cell count, not a character count")
+    # A whole scene-region change: the region's visible cells (§10.2's partial-map row,
+    # whose 600-cell figure is its rounded version; this is the declared rectangle).
+    term("region_repaint", facts.region[0] * facts.region[1],
+         "§10.2's partial-map row: the declared region's visible cells")
+    rows.append("cycles_excluded_scene_switch_term=scene switch (set_priority, both scenes resident)")
+    rows.append(
+        "cycles_excluded_scene_switch_reason=not estimated: §5.1 calls 'tens of cycles' an assumption, "
+        "and AP-3b's L3 leg measures the switch with both scenes resident; 2b PR-(2) owns it. Named as "
+        "excluded so the estimate's terms above are all labelled rather than one of them being a guess"
+    )
+    return rows
+
+
+def rom_budget(facts: VariantFacts, *, albm1_bytes: int | None, audio_bytes: int | None,
+               cart_bytes: int | None) -> dict[str, int | str | None]:
+    """§10.1's cart addends, and the two budget verdicts re-homed by 2b PR-(1).
+
+    `over-budget` is `code + ALBM1 + art`, where ALBM1 already carries the packed audio
+    region — the three addends the register row names. Art is priced at the variant's
+    derived ceiling in 4 bpp tiles (32 B each) until `album_art.py` exists in 2b PR-(4);
+    `viz` is Phase 3's `[viz]` and is not parsed, so it is named as absent rather than
+    counted as zero. A standalone report (`--emit-report`) has no album, so ALBM1 and the
+    audio term are `None` and the total is **not computed** — the honest answer, and the
+    reason the bake is what refuses.
+    """
+    art_bytes = facts.pool_image * ART_TILE_BYTES
+    total = None if albm1_bytes is None else CODE_RESERVE_BYTES + albm1_bytes + art_bytes
+    if total is not None and cart_bytes is not None and total > cart_bytes:
+        raise Refusal(
+            "over-budget",
+            f"[[variant]] {facts.id}: code reserve {CODE_RESERVE_BYTES} B + ALBM1 {albm1_bytes} B "
+            f"(audio assets {audio_bytes} B are inside it) + art {art_bytes} B = {total} B, over the "
+            f"declared cart {cart_bytes} B. §10.1 reserves the code before the encoder sizes the audio, "
+            "so a code growth can never silently eat samples; this is the verdict that says the album "
+            "does not fit (2b PR-(1) re-homed it from Phase 3, §9.0's register row)",
+        )
+    return {
+        "code_reserve_bytes": CODE_RESERVE_BYTES,
+        "albm1_bytes": albm1_bytes,
+        "audio_assets_bytes": audio_bytes,
+        "art_bytes": art_bytes,
+        "art_tile_bytes": ART_TILE_BYTES,
+        "viz_bytes": None,
+        "total_bytes": total,
+        "cart_bytes": cart_bytes,
+        "verdict": "not computed" if total is None else ("fits" if cart_bytes is None or total <= cart_bytes else "over"),
+    }
+
+
+def budget_block(budget: dict[str, int | str | None] | None) -> list[str]:
+    if budget is None:
+        return [
+            "rom_code_reserve_bytes=not computed",
+            "rom_albm1_bytes=not computed",
+            "rom_audio_assets_bytes=not computed",
+            "rom_art_bytes=not computed",
+            "rom_viz_bytes=not computed",
+            "rom_total_bytes=not computed",
+            "rom_cart_bytes=not computed",
+            "rom_verdict=not computed (no album in this invocation; the bake is what refuses over-budget)",
+        ]
+    return [f"rom_{key}={budget[key]}" for key in (
+        "code_reserve_bytes", "albm1_bytes", "audio_assets_bytes", "art_bytes", "art_tile_bytes",
+        "viz_bytes", "total_bytes", "cart_bytes", "verdict",
+    )]
+
+
+def report_text(spec: LayoutSpec, facts_list: list[VariantFacts],
+                budget: dict[str, int | str | None] | None = None,
+                budget_variant: str = "",
+                skipped: list[tuple[str, str]] | None = None) -> str:
+    """One derivation, two renderings — the prose (`VariantFacts.lines`) and this block.
+
+    2b PR-(1): the artifact this phase has to leave behind is the spec -> `layout.rs` ->
+    report pipeline. The report is deliberately the sorted `key=value` form §13 calls the
+    machine-readable one, so a reviewer diffs numbers rather than sentences and the file
+    does not churn when prose changes. Two runs of the same spec must produce identical
+    bytes (`make album-layout-test` holds that), so nothing here can carry a timestamp or
+    an absolute path.
+    """
+    lines = [
+        f"schema={REPORT_SCHEMA}",
+        f"spec={_relative(spec.path)}",
+        "generated_by=album-layout-gen (scripts/album_bake.py)",
+        f"hardware_screen_tiles={spec.screen_tiles[0]}x{spec.screen_tiles[1]}",
+        f"hardware_map_tiles={spec.map_tiles[0]}x{spec.map_tiles[1]}",
+        f"hardware_tile_px={spec.tile_px}",
+        f"hardware_pool_slots={spec.pool_slots}",
+        f"hardware_resident_scene_max={spec.resident_scene_max}",
+        f"layout_code_reserve_bytes={CODE_RESERVE_BYTES}",
+        "layout_source=ALBUM-PLAYER.md §10.1 (the code reserve is 256 KiB); §5.1/R14 for the pool terms",
+    ]
+    for facts in facts_list:
+        lines.append("")
+        lines.append(f"[variant {facts.id}]")
+        lines.extend(numbers_block(facts))
+        lines.extend(cycles_block(facts))
+        lines.extend(budget_block(budget if facts.id == budget_variant else None))
+    # A variant the generator refused is *named in the report*, not silently absent
+    # (§13's AP-3 rule: a green says what it did not look at). No numbers are emitted
+    # for it, because there are none to emit.
+    for variant_id, refusal in skipped or []:
+        lines.append("")
+        lines.append(f"[variant {variant_id}]")
+        lines.append("derivable=false")
+        lines.append(f"refusal={refusal}")
+    return "\n".join(lines) + "\n"
 
 
 def _rs(value: object) -> str:
@@ -3352,14 +3716,13 @@ licence = ["assets/fonts/fusion-pixel-OFL.txt", "assets/fonts/fusion-pixel-LICEN
 id = "F"
 product = true
 tile_budget = 512
-resident_scenes = 1
 image_tiles = 196
 bar_cells = 20
 chrome_art_tiles = 9
 glyph_atlas = "static"
 band = [{id="chrome", rows=2, always=true}, {id="title", rows=2, always=true}, {id="scene", rows=16, always=false}]
 palette = [{role="text", banks=[0]}, {role="chrome", banks=[1]}, {role="art", banks=[3]}, {role="viz", banks=[4]}, {role="game", banks=[5]}]
-scene = [{name="art", phase="2b", band="scene", min_boxes=1}, {name="list", phase="2b", band="scene", min_visible_rows=4}]
+scene = [{name="art", phase="2b", band="scene", kind="art", resident=true, min_boxes=1}, {name="list", phase="2b", band="scene", kind="text", resident=true, min_visible_rows=4}]
 element = [
   {id="clock", kind="text", band="chrome", x0=0, y0=0, x1=11, y1=1, face="fixture", row_px=16, banks=[0]},
   {id="keyart", kind="art", band="chrome", x0=20, y0=0, x1=29, y1=1, banks=[1]},
@@ -3392,7 +3755,7 @@ FIXTURE_LEGS = (
     ("face-not-resolvable", "a licence row that is absent", ('licence = ["assets/fonts/fusion-pixel-OFL.txt", "assets/fonts/fusion-pixel-LICENSES"]', 'licence = ["assets/fonts/not-a-licence.txt"]')),
     ("image-tiles-over-budget", "the distinct pool sum over the declared budget", ("tile_budget = 512", "tile_budget = 300")),
     ("image-tiles-over-budget", "the upper pool sum over budget for a per-cell atlas", ('glyph_atlas = "static"', 'glyph_atlas = "per-cell"')),
-    ("image-tiles-over-budget", "more resident scenes than the cap the spec states", ("resident_scenes = 1", "resident_scenes = 4")),
+    ("image-tiles-over-budget", "more resident scenes than the cap the spec states", ("resident_scene_max = 3", "resident_scene_max = 1")),
     ("scene-minimum", "a scene's own row minimum above what the geometry holds", ("min_visible_rows=4", "min_visible_rows=9")),
     ("scene-minimum", "a scene's own box minimum above the derived list", ("min_boxes=1", "min_boxes=99")),
     ("bar-cells-out-of-range", "a declared grid below §6's floor", ("bar_cells = 20", "bar_cells = 8")),
@@ -3624,7 +3987,6 @@ licence = [{licence}]
 id = "P"
 product = false
 tile_budget = 512
-resident_scenes = 1
 image_tiles = 256            # 128x128: the first term of every row of the table
 bar_cells = 16               # declared, unused — see the comment above
 chrome_art_tiles = 0         # no chrome term: the sum is the two terms the table prices
@@ -3659,16 +4021,22 @@ always = false
 name = "art"
 phase = "2b"
 band = "scene"
+kind = "art"
+resident = false
 min_boxes = 1
 [[variant.scene]]
 name = "list"
 phase = "2b"
 band = "scene"
+kind = "text"
+resident = false
 min_visible_rows = 4
 [[variant.scene]]
 name = "blank"
 phase = "2a"
 band = "scene"
+kind = "fill"
+resident = true
 
 [[variant.element]]
 id = "art"
@@ -3818,6 +4186,109 @@ def layout_self_test() -> int:
     print(f"  named and skipped (not counted, §9.0's note under its register):")
     print(f"    {ART_ROW_NOT_FIREABLE_YET[0]}: {ART_ROW_NOT_FIREABLE_YET[1]}")
     print(f"      why not fired here: {ART_ROW_NOT_FIREABLE_YET[2]}")
+
+    # -- the two budget rows 2b PR-(1) re-homed from Phase 3 ---------------------
+    #
+    # Call legs rather than spec mutations, because neither input is a field of
+    # `layout_spec.toml`: `over-budget` reads an album's ALBM1 bytes and the cart size,
+    # and `over-track-count` reads the track list. Both directions are checked — the
+    # refusal fires by name, and the same arithmetic at a cart wide enough does not —
+    # because a row that refused every album would satisfy the first direction and mean
+    # nothing.
+    budget_fired: set[str] = set()
+    facts_a = derive_variant(spec, spec.variants[0])
+
+    def cart_budget_overflow() -> None:
+        rom_budget(facts_a, albm1_bytes=400 * 1024, audio_bytes=380 * 1024, cart_bytes=512 * 1024)
+
+    def cart_budget_fits() -> dict:
+        return rom_budget(facts_a, albm1_bytes=200 * 1024, audio_bytes=180 * 1024,
+                          cart_bytes=4 * 1024 * 1024)
+
+    def track_ceiling_refused() -> None:
+        text = _write_config(budget_tmp / "tracks" / "album.toml").read_text()
+        stanzas = "\n".join(
+            f'[[track]]\nfile = "assets/sound/track{i:02d}.wav"\ntitle = "T{i}"\n'
+            for i in range(MAX_TRACKS)
+        )
+        path = budget_tmp / "tracks" / "album.toml"
+        path.write_text(text + "\n" + stanzas)
+        Config(path)
+
+    def track_ceiling_fits() -> None:
+        Config(_write_config(budget_tmp / "tracks-ok" / "album.toml"))
+
+    budget_tmp = Path(tempfile.mkdtemp(prefix="album-budget-legs-"))
+
+    for refusal_id, how, call in (
+        ("over-budget", f"code reserve + ALBM1 400 KiB (audio inside it) on a 512 KiB cart at variant {facts_a.id}",
+         cart_budget_overflow),
+        ("over-track-count", f"{MAX_TRACKS + 1} tracks in one config (ALBM1 carries {MAX_TRACKS})",
+         track_ceiling_refused),
+    ):
+        try:
+            call()
+            note = "DID NOT FIRE"
+            failures.append(f"{refusal_id}: {how} — no refusal at all")
+        except Refusal as exc:
+            if exc.rule != refusal_id:
+                note = f"WRONG REFUSAL ({exc.rule})"
+                failures.append(f"{refusal_id}: {how} — got {exc.rule}: {exc.detail}")
+            else:
+                note = "fired ✓"
+                budget_fired.add(refusal_id)
+        print(f"  {refusal_id:28}  {how:58}  {note}")
+    budget_missing = [row[0] for row in BUDGET_REGISTER if row[0] not in budget_fired]
+    print(f"  budget rows fired: {len(budget_fired)} of {len(BUDGET_REGISTER)}")
+    for row in budget_missing:
+        print(f"  {row:28}  DID NOT FIRE — this tool's own error path is unproven")
+        failures.append(f"{row}: never exercised")
+    # The negative directions, so neither row is satisfied by a tool that refuses
+    # everything: total is exactly the three addends, and a legal cart does not refuse.
+    fits = cart_budget_fits()
+    print(f"  {'over-budget, negative':28}  {'a 4 MiB cart holds a 200 KiB ALBM1':58}  "
+          f"{'no refusal' if fits['verdict'] == 'fits' else 'FAIL'}")
+    if fits["verdict"] != "fits":
+        failures.append("over-budget: a cart wider than the addends was still refused")
+    try:
+        track_ceiling_fits()
+        note = "no refusal"
+    except Refusal as exc:
+        note = f"WRONG REFUSAL ({exc.rule})"
+        failures.append(f"over-track-count negative: a legal track list was refused ({exc.rule})")
+    print(f"  {'over-track-count, negative':28}  {'a one-track config':58}  {note}")
+
+    # The scene schema itself, self-tested: the two new fields are required, the kind
+    # vocabulary is closed, and the retired count is no longer a key. The live spec is the
+    # negative control for all of this — it derives — so a tool that refused every scene
+    # would fail the register and reproduction legs above.
+    schema_fired = 0
+    for how, mutation in (
+        ("a scene kind outside §5.2's closed vocabulary",
+         ('name="art", phase="2b", band="scene", kind="art"',
+          'name="art", phase="2b", band="scene", kind="mosaic"')),
+        ("a scene that declares no `resident` flag",
+         ("resident=true, min_boxes=1", "min_boxes=1")),
+        ("the retired variant-level `resident_scenes` count",
+         ("tile_budget = 512", "tile_budget = 512\nresident_scenes = 1")),
+    ):
+        try:
+            fixture = LayoutSpec(_write_spec(budget_tmp, _fixture_text(mutation), "schema.toml"))
+            derive_variant(fixture, fixture.variants[0])
+            note = "DID NOT FIRE"
+            failures.append(f"scene schema: {how} — no refusal at all")
+        except Refusal as exc:
+            if exc.rule != "spec":
+                note = f"WRONG REFUSAL ({exc.rule})"
+                failures.append(f"scene schema: {how} — got {exc.rule}: {exc.detail}")
+            else:
+                note = "fired ✓"
+                schema_fired += 1
+        print(f"  {'scene schema':28}  {how:58}  {note}")
+    print(f"  scene schema legs fired: {schema_fired} of 3")
+    if schema_fired != 3:
+        failures.append("scene schema: a required field or the closed kind vocabulary is not asserted")
+    shutil.rmtree(budget_tmp, ignore_errors=True)
 
     # -- the reproduction legs: this tool must reproduce the plan's arithmetic -------
     #
@@ -4911,6 +5382,10 @@ def main(argv: list[str] | None = None) -> int:
                       help="derive and print the audit for every variant the spec declares; write nothing")
     parser.add_argument("--emit-layout", action="store_true",
                       help="write src/layout.rs only; the numbers stay derived from the spec")
+    parser.add_argument("--emit-report", default="", metavar="PATH",
+                      help="write the machine-readable layout report (2b PR-(1)); '-' writes stdout. "
+                           "No album is read, so the ROM addends say 'not computed' — the bake is where "
+                           "`over-budget` is asked")
     parser.add_argument("--layout-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--variant", default="", help="ask for a variant other than [layout]'s (a test instrument)")
     parser.add_argument("--spec", default=str(DEFAULT_LAYOUT_SPEC), help="the layout spec to read (a test instrument)")
@@ -4920,24 +5395,44 @@ def main(argv: list[str] | None = None) -> int:
             return self_test()
         if args.layout_self_test:
             return layout_self_test()
-        if args.print_layout or args.emit_layout:
-            facts = layout_for(args.variant, Path(args.spec).resolve())[2]
+        if args.print_layout or args.emit_layout or args.emit_report:
+            spec_path = Path(args.spec).resolve()
+            spec = LayoutSpec(spec_path)
             if args.print_layout:
                 print(
-                    f"album-layout-gen: {_relative(Path(args.spec))} declares every variant; "
+                    f"album-layout-gen: {_relative(spec_path)} declares every variant; "
                     "a product gate reports a non-product one as skipped with its reason (§13's AP-3 rule)"
                 )
-                for variant in LayoutSpec(Path(args.spec).resolve()).variants:
+                for variant in spec.variants:
                     try:
-                        derived = derive_variant(LayoutSpec(Path(args.spec).resolve()), variant)
+                        derived = derive_variant(spec, variant)
                     except Refusal as exc:
                         print(f"  variant {variant.id}: not derivable — {exc.rule}: {exc.detail}")
                         continue
                     for line in derived.lines(gate=variant.product):
                         print(line)
             if args.emit_layout:
+                facts = layout_for(args.variant, spec_path)[2]
                 write_atomic(DEFAULT_LAYOUT_RS, layout_rs_text(facts).encode("utf-8"))
                 print(f"album-layout-gen: wrote {_relative(DEFAULT_LAYOUT_RS)}")
+            if args.emit_report:
+                # Every declared variant, in declaration order, and a variant that cannot
+                # be derived is *named* rather than silently dropped (AP-3's rule) — the
+                # report is the spec's artifact, not one album's.
+                facts_list: list[VariantFacts] = []
+                skipped: list[tuple[str, str]] = []
+                for variant in spec.variants:
+                    try:
+                        facts_list.append(derive_variant(spec, variant))
+                    except Refusal as exc:
+                        print(f"album-layout-gen: variant {variant.id} not derivable — {exc.rule}: {exc.detail}")
+                        skipped.append((variant.id, exc.rule))
+                text = report_text(spec, facts_list, skipped=skipped)
+                if args.emit_report == "-":
+                    sys.stdout.write(text)
+                else:
+                    write_atomic(Path(args.emit_report), text.encode("utf-8"))
+                    print(f"album-layout-gen: wrote {args.emit_report}")
             return 0
         return bake(Path(args.album).resolve())
     except Refusal as exc:
