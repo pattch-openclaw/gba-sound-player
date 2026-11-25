@@ -160,10 +160,20 @@ pub struct Point {
 
 /// Measure one candidate exactly: code the frame, count what the reader will do.
 ///
-/// The distortion counts every coefficient below `NCODED`, including those the
-/// coder left zero because the band was never reached — the tail's energy is
-/// distortion, not a free saving. Skipping it would make "code nothing" look
-/// optimal, which is how a search like this goes wrong quietly.
+/// **`dist` is derived, not summed.** The reference computes a frame's distortion out of
+/// its Lagrangian — `D = J − λ·(bits − 1)` (`enc_core.c:404`), where `J` is the two channels'
+/// returned `J` and `bits` counts the M/S bit — and that is the number its `allocate`
+/// compares frames on. Summing the per-band squared errors instead gives a value that
+/// differs by tens of ULP on a matching coding (measured: 76), which is a different plan the
+/// moment it lands on a `<`. So the measurement reproduces the derivation (S8-5 item 1,
+/// inventory row 1).
+///
+/// The `−1` is already taken out here: this function's `bits` is the bands' bit count, and
+/// the reference's starts at 1 for the M/S bit the header carries. `D = J − λ·bits` is the
+/// same expression written in this function's units.
+///
+/// The distortion still accounts for every coefficient below `NCODED` — the tail's energy is
+/// distortion, not a free saving, and it arrives through the path's `suffix`/`Dz` term.
 pub fn measure(
     coef: &[f32; 2 * M],
     tables: &DefaultTables,
@@ -178,14 +188,15 @@ pub fn measure(
     // `(e_M ± e_S)/√2`, whose squares sum to `e_M² + e_S²`.
     let rot = quant::rotate(coef, ms);
     let mut chans = [Chan::empty(), Chan::empty()];
-    let mut dist = 0f64;
-    let mut bits = 0u64;
+    let mut j = 0f64;
     for ch in 0..2 {
         let slice = &rot[ch * M..ch * M + M];
         let lr = crate::quant::quantise_chan_rd(slice, tables, g, ms, kappa, mu);
-        dist += lr.dist;
+        j += lr.j;
         chans[ch] = lr.chan;
     }
+    let d = quant::Unit::of(g, ms).d;
+    let lam = kappa * d * d;
     let mut bw = crate::bitwriter::BitWriter::new();
     // The header is excluded from the measured bits: the `g` delta depends on the
     // previous frame's `g`, so charging it per candidate would double-count one bit or
@@ -195,7 +206,8 @@ pub fn measure(
     for chan in &chans {
         frame::write_chan(&mut bw, tables, chan);
     }
-    bits += bw.pos();
+    let bits = bw.pos();
+    let dist = j - lam * bits as f64;
     let ops = frame_ops(tables, &chans, ms);
     Ok((
         Point {

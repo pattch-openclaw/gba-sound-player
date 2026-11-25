@@ -5,7 +5,8 @@
         test test-rom flac-test flac-test-wide flac-test-crc flac-test-scan \
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
-        uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-probe uli-plan-diff uli-frame-diff \
+        uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-band-rdo-fixture-clean \
+        uli-probe uli-plan-diff uli-frame-diff \
         uli-rd-ab uli-accept uli-oracle-check \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
@@ -784,6 +785,14 @@ uli-mdct-fixture:
 uli-band-rdo-fixture:
 	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/gen_uli_band_rdo_fixture.py
 
+# S8-5 item 1's fixture: the same 2,400 `band_rdo` cases from the same C, compiled with the
+# oracle of record's flags (`-ffp-contract=off -march=armv8-a`). It is a *second* file on
+# purpose — `band_rdo.txt` is a pin recording what the pre-S8-4b (fusing) oracle answered,
+# and `tests/quant.rs` compares against this one bitwise. Never make the default target
+# produce this file or this one produce the default's (inventory row 18).
+uli-band-rdo-fixture-clean:
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/gen_uli_band_rdo_fixture.py --clean
+
 # S8-1's frozen-plan probe: the reference's own `frame_code` and `band_rdo` driven at a
 # held-still (g, ms, tables), so our coding can be compared at the level where a difference
 # is a cause instead of a byte count. Self-checking before it is trusted: it must reproduce
@@ -801,6 +810,9 @@ uli-probe:
 # which pairs `uli_enc::frozen` with `scripts/uli_probe.py`). Deliberately NOT on any gate's
 # path: it compiles the off-tree reference's C. The default corpus is the committed 4-frame
 # coefficient golden, so it runs without an album; pass ULI_FRAME_DIFF_ARGS= for others.
+# **It exits 0 since 2026-11-25 (S8-5 items 1-3)**: bits, stream, cycles, the nine counters and
+# `D` all agree on 24 of 24 codings. It exited 2 with findings from S8-1 until then, and it
+# will exit 2 again the moment a divergence opens — that is what it is for.
 ULI_FRAME_DIFF_ARGS ?= --coef $(abspath crates/uli-enc/tests/fixtures/mdct_ref_coef.f32)
 uli-frame-diff: toolchain-check
 	@test -f $(GBA_AUDIO)/encoder/enc_core.c || \

@@ -30,6 +30,7 @@ Usage:  scripts/gen_uli_band_rdo_fixture.py        (GBA_AUDIO= overrides the loc
 Regenerate with `make uli-band-rdo-fixture`.
 """
 
+import argparse
 import math
 import os
 import struct
@@ -40,6 +41,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "crates/uli-enc/tests/fixtures/band_rdo.txt"
+# The *additional* fixture S8-5's bitwise-`D` gate runs against: the same 2,400 cases from
+# the same C, compiled with the oracle of record's float flags instead of GCC's default
+# (which fuses `D += e*e` into an FMA). It does not replace `band_rdo.txt`, which is a pin
+# and records what the pre-S8-4b oracle answered — see inventory row 18.
+CLEAN_OUT = OUT.with_name("band_rdo_clean.txt")
 GBA_AUDIO = Path(os.environ.get("GBA_AUDIO", ROOT.parent / "gba-audio"))
 CASES = 2400
 KAPPA = 0.13
@@ -119,6 +125,20 @@ def main() -> int:
     if not (enc / "enc_core.c").exists():
         print(f"gen_uli_band_rdo_fixture: no reference encoder at {enc}", file=sys.stderr)
         return 1
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--out", type=Path, default=None,
+                    help=f"where to write the fixture (default {OUT})")
+    ap.add_argument("--cases", type=int, default=CASES)
+    ap.add_argument("--clean", action="store_true",
+                    help="compile the probe with the oracle of record's flags "
+                         "(-ffp-contract=off -march=armv8-a) and default the output to "
+                         f"{CLEAN_OUT.name}. This is the fixture a bitwise-`D` comparison "
+                         "needs; the default flags are the fused build's, kept because they "
+                         "reproduce the committed pin")
+    args = ap.parse_args()
+    out = args.out if args.out is not None else (CLEAN_OUT if args.clean else OUT)
+    cases = args.cases
+
     cc = os.environ.get("CC", "cc")
     # These defaults are the ones that produced the committed fixture, and they are kept so a
     # regeneration reproduces it (the fixture is a pin: if it moves, the regeneration is the
@@ -129,7 +149,13 @@ def main() -> int:
     # clean oracle is S8-5's decision and would be an *additional* file, not a movement of
     # this one (PLAN-OF-RECORD §S8-4b, inventory row 18). Override with `CFLAGS=` to make
     # one, deliberately.
-    flags = os.environ.get("CFLAGS", "-O2 -std=gnu11 -w").split()
+    if args.clean:
+        flags = os.environ.get(
+            "CFLAGS", "-O2 -std=gnu11 -w -ffp-contract=off -march=armv8-a"
+        ).split()
+    else:
+        flags = os.environ.get("CFLAGS", "-O2 -std=gnu11 -w").split()
+    print(f"gen_uli_band_rdo_fixture: {' '.join(flags)}")
     with tempfile.TemporaryDirectory() as td:
         probe = Path(td) / "probe.c"
         probe.write_text(PROBE)
@@ -139,18 +165,18 @@ def main() -> int:
              str(GBA_AUDIO / "src/uli/uli_tables.c"), "-lm"],
             check=True,
         )
-        OUT.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run([str(exe), str(OUT), str(CASES)], check=True)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run([str(exe), str(out), str(cases)], check=True)
 
-    lines = OUT.read_text().splitlines()
+    lines = out.read_text().splitlines()
     # A fixture that collapsed to one behaviour would pass while testing nothing.
     classes = {int(l.split()[16]) for l in lines}
     kinds = {int(l.split()[17]) for l in lines}
-    if len(lines) < CASES // 2 or len(classes) < 8 or len(kinds) < 20:
+    if len(lines) < cases // 2 or len(classes) < 8 or len(kinds) < 20:
         print(f"gen_uli_band_rdo_fixture: {len(lines)} lines, {len(classes)} classes, "
               f"{len(kinds)} steps — too narrow to witness anything", file=sys.stderr)
         return 1
-    print(f"wrote {OUT} ({len(lines)} cases, {len(classes)} classes, {len(kinds)} steps)")
+    print(f"wrote {out} ({len(lines)} cases, {len(classes)} classes, {len(kinds)} steps)")
     return 0
 
 

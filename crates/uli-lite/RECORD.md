@@ -3255,6 +3255,44 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
+- **2026-11-25 (last) — S8-5 items 1-3: the frozen coder is the reference's, bit for bit.**
+  The step the whole inventory was aimed at, and it closed in three changes rather than the
+  eighteen the inventory listed.
+
+  **What changed.** `BandRd` now carries `j` — the band's Lagrangian accumulated **per
+  tuple**, `d_tuple + λ·bits`, as the reference's `J += best` does — and the frame's `D` is
+  *derived* from it (`J − λ·bits`; our bit count excludes the M/S bit the reference's starts
+  at, so its `bits − 1` is ours). The class Viterbi adds its terms in the reference's order
+  (`V + λ·l + μ·CY + Jb`), charges the terminator and refuses a zero-length EOB as a stop,
+  and the `allz` `0.4·D` guard is in. `BandRd::dist` stays, but as the *band-level*
+  diagnostic the `band_rdo` probe reports: re-accumulated in coefficient order, because the
+  probe's `D` and the encoder's `J` are different expressions and both are compared.
+
+  **Measured.** `make uli-frame-diff`, 24 frozen codings: **identical — bits, stream, cycles,
+  all nine counters and `D`; worst ULP distance 0.** Before: bits 24/24, stream 23/24, cycles
+  23/24, `D` 2/24 bitwise with 76 ULP worst. So the derivation was the whole of the residual
+  `D` gap (the 27 ULP contraction contributed was already taken out at S8-4b), and the
+  "equal-cost tie" at frame 1 `g=100 ms=1` was not a tie rule at all — it was the unpriced
+  terminator, which is why it disappears with the sequence terms rather than with a
+  tie-break check. Suite: **97 tests in 17 suites**, green; `make uli-probe` still
+  reproduces the 2,400 frozen cases.
+
+  **The three tests that pin it** (they construct their cases rather than reading about
+  them): `band_rdo_matches_the_clean_golden_bit_for_bit` — 2,400 cases against the new
+  `fixtures/band_rdo_clean.txt`, `D` bitwise, which is row 18's payoff; the fused
+  `band_rdo.txt` stays as a pin at a measured 2 ULP and is now explicitly labelled as the
+  pre-rebuild oracle's answer; `the_former_tie_is_the_references_bytes` pins frame 1 at
+  `g=100 ms=1` as an FNV hash of the reference's 397 halfwords; and
+  `a_band_below_four_tenths_of_a_step_may_only_be_class_zero` /
+  `a_channels_bits_are_the_writers_terminator_included` cover rows 3 and 2. `tests/frozen.rs`
+  now pins `D` bitwise on seven cases, which it could not do before.
+
+  **What it means for the rest of S8.** The coder is no longer a source of divergence at a
+  frozen plan, so every remaining cell difference is the **plan** — rows 5-13, which is S8-6
+  and S8-7. The cells still differ (the `fast` cell: ours 19,780 bytes against 19,744, tables
+  2,081 of 5,212, and `g` ranges 120..187 against 108..141), and that is now the expected
+  shape rather than a puzzle.
+
 - **2026-11-25 (later) — S8-4b: the oracle is rebuilt contraction-free, the probe had to move
   with it, and the frozen goldens turn out to be a fused build's answers.** The rebuild itself
   was one command and the finding is in the seams.

@@ -444,14 +444,22 @@ fn recon(dq: &[i8; 16], m: i32, d: f64) -> f64 {
 #[derive(Clone, Copy, Debug)]
 pub struct BandRd {
     pub m: [i32; BANDW],
+    /// The band's Lagrangian **as the reference accumulates it**: one add per tuple,
+    /// `d_tuple + λ·bits_tuple`, summed left to right from `0.0` (`enc_core.c:225-280`).
+    ///
+    /// This is the number the reference's search compares, so it is the one that matters
+    /// for parity (S8-5 item 1). It is *not* `dist + λ·bits` recomputed at the end: those
+    /// two roundings differ, and a 1-ULP difference in a compared value is a different plan.
+    pub j: f64,
+    /// `Σ (|x| − rec)²` over the band's 16 coefficients, accumulated **in coefficient
+    /// order** — the quantity the `band_rdo` probe reports (`scripts/gen_uli_band_rdo_fixture.py`),
+    /// which is not the same expression as `j`.
+    ///
+    /// It stays separate for that reason: the probe's `D` is a per-coefficient sum, the
+    /// encoder's `D` is derived from `j` at frame level, and both are compared against their
+    /// own reference. Folding them into one would make one of the two tests unpassable.
     pub dist: f64,
     pub bits: u64,
-}
-
-impl BandRd {
-    pub fn j(&self, lam: f64) -> f64 {
-        self.dist + lam * self.bits as f64
-    }
 }
 
 /// Rate/distortion quantisation of one 16-coefficient band under one class.
@@ -482,9 +490,21 @@ pub fn band_rdo(
     let dq = &tables.dq[class];
     let mut out = BandRd {
         m: [0; BANDW],
+        j: 0.0,
         dist: 0.0,
         bits: 0,
     };
+    // The zero class codes nothing, and the reference returns the band's whole energy as
+    // its `J` (`enc_core.c:227-232`): no bits are spent, so `J = D` there. Both fields are
+    // that one sum, in the same order over all 16 coefficients.
+    if tables.ctype[class] == CT_ZERO {
+        for i in 0..BANDW {
+            let v = f64::from(x[i]);
+            out.dist += v * v;
+        }
+        out.j = out.dist;
+        return Some(out);
+    }
     // A symbol with no code cannot be written, so it must not be priced. A zero-length
     // symbol costs nothing to "send" in this arithmetic, so leaving it in the candidate set
     // makes it look free and it wins. Inert while every symbol in the tables has a code —
@@ -505,7 +525,6 @@ pub fn band_rdo(
         let mut best_j = f64::INFINITY;
         let mut best = [0i32; 4];
         let mut best_bits = 0u64;
-        let mut best_dist = 0.0f64;
 
         if pair {
             for p in 0..cn[0] {
@@ -527,7 +546,6 @@ pub fn band_rdo(
                         best_j = j;
                         best = [m0, m1, 0, 0];
                         best_bits = bits;
-                        best_dist = dist;
                     }
                 }
             }
@@ -558,7 +576,6 @@ pub fn band_rdo(
                                 best_j = j;
                                 best = m;
                                 best_bits = bits;
-                                best_dist = dist;
                             }
                         }
                     }
@@ -572,8 +589,19 @@ pub fn band_rdo(
         }
         out.m[i..i + per].copy_from_slice(&best[..per]);
         out.bits += best_bits;
-        out.dist += best_dist;
+        // One add per tuple of the *incurred* Lagrangian, which is what the reference's
+        // `J += best` does — not a re-derivation from the totals, which rounds differently
+        // (row 1 of S8's inventory).
+        out.j += best_j;
         i += per;
+    }
+    // The band-level diagnostic, in the probe's order: coefficient by coefficient, from
+    // zero, over all 16 (the ones the format forces to zero contribute `|x|²`, which is
+    // also what the probe's `make_cand`/`rec_of` path gives them).
+    for i in 0..BANDW {
+        let ax = f64::from(x[i].abs());
+        let e = ax - recon(dq, out.m[i], d);
+        out.dist += e * e;
     }
     Some(out)
 }
@@ -603,8 +631,11 @@ pub fn rd_classes(tables: &DefaultTables) -> Vec<usize> {
 #[derive(Clone, Debug)]
 pub struct ChanRd {
     pub chan: Chan,
-    /// Squared error over the coded range, in analysis units.
-    pub dist: f64,
+    /// The channel's Lagrangian as the reference returns it (`enc_core.c:383`):
+    /// `bestEnd − μ·cyc`, i.e. the chosen path's `J` with the band-symbol cycle charges
+    /// removed. The frame's distortion is *derived* from this and the bit count, which is
+    /// why it is carried separately rather than reduced to a `D` here (inventory row 1).
+    pub j: f64,
     /// Bits the coefficients and band symbols occupy, EOB included.
     pub bits: u64,
 }
@@ -744,7 +775,10 @@ pub fn quantise_chan_rd(
     let mut energy = [0f64; NBANDS];
     for b in 0..NBANDS {
         let mut e = 0.0;
-        for i in 0..band_ncod(b) {
+        // All 16 coefficients, not just the codeable ones: the reference's `Dz`
+        // (`enc_core.c:298`) sums the band unconditionally, and the format forces the
+        // uncoded tail to zero anyway, so this is the same value in the same order.
+        for i in 0..BANDW {
             let v = f64::from(coef[b * BANDW + i]);
             e += v * v;
         }
@@ -754,19 +788,32 @@ pub fn quantise_chan_rd(
     // Per-band, per-class cost of coding that band **ignoring the band symbol**, which is
     // charged in the shortest-path below because it depends on the *previous* class.
     //
-    // `band_dist[b][c]` and `band_bits[b][c]` are `f64::INFINITY` / `None` where the class
-    // cannot code the band (a symbol with no code), which the search then skips.
-    let mut band_dist = [[f64::INFINITY; MAXK]; NBANDS];
+    // `band_j[b][c]` is `f64::INFINITY` where the class cannot code the band (a symbol with
+    // no code, or the `allz` guard), and the search then skips it.
+    // `band_j[b][c]` is the reference's `Jb[b][c]`: the band's Lagrangian under class `c`,
+    // plus `mu · band_cycles` when the cycle price is live (`enc_core.c:301-308`). The
+    // search compares *this* number, so the class decisions follow the same roundings.
+    let mut band_j = [[f64::INFINITY; MAXK]; NBANDS];
     let mut band_bits = [[0u64; MAXK]; NBANDS];
     // The decoder work a class adds to this band, for the `mu` term. Zero for class 0,
     // which is what makes a zero band cheap in the cycle-aware search as well as the rate
     // one.
     let mut band_cyc = [[0u32; MAXK]; NBANDS];
+    let inv = 1.0 / d;
     for b in 0..NBANDS {
         let ncod = band_ncod(b);
         // Code nothing: one band symbol, all of this band's energy left as error.
-        band_dist[b][0] = energy[b];
+        band_j[b][0] = energy[b];
         band_bits[b][0] = 0;
+        // The reference's `allz` guard (`enc_core.c:301-302`): a band whose every
+        // coefficient is below `0.4` of a step may only take class 0. It is not a
+        // heuristic about quality — it keeps the search from spending a band symbol to
+        // code magnitudes that are all noise, and it changes the plan when the trained
+        // rows price those symbols cheaply (inventory row 3).
+        let allz = (0..BANDW).all(|i| f64::from(coef[b * BANDW + i].abs()) * inv < 0.4);
+        if allz {
+            continue;
+        }
         for klass in rd_classes(tables) {
             // A class whose band symbol has no code cannot be written, so it must not be
             // priced: a zero-length symbol costs nothing here and therefore wins.
@@ -784,7 +831,12 @@ pub fn quantise_chan_rd(
             ) else {
                 continue;
             };
-            band_dist[b][klass] = rd.dist;
+            band_j[b][klass] = rd.j
+                + if mu > 0.0 {
+                    mu * cycles_of(tables, klass, &rd.m) as f64
+                } else {
+                    0.0
+                };
             band_bits[b][klass] = rd.bits;
             band_cyc[b][klass] = cycles_of(tables, klass, &rd.m);
         }
@@ -804,48 +856,41 @@ pub fn quantise_chan_rd(
     let mut v = [[f64::INFINITY; MAXK + 1]; NBANDS + 1];
     let mut from = [[NONE; MAXK + 1]; NBANDS + 1];
     v[0][k] = 0.0; // the reader's initial context is the sentinel `k`
-    // Terminating before band 0 is a real option: the channel is silence. It still sends
-    // the terminator's band symbol, and the cycle term charges for that symbol whenever the
-    // price is live — the `mu > 0` guard is what keeps `0 * cycles` off the `f64::INFINITY`
-    // sentinels this search uses for unreachable states.
-    let mut best_total = suffix[0]
-        + if mu > 0.0 {
-            mu * CY_BANDSYM as f64
-        } else {
-            0.0
-        };
-    let mut best_end = (0usize, k);
+    // The scan is the reference's, term for term (`enc_core.c:309-330`), and the order of
+    // the adds inside each term is part of it: `V + λ·l + μ·CY + Jb`, left to right. Two of
+    // its rules are not cosmetic:
+    //
+    //  * **the terminator is charged** — `λ·len_cb[s][EOB]` and a band symbol, because it
+    //    is a symbol the reader reads (inventory row 2). Leaving it unpriced made a stop
+    //    look cheaper than it is, which is invisible while every row prices alike and
+    //    decisive once a trained set's rows differ;
+    //  * **a zero-length EOB is not a candidate** — the arm is skipped rather than priced
+    //    at nothing, which is the same rule the class symbols already follow.
+    let cy_band = mu * CY_BANDSYM as f64;
+    let mut best_total = f64::INFINITY;
+    let mut best_end = (NONE, NONE);
     for b in 0..NBANDS {
         for s in 0..=k {
             if v[b][s].is_infinite() {
                 continue;
             }
-            // Terminate here: the terminator's *bits* are deliberately unpriced (see
-            // above); its band symbol still costs `mu` cycles when the price is live.
-            let stop = v[b][s]
-                + suffix[b]
-                + if mu > 0.0 {
-                    mu * CY_BANDSYM as f64
-                } else {
-                    0.0
-                };
-            if stop < best_total {
-                best_total = stop;
-                best_end = (b, s);
+            let le = tables.cb[s].symbol_len(k) as u64;
+            if le != 0 {
+                let stop = v[b][s] + lam * le as f64 + cy_band + suffix[b];
+                if stop < best_total {
+                    best_total = stop;
+                    best_end = (b, s);
+                }
             }
             for c in 0..k {
-                if band_dist[b][c].is_infinite() {
+                if band_j[b][c].is_infinite() {
                     continue;
                 }
-                let j = v[b][s]
-                    + lam * tables.cb[s].symbol_len(c) as f64
-                    + band_dist[b][c]
-                    + lam * band_bits[b][c] as f64
-                    + if mu > 0.0 {
-                        mu * (CY_BANDSYM + band_cyc[b][c]) as f64
-                    } else {
-                        0.0
-                    };
+                let l = tables.cb[s].symbol_len(c) as u64;
+                if l == 0 {
+                    continue;
+                }
+                let j = v[b][s] + lam * l as f64 + cy_band + band_j[b][c];
                 if j < v[b + 1][c] {
                     v[b + 1][c] = j;
                     from[b + 1][c] = s;
@@ -853,13 +898,19 @@ pub fn quantise_chan_rd(
             }
         }
     }
-    // Coding every band needs no terminator, so it is a candidate end too.
-    for s in 0..=k {
+    // Coding every band needs no terminator, so it is a candidate end too — and the
+    // comparison excludes the sentinel context, as the reference's `for s < K` does.
+    for s in 0..k {
         if v[NBANDS][s] < best_total {
             best_total = v[NBANDS][s];
             best_end = (NBANDS, s);
         }
     }
+    assert!(
+        best_end.0 != NONE,
+        "no class path exists: the table set has no reachable terminator, which the \
+         EOB assertion above is meant to have caught"
+    );
 
     let (best_b, _) = best_end;
     // Backtrack the class of each coded band.
@@ -874,19 +925,19 @@ pub fn quantise_chan_rd(
     // Re-derive the magnitudes for the classes the path chose. Keeping them for every
     // (band, class) would be 32 KB of dead alternatives per channel.
     let mut bands = Vec::with_capacity(best_b);
-    let mut dist = 0f64;
     let mut bits = 0u64;
+    // The band-symbol cycle charges the reference tracks and then removes again: `cyc` is
+    // `Σ (CY_BANDSYM + band_cyc)` over the emitted bands, plus the terminator's symbol.
+    let mut cyc = 0f64;
     let mut ctx = k;
     for (b, &klass) in classes.iter().enumerate() {
         bits += tables.cb[ctx].symbol_len(klass) as u64;
         ctx = klass;
         if klass == 0 {
-            // A zero band inside the coded range still loses all of its energy, and that
-            // energy is distortion like any other. Charging it in the shortest path but not
-            // in the reported total would understate the cost of every plan that leaves a
-            // hole in the middle of the spectrum — and this number is what the allocation
-            // compares frames on.
-            dist += energy[b];
+            // A zero band inside the coded range still loses all of its energy, and the
+            // shortest path already charged it (`band_j[b][0]`); nothing is added here, and
+            // the reported `j` is the path's own total rather than a re-sum.
+            cyc += CY_BANDSYM as f64;
             bands.push(Band::zero());
             continue;
         }
@@ -912,17 +963,17 @@ pub fn quantise_chan_rd(
                 v
             };
         }
-        dist += rd.dist;
         bits += rd.bits;
+        cyc += CY_BANDSYM as f64 + band_cyc[b][klass] as f64;
         bands.push(band);
     }
-    dist += suffix[best_b];
     if best_b < NBANDS {
         bits += tables.cb[ctx].symbol_len(k) as u64;
+        cyc += CY_BANDSYM as f64;
     }
     ChanRd {
         chan: Chan { bands },
-        dist,
+        j: best_total - mu * cyc,
         bits,
     }
 }

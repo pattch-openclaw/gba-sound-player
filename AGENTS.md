@@ -59,7 +59,7 @@ Run with `. .agents/env.sh`:
 | `make uli-test` | uli-lite corpus 6 tests; uli-enc **17 suites / 93 tests** |
 | `make uli-overlay-test` | pass (product + `verify` builds) |
 | `make uli-probe` | 2,400 `band_rdo` cases byte-for-byte; MDCT golden matches |
-| `make uli-frame-diff` | **exits 2 by design** while it has findings (PR #192/#193 work) |
+| `make uli-frame-diff` | **exit 0**: bits, stream, cycles, counters and `D` identical on 24 of 24 frozen codings (S8-5 items 1–3); exit 2 means a divergence reopened |
 | `make uli-plan-diff A=… B=…` | exit 0 identical / 2 different, as documented |
 | `make uli-oracle-check` | exit 0: the oracle is the recorded `clean` build (`sha256 1991ee6c…`, zero fused sites); exits 2 on any other binary or a fused decision path |
 | `make uli-accept ULI_ACCEPT_ONLY=fast` | ~15 s, **exits 2 (DIFF)**, which is the expected S8 answer today; the fast cell needs no corpus |
@@ -113,8 +113,9 @@ on a bare checkout.
    Dockerfile). A mismatched runner is a confusing boot failure, not a build error.
 7. **The ULI2 S8 instruments are off the gate path on purpose.** `uli-probe`,
    `uli-frame-diff`, `uli-accept` and `uli-oracle-check` compile, run or read the
-   off-tree oracle; E-R1 forbids the dependency, not the oracle. `uli-frame-diff`
-   and `uli-accept` exit 2 while they have findings; that is not a broken harness.
+   off-tree oracle; E-R1 forbids the dependency, not the oracle. `uli-frame-diff` exits 0
+   since S8-5 (identical on 24 of 24) and `uli-accept` exits 2 while it has findings; neither
+   is a broken harness.
    `uli-accept ULI_ACCEPT_ONLY=fast` is the one acceptance cell that needs no
    corpus, and it is the S8 iteration loop.
 8. **`make clean` is shallow.** It removes ROMs/assets/logs but keeps every
