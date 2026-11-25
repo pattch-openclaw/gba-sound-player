@@ -835,6 +835,22 @@ numbers *of that day* and are superseded by the current state at the top of
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md); each
 entry is kept for the decision and its reasoning, not for its numbers.**
 
+- **2026-11-25 (later) — S8-5's coder landed, and the reference's arithmetic is now ours at a
+  frozen plan.** Three changes closed the whole coder half of the divergence inventory: the
+  band's Lagrangian is accumulated the way the reference accumulates it (per tuple, and the
+  frame's `D` is *derived* from it as `J − λ·(bits − 1)` rather than summed), the class
+  Viterbi charges its terminator and refuses a zero-length EOB, and the `allz` `0.4·D` guard
+  is in — with every term added in the reference's order. `make uli-frame-diff` reports
+  **identical on 24 of 24 frozen codings: bits, stream, cycles, counters and `D`, worst 0
+  ULP**, where it began at 76 ULP of `D` with one divergent stream. Two consequences are
+  recorded rather than assumed: the derivation was the *whole* of the residual `D` gap (the
+  fused-oracle contraction was only ~27 ULP, and S8-4b had already removed it), and the
+  "equal-cost tie" at frame 1 `g=100 ms=1` was the unpriced terminator, not a tie rule. The
+  suite is 97 tests; the clean `band_rdo` golden (`fixtures/band_rdo_clean.txt`,
+  `make uli-band-rdo-fixture-clean`) is the fixture that makes a *bitwise* `D` claim possible,
+  and the committed fused one stays as a pin at 2 ULP. What remains in S8 is the plan, not the
+  coder: S8-2 (P2), S8-6 (the trainer) and S8-7 (the search).
+
 - **2026-11-25 — the oracle is a binary, not a specification: byte-exactness is pinned to a
   build, and the prerequisites before the search are landed.** Three rulings, all from
   measurement taken while doing S8's prerequisites.
