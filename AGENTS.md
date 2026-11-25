@@ -61,7 +61,7 @@ Run with `. .agents/env.sh`:
 | `make uli-probe` | 2,400 `band_rdo` cases byte-for-byte; MDCT golden matches |
 | `make uli-frame-diff` | **exits 2 by design** while it has findings (PR #192/#193 work) |
 | `make uli-plan-diff A=… B=…` | exit 0 identical / 2 different, as documented |
-| `make uli-oracle-check` | exit 0: the oracle's sha256 and fused-multiply map are the recorded ones (`--expect clean` exits 2 until the oracle is rebuilt contraction-free) |
+| `make uli-oracle-check` | exit 0: the oracle is the recorded `clean` build (`sha256 1991ee6c…`, zero fused sites); exits 2 on any other binary or a fused decision path |
 | `make uli-accept ULI_ACCEPT_ONLY=fast` | ~15 s, **exits 2 (DIFF)**, which is the expected S8 answer today; the fast cell needs no corpus |
 | `make uli-bench` | ROM built and ran headless: `[uli-bench] PASS` |
 | `make flac-check` | pass (gates + overlay + product + playback + spike) |
@@ -78,15 +78,18 @@ on a bare checkout.
 
 ## Gotchas found the hard way
 
-1. **The ULI2 oracle is a binary, not a specification — and it fuses.** Byte-exactness
-   against `$GBA_AUDIO/build/uli_enc` is a claim about *that build*: its Makefile says
-   `-O2 -march=native` and GCC defaults to `-ffp-contract=fast`, so the shipped binary has
-   **35 fused multiply-adds, 13 of them on the encoder's decision path** (`frame_code`,
-   `band_rdo`, `curves_compute`, `allocate`). Rust does not fuse, so a byte-identical blob
-   cannot be derived from that binary by arithmetic parity — only approximated. Run
-   `make uli-oracle-check` before any S8 measurement and read it; the oracle of record is
-   meant to be rebuilt with `-ffp-contract=off` (PLAN-OF-RECORD §S8-4b). Do not "fix" a map
-   difference by re-pinning the script.
+1. **The ULI2 oracle is a binary, not a specification.** Byte-exactness against
+   `$GBA_AUDIO/build/uli_enc` is a claim about *that build*, and the two builds that have
+   existed differ: the Makefile's default (`-O2 -march=native`, GCC's `-ffp-contract=fast`)
+   produced **35 fused multiply-adds, 13 on the encoder's decision path** (`frame_code`,
+   `band_rdo`, `curves_compute`, `allocate`), which Rust cannot reproduce because it does not
+   fuse. Since S8-4b the oracle of record is the contraction-free rebuild —
+   `sha256 1991ee6c…`, built `-ffp-contract=off -march=armv8-a`, **zero** fused sites — and
+   the old binary survives as the `native` profile. Run `make uli-oracle-check` before any S8
+   measurement: it fails on a different sha256 or a fused decision path. `uli_probe.py`
+   compiles the reference's C and therefore uses the same float flags; do not "fix" a map
+   difference by re-pinning the script. The committed `band_rdo` golden is a *fused* build's
+   answer, so its `D` column cannot be matched bitwise by a clean or Rust build (2 ULP).
 2. **flac/metaflac must be 1.5.0.** Ubuntu 24.04 ships 1.4.3, which regenerates
    `crates/flac-lite/tests/gfp/p2_fixed0_stereo_16384_b2048.gfp` as different
    bytes (13,577 vs 13,898). `make gafp-pack-check` then fails inside

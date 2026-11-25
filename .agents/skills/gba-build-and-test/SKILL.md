@@ -198,8 +198,10 @@ exports, so source it before `make`.
   (0 tests, expected), `make check` clean, `make uli-check` pass, `make uli-test`
   **17 suites / 93 tests**, `make uli-overlay-test` pass, `make uli-probe` reproduces the
   2,400 `band_rdo` cases, `make uli-frame-diff` exits 2 with findings (expected),
-  `make uli-oracle-check` prints the oracle's sha256 and fused-multiply map (exit 0 while the
-  map is the recorded one, 2 when it drifts — read the note, do not re-pin it),
+  `make uli-oracle-check` exit 0 — the oracle is the recorded `clean` build
+  (`sha256 1991ee6c…`, zero fused multiply-adds; the pre-S8-4b fusing binary is the named
+  `native` profile, and a mismatch means the measurements are against a different oracle —
+  read the note, do not re-pin it),
   `make uli-accept ULI_ACCEPT_ONLY=fast` runs the S8 progress cell in ~15 s and exits 2
   (DIFF is the expected answer until S8 closes),
   `make uli-bench` `[uli-bench] PASS`, `make flac-check` pass, `make gafp-pack-check`
