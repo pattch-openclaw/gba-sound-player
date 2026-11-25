@@ -865,13 +865,19 @@ uli-accept:
 
 # S8's oracle-shape instrument (inventory row 15): the reference binary's identity, the
 # flags its Makefile claims, and its fused-multiply map, function by function. Byte
-# exactness is a claim about *this binary*: `-march=native` plus GCC's default
-# `-ffp-contract=fast` put 35 FMA sites in the shipped oracle, 13 of them on the decision
-# path (frame_code, band_rdo, curves_compute, allocate) where our non-fusing Rust cannot
-# match by construction. Exits 2 when the map is not the recorded one, or (with
-# `--expect clean`) when a rebuilt oracle still fuses on the decision path.
-# Deliberately NOT on any gate's path: it reads an off-tree binary.
-ULI_ORACLE_EXPECT ?= native
+# exactness is a claim about *this binary*, and the two recorded builds differ:
+#
+#   clean   (the oracle of record since 2026-11-25, S8-4b) — built with
+#           `-ffp-contract=off -march=armv8-a`, sha256 1991ee6c…, **zero** fused sites.
+#   native  (the pre-S8-4b binary) — `-O2 -march=native` with GCC's default
+#           `-ffp-contract=fast`: 35 fused sites, 13 on the decision path (frame_code,
+#           band_rdo, curves_compute, allocate), where our non-fusing Rust cannot match by
+#           construction. Kept as a named profile so a tree that still has it can be told
+#           what it is.
+#
+# Exits 2 when the binary is not the expected one, or when a `clean` build still fuses on
+# the decision path. Deliberately NOT on any gate's path: it reads an off-tree binary.
+ULI_ORACLE_EXPECT ?= clean
 uli-oracle-check:
 	@test -x $(GBA_AUDIO)/build/uli_enc || { echo "uli-oracle-check: no reference encoder (make -C $(GBA_AUDIO)/encoder)"; exit 1; }
 	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/check_uli_oracle.py --expect $(ULI_ORACLE_EXPECT)

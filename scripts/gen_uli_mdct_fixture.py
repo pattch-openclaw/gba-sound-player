@@ -103,6 +103,11 @@ def main() -> int:
     in_path.write_bytes(album())
 
     cc = os.environ.get("CC", "cc")
+    # As in `gen_uli_band_rdo_fixture.py`: these defaults reproduce the committed fixture, and
+    # the *committed* coefficients came from a build with GCC's default float contraction
+    # (`fast`) while the oracle of record since S8-4b is contraction-free. It does not matter
+    # here — `mdct_frame` narrows to f32, so a 1-ULP f64 difference almost never survives —
+    # which is why this golden is still bitwise and `band_rdo`'s `D` is not.
     flags = os.environ.get("CFLAGS", "-O2 -march=native -std=gnu11 -w").split()
     with tempfile.TemporaryDirectory() as td:
         probe = Path(td) / "probe.c"

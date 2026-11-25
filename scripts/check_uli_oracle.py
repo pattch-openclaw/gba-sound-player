@@ -69,9 +69,14 @@ ROOT = Path(__file__).resolve().parent.parent
 GBA_AUDIO = Path(os.environ.get("GBA_AUDIO", ROOT.parent / "gba-audio"))
 REF = GBA_AUDIO / "build/uli_enc"
 
-# The recorded map, measured 2026-11-25 on aarch64 from the off-tree Makefile's
-# `CFLAGS ?= -O2 -march=native -std=gnu11 -Wall -Wno-unused-function` (GCC defaults to
-# `-ffp-contract=fast`, and this binary has fused sites in ten functions).
+# The two recorded builds. **`clean` is the oracle of record since 2026-11-25 (S8-4b)**;
+# `native` is the binary it replaced, kept as a named profile so a tree that still has it
+# can be told what it is rather than only that it is wrong.
+#
+# `native` was built with the off-tree Makefile's default
+# `CFLAGS ?= -O2 -march=native -std=gnu11 -Wall -Wno-unused-function`, and GCC's default
+# `-ffp-contract=fast` fused multiply-adds in ten functions — 13 of them on the decision
+# path, which is why exactness against it was never attainable by construction.
 RECORDED_NATIVE_FMA = {
     "main": 16,
     "frame_code": 6,
@@ -83,6 +88,22 @@ RECORDED_NATIVE_FMA = {
     "proxy_report.constprop.0": 1,
     "now": 1,
     "main._omp_fn.0": 1,
+}
+
+RECORDED = {
+    "clean": {
+        "sha256": "1991ee6c2e9f039cd2bc974abcd193f793c147cfdfd040cba2fd2d009b50ae6b",
+        "cflags": "-O2 -std=gnu11 -Wall -Wno-unused-function -ffp-contract=off "
+        "-march=armv8-a",
+        "fma": {},
+        "note": "rebuilt 2026-11-25 (S8-4b); zero fused multiply-add sites anywhere",
+    },
+    "native": {
+        "sha256": "71df29fef11af785cd19f8c72c32afc947cfd2321819a7312718c3dad266e3a7",
+        "cflags": "-O2 -march=native -std=gnu11 -Wall -Wno-unused-function",
+        "fma": RECORDED_NATIVE_FMA,
+        "note": "the pre-S8-4b binary: 35 fused sites, 13 on the decision path",
+    },
 }
 
 # The functions whose arithmetic can change the *bytes*. `frame_code` codes a frame;
@@ -161,9 +182,13 @@ def class_of(fn: str) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ref", type=Path, default=REF, help=f"oracle binary (default {REF})")
-    ap.add_argument("--expect", choices=("native", "clean"), default="native",
-                    help="native: the map recorded 2026-11-25. clean: a contraction-free "
-                         "rebuild, which must have no fused site on the decision path")
+    ap.add_argument("--expect", choices=("native", "clean"), default="clean",
+                    help="clean: the oracle of record — no fused site on the decision path "
+                         "and the recorded sha256 (default). native: the pre-S8-4b binary, "
+                         "as a named historical profile")
+    ap.add_argument("--allow-rebuild", action="store_true",
+                    help="tolerate a sha256 that is not the recorded one, for a deliberate "
+                         "rebuild that will re-record it. The map is still checked")
     args = ap.parse_args()
 
     ref = args.ref
@@ -181,12 +206,11 @@ def main() -> int:
     print(f"binary   {ref.stat().st_size} bytes  sha256 {sha}")
     flags = makefile_flags(GBA_AUDIO / "encoder/Makefile")
     for key in FLAG_KEYS:
-        if key in flags:
+        if flags.get(key):
             print(f"{key:<8} {flags[key]}")
-    if "-march=native" in flags.get("CFLAGS", ""):
-        print("note     -march=native is set in CFLAGS: the oracle is ISA-specific")
-    if "-ffp-contract=off" not in flags.get("CFLAGS", ""):
-        print("note     CFLAGS does not pin -ffp-contract: GCC's default is `fast` (fuse)")
+    print("         ^ the Makefile's default. `CFLAGS ?=` means an override wins, and the")
+    print("           recorded builds below were built with one — so this line describes the")
+    print("           *file*, not necessarily the binary. The map is what describes the binary.")
     print()
     print("byte-exactness against this binary is a same-host, same-binary claim (E-R5's")
     print("float clause). A rebuild elsewhere, or with different float flags, is a different")
@@ -194,6 +218,12 @@ def main() -> int:
     print()
 
     counts = fma_map(ref, mnemonics)
+    want = RECORDED[args.expect]
+    print(f"expect   {args.expect} ({want['note']})")
+    print(f"         built with {want['cflags']}")
+    sha_ok = sha == want["sha256"]
+    print(f"recorded {want['sha256'][:16]}…  {'MATCH' if sha_ok else 'DIFFERS'}")
+    print()
     print("fused multiply-add sites, by function:")
     if not counts:
         print("  none")
@@ -208,37 +238,41 @@ def main() -> int:
         print("(`--expect clean`) and re-taken measurements.")
     else:
         print("the decision path is contraction-free: arithmetic parity is attainable by")
-        print("construction, and the MDCT's remaining sites are absorbed by the f32 narrowing.")
+        print("construction, and any MDCT sites are absorbed by the f32 narrowing.")
     print()
 
-    if args.expect == "native":
-        ok = counts == RECORDED_NATIVE_FMA
-        if ok:
-            print("OK: the oracle's fused-multiply map is the one the inventory was built on.")
-            return 0
-        print("CHANGED: the oracle's float arithmetic is not the shape the record describes.",
-              file=sys.stderr)
-        for fn in sorted(set(counts) | set(RECORDED_NATIVE_FMA)):
-            got, want = counts.get(fn, 0), RECORDED_NATIVE_FMA.get(fn, 0)
-            if got != want:
-                print(f"  {fn}: {got} fused sites, recorded {want}", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("Every S8 measurement, and every divergence already attributed, was taken",
-              file=sys.stderr)
-        print("against a different oracle. Fix the build flags off-tree or re-take the",
-              file=sys.stderr)
-        print("measurements; do not re-pin this script.", file=sys.stderr)
-        return 2
-
-    # `--expect clean`: a contraction-free oracle. Anything left on the decision path means
-    # the rebuild did not do what it claims, and the MDCT's sites are tolerated by class.
-    if not decision:
-        print("OK: no fused multiply-add on the decision path (contraction-free oracle).")
+    failures = []
+    if args.expect == "clean":
+        if decision:
+            failures.append(
+                f"{sum(decision.values())} fused site(s) on the decision path "
+                f"({', '.join(sorted(decision))})"
+            )
+    elif counts != want["fma"]:
+        for fn in sorted(set(counts) | set(want["fma"])):
+            got, exp = counts.get(fn, 0), want["fma"].get(fn, 0)
+            if got != exp:
+                failures.append(f"{fn}: {got} fused sites, recorded {exp}")
+    if not sha_ok and not args.allow_rebuild:
+        failures.append(
+            f"the binary is not the recorded {args.expect} build (sha256 {sha[:16]}… vs "
+            f"{want['sha256'][:16]}…)"
+        )
+    if not failures:
+        print(f"OK: this is the recorded {args.expect} oracle"
+              + ("" if sha_ok else " (map matches; sha differs, tolerated)"))
         return 0
-    print("NOT CLEAN: the decision path still carries fused multiply-add sites.",
+    print("CHANGED: the oracle is not what the record describes.", file=sys.stderr)
+    for f in failures:
+        print(f"  {f}", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("Every S8 measurement, and every divergence already attributed, was taken",
           file=sys.stderr)
-    for fn, n in sorted(decision.items()):
-        print(f"  {fn}: {n}", file=sys.stderr)
+    print("against a specific binary. Fix the build flags off-tree, re-record with",
+          file=sys.stderr)
+    print("`--allow-rebuild` once the new sha is written into PLAN-OF-RECORD §S8-4b, or",
+          file=sys.stderr)
+    print("re-take the measurements; do not re-pin this script quietly.", file=sys.stderr)
     return 2
 
 

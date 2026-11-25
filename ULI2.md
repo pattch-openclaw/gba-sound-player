@@ -351,8 +351,8 @@ that is S8, in progress in [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite
 §S8 (S8-0, S8-1, S8-3, S8-4 and S8-5 item 4 landed; §S8's sub-step table is the status of
 record). And one thing S8 found that is not about this encoder at all: **the oracle is a
 binary, not a specification** — its build fuses multiply-adds on the search's decision path,
-so the oracle of record is a contraction-free rebuild whose sha256 is recorded (§Decision
-log, 2026-11-25).
+so the oracle of record is a contraction-free rebuild — **`sha256 1991ee6c…`, zero fused
+sites** — whose identity `make uli-oracle-check` checks (§Decision log, 2026-11-25).
 
 **Target.** Reimplement any C-language tooling or source material in Rust and
 remove the dependency on `gba-audio` and its C sources. That means, at minimum:
@@ -488,8 +488,8 @@ product codec.** mGBA, WAITCNT 4/2, 262,144-cycle period, both corpora pinned
   [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) §S7.
 - **Still open:** the non-decode half of the gate (above); the dense-frame tail
   of the entropy path; the encoder's **acceptance** (S8 — S1–S7 and S8-0/S8-1/S8-3/S8-4 have
-  landed, but no matrix cell is byte-identical yet, and the oracle-of-record rebuild is owed
-  before the remaining work can be attributed); the app's asset path onto it (R7/Q3 — `make uli-album-asset`
+  landed, including S8-4b's oracle-of-record rebuild, but no matrix cell is byte-identical
+  yet — S8-5 items 1–3 are next); the app's asset path onto it (R7/Q3 — `make uli-album-asset`
   still produces the bench corpus with the reference, by design); and a licensing/publish
   decision (`publish = false`).
 
@@ -849,10 +849,20 @@ entry is kept for the decision and its reasoning, not for its numbers.**
   the gate's MATCH table**, and `make uli-oracle-check` (S8-4b) is the instrument that says
   which binary is in play and where its fused sites are. The alternative — reproducing GCC's
   fusion in Rust with `mul_add` — is rejected: it buys parity with one compiler's choices and
-  loses it on the next rebuild. **The rebuild itself is the one prerequisite this tree cannot
-  discharge itself**: the binary lives off-tree by E-R1 and changing it changes the artefact
-  `uli-probe`, `uli-frame-diff` and `uli-accept` all measure, so it is a deliberate step with
-  its own command (in §S8), not a side effect of `make`.
+  loses it on the next rebuild. **The rebuild was taken the same day**, because it changes the
+  artefact `uli-probe`, `uli-frame-diff` and `uli-accept` all measure and was therefore a
+  deliberate step, not a side effect of `make`: the oracle of record is now 75,944 bytes,
+  **`sha256 1991ee6c2e9f039cd2bc974abcd193f793c147cfdfd040cba2fd2d009b50ae6b`, with zero fused
+  multiply-adds**, and `make uli-oracle-check` fails on any other binary or on a fused decision
+  path. Two consequences were found by doing it rather than by planning it: `scripts/uli_probe.py`
+  had been compiling the reference's C with the *old* oracle's flags (GCC's default
+  contraction), so the probe is not a differential against a clean binary unless it is built
+  clean — it now is; and the committed `band_rdo` golden is a fused build's answer (the
+  contraction-free build of the same C agrees within 2 ULP in `D` and exactly everywhere else),
+  so S8-5's bitwise-`D` gate needs an **additional** clean golden rather than a movement of the
+  committed pin. Re-taken against the clean oracle, the frozen-plan differential's worst `D`
+  gap fell **103 → 76 ULP**, which says contraction was ~27 ULP and the derivation is the rest
+  — the split S8-5 step 1 assumes, now measured.
   2. **`D` parity means bitwise, and it is arrived at by reproducing the derivation.** The
   reference *derives* a frame's distortion as `J − λ·(bits − 1)` (`enc_core.c:404`) where we
   sum it directly; the resulting 103 ULP is a derivation mismatch, not accumulation noise.
