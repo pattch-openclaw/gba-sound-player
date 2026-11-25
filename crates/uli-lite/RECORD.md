@@ -3255,6 +3255,47 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
+- **2026-11-23 — S8-5 item 4: the cycle model matches, and the plan divergence does not care.**
+  `rd::frame_ops` stopped counting `long_codes` — the reference's *encoder* never sets that
+  field (its decoder charges it, `uli_dec_ref.c:32`), so `uli_cycle_model` ran with it at zero
+  and ours ran with `40 × long_codes` too much. The arithmetic was checked before the code
+  changed: `cycles − 40·long_codes` was the reference's number on **23 of 24** frozen codings,
+  and the single residual was `45` on the tie frame, whose `escs` genuinely differs by one
+  (`45` = `ULI_CY_ESC`).
+
+  After the change, over the same 24 codings: **`cycles` same on 23 of 24, `long_codes` same on
+  24 of 24**, `bits`/`stream` unchanged — the one cycle residual is the tie, not the model.
+  `tests/frozen.rs` now pins the reference's cycle estimate for seven `(frame, g, ms)` cases
+  (and asserts `long_codes` stays 0), so the model cannot drift back.
+
+  Then the album, because the point of the fix was `--cap` admission. `biomaster` at S7's
+  flags, our blob `a6a18dd3…95a4`, 3,293,728 B, **31.91 dB** (was 31.89 at 3,293,696 B),
+  est max/mean cycles **194487/178154** — and the reference is unchanged at 3,293,048 B,
+  193986/177949:
+
+  | reading | before item 4 | after | reference |
+  |---|---|---:|---:|---:|
+  | frames differing in `g` | 7,059 | **7,140** | — |
+  | frames differing in `ms` | 725 | **722** | — |
+  | table bytes differing | 1,971 | **1,956** | — |
+  | `est_max_cycles` | 193,986 | **194,487** | 193,986 |
+  | `est_mean_cycles` | 178,159 | **178,154** | 177,949 |
+  | pooled codec SNR | 31.89 | **31.91** | 31.87 |
+
+  Two things this settles, and neither is the one hoped for. **The fix is correct and it did
+  not move the plan closer.** Divergent frames went *up* by 81: a different admitted set moves
+  choices in both directions and near-ties resolve either way, so "how many frames agree" was
+  never a distance metric — it is a cheap reading that happens to be wrong, and the plan now
+  says so. **And the header cycle fields cannot match until the plan does**: `est_max_cycles`
+  is a maximum over the *chosen* plan, so before the fix it matched the reference by
+  coincidence (our inflated estimate peaked on the same frame) and now reads 501 higher.
+  Agreement there is a consequence of S8-7, not of this item.
+
+  What the fix buys is the precondition: the per-frame estimate is now the reference's number,
+  so when the search converges the header agrees *because the model is right* rather than by
+  luck. The remaining cause of the plan divergence is where the inventory already said it was —
+  the candidate window and the training shape (rows 6, 7, 9) — and that is S8-7.
+
 - **2026-11-23 — S8-1's Rust half: the frozen-plan differential runs, and the coder is not the
   first cause either.** S8-1's probe could only say what the *oracle* does. `uli_enc::frozen`
   (`code_at`: one `rd::measure`, then one `write_frame` of exactly what it measured) plus

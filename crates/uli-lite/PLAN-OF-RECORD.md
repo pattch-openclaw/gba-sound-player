@@ -1166,7 +1166,7 @@ read-side, so this does not reopen the paragraph above.
 | **S5** | Album assembly (WAV front end, gapless join, tags verbatim), `--budget`/`--cap` on real sizes, frame-parallel search | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes (each seeked to its own preroll); hashes pinned; too small refuses **before the first frame**, citing both numbers; a 32,768 Hz WAV reaches the same blob its pre-resampled PCM does, and a resampled WAV is quoted by SNR; the CLI prints the reference's columns | **done** — see "S5" below for the numbers and the defaults-restored failure |
 | **S6** | `mu` (decoder-cycle-aware) search: re-code an over-cap frame by dropping its cheapest coefficients instead of refusing the candidate | E-R8 **discharged**; E-R7 **contributed to, not discharged** — its criterion is codec-only and unmeasured, and S7 accepts it | a knob that demonstrably trades SNR for decode cycles, measured on the bench — and, measured 2026-11-20, it closes the last high-rate gap: at `--budget 400000 --cap 74` the equivalent mechanism is worth **1.48 dB** to the oracle, against a 1.15 dB gap | **done** — `--musearch 1` by default; worth **1.44 dB** here (39.57 → 41.01 dB) and the oracle's 41.02 is 0.01 dB above, cap 74.0% max on both arms. See "S6" below |
 | **S7** | **The acceptance matrix, as a buildable target** | E-R2, E-R5, E-R7 (and E-R1's oracle posture) | the four cells below run in CI-shaped form and compare SHA-256s against the reference's blobs, including the two header cycle fields | **done** — `make uli-accept` runs the four cells and the `--dacw 1` row; every cell is a **DIFF**, whose first content difference is inside the **trained tables** in every cell, and which is **unattributed** (see "S7" below) |
-| **S8** | **Byte-exactness on the reference's `--dacw 0` arm**: attribute the S7 DIFF with instruments rather than bytes (the pass-1 plan is not in the blob), then close every named divergence until the matrix matches — the SNR arm is **withdrawn from S8** and becomes S9 | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R2 (the boundary is PCM), E-R7 (moved to S9 — see "S8 — the plan") | every matrix cell byte-identical at `--dacw 0`, checked by `make uli-accept`, with the four instruments of S8-1…S8-4 in place and every pin re-recorded | **in progress** — S8-1 (the probe, `make uli-probe`, now two-sided via `uli_enc::frozen` and `make uli-frame-diff`) and S8-3 (the plan/table diff, `make uli-plan-diff`) landed 2026-11-23. S8-3 took the first-order attribution — the plan differs, so the counts do, so the tables are downstream — and the frame differential narrowed it again: at a frozen plan the **coder** reproduces the reference's bits on 24 of 24 codings, so neither the coder nor the trainer is the first cause; the search is, plus the cycle model (inventory #14). Five sub-steps are unstarted, and S8-5's distortion gate was restated by measurement (§S8). The scope, the divergence inventory, the instruments and each sub-step's gate are in "S8 — the plan" below |
+| **S8** | **Byte-exactness on the reference's `--dacw 0` arm**: attribute the S7 DIFF with instruments rather than bytes (the pass-1 plan is not in the blob), then close every named divergence until the matrix matches — the SNR arm is **withdrawn from S8** and becomes S9 | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R2 (the boundary is PCM), E-R7 (moved to S9 — see "S8 — the plan") | every matrix cell byte-identical at `--dacw 0`, checked by `make uli-accept`, with the four instruments of S8-1…S8-4 in place and every pin re-recorded | **in progress** — S8-1 (the probe, `make uli-probe`, now two-sided via `uli_enc::frozen` and `make uli-frame-diff`) and S8-3 (the plan/table diff, `make uli-plan-diff`) landed 2026-11-23. S8-3 took the first-order attribution — the plan differs, so the counts do, so the tables are downstream — and the frame differential narrowed it again: at a frozen plan the **coder** reproduces the reference's bits on 24 of 24 codings, so neither the coder nor the trainer is the first cause; the search is, plus the cycle model (inventory #14). Five sub-steps are unstarted, S8-5 has begun (item 4 — the cycle model's `long_codes` — is done and its distortion gate was restated by measurement), and the next open question is the search (§S8). The scope, the divergence inventory, the instruments and each sub-step's gate are in "S8 — the plan" below |
 
 S7 is a step rather than a property of the plan because it has work in it — a host
 target that builds nothing of ours from C, calls the off-tree binary, compares hashes
@@ -1297,7 +1297,7 @@ tree; C anchors are the off-tree reference `../gba-audio/encoder/`.
 | 11 | retry loop | 6 attempts; `tgt -= (size−budget)·8·1.02 + 2000` (`uli_enc.c:405`); re-allocates on the **same** curves | 10 attempts (`lib.rs:195`); re-runs coarse **and refine** on a failed attempt (`lib.rs:421-436`) | **differs** |
 | 12 | `--stride`/`--fine` themselves | no such knob; the sweep is fixed by the window | user-visible, defaults 8/4 (`bin/uli-enc.rs:67-68`) | **must go** (S8-0) |
 | 13 | container sizing arithmetic | `(budget − overhead)·8 − 64` (`uli_enc.c:316`) | believed equal; S7's size deltas are attributable to stream bytes alone | **to confirm** at S8-7 |
-| 14 | the cycle model: **`long_codes`** | the *encoder* never increments `ops.long_codes` — its decoder does (`uli_dec_ref.c:32`), so `uli_cycle_model` is called with that term at zero | `frame_ops` counts every code longer than `LUTB` (`rd.rs:295`) | **localised 2026-11-23**: with the counters printed on both sides, **eight of the nine agree on every one of the 24 codings**, and the ninth is `long_codes` — ours 26/5/5/7 against the reference's **0/0/0/0** on the four frames at `g=100 ms=0`, which is `40 ×` each frame's cycle delta to the unit. (`escs` moves on exactly one frame, the one whose *coding* is the equal-cost tie above, so it is a consequence and not a second cause.) The reference's encoder simply omits a term its own decoder charges; matching it is S8-5 item 4 |
+| 14 | the cycle model: **`long_codes`** | the *encoder* never increments `ops.long_codes` — its decoder does (`uli_dec_ref.c:32`), so `uli_cycle_model` is called with that term at zero | `frame_ops` counts every code longer than `LUTB` (`rd.rs:295`) | **localised and matched 2026-11-23**: with the counters printed on both sides, **eight of the nine agreed on every one of the 24 codings**, and the ninth was `long_codes` — ours 26/5/5/7 against the reference's **0/0/0/0** on the four frames at `g=100 ms=0`, which is `40 ×` each frame's cycle delta to the unit. The reference's encoder omits a term its own decoder charges, so `rd::frame_ops` no longer counts it (S8-5 item 4, done): the differential now reads **`cycles` same on 23 of 24**, and the one residual is the equal-cost tie's `escs` (one escape, `45` cycles) — the tie, not the model |
 
 Rows 1-4 are the coder, 5-13 the search and its constants. Row 8, and the trainer's
 algorithm in section 3's last row, are the two places we are already right — stated so that
@@ -1525,16 +1525,34 @@ established that the reference charges it, so the omission was right by accident
 rows and is wrong on trained ones. This is where that correction is made. *Gate:* through P1,
 over a probe corpus that includes over-cap frames (so the μ path is exercised), our emitted
 bit stream is **byte-identical** for frozen `(g, ms, tables)`.
-4. **The cycle model (inventory #14) — localised 2026-11-23, and this is the fix.**
-`frame_ops` must leave `long_codes` at zero. The reference's *encoder* never increments it:
+4. **The cycle model (inventory #14) — done 2026-11-23.** `frame_ops` leaves `long_codes`
+at zero. The reference's *encoder* never increments it:
 the counter exists in `UliOps` for the decoder, which charges it (`uli_dec_ref.c:32`), and
 `frame_code` passes `uli_cycle_model` an ops struct whose `long_codes` is therefore always
-zero. Ours counts it, so every coded frame reads high by exactly `40 × long_codes` and
-`--cap` admits fewer candidates than the reference's. Dropping it in the **encoder's**
+zero. Ours counted it, so every coded frame read high by exactly `40 × long_codes` and
+`--cap` admitted fewer candidates than the reference's. Dropping it in the **encoder's**
 counting is the matching change; the product decoder's model stays honest, because that path
-decodes real streams and its long codes are real. *Gate:* `make uli-frame-diff` reports
-`cycles` and `long_codes` **same** on every coding, and S7's two header cycle fields (offsets
-68/72) stop differing for this reason.
+decodes real streams and its long codes are real. *Gate, measured:* `make uli-frame-diff`
+reports `cycles` **same on 23 of 24** and `long_codes` **same on 24 of 24**; the residual is
+the tie frame, where the coding genuinely differs and `escs` moves by one. `tests/frozen.rs`
+now pins the reference's cycle estimate for seven `(frame, g, ms)` cases, so the model cannot
+drift back.
+
+Two corrections come from the album-level run (`biomaster`, same flags as S7's cell), and both
+are worth having *before* the search work rather than after:
+
+- **The header cycle fields cannot match until the plan does.** `est_max_cycles` is the max
+  over *the chosen plan*, so it is a function of the model **and** the plan. Before the fix
+  ours read `193986/178159` against the reference's `193986/177949` — and the max matched by
+  coincidence, because our inflated per-frame estimate happened to peak on the same frame.
+  After the fix it reads `194487/178154`: the mean is 5 closer, the max 501 further, because
+  admitting the candidates we used to exclude let some frame spend more. So the fix's gate is
+  the **per-frame** agreement above, and the header fields become a *consequence* of S8-7.
+- **The count of divergent frames is not a distance metric.** `g` differs on **7,059** frames
+  before the fix and **7,140** after; `ms` on 725 and 722. The fix is right (the model now
+  matches, and the album is 0.02 dB better at 32 bytes more), but "more frames now agree" was
+  never the right way to read it: a different admitted set moves choices in both directions,
+  and near-ties resolve either way. The metric that matters is S8-7's, not this one.
 
 **S8-6 — the trainer (inventory #9, #10).** Feed P2's pass-1 plan to `train::collect` +
 `train::build`. *Gate:* the table region is byte-identical to the blob's, `dq` included
