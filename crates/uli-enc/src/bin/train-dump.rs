@@ -27,6 +27,11 @@
 //! Usage:
 //!   train-dump --dump PLAN.txt --blob REF.uli --album A.f32 --tracks T.tsv [--kappa 0.13]
 //!
+//! `--initial-out PATH` writes the initial tables (after the four `train-itN` rounds) and
+//! `--initial-only` stops there, without running (a)/(b). That is the diagnostic for
+//! S8-7's pass-1 curves: the initial set is what they code under, and row 25's attribution
+//! used it to compare a frame's 56 candidates against the oracle's.
+//!
 //! Exit status: 0 when both table checks match and the counts are exact; 2 on a DIFF (the
 //! `uli_accept.py` convention); 1 on a harness/parse error.
 
@@ -301,6 +306,8 @@ fn main() {
     let mut album_path = None;
     let mut tracks_path = None;
     let mut kappa = 0.13f64;
+    let mut initial_out: Option<String> = None;
+    let mut initial_only = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut take = |name: &str| {
@@ -317,6 +324,8 @@ fn main() {
                     .parse()
                     .unwrap_or_else(|_| usage("bad --kappa"))
             }
+            "--initial-out" => initial_out = Some(take("--initial-out")),
+            "--initial-only" => initial_only = true,
             other => usage(&format!("unknown argument {other:?}")),
         }
     }
@@ -364,6 +373,16 @@ fn main() {
     let mut initial = base.clone();
     for tag in &train_rounds {
         initial = train::build(&initial, &rounds[*tag].stats);
+    }
+    if let Some(path) = initial_out {
+        fs::write(&path, initial.to_blob()).unwrap_or_else(|e| usage(&format!("{path}: {e}")));
+        println!(
+            "  initial tables: {} bytes -> {path}",
+            initial.tables_bytes()
+        );
+    }
+    if initial_only {
+        return;
     }
 
     // (a) the trainer alone: the dumped retrain stats -> tables.

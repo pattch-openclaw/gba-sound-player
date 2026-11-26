@@ -118,7 +118,14 @@ on a bare checkout.
    is a broken harness.
    `uli-accept ULI_ACCEPT_ONLY=fast` is the one acceptance cell that needs no
    corpus, and it is the S8 iteration loop.
-8. **`make clean` is shallow.** It removes ROMs/assets/logs but keeps every
+8. **The acceptance corpus is generated, not committed.** `make uli-album-asset`
+   turns the tracked 96 kHz/24-bit `assets/sound/bioluminescent.wav` through the
+   sibling's `encoder/prep.py` into `examples/uli_bench/assets/album.f32` +
+   `tracks.tsv`, then the reference blob/decode/pin; `make uli-adversarial-asset`
+   adds the fourth matrix slot, and `make uli-cross-asset` / `make uli-two-track-asset`
+   the others. The assets and `src/album_pin*.rs` are gitignored. The full recipe is
+   `ULI2.md` → "The measurement corpus".
+9. **`make clean` is shallow.** It removes ROMs/assets/logs but keeps every
    workspace's `target/`. `make clean-deep` drops ~4.5 GB of caches and makes the
    next full build ~135 s (cold) instead of ~22 s (warm). Don't deep-clean to
    "make sure".
@@ -132,3 +139,5 @@ on a bare checkout.
 - FLAC path: `FLAC.md`, `flac-docs/`
 - Album player: `ALBUM-PLAYER.md`
 - Encoder crate docs: `crates/uli-enc/README.md`
+- Acceptance corpus generation and use: `ULI2.md` → "The measurement corpus";
+  `examples/uli_bench/README.md` → "The corpus"

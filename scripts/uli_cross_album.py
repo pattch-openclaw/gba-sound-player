@@ -14,6 +14,13 @@ The processing recipe is transcribed from the sibling's `tracklist.json`
 44.1 kHz WAVs, which `prep.py` resamples to the codec's 32,768 Hz. Downloads are
 cached in `CACHE`, so a re-run is cheap.
 
+`make uli-cross-asset` is the in-repo target: it runs this script with
+`$GBA_AUDIO/music/tracklist.json`, then `prep.py`, the reference encoder/decoder and
+`scripts/uli_album_pin.py`, writing `examples/uli_bench/assets/cross/` and
+`src/album_pin_cross.rs` (all gitignored). `make uli-accept`'s `cross60` cell uses
+`cross/album.f32`; the fourth slot becomes `adv` when the adversarial corpus exists. See
+`ULI2.md` -> "The measurement corpus".
+
 Usage:
   python3 scripts/uli_cross_album.py TRACKLIST OUTDIR [--cache DIR]
 

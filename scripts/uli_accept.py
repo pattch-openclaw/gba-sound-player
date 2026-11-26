@@ -48,13 +48,25 @@ Usage:
 `fast` is first because S8-5…S8-7 are iterated on it: during those sub-steps it runs
 unpinned and the signal is the diff (first divergent frame, first divergent table field),
 not a hash. The other four cells are the confirmation, and every cell is pinned at S8's
-gate. Since S8-7 (2026-11-26) `fast` and `tiny` are byte-identical to the oracle; the three
-corpus cells need `ULI_ACCEPT_ASSETS`, absent from this checkout, and are the remaining S8
-measurement.
+gate. Since S8-7 (2026-11-26) `fast`, `tiny`, `off-default` and `adv` are byte-identical to
+the oracle; `biomaster` differs in 3 of 16,553 frames and is inventory row 25 in
+`PLAN-OF-RECORD.md` §S8. The three corpus cells need `ULI_ACCEPT_ASSETS`; the corpus is
+generated, never committed.
 
 ULI_ACCEPT_ASSETS points at the corpus (default: examples/uli_bench/assets). It is
 required only by the cells that use it, so `--only fast` runs on a checkout with no
-generated corpus — which is possible precisely because the fast cell is generated.
+generated corpus — which is possible precisely because the fast cell is generated. Populate
+it with:
+
+  make uli-album-asset          # assets/album.f32 + tracks.tsv, biomaster.uli, pin (biomaster)
+  make uli-cross-asset          # assets/cross/ (cross60, or use adv below)
+  make uli-adversarial-asset    # assets/adv/ (the fourth slot replaces cross60)
+  make uli-two-track-asset      # assets/two/ (the player's seek witness)
+
+`make uli-album-asset` takes the tracked 96 kHz / 24-bit master
+`assets/sound/bioluminescent.wav` through the sibling's `encoder/prep.py` (resample to
+32,768 Hz), then the reference encoder/decoder and `scripts/uli_album_pin.py`. The full
+recipe and the gitignore division are in `ULI2.md` -> "The measurement corpus".
 
 Exit status: 0 when every cell MATCHes, 2 when any cell DIFFs, 1 on a harness error
 (missing input, encoder failure, unparseable container).
@@ -75,7 +87,10 @@ ROOT = Path(__file__).resolve().parent.parent
 GBA_AUDIO = Path(os.environ.get("GBA_AUDIO", ROOT.parent / "gba-audio"))
 REF = GBA_AUDIO / "build/uli_enc"
 OURS = ROOT / "crates/uli-enc/target"
-ASSETS = Path(os.environ.get("ULI_ACCEPT_ASSETS", ROOT / "examples/uli_bench/assets"))
+# Absolute: the encoders run with `cwd=work` inside a temp directory, so a relative asset
+# path would resolve there and fail. The Makefile's default is repo-relative; resolve it
+# once, here, and every cell's input is unambiguous.
+ASSETS = Path(os.environ.get("ULI_ACCEPT_ASSETS", ROOT / "examples/uli_bench/assets")).resolve()
 GEN_FIXTURE = ROOT / "crates/uli-lite/tests/fixtures/gen_fixture.py"
 # S8-4's cell. Generated, never truncated: `--frames` rewrites the track table, which is a
 # different input rather than a different setting, and a truncated album's trained tables

@@ -910,7 +910,10 @@ uli-rd-ab:
 # when the search or the container changes, and record the verdict in
 # PLAN-OF-RECORD.md -> S7. The corpus defaults to examples/uli_bench/assets; pass
 # ULI_ACCEPT_ASSETS= when it lives elsewhere. `ULI_ACCEPT_ONLY=fast` runs one cell (the
-# S8 progress signal) and needs no corpus at all.
+# S8 progress signal) and needs no corpus at all. Populate the default corpus with
+# `make uli-album-asset` (biomaster/off-default), `make uli-cross-asset` (cross60) or
+# `make uli-adversarial-asset` (the fourth slot replaces cross60 when present); see
+# ULI2.md -> "The measurement corpus".
 ULI_ACCEPT_ONLY ?=
 uli-accept:
 	@test -x $(GBA_AUDIO)/build/uli_enc || { echo "uli-accept: no reference encoder (make -C $(GBA_AUDIO)/encoder)"; exit 1; }
@@ -976,6 +979,15 @@ uli-bench: uli-bench-rom
 # and re-verifies its published checkpoints against the decoder's 8-bit track
 # output before it will emit a pin. Needs the sibling `gba-audio` checkout and
 # ffmpeg; it therefore never runs in `make test`.
+#
+# The default master is `assets/sound/bioluminescent.wav` (96 kHz / 24-bit,
+# 258.6 s). The 32,768 Hz / 8-bit WAV beside it is a listening derivative, **not**
+# this target's input: `prep.py` resamples the 96 kHz master to 32,768 Hz and
+# writes `album.f32` + `tracks.tsv`, which `make uli-accept`'s `biomaster` and
+# `off-default` cells encode. The bench/gate arms use the resulting
+# `biomaster.uli` and its generated pin. `ULI_ALBUM_WAV` points the same recipe at
+# another master. Full recipe and the other corpora: ULI2.md -> "The measurement
+# corpus — how examples/uli_bench/assets is generated and used".
 #
 # `gba-audio/encoder/prep.py` needs numpy, scipy and soundfile, which a bare
 # system python often lacks (PEP 668). Point `ULI_ALBUM_PY` at a venv:
