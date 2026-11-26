@@ -30,8 +30,10 @@
 use uli_lite::format::{BANDW, CT_PAIR, CT_QUAD, CT_ZERO, M, MAXK, MAXLEN, NBANDS};
 
 use crate::frame;
-use crate::plan::Content;
+use crate::pcm::Samples;
+use crate::plan::{Content, GPlan};
 use crate::quant;
+use crate::rd;
 use crate::tables_default::{Codes, DefaultTables, K};
 
 /// The frequency floor added before the Huffman merge.
@@ -170,6 +172,80 @@ pub fn collect_frames(
     }
     let _ = kappa;
     st
+}
+
+/// S8-7: the reference's initial training shape, `train()` in `uli_enc.c:85-115,322`.
+///
+/// Four outer iterations. Each bisects λ over nine probes in `log(λ) ± 3`, coding every
+/// **8th** frame at `g = g_guess(exp(mid), w[f], κ)` with **M/S forced on**, and comparing
+/// the sampled mean bits/frame — including the M/S header bit — against `target`. The final
+/// λ of that bisection is used to code the sampled frames once more, accumulating the
+/// `EncStats` that `build` turns into the next table set. The returned λ is the reference's
+/// loop state: it also centres the pass-1 window (`g_guess(λ, w) − 7`), which is why it is
+/// returned rather than recomputed.
+///
+/// The coding here is the same `rd::measure` the search uses, at `mu = 0`; the stats come
+/// from `collect_frames` on the sampled frames, so the trainer and the retrain share one
+/// collector. Sequential on purpose: the reference parallelises `count_frames`, and its
+/// `stats_add` order is therefore thread-dependent (inventory row 21); frame order is the
+/// reproducible side of that ULP question, and the integer counts are order-free.
+pub fn reference_train(
+    samples: &Samples,
+    n_samples: usize,
+    w: &[f64],
+    tables: &DefaultTables,
+    target: f64,
+    kappa: f64,
+) -> Result<(DefaultTables, f64), crate::Error> {
+    let nf = w.len();
+    let frames: Vec<usize> = (0..nf).step_by(8).collect();
+    let n = frames.len();
+    let mut coefs: Vec<[f32; M * 2]> = Vec::with_capacity(n);
+    let mut coef = [0f32; M * 2];
+    for &f in &frames {
+        crate::mdct::mdct_frame(samples, f, n_samples, &mut coef);
+        coefs.push(coef);
+    }
+
+    let mut t = tables.clone();
+    let mut lam = 3000.0f64;
+    for _round in 0..4 {
+        let mut lo = lam.ln() - 3.0;
+        let mut hi = lam.ln() + 3.0;
+        for _probe in 0..9 {
+            let mid = 0.5 * (lo + hi);
+            let lambda = mid.exp();
+            let mut sum = 0u64;
+            for (i, &f) in frames.iter().enumerate() {
+                let g = rd::g_guess(lambda, w[f], kappa);
+                let (point, _) = rd::measure(&coefs[i], &t, g, true, kappa, 0.0)?;
+                // `frame_code`'s bits start at 1 for the M/S flag; `measure` reports only
+                // the bands, so the header bit is added here, exactly as the reference's
+                // `R[i] = r.bits` includes it.
+                sum += point.bits + 1;
+            }
+            if sum as f64 / n as f64 > target {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lam = (0.5 * (lo + hi)).exp();
+
+        let mut g_all = vec![0i32; nf];
+        let ms_all = vec![true; nf];
+        let mut chans = vec![[quant::Chan::empty(), quant::Chan::empty()]; nf];
+        for (i, &f) in frames.iter().enumerate() {
+            let g = rd::g_guess(lam, w[f], kappa);
+            g_all[f] = g;
+            let (_, ch) = rd::measure(&coefs[i], &t, g, true, kappa, 0.0)?;
+            chans[f] = ch;
+        }
+        let content = Content::coded(GPlan::new(g_all, ms_all), chans);
+        let st = collect_frames(samples, n_samples, &t, &content, kappa, &frames);
+        t = build(&t, &st);
+    }
+    Ok((t, lam))
 }
 
 /// Rebuild the tables from counts, keeping every structural row of `base`.

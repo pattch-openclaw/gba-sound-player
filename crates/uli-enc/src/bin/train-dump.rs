@@ -11,7 +11,7 @@
 //!   (a) `train::build` from the dumped `retrain` stats, which isolates the trainer's
 //!       table construction (Huffman lengths, `dq`, the carry-over of `dq` rows with too few
 //!       observations to be fitted);
-//!   (b) `train::collect` over the dumped pass-1 plan, sampled every second frame, which
+//!   (b) `train::collect_frames` over the dumped pass-1 plan, sampled every second frame, which
 //!       adds the coder and the collector to the chain. This is S8-6's gate as written:
 //!       feed the plan to `collect` + `build` and require the reference blob's table region.
 //!

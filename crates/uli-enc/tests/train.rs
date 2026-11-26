@@ -25,7 +25,11 @@ use uli_enc::plan::{Content, GPlan};
 use uli_enc::{Args, DEFAULT_CAP_PCT, DefaultTables, Input, train};
 use uli_lite::CodeTables;
 
-const N_SAMPLES: usize = 2048;
+// S8-7: 8,192 samples (17 frames) rather than 2,048 (5). The reference's `train()`
+// samples every 8th frame, so a five-frame album hands it **one** frame and the trained
+// set overfits; the training-pays claim has to be measured on an album long enough for
+// the sampling to mean anything. The search shape is otherwise the shipped one.
+const N_SAMPLES: usize = 8192;
 
 /// Correlated stereo, so both the M/S flag and the per-context statistics have something to
 /// find. The committed MDCT fixture is deliberately uncorrelated and would make training look
@@ -61,28 +65,24 @@ fn args(album: std::path::PathBuf, tracks: std::path::PathBuf, budget: u64, trai
     }
 }
 
-/// A budget that binds on this short album, so the comparison is between two encoders that
-/// spent the same number of bytes rather than two that spent what they liked.
+/// A budget that binds on this album, so the comparison is between two encoders that spent
+/// the same number of bytes rather than two that spent what they liked.
 ///
-/// **Re-measured and moved from 8,000 to 6,600 at S8-0.** The claim and its threshold are
-/// unchanged; the budget moved because 8,000 is the least rate-limited budget that fits this
-/// album, and at that end both table sets land within a rounding of the same near-transparent
-/// plan, so the witness is only just past its own 0.25 dB bar. Measured on this album at the
-/// shipped search shape — one thread, `--musearch 0`, trained against `--no-train` at the same
-/// budget:
+/// **Re-measured at S8-7**, when the search became the reference's: the album is now 8,192
+/// samples (17 frames) for the reason above, and the budget stays 6,600. Measured on this
+/// album at the shipped shape — one thread, `--musearch 0`, trained against `--no-train` at
+/// the same budget:
 ///
-/// | budget | stream bits | trained | built-in | gain |
-/// |---|---|---|---|---|
-/// | 8,000 | 21,088 | 55.41 | 54.98 | +0.43 |
-/// | 7,400 | 16,288 | 55.46 | 54.98 | +0.48 |
-/// | 7,000 | 13,088 | 55.41 | 54.87 | +0.54 |
-/// | 6,600 | 9,888 | 55.23 | 54.12 | **+1.11** |
-/// | 6,200 | 6,688 | 53.69 | 51.20 | +2.49 |
+/// | budget | trained | built-in | gain |
+/// |---|---|---|---|
+/// | 5,600 | 35.17 | 31.55 | +3.62 |
+/// | 6,000 | 44.26 | 42.01 | +2.25 |
+/// | 6,600 | 51.16 | 47.83 | **+3.33** |
+/// | 7,400 | 55.82 | 53.55 | +2.27 |
+/// | 8,000 | 58.54 | 56.46 | +2.08 |
 ///
-/// 6,600 is the product-like regime (309 B/frame against the album's ~199) and about two and a
-/// half times the assertion's margin. Below it the stream stops paying for the 5,212-byte
-/// table blob, which is why the gain rises again at 6,200 while the fidelity falls for both
-/// arms.
+/// (The S8-0 table this replaces was measured on the five-frame album with the old sweep;
+/// it is in `PLAN-OF-RECORD.md` §S8-0 and no longer describes this search.)
 const BINDING: u64 = 6_600;
 
 #[test]

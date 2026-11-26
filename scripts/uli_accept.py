@@ -48,7 +48,9 @@ Usage:
 `fast` is first because S8-5…S8-7 are iterated on it: during those sub-steps it runs
 unpinned and the signal is the diff (first divergent frame, first divergent table field),
 not a hash. The other four cells are the confirmation, and every cell is pinned at S8's
-gate.
+gate. Since S8-7 (2026-11-26) `fast` and `tiny` are byte-identical to the oracle; the three
+corpus cells need `ULI_ACCEPT_ASSETS`, absent from this checkout, and are the remaining S8
+measurement.
 
 ULI_ACCEPT_ASSETS points at the corpus (default: examples/uli_bench/assets). It is
 required only by the cells that use it, so `--only fast` runs on a checkout with no

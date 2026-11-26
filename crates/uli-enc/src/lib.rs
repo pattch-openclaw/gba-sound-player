@@ -304,6 +304,10 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
     let mut report_g: Option<Vec<i32>> = None;
     let mut report_lambda: Option<f64> = None;
     let mut report_mu_frames = 0usize;
+    // The header's cycle fields are the reference's *encoder* model at the chosen plan,
+    // not the decoder's re-measurement of the stream (S8-7). They are set only by the RD
+    // path; the fixed-step and silence paths fall back to the verify decode.
+    let mut search_cycles: Option<(u32, u32)> = None;
 
     // The premise is a property of the *final* tables, so serialise and re-parse
     // them first: a bound checked against the in-memory model would not prove
@@ -366,85 +370,160 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             .collect();
         let w = rd::weights(&pcm, &energy);
 
-        // One search over a given table set, so training can run it twice: once to measure
-        // the album, once to code it with what the measurement produced. The measurement
-        // pass never pays the cycle price: training reads only the plan's symbol counts and
-        // its reconstruction errors, so re-coding there would fit the tables to codings that
-        // never ship. The price belongs to the pass whose bands do.
-        let run = |tbl: &DefaultTables,
-                   musearch: bool|
-         -> Result<(Content, Vec<i32>, f64, usize), Error> {
-            let params = rd::SearchParams {
-                tables: tbl,
-                n_frames: nf,
-                kappa,
-                cap,
-                musearch,
-                force_ms: ms,
-                threads,
-            };
-            // One curve set, measured once. The retry loop below re-allocates on these
-            // same curves, as the reference does (inventory row 11): re-measuring would
-            // move the curves underneath a target that is only being squeezed.
-            let curves = Curves::compute(s, pcm.n_samples as usize, &params)?;
-            let mut target = sizing.target_bits as f64;
-            for attempt in 0..RETRY_ATTEMPTS {
-                let (lambda, picks) = curves.allocate(&w, target, cap)?;
-                let content = curves.to_content(&picks, s, pcm.n_samples as usize, tbl, kappa)?;
-                match Plan::new(&pcm, tbl, &content, budget, cap_pct) {
-                    Ok(_) => {
-                        let mu_frames = picks
-                            .iter()
-                            .enumerate()
-                            .filter(|&(f, &i)| curves.per_frame[f].mu[i] > 0.0)
-                            .count();
-                        return Ok((content, curves.chosen_g(&picks), lambda, mu_frames));
-                    }
-                    Err(Error::Refusal(r)) => {
-                        if attempt + 1 == RETRY_ATTEMPTS {
-                            return Err(Error::Refusal(r));
-                        }
-                        let over = (r.needed as f64 - r.allowed as f64) * 8.0 * 1.02 + 2000.0;
-                        target -= over;
-                        if target < 1000.0 {
-                            // The album cannot be coded that cheaply; say so with the
-                            // numbers rather than looping into a degenerate target.
-                            return Err(Error::Refusal(r));
-                        }
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-            Err(Error::Plan(
-                "the bit target did not converge in the retry loop".into(),
-            ))
-        };
+        // The reference's search, in its order (S8-7): `train()` the initial tables from
+        // the default set, curves 1 over a 28-step window around `g_guess(λ) − 7`, allocate
+        // pass 1, retrain on every second frame of that plan, curves 2 over a 20-step window
+        // around the pass-1 answer, allocate pass 2 with the same-curves retry, then emit.
+        //
+        // The target is the same number the reference derives: `Plan` owns the container
+        // overhead and the `-64` reserve, and the per-frame header allowance is subtracted
+        // once here so the three allocations (pass 1, pass 2 and each retry) share one
+        // expression of it.
+        let target_bits = sizing.target_bits as f64;
+        let alloc_target = target_bits - 3.5 * nf as f64;
+        let (trained, lam) = train::reference_train(
+            s,
+            pcm.n_samples as usize,
+            &w,
+            tables,
+            target_bits / nf as f64 * 0.985,
+            kappa,
+        )?;
+        let initial = if train { trained } else { tables.clone() };
 
-        let (first, _, _, _) = run(tables, false)?;
-        let effective = if train {
-            // Pass one measured the album with the built-in tables. What it saw is only an
-            // approximation of what the trained tables will see — lengths change which
-            // magnitudes are worth coding — so this pass exists to get close, not to be
-            // right, and the second pass is the one that ships.
-            let stats = train::collect(s, pcm.n_samples as usize, tables, &first, kappa);
-            let trained = train::build(tables, &stats);
-            train::validate(&trained).map_err(|e| {
+        // Pass 1: the window is contiguous, 28 steps, centred seven below the training
+        // λ's guess. The cap is a filter here, not a price: `musearch` is off, as the
+        // reference's first curve pass is.
+        let ng1 = 28usize;
+        let g0_1: Vec<i32> = (0..nf)
+            .map(|f| {
+                let mut lo = rd::g_guess(lam, w[f], kappa) - 7;
+                if lo < rd::G_MIN {
+                    lo = rd::G_MIN;
+                }
+                if lo + ng1 as i32 - 1 > rd::G_MAX {
+                    lo = rd::G_MAX - ng1 as i32 + 1;
+                }
+                lo
+            })
+            .collect();
+        let p1 = rd::SearchParams {
+            tables: &initial,
+            n_frames: nf,
+            kappa,
+            cap,
+            musearch: false,
+            force_ms: ms,
+            threads,
+        };
+        let curves1 = Curves::compute(s, pcm.n_samples as usize, &p1, &g0_1, ng1)?;
+        let (_lambda1, picks1) = curves1.allocate(&w, alloc_target, cap)?;
+        let content1 = curves1.to_content(&picks1, s, pcm.n_samples as usize, &initial, kappa)?;
+        let g1: Vec<i32> = (0..nf).map(|f| content1.g(f)).collect();
+
+        // Retrain on every second frame of the pass-1 plan, which is the table set the
+        // second pass and the blob carry. `collect_frames` is the S8-6 sampler; `build`
+        // is the S8-6 trainer.
+        let sampled: Vec<usize> = (0..nf).step_by(2).collect();
+        let retrained = if train {
+            let stats = train::collect_frames(
+                s,
+                pcm.n_samples as usize,
+                &initial,
+                &content1,
+                kappa,
+                &sampled,
+            );
+            let retrained = train::build(&initial, &stats);
+            train::validate(&retrained).map_err(|e| {
                 Error::Plan(format!(
                     "the trained tables are not a usable table set: {e}"
                 ))
             })?;
-            // The premise is a property of the bytes, so check the bytes — the same
-            // discipline the untrained path applies for the same reason.
-            let blob = trained.to_blob();
+            // The premise is a property of the bytes, so check the bytes.
+            let blob = retrained.to_blob();
             let mut parsed = CodeTables::new();
             parsed.parse_into(&blob).map_err(Error::Tables)?;
             parsed.premise().map_err(Error::Premise)?;
             trained_used = true;
-            trained
+            retrained
         } else {
             tables.clone()
         };
-        let (content, gs, lambda, mu_frames) = run(&effective, musearch)?;
+        let effective = retrained;
+
+        // Pass 2: 20 contiguous steps centred nine below each frame's pass-1 answer.
+        // `musearch` is the shipped flag here, and the six-attempt retry re-allocates on
+        // these same curves — the reference's inventory row 11.
+        let ng2 = 20usize;
+        let g0_2: Vec<i32> = g1
+            .iter()
+            .map(|&g| {
+                let mut lo = g - 9;
+                if lo < rd::G_MIN {
+                    lo = rd::G_MIN;
+                }
+                if lo + ng2 as i32 - 1 > rd::G_MAX {
+                    lo = rd::G_MAX - ng2 as i32 + 1;
+                }
+                lo
+            })
+            .collect();
+        let p2 = rd::SearchParams {
+            tables: &effective,
+            n_frames: nf,
+            kappa,
+            cap,
+            musearch,
+            force_ms: ms,
+            threads,
+        };
+        let curves2 = Curves::compute(s, pcm.n_samples as usize, &p2, &g0_2, ng2)?;
+        let mut target = alloc_target;
+        let mut chosen: Option<(Content, Vec<usize>, f64)> = None;
+        for attempt in 0..RETRY_ATTEMPTS {
+            let (lambda, picks) = curves2.allocate(&w, target, cap)?;
+            let content =
+                curves2.to_content(&picks, s, pcm.n_samples as usize, &effective, kappa)?;
+            match Plan::new(&pcm, &effective, &content, budget, cap_pct) {
+                Ok(_) => {
+                    chosen = Some((content, picks, lambda));
+                    break;
+                }
+                Err(Error::Refusal(r)) => {
+                    if attempt + 1 == RETRY_ATTEMPTS {
+                        return Err(Error::Refusal(r));
+                    }
+                    let over = (r.needed as f64 - r.allowed as f64) * 8.0 * 1.02 + 2000.0;
+                    target -= over;
+                    if target < 1000.0 {
+                        return Err(Error::Refusal(r));
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let (content, picks, lambda) = chosen.ok_or(Error::Plan(
+            "the bit target did not converge in the retry loop".into(),
+        ))?;
+
+        // The header cycle fields are `cv.C` at the chosen candidates, not the decoder's
+        // measurement of the emitted stream. On a matching plan they are the same number;
+        // on a tie or a re-code they are not, and the reference's header is the former.
+        let mut cmax = 0u32;
+        let mut csum = 0u64;
+        for f in 0..nf {
+            let c = curves2.per_frame[f].c[picks[f]];
+            cmax = cmax.max(c);
+            csum += u64::from(c);
+        }
+        search_cycles = Some((cmax, (csum / nf as u64) as u32));
+        let gs: Vec<i32> = (0..nf).map(|f| content.g(f)).collect();
+        let mu_frames = picks
+            .iter()
+            .enumerate()
+            .filter(|&(f, &i)| curves2.per_frame[f].mu[i] > 0.0)
+            .count();
         tables_effective = Some(effective);
         report_g = Some(gs);
         report_lambda = Some(lambda);
@@ -539,7 +618,9 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
     let mut bytes = container::emit(&plan, tables, &fpos, &stream_bytes);
 
     let verify = self_verify(&bytes, plan.n_frames, samples.as_ref(), &pcm)?;
-    container::patch_cycles(&mut bytes, verify.max_cycles, verify.mean_cycles);
+    let (est_max_cycles, est_mean_cycles) =
+        search_cycles.unwrap_or((verify.max_cycles, verify.mean_cycles));
+    container::patch_cycles(&mut bytes, est_max_cycles, est_mean_cycles);
 
     // Re-parse the *patched* blob: the cycle fields are the last bytes written,
     // and a reader that only sees the pre-patch bytes has not seen the output.
@@ -560,11 +641,11 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             bits_per_frame: plan.bits_per_frame,
             n_frames: plan.n_frames,
             workers_used: coded.len(),
-            est_max_cycles: verify.max_cycles,
+            est_max_cycles,
             g,
             g_chosen: report_g,
             lambda: report_lambda,
-            est_mean_cycles: verify.mean_cycles,
+            est_mean_cycles,
             stream_bits: verify.bits,
             snr_db: verify.snr_db,
             snr8_db: verify.snr8_db,

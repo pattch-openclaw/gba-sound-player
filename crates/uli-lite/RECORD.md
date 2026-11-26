@@ -3255,7 +3255,58 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
-- **2026-11-25 (latest) — S8-6: the trainer, fed the reference's own pass-1 plan, reproduces
+- **2026-11-26 (latest) — S8-7: the encoder emits the reference's bytes on the generated
+  cells.** The search is the reference's now, in the reference's order.
+
+  **What changed.** `train::reference_train` implements `train()`'s shape: analytic
+  `g_guess(λ,w)`, M/S forced on, four rounds, a nine-probe λ bisection over ±3 in log, every
+  **8th** frame, target `×0.985`, and the returned λ (the pass-1 window's centre). `Curves`
+  now takes a contiguous window (`g0[f]`, `ng`) and reproduces `curves_compute`'s slide
+  coarser by `ng/2` when the last candidate is over the cap. `lib.rs` runs pass 1 (`NG = 28`
+  around `g_guess(λ)−7`), allocates, retrains on every 2nd frame through S8-6's
+  `collect_frames` + `build`, runs pass 2 (`NG = 20` around `g_pass1−9`), and retries six
+  times on the same curves. The allocation target moved to the driver (`target_bits −
+  3.5·NF`), so pass 1, pass 2 and every retry share one expression.
+
+  **Four divergences after the coder and trainer were already exact**, each now an inventory
+  row:
+  1. **The curve slices are `float`** in the reference (`cv.R/D/MU`) and the allocation reads
+     the narrowed values. Ours were `f64`. With `f32` slices, the pass-1 plan went from
+     **29 differing frames to 0** (and the shipped plan from 5 to 0). Row 22.
+  2. **`frame_code`'s `bits` starts at 1 for the M/S flag**; `measure` reports bands only and
+     the curve stored that, so the λ solution was one bit/frame low. The curve now stores
+     `(bits + 1) as f32`. Row 23.
+  3. **The header's cycle fields are `cv.C` at the chosen candidates**, not the verification
+     decode's re-measured ops. `fast`'s old path wrote `165,160`; the blob now writes
+     `165,214`, the oracle's. Row 24.
+  4. **The retry's `size` excludes the 16-byte target slack** that `overhead_bytes` reserves.
+     Including it made the first retry target 130.56 bits too small and moved five `fast`
+     frames' steps; with `size_overhead = overhead − 16`, attempt 0 is refused at 20,016 and
+     attempt 1 is the oracle's plan. Row 13, now closed.
+
+  **Gate, measured.** `make uli-accept ULI_ACCEPT_ONLY=fast,tiny` exits 0:
+  **`fast` 19,744 B `sha256 2f21f6d713ab25ade49c030f808738791fa3a50d5a4a3d1cb0df420583061e7c`**
+  (`--budget 20000 --cap 74 --threads 4`) and **`tiny` 39,308 B
+  `c398c2d2f0d56ea7bb890a998b85ec595d87bbee46d9f76ae9b71ffb93f3fa06`**
+  (`--budget 300000 --threads 1`). `make uli-plan-diff` reports every frame's `g` and `ms`
+  equal, tables identical and both header cycle fields equal; the pass-1 plans are exact.
+  The oracle and this encoder each emit the same blob at `--threads 1` and `--threads 4`
+  (row 16). `make uli-frame-diff` is still identical on 24 of 24, `make uli-train-diff` still
+  matches the 5,212-byte table region, `make uli-check` is clean and `make uli-test` is green
+  (18 suites / 99 tests).
+
+  **One test was re-measured rather than thresholded.** `training_pays_for_itself` moved its
+  album from 2,048 to 8,192 samples: `train()` samples every 8th frame, so a five-frame album
+  gave it one frame and the trained set overfitted (trained 55.10 vs built-in 56.50 dB at
+  budget 6,600). On the 17-frame album the same budget measures **51.16 vs 47.83 dB, +3.33**,
+  and the table (5,600/6,000/6,600/7,400/8,000) is in the test. The threshold did not move.
+
+  **Not measured here.** The three corpus cells (`biomaster`, `cross60`, `off-default`) need
+  `examples/uli_bench/assets`, absent from this checkout. The generated cells are the two that
+  run without it, so **S8 is open on the corpus confirmation and the pin ledger, not on a
+  known code difference**.
+
+- **2026-11-25 (later) — S8-6: the trainer, fed the reference's own pass-1 plan, reproduces
   the table region.** The row the S8-2 instrument was built for, and it closed with two trainer
   bugs that reading the code had not found — both visible only because the gate compares the
   reference's *counts*, not just the bytes.

@@ -146,12 +146,13 @@ The SNR columns are **full-band time-domain** on both sides. E-R7's 32.29 mean /
 25.78 worst dB is a **codec-only proxy** measured elsewhere; the oracle's own codec
 proxy is printed beside ours so the two are never interchanged.
 
-**Its verdict is DIFF on every cell**, and that is the measured state rather than a harness
-fault: the first content difference lands inside the **trained tables** in all four, and it is
-**unattributed**. Closing it is S8, whose plan — five instruments, a 21-row divergence
+**Since S8-7 (2026-11-26) the two generated cells are byte-identical to the oracle** — `fast`
+19,744 B `sha256 2f21f6d7…` and `tiny` 39,308 B `c398c2d2…`, at one and four threads. The
+matrix's three corpus cells (`biomaster`, `cross60`, `off-default`) are **not measured in this
+checkout** because `examples/uli_bench/assets` is absent; the S8 exit gate remains open on that
+confirmation, not on a known code difference. The plan — five instruments, a 24-row divergence
 inventory, nine sub-steps — is in
-[`../uli-lite/PLAN-OF-RECORD.md`](../uli-lite/PLAN-OF-RECORD.md) → "S8 — the plan". Until it
-closes, the encoder matches the reference's **`--dacw 0`** arm only in intent, never in bytes.
+[`../uli-lite/PLAN-OF-RECORD.md`](../uli-lite/PLAN-OF-RECORD.md) → "S8 — the plan".
 
 ## What it is not (yet)
 
@@ -197,7 +198,8 @@ blob, so the instrument is checked against the artefact it explains. It is S8-2'
 and it does not change this crate. S8-6 consumes it: `make uli-train-diff` rebuilds the initial
 tables from the dumped train rounds, feeds the pass-1 plan to `train::collect_frames` every
 second frame, and requires the reference blob's 5,212-byte table region — `PLAN-OF-RECORD.md`
-→ S8-6. It is the trainer the search work (S8-7) will wire in, not a product path.
+→ S8-6. S8-7 wires it into the reference's search; both generated cells are byte-identical to
+the oracle. It is a diagnostic, not a product path.
 
 ## Test
 

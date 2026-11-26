@@ -348,8 +348,11 @@ It is never linked into the GBA image. The source-prep path (source decoding,
 resampling, track assembly) remains external Python tooling for now, which is acceptable
 under the rule below. **What the Rust encoder does not yet do is match the oracle's bytes** —
 that is S8, in progress in [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md)
-§S8 (S8-0, S8-1, **S8-2**, S8-3, S8-4, S8-4b, S8-5 and **S8-6** landed; §S8's sub-step table
-is the status of record, and what remains there is the search's reproduction: S8-7). And one
+§S8 (S8-0, S8-1, **S8-2**, S8-3, S8-4, S8-4b, S8-5, **S8-6** and **S8-7** landed; §S8's sub-step
+table is the status of record, and **the encoder is byte-identical to the oracle on the two
+generated acceptance cells** — `fast` and `tiny`. The three corpus cells need
+`examples/uli_bench/assets`, which this checkout does not have, so the S8 exit gate is open on
+that confirmation alone). And one
 thing S8 found that is not about this encoder at all: **the oracle is a binary, not a
 specification** — its build fuses multiply-adds on the search's decision path, so the oracle
 of record is a contraction-free rebuild — **`sha256 1991ee6c…`, zero fused sites** — whose
@@ -398,10 +401,12 @@ equals the reference's — `--stride`/`--fine` deleted, not defaulted off), S8-1
 frozen probe), **S8-2 (P2: `make uli-dump-plan`, the reference's own both-pass plan and the
 counts the trainer consumed, gated against the plan its blob declares)**, S8-3 (the plan/table
 diff), S8-4 (the `fast` cell, 2.4 s against our 12.2 s), S8-4b (the contraction-free oracle of
-record), S8-5 (the frozen coder: identical on 24 of 24) and **S8-6 (the trainer: the 5,212-byte
-table region reproduced from the reference's own pass-1 plan on `fast` and `tiny`)** have
-landed; the 21-row divergence inventory, the sub-step table with its `needs` and the five
-instruments are in §S8. The
+record), S8-5 (the frozen coder: identical on 24 of 24), **S8-6 (the trainer: the 5,212-byte
+table region reproduced from the reference's own pass-1 plan on `fast` and `tiny`)** and
+**S8-7 (the search: the two generated cells now byte-identical to the oracle, 19,744 B
+`2f21f6d7…` and 39,308 B `c398c2d2…`)** have landed; the 24-row divergence inventory, the
+sub-step table with its `needs` and the five instruments are in §S8. The three corpus cells
+remain unmeasured here for want of the corpus, not for want of a code change. The
 hand-written C encoder is now the **oracle and the asset producer**, not the only encoder in
 existence.
 Requirements, slices and gates:
@@ -841,6 +846,20 @@ numbers *of that day* and are superseded by the current state at the top of
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md); each
 entry is kept for the decision and its reasoning, not for its numbers.**
 
+- **2026-11-26 — S8-7: the encoder emits the reference's bytes on the generated cells.** The
+  search is now the reference's in shape and arithmetic: `train()`'s analytic allocation, the
+  contiguous 28- and 20-step windows with their coarser slide, retraining on every 2nd frame,
+  six attempts on the same curves, `f32` curve slices, the M/S header bit in the allocation's
+  rate, the header cycle fields from `cv.C`, and the retry's size without the 16-byte target
+  slack. `make uli-accept ULI_ACCEPT_ONLY=fast,tiny` exits 0: **`fast` 19,744 B
+  `sha256 2f21f6d7…`, `tiny` 39,308 B `c398c2d2…`**, at one and four threads. The four
+  changes after the coder/trainer were exact are inventory rows 22–24 and the closure of row
+  13, and they are why the last five differing steps became zero. **The three corpus cells
+  (`biomaster`, `cross60`, `off-default`) are not measured in this checkout**, because
+  `examples/uli_bench/assets` is absent; that is the remaining S8 measurement, not a known
+  code difference. The 24-row inventory and the sub-step table are in
+  [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) §S8.
+
 - **2026-11-25 (later) — S8-5's coder landed, and the reference's arithmetic is now ours at a
   frozen plan.** Three changes closed the whole coder half of the divergence inventory: the
   band's Lagrangian is accumulated the way the reference accumulates it (per tuple, and the
@@ -857,7 +876,8 @@ entry is kept for the decision and its reasoning, not for its numbers.**
   and the committed fused one stays as a pin at 2 ULP. What remained in S8 after that entry was
   the plan, not the coder — S8-2 (P2, the `--dump-plan` instrument, **landed 2026-11-25**), S8-6
   (the trainer, **landed 2026-11-25**: the table region reproduced from the reference's
-  pass-1 plan) and S8-7 (the search, still open).
+  pass-1 plan) and S8-7 (the search, **landed on the generated cells 2026-11-26**: `fast` and
+  `tiny` are byte-identical; the three corpus cells await their absent corpus).
 
 - **2026-11-25 — the oracle is a binary, not a specification: byte-exactness is pinned to a
   build, and the prerequisites before the search are landed.** Three rulings, all from
