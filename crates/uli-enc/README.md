@@ -195,16 +195,16 @@ It prints the album line and the sizing line
 nonzero, citing needed and allowed bytes, if the album does not fit the budget —
 before writing `--out`.
 
-A third diagnostic is the reference's own plan, not ours: `make uli-dump-plan` builds a patched
-copy of the oracle's driver off-tree (in a temp directory, no C in this repository) and writes
+A third diagnostic reads the oracle's own plan, not ours: `make uli-dump-plan` builds a
+patched copy of the oracle's driver off-tree (in a temp directory, no C in this repository) and writes
 its **pass-1** plan, every **pass-2** attempt and the per-class counts `tables_from_stats`
 consumed. Its gate is that the dumped shipped plan equals the plan decoded from that run's own
 blob, so the instrument is checked against the artefact it explains. It is S8-2's instrument
 and it does not change this crate. S8-6 consumes it: `make uli-train-diff` rebuilds the initial
 tables from the dumped train rounds, feeds the pass-1 plan to `train::collect_frames` every
 second frame, and requires the reference blob's 5,212-byte table region — `PLAN-OF-RECORD.md`
-→ S8-6. S8-7 wires it into the reference's search; both generated cells are byte-identical to
-the oracle. It is a diagnostic, not a product path.
+→ S8-6. S8-7 wires it into the search; the generated cells are byte-identical to the oracle.
+It is a diagnostic, not a product path.
 
 ## Test
 

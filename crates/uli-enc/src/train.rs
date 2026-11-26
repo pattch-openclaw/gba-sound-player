@@ -18,8 +18,8 @@
 //! them). One pass with default tables gives a plan whose statistics are close but not equal
 //! to a plan coded with the trained ones, so the second pass measures the album *as it will
 //! actually be coded* and the plan it produces is the one that ships. More passes converge
-//! further; the reference does two and the returns past the second are small enough that
-//! the plan does not claim more.
+//! further; two passes are enough that the returns past the second are small enough not to
+//! change the plan.
 //!
 //! **Determinism.** The counts are integers, and the only floating point in the path is
 //! `huff_lengths`' `sqrt` in its length-capping re-merge — so a trained table is
@@ -98,10 +98,10 @@ pub fn collect(
 
 /// Collect statistics from a *subset* of a finished plan, in the given frame order.
 ///
-/// The reference's `retrain(g, ms, 2)` samples every second frame (`fr[i] = i*sub`), so
-/// the trainer's input is not the whole album; `train()` samples every eighth. Sharing the
-/// collector with a frame list is what lets the two samplings be the same code (inventory
-/// row 10) rather than two implementations that have to agree.
+/// The trainer samples rather than reading the whole album: every 8th frame for the initial
+/// tables, every 2nd for the retrain. Sampling bounds the coding cost and still spans the
+/// album's sections. Sharing one collector with a frame list keeps both samplings on the
+/// same symbol/error accounting, rather than two implementations that must agree.
 pub fn collect_frames(
     samples: &crate::pcm::Samples,
     n_samples: usize,
@@ -158,12 +158,11 @@ pub fn collect_frames(
                     }
                 }
             }
-            // The terminator is conditional, exactly as `frame::write_chan` emits it: a
-            // channel that codes all `NBANDS` bands gives the reader no chance to read an
-            // EOB, and the reference's `frame_code` does not charge one. Counting it here
-            // would train the context table on symbols the stream never carries — measured
-            // on S8-4's `fast` cell as 10 extra terminators in context 1 and 9 in context
-            // 2 (S8-6, inventory row 19).
+            // The terminator is conditional, exactly as the writer emits it: a channel that
+            // codes all `NBANDS` bands gives the reader no EOB to read, so the stream
+            // carries no terminator. Counting one here would train the context table on a
+            // symbol that never appears — measured on the fast cell as 10 extra terminators
+            // in one context and 9 in another.
             if chans[f][ch].bands.len() < NBANDS {
                 st.cb[ctx][k] += 1.0;
             }
@@ -174,22 +173,21 @@ pub fn collect_frames(
     st
 }
 
-/// S8-7: the reference's initial training shape, `train()` in `uli_enc.c:85-115,322`.
+/// The initial training pass: four rounds that turn analytic step guesses into a usable table
+/// set before the search measures a real plan.
 ///
-/// Four outer iterations. Each bisects λ over nine probes in `log(λ) ± 3`, coding every
-/// **8th** frame at `g = g_guess(exp(mid), w[f], κ)` with **M/S forced on**, and comparing
-/// the sampled mean bits/frame — including the M/S header bit — against `target`. The final
-/// λ of that bisection is used to code the sampled frames once more, accumulating the
-/// `EncStats` that `build` turns into the next table set. The returned λ is the reference's
-/// loop state: it also centres the pass-1 window (`g_guess(λ, w) − 7`), which is why it is
-/// returned rather than recomputed.
+/// Each round bisects λ over nine probes in `log(λ) ± 3`. For each probe it codes every 8th
+/// frame at `g = g_guess(exp(mid), w[f], κ)` with M/S forced on, and compares the sampled
+/// mean bits/frame — including the M/S header bit — against `target`. The final λ of the
+/// bisection codes the sampled frames once more; those counts and errors become the next
+/// table set. Four rounds are enough for the lengths to settle without paying a full search,
+/// and the returned λ centres the first real search window.
 ///
-/// The coding here is the same `rd::measure` the search uses, at `mu = 0`; the stats come
-/// from `collect_frames` on the sampled frames, so the trainer and the retrain share one
-/// collector. Sequential on purpose: the reference parallelises `count_frames`, and its
-/// `stats_add` order is therefore thread-dependent (inventory row 21); frame order is the
-/// reproducible side of that ULP question, and the integer counts are order-free.
-pub fn reference_train(
+/// The coding is the same [`rd::measure`] the search uses, at `mu = 0`; the stats come from
+/// `collect_frames`, so the initial pass and the retrain share one collector. Sequential on
+/// purpose: the counts are integers and order-free, but the centroid sums are floating point,
+/// and one fixed order makes the tables reproducible.
+pub fn initial_train(
     samples: &Samples,
     n_samples: usize,
     w: &[f64],
@@ -219,9 +217,8 @@ pub fn reference_train(
             for (i, &f) in frames.iter().enumerate() {
                 let g = rd::g_guess(lambda, w[f], kappa);
                 let (point, _) = rd::measure(&coefs[i], &t, g, true, kappa, 0.0)?;
-                // `frame_code`'s bits start at 1 for the M/S flag; `measure` reports only
-                // the bands, so the header bit is added here, exactly as the reference's
-                // `R[i] = r.bits` includes it.
+                // The rate includes the one-bit frame header; `measure` reports bands only,
+                // so add the header bit when comparing sampled bits/frame with the target.
                 sum += point.bits + 1;
             }
             if sum as f64 / n as f64 > target {
@@ -250,16 +247,14 @@ pub fn reference_train(
 
 /// Rebuild the tables from counts, keeping every structural row of `base`.
 ///
-/// **Context rows are always rebuilt, even when they have no counts.** The reference's
-/// `tables_from_stats` calls `huff_lengths` for every `st->cb[a]` unconditionally, so an
-/// unobserved context gets the balanced code the 0.2 floor implies (14 symbols at four
-/// bits and the terminator at three), not the base's model lengths. Retaining the base
-/// there is invisible on a rich album and differs from the oracle on a small one — measured
-/// on S8-4's `fast` cell as 21 bytes of `len_cb` (S8-6, inventory row 9's trainer side).
+/// **Context rows are always rebuilt, even when they have no counts.** A context that never
+/// occurs still needs a complete code, and the natural one is the balanced code implied by
+/// the frequency floor (14 symbols at four bits and the terminator at three). Keeping a
+/// previous row makes the table depend on training history: invisible on a rich album, wrong
+/// on a sparse one — measured as 21 bytes of `len_cb` on the `fast` cell.
 ///
-/// A *class* row with no observations keeps the base's lengths, which is the reference's
-/// rule too (`if (s > 0) huff_lengths(...)`): an album that never uses a class still has to
-/// be able to code a frame that would.
+/// A *class* row with no observations keeps the base lengths: an album that never uses a
+/// class must still be able to code a frame that would.
 pub fn build(base: &DefaultTables, st: &Stats) -> DefaultTables {
     let mut t = base.clone();
     let k = t.k;

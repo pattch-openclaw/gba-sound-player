@@ -1217,7 +1217,7 @@ other document.
 | **S8-4b** | the oracle of record: rebuilt contraction-free, its sha256 and fused-multiply map recorded (`make uli-oracle-check`) | — | **landed 2026-11-25** — sha256 `1991ee6c…`, **zero** fused sites | S8-5 items 1–3 arithmetic parity, and the S8 gate's MATCH claim |
 | **S8-5** | the coder: distortion parity, tie parity, the sequence terms, the cycle model | S8-1, S8-4, S8-4b — all landed | **landed 2026-11-25** — items 1–4; the frozen differential is **identical on 24 of 24** | S8-6 |
 | **S8-6** | the trainer, fed a *matching* pass-1 plan | S8-2, S8-5 | **landed 2026-11-25** — `make uli-train-diff`; the 5,212-byte table region is the reference's on the `fast` cell (257 frames) and `tiny` (129), from both the dumped stats and a re-coding of the pass-1 plan every 2nd frame; integer counts exact, `cen_s` at 6 ULP worst on `fast` and 0 on `tiny` | S8-7 |
-| **S8-7** | the search: the reference's windows, training shape and retry | S8-0 … S8-6 | **landed 2026-11-26** — `make uli-accept` reports MATCH on `fast`, `tiny`, `biomaster`, `off-default` and `adv`; row 25 (the last 3-frame residual) is closed by the M/S-bit comparison fix | the S8 gate |
+| **S8-7** | the search: contiguous windows, initial training and retry | S8-0 … S8-6 | **landed 2026-11-26** — `make uli-accept` reports MATCH on `fast`, `tiny`, `biomaster`, `off-default` and `adv`; row 25 (the last 3-frame residual) is closed by the M/S-bit comparison fix | the S8 gate |
 
 Two rules keep this list from producing dangling prerequisites, which is what happened to
 S8-1…S8-4 while they were described only as prose in §7:
@@ -1352,7 +1352,7 @@ tree; C anchors are the off-tree reference `../gba-audio/encoder/`.
 | 6 | candidate window (pass 1) | `NG = 28` contiguous, `lo = g_guess(λ_train) − 7` (`uli_enc.c:326-339`) | the same contiguous 28-step window in `rd::Curves::compute` (S8-7) | **closed at S8-7 (2026-11-26)**: the pass-1 plan is byte-identical on the `fast` (257 frames) and `tiny` (129) cells, and its sliding-window rule is `rd::curve`'s |
 | 7 | candidate window (pass 2) | `NG = 20` contiguous, `lo = g_pass1 − 9` (`uli_enc.c:349-354`) | the same contiguous 20-step window, centred on the pass-1 answer (S8-7) | **closed at S8-7**: the shipped plan matches on `fast` and `tiny`; `plan_diff` reports `g: every frame agrees` |
 | 8 | pass-1 curves | computed with **`musearch = 0`** (`uli_enc.c:341`) | `run(tables, false)` — musearch off | **matches** |
-| 9 | initial training | `train()`: analytic `g = g_guess(λ,w)`, **M/S forced to 1**, 4 outer iterations, each a 9-step λ bisection over `±3` in log, every **8th** frame, target `target/NF × 0.985` (`uli_enc.c:85-115,322`) | `train::reference_train`, the same shape (S8-7) | **closed at S8-7**: the four `train-itN` stat sets match P2's dump exactly (all counts and `cen_s`; the 33-frame sample), and the returned λ is the reference's |
+| 9 | initial training | `train()`: analytic `g = g_guess(λ,w)`, **M/S forced to 1**, 4 outer iterations, each a 9-step λ bisection over `±3` in log, every **8th** frame, target `target/NF × 0.985` (`uli_enc.c:85-115,322`) | `train::initial_train`, the same shape (S8-7) | **closed at S8-7**: the four `train-itN` stat sets match P2's dump exactly (all counts and `cen_s`; the 33-frame sample), and the returned λ is the reference's |
 | 10 | retrain sampling | every **2nd** frame (`uli_enc.c:349`) | `train::collect_frames` with every 2nd frame (S8-6), wired into the search at S8-7 | **closed at S8-7** — the retrained 5,212-byte table region matches the blob on `fast` and `tiny` |
 | 11 | retry loop | 6 attempts; `tgt -= (size−budget)·8·1.02 + 2000` (`uli_enc.c:405`); re-allocates on the **same** curves | 6 attempts on the same curves, with the reference's size expression (S8-7) | **closed at S8-7**: on `fast` attempt 0 is refused at 20,016 bytes against 20,000 and attempt 1 is the reference's plan, byte for byte |
 | 12 | `--stride`/`--fine` themselves | no such knob; the sweep is fixed by the window | **gone** (S8-0): the flags, the refine stage and the two `Args` fields are deleted, and the surviving spacing is a constant | **closed at S8-0** |
@@ -1910,18 +1910,18 @@ mean could flip a `dq`.
 analytic allocation (`g = g_guess`, M/S forced 1, four iterations, every 4th frame, target
 ×0.985) is S8-7's, as its row says (`#9·shape`). What S8-6 closes is row 10's sampling
 (`collect_frames`) and the trainer's table construction. `make uli-train-diff` is the
-instrument; S8-7 wires this trainer into the reference's windows and retry.
+instrument; S8-7 wires this trainer into the search's windows and retry.
 
 **S8-7 — the search — landed on the generated cells 2026-11-26.** The encoder now runs the
-reference's pipeline in its order: `train::reference_train` (analytic `g_guess`, M/S forced 1,
+search in this order: `train::initial_train` (analytic `g_guess`, M/S forced 1,
 four iterations, nine λ probes over ±3 in log, every **8th** frame, target `×0.985`) →
 `Curves::compute` over the contiguous 28-step pass-1 window centred on `g_guess(λ_train,w) − 7`
 → allocate → retrain on every 2nd frame (S8-6's `collect_frames` + `build`) → the contiguous
 20-step pass-2 window centred on `g_pass1 − 9` → six attempts on the same curves → emit. The
-window **slides coarser** when its last candidate is over the cap, as `curves_compute` does,
-and the slices are `f32` because the reference's `cv.R/D/MU` are `float`. The header's cycle
-fields come from `cv.C` at the chosen candidates, and the retry's `size` uses the reference's
-overhead (without the 16-byte target slack).
+window **slides coarser** when its last candidate is over the cap, so a dense frame can
+still reach an admissible step. Curve samples are `f32` because they are search measurements
+compared at their recorded precision. The header's cycle fields come from the plan's chosen
+candidates, and the retry's size excludes the 16-byte target slack.
 
 *Gate, measured 2026-11-26:* **the `fast` and `tiny` cells are byte-identical to the oracle** —
 `fast` 19,744 B `sha256 2f21f6d7…` (257 frames, `--budget 20000 --cap 74 --threads 4`), `tiny`

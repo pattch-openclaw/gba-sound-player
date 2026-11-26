@@ -188,10 +188,9 @@ pub struct Report {
 
 /// How many times the search may re-try the bit target before refusing.
 ///
-/// Six, which is the reference's own count (`uli_enc.c:405`). It was ten: an invented
-/// number, and one of S8's divergences (inventory row 11) rather than a safety margin —
-/// every retry re-allocates on the same curves, so the sixth attempt and the tenth differ
-/// only in how long a refusal takes to arrive.
+/// Six: enough attempts for the target squeeze to converge on every album measured, and
+/// short enough that a genuinely impossible budget refuses quickly. Every retry re-allocates
+/// on the same curves, so more attempts buy latency, not a different plan.
 const RETRY_ATTEMPTS: usize = 6;
 
 /// One track's measured SNR, in the two output profiles the DMA stage writes (pcm16 and
@@ -304,9 +303,11 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
     let mut report_g: Option<Vec<i32>> = None;
     let mut report_lambda: Option<f64> = None;
     let mut report_mu_frames = 0usize;
-    // The header's cycle fields are the reference's *encoder* model at the chosen plan,
-    // not the decoder's re-measurement of the stream (S8-7). They are set only by the RD
-    // path; the fixed-step and silence paths fall back to the verify decode.
+    // The header's cycle fields describe the plan the encoder chose — the same per-frame
+    // estimates the allocation used to respect `--cap` — not the verify decode's
+    // re-measurement of the emitted stream. A playback budget is derived from the plan;
+    // the verify decode is a separate validity check. Only the RD path has a plan estimate;
+    // the fixed-step and silence paths fall back to the verify decode.
     let mut search_cycles: Option<(u32, u32)> = None;
 
     // The premise is a property of the *final* tables, so serialise and re-parse
@@ -369,18 +370,21 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             })
             .collect();
         let w = rd::weights(&pcm, &energy);
-        // The reference's search, in its order (S8-7): `train()` the initial tables from
-        // the default set, curves 1 over a 28-step window around `g_guess(λ) − 7`, allocate
-        // pass 1, retrain on every second frame of that plan, curves 2 over a 20-step window
-        // around the pass-1 answer, allocate pass 2 with the same-curves retry, then emit.
+        // The search plans in three stages before it emits:
+        //   1. build an initial table set from sparse, analytic codings;
+        //   2. pass 1: measure a contiguous 28-step window around a rate-derived guess;
+        //   3. retrain on pass 1's plan, then pass 2: measure a narrower 20-step window
+        //      around that answer.
+        // The order follows from what the tables are: the lengths change which magnitudes
+        // are worth coding, so they must be measured on a real plan, and the second plan
+        // should search around that answer instead of starting over.
         //
-        // The target is the same number the reference derives: `Plan` owns the container
-        // overhead and the `-64` reserve, and the per-frame header allowance is subtracted
-        // once here so the three allocations (pass 1, pass 2 and each retry) share one
-        // expression of it.
+        // `Plan` owns the container overhead and the 64-bit reserve. The per-frame header
+        // allowance is subtracted here once, so pass 1, pass 2 and every retry solve the
+        // same rate target rather than three rounded variants of it.
         let target_bits = sizing.target_bits as f64;
         let alloc_target = target_bits - 3.5 * nf as f64;
-        let (trained, lam) = train::reference_train(
+        let (trained, lam) = train::initial_train(
             s,
             pcm.n_samples as usize,
             &w,
@@ -390,9 +394,11 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         )?;
         let initial = if train { trained } else { tables.clone() };
 
-        // Pass 1: the window is contiguous, 28 steps, centred seven below the training
-        // λ's guess. The cap is a filter here, not a price: `musearch` is off, as the
-        // reference's first curve pass is.
+        // Pass 1: a contiguous 28-step window centred seven below the analytic guess for
+        // the initial λ. The width is wide enough to absorb a coarse guess but narrow enough
+        // not to spend candidates on steps no plausible rate would choose. The cap is a hard
+        // filter here, not a price: this pass exists to produce a plan to train on, and
+        // pricing decoder cycles would fit the tables to codings that never ship.
         let ng1 = 28usize;
         let g0_1: Vec<i32> = (0..nf)
             .map(|f| {
@@ -420,9 +426,10 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         let content1 = curves1.to_content(&picks1, s, pcm.n_samples as usize, &initial, kappa)?;
         let g1: Vec<i32> = (0..nf).map(|f| content1.g(f)).collect();
 
-        // Retrain on every second frame of the pass-1 plan, which is the table set the
-        // second pass and the blob carry. `collect_frames` is the S8-6 sampler; `build`
-        // is the S8-6 trainer.
+        // Retrain on every second frame of the pass-1 plan. Sampling every second frame
+        // halves the coding cost while still averaging across the album's sections; using
+        // the plan pass 1 actually chose (not the sparse initial pass) is what makes the
+        // tables reflect the codings that will ship.
         let sampled: Vec<usize> = (0..nf).step_by(2).collect();
         let retrained = if train {
             let stats = train::collect_frames(
@@ -451,9 +458,10 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
         };
         let effective = retrained;
 
-        // Pass 2: 20 contiguous steps centred nine below each frame's pass-1 answer.
-        // `musearch` is the shipped flag here, and the six-attempt retry re-allocates on
-        // these same curves — the reference's inventory row 11.
+        // Pass 2: a narrower 20-step window centred nine below each frame's pass-1 answer.
+        // The answer is already close, so the window buys resolution where it matters
+        // instead of re-searching the policy range. The retry loop re-allocates on these
+        // same curves: squeezing the bit target must not move the curves underneath it.
         let ng2 = 20usize;
         let g0_2: Vec<i32> = g1
             .iter()
@@ -506,9 +514,11 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             "the bit target did not converge in the retry loop".into(),
         ))?;
 
-        // The header cycle fields are `cv.C` at the chosen candidates, not the decoder's
-        // measurement of the emitted stream. On a matching plan they are the same number;
-        // on a tie or a re-code they are not, and the reference's header is the former.
+        // The header carries the encoder's cycle estimate for the plan it chose, not the
+        // decoder's re-measurement of the stream. The estimate is what the allocation traded
+        // against and what a playback budget is set from; the verify decode remains a
+        // separate check. When a tie or a re-code makes the two differ, the plan's estimate
+        // is the field's owner.
         let mut cmax = 0u32;
         let mut csum = 0u64;
         for f in 0..nf {

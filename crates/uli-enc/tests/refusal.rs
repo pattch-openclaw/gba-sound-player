@@ -34,9 +34,9 @@ fn a_budget_below_overhead_plus_the_stream_refuses_and_cites_both_numbers() {
     // same uniform size the emit loop will produce.
     let content = Content::silence(frame_count(pcm.n_samples));
     let planned = Plan::new(&pcm, &tables, &content, 1 << 30, DEFAULT_CAP_PCT).expect("plans");
-    // `overhead_bytes` includes the 16-byte *target* slack; the reference's size check
-    // (and so `Refusal.needed`) excludes it (S8-7, inventory row 13). At exactly the
-    // size overhead the stream still cannot fit, which is the point here.
+    // `overhead_bytes` includes the 16-byte *target* slack; the size check (and so
+    // `Refusal.needed`) excludes it, because that is what the container will occupy. At
+    // exactly the size overhead the stream still cannot fit, which is the point here.
     const TARGET_SLACK: u64 = 16;
     let budget = planned.overhead_bytes as u64 - TARGET_SLACK;
 

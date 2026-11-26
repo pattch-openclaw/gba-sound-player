@@ -444,20 +444,21 @@ fn recon(dq: &[i8; 16], m: i32, d: f64) -> f64 {
 #[derive(Clone, Copy, Debug)]
 pub struct BandRd {
     pub m: [i32; BANDW],
-    /// The band's Lagrangian **as the reference accumulates it**: one add per tuple,
-    /// `d_tuple + λ·bits_tuple`, summed left to right from `0.0` (`enc_core.c:225-280`).
+    /// The band's Lagrangian: one add per tuple, `d_tuple + λ·bits_tuple`, summed left to
+    /// right from `0.0`.
     ///
-    /// This is the number the reference's search compares, so it is the one that matters
-    /// for parity (S8-5 item 1). It is *not* `dist + λ·bits` recomputed at the end: those
-    /// two roundings differ, and a 1-ULP difference in a compared value is a different plan.
+    /// This is the value the frame-level distortion is derived from and the search compares,
+    /// so its rounding is part of the plan. It is *not* `dist + λ·bits` recomputed at the end:
+    /// the two expressions round differently, and a 1-ULP difference in a compared value is a
+    /// different plan.
     pub j: f64,
     /// `Σ (|x| − rec)²` over the band's 16 coefficients, accumulated **in coefficient
-    /// order** — the quantity the `band_rdo` probe reports (`scripts/gen_uli_band_rdo_fixture.py`),
-    /// which is not the same expression as `j`.
+    /// order** — the quantity the `band_rdo` probe reports
+    /// (`scripts/gen_uli_band_rdo_fixture.py`), which is not the same expression as `j`.
     ///
-    /// It stays separate for that reason: the probe's `D` is a per-coefficient sum, the
-    /// encoder's `D` is derived from `j` at frame level, and both are compared against their
-    /// own reference. Folding them into one would make one of the two tests unpassable.
+    /// It stays separate for that reason: the probe's `D` is a per-coefficient sum, while the
+    /// encoder's frame distortion is derived from `j`; each expression has its own expected
+    /// value. Folding them into one would make one of the two tests unpassable.
     pub dist: f64,
     pub bits: u64,
 }
@@ -494,9 +495,8 @@ pub fn band_rdo(
         dist: 0.0,
         bits: 0,
     };
-    // The zero class codes nothing, and the reference returns the band's whole energy as
-    // its `J` (`enc_core.c:227-232`): no bits are spent, so `J = D` there. Both fields are
-    // that one sum, in the same order over all 16 coefficients.
+    // The zero class spends no bits, so its Lagrangian is its distortion. Both fields are
+    // that one sum over all 16 coefficients, in the same order.
     if tables.ctype[class] == CT_ZERO {
         for i in 0..BANDW {
             let v = f64::from(x[i]);
@@ -589,9 +589,9 @@ pub fn band_rdo(
         }
         out.m[i..i + per].copy_from_slice(&best[..per]);
         out.bits += best_bits;
-        // One add per tuple of the *incurred* Lagrangian, which is what the reference's
-        // `J += best` does — not a re-derivation from the totals, which rounds differently
-        // (row 1 of S8's inventory).
+        // One add per tuple of the *incurred* Lagrangian, not a re-derivation from the
+        // totals: the two expressions round differently, and a 1-ULP difference in a value
+        // the plan compares is a different plan on a near-tie.
         out.j += best_j;
         i += per;
     }
@@ -631,10 +631,9 @@ pub fn rd_classes(tables: &DefaultTables) -> Vec<usize> {
 #[derive(Clone, Debug)]
 pub struct ChanRd {
     pub chan: Chan,
-    /// The channel's Lagrangian as the reference returns it (`enc_core.c:383`):
-    /// `bestEnd − μ·cyc`, i.e. the chosen path's `J` with the band-symbol cycle charges
-    /// removed. The frame's distortion is *derived* from this and the bit count, which is
-    /// why it is carried separately rather than reduced to a `D` here (inventory row 1).
+    /// The chosen path's Lagrangian with the band-symbol cycle charges removed:
+    /// `bestEnd − μ·cyc`. The frame's distortion is *derived* from this and the bit count,
+    /// which is why it is carried separately rather than reduced to a `D` here.
     pub j: f64,
     /// Bits the coefficients and band symbols occupy, EOB included.
     pub bits: u64,
@@ -775,9 +774,10 @@ pub fn quantise_chan_rd(
     let mut energy = [0f64; NBANDS];
     for b in 0..NBANDS {
         let mut e = 0.0;
-        // All 16 coefficients, not just the codeable ones: the reference's `Dz`
-        // (`enc_core.c:298`) sums the band unconditionally, and the format forces the
-        // uncoded tail to zero anyway, so this is the same value in the same order.
+        // All 16 coefficients, not just the codeable ones: the uncoded tail's energy is
+        // distortion, and a search that ignored it would think coding nothing is optimal.
+        // The format forces those coefficients to zero, so summing them is the same value
+        // in the same order.
         for i in 0..BANDW {
             let v = f64::from(coef[b * BANDW + i]);
             e += v * v;
@@ -790,9 +790,9 @@ pub fn quantise_chan_rd(
     //
     // `band_j[b][c]` is `f64::INFINITY` where the class cannot code the band (a symbol with
     // no code, or the `allz` guard), and the search then skips it.
-    // `band_j[b][c]` is the reference's `Jb[b][c]`: the band's Lagrangian under class `c`,
-    // plus `mu · band_cycles` when the cycle price is live (`enc_core.c:301-308`). The
-    // search compares *this* number, so the class decisions follow the same roundings.
+    // `band_j[b][c]` is the band's Lagrangian under class `c`, plus `mu · band_cycles` when
+    // the cycle price is live. The search compares this number, so its roundings are the
+    // class decisions.
     let mut band_j = [[f64::INFINITY; MAXK]; NBANDS];
     let mut band_bits = [[0u64; MAXK]; NBANDS];
     // The decoder work a class adds to this band, for the `mu` term. Zero for class 0,
@@ -805,11 +805,10 @@ pub fn quantise_chan_rd(
         // Code nothing: one band symbol, all of this band's energy left as error.
         band_j[b][0] = energy[b];
         band_bits[b][0] = 0;
-        // The reference's `allz` guard (`enc_core.c:301-302`): a band whose every
-        // coefficient is below `0.4` of a step may only take class 0. It is not a
-        // heuristic about quality — it keeps the search from spending a band symbol to
-        // code magnitudes that are all noise, and it changes the plan when the trained
-        // rows price those symbols cheaply (inventory row 3).
+        // The all-zero guard: a band whose every coefficient is below `0.4` of a step may
+        // only take class 0. It is not a quality heuristic — it keeps the search from
+        // spending a band symbol to code magnitudes that are all noise, and it changes the
+        // plan when trained rows price those symbols cheaply (inventory row 3).
         let allz = (0..BANDW).all(|i| f64::from(coef[b * BANDW + i].abs()) * inv < 0.4);
         if allz {
             continue;
@@ -856,9 +855,8 @@ pub fn quantise_chan_rd(
     let mut v = [[f64::INFINITY; MAXK + 1]; NBANDS + 1];
     let mut from = [[NONE; MAXK + 1]; NBANDS + 1];
     v[0][k] = 0.0; // the reader's initial context is the sentinel `k`
-    // The scan is the reference's, term for term (`enc_core.c:309-330`), and the order of
-    // the adds inside each term is part of it: `V + λ·l + μ·CY + Jb`, left to right. Two of
-    // its rules are not cosmetic:
+    // The scan is a fixed-order shortest path. The order of the adds inside each term is
+    // part of the result: `V + λ·l + μ·CY + Jb`, left to right. Two rules are not cosmetic:
     //
     //  * **the terminator is charged** — `λ·len_cb[s][EOB]` and a band symbol, because it
     //    is a symbol the reader reads (inventory row 2). Leaving it unpriced made a stop
@@ -898,8 +896,8 @@ pub fn quantise_chan_rd(
             }
         }
     }
-    // Coding every band needs no terminator, so it is a candidate end too — and the
-    // comparison excludes the sentinel context, as the reference's `for s < K` does.
+    // Coding every band needs no terminator, so it is a candidate end too. The comparison
+    // covers real classes only; the sentinel context is not a class a path can end on.
     for s in 0..k {
         if v[NBANDS][s] < best_total {
             best_total = v[NBANDS][s];
@@ -926,8 +924,8 @@ pub fn quantise_chan_rd(
     // (band, class) would be 32 KB of dead alternatives per channel.
     let mut bands = Vec::with_capacity(best_b);
     let mut bits = 0u64;
-    // The band-symbol cycle charges the reference tracks and then removes again: `cyc` is
-    // `Σ (CY_BANDSYM + band_cyc)` over the emitted bands, plus the terminator's symbol.
+    // The band-symbol cycle charge: `cyc` is `Σ (CY_BANDSYM + band_cyc)` over the emitted
+    // bands, plus the terminator's symbol. It is what the `mu` term prices.
     let mut cyc = 0f64;
     let mut ctx = k;
     for (b, &klass) in classes.iter().enumerate() {

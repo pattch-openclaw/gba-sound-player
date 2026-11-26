@@ -3323,7 +3323,7 @@ authoritative and this one carries the numbers.
 - **2026-11-26 (earlier) — S8-7: the encoder emits the reference's bytes on the generated
   cells.** The search is the reference's now, in the reference's order.
 
-  **What changed.** `train::reference_train` implements `train()`'s shape: analytic
+  **What changed.** `train::initial_train` implements `train()`'s shape: analytic
   `g_guess(λ,w)`, M/S forced on, four rounds, a nine-probe λ bisection over ±3 in log, every
   **8th** frame, target `×0.985`, and the returned λ (the pass-1 window's centre). `Curves`
   now takes a contiguous window (`g0[f]`, `ng`) and reproduces `curves_compute`'s slide

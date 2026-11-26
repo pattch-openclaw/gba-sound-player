@@ -400,7 +400,7 @@ cell, and it is unattributed (the measured table is below, and in
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) §S7). **S8 is in
 progress**, scoped to byte-exactness on the reference's `--dacw 0` arm: S8-0 (the flag surface
 equals the reference's — `--stride`/`--fine` deleted, not defaulted off), S8-1 (the two-sided
-frozen probe), **S8-2 (P2: `make uli-dump-plan`, the reference's own both-pass plan and the
+frozen probe), **S8-2 (P2: `make uli-dump-plan`, the oracle's own both-pass plan and the
 counts the trainer consumed, gated against the plan its blob declares)**, S8-3 (the plan/table
 diff), S8-4 (the `fast` cell, 2.4 s against our 12.2 s), S8-4b (the contraction-free oracle of
 record), S8-5 (the frozen coder: identical on 24 of 24), **S8-6 (the trainer: the 5,212-byte
@@ -957,12 +957,12 @@ entry is kept for the decision and its reasoning, not for its numbers.**
   measurement corpus" below and in the Makefile, `examples/uli_bench/README.md`,
   `scripts/uli_accept.py`, `scripts/uli_album_pin.py` and `scripts/uli_cross_album.py`.
 
-- **2026-11-26 — S8-7: the encoder emits the reference's bytes on the generated cells.** The
-  search is now the reference's in shape and arithmetic: `train()`'s analytic allocation, the
-  contiguous 28- and 20-step windows with their coarser slide, retraining on every 2nd frame,
-  six attempts on the same curves, `f32` curve slices, the M/S header bit in the allocation's
-  rate, the header cycle fields from `cv.C`, and the retry's size without the 16-byte target
-  slack. `make uli-accept ULI_ACCEPT_ONLY=fast,tiny` exits 0: **`fast` 19,744 B
+- **2026-11-26 — S8-7: the encoder emits the oracle's bytes on the generated cells.** The
+  search now has the shape and arithmetic that make the plan reproducible: an initial analytic
+  allocation, contiguous 28- and 20-step windows with their coarser slide, retraining on every
+  2nd frame, six attempts on the same curves, `f32` curve slices, the M/S header bit in the
+  allocation's rate, the header cycle fields from the plan's own estimates, and the retry's
+  size without the 16-byte target slack. `make uli-accept ULI_ACCEPT_ONLY=fast,tiny` exits 0: **`fast` 19,744 B
   `sha256 2f21f6d7…`, `tiny` 39,308 B `c398c2d2…`**, at one and four threads. The four
   changes after the coder/trainer were exact are inventory rows 22–24 and the closure of row
   13, and they are why the last five differing steps became zero. **The three corpus cells

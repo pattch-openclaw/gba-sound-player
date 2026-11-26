@@ -25,10 +25,10 @@ use uli_enc::plan::{Content, GPlan};
 use uli_enc::{Args, DEFAULT_CAP_PCT, DefaultTables, Input, train};
 use uli_lite::CodeTables;
 
-// S8-7: 8,192 samples (17 frames) rather than 2,048 (5). The reference's `train()`
-// samples every 8th frame, so a five-frame album hands it **one** frame and the trained
-// set overfits; the training-pays claim has to be measured on an album long enough for
-// the sampling to mean anything. The search shape is otherwise the shipped one.
+// 8,192 samples (17 frames) rather than 2,048 (5). The initial trainer samples every 8th
+// frame, so a five-frame album gives it **one** frame and the trained set overfits; the
+// training-pays claim needs an album long enough for the sampling to mean anything. The
+// search shape is otherwise the shipped one.
 const N_SAMPLES: usize = 8192;
 
 /// Correlated stereo, so both the M/S flag and the per-context statistics have something to
@@ -68,10 +68,10 @@ fn args(album: std::path::PathBuf, tracks: std::path::PathBuf, budget: u64, trai
 /// A budget that binds on this album, so the comparison is between two encoders that spent
 /// the same number of bytes rather than two that spent what they liked.
 ///
-/// **Re-measured at S8-7**, when the search became the reference's: the album is now 8,192
-/// samples (17 frames) for the reason above, and the budget stays 6,600. Measured on this
-/// album at the shipped shape — one thread, `--musearch 0`, trained against `--no-train` at
-/// the same budget:
+/// **Re-measured at S8-7**, after the search rework: the album is now 8,192 samples (17
+/// frames) for the reason above, and the budget stays 6,600. Measured on this album at the
+/// shipped shape — one thread, `--musearch 0`, trained against `--no-train` at the same
+/// budget:
 ///
 /// | budget | trained | built-in | gain |
 /// |---|---|---|---|
@@ -184,10 +184,10 @@ fn training_actually_changes_the_tables() {
 
 /// S8-6: an unobserved context is still rebuilt, to the balanced code the 0.2 floor implies.
 ///
-/// The reference's `tables_from_stats` calls `huff_lengths` for every `st->cb[a]`
-/// unconditionally, so a context a small album never visits does **not** keep the built-in
-/// row. Measured on S8-4's `fast` cell, retaining the base row left 21 bytes of `len_cb`
-/// different from the oracle's table region; this test is the regression, on the fifteen
+/// A context a small album never visits must still get a complete code, and the balanced
+/// code the floor implies is the natural one; keeping the built-in row makes the table depend
+/// on training history. Retaining the base row left 21 bytes of `len_cb` different from the
+/// expected table region on the fast cell; this test is the regression, on the fifteen
 /// evenly-weighted symbols of a 14-class set (fourteen at four bits, the terminator at
 /// three).
 #[test]
@@ -195,8 +195,8 @@ fn an_unobserved_context_is_rebuilt_to_the_balanced_code() {
     // The default rows are already balanced, so a base-only test cannot see the difference.
     // Model the sequence that exposed it: a round observes context 9, a later round has no
     // counts for it. The later `build` must revert the row to the balanced code rather than
-    // keep the observed one — which is what the reference's unconditional `huff_lengths`
-    // does, and what left 21 bytes of `len_cb` different from the oracle before S8-6.
+    // keep the observed one — the observed row is history, not evidence about the next pass,
+    // and retaining it left 21 bytes of `len_cb` different from the expected tables before S8-6.
     let base = DefaultTables::build();
     let mut observed = train::Stats::default();
     observed.cb[9][0] = 100.0;
