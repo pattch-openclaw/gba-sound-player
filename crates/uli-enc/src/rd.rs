@@ -434,8 +434,13 @@ impl Curves {
             Some(m) => m,
             None => {
                 if fa == fb {
-                    let jb = b.dist + lam0 * b.bits as f64;
-                    let ja = a.dist + lam0 * a.bits as f64;
+                    // `frame_code`'s bits start at 1 for the M/S flag; the reference's
+                    // comparison is `b.D + lam*b.bits` with that bit included. Adding it
+                    // here is not cosmetic: `lam*(bands+1)` and `lam*bands` round
+                    // differently, and on a near-tie (biomaster frame 13) the omitted
+                    // bit flipped the chosen domain and then the whole pass-1 step.
+                    let jb = b.dist + lam0 * (b.bits as f64 + 1.0);
+                    let ja = a.dist + lam0 * (a.bits as f64 + 1.0);
                     jb < ja
                 } else {
                     fb

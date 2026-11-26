@@ -18,6 +18,9 @@ The patch adds `--dump-plan FILE`, which writes:
   plan <tag> attempt N frame F g G ms M bits HEX D HEX cycles C mu HEX
   stats <tag> esc HEX frames HEX ms_frames HEX
   stats <tag> cb|q|p|cen_s|cen_n ... HEX
+  lambda <tag> [attempt] HEX        (train, pass1, and each pass2 attempt)
+  weight F HEX                      (the per-frame `weights_plain` value)
+  g0 <pass> frame F G               (the window start after the coarser slide)
 
 for the **pass-1** plan (tag `pass1`, the trainer's input), every **pass-2** attempt
 (tag `pass2`; the last one is the shipped plan), and every `EncStats` set that
@@ -42,6 +45,11 @@ Usage:
     scripts/uli_dump_plan.py --album album.f32 --tracks tracks.tsv --out album.uli \
         --dump-plan plan.txt --budget 20000 --cap 74 --threads 4 \
         --plan-dump <built plan_dump binary>
+
+The `lambda`, `weight` and `g0` lines are **bit patterns**, not decimals: they are the
+diagnostic that settled row 25 (the pass-1 and pass-2 λ, the weights and the slid window
+starts were identical; the residual was the M/S bit inside `measure_g`). They are ignored by
+the plan gate's parser and by `train-dump`.
 
 `--plan-dump` is the path to the built example. The Makefile target builds it; when you run
 the script by hand, build it once (the target's recipe is the exact command) or pass
@@ -101,6 +109,17 @@ static void p2_open(const char *path) {
     fprintf(DUMP_F, "# uli_dump_plan 1\n");
 }
 
+static void p2_lambda(const char *tag, int attempt, double v) {
+    if (!DUMP_F) return;
+    if (attempt < 0) fprintf(DUMP_F, "lambda %s %016llx\n", tag, p2_hex(v));
+    else fprintf(DUMP_F, "lambda %s %d %016llx\n", tag, attempt, p2_hex(v));
+}
+
+static void p2_weights(const double *w) {
+    if (!DUMP_F) return;
+    for (int64_t f = 0; f < NF; f++) fprintf(DUMP_F, "weight %lld %016llx\n", (long long)f, p2_hex(w[f]));
+}
+
 static void p2_stats(const char *tag, const EncStats *st) {
     if (!DUMP_F) return;
     fprintf(DUMP_F, "stats %s esc %016llx frames %016llx ms_frames %016llx\n",
@@ -127,6 +146,13 @@ static void p2_stats(const char *tag, const EncStats *st) {
 
 # `Curves` is defined after the globals, so the plan dumper is inserted next to it.
 HELPERS_CURVES = r'''
+/* The pass's window start after `curves_compute`'s coarser slide. */
+static void p2_g0(const char *tag, const Curves *cv) {
+    if (!DUMP_F) return;
+    for (int64_t f = 0; f < NF; f++)
+        fprintf(DUMP_F, "g0 %s frame %lld %d\n", tag, (long long)f, cv->g0[f]);
+}
+
 /* P2's per-frame plan, in the units `frame_code` reports (bits include the M/S bit and
  * exclude the g delta; D is the derived distortion the coder branched on). */
 static void p2_plan(const char *tag, int attempt, const Curves *cv, const int *k,
@@ -171,6 +197,42 @@ ANCHORS = [
         "    NDAC = 1024.0 * 32768.0 * 32768.0 / 2 * pow(10, DAC_NOISE_DBFS / 10);\n"
         "    p2_open(DUMP_PATH);\n",
         "main after the option parse (open the dump before training)",
+    ),
+    (
+        "    double *w = malloc(NF * 8); weights_plain(w);\n",
+        "    double *w = malloc(NF * 8); weights_plain(w);\n"
+        "    p2_weights(w);\n",
+        "main after weights_plain (the per-frame weights)",
+    ),
+    (
+        "    double lam = train(w, target_bits / NF * 0.985, 4, 8, 3000.0, Dt);\n",
+        "    double lam = train(w, target_bits / NF * 0.985, 4, 8, 3000.0, Dt);\n"
+        '    p2_lambda("train", -1, lam);\n',
+        "main after train (the returned lambda)",
+    ),
+    (
+        "    curves_compute(&cv, cap, 0);\n",
+        "    curves_compute(&cv, cap, 0);\n"
+        '    p2_g0("pass1", &cv);\n',
+        "after the pass-1 curves (the slid window starts)",
+    ),
+    (
+        "    alloc_full(&cv, dacw, target_bits - 3.5 * NF, cap, k, w);\n",
+        "    double p2lam1 = alloc_full(&cv, dacw, target_bits - 3.5 * NF, cap, k, w);\n"
+        '    p2_lambda("pass1", -1, p2lam1);\n',
+        "after the pass-1 allocation (its lambda)",
+    ),
+    (
+        "    curves_compute(&cv, cap, musearch);\n",
+        "    curves_compute(&cv, cap, musearch);\n"
+        '    p2_g0("pass2", &cv);\n',
+        "after the pass-2 curves (the slid window starts)",
+    ),
+    (
+        "        alloc_full(&cv, dacw, tgt, cap, k, w);\n",
+        "        double p2lam2 = alloc_full(&cv, dacw, tgt, cap, k, w);\n"
+        '        p2_lambda("pass2", attempt, p2lam2);\n',
+        "after each pass-2 allocation (its lambda)",
     ),
     (
         "typedef struct { int NG; int *g0; float *R, *D, *MU; uint32_t *C; int8_t *MS; } Curves;\n",
@@ -346,6 +408,8 @@ def parse_dump(text: str) -> dict:
                     "mu": f64(m.group(9)),
                 }
             )
+            continue
+        if line.split()[0] in ("lambda", "weight", "g0"):
             continue
         m = STATS_RE.match(line)
         if m:

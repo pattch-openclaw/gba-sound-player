@@ -3255,7 +3255,36 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
-- **2026-11-26 (later) — the corpus is generated in-tree: four matrix cells exact, `biomaster`
+- **2026-11-26 (latest) — row 25 closed: the M/S header bit in the domain comparison, not an
+  allocation-scale mystery.** The three `biomaster` pass-1 frames were the last S8 residual.
+  `curves_compute` chooses the M/S domain with `b.D + lam*b.bits`, where `frame_code`'s `bits`
+  starts at 1 for the M/S flag (`enc_core.c:326-339`). `Curves::measure_g` compared
+  `b.D + lam*bands`: the `+1` cancels algebraically, so the expression looked right, but it
+  does **not** cancel in floating rounding — `lam*(bands+1)` and `lam*bands` can round
+  differently. At frames 13, 16,525 and 16,545 of the master, that flipped the domain, which
+  moved the pass-1 step and then the pass-2 plan. The fix is one `+1` in `Curves::measure_g`.
+
+  **How it was found, in order** (each step ruled out a layer):
+  * P2 now dumps the pass-1/pass-2 λ, the per-frame weights and the slid window starts; our
+    side dumped the same. All were **bit-identical** (`lambda train 40e2328a…`, `pass1
+    40dd1c5f…`, `pass2 40df5867…`; all weights; all `g0`), so neither the λ solution nor a
+    window/slide difference was the cause.
+  * `train-dump --initial-out` and our own initial table dump: **5212 bytes, identical**, so
+    the curves' tables were not it.
+  * The coefficients of frames 13/16,525/16,545 and the frozen codings of all 56 candidates
+    per frame with the reference tables were **bitwise identical**, so the coder and MDCT were
+    not it.
+  * The remaining expression was the per-`g` M/S comparison; adding the header bit made
+    `biomaster` `sha256 49eb6a11…` (3,293,128 B) and **`make uli-accept` MATCH on every cell it
+    runs: `fast`, `tiny`, `biomaster`, `off-default`, `adv`** (and `dacw1` still a recorded
+    difference). `cross60` is not run while `adv` is present.
+
+  **Instruments kept.** P2's `lambda`, `weight` and `g0` lines, and `train-dump
+  --initial-out/--initial-only`, are now part of the S8 diagnostic set; the dump parser skips
+  the extra lines, and `train-dump` ignores them. This is the second site of row 23 (the M/S
+  header bit) and closes row 25. S8's matrix gate is met; the pin ledger remains.
+
+- **2026-11-26 (earlier) — the corpus is generated in-tree: four matrix cells exact, `biomaster`
   three frames off.** The acceptance corpus was never absent from the tree; it was
   ungenerated. The recipe is the in-repo targets, with the off-tree editor doing source prep:
 

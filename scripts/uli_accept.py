@@ -48,10 +48,10 @@ Usage:
 `fast` is first because S8-5…S8-7 are iterated on it: during those sub-steps it runs
 unpinned and the signal is the diff (first divergent frame, first divergent table field),
 not a hash. The other four cells are the confirmation, and every cell is pinned at S8's
-gate. Since S8-7 (2026-11-26) `fast`, `tiny`, `off-default` and `adv` are byte-identical to
-the oracle; `biomaster` differs in 3 of 16,553 frames and is inventory row 25 in
-`PLAN-OF-RECORD.md` §S8. The three corpus cells need `ULI_ACCEPT_ASSETS`; the corpus is
-generated, never committed.
+gate. Since S8-7 (2026-11-26) every cell the matrix runs — `fast`, `tiny`, `biomaster`,
+`off-default` and `adv` — is byte-identical to the oracle; `biomaster`'s last three-frame
+residual was the M/S header bit in `measure_g` (inventory rows 23/25). `cross60` is not run
+while `adv` is present. The corpus is generated, never committed.
 
 ULI_ACCEPT_ASSETS points at the corpus (default: examples/uli_bench/assets). It is
 required only by the cells that use it, so `--only fast` runs on a checkout with no

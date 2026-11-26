@@ -369,7 +369,6 @@ pub fn encode_with_tables(input: &Args, tables: &DefaultTables) -> Result<Output
             })
             .collect();
         let w = rd::weights(&pcm, &energy);
-
         // The reference's search, in its order (S8-7): `train()` the initial tables from
         // the default set, curves 1 over a 28-step window around `g_guess(λ) − 7`, allocate
         // pass 1, retrain on every second frame of that plan, curves 2 over a 20-step window
