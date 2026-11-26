@@ -1911,8 +1911,8 @@ album-card-test: toolchain-check album-bake
 	    || echo "album-card-test: the runner exited $$status; the log is still the verdict"; \
 	  grep -q '^\[album-rom\] verdict PASSED' $(ALBUM_CARD_LOG) \
 	    || { echo "album-card-test: no 'verdict PASSED' line — see $(ALBUM_CARD_LOG)"; exit 1; }; \
-	  grep -q '^\[album-rom\] scene: title_card (Select; implemented 2 of 4 declared)' $(ALBUM_CARD_LOG) \
-	    || { echo "album-card-test: Select did not reach the title card — the scene line is missing or names another scene"; exit 1; }; \
+	  grep -q '^\[album-rom\] scene: last=title_card changes=1 implemented=2 declared=4' $(ALBUM_CARD_LOG) \
+	    || { echo "album-card-test: Select did not reach the title card — the post-drain scene summary is missing or names another scene"; exit 1; }; \
 	  grep -q 'feed: .*underflows=0' $(ALBUM_CARD_LOG) \
 	    || { echo "album-card-test: the ring booked an underflow across the card's paint — see $(ALBUM_CARD_LOG)"; exit 1; }; \
 	  grep -q 'card=declared' $(ALBUM_CARD_LOG) \

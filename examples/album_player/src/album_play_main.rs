@@ -4196,6 +4196,12 @@ mod rom {
         // the chrome's share one commit (§5.7's at-most-one-commit rule).
         let mut scene = surface::SceneId::Blank;
         let mut pending_scene: Option<surface::SceneId> = None;
+        // 2b PR-(3): the scene change is **recorded** here and printed after the drain, never
+        // from inside the loop. `agb::println!` is a semihosting trap, and this file's own
+        // rule (and the audit at the end of this module) is that no print may sit in a pass
+        // that is feeding the DMA.
+        let mut scene_changes = 0u32;
+        let mut last_scene = surface::SceneId::Blank;
         let mut paint = Paint::new();
         paint.start(producer.total_samples as u32, 0);
         let mut visits = Visits::new();
@@ -4343,12 +4349,8 @@ mod rom {
                 // frame slice; audio keeps playing, because a scene is not a transport state.
                 scene = scene.next();
                 pending_scene = Some(scene);
-                agb::println!(
-                    "[album-rom] scene: {} (Select; implemented {} of {} declared)",
-                    scene.id(),
-                    surface::SceneId::IMPLEMENTED.len(),
-                    layout::SCENES.len()
-                );
+                scene_changes = scene_changes.wrapping_add(1);
+                last_scene = scene;
             }
             if let Some(detected) = detected
                 && detected.action != keys::Action::PauseToggle
@@ -4841,6 +4843,16 @@ mod rom {
             late,
             late_max,
             REARM_GRACE_SAMPLES
+        );
+        // 2b PR-(3)'s scene summary, printed only with the audio stopped (see the note at the
+        // loop's state): which scenes `Select` walked, and how many times. `implemented` and
+        // `declared` are the registry's own counts, so the line is attributable to a spec.
+        agb::println!(
+            "[album-rom] scene: last={} changes={} implemented={} declared={} (printed after the drain; a print in the loop is a semihosting trap)",
+            last_scene.id(),
+            scene_changes,
+            surface::SceneId::IMPLEMENTED.len(),
+            layout::SCENES.len()
         );
         // The skip rows' take→hand-off bound is this run's own: the worst main-loop pass it measured,
         // in feeder periods, plus the deferral (`take_to_handoff_bound`). A cart's slower pass raises
