@@ -100,15 +100,18 @@ static ALBUM_STORAGE: uli_lite::Aligned<
 ))]
 static ALBUM: &[u8] = &ALBUM_STORAGE.0;
 
-/// PR E's corpus: `assets/sound/bioluminescent.wav` (the tracked reference
-/// master, 258.61 s) encoded at the **product configuration** — 32,768 Hz, hop
-/// 512, `--cap 74`, budget scaled to the product's ~102 kbit/s — by the C
-/// encoder of record, with `make uli-album-asset`.
+/// PR E's corpus: `assets/sound/bioluminescent.wav` (the tracked 96 kHz /
+/// 24-bit reference master, 258.61 s; the 32,768 Hz / 8-bit WAV beside it is a
+/// listening derivative, not the encoder input) encoded at the **product
+/// configuration** — 32,768 Hz, hop 512, `--cap 74`, budget scaled to the
+/// product's ~102 kbit/s — by the C encoder of record, with
+/// `make uli-album-asset`. `prep.py` does the resample and writes
+/// `assets/album.f32` + `tracks.tsv`.
 ///
 /// Both the blob and its pin module are **build output** (gitignored): the
 /// tracked input is the WAV, the recipe is the make target, and the pin is
 /// C-sourced (`scripts/uli_album_pin.py` reads the C reference decoder's own
-/// `hash_of_frame_hashes`).
+/// `hash_of_frame_hashes`). Full recipe: `ULI2.md` -> "The measurement corpus".
 #[cfg(feature = "cross-corpus")]
 static ALBUM_CROSS_BLOB: uli_lite::Aligned<{ include_bytes!("../assets/cross/cross.uli").len() }> =
     uli_lite::Aligned(*include_bytes!("../assets/cross/cross.uli"));

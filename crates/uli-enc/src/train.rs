@@ -18,8 +18,8 @@
 //! them). One pass with default tables gives a plan whose statistics are close but not equal
 //! to a plan coded with the trained ones, so the second pass measures the album *as it will
 //! actually be coded* and the plan it produces is the one that ships. More passes converge
-//! further; the reference does two and the returns past the second are small enough that
-//! the plan does not claim more.
+//! further; two passes are enough that the returns past the second are small enough not to
+//! change the plan.
 //!
 //! **Determinism.** The counts are integers, and the only floating point in the path is
 //! `huff_lengths`' `sqrt` in its length-capping re-merge — so a trained table is
@@ -27,11 +27,13 @@
 //! tables that come from floats. The *counts* are integer and the merge is deterministic, so
 //! the same host reproduces the same tables byte for byte.
 
-use uli_lite::format::{BANDW, CT_PAIR, CT_QUAD, CT_ZERO, M, MAXK, MAXLEN};
+use uli_lite::format::{BANDW, CT_PAIR, CT_QUAD, CT_ZERO, M, MAXK, MAXLEN, NBANDS};
 
 use crate::frame;
-use crate::plan::Content;
+use crate::pcm::Samples;
+use crate::plan::{Content, GPlan};
 use crate::quant;
+use crate::rd;
 use crate::tables_default::{Codes, DefaultTables, K};
 
 /// The frequency floor added before the Huffman merge.
@@ -90,7 +92,24 @@ pub fn collect(
     content: &Content,
     kappa: f64,
 ) -> Stats {
-    let n_frames = content.len();
+    let frames: Vec<usize> = (0..content.len()).collect();
+    collect_frames(samples, n_samples, tables, content, kappa, &frames)
+}
+
+/// Collect statistics from a *subset* of a finished plan, in the given frame order.
+///
+/// The trainer samples rather than reading the whole album: every 8th frame for the initial
+/// tables, every 2nd for the retrain. Sampling bounds the coding cost and still spans the
+/// album's sections. Sharing one collector with a frame list keeps both samplings on the
+/// same symbol/error accounting, rather than two implementations that must agree.
+pub fn collect_frames(
+    samples: &crate::pcm::Samples,
+    n_samples: usize,
+    tables: &DefaultTables,
+    content: &Content,
+    kappa: f64,
+    frames: &[usize],
+) -> Stats {
     let mut st = Stats::default();
     let k = tables.k;
     for (c, slot) in st.cls.iter_mut().enumerate().take(k) {
@@ -98,7 +117,7 @@ pub fn collect(
         *slot = vec![0.0; n];
     }
     let mut coef = [0f32; M * 2];
-    for f in 0..n_frames {
+    for &f in frames {
         crate::mdct::mdct_frame(samples, f, n_samples, &mut coef);
         let ms = content.ms(f) != 0;
         let rot = quant::rotate(&coef, ms);
@@ -139,8 +158,14 @@ pub fn collect(
                     }
                 }
             }
-            // The terminator, from the context of the last band coded.
-            st.cb[ctx][k] += 1.0;
+            // The terminator is conditional, exactly as the writer emits it: a channel that
+            // codes all `NBANDS` bands gives the reader no EOB to read, so the stream
+            // carries no terminator. Counting one here would train the context table on a
+            // symbol that never appears — measured on the fast cell as 10 extra terminators
+            // in one context and 9 in another.
+            if chans[f][ch].bands.len() < NBANDS {
+                st.cb[ctx][k] += 1.0;
+            }
         }
         st.frames += 1;
     }
@@ -148,20 +173,95 @@ pub fn collect(
     st
 }
 
+/// The initial training pass: four rounds that turn analytic step guesses into a usable table
+/// set before the search measures a real plan.
+///
+/// Each round bisects λ over nine probes in `log(λ) ± 3`. For each probe it codes every 8th
+/// frame at `g = g_guess(exp(mid), w[f], κ)` with M/S forced on, and compares the sampled
+/// mean bits/frame — including the M/S header bit — against `target`. The final λ of the
+/// bisection codes the sampled frames once more; those counts and errors become the next
+/// table set. Four rounds are enough for the lengths to settle without paying a full search,
+/// and the returned λ centres the first real search window.
+///
+/// The coding is the same [`rd::measure`] the search uses, at `mu = 0`; the stats come from
+/// `collect_frames`, so the initial pass and the retrain share one collector. Sequential on
+/// purpose: the counts are integers and order-free, but the centroid sums are floating point,
+/// and one fixed order makes the tables reproducible.
+pub fn initial_train(
+    samples: &Samples,
+    n_samples: usize,
+    w: &[f64],
+    tables: &DefaultTables,
+    target: f64,
+    kappa: f64,
+) -> Result<(DefaultTables, f64), crate::Error> {
+    let nf = w.len();
+    let frames: Vec<usize> = (0..nf).step_by(8).collect();
+    let n = frames.len();
+    let mut coefs: Vec<[f32; M * 2]> = Vec::with_capacity(n);
+    let mut coef = [0f32; M * 2];
+    for &f in &frames {
+        crate::mdct::mdct_frame(samples, f, n_samples, &mut coef);
+        coefs.push(coef);
+    }
+
+    let mut t = tables.clone();
+    let mut lam = 3000.0f64;
+    for _round in 0..4 {
+        let mut lo = lam.ln() - 3.0;
+        let mut hi = lam.ln() + 3.0;
+        for _probe in 0..9 {
+            let mid = 0.5 * (lo + hi);
+            let lambda = mid.exp();
+            let mut sum = 0u64;
+            for (i, &f) in frames.iter().enumerate() {
+                let g = rd::g_guess(lambda, w[f], kappa);
+                let (point, _) = rd::measure(&coefs[i], &t, g, true, kappa, 0.0)?;
+                // The rate includes the one-bit frame header; `measure` reports bands only,
+                // so add the header bit when comparing sampled bits/frame with the target.
+                sum += point.bits + 1;
+            }
+            if sum as f64 / n as f64 > target {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lam = (0.5 * (lo + hi)).exp();
+
+        let mut g_all = vec![0i32; nf];
+        let ms_all = vec![true; nf];
+        let mut chans = vec![[quant::Chan::empty(), quant::Chan::empty()]; nf];
+        for (i, &f) in frames.iter().enumerate() {
+            let g = rd::g_guess(lam, w[f], kappa);
+            g_all[f] = g;
+            let (_, ch) = rd::measure(&coefs[i], &t, g, true, kappa, 0.0)?;
+            chans[f] = ch;
+        }
+        let content = Content::coded(GPlan::new(g_all, ms_all), chans);
+        let st = collect_frames(samples, n_samples, &t, &content, kappa, &frames);
+        t = build(&t, &st);
+    }
+    Ok((t, lam))
+}
+
 /// Rebuild the tables from counts, keeping every structural row of `base`.
 ///
-/// A class with no observations keeps the base's lengths rather than being given a degenerate
-/// table: an album that never uses a class still has to be able to code a frame that would.
+/// **Context rows are always rebuilt, even when they have no counts.** A context that never
+/// occurs still needs a complete code, and the natural one is the balanced code implied by
+/// the frequency floor (14 symbols at four bits and the terminator at three). Keeping a
+/// previous row makes the table depend on training history: invisible on a rich album, wrong
+/// on a sparse one — measured as 21 bytes of `len_cb` on the `fast` cell.
+///
+/// A *class* row with no observations keeps the base lengths: an album that never uses a
+/// class must still be able to code a frame that would.
 pub fn build(base: &DefaultTables, st: &Stats) -> DefaultTables {
     let mut t = base.clone();
     let k = t.k;
 
     for s in 0..=k {
-        let counts = &st.cb[s];
-        if counts.iter().any(|&c| c > 0.0) {
-            let len = huff_lengths(&counts[..=k], FLOOR);
-            t.cb[s] = Codes::from_lengths(&len);
-        }
+        let len = huff_lengths(&st.cb[s][..=k], FLOOR);
+        t.cb[s] = Codes::from_lengths(&len);
     }
 
     for c in 0..k {

@@ -34,7 +34,11 @@ fn a_budget_below_overhead_plus_the_stream_refuses_and_cites_both_numbers() {
     // same uniform size the emit loop will produce.
     let content = Content::silence(frame_count(pcm.n_samples));
     let planned = Plan::new(&pcm, &tables, &content, 1 << 30, DEFAULT_CAP_PCT).expect("plans");
-    let budget = planned.overhead_bytes as u64;
+    // `overhead_bytes` includes the 16-byte *target* slack; the size check (and so
+    // `Refusal.needed`) excludes it, because that is what the container will occupy. At
+    // exactly the size overhead the stream still cannot fit, which is the point here.
+    const TARGET_SLACK: u64 = 16;
+    let budget = planned.overhead_bytes as u64 - TARGET_SLACK;
 
     let err = encode(&Args {
         input: Input::Pcm { album, tracks },
@@ -59,7 +63,7 @@ fn a_budget_below_overhead_plus_the_stream_refuses_and_cites_both_numbers() {
                 ..
             } = r;
             assert_eq!(allowed, budget);
-            assert_eq!(overhead_bytes, planned.overhead_bytes as u64);
+            assert_eq!(overhead_bytes, planned.overhead_bytes as u64 - TARGET_SLACK);
             assert!(needed > allowed, "needed {needed} == allowed {allowed}");
             let text = r.to_string();
             assert!(text.contains(&needed.to_string()), "{text}");

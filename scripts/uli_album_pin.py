@@ -17,6 +17,14 @@ test:
 
 Nothing here is an oracle of its own: the authority is the C decode.
 
+This is the last step of `make uli-album-asset` (and of `uli-cross-asset`,
+`uli-adversarial-asset` and `uli-two-track-asset`). The default master is the tracked
+`assets/sound/bioluminescent.wav` (96 kHz / 24-bit, 258.6 s); the sibling's
+`encoder/prep.py` resamples it to 32,768 Hz and writes the `album.f32` + `tracks.tsv`
+pair, the reference encoder writes the blob, and the reference decoder writes the `--ref`
+directory this script reads. The 32,768 Hz / 8-bit WAV beside the master is a listening
+derivative, not the encoder input. See `ULI2.md` -> "The measurement corpus".
+
 Usage:
   python3 scripts/uli_album_pin.py --blob <album.uli> --ref <uli_dec OUTDIR> \\
       --rs examples/uli_bench/src/album_pin.rs

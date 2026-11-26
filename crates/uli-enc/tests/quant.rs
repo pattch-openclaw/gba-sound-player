@@ -1305,8 +1305,11 @@ fn musearch_is_inert_when_the_cap_does_not_bind() {
         force_ms: None,
         threads: 1,
     };
-    let off = uli_enc::Curves::compute(&samples, N_SAMPLES, &params(false)).expect("curves");
-    let on = uli_enc::Curves::compute(&samples, N_SAMPLES, &params(true)).expect("curves");
+    let g0 = vec![uli_enc::rd::G_MIN];
+    let ng = (uli_enc::rd::G_MAX - uli_enc::rd::G_MIN + 1) as usize;
+    let off =
+        uli_enc::Curves::compute(&samples, N_SAMPLES, &params(false), &g0, ng).expect("curves");
+    let on = uli_enc::Curves::compute(&samples, N_SAMPLES, &params(true), &g0, ng).expect("curves");
     let (a, b) = (&off.per_frame[0], &on.per_frame[0]);
     assert_eq!(a.g, b.g);
     assert_eq!(a.r, b.r);

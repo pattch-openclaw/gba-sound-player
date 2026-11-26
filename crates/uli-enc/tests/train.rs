@@ -20,10 +20,16 @@
 mod common;
 
 use common::{TempDir, materialise, write_tracks};
+use uli_enc::pcm::Samples;
+use uli_enc::plan::{Content, GPlan};
 use uli_enc::{Args, DEFAULT_CAP_PCT, DefaultTables, Input, train};
 use uli_lite::CodeTables;
 
-const N_SAMPLES: usize = 2048;
+// 8,192 samples (17 frames) rather than 2,048 (5). The initial trainer samples every 8th
+// frame, so a five-frame album gives it **one** frame and the trained set overfits; the
+// training-pays claim needs an album long enough for the sampling to mean anything. The
+// search shape is otherwise the shipped one.
+const N_SAMPLES: usize = 8192;
 
 /// Correlated stereo, so both the M/S flag and the per-context statistics have something to
 /// find. The committed MDCT fixture is deliberately uncorrelated and would make training look
@@ -59,28 +65,24 @@ fn args(album: std::path::PathBuf, tracks: std::path::PathBuf, budget: u64, trai
     }
 }
 
-/// A budget that binds on this short album, so the comparison is between two encoders that
-/// spent the same number of bytes rather than two that spent what they liked.
+/// A budget that binds on this album, so the comparison is between two encoders that spent
+/// the same number of bytes rather than two that spent what they liked.
 ///
-/// **Re-measured and moved from 8,000 to 6,600 at S8-0.** The claim and its threshold are
-/// unchanged; the budget moved because 8,000 is the least rate-limited budget that fits this
-/// album, and at that end both table sets land within a rounding of the same near-transparent
-/// plan, so the witness is only just past its own 0.25 dB bar. Measured on this album at the
-/// shipped search shape — one thread, `--musearch 0`, trained against `--no-train` at the same
+/// **Re-measured at S8-7**, after the search rework: the album is now 8,192 samples (17
+/// frames) for the reason above, and the budget stays 6,600. Measured on this album at the
+/// shipped shape — one thread, `--musearch 0`, trained against `--no-train` at the same
 /// budget:
 ///
-/// | budget | stream bits | trained | built-in | gain |
-/// |---|---|---|---|---|
-/// | 8,000 | 21,088 | 55.41 | 54.98 | +0.43 |
-/// | 7,400 | 16,288 | 55.46 | 54.98 | +0.48 |
-/// | 7,000 | 13,088 | 55.41 | 54.87 | +0.54 |
-/// | 6,600 | 9,888 | 55.23 | 54.12 | **+1.11** |
-/// | 6,200 | 6,688 | 53.69 | 51.20 | +2.49 |
+/// | budget | trained | built-in | gain |
+/// |---|---|---|---|
+/// | 5,600 | 35.17 | 31.55 | +3.62 |
+/// | 6,000 | 44.26 | 42.01 | +2.25 |
+/// | 6,600 | 51.16 | 47.83 | **+3.33** |
+/// | 7,400 | 55.82 | 53.55 | +2.27 |
+/// | 8,000 | 58.54 | 56.46 | +2.08 |
 ///
-/// 6,600 is the product-like regime (309 B/frame against the album's ~199) and about two and a
-/// half times the assertion's margin. Below it the stream stops paying for the 5,212-byte
-/// table blob, which is why the gain rises again at 6,200 while the fidelity falls for both
-/// arms.
+/// (The S8-0 table this replaces was measured on the five-frame album with the old sweep;
+/// it is in `PLAN-OF-RECORD.md` §S8-0 and no longer describes this search.)
 const BINDING: u64 = 6_600;
 
 #[test]
@@ -177,5 +179,82 @@ fn training_actually_changes_the_tables() {
         parsed.tables(),
         &base[..],
         "the shipped tables are byte-identical to the built-in ones, so nothing was trained"
+    );
+}
+
+/// S8-6: an unobserved context is still rebuilt, to the balanced code the 0.2 floor implies.
+///
+/// A context a small album never visits must still get a complete code, and the balanced
+/// code the floor implies is the natural one; keeping the built-in row makes the table depend
+/// on training history. Retaining the base row left 21 bytes of `len_cb` different from the
+/// expected table region on the fast cell; this test is the regression, on the fifteen
+/// evenly-weighted symbols of a 14-class set (fourteen at four bits, the terminator at
+/// three).
+#[test]
+fn an_unobserved_context_is_rebuilt_to_the_balanced_code() {
+    // The default rows are already balanced, so a base-only test cannot see the difference.
+    // Model the sequence that exposed it: a round observes context 9, a later round has no
+    // counts for it. The later `build` must revert the row to the balanced code rather than
+    // keep the observed one — the observed row is history, not evidence about the next pass,
+    // and retaining it left 21 bytes of `len_cb` different from the expected tables before S8-6.
+    let base = DefaultTables::build();
+    let mut observed = train::Stats::default();
+    observed.cb[9][0] = 100.0;
+    let skewed = train::build(&base, &observed);
+    assert_ne!(
+        skewed.cb[9].len, base.cb[9].len,
+        "the observed row should be skewed, not the balanced default"
+    );
+
+    let rebuilt = train::build(&skewed, &train::Stats::default());
+    assert_eq!(
+        rebuilt.cb[9].len, base.cb[9].len,
+        "a zero-count context kept the previous row instead of being rebuilt"
+    );
+    let mut lengths: Vec<u8> = (0..=base.k).map(|b| rebuilt.cb[9].symbol_len(b)).collect();
+    assert_eq!(rebuilt.cb[9].symbol_len(base.k), 3);
+    lengths.sort_unstable();
+    assert_eq!(lengths, [3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]);
+}
+
+#[test]
+fn the_terminator_is_charged_only_when_it_is_written() {
+    use uli_enc::quant::{Band, Chan};
+    use uli_lite::format::NBANDS;
+
+    let tables = DefaultTables::build();
+    let samples = Samples::from_interleaved(vec![0.0; N_SAMPLES * 2]);
+    let g = 100;
+    let ms = false;
+
+    let collect = |bands: usize| {
+        let chan = Chan {
+            bands: vec![Band::zero(); bands],
+        };
+        let content = Content::coded(GPlan::new(vec![g], vec![ms]), vec![[chan.clone(), chan]]);
+        train::collect_frames(&samples, N_SAMPLES, &tables, &content, 0.13, &[0])
+    };
+
+    let full = collect(NBANDS);
+    assert_eq!(full.frames, 1);
+    assert_eq!(
+        full.cb[0][tables.k], 0.0,
+        "a full-band channel must not be charged a terminator"
+    );
+    assert_eq!(full.cb[0][0], 2.0 * (NBANDS as f64 - 1.0));
+    assert_eq!(
+        full.cb[tables.k][0], 2.0,
+        "the first band of each channel is context k"
+    );
+
+    let short = collect(NBANDS - 1);
+    assert_eq!(
+        short.cb[0][tables.k], 2.0,
+        "a channel that ends early is charged one terminator per channel"
+    );
+    assert_eq!(short.cb[0][0], 2.0 * (NBANDS as f64 - 2.0));
+    assert_eq!(
+        short.cb[tables.k][0], 2.0,
+        "the first band of each channel is context k"
     );
 }

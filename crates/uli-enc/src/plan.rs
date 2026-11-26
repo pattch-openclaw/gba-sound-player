@@ -25,8 +25,12 @@ pub const DEFAULT_BUDGET: u64 = 33_292_288;
 /// quarter of each frame for everything the decoder is not: interrupts, the mixer, the UI.
 pub const DEFAULT_CAP_PCT: f64 = 74.0;
 
-/// Slack added to the computed container overhead, covering the alignment and padding
-/// that squaring each region up to four bytes contributes.
+/// Slack added to `overhead_bytes` for the **target**: alignment and padding that squaring
+/// each region up to four bytes contributes. The size check uses `overhead_bytes - SLACK`,
+/// because that is what the container will actually occupy; the target reserves the slack so
+/// a plan that lands on its arithmetic still has room. Keeping the two numbers distinct stops
+/// the retry from squeezing a plan that already fits by treating reserved padding as missing
+/// stream.
 const OVERHEAD_SLACK: usize = 16;
 /// Bits held back from the stream target, so a plan that lands exactly on its arithmetic is
 /// still inside the budget rather than on the boundary.
@@ -337,12 +341,17 @@ impl Plan {
             stream_bits += content.frame_bits(tables, f);
         }
         let stream_halfwords = crate::bitwriter::padded_halfwords(stream_bits);
-        let needed = overhead_bytes as u64 + (stream_halfwords * 2) as u64;
+        // The size the budget and the retry compare is the actual container size: the fixed
+        // regions plus the stream halfwords. It must not include the target slack — on a
+        // 16-byte difference the retry's adjustment moved the second allocation target by
+        // 130.56 bits, enough to change five frames' steps on the fast cell.
+        let size_overhead = overhead_bytes - OVERHEAD_SLACK;
+        let needed = size_overhead as u64 + (stream_halfwords * 2) as u64;
         if needed > budget {
             return Err(Error::Refusal(Refusal {
                 needed,
                 allowed: budget,
-                overhead_bytes: overhead_bytes as u64,
+                overhead_bytes: size_overhead as u64,
                 target_bits,
             }));
         }

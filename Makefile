@@ -6,7 +6,7 @@
         flac-test-rice flac-gates flac-portable-check gafp-check gafp-pack-check \
         product-play-test opus-test opus-rom uli-test uli-check uli-fixture \
         uli-default-tables uli-mdct-fixture uli-band-rdo-fixture uli-band-rdo-fixture-clean \
-        uli-probe uli-plan-diff uli-frame-diff \
+        uli-probe uli-plan-diff uli-frame-diff uli-dump-plan uli-train-diff \
         uli-rd-ab uli-accept uli-oracle-check \
         uli-bench-rom uli-bench uli-attrib uli-attrib-subframe uli-frame-ops \
         uli-album-asset uli-album-bench uli-album-bench-rom uli-gate uli-gate-rom uli-gate-fixture uli-gate-fixture-rom uli-play-rom \
@@ -823,6 +823,47 @@ uli-frame-diff: toolchain-check
 	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_frame_diff.py \
 	  --ours $(dir $(ULI_ENC_BIN))frame-dump $(ULI_FRAME_DIFF_ARGS)
 
+# S8-2's P2: a patched local build of the reference with `--dump-plan`, which writes the
+# per-frame plan the reference *chose* for both passes (the pass-1 plan is the trainer's
+# input and is not in the blob), plus the per-class counts `tables_from_stats` consumed.
+# The patch is generated into a temp dir at run time, so no C enters this tree; the gate
+# is that the dumped shipped plan equals the plan recovered from that run's own blob.
+# The default cell is S8-4's generated `fast` cell (no corpus); pass
+# ULI_DUMP_PLAN_ARGS="--album A --tracks T --out B --budget N --cap P --threads N" for a
+# measurement. Deliberately NOT on any gate's path: it builds the off-tree reference.
+ULI_DUMP_PLAN_ARGS ?=
+ULI_PLAN_DUMP ?= crates/uli-lite/target/$(HOST_TRIPLE)/release/examples/plan_dump
+uli-dump-plan: toolchain-check
+	@test -f $(GBA_AUDIO)/encoder/uli_enc.c || \
+	  { echo "uli-dump-plan: no reference encoder source at $(GBA_AUDIO)/encoder (set GBA_AUDIO=)"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) build --release --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE) --example plan_dump
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_dump_plan.py \
+	  --plan-dump $(abspath $(ULI_PLAN_DUMP)) $(ULI_DUMP_PLAN_ARGS)
+
+# S8-6: the trainer, fed the reference's own pass-1 plan. P2's dump supplies the four
+# train rounds' stats (which build the initial tables) and the retrain stats; `train-dump`
+# rebuilds the initial tables, checks `train::build` on the dumped retrain stats, then codes
+# the pass-1 plan every second frame through `train::collect_frames` and checks the final
+# table region. Gate: the blob's 5,212-byte table region, `dq` included, byte for byte, and
+# the integer stats counts exact. `--work-dir` keeps the cell/blob/dump for inspection.
+# Deliberately NOT on any gate's path: it builds and runs the off-tree reference.
+ULI_TRAIN_DUMP_BIN ?= crates/uli-enc/target/$(HOST_TRIPLE)/release/train-dump
+ULI_TRAIN_DIFF_DIR ?= $(GATE_NEUTRAL_CWD)/uli-train-diff
+uli-train-diff: toolchain-check
+	@test -f $(GBA_AUDIO)/encoder/uli_enc.c || \
+	  { echo "uli-train-diff: no reference encoder source at $(GBA_AUDIO)/encoder (set GBA_AUDIO=)"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) build --release --manifest-path $(ULI_ENC_MANIFEST) --target $(HOST_TRIPLE) --bins && \
+	  $(CARGO) build --release --manifest-path $(ULI_CRATE_MANIFEST) --target $(HOST_TRIPLE) --example plan_dump
+	rm -rf $(ULI_TRAIN_DIFF_DIR)
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/uli_dump_plan.py \
+	  --work-dir $(ULI_TRAIN_DIFF_DIR) \
+	  --plan-dump $(abspath $(ULI_PLAN_DUMP)) \
+	  --train-dump $(abspath $(ULI_TRAIN_DUMP_BIN))
+
 # S8-3's plan/table diff: between two blobs, *which* table field and *which* frame's step
 # differ — the question S7 can only answer at region granularity. Needs no reference build
 # (it reads the container), so it works on ours against the oracle's or ours against ours.
@@ -869,7 +910,10 @@ uli-rd-ab:
 # when the search or the container changes, and record the verdict in
 # PLAN-OF-RECORD.md -> S7. The corpus defaults to examples/uli_bench/assets; pass
 # ULI_ACCEPT_ASSETS= when it lives elsewhere. `ULI_ACCEPT_ONLY=fast` runs one cell (the
-# S8 progress signal) and needs no corpus at all.
+# S8 progress signal) and needs no corpus at all. Populate the default corpus with
+# `make uli-album-asset` (biomaster/off-default), `make uli-cross-asset` (cross60) or
+# `make uli-adversarial-asset` (the fourth slot replaces cross60 when present); see
+# ULI2.md -> "The measurement corpus".
 ULI_ACCEPT_ONLY ?=
 uli-accept:
 	@test -x $(GBA_AUDIO)/build/uli_enc || { echo "uli-accept: no reference encoder (make -C $(GBA_AUDIO)/encoder)"; exit 1; }
@@ -935,6 +979,15 @@ uli-bench: uli-bench-rom
 # and re-verifies its published checkpoints against the decoder's 8-bit track
 # output before it will emit a pin. Needs the sibling `gba-audio` checkout and
 # ffmpeg; it therefore never runs in `make test`.
+#
+# The default master is `assets/sound/bioluminescent.wav` (96 kHz / 24-bit,
+# 258.6 s). The 32,768 Hz / 8-bit WAV beside it is a listening derivative, **not**
+# this target's input: `prep.py` resamples the 96 kHz master to 32,768 Hz and
+# writes `album.f32` + `tracks.tsv`, which `make uli-accept`'s `biomaster` and
+# `off-default` cells encode. The bench/gate arms use the resulting
+# `biomaster.uli` and its generated pin. `ULI_ALBUM_WAV` points the same recipe at
+# another master. Full recipe and the other corpora: ULI2.md -> "The measurement
+# corpus — how examples/uli_bench/assets is generated and used".
 #
 # `gba-audio/encoder/prep.py` needs numpy, scipy and soundfile, which a bare
 # system python often lacks (PEP 668). Point `ULI_ALBUM_PY` at a venv:
@@ -2301,6 +2354,10 @@ help:
 	@echo "      uli-rd-ab            S3 gate: ours vs the reference, same PCM and budgets"
 	@echo "      uli-accept           S7 matrix: four cells + a --dacw 1 row; MATCH, or DIFF"
 	@echo "                           localised to a container region (needs the off-tree oracle)"
+	@echo "      uli-dump-plan        S8-2: the reference's own pass-1/pass-2 plan and counts;"
+	@echo "                           the dumped shipped plan must equal the plan decoded from its blob"
+	@echo "      uli-train-diff       S8-6: the trainer on that pass-1 plan; the table region"
+	@echo "                           must equal the reference blob's, dq included"
 	@echo "      uli-overlay-test     product path vs the portable reference, both builds, + premise"
 	@echo "      uli-fixture          regenerate the committed expected-vector file"
 	@echo "      uli-bench            build + run + read PASS: 129-frame cycle/witness image"

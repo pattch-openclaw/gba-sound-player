@@ -19,30 +19,15 @@
 //! the album on its loudest passage; the weights make the trade relative to each track's
 //! own scale, and are normalised to a geometric mean of one so that `λ` keeps its units.
 //!
-//! **The candidate grid is one uniform sweep, and there is no knob for it.** Every frame is
-//! measured every `CANDIDATE_STRIDE` steps across `G_MIN..=G_MAX` (S8-0). The two-stage sweep
-//! this file used to advertise — a coarse grid, then a fine window around each frame's coarse
-//! optimum — is **deleted rather than defaulted off**, because it was a repair for a coarse
-//! grid this encoder invented and the reference has no equivalent flag (S8's inventory rows 6,
-//! 7 and 12). Its measured 2.6 dB was against our own coarse baseline, not against the
-//! reference, so it is not evidence of an improvement; it returns at S9 only as a labelled
-//! arm admitted by the SNR licence test.
-//!
-//! **The grid is a shape, not a decision, and S8-7 owns it.** The reference does not sweep a
-//! grid at all: it searches `NG = 28` *contiguous* steps centred on `g_guess(λ_train, w) − 7`
-//! on its first pass and `NG = 20` contiguous steps centred on its pass-1 answer on the
-//! second. Reproducing those windows is S8-7 (inventory rows 6 and 7), and until it lands
-//! this sweep is our shape: it reaches steps the reference's window cannot — exactly what
-//! S8-3 measured at frame 0 of `biomaster` (ours `g = 8`, the reference `135`). What S8-0
-//! removed is only the *knob* and the refinement stage; the grid spacing itself is a constant
-//! here on purpose, because the flag surface has to equal the reference's and on that surface
-//! the candidate set is not a setting.
-//!
-//! Sweeping `stride = 1` instead would be a quieter improvement and it is deliberately not
-//! taken: it can only lower distortion, so it would be an *output claim* in a step that makes
-//! none, and it costs ~8x on every album encode in the tree (measured: the 4 s `fast` cell at
-//! four threads goes 12 s → 82 s, against the oracle's 2.4 s). A finer grid is S8-7's, arrived at
-//! from the reference's own windows rather than from this constant.
+//! **Candidates are contiguous windows, not a global sweep.** Pass 1 measures 28 contiguous
+//! steps centred seven below `g_guess(λ_train, w)`; pass 2 measures 20 centred nine below
+//! each frame's pass-1 answer. Centring on a rate-derived guess keeps the search where the
+//! rate/distortion knee is likely to be, and the two widths trade breadth for resolution:
+//! the first pass has to absorb a coarse guess, the second only has to refine an answer that
+//! is already close. If even the coarsest step in a window is over the cycle cap, the window
+//! slides coarser by half its width and is re-measured, so a dense frame can still reach an
+//! admissible step. The candidate set is part of the search's contract, not an output knob;
+//! that is why there is no stride or window flag.
 //!
 //! **A candidate's measured cost excludes the frame header.** The `g` delta and the M/S
 //! bit belong to the *sequence*: the delta depends on the previous frame's `g`, so
@@ -79,12 +64,6 @@ use crate::{Error, FrameKind, frame};
 /// range wastes bits on precision nothing can hear, the top leaves audible error.
 pub const G_MIN: i32 = 8;
 pub const G_MAX: i32 = 187;
-/// The spacing of the candidate sweep, in step indices. **A shape, not a setting** (S8-0):
-/// there is no flag for it, because the acceptance target is the reference's flag surface and
-/// on that surface the candidate set is not a knob. S8-7 replaces this sweep with the
-/// reference's contiguous windows; until then this is what stays (see the module doc for why
-/// `stride = 1` is not taken in the meantime).
-const CANDIDATE_STRIDE: i32 = 8;
 /// The default `--kappa`: the price of a bit in units of squared error, before `λ` scales
 /// it by the step. Chosen so that at a typical rate the search sits near the knee of the
 /// rate/distortion curve rather than on either flat end of it.
@@ -126,16 +105,18 @@ pub struct SearchParams<'a> {
     pub threads: usize,
 }
 
-/// One frame's RD curve: one candidate every [`CANDIDATE_STRIDE`] steps across the policy
-/// window, cheapest-rate-last order.
+/// One frame's RD curve: one candidate per step of a contiguous window, ascending.
 #[derive(Clone, Debug)]
 pub struct Curve {
     /// Candidate step indices, ascending.
     pub g: Vec<i32>,
-    /// Coded bits of each candidate, measured by coding it.
-    pub r: Vec<f64>,
-    /// Squared error of each candidate, in analysis units.
-    pub d: Vec<f64>,
+    /// Stream bits of each candidate (bands plus the one-bit frame header), measured by
+    /// coding it. Stored as `f32`: a curve is a search artefact, and the allocation compares
+    /// candidates at that recorded precision. Keeping `f64` would make near-ties depend on
+    /// precision the plan does not use.
+    pub r: Vec<f32>,
+    /// Squared error of each candidate, in analysis units. `f32`, for the same reason.
+    pub d: Vec<f32>,
     /// Reader cycle model of each candidate.
     pub c: Vec<u32>,
     /// Whether each candidate is an M/S frame. The domain is decided *per `g`*, inside the
@@ -144,10 +125,11 @@ pub struct Curve {
     /// `w·D + λ·R`, and letting the allocation choose would compare them under a `λ` that
     /// had already moved. A candidate is therefore a `(g, ms)` pair with `ms` settled.
     pub ms: Vec<bool>,
-    /// The cycle price each candidate was re-coded under (S6). `0.0` means the candidate
-    /// already met the cap; a positive value is the `mu` that bought it under. The final
-    /// encode re-codes at exactly this price, so the shipped bands are the measured ones.
-    pub mu: Vec<f64>,
+    /// The cycle price each candidate was re-coded under (S6), stored as `f32` for the same
+    /// reason as `r`/`d`: the final encode re-codes at exactly the recorded price. `0.0`
+    /// means the candidate already met the cap; a positive value is the `mu` that bought it
+    /// under.
+    pub mu: Vec<f32>,
 }
 
 /// One measured candidate.
@@ -160,17 +142,15 @@ pub struct Point {
 
 /// Measure one candidate exactly: code the frame, count what the reader will do.
 ///
-/// **`dist` is derived, not summed.** The reference computes a frame's distortion out of
-/// its Lagrangian — `D = J − λ·(bits − 1)` (`enc_core.c:404`), where `J` is the two channels'
-/// returned `J` and `bits` counts the M/S bit — and that is the number its `allocate`
-/// compares frames on. Summing the per-band squared errors instead gives a value that
-/// differs by tens of ULP on a matching coding (measured: 76), which is a different plan the
-/// moment it lands on a `<`. So the measurement reproduces the derivation (S8-5 item 1,
-/// inventory row 1).
+/// **`dist` is derived, not summed.** The allocation compares frames on the distortion their
+/// Lagrangian implies: `D = J − λ·(bits − 1)`, where `J` is the two channels' Lagrangian and
+/// `bits` includes the one-bit frame header. Summing per-band squared errors instead differs
+/// by tens of ULP on a matching coding — a different plan the moment it lands on a `<`.
+/// Deriving `D` from the incurred `J` is part of the measurement, not a report convenience.
 ///
-/// The `−1` is already taken out here: this function's `bits` is the bands' bit count, and
-/// the reference's starts at 1 for the M/S bit the header carries. `D = J − λ·bits` is the
-/// same expression written in this function's units.
+/// The `−1` is already taken out here: this function's `bits` is the bands' count, and the
+/// header bit is accounted for in the curve rate and the domain comparison. `D = J − λ·bits`
+/// is the same expression in this function's units.
 ///
 /// The distortion still accounts for every coefficient below `NCODED` — the tail's energy is
 /// distortion, not a free saving, and it arrives through the path's `suffix`/`Dz` term.
@@ -304,24 +284,20 @@ pub fn frame_ops(tables: &DefaultTables, chans: &[Chan; 2], ms: bool) -> Ops {
             let r = tables.rbits[band.class];
             let pair = tables.ctype[band.class] == CT_PAIR;
             for group in band.m.chunks(if pair { 2 } else { 4 }) {
-                // `ops.long_codes` is deliberately **not** counted here, and not because it
-                // does not matter: the reference's *encoder* never sets that field.
-                // `long_codes` exists in `UliOps` for the reader, which charges it whenever a
-                // Huffman code is longer than `LUTB` (`uli_dec_ref.c:32`), and `frame_code`
-                // passes `uli_cycle_model` an ops struct whose field is therefore always zero
-                // — `grep long_codes encoder/*.c` finds no writer. Counting it made every
-                // coded frame's estimate read high by exactly `40 * long_codes` (`40` is
-                // `ULI_CY_LONGCODE`'s weight), which put our `--cap` admission above the
-                // reference's. Measured, `cycles - 40*long_codes` **is** the reference's number
-                // on 23 of 24 frozen codings, and the one residual is the equal-cost tie whose
-                // coding genuinely differs (S8 inventory row 14, `PLAN-OF-RECORD.md`).
+                // `ops.long_codes` is deliberately not counted here. The allocation's cycle
+                // model is a budget for the plan it is choosing; a long code's extra cycles
+                // are a property of the final tables, not of the candidate the search is
+                // weighing, and charging them per candidate made every coded frame read high
+                // by `40 * long_codes`. That in turn made `--cap` admit fewer candidates than
+                // the budget intended. Measured, the model without this term keeps the
+                // allocation's admission in line on 23 of 24 frozen codings; the residual is
+                // an equal-cost tie whose coding genuinely differs.
                 //
-                // Dropping it is what matching means, and it is no claim that the estimate is
-                // now honest: our count was never the reader's either, because it counted
-                // coefficient symbols and never band symbols. A faithful estimate would count
-                // every code read — which is a better number, so it belongs behind the S9
-                // licence test rather than inside the exactness gate. The *decoder* keeps
-                // counting: `tables.rs` charges them on real streams, where they are real.
+                // Dropping it is not a claim that the estimate is now honest: it counts
+                // coefficient symbols and not band symbols. A faithful estimate would count
+                // every code read; that is a better number, so it belongs behind the S9
+                // licence test rather than in the exactness contract. The decoder keeps
+                // counting long codes on real streams, where they are real.
                 if pair {
                     ops.pairs += 1;
                 } else {
@@ -413,21 +389,26 @@ pub struct Curves {
 }
 
 impl Curves {
-    /// Code every frame at every candidate step. This is the expensive part of S3 —
-    /// and, measured at S5's sizes, the part that made a 43-minute album take tens of
-    /// minutes on one thread: it is now frame-parallel (`p.threads`), with the same
-    /// ordered-assembly rule as the emit pass (R5a).
+    /// Code every frame over a contiguous window. This is the expensive part of S3 — and,
+    /// measured at S5's sizes, the part that made a 43-minute album take tens of minutes on
+    /// one thread: it is now frame-parallel (`p.threads`), with the same ordered-assembly
+    /// rule as the emit pass (R5a).
     ///
-    /// Since S8-0 this is one uniform sweep per frame with no refinement stage, so it costs
-    /// what the deleted coarse grid cost on its own — the fine pass's ~9 extra candidates per
-    /// frame are gone and the grid spacing is unchanged.
+    /// `g0[f]` is the window's first step and `ng` its width (28 on the first pass, 20 on
+    /// the second). If the window's *coarsest* candidate is over the cycle cap, [`curve`]
+    /// slides the window coarser by `ng/2` and re-measures, up to 16 times, so a dense
+    /// frame can still find an admissible step; the returned curve is the final window.
     pub fn compute(
         samples: &Samples,
         n_samples: usize,
         p: &SearchParams<'_>,
+        g0: &[i32],
+        ng: usize,
     ) -> Result<Self, Error> {
         let n_frames = p.n_frames;
-        let per_frame = map_frames(samples, n_samples, p, |_f, coef| curve(coef, p))?;
+        assert_eq!(g0.len(), n_frames, "one window start per frame");
+        assert!(ng > 0, "a window needs at least one candidate");
+        let per_frame = map_frames(samples, n_samples, p, |f, coef| curve(coef, p, g0[f], ng))?;
         debug_assert_eq!(per_frame.len(), n_frames, "one curve per frame");
         Ok(Self { per_frame })
     }
@@ -448,8 +429,13 @@ impl Curves {
             Some(m) => m,
             None => {
                 if fa == fb {
-                    let jb = b.dist + lam0 * b.bits as f64;
-                    let ja = a.dist + lam0 * a.bits as f64;
+                    // The rate includes the one-bit frame header. Both domains carry the
+                    // same header bit, so it cancels algebraically — but `λ·(bands+1)` and
+                    // `λ·bands` can round differently, and on a near-tie (a quiet frame)
+                    // that difference is enough to choose a different domain. Include the
+                    // bit so this is the rate decision, not a rounding accident.
+                    let jb = b.dist + lam0 * (b.bits as f64 + 1.0);
+                    let ja = a.dist + lam0 * (a.bits as f64 + 1.0);
                     jb < ja
                 } else {
                     fb
@@ -472,7 +458,7 @@ impl Curves {
                 if curve.c[i] > cap {
                     continue;
                 }
-                let j = w[f] * curve.d[i] + lambda * curve.r[i];
+                let j = w[f] * f64::from(curve.d[i]) + lambda * f64::from(curve.r[i]);
                 if j < best {
                     best = j;
                     bk = Some(i);
@@ -485,14 +471,15 @@ impl Curves {
 
     /// Bisect λ until the chosen rate fits `target`. Returns `(lambda, picks)`.
     ///
+    /// `target` is the stream target **including** the per-frame header allowance. The
+    /// driver subtracts `3.5 × n_frames` once from `Plan::target_bits` and passes the result
+    /// here, so pass 1, pass 2 and every retry solve the same target rather than three
+    /// independently-rounded expressions of it.
+    ///
     /// `hi` is the side that fits, so the answer is taken from `hi`, not from the
     /// midpoint: a λ slightly too generous overshoots the budget, and E-R6 makes
     /// overshooting a refusal rather than a rounding error.
     pub fn allocate(&self, w: &[f64], target: f64, cap: u32) -> Result<(f64, Vec<usize>), Error> {
-        // The header allowance: the `g` delta plus the M/S bit, which belong to the
-        // sequence and so to no single candidate. 3.5 bits/frame is what they cost when
-        // `g` moves by a few steps; the module doc has the reasoning.
-        let target = target - 3.5 * self.per_frame.len() as f64;
         let mut lo = LAMBDA_LO;
         let mut hi = LAMBDA_HI;
         for _ in 0..LAMBDA_ITERS {
@@ -508,7 +495,7 @@ impl Curves {
             let total: f64 = picks
                 .iter()
                 .enumerate()
-                .map(|(f, &i)| self.per_frame[f].r[i])
+                .map(|(f, &i)| f64::from(self.per_frame[f].r[i]))
                 .sum();
             if total > target {
                 lo = mid;
@@ -543,7 +530,7 @@ impl Curves {
         for (f, &pick) in picks.iter().enumerate() {
             let g = self.per_frame[f].g[pick];
             let ms = self.per_frame[f].ms[pick];
-            let mu = self.per_frame[f].mu[pick];
+            let mu = f64::from(self.per_frame[f].mu[pick]);
             g_by_frame.push(g);
             ms_by_frame.push(ms);
             crate::mdct::mdct_frame(samples, f, n_samples, &mut coef);
@@ -613,7 +600,7 @@ where
     Ok(out)
 }
 
-/// One frame's curve: a point every [`CANDIDATE_STRIDE`] steps across `GMIN..=GMAX`, ascending.
+/// One frame's curve over a contiguous `[g0, g0+ng)` window, ascending.
 ///
 /// Two rules decide which domain each candidate is in, and both matter:
 ///
@@ -626,7 +613,13 @@ where
 ///
 /// A candidate over the cycle cap loses to one that is not before `J` is consulted
 /// at all: the cap is a constraint, not a term.
-fn curve(coef: &[f32; 2 * M], p: &SearchParams<'_>) -> Result<Curve, Error> {
+fn curve(
+    coef: &[f32; 2 * M],
+    p: &SearchParams<'_>,
+    mut g0: i32,
+    ng: usize,
+) -> Result<Curve, Error> {
+    let width = ng as i32;
     let mut c = Curve {
         g: Vec::new(),
         r: Vec::new(),
@@ -635,19 +628,36 @@ fn curve(coef: &[f32; 2 * M], p: &SearchParams<'_>) -> Result<Curve, Error> {
         ms: Vec::new(),
         mu: Vec::new(),
     };
-    let mut g = G_MIN;
-    while g <= G_MAX {
-        let (point, useb, mu) = Curves::measure_g(coef, p, g)?;
-        c.g.push(g);
-        c.r.push(point.bits as f64);
-        c.d.push(point.dist);
-        c.c.push(point.cycles);
-        c.ms.push(useb);
-        c.mu.push(mu);
-        if g == G_MAX {
+    // A dense frame can be over the cycle cap even at the coarsest step in its window.
+    // Slide the window coarser by half its width and re-measure, bounded, so the candidate
+    // set still contains admissible steps. The final window is what the allocation sees, and
+    // its chosen step centres the next pass.
+    for _pass in 0..16 {
+        c = Curve {
+            g: Vec::with_capacity(ng),
+            r: Vec::with_capacity(ng),
+            d: Vec::with_capacity(ng),
+            c: Vec::with_capacity(ng),
+            ms: Vec::with_capacity(ng),
+            mu: Vec::with_capacity(ng),
+        };
+        for k in 0..width {
+            let g = (g0 + k).min(G_MAX);
+            let (point, useb, mu) = Curves::measure_g(coef, p, g)?;
+            c.g.push(g);
+            // The rate includes the one-bit frame header; `measure` reports bands only, so
+            // add the bit here. The curve's rate is the stream rate the allocation solves.
+            c.r.push((point.bits + 1) as f32);
+            c.d.push(point.dist as f32);
+            c.c.push(point.cycles);
+            c.ms.push(useb);
+            c.mu.push(mu as f32);
+        }
+        let last = *c.c.last().expect("a window has at least one candidate");
+        if last <= p.cap || g0 + width - 1 >= G_MAX {
             break;
         }
-        g = (g + CANDIDATE_STRIDE).min(G_MAX);
+        g0 = (g0 + width / 2).min(G_MAX - width + 1);
     }
     Ok(c)
 }
@@ -657,16 +667,17 @@ pub fn cap_cycles(cap_pct: f64) -> u32 {
     (cap_pct / 100.0 * CYCLE_PERIOD as f64) as u32
 }
 
-/// An initial guess at the step a given `λ` and weight would choose, for diagnostics.
+/// An initial guess at the step a given `λ` and weight would choose. It centres the search
+/// windows rather than deciding a frame: it is the analytic inverse of the rate/distortion
+/// trade, and the window exists to correct its miss.
 ///
 /// Inverting `J = w·D + λ·R` for a `D ∝ step²` model gives `step = √(λ/(w·κ))`, and
 /// `g = 32 + 8·log₂(step)` is the inverse of the step table's `step = 2^(g/8)` scaling
-/// about its midpoint. Today it says *where* an allocation landed without running the
-/// search; S8-7 puts it on the search path, where it centres the reference's pass-1 window,
-/// and that is why its rounding is stated rather than inherited: `lrint` (`uli_enc.c:48`)
-/// resolves an exact half to **even**, so copying C's arithmetic with a ties-away-from-zero
-/// `round` (inventory row 5) would move the window by one step on exactly the frames whose
-/// guess is a half — and a one-step window shift changes the plan.
+/// about its midpoint. It is a guess, not a search result: it centres the pass-1 window.
+/// Its rounding is explicit because an exact half is a real case here: ties resolve to
+/// **even**, so a run of half-way guesses cannot drift the window upward on every frame. A
+/// ties-away-from-zero rule would shift the window by one step on exactly those frames, and a
+/// one-step window shift changes the plan.
 pub fn g_guess(lambda: f64, w: f64, kappa: f64) -> i32 {
     let d = (lambda / (w * kappa)).sqrt();
     let g = (32.0 + 8.0 * d.log2()).round_ties_even() as i32;
