@@ -461,6 +461,12 @@ phase = "2b"
 band = "scene"
 kind = "composite"
 resident = false             # §5.1's cap is art + list + blank; a mid-album card is re-pointed on entry
+# 2b PR-(3): the card draws the *same* cover as the art scene, so its image term is 0
+# and the audit counts one asset rather than two. The bake checks that the named
+# scene has an art element and that this card's box is no larger than that scene's
+# derived ceiling; without the field the projection would sum 256 + 256 and refuse B
+# at 718/512 for an image the ROM only ever holds once.
+shares_image = "art"
 
 [[variant.scene]]
 name = "blank"
@@ -554,6 +560,76 @@ y1 = 15
 face = "ark10"
 row_px = 16
 banks = [0]
+
+# --- 2b PR-(3): the title card's spans and picture (A12) -----------------------
+#
+# All four spans are one 16 px line in the right-hand 19 columns (152 px), beside a
+# 10x10-tile picture on the left. Every string is elided/fitted against its own
+# declared box (§5.5); the counts line is ASCII because the tracked cut is
+# U+0020-U+007E and has no middle dot — the same finding 2a PR-(2) made about the
+# elision marker, so `-` carries the separator here.
+[[variant.element]]
+id = "card_title"
+kind = "text"
+band = "scene"
+scene = "title_card"
+x0 = 11
+y0 = 0
+x1 = 29
+y1 = 1
+face = "ark10"
+row_px = 16
+banks = [0]
+
+[[variant.element]]
+id = "card_artist"
+kind = "text"
+band = "scene"
+scene = "title_card"
+x0 = 11
+y0 = 2
+x1 = 29
+y1 = 3
+face = "ark10"
+row_px = 16
+banks = [0]
+
+[[variant.element]]
+id = "card_year"
+kind = "text"
+band = "scene"
+scene = "title_card"
+x0 = 11
+y0 = 4
+x1 = 29
+y1 = 5
+face = "ark10"
+row_px = 16
+banks = [0]
+
+[[variant.element]]
+id = "card_counts"
+kind = "text"
+band = "scene"
+scene = "title_card"
+x0 = 11
+y0 = 6
+x1 = 29
+y1 = 7
+face = "ark10"
+row_px = 16
+banks = [0]
+
+[[variant.element]]
+id = "card_art"
+kind = "art"
+band = "scene"
+scene = "title_card"
+x0 = 0
+y0 = 0
+x1 = 9
+y1 = 9
+banks = [3, 4, 5, 6]
 
 [[variant.control]]
 key = "select"

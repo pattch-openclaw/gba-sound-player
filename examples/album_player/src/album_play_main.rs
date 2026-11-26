@@ -1168,6 +1168,7 @@ mod rom {
                             Some(keys::Action::NextTrack) => "acts: next track",
                             Some(keys::Action::PrevTrack) => "acts: previous track",
                             Some(keys::Action::RestartTrack) => "acts: restart track",
+                            Some(keys::Action::SelectScene) => "acts: cycle scene",
                             None => "no action",
                         }
                     );
@@ -1382,6 +1383,53 @@ mod rom {
         }
     }
 
+    /// Paint one scene into the region and present it (2b PR-(3)).
+    ///
+    /// This is a **separate commit from the chrome's**, taken on the `Select` event rather
+    /// than waiting for `paint.due()`: a card that appeared on the next whole second would
+    /// be up to a second late, and a press is judged by what happens next. It is still one
+    /// commit per pass — the caller suppresses the chrome refresh on the same pass — so
+    /// §5.7's at-most-one-commit invariant holds.
+    fn paint_scene(
+        scene: surface::SceneId,
+        album: &Album<'static>,
+        writes: &mut surface::Writes,
+        ui_bg: &mut surface::Painted,
+        gfx: &mut Graphics<'_>,
+        tiles: &surface::Tilesets,
+    ) {
+        match scene {
+            surface::SceneId::Blank => surface::Surface::paint_blank(writes),
+            surface::SceneId::TitleCard => {
+                surface::Surface::paint_card(writes, &card_for(album));
+            }
+        }
+        ui_bg.apply_scene(writes, tiles);
+        ui_bg.commit(gfx);
+    }
+
+    /// The title card's strings, from the album's own manifest (2b PR-(3)).
+    ///
+    /// The minutes line rounds **up** and is ASCII: §5.5a's cut has no middle dot, so the
+    /// separator is `-`. The sum is over `ALBM1`'s per-track sample counts, and
+    /// `seconds / RATE_HZ` is a shift (the rate is a declared constant), so no divide
+    /// helper is linked for it.
+    fn card_for(album: &Album<'static>) -> surface::Card<'static> {
+        let mut samples = 0u32;
+        let mut index = 0u32;
+        while index < album.n_tracks() {
+            samples = samples.saturating_add(album.track(index).n_samples);
+            index += 1;
+        }
+        surface::Card {
+            title: album.album_title(),
+            artist: album.album_artist(),
+            year: album.year(),
+            n_tracks: album.n_tracks(),
+            seconds: samples / geometry::RATE_HZ,
+        }
+    }
+
     /// The transport state as the word beside the control art (§5.6: a state is carried by more than
     /// hue; until §5.3's `PAUSED` badge lands in 2b, the word is the whole of it). Every one of these
     /// fits `keylabels`' nine cells, and the host gate measures that rather than trusting an eye.
@@ -1476,6 +1524,34 @@ mod rom {
         (2510, keys::BTN_LEFT),
         (2516, 0),
     ];
+
+    /// The gate script plus one `Select` edge, for 2b PR-(3)'s card arm.
+    ///
+    /// Built from [`GATE_REPLAY_SCRIPT`] by a `const fn` rather than copied, so the card
+    /// arm cannot drift from the run every other term is measured on. The two new entries
+    /// sit between the pause's release (66) and the first skip (120) — the quietest stretch
+    /// in the script, where a scene change cannot change the skip arithmetic the gate reads.
+    #[cfg(feature = "input-replay")]
+    const CARD_REPLAY_SCRIPT: [(u32, u16); 30] = card_replay_script();
+
+    #[cfg(feature = "input-replay")]
+    const fn card_replay_script() -> [(u32, u16); 30] {
+        let mut out = [(0u32, 0u16); 30];
+        // The four entries before frame 90: 8/A, 14/release, 60/START, 66/release.
+        let mut i = 0;
+        while i < 4 {
+            out[i] = GATE_REPLAY_SCRIPT[i];
+            i += 1;
+        }
+        out[4] = (90, keys::BTN_SELECT);
+        out[5] = (96, 0);
+        let mut j = 4;
+        while j < GATE_REPLAY_SCRIPT.len() {
+            out[j + 2] = GATE_REPLAY_SCRIPT[j];
+            j += 1;
+        }
+        out
+    }
 
     // ------------------------------------------------------- R13's diagnostic scenarios
 
@@ -1599,18 +1675,33 @@ mod rom {
 
     // The selection itself: one compiled-in script per build, chosen by feature. A gate build names
     // none of the three, so it gets the script `make album-test` asserts on.
-    #[cfg(all(feature = "input-replay", feature = "replay-script-a"))]
+    #[cfg(all(feature = "input-replay", feature = "replay-script-card"))]
+    const REPLAY_SCRIPT: &[(u32, u16)] = &CARD_REPLAY_SCRIPT;
+    #[cfg(all(
+        feature = "input-replay",
+        feature = "replay-script-a",
+        not(feature = "replay-script-card")
+    ))]
     const REPLAY_SCRIPT: &[(u32, u16)] = REPLAY_SCRIPT_A;
-    #[cfg(all(feature = "input-replay", feature = "replay-script-b"))]
+    #[cfg(all(
+        feature = "input-replay",
+        feature = "replay-script-b",
+        not(feature = "replay-script-card")
+    ))]
     const REPLAY_SCRIPT: &[(u32, u16)] = REPLAY_SCRIPT_B;
-    #[cfg(all(feature = "input-replay", feature = "replay-script-c"))]
+    #[cfg(all(
+        feature = "input-replay",
+        feature = "replay-script-c",
+        not(feature = "replay-script-card")
+    ))]
     const REPLAY_SCRIPT: &[(u32, u16)] = REPLAY_SCRIPT_C;
     #[cfg(all(
         feature = "input-replay",
         not(any(
             feature = "replay-script-a",
             feature = "replay-script-b",
-            feature = "replay-script-c"
+            feature = "replay-script-c",
+            feature = "replay-script-card"
         ))
     ))]
     const REPLAY_SCRIPT: &[(u32, u16)] = &GATE_REPLAY_SCRIPT;
@@ -1622,6 +1713,17 @@ mod rom {
     compile_error!("replay-script-b and replay-script-c are two different key scripts; pick one");
     #[cfg(all(feature = "replay-script-a", feature = "replay-script-c"))]
     compile_error!("replay-script-a and replay-script-c are two different key scripts; pick one");
+    #[cfg(all(
+        feature = "replay-script-card",
+        any(
+            feature = "replay-script-a",
+            feature = "replay-script-b",
+            feature = "replay-script-c"
+        )
+    ))]
+    compile_error!(
+        "replay-script-card and a diagnostic script are two different key scripts; pick one"
+    );
 
     /// The track a direction command moves to, §5.3's wrap at the album's ends.
     ///
@@ -3891,11 +3993,19 @@ mod rom {
         // but 2a's report also has to name what was drawn with it — the band stack, the one scene, the
         // authored chrome — or "the title band looked wrong" is a statement about nothing in particular.
         agb::println!(
-            "[album-rom] surface: bands={} elements={} region={}x{} scenes=1 icons={} chrome_tiles={} atlas_tiles={} (generated: ALBUM-PLAYER.md §5.0, §5.1, §5.2, §5.3)",
+            "[album-rom] surface: bands={} elements={} region={}x{} scenes={} of {} declared boot={} card={} icons={} chrome_tiles={} atlas_tiles={} (generated: ALBUM-PLAYER.md §5.0, §5.1, §5.2, §5.3)",
             layout::BANDS.len(),
             layout::ELEMENTS.len(),
             layout::REGION.cols,
             layout::REGION.rows,
+            surface::SceneId::IMPLEMENTED.len(),
+            layout::SCENES.len(),
+            surface::SceneId::Blank.id(),
+            if surface::CARD_ART.is_some() {
+                "declared"
+            } else {
+                "none"
+            },
             chrome::ICON_TILES,
             chrome::TILE_COUNT,
             glyphs::ATLAS_TILES
@@ -4080,6 +4190,12 @@ mod rom {
         // restructure: the period IRQ takes a chunk, applies the hand-off gain, re-arms the DMA and
         // counts, and the producer's flow control is the same predicate it always was, asked once
         // per pass.
+        // 2b PR-(3): the implemented scene registry, starting on `blank` (2a's boot
+        // scene, option (c)). `Select` advances `scene` and parks the target in
+        // `pending_scene`; the frame slice below paints it, so the card's map write and
+        // the chrome's share one commit (§5.7's at-most-one-commit rule).
+        let mut scene = surface::SceneId::Blank;
+        let mut pending_scene: Option<surface::SceneId> = None;
         let mut paint = Paint::new();
         paint.start(producer.total_samples as u32, 0);
         let mut visits = Visits::new();
@@ -4220,7 +4336,23 @@ mod rom {
                 idle = 0;
             }
             if let Some(detected) = detected
+                && detected.action == keys::Action::SelectScene
+            {
+                // §5.3's Select: one step through the implemented scenes, in the order the
+                // generated registry declares them (§5.2). The paint is deferred to the
+                // frame slice; audio keeps playing, because a scene is not a transport state.
+                scene = scene.next();
+                pending_scene = Some(scene);
+                agb::println!(
+                    "[album-rom] scene: {} (Select; implemented {} of {} declared)",
+                    scene.id(),
+                    surface::SceneId::IMPLEMENTED.len(),
+                    layout::SCENES.len()
+                );
+            }
+            if let Some(detected) = detected
                 && detected.action != keys::Action::PauseToggle
+                && detected.action != keys::Action::SelectScene
             {
                 // A skip's first step only: the transport issues the ramp-out and the track's
                 // arithmetic is kept here. A command the state machine will not take (paused, or a
@@ -4291,7 +4423,25 @@ mod rom {
                     _ => {}
                 }
             }
-            if paint.due() {
+            // A Select paints on its own pass rather than waiting for the clock latch, and
+            // that pass's one commit is this one: `scene_committed` suppresses the chrome
+            // refresh below, whose tick is still due on the next pass (the latch is only
+            // stamped by `sample()`).
+            let scene_committed = match pending_scene.take() {
+                Some(next) => {
+                    paint_scene(
+                        next,
+                        &album,
+                        &mut ui_writes,
+                        &mut ui_bg,
+                        &mut gfx,
+                        &tilesets,
+                    );
+                    true
+                }
+                None => false,
+            };
+            if paint.due() && !scene_committed {
                 paint.sample();
                 idle = 0;
                 // §5.1's rule 2: only the cells that changed, and only when something changed. A
