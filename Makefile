@@ -997,6 +997,12 @@ uli-bench: uli-bench-rom
 #   python3 -m venv /tmp/uli-venv && /tmp/uli-venv/bin/pip install numpy scipy soundfile
 #   make uli-album-asset ULI_ALBUM_PY=/tmp/uli-venv/bin/python3
 GBA_AUDIO ?= $(abspath ../gba-audio)
+# The oracle of record is the contraction-free rebuild (S8-4b, sha256 1991ee6c…).
+# The sibling Makefile defaults to `-O2 -march=native`, whose default
+# `-ffp-contract=fast` fuses on the search's decision path; passing these flags
+# makes a fresh recursive build produce the clean oracle instead. `uli-oracle-check`
+# below is the assertion that the binary in play is still that one.
+ULI_ORACLE_CFLAGS ?= -O2 -std=gnu11 -Wall -Wno-unused-function -ffp-contract=off -march=armv8-a
 ULI_ALBUM_WAV ?= $(abspath assets/sound/bioluminescent.wav)
 ULI_ALBUM_DIR := $(ULI_BENCH_DIR)/assets
 ULI_ALBUM_BLOB := $(ULI_ALBUM_DIR)/biomaster.uli
@@ -1010,6 +1016,12 @@ ULI_ALBUM_BUDGET ?= 3294000
 # Which corpus the bench/gate arms measure. `album-corpus` is PR E's master,
 # `adversarial-corpus` is E3-a's synthetic density set, `cross-corpus` is E3-b's
 # 12-track album. All three are generated, gitignored assets.
+#
+# W2 (`crates/uli-lite/PLAN-OF-RECORD.md` -> "Remaining ULI2 work — the four
+# threads") owns switching these asset targets from the off-tree oracle to
+# `crates/uli-enc`. Until then step 2 below runs `$GBA_AUDIO/build/uli_enc`; the
+# recursive build pins `ULI_ORACLE_CFLAGS` and `check_uli_oracle.py --expect
+# clean` refuses a fused rebuild, so the oracle pin cannot silently move.
 ULI_CORPUS_FEATURE ?= album-corpus
 ULI_ALBUM_THREADS ?= 8
 ULI_ALBUM_PY ?= python3
@@ -1020,7 +1032,8 @@ uli-album-asset:
 	  { echo "uli-album-asset: no gba-audio encoder at $(GBA_AUDIO) (set GBA_AUDIO=)"; exit 1; }
 	mkdir -p $(ULI_ALBUM_DIR) $(ULI_ALBUM_REF)
 	$(ULI_ALBUM_PY) $(GBA_AUDIO)/encoder/prep.py $(ULI_ALBUM_WAV) --out $(ULI_ALBUM_DIR)
-	$(MAKE) -C $(GBA_AUDIO)/encoder
+	$(MAKE) -C $(GBA_AUDIO)/encoder CFLAGS="$(ULI_ORACLE_CFLAGS)"
+	GBA_AUDIO=$(GBA_AUDIO) python3 scripts/check_uli_oracle.py --expect clean
 	$(GBA_AUDIO)/build/uli_enc --album $(ULI_ALBUM_DIR)/album.f32 \
 	  --tracks $(ULI_ALBUM_DIR)/tracks.tsv --out $(ULI_ALBUM_BLOB) \
 	  --budget $(ULI_ALBUM_BUDGET) --cap 74 --threads $(ULI_ALBUM_THREADS)

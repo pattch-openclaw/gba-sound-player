@@ -4,7 +4,7 @@
 the licensing and encoder risks). **This file owns the phases, gates, the
 measurement ledger and the order of work.**
 
-## Current state (decode 2026-11-19; encoder 2026-11-25)
+## Current state (decode 2026-11-19; encoder 2026-11-27)
 
 mGBA, WAITCNT 4/2, 262,144-cycle period, no UI. Both corpora pinned
 (`xover=0 hfnz=0`), two runs per image identical to the cycle.
@@ -33,14 +33,17 @@ mGBA, WAITCNT 4/2, 262,144-cycle period, no UI. Both corpora pinned
   (gate); code tables in `.ewram`.
 - **Open:** the non-decode gate half; the dense-frame tail of entropy (the
   sub-frame partition needs re-measuring on the product reader first — see "The
-  entropy path against the C+ASM reference"); a licensing/publish decision.
-- **The encoder: S7 (the acceptance matrix) is done, and its answer is DIFF; S8 (byte-exactness
-  on the reference's `--dacw 0` arm) is in progress as of 2026-11-25.** `make uli-accept`
-  compares our `--rd` encoder against the off-tree reference on identical PCM and flags, and
-  no cell is byte-identical. The cause is **attributed at first order**: the plan differs
+  entropy path against the C+ASM reference"); the ULI2 provenance/publish decision (root MIT
+  exists; `NOTICE.md` marks the three crates unresolved). These are
+  **W4**; the asset path (**W2**) and the app switch (**W3**) are indexed in "Remaining
+  ULI2 work" below.
+- **The encoder: S8 is done — the acceptance matrix MATCHes on every cell (2026-11-26), and
+  the pin ledger was discharged on 2026-11-27.** `make uli-accept` compares our `--rd`
+  encoder against the off-tree reference on identical PCM and flags. The S7 DIFF's cause is
+  **attributed at first order**: the plan differs
   (S8-3 finds it at frame 0 of `biomaster`), so the counts differ, so the tables are
   downstream; at a frozen plan the coder reproduces the reference's bits on 24 of 24 codings.
-  **Landed in S8 so far:** S8-1 (the two-sided frozen probe), **S8-2 (P2: `make
+  **Landed in S8:** S8-1 (the two-sided frozen probe), **S8-2 (P2: `make
   uli-dump-plan`, the reference's own pass-1/pass-2 plan and the per-class counts
   `tables_from_stats` consumed; its gate is the dumped shipped plan against the plan decoded
   from that run's own blob — 257 of 257 frames, both header cycle fields and every seek entry
@@ -63,10 +66,11 @@ mGBA, WAITCNT 4/2, 262,144-cycle period, no UI. Both corpora pinned
   four threads.** The corpus is generated in-tree (`make uli-album-asset`, `make uli-adversarial-asset`);
   with it, **every cell the matrix runs — `fast`, `tiny`, `biomaster`, `off-default` and
   `adv` — is byte-identical to the oracle**, including `biomaster` after row 25's fix. `cross60`
-  is not run while `adv` is present; what remains for S8 is the pin ledger, not a code
-  difference. §S8's sub-step table is the single
-  answer to "what is next". The SNR licence test S7 left
-  open moves to S9, so that S8 has exactly one target. See "S7" for the measured table.
+  is not run while `adv` is present. **S8 is done (2026-11-27): the pin ledger is discharged
+  below and §S7 now carries the MATCH re-take; no code difference remains.** The SNR licence
+  test S7 left open moves to S9, so S8 kept exactly one target. The four remaining work
+  threads are indexed in "Remaining ULI2 work" immediately below; see "S7" for the measured
+  table.
 - **The encoder: S6 (the decoder-cycle price) is done, and it was the whole of the high-rate
   gap — but only where the cap binds hard.** An over-cap candidate is re-coded under
   `mu · (band symbol + decoded work)` instead of being refused, and the final encode re-codes
@@ -102,6 +106,29 @@ mGBA, WAITCNT 4/2, 262,144-cycle period, no UI. Both corpora pinned
   (length, budget, step index) fire before a byte is written. S2 onward — MDCT,
   quantisation, the RD search — is where audio appears; the plan, its requirements
   and its steps are under "The encoder — the last missing piece".
+
+## Remaining ULI2 work — the four threads (2026-11-27)
+
+S8 closes the encoder question; what remains is no longer one plan but four independent
+threads. This table is the index. Each thread has one owner file; a thread is finished only
+when the gate in the last column is measured and its result is recorded there.
+
+| thread | what it covers | owner | state | exit gate |
+|---|---|---|---|---|
+| **W1 — S8 bookkeeping** | the S8 pin ledger, the S7 MATCH re-take, and the stale status text in `ULI2.md` and `crates/uli-enc/README.md` | this file §S8; `ULI2.md` | **done 2026-11-27** | `make uli-accept` MATCH on every cell; frozen fixtures unchanged; §S7 carries MATCH; no live text still calls S8 open |
+| **W2 — asset path onto the in-repo encoder** | point `uli-album-asset`, `uli-adversarial-asset`, `uli-cross-asset` and `uli-two-track-asset` at `crates/uli-enc`; keep the C tools only as the `uli-accept` oracle; emit the pin from the bit-exact Rust `uli-lite` decoder instead of the C `uli_dec`; the recursive `$(MAKE) -C $(GBA_AUDIO)/encoder` build is already pinned clean (2026-11-27: `ULI_ORACLE_CFLAGS` plus `check_uli_oracle.py --expect clean`), so only the switch remains; decide the multi-track `--dacw 0`/`--dacw 1` objective and make a fresh-clone bake work without `GBA_AUDIO`'s **encoder** | this file; `Makefile`; `ULI2.md` → "The measurement corpus" | **next** | the four asset targets build and run the Rust encoder; no asset target needs `$GBA_AUDIO/build/uli_enc`; the generated blobs still decode and pin; the multi-track objective is recorded; a product bake no longer needs either C tool |
+| **W3 — the product app switches to ULI2** | `backend-uli2` + `src/backend/uli2.rs`, the derived 32,768 Hz / 512-sample geometry, the ULA2→`ALBM1` manifest seam, the app-side UI cost, and the album-length hardware run | `ALBUM-PLAYER.md` §4.2b, §11 Phase 5, AP-9/R7/Q3 | **open (app-side; can run in parallel with W2)** | `make album-rom BACKEND=uli2` plays an album from a fresh checkout; the three-arm compile and runtime parity pass; the UI fits the measured margin; the hardware run matches the FLAC arm's witness |
+| **W4 — codec/player residuals and S9** | the non-decode gate half (7.80 points at ~2.9x C), the dense-frame entropy tail, U5's 1 Hz redraw defect, S9's `--dacw 1` arm and the SNR licence test, and the ULI2 provenance/publish decision (root MIT exists; `NOTICE.md` marks the three crates unresolved) | this file "Current state"; `ULI2.md` §Gates/§Risks; §S9 | **open; only U5's redraw defect can block W3** | each item is measured against its own gate; U5's redraw defect is closed and the UI margin re-taken; S9's arms are admitted only by the SNR licence test |
+
+**Order and meaning for a v1 switch.** W1 is done; W2 is the next codec-track task because it
+removes the last build-time encoder dependency on `gba-audio` and makes the asset path
+reproducible from a fresh clone. W3 is the actual FLAC→ULI2 product switch and is application
+work; it can start once W2's asset shape is agreed, even before every target is switched. W4
+is deliberately last: the non-decode half and the dense entropy tail are performance work
+with a measured margin, S9 is an improvement track that is only meaningful once exactness is
+frozen, and licensing is a publish question. **ULI2 v1 is "finalized" when W1+W2+W3 are
+closed and W4's U5 redraw defect and UI-margin measurement are closed; S9 and licensing are
+explicitly outside v1.**
 
 **Everything below this line is the ledger that produced those numbers, in
 chronological order, and it is kept deliberately: this project's method is that
@@ -994,10 +1021,11 @@ ready: `uli-playback` already implements the app's `PcmSource` seam
 (`UliSource<'a, D: FrameDecoder>`), `ALBUM-PLAYER.md` §4.2b already specifies
 `src/backend/uli2.rs` under `make album-rom BACKEND=flac|uli2`, and the ULA2
 container already carries tracks, titles, artists and a seek table. What is
-missing is the ability to **make** a `.uli` blob from our own audio: today that
-requires the C encoder in `gba-audio`, which the project's rule forbids depending
-on. Until an in-repo encoder exists, ULI2 cannot be used as the album player's
-codec — the assets would come from a build we do not own.
+missing was the ability to **make** a `.uli` blob from our own audio: it used to
+require the C encoder in `gba-audio`, which the project's rule forbids depending
+on. **That gap is closed** — `crates/uli-enc` covers S1–S8 and emits the oracle's
+bytes — so the remaining work is W2 (point the asset targets at it) and W3 (the
+app's backend), not an encoder.
 
 **What the reference is.** ~890 lines of C plus two Python tools, and the shape
 matters more than the size:
@@ -1189,8 +1217,8 @@ read-side, so this does not reopen the paragraph above.
 | **S4** | Two-pass table training: the album's own symbol counts into Huffman lengths, and its own reconstruction errors into `dq`, then a second search with the trained set | E-R4, E-R5, E-R7 | output byte-stable across runs; the trained set is a complete prefix code and stays inside E-R4; training measurably beats the built-in tables at a binding budget; and the band-class choice is a shortest path, since trained context codebooks differ | **done** |
 | **S5** | Album assembly (WAV front end, gapless join, tags verbatim), `--budget`/`--cap` on real sizes, frame-parallel search | E-R2, E-R6, E-R9 | a 43-minute album encodes inside a **passed-in** `--budget` at cap ≤ 74; every track decodes (each seeked to its own preroll); hashes pinned; too small refuses **before the first frame**, citing both numbers; a 32,768 Hz WAV reaches the same blob its pre-resampled PCM does, and a resampled WAV is quoted by SNR; the CLI prints the reference's columns | **done** — see "S5" below for the numbers and the defaults-restored failure |
 | **S6** | `mu` (decoder-cycle-aware) search: re-code an over-cap frame by dropping its cheapest coefficients instead of refusing the candidate | E-R8 **discharged**; E-R7 **contributed to, not discharged** — its criterion is codec-only and unmeasured, and S7 accepts it | a knob that demonstrably trades SNR for decode cycles, measured on the bench — and, measured 2026-11-20, it closes the last high-rate gap: at `--budget 400000 --cap 74` the equivalent mechanism is worth **1.48 dB** to the oracle, against a 1.15 dB gap | **done** — `--musearch 1` by default; worth **1.44 dB** here (39.57 → 41.01 dB) and the oracle's 41.02 is 0.01 dB above, cap 74.0% max on both arms. See "S6" below |
-| **S7** | **The acceptance matrix, as a buildable target** | E-R2, E-R5, E-R7 (and E-R1's oracle posture) | the four cells below run in CI-shaped form and compare SHA-256s against the reference's blobs, including the two header cycle fields | **done** — `make uli-accept` runs the four cells and the `--dacw 1` row; every cell is a **DIFF**, whose first content difference is inside the **trained tables** in every cell, and which is **unattributed** (see "S7" below) |
-| **S8** | **Byte-exactness on the reference's `--dacw 0` arm**: attribute the S7 DIFF with instruments rather than bytes (the pass-1 plan is not in the blob), then close every named divergence until the matrix matches — the SNR arm is **withdrawn from S8** and becomes S9 | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R2 (the boundary is PCM), E-R7 (moved to S9 — see "S8 — the plan") | every matrix cell byte-identical at `--dacw 0`, checked by `make uli-accept` with the oracle's sha256 recorded, `make uli-oracle-check ULI_ORACLE_EXPECT=clean` green, and every pin re-recorded | **in progress (matrix met; pin ledger pending)** — all sub-steps are implemented; with the generated corpus, `make uli-accept` reports **MATCH on every cell it runs: `fast`, `tiny`, `biomaster`, `off-default` and `adv`** (the fourth slot when the adversarial corpus is present). `cross60` is not run while `adv` is present. What remains is the pin ledger, not a code difference. The sub-step table at the head of "S8 — the plan" carries each row's `needs`, its status and what it unblocks, so no prerequisite is prose elsewhere |
+| **S7** | **The acceptance matrix, as a buildable target** | E-R2, E-R5, E-R7 (and E-R1's oracle posture) | the four cells below run in CI-shaped form and compare SHA-256s against the reference's blobs, including the two header cycle fields | **done; its DIFF verdict is superseded by S8's MATCH (2026-11-27)** — `make uli-accept` runs the cells and the `--dacw 1` row; all five cells now MATCH, and the original DIFF is kept below as the record of what S8 closed |
+| **S8** | **Byte-exactness on the reference's `--dacw 0` arm**: attribute the S7 DIFF with instruments rather than bytes (the pass-1 plan is not in the blob), then close every named divergence until the matrix matches — the SNR arm is **withdrawn from S8** and becomes S9 | E-R5 (exactness is fair to ask: the oracle is deterministic), E-R2 (the boundary is PCM), E-R7 (moved to S9 — see "S8 — the plan") | every matrix cell byte-identical at `--dacw 0`, checked by `make uli-accept` with the oracle's sha256 recorded, `make uli-oracle-check ULI_ORACLE_EXPECT=clean` green, and every pin re-recorded | **done (2026-11-27)** — all sub-steps are implemented and the pin ledger is discharged below; with the generated corpus, `make uli-accept` reports **MATCH on every cell it runs: `fast`, `tiny`, `biomaster`, `off-default` and `adv`** (the fourth slot when the adversarial corpus is present). `cross60` is not run while `adv` is present. The S7 MATCH re-take is in §S7 and the pin ledger is discharged in §S8 item 9. The sub-step table at the head of "S8 — the plan" carries each row's `needs`, its status and what it unblocks, so no prerequisite is prose elsewhere |
 
 S7 is a step rather than a property of the plan because it has work in it — a host
 target that builds nothing of ours from C, calls the off-tree binary, compares hashes
@@ -1938,8 +1966,8 @@ sides (row 16). The shipped encoder's own suite is green (18 suites / 99 tests),
 3,293,128 B `49eb6a11…` (`--budget 3294000 --cap 74 --threads 8`). Row 25's last three-frame
 residual was the M/S header bit in `measure_g`'s domain comparison; with it added the cell is
 exact. `cross60` is not run while `adv` is present — the fourth slot is deliberately one
-corpus. The row is landed; what remains for S8 is the pin ledger and `make uli-oracle-check`
-naming `1991ee6c…` with every cell MATCH.
+corpus. The row is landed; `make uli-oracle-check` names `1991ee6c…` and the pin ledger was
+discharged on 2026-11-27; every cell MATCHes.
 
 *What the last attribution found, in order.* Four changes were needed after the trainer and
 coder were already exact, and each is an inventory row: the curve arrays had to be `float`
@@ -1957,11 +1985,13 @@ and the `dacw1` row is still a recorded difference; P1/P2/P3 and `make uli-train
 still pass; the pin ledger below is discharged; and the S7 section keeps its DIFF table with a
 superseded note rather than a deletion (nothing in this record is deleted).
 
-*Where the gate stands on 2026-11-26.* The corpus was generated by `make uli-album-asset` and
-`make uli-adversarial-asset`; `make uli-accept` now reports **MATCH on every cell it runs —
+*Where the gate stands on 2026-11-27.* The corpus was generated by `make uli-album-asset` and
+`make uli-adversarial-asset`; `make uli-accept` reports **MATCH on every cell it runs —
 `fast`, `tiny`, `biomaster`, `off-default` and `adv`** — with the oracle of record's sha256.
-`biomaster` is exact after row 25's fix; `cross60` is not run while `adv` is present. What
-remains is the pin ledger, not a code difference.
+`biomaster` is exact after row 25's fix; `cross60` is not run while `adv` is present. The pin
+ledger was discharged on 2026-11-27 (item 9 below), so S8 is closed. `cross60` remains an
+unexercised fourth-slot alternative, not an open code difference: the row-25 fix is corpus-
+independent, and the cell is re-run when the `cross` corpus is next generated.
 
 The additions from 2026-11-25 and S8-7, so the gate names what it actually claims:
 
@@ -2020,19 +2050,23 @@ Stated so that no sub-step relitigates them.
 8. **The fast cell is a cell, not a shortcut.** It is pinned at S8's gate and its own reason
   for existing is that the big cells cannot be iterated on and `tiny` cannot diagnose.
 
-**9. The pin ledger.**
+**9. The pin ledger — discharged 2026-11-27.**
 
-S8-7 changes every byte we emit, so the pins are handled once, deliberately, at the gate —
-and the classification is what keeps it from being a scramble:
+S8-7 changed every byte we emit, so the pins were handled once at the gate. The resolution of
+each row is recorded here; the frozen fixture rows were verified by hash and the acceptance
+rows by the MATCH run.
 
-| artefact | source | effect |
-|---|---|---|
-| `crates/uli-enc/tests/fixtures/{uli2_default_tables.bin,mdct_ref_coef.f32,band_rdo.txt}` | the **reference**, frozen | **must not move.** If one does, the regeneration is the bug (the fixtures README already says this) |
-| `crates/uli-lite/tests/fixtures/uli2_tiny.uli` | the **C encoder** (S7 decision 2) | **must not move.** It is a decoder pin, not an encoder expectation |
-| in-repo determinism tests | our own two runs | comparison is run-to-run, not fixed values; they need `Args` fields removed at S8-0 and no re-pin |
-| `make uli-accept` cell hashes and the S7 table | our encoder vs the oracle | **re-taken at the gate**, with MATCH and the new hashes recorded in place |
-| S5's album numbers (33,291,896 B, `69911924…e656b8`, 31.75/28.56 dB) and the `cross` residual | our encoder | **superseded, not edited.** They stay as the S5 arm with a dated note saying S8's exactness target replaces them; they are no longer the current figure |
-| `make uli-player-cross`'s 33,088,280 B and ALBUM-PLAYER row 5's 167,232 periods | our blob, ROM-scaled | **re-measured once at the gate** if the blob moves; the ROM figure is a downstream claim and must follow, not lead |
+| artefact | source | effect | resolution (2026-11-27) |
+|---|---|---|---|
+| `crates/uli-enc/tests/fixtures/{uli2_default_tables.bin,mdct_ref_coef.f32,band_rdo.txt}` | the **reference**, frozen | **must not move.** If one does, the regeneration is the bug (the fixtures README already says this) | **unchanged.** `uli2_default_tables.bin 15b477ed…96bcb0`, `mdct_ref_coef.f32 db7f8fc8…37bfc`, `band_rdo.txt da98f5d6…48e7f`; `git status` clean |
+| `crates/uli-lite/tests/fixtures/uli2_tiny.uli` | the **C encoder** (S7 decision 2) | **must not move.** It is a decoder pin, not an encoder expectation | **unchanged**, `68dca43a…cb756d`, 39,308 B |
+| in-repo determinism tests | our own two runs | comparison is run-to-run, not fixed values; they need `Args` fields removed at S8-0 and no re-pin | **no re-pin.** `make uli-test` is 18 suites / 99 tests green; `--threads 1` and `--threads 4` give the same bytes on `fast` |
+| `make uli-accept` cell hashes and the S7 table | our encoder vs the oracle | **re-taken at the gate**, with MATCH and the new hashes recorded in place | **re-taken.** §S7 carries the MATCH table and full SHA-256s for `fast`, `tiny`, `biomaster`, `off-default` and `adv` |
+| S5's album numbers (33,291,896 B, `69911924…e656b8`, 31.75/28.56 dB) and the `cross` residual | our encoder | **superseded, not edited.** They stay as the S5 arm with a dated note saying S8's exactness target replaces them; they are no longer the current figure | **dated note added in §S5**; the S5 arm is retained as the record of that measurement |
+| `make uli-player-cross`'s 33,088,280 B and ALBUM-PLAYER row 5's 167,232 periods | oracle blob, ROM-scaled | **re-measured once at the gate** if the blob moves; the ROM figure is a downstream claim and must follow, not lead | **not an S8-7 pin**: the `cross` asset is produced by the oracle, not by our encoder. The 2026-11-16 figure predates the clean-oracle rebuild (S8-4b), so it is flagged for re-measurement when the `cross` corpus is next generated. Tracked in **W2**, not S8 |
+
+The S8 pin ledger is therefore closed: `make uli-oracle-check` names `1991ee6c…`, the
+five-cell MATCH run is recorded in §S7, and no frozen fixture moved.
 
 **10. S9 — reinstating the improvements.**
 
@@ -2069,7 +2103,7 @@ stays the gate that says the arm changed only what it claims to change.
   refuses to match after S8-5…S8-7, the deliverable is the inventory row it died on, the
   attributed diff, and a re-scoped claim — not a silent return to the SNR arm.
 
-#### S7 — the acceptance matrix, and the answer it gives: DIFF
+#### S7 — the acceptance matrix (2026-11-21); superseded by S8's MATCH (2026-11-27)
 
 **Three things S7 was not.** It was not a gate: the harness calls the off-tree reference
 binary, which E-R1 keeps off `make uli-test`, so `make uli-accept` sits on no gate path
@@ -2100,7 +2134,24 @@ Exit 2 is DIFF, 1 is a harness error; `--list` prints the cells and runs nothing
 [`../../ULI2.md`](../../ULI2.md) -> "The measurement corpus — how `examples/uli_bench/assets`
 is generated and used".
 
-**The four cells**, measured 2026-11-21 by
+**Re-taken at S8's gate (2026-11-27).** The matrix now reports MATCH on every cell it runs,
+against the oracle of record (`sha256 1991ee6c…`, zero fused multiply-add sites). `fast` and
+`tiny` are generated in the harness, so they need no corpus; `cross60` is not run while `adv`
+is present. This is the current answer:
+
+| cell | flags | bytes | SHA-256 (both sides) | est max @68 | est mean @72 | verdict |
+|---|---|---:|---|---:|---:|---|
+| `fast` | `--budget 20000 --cap 74 --threads 4` | 19,744 | `2f21f6d713ab25ade49c030f808738791fa3a50d5a4a3d1cb0df420583061e7c` | 193,984 | 165,214 | **MATCH** |
+| `tiny` | `--budget 300000 --threads 1` | 39,308 | `c398c2d2f0d56ea7bb890a998b85ec595d87bbee46d9f76ae9b71ffb93f3fa06` | 193,977 | 181,822 | **MATCH** |
+| `biomaster` | `--budget 3294000 --cap 74 --threads 8` | 3,293,128 | `49eb6a11da105b1d944263e5fe3c20f54db570897ed5510eeedbe5daf2abee58` | 193,986 | 177,900 | **MATCH** |
+| `off-default` | `--budget 1647000 --cap 60 --threads 8` | 75,572 | `809bd7be7ca9d0b47f7b686e44404c7d865abac313a9229fe1744bfcc7d5ae85` | 157,285 | 157,230 | **MATCH** |
+| `adv` | `--budget 127500 --cap 74 --threads 4` | 127,380 | `1a0c88566ef5faed1be4875221a59a08fda21be1e8d99a059d0064b0511a41f8` | 193,986 | 177,402 | **MATCH** |
+
+The `--dacw 1` row remains oracle-only and still reports 39,308 B / `c398c2d2…` on `tiny`,
+identical to `--dacw 0` there: the DAC-weight objective is S9's, not an expectation here.
+
+**The original S7 answer (2026-11-21), kept as the record of the DIFF:** the four cells,
+measured by
 `make uli-accept ULI_ACCEPT_ASSETS=/home/sam/Documents/coding/ulc-gba/gba-sound-player/examples/uli_bench/assets`,
 every oracle invocation at `--dacw 0`:
 
@@ -2428,6 +2479,11 @@ against the reference's 14m30s, i.e. E-R9's *rationale* rather than its mechanis
 `measure` codes every candidate exactly — is in
 [`RECORD.md`](RECORD.md) → "2026-11-20 — S5". A too-small budget still refuses before the
 first frame (S1's `Refusal`, covered by `tests/refusal.rs`).
+
+*Superseded 2026-11-27.* S8-7 makes this encoder emit the oracle's bytes on every matrix
+cell, so the 33,291,896 B / `69911924…e656b8` figures above are the S5 arm, not the current
+output. They are kept as that measurement, with this note, rather than edited; the current
+encoder figures are the MATCH run in §S7.
 
 #### S4 — training, and the ~1 dB it turns out to have been
 

@@ -56,20 +56,20 @@ Run with `. .agents/env.sh`:
 | `make test-rom` | build + link + boot in mGBA, 0 tests collected (expected) |
 | `make check` | all workspaces rustfmt-clean |
 | `make uli-check` | pass |
-| `make uli-test` | uli-lite corpus 6 tests; uli-enc **17 suites / 93 tests** |
+| `make uli-test` | uli-lite corpus 6 tests; uli-enc **18 suites / 99 tests** |
 | `make uli-overlay-test` | pass (product + `verify` builds) |
 | `make uli-probe` | 2,400 `band_rdo` cases byte-for-byte; MDCT golden matches |
 | `make uli-frame-diff` | **exit 0**: bits, stream, cycles, counters and `D` identical on 24 of 24 frozen codings (S8-5 items 1–3); exit 2 means a divergence reopened |
 | `make uli-plan-diff A=… B=…` | exit 0 identical / 2 different, as documented |
 | `make uli-oracle-check` | exit 0: the oracle is the recorded `clean` build (`sha256 1991ee6c…`, zero fused sites); exits 2 on any other binary or a fused decision path |
-| `make uli-accept ULI_ACCEPT_ONLY=fast` | ~15 s, **exits 2 (DIFF)**, which is the expected S8 answer today; the fast cell needs no corpus |
+| `make uli-accept ULI_ACCEPT_ONLY=fast` | ~15 s, **exits 0 (MATCH)** since S8 closed; exits 2 on a DIFF, which is now a regression; the fast cell needs no corpus |
 | `make uli-bench` | ROM built and ran headless: `[uli-bench] PASS` |
 | `make flac-check` | pass (gates + overlay + product + playback + spike) |
 | `make gafp-pack-check` | 4 fixtures byte-identical, 9 host facts |
 | `make album-bake` then `make album-pack-check` | bake writes assets; gate passes 54 tests |
-| `make uli-album-asset ULI_ALBUM_PY="$ULI_ALBUM_PY"` | available (runs `prep.py` + the C oracle encoder; not run here) |
+| `make uli-album-asset ULI_ALBUM_PY="$ULI_ALBUM_PY"` | available (runs `prep.py` + the C oracle encoder; **W2** will switch the encoder step to `crates/uli-enc`; not run here) |
 
-`make uli-accept` (the full S7 matrix) and the album-level ULI2 numbers still need
+`make uli-accept` (the full S7/S8 matrix) and the album-level ULI2 numbers still need
 the generated corpus (`make uli-album-asset`) plus the reference encoder; the
 encoder is built at `$GBA_AUDIO/build/uli_enc`, the corpus is not generated here.
 The `fast` cell is the exception by design: it is generated, so
@@ -85,8 +85,8 @@ on a bare checkout.
    `band_rdo`, `curves_compute`, `allocate`), which Rust cannot reproduce because it does not
    fuse. Since S8-4b the oracle of record is the contraction-free rebuild —
    `sha256 1991ee6c…`, built `-ffp-contract=off -march=armv8-a`, **zero** fused sites — and
-   the old binary survives as the `native` profile. Run `make uli-oracle-check` before any S8
-   measurement: it fails on a different sha256 or a fused decision path. `uli_probe.py`
+   the old binary survives as the `native` profile. Run `make uli-oracle-check` before any
+   byte-exactness measurement: it fails on a different sha256 or a fused decision path. `uli_probe.py`
    compiles the reference's C and therefore uses the same float flags; do not "fix" a map
    difference by re-pinning the script. The committed `band_rdo` golden is a *fused* build's
    answer, so its `D` column cannot be matched bitwise by a clean or Rust build (2 ULP).
@@ -114,10 +114,11 @@ on a bare checkout.
 7. **The ULI2 S8 instruments are off the gate path on purpose.** `uli-probe`,
    `uli-frame-diff`, `uli-accept` and `uli-oracle-check` compile, run or read the
    off-tree oracle; E-R1 forbids the dependency, not the oracle. `uli-frame-diff` exits 0
-   since S8-5 (identical on 24 of 24) and `uli-accept` exits 2 while it has findings; neither
-   is a broken harness.
+   since S8-5 (identical on 24 of 24) and `uli-accept` exits 0 while every cell MATCHes;
+   neither is a broken harness. `uli-accept` exits 2 on a DIFF, which is now a regression to
+   investigate, not the expected S8 answer.
    `uli-accept ULI_ACCEPT_ONLY=fast` is the one acceptance cell that needs no
-   corpus, and it is the S8 iteration loop.
+   corpus, and it is the first regression check after any encoder change.
 8. **The acceptance corpus is generated, not committed.** `make uli-album-asset`
    turns the tracked 96 kHz/24-bit `assets/sound/bioluminescent.wav` through the
    sibling's `encoder/prep.py` into `examples/uli_bench/assets/album.f32` +

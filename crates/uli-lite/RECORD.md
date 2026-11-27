@@ -3255,6 +3255,19 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
+- **2026-11-27 (latest) — S8's pin ledger discharged; the remaining work is indexed as four
+  threads.** The S7 table was re-taken at the gate: all five cells the matrix runs (`fast`,
+  `tiny`, `biomaster`, `off-default`, `adv`) are MATCH against the clean oracle
+  (`1991ee6c…`), with sizes 19,744 / 39,308 / 3,293,128 / 75,572 / 127,380 B. The frozen
+  fixtures and `uli2_tiny.uli` are unchanged by hash; `make uli-test` is 18 suites / 99 tests;
+  `make uli-oracle-check` is green. §S7 now carries both the original DIFF and the MATCH
+  re-take, and §S8 item 9 records each pin's resolution. `uli-album-asset` now pins the
+  recursive oracle build with `ULI_ORACLE_CFLAGS` and checks it clean, so the pin cannot move
+  silently. The live work is no longer S8 but
+  **W2** (asset targets onto `crates/uli-enc`), **W3** (the app's ULI2 backend), and **W4**
+  (the non-decode gate half, entropy tail, U5 redraw defect, S9 and licensing), indexed in
+  [`PLAN-OF-RECORD.md`](PLAN-OF-RECORD.md) → "Remaining ULI2 work — the four threads".
+
 - **2026-11-26 (latest) — row 25 closed: the M/S header bit in the domain comparison, not an
   allocation-scale mystery.** The three `biomaster` pass-1 frames were the last S8 residual.
   `curves_compute` chooses the M/S domain with `b.D + lam*b.bits`, where `frame_code`'s `bits`

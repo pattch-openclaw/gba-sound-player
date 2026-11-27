@@ -1,8 +1,12 @@
 # ULI2.md — product codec decision: ULI2 in a standalone `uli-lite` crate
 
-Status: **accepted 2026-11-13; GBA-first since 2026-11-14; at near-parity with
-the C + ASM reference since 2026-11-19.** ULI2 is the repository's product codec
-and is in the state it needs to be used as the drop-in codec here.
+Status: **accepted 2026-11-13; GBA-first since 2026-11-14; decode at 1.070x
+the C + ASM reference since 2026-11-19; encoder byte-exact to the recorded
+oracle since 2026-11-26.** ULI2 is the repository's product codec and is in the
+state it needs to be used as the drop-in codec here. The format and encoder are frozen; the
+remaining work is the four threads indexed in
+[`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) →
+"Remaining ULI2 work — the four threads".
 
 Measured (mGBA, WAITCNT 4/2, 262,144-cycle period, no UI, both corpora pinned):
 
@@ -34,6 +38,7 @@ falsification — is the ledger, not this file; see "Where things live" below.
 | the risks that survive, and the decisions taken | **this file**, §Risks / §Decision log |
 | the current measured state | [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md), top |
 | the plan, the phases, and the order of work | [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) |
+| **the four remaining work threads (W1–W4) and their order** | [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md), "Remaining ULI2 work — the four threads" |
 | the measurement record: arms, falsifications, the landing log | [`crates/uli-lite/RECORD.md`](crates/uli-lite/RECORD.md) |
 | architecture, memory layout, the measurement *method*, the kernel table, **the encoder plan** | [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) |
 | the product path's architecture and its gates | [`crates/uli-lite-gba/README.md`](crates/uli-lite-gba/README.md) |
@@ -69,10 +74,12 @@ standalone, `no_std`, pure-Rust, zero-dependency, zero-allocation crate at
 ARM-mode kernels and memory placement. Do **not** open a new repository yet: the
 crate boundary is the extraction seam, exactly as it is for `flac-lite`. Keep
 `flac-lite` as the reusable lossless library; remove FLAC from the **product
-path**, not from the repository. The current decoder port is the first
-milestone. For the time being the offline encoder is expected to be reused from
-`gba-audio` (C/OpenMP), because it is the encoding reference and the source of
-the measured assets. The target is to replace that encoder and any other
+path**, not from the repository. The decoder port and the in-repo encoder are the two
+milestones; both have landed. The offline encoder is now the in-repo Rust encoder
+(`crates/uli-enc`, S1–S8): it is byte-exact to the recorded contraction-free
+oracle on every acceptance cell, and the C/OpenMP tool from `gba-audio` is kept
+only as that oracle. What remains is wiring the asset targets and the album app
+onto it (W2/W3) and S9's quality arms. The target is to replace any other
 C-language tooling or source material with Rust, so this project does not depend
 on the `gba-audio` repository or its C sources. General Python scripts and
 reusable external tools such as `ffmpeg` remain acceptable; the isolation rule
@@ -198,7 +205,7 @@ encoder *fills the cart* and "an album" is
 whatever 43½ minutes at ~102 kbit/s is. **The C and Rust sides are the same
 number**: there is one bitstream format, and the Rust decoder is bit-exact, so a Rust
 build cannot store more or fewer minutes than the C one. The Rust encoder exists now
-(`crates/uli-enc`, S1–S7) and honours the same rate contract, with the byte budget as
+(`crates/uli-enc`, S1–S8) and honours the same rate contract, with the byte budget as
 its knob.
 
 ### There is no sample-rate table, and in v1 there cannot be one
@@ -338,8 +345,8 @@ is stable.
 
 ### Encoder and asset generation: current vs target
 
-**Current (2026-11-23).** The from-scratch Rust encoder exists in this repository:
-`crates/uli-enc` implements the whole target list below through **S7** — forward MDCT, the RD
+**Current (2026-11-27).** The from-scratch Rust encoder exists in this repository:
+`crates/uli-enc` implements the whole target list below through **S8** — forward MDCT, the RD
 search with M/S, two-pass table training, album-wide allocation, the per-frame cycle cap and
 the ULA2 container/tables/seek/strings writer — and the blobs this tree measures now come
 from it, not from `gba-audio`. The offline C/OpenMP tool from `gba-audio` is now the
@@ -347,14 +354,14 @@ from it, not from `gba-audio`. The offline C/OpenMP tool from `gba-audio` is now
 produces the bench corpus with it, by design (E-R1 forbids the dependency, not the oracle).
 It is never linked into the GBA image. The source-prep path (source decoding,
 resampling, track assembly) remains external Python tooling for now, which is acceptable
-under the rule below. **What the Rust encoder does not yet do is match the oracle's bytes** —
-that is S8, in progress in [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md)
-§S8 (S8-0, S8-1, **S8-2**, S8-3, S8-4, S8-4b, S8-5, **S8-6** and **S8-7** landed; §S8's sub-step
-table is the status of record, and **`make uli-accept` reports MATCH on every cell it runs —
-`fast`, `tiny`, `biomaster`, `off-default` and `adv`** — after row 25's M/S-bit fix. The
-corpus is generated by `make uli-album-asset` / `make uli-adversarial-asset`, never committed —
-see "The measurement corpus" below; `cross60` is not run while `adv` is present. What remains
-is the S8 pin ledger). And one
+under the rule below. **The Rust encoder matches the oracle's bytes on every matrix cell
+(2026-11-26):** `make uli-accept` reports MATCH on `fast`, `tiny`, `biomaster`, `off-default`
+and `adv`, against the oracle of record `sha256 1991ee6c…`; the S8 pin ledger was discharged
+on 2026-11-27. What remains for the encoder is **W2** — switching the asset targets from the
+oracle's `uli_enc` to `crates/uli-enc` — and **S9**, the labelled improvements (`--dacw 1`,
+the SNR licence test, the removed search ideas). The corpus is generated by
+`make uli-album-asset` / `make uli-adversarial-asset`, never committed — see "The measurement
+corpus" below; `cross60` is not run while `adv` is present. And one
 thing S8 found that is not about this encoder at all: **the oracle is a binary, not a
 specification** — its build fuses multiply-adds on the search's decision path, so the oracle
 of record is a contraction-free rebuild — **`sha256 1991ee6c…`, zero fused sites** — whose
@@ -365,9 +372,13 @@ remove the dependency on `gba-audio` and its C sources. That means, at minimum:
 
 - a from-scratch Rust encoder: forward MDCT, quantisation/search, table
   training, album-wide allocation, the per-frame CPU cap, and the ULA2
-  container/tables/seek/strings writer; **met through S7** (`crates/uli-enc`);
+  container/tables/seek/strings writer; **met through S8** (`crates/uli-enc`,
+  byte-exact to the recorded oracle);
 - Rust replacements for any other C-language asset-generation code that would
-  otherwise be reused from `gba-audio`;
+  otherwise be reused from `gba-audio`; **the remaining C in the asset path is
+  the `uli_enc` oracle (only for `make uli-accept`) and the pin's `uli_dec`;
+  W2 replaces the product path and can emit the pin from the bit-exact Rust
+  `uli-lite` decoder**;
 - deterministic, documented encoder output and its own round-trip witness;
   **met** — E-R5's four rules, `tests/determinism.rs`, and the round trip through
   `uli_lite::Album` in `tests/roundtrip.rs`.
@@ -382,8 +393,8 @@ committed expected-vector file remains the frozen C-pinned reference; the Rust
 tool is a maintenance/snapshot generator, not an independent oracle, so a
 failing decoder test must not be "fixed" by regenerating it.
 
-**Status (2026-11-23): the encoder exists in-repo and S1–S7 have landed; what is left is
-byte-exactness, not capability.** S1–S5 have landed in `crates/uli-enc`: the PCM boundary and the
+**Status (2026-11-27): the encoder exists in-repo, S1–S8 have landed, and it is
+byte-exact to the recorded oracle on every acceptance cell.** The first five steps landed in `crates/uli-enc`: the PCM boundary and the
 container, the forward MDCT, the RD search with M/S, trained code tables, and album
 assembly with the WAV front end and a frame-parallel search. It encodes the
 43.5-minute, 12-track `cross` album inside a passed-in budget with 392 bytes to spare,
@@ -393,12 +404,11 @@ at four threads. **E-R9 is met in mechanism, not in rationale:** that album take
 where the reference takes 14m30s on the same box, because every candidate is coded
 exactly rather than estimated — a named follow-up, not a claim. **S6 is done:** the
 cycle-aware `--musearch` re-code is shipped on by default and worth 1.44 dB at a binding
-cap (the reference's 1.48). **S7 is done, and its answer is DIFF:** `make uli-accept` runs
-this encoder and the C reference on identical PCM and flags across four cells, and no cell is
-byte-identical — the first content difference lands inside the **trained tables** in every
-cell, and it is unattributed (the measured table is below, and in
-[`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) §S7). **S8 is in
-progress**, scoped to byte-exactness on the reference's `--dacw 0` arm: S8-0 (the flag surface
+cap (the reference's 1.48). **S7's DIFF (2026-11-21) was superseded by S8's MATCH (2026-11-26):** `make
+uli-accept` now reports MATCH on `fast`, `tiny`, `biomaster`, `off-default` and `adv` against
+the contraction-free oracle of record (`sha256 1991ee6c…`, zero fused sites). S8 was scoped to
+byte-exactness on the reference's `--dacw 0` arm, and its steps are the record of how that
+was reached: S8-0 (the flag surface
 equals the reference's — `--stride`/`--fine` deleted, not defaulted off), S8-1 (the two-sided
 frozen probe), **S8-2 (P2: `make uli-dump-plan`, the oracle's own both-pass plan and the
 counts the trainer consumed, gated against the plan its blob declares)**, S8-3 (the plan/table
@@ -406,11 +416,12 @@ diff), S8-4 (the `fast` cell, 2.4 s against our 12.2 s), S8-4b (the contraction-
 record), S8-5 (the frozen coder: identical on 24 of 24), **S8-6 (the trainer: the 5,212-byte
 table region reproduced from the reference's own pass-1 plan on `fast` and `tiny`)** and
 **S8-7 (the search: `fast`, `tiny`, `biomaster`, `off-default` and `adv` byte-identical to the
-oracle)** have landed; row 25 is closed. The 25-row divergence inventory, the sub-step table
+oracle)** have landed; row 25 is closed. The S8 pin ledger was discharged on
+2026-11-27; what remains is W2 (asset targets onto this encoder) and S9 (quality arms). The 25-row divergence inventory, the sub-step table
 with its `needs` and the five instruments are in §S8. The corpus is generated in-tree, not
 committed: see "The measurement corpus" below. The
-hand-written C encoder is now the **oracle and the asset producer**, not the only encoder in
-existence.
+hand-written C encoder is now the **oracle and, until W2 lands, the asset producer** — not
+the only encoder in existence.
 Requirements, slices and gates:
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) -> "The
 encoder — the last missing piece".
@@ -525,7 +536,7 @@ fixed; see [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.
 
 ## Porting plan
 
-### Implementation status (2026-11-19)
+### Implementation status (decode 2026-11-19; encoder 2026-11-27)
 
 **ULI2 is at near-parity with the C + ASM reference and is the repository's
 product codec.** mGBA, WAITCNT 4/2, 262,144-cycle period, both corpora pinned
@@ -555,31 +566,20 @@ product codec.** mGBA, WAITCNT 4/2, 262,144-cycle period, both corpora pinned
   that proof's seed; `uli_lite` remains the checked oracle.
 - **The player ships** (U5 met on hardware for three ROMs, with one open defect:
   the 1 Hz text redraw delays the feeder on 104 of 16,553 periods).
-- **The acceptance matrix is measured (S7, 2026-11-21), and the answer is DIFF.**
-  `make uli-accept` runs our `--rd` encoder and the reference on identical PCM and
-  flags across four cells — the generated fixture, the whole `biomaster` album, a 60 s
-  `cross` slice, and the album at `--cap 60` — and no cell is byte-identical. The
-  **first content difference lands inside the trained tables** in every cell (1,971–2,626
-  of 5,212 bytes) and runs through the stream from there, while the container's strings and
-  `tiny`'s single seek entry (frame 0, bit position 0) are identical. So the divergence
-  begins in table training and is **unattributed** *(superseded at first order by S8-3's plan
-  diff: on `biomaster` the plan itself differs at frame 0 and 7,059 frames differ in `g`, so
-  the tables are downstream; `PLAN-OF-RECORD.md` §S8 → "First attribution")*: the seek
-  bit-position delta (printed as
-  `ref − ours`) has the reference **2,256 bits ahead** at frame 256 on `biomaster` and
-  **ours 1,144 ahead** on the cap-60 cell, and the chosen step ranges differ at both ends
-  (`8..119` against `89..135` on `biomaster`) because our search covers the whole policy
-  range while the reference's is a moving 20-step window around its pass-1 guess — a lead,
-  not a proven cause. Hashes, cell flags and the metric caveat
-  (E-R7's 32.29 / 25.78 is codec-only; the `verify:` columns are full-band time
-  domain) are in
-  [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) §S7.
-- **Still open:** the non-decode half of the gate (above); the dense-frame tail
-  of the entropy path; the encoder's **acceptance** (S8 — S1–S7 and S8-0/S8-1/S8-3/S8-4 have
-  landed, including S8-4b's oracle-of-record rebuild, but no matrix cell is byte-identical
-  yet — S8-5 items 1–3 are next); the app's asset path onto it (R7/Q3 — `make uli-album-asset`
-  still produces the bench corpus with the reference, by design); and a licensing/publish
-  decision (`publish = false`).
+- **The acceptance matrix is MATCH (S8, 2026-11-26; pin ledger 2026-11-27).** S7's DIFF
+  (2026-11-21) was closed by S8: `make uli-accept` reports MATCH on `fast`, `tiny`,
+  `biomaster`, `off-default` and `adv` against the contraction-free oracle of record
+  (`sha256 1991ee6c…`, zero fused sites). The earlier DIFF, its attribution and the 25-row
+  inventory are kept as the record in
+  [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) §S7/§S8; the
+  current MATCH table with full hashes is §S7. `cross60` is not run while `adv` is present.
+- **Still open:** the non-decode half of the gate (above); the dense-frame tail of the
+  entropy path; U5's 1 Hz text-redraw defect; the asset path onto the in-repo encoder (W2);
+  the app's ULI2 backend and geometry (W3); S9's `--dacw 1` and SNR licence test; and the
+  licensing/publish decision (`publish = false`; the root is MIT, but `NOTICE.md` lists the
+  three ULI2 crates as unresolved). The four work threads and their exit gates
+  are indexed in [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) →
+  "Remaining ULI2 work — the four threads".
 
 The step-by-step ladder that produced these numbers — PRs A through E, the
 root-cause audit, the closed-world pass — is in
@@ -820,9 +820,9 @@ claims to be measured, not inherited from `gba-audio`.
 | **U2 — bit-exact host** | The Rust core matches the C integer reference frame-for-frame on the committed corpus and rejects malformed frames without panic. | `make uli-test`; pinned hashes |
 | **U3 — bit-exact product** | The product path decodes the corpus to the pinned int8/int16 frames, in the host full-frame twin and on the target. | **Met.** The product path is `GbaDecoder` with all five kernels in hand-written ARM asm (`ArmKernels` remains as a kernel overlay, not the product). `make uli-overlay-test` (host, both builds), `make uli-bench` (target pins), `make uli-kernel-twin` (asm vs Rust on the ARM7TDMI). |
 | **U4 — real-time decode** | Worst decode frame fits the product budget at WAITCNT 4/2; the gate total (decode + convert + IRQ + DMA) is under the agreed ceiling, written down as the **262,144-cycle period** (mGBA, no UI — not a hardware playback claim). | **Met (2026-11-19):** album decode wall **194,695 worst / 169,354 mean = 74.27% / 64.60%**; gate total **226,152 / 200,624 = 86.27% / 76.53%** — **13.73 points of margin at the worst frame, zero starved periods over 16,552**, `frames_over_period=0`. Against the C+ASM reference's own record (decode 69.43%, gate 73.63%) that is **1.070x on the decode wall**; of the remaining 12.6-point gate gap only 4.84 points are decode, the other 7.80 being the convert/IRQ/DMA half at ~2.9x C's cost. `make uli-gate`. The ladder that got here (PR A through E, the root-cause audit, the closed-world pass) is in `crates/uli-lite/RECORD.md`. |
-| **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | **Met on hardware (GBA SP, 2026-11-16) for the three player ROMs, two runs each, identical to the cycle**: headphone 94.52% worst / 81.39% mean, speaker 95.89% / 82.61%, two-track 94.56% / 80.92%, all with 0 underruns; the GBA 001 was unavailable. **With one open defect**: the 1 Hz text redraw delays the feeder past the DMA's grace on 104 of 16,553 periods (audible splices; `late`, not underruns), so the audio default is the end-only screen until the UI is made non-blocking. **Met in mGBA too.** `make uli-player` (headphone) and `make uli-player-speaker`: zero underruns, period audit closed (periods = served + 1 tail), ring full, three builds measured (2026-11-16). The hardware half is still owed — two units × two runs of *this* player; the manual listen that has happened is the PR E audio-only ROM, which carried no counted ledger. |
+| **U5 — product playback** | 32,768 Hz product path runs with zero underruns and a clean period audit. | **Met on hardware (GBA SP, 2026-11-16) for the three player ROMs, two runs each, identical to the cycle**: headphone 94.52% worst / 81.39% mean, speaker 95.89% / 82.61%, two-track 94.56% / 80.92%, all with 0 underruns; the GBA 001 was unavailable. **With one open defect**: the 1 Hz text redraw delays the feeder past the DMA's grace on 104 of 16,553 periods (audible splices; `late`, not underruns), so the audio default is the end-only screen until the UI is made non-blocking. **Met in mGBA too.** `make uli-player` (headphone) and `make uli-player-speaker`: zero underruns, period audit closed (periods = served + 1 tail), ring full, three builds measured (2026-11-16). **Remaining hardware debt:** the GBA 001 was unavailable, so the two-unit half is not done; the SP run above covers the three player ROMs, two runs each. The open UI defect is W4's. |
 | **U6 — memory** | IWRAM/EWRAM/stack stay inside the product budget with the UI and feeder linked. | **Met for the decode/player path (2026-11-19):** `.iwram` 26,496 B of 32,768 (code + `HotState` 8,192 + `ClassTables` 560 + `q3`/`clz6` 148); stack high-water 948 B (bench) / 1,988 B (gate); code tables in `.ewram`. The UI is not in the gate arm, so this is re-checked when the UI lands. `make uli-gate`; linker map. |
-| **U7 — licensing/spec** | A public crate, if published, has a permissive license and a standalone format specification; otherwise it remains `publish = false`. | **Deferred by decision 2026-11-14: `publish = false`, no license work now.** |
+| **U7 — licensing/spec** | A public crate, if published, has a permissive license and a standalone format specification; otherwise it remains `publish = false`. | **The ULI2 crates remain `publish = false`.** The repository-level MIT licence landed 2026-11-27 (commit `1bbd9e1`, [`LICENSE`](LICENSE)), but [`NOTICE.md`](NOTICE.md) explicitly lists `uli-lite`, `uli-lite-gba` and `uli-enc` as **unresolved** because they derive from `gba-audio`; the ULI2 provenance/publish decision is still open. |
 
 The U4 ceiling is not copied from `gba-audio`'s 75%: this tree's UI, feeder and
 animation budget decide it, and it was written down as **the 262,144-cycle
@@ -861,12 +861,15 @@ product codec without pretending one codec covers both jobs.
 
 ## Risks and open questions
 
-1. **Licensing — deferred by decision (2026-11-14).** `gba-audio` has no LICENSE
-   file, so `uli-lite` stays `publish = false` and **no license work is done
-   now**. What stays true if a publish decision is ever taken: a written
-   permissive license (MIT/Apache-2.0/Unlicense) from the author, or a
-   clean-room rewrite, plus the format name — and the adapted asm counts as
-   derived work, so it is only acceptable while nothing is published.
+1. **Licensing — the ULI2 crates are still unresolved (2026-11-27).** The repository
+   now carries MIT at the root ([`LICENSE`](LICENSE), commit `1bbd9e1`) and
+   [`NOTICE.md`](NOTICE.md) records the third-party terms, but it explicitly lists
+   `uli-lite`, `uli-lite-gba` and `uli-enc` as **unresolved** because they derive from
+   `gba-audio`, which has no LICENSE file. They stay `publish = false` and no ULI2
+   provenance/licensing work is done now. If a publish decision is taken: a written
+   permissive license from the `gba-audio` author, or a clean-room rewrite, plus the
+   format name — and the adapted asm counts as derived work, so it is only acceptable
+   while nothing is published.
 2. **Format stability.** ULI2 is versioned (`ULA2` version 1) but not a
    standard. Pin the reference commit, write a standalone `FORMAT.md` before
    publishing, and treat bitstream changes as breaking.
@@ -893,19 +896,15 @@ product codec without pretending one codec covers both jobs.
    is the gate: our convert/IRQ/DMA half costs ~2.9x C's, which is 7.80 of the
    12.6 points we are still behind on the gate total.
 
-6. **Encoder packaging and independence — v1 boundary set (2026-11-14).** For
-   v1 assets are produced **off-tree** with the C encoder; this project
-   builds nothing from it and vendors no C source. That keeps the repo free of
-   C while the decoder work proceeds, and it means ULI2 is still not the
-   public-reuse answer: packaging a codec needs an in-repo encoder. **The Rust
-   encoder milestone is scheduled as of 2026-11-19** — it is the last missing
-   piece before ULI2 can be the album player's codec — under the same rule: no C
-   source, no dependency, every artefact in this repository. **Amended 2026-11-23:
-   the milestone landed** — `crates/uli-enc` covers S1–S7 under that rule, and what
-   this risk still holds is the acceptance half (S8: match the oracle's bytes, against a
-   *named* oracle binary — see the 2026-11-25 decision below) and the app's asset path onto
-   it. Requirements, slices
-   and acceptance gates: `crates/uli-lite/PLAN-OF-RECORD.md` → "The encoder".
+6. **Encoder packaging and independence — the encoder is in-repo, the asset path is not
+   (2026-11-27).** `crates/uli-enc` covers **S1–S8** under the no-C rule and is byte-exact
+   to the recorded contraction-free oracle on every acceptance cell; the C/OpenMP tool is
+   now only that oracle. The repository therefore no longer lacks an encoder, but the asset
+   targets still call `$GBA_AUDIO/build/uli_enc` (**W2**) and the album app has no ULI2
+   backend (**W3**), so a fresh clone still cannot bake a ULI2 album without the sibling
+   checkout. S9's `--dacw 1` quality arm and the licensing/publish decision (the repo now has MIT at the root, but `NOTICE.md` marks the three ULI2 crates as unresolved) remain separate.
+   Requirements, slices and acceptance gates: `crates/uli-lite/PLAN-OF-RECORD.md` → "The
+   encoder"; work threads: → "Remaining ULI2 work — the four threads".
 7. **Rate flexibility — v1 fixed (2026-11-14).** 32,768 Hz, hop 512, stereo, no
    long-block. Higher rates (65,536 Hz) would be a format/encoder change and are
    explicitly out of scope; the v1 target is matching the C project's fidelity
@@ -922,6 +921,24 @@ product codec without pretending one codec covers both jobs.
 numbers *of that day* and are superseded by the current state at the top of
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md); each
 entry is kept for the decision and its reasoning, not for its numbers.**
+
+- **2026-11-27 — S8 bookkeeping closed, and the remaining ULI2 work is indexed as four
+  threads.** `make uli-accept` re-taken on `fast`, `tiny`, `biomaster`, `off-default` and
+  `adv` reports MATCH on every cell against the recorded clean oracle (`sha256 1991ee6c…`,
+  zero fused sites); `make uli-oracle-check` is green; `make uli-test` is 18 suites / 99
+  tests. The S8 pin ledger is discharged: the frozen fixtures and `uli2_tiny.uli` are
+  unchanged, the S7 table now carries the MATCH re-take with full hashes, and S5's album
+  numbers are marked superseded rather than edited. The `uli-album-asset` recursive build now
+  passes `ULI_ORACLE_CFLAGS` and runs `check_uli_oracle.py --expect clean`, so a fresh build
+  cannot silently replace the oracle with the fused `native` binary. **This closes S8, not
+  ULI2.** The remaining work is indexed in
+  [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) → "Remaining ULI2
+  work — the four threads": **W2** (point the asset targets at `crates/uli-enc`, retiring
+  the oracle from the product bake), **W3** (the app's `backend-uli2` and geometry), and
+  **W4** (the non-decode gate half, the dense entropy tail, U5's redraw defect, S9 and
+  licensing). Those are the threads to follow; the stale "S8 in progress / no matrix cell
+  byte-identical" status text in this file and in the encoder README was corrected in the
+  same pass.
 
 - **2026-11-26 (latest) — row 25 closed: the M/S header bit belongs in the domain comparison
   too, and every matrix cell is byte-identical.** The three `biomaster` frames were not an
