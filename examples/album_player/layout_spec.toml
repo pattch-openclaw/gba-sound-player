@@ -135,9 +135,12 @@ bar_cells = 18
 # below. Counted as *distinct tiles in the pool*, which is what agb's allocator
 # hands out — the map entries themselves are the 2,048 B screenblock, a separate
 # term (§5.1). Enumerated so a reviewer can argue with the number: 4 backdrop
-# fills (one per band, one for the region's backing), and one 8x8 tile per
-# declared control slot (5).
-chrome_art_tiles = 9
+# fills (one per band, one for the region's backing), one 8x8 tile per declared
+# control slot (5), and the `start` slot's **second** drawing — the play triangle
+# and the pause bars are two tiles in one slot, because that pair is the
+# play/pause indication (ruled 2026-11-27, §5.3; `chrome::transport_icon` swaps
+# them on a state change, it does not allocate a new slot).
+chrome_art_tiles = 10
 
 # 2a's baseline text mechanism (§5.5a): the static glyph atlas, addressed by index,
 # so a repeated letter is one tile. The alternative is today's
@@ -401,7 +404,7 @@ image_tiles = 256
 # spec that owns the number, and recorded here rather than silently edited.
 bar_cells = 80
 
-chrome_art_tiles = 9         # as A: 4 backdrop fills + one tile per declared control slot
+chrome_art_tiles = 10        # as A: 4 backdrop fills + one tile per declared control slot + the start slot's play/pause pair
 glyph_atlas = "static"
 
 [[variant.palette]]

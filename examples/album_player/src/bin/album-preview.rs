@@ -78,6 +78,7 @@ fn main() {
         elapsed_samples: 0,
         total_samples,
         bar_cell: surface::BarCell::new(0),
+        paused: false,
         state_word: "PLAYING",
     };
     ui.update(&boot, &mut writes);
@@ -93,6 +94,7 @@ fn main() {
         elapsed_samples: elapsed,
         total_samples,
         bar_cell: surface::BarCell::from_samples(elapsed, track.recip),
+        paused: true,
         state_word: "PAUSED",
     };
     ui.update(&later, &mut writes);
