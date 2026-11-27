@@ -939,7 +939,7 @@ fn the_scene_registry_is_the_spec_order_filtered_to_what_this_rom_implements() {
 #[test]
 fn the_card_paints_inside_the_region_and_touches_no_band() {
     let mut writes = surface::Writes::new();
-    surface::Surface::paint_card(&mut writes, &fixture_card());
+    surface::Surface::paint_card(&mut writes, &fixture_card(), None);
     assert!(!writes.is_empty());
     assert_eq!(writes.dropped(), 0, "the card's batch must fit MAX_WRITES");
     let region_top = surface::REGION_ROW;
@@ -988,7 +988,7 @@ fn blank_then_card_leaves_every_region_cell_opaque() {
     surface::Surface::paint_blank(&mut blank);
     canvas.apply(&blank);
     let mut card = surface::Writes::new();
-    surface::Surface::paint_card(&mut card, &fixture_card());
+    surface::Surface::paint_card(&mut card, &fixture_card(), None);
     canvas.apply(&card);
     for y in surface::REGION_ROW..surface::REGION_ROW + layout::REGION.rows {
         for x in 0..layout::REGION.cols {

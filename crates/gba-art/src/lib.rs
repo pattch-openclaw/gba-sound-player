@@ -23,4 +23,4 @@
 pub mod art1;
 pub mod paint;
 
-pub use paint::paint;
+pub use paint::{paint, paint_at};

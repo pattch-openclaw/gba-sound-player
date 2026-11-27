@@ -1141,6 +1141,11 @@ def bake(config_path: Path) -> int:
     # checked against the variant it derives) and *before* anything is written, so a refused
     # box never leaves a stale ART1 or a module whose pool term disagrees with the image.
     art_meta = prepare_art(config, facts, assets_dir)
+    if art_meta is None:
+        # `assets.rs` always includes the blob (the `AlignedArt` static needs a file even at
+        # length 0), so a no-art album gets an empty one rather than a conditional include.
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        write_atomic(assets_dir / "art1.bin", b"")
     longest_title: tuple[float, str] = (0.0, "")
 
     print(f"album_bake: {config_path.relative_to(REPO) if config_path.is_relative_to(REPO) else config_path}")

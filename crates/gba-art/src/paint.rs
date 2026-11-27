@@ -17,14 +17,29 @@ use crate::art1::Art1;
 /// Returns the number of cells pushed. A cell whose map entry names a tile or bank outside the
 /// blob is an `ART1` validation failure and cannot reach here (`art1::parse` refuses it).
 pub fn paint(art: &Art1<'_>, rect: Rect, base_bank: u8, writes: &mut Writes) -> usize {
-    let cols = art.tile_cols.min(rect.cols);
-    let rows = art.tile_rows.min(rect.rows);
+    paint_at(art, 0, 0, rect, base_bank, writes)
+}
+
+/// Paint a crop of `art` starting at `(src_col, src_row)` into `rect`.
+///
+/// The card's picture is a centre crop of the album's one ART1, so the scene crate needs a
+/// source offset rather than a second image (2b PR-(4b)).
+pub fn paint_at(
+    art: &Art1<'_>,
+    src_col: u32,
+    src_row: u32,
+    rect: Rect,
+    base_bank: u8,
+    writes: &mut Writes,
+) -> usize {
+    let cols = (art.tile_cols - src_col).min(rect.cols);
+    let rows = (art.tile_rows - src_row).min(rect.rows);
     let mut pushed = 0;
     let mut row = 0;
     while row < rows {
         let mut col = 0;
         while col < cols {
-            let entry = art.map_entry(row * art.tile_cols + col);
+            let entry = art.map_entry((src_row + row) * art.tile_cols + src_col + col);
             writes.push(Write {
                 x: (rect.x + col) as u8,
                 y: (rect.y + row) as u8,

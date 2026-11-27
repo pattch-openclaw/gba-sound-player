@@ -1399,9 +1399,20 @@ mod rom {
         tiles: &surface::Tilesets,
     ) {
         match scene {
+            surface::SceneId::Art => match &tiles.art_image {
+                Some(image) => surface::Surface::paint_art(writes, image, tiles.art_bank),
+                None => surface::Surface::paint_blank(writes),
+            },
             surface::SceneId::Blank => surface::Surface::paint_blank(writes),
             surface::SceneId::TitleCard => {
-                surface::Surface::paint_card(writes, &card_for(album));
+                surface::Surface::paint_card(
+                    writes,
+                    &card_for(album),
+                    tiles
+                        .art_image
+                        .as_ref()
+                        .map(|image| (image, tiles.art_bank)),
+                );
             }
         }
         ui_bg.apply_scene(writes, tiles);
@@ -1532,22 +1543,26 @@ mod rom {
     /// sit between the pause's release (66) and the first skip (120) — the quietest stretch
     /// in the script, where a scene change cannot change the skip arithmetic the gate reads.
     #[cfg(feature = "input-replay")]
-    const CARD_REPLAY_SCRIPT: [(u32, u16); 30] = card_replay_script();
+    const CARD_REPLAY_SCRIPT: [(u32, u16); 32] = card_replay_script();
 
     #[cfg(feature = "input-replay")]
-    const fn card_replay_script() -> [(u32, u16); 30] {
-        let mut out = [(0u32, 0u16); 30];
+    const fn card_replay_script() -> [(u32, u16); 32] {
+        let mut out = [(0u32, 0u16); 32];
         // The four entries before frame 90: 8/A, 14/release, 60/START, 66/release.
         let mut i = 0;
         while i < 4 {
             out[i] = GATE_REPLAY_SCRIPT[i];
             i += 1;
         }
+        // Two Select edges: with `art` in the registry (2b PR-(4b)) the cycle is
+        // blank → art → title_card, so the card is the second step.
         out[4] = (90, keys::BTN_SELECT);
         out[5] = (96, 0);
+        out[6] = (100, keys::BTN_SELECT);
+        out[7] = (106, 0);
         let mut j = 4;
         while j < GATE_REPLAY_SCRIPT.len() {
-            out[j + 2] = GATE_REPLAY_SCRIPT[j];
+            out[j + 4] = GATE_REPLAY_SCRIPT[j];
             j += 1;
         }
         out
@@ -3993,7 +4008,7 @@ mod rom {
         // but 2a's report also has to name what was drawn with it — the band stack, the one scene, the
         // authored chrome — or "the title band looked wrong" is a statement about nothing in particular.
         agb::println!(
-            "[album-rom] surface: bands={} elements={} region={}x{} scenes={} of {} declared boot={} card={} icons={} chrome_tiles={} atlas_tiles={} (generated: ALBUM-PLAYER.md §5.0, §5.1, §5.2, §5.3)",
+            "[album-rom] surface: bands={} elements={} region={}x{} scenes={} of {} declared boot={} card={} art={} icons={} chrome_tiles={} atlas_tiles={} (generated: ALBUM-PLAYER.md §5.0, §5.1, §5.2, §5.3)",
             layout::BANDS.len(),
             layout::ELEMENTS.len(),
             layout::REGION.cols,
@@ -4005,6 +4020,11 @@ mod rom {
                 "declared"
             } else {
                 "none"
+            },
+            if assets::HAS_ART {
+                assets::ART_BOX_PX_W
+            } else {
+                0
             },
             chrome::ICON_TILES,
             chrome::TILE_COUNT,
