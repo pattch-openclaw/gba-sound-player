@@ -1375,6 +1375,7 @@ mod rom {
             elapsed_samples: paint.visit,
             total_samples: paint.total,
             bar_cell: surface::BarCell::from_samples(paint.last, album.track(track as u32).recip),
+            paused: matches!(state, State::Paused),
             state_word: transport_word(state),
         };
         if ui.update(&view, writes) {
@@ -1454,9 +1455,10 @@ mod rom {
         }
     }
 
-    /// The transport state as the word beside the control art (§5.6: a state is carried by more than
-    /// hue; until §5.3's `PAUSED` badge lands in 2b, the word is the whole of it). Every one of these
-    /// fits `keylabels`' nine cells, and the host gate measures that rather than trusting an eye.
+    /// The transport state as the debug word (§5.3's 2026-11-27 ruling: the word is debug chrome,
+    /// gated at the drawing by the crate feature `state-word`; the product's state signal is the
+    /// `start` slot's play/pause drawing). Every one of these fits `keylabels`' nine cells, and the
+    /// host gate measures that rather than trusting an eye.
     fn transport_word(state: State) -> &'static str {
         match state {
             State::Playing => "PLAYING",
@@ -4053,6 +4055,7 @@ mod rom {
             elapsed_samples: 0,
             total_samples: assets::TRACKS[START_TRACK].n_samples,
             bar_cell: surface::BarCell::new(0),
+            paused: matches!(transport_state(), State::Paused),
             state_word: transport_word(transport_state()),
         };
         if ui.update(&boot_view, &mut ui_writes) {

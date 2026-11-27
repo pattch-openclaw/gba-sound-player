@@ -84,7 +84,10 @@ fn tile_char(cell: Option<&surface::Write>) -> char {
             chrome::FILL_CHROME => '=',
             chrome::FILL_TITLE => '-',
             chrome::ICON_SELECT => 'S',
-            chrome::ICON_START => 'P',
+            chrome::ICON_PLAY => 'P',
+            // The pause drawing is two bars; 'B' is the mnemonic the composite gives it, and the
+            // boot frame's assertion reads it as "audio is running" by that character alone.
+            chrome::ICON_PAUSE => 'B',
             chrome::ICON_PREV => '<',
             chrome::ICON_NEXT => '>',
             chrome::ICON_RESTART => 'R',
@@ -124,6 +127,12 @@ fn glyph_char(tile: u16) -> char {
     '?'
 }
 
+/// A view whose debug word names its transport state.
+///
+/// `paused` is derived from the word here so every call site below reads as the state it means. The
+/// app derives it from `transport::State` (`matches!(state, State::Paused)`) and the two agree,
+/// because `transport_word` prints `PAUSED` for exactly that state — the transient words
+/// (`PAUSING`, `RESUME`, ...) are "not paused" for the `start` slot's drawing.
 fn view<'a>(
     title: &'a str,
     elapsed: u32,
@@ -136,6 +145,7 @@ fn view<'a>(
         elapsed_samples: elapsed,
         total_samples: total,
         bar_cell: surface::BarCell::new(bar_cell),
+        paused: word == "PAUSED",
         state_word: word,
     }
 }
@@ -155,9 +165,13 @@ fn paint_static(ui: &mut surface::Surface, canvas: &mut Canvas) {
     canvas.apply_stacked(&writes);
 }
 
-/// The boot frame: the band stack, the region, the five icons, the first title, `0:00` and a bar at
-/// its first cell. This is the composite a reviewer can read and the one a human validates on the
-/// ROM, so it is checked here first, in the same cells.
+/// The boot frame: the band stack, the region, the control drawings, the first title, `0:00` and a
+/// bar at its first cell. This is the composite a reviewer can read and the one a human validates on
+/// the ROM, so it is checked here first, in the same cells.
+///
+/// The `start` slot shows its **pause** drawing here (character `B`): the boot view is a running
+/// transport, and §5.3's ruling is that the control draws the action a press performs. A paused frame
+/// draws `P` in the same cell — `a_pause_swaps_the_start_slot_and_writes_one_cell` is that leg.
 #[test]
 fn the_boot_frame_is_the_declared_band_stack_with_a_title_in_it() {
     let mut ui = surface::Surface::new();
@@ -180,7 +194,7 @@ fn the_boot_frame_is_the_declared_band_stack_with_a_title_in_it() {
     assert_eq!(
         writes.len(),
         5,
-        "the foreground layer's static content is the five control icons"
+        "the foreground layer's static content is one icon per control slot"
     );
     assert_eq!(writes.dropped(), 0);
 
@@ -223,8 +237,17 @@ fn the_boot_frame_is_the_declared_band_stack_with_a_title_in_it() {
         ),
         "the title's lower tile row is missing, or the bar is not the band's last ten cells"
     );
-    // The chrome band, two rows down: the clock, the state word, then five icons in their slots.
+    // The chrome band, two rows down: the clock, the debug state word, then the control drawings in
+    // their slots.
     let chrome_row = canvas.row(layout::BANDS[0].screen_row);
+    // The state word is debug chrome (§5.3's 2026-11-27 ruling): with the `state-word` feature off
+    // the nine `keylabels` cells are never drawn, so they keep the band fill — which is the whole
+    // shape the flip to off will have, asserted here in both builds rather than only in the one that
+    // happens to be the default today.
+    #[cfg(feature = "state-word")]
+    const LABELS: &str = "PLAYING==";
+    #[cfg(not(feature = "state-word"))]
+    const LABELS: &str = "=========";
     // The clock is nine characters in a twelve-cell box: the cells it does not use keep the band's
     // own fill rather than being blanked to the backdrop, which is what the `===` run is.
     assert_eq!(
@@ -238,19 +261,14 @@ fn the_boot_frame_is_the_declared_band_stack_with_a_title_in_it() {
         "the clock's spare cells did not keep the band fill"
     );
     assert_eq!(
-        &chrome_row[12..19],
-        "PLAYING",
-        "the state word is not beside the clock"
-    );
-    assert_eq!(
-        &chrome_row[19..21],
-        "==",
-        "the word's spare cells did not keep the band fill"
+        &chrome_row[12..21],
+        LABELS,
+        "the state word is not beside the clock (or its cells did not keep the band fill when the debug feature is off)"
     );
     assert_eq!(
         &chrome_row[21..26],
-        "SP><R",
-        "the five authored icons are not in their slots"
+        "SB><R",
+        "the control drawings are not in their slots — `B` is the pause bars, i.e. a running transport"
     );
     assert_eq!(
         &chrome_row[26..],
@@ -261,7 +279,7 @@ fn the_boot_frame_is_the_declared_band_stack_with_a_title_in_it() {
     // an icon is one tile tall while a line box is two.
     assert_eq!(
         canvas.row(layout::BANDS[0].screen_row + 1),
-        format!("0:00/9:36===PLAYING=={}", "=".repeat(9)),
+        format!("0:00/9:36==={LABELS}{}", "=".repeat(9)),
         "the chrome band's lower row is not the glyphs' second tile row then fill"
     );
 
@@ -506,7 +524,8 @@ fn the_authored_tiles_are_the_declared_pool_terms_and_are_distinct() {
     let mut seen: Vec<&[u8; chrome::TILE_BYTES]> = Vec::new();
     for icon in [
         chrome::ICON_SELECT,
-        chrome::ICON_START,
+        chrome::ICON_PLAY,
+        chrome::ICON_PAUSE,
         chrome::ICON_PREV,
         chrome::ICON_NEXT,
         chrome::ICON_RESTART,
@@ -514,11 +533,13 @@ fn the_authored_tiles_are_the_declared_pool_terms_and_are_distinct() {
         let tile = &chrome::TILES[icon as usize];
         assert!(
             !seen.iter().any(|t| *t == tile),
-            "two control icons share a bitmap"
+            "two control drawings share a bitmap"
         );
         seen.push(tile);
     }
-    assert_eq!(layout::CONTROL_SLOTS.len(), chrome::ICON_TILES);
+    // One drawing per declared slot, plus the `start` slot's second one: the play/pause pair is two
+    // tiles for one key (§5.3, ruled 2026-11-27), which is why this is `+ 1` and not `==`.
+    assert_eq!(layout::CONTROL_SLOTS.len() + 1, chrome::ICON_TILES);
     for slot in &layout::CONTROL_SLOTS {
         assert!(
             chrome::icon_for_slot(slot.key).is_some(),
@@ -526,6 +547,128 @@ fn the_authored_tiles_are_the_declared_pool_terms_and_are_distinct() {
             slot.key
         );
     }
+}
+
+/// **AP-4's control-art fixture, as this tree can witness it: the play/pause pair is told apart by
+/// shape alone, with colour removed.**
+///
+/// The two drawings are 1bpp — one lit value and transparency — so hue is already out of them; what
+/// the leg checks is the thing a palette cannot supply. A pair that differed only in hue would pass
+/// every tile-index and pool-sum leg above while failing §5.6's actual rule, so this reads the
+/// silhouettes: both have ink, they are not the same shape, and the function the surface calls maps a
+/// paused transport to the triangle and a running one to the bars.
+#[test]
+fn the_play_and_pause_icons_differ_by_shape_with_colour_removed() {
+    fn silhouette(tile: u16) -> [u8; 8] {
+        let mut rows = [0u8; 8];
+        for (y, row) in rows.iter_mut().enumerate() {
+            let mut bits = 0u8;
+            for x in 0..8 {
+                let byte = chrome::TILES[tile as usize][y * 4 + x / 2];
+                let value = if x % 2 == 0 { byte & 0x0F } else { byte >> 4 };
+                if value != 0 {
+                    bits |= 1 << x;
+                }
+            }
+            *row = bits;
+        }
+        rows
+    }
+
+    let play = silhouette(chrome::ICON_PLAY);
+    let pause = silhouette(chrome::ICON_PAUSE);
+    assert!(
+        play.iter().any(|row| *row != 0),
+        "the play drawing is blank"
+    );
+    assert!(
+        pause.iter().any(|row| *row != 0),
+        "the pause drawing is blank"
+    );
+    assert_ne!(
+        play, pause,
+        "the two transport drawings have the same silhouette — colour removed, they say nothing"
+    );
+    // Not merely different: the pause drawing is two solid vertical bars, so at least one row must
+    // differ in more than one pixel. A pair that differed by a single pixel would satisfy `assert_ne`
+    // and be unreadable at 1x, which is §5.6's second edition.
+    assert!(
+        play.iter()
+            .zip(pause.iter())
+            .any(|(a, b)| (a ^ b).count_ones() >= 2),
+        "the two drawings differ by at most one pixel per row — indistinguishable at the device's scale"
+    );
+    assert_eq!(
+        chrome::transport_icon(true),
+        chrome::ICON_PLAY,
+        "a paused transport does not draw the play triangle"
+    );
+    assert_eq!(
+        chrome::transport_icon(false),
+        chrome::ICON_PAUSE,
+        "a running transport does not draw the pause bars"
+    );
+}
+
+/// §5.3's play/pause indication at the surface: a transport change swaps **one** cell — the `start`
+/// slot's drawing — and an unchanged state writes nothing at all.
+///
+/// The debug word is deliberately the same in both views, so the only thing that can differ is the
+/// icon: this leg is about the indication the plan keeps when the feature flips off.
+#[test]
+fn a_pause_swaps_the_start_slot_and_writes_one_cell() {
+    let mut ui = surface::Surface::new();
+    let mut canvas = Canvas::new();
+    let mut writes = surface::Writes::new();
+    paint_static(&mut ui, &mut canvas);
+
+    let mut running = view("Bioluminescent", 0, TOTAL, 0, "PLAYING");
+    running.paused = false;
+    let mut paused = view("Bioluminescent", 0, TOTAL, 0, "PLAYING");
+    paused.paused = true;
+
+    assert!(ui.update(&running, &mut writes));
+    let start = layout::CONTROL_SLOTS
+        .iter()
+        .position(|slot| slot.key == "start")
+        .expect("variant B declares a start slot");
+    assert_eq!(
+        ui.icons()[start],
+        chrome::ICON_PAUSE,
+        "a running transport left the play triangle in the start slot"
+    );
+    assert!(
+        !ui.update(&running, &mut writes),
+        "a still running frame repainted"
+    );
+
+    assert!(ui.update(&paused, &mut writes));
+    assert_eq!(
+        writes.len(),
+        1,
+        "a pause wrote {} cells; the word is unchanged, so only the start icon may move",
+        writes.len()
+    );
+    let written = &writes.as_slice()[0];
+    assert_eq!(
+        written.tile,
+        chrome::ICON_PLAY,
+        "the pause did not write the play triangle"
+    );
+    let slot = &layout::CONTROL_SLOTS[start];
+    assert_eq!(
+        (
+            written.x as u32 * chrome::TILE_PX,
+            written.y as u32 * chrome::TILE_PX
+        ),
+        (slot.px_x, slot.px_y),
+        "the swapped drawing did not land in the declared start slot"
+    );
+    assert_eq!(ui.icons()[start], chrome::ICON_PLAY);
+    assert!(
+        !ui.update(&paused, &mut writes),
+        "a still paused frame repainted"
+    );
 }
 
 /// The palettes: §5.4's four declared roles, entry 0 the backdrop in every bank, and the bar's fill

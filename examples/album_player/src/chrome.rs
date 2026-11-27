@@ -15,20 +15,28 @@
 //! keeping it here means the ROM links no asset blob for nine tiles.
 //!
 //! **Placeholders are allowed to be ugly, and are not allowed to be indistinguishable** (§5.3). The
-//! five icons differ in *shape*, which is what §5.6 requires: a diamond, a triangle, two arrows and
-//! a return glyph. Nothing here differs from anything else only in hue, so the gate that reads
-//! shape (and the colourblind verifier) both have something to read. The sixth bitmap §5.3 reserves
-//! room for — the `PAUSED` badge — is 2b's, and until it lands **the transport state is carried by a
-//! word** in `keylabels`, which is the alternative §5.6 names in its own sentence.
+//! six drawings differ in *shape*, which is what §5.6 requires: a diamond, a play triangle, two
+//! pause bars, two arrows and a return glyph. Nothing here differs from anything else only in hue,
+//! so the gate that reads shape (and the colourblind verifier) both have something to read.
+//!
+//! **The `start` slot carries two drawings, and that pair is the play/pause indication** (ruled
+//! 2026-11-27). [`transport_icon`] answers it: a play triangle while the transport is paused (the
+//! press starts audio) and pause bars otherwise (the press pauses, or is refused during a refill).
+//! The drawing therefore says what a press will do *and* separates the two states by shape alone,
+//! which is §5.6's rule with no word needed. The separate `PAUSED` badge §5.3 reserves an identity
+//! for is still undrawn, and the state **word** in `keylabels` is debug chrome behind the crate
+//! feature `state-word` (in `default` today): both are the surface's business, and the tile count
+//! below is the one tie that moves with them.
 //!
 //! ## Why the tile count is a compile-time tie to `layout.rs`
 //!
 //! §5.1's pool audit sums *declared* distinct tiles: `layout::POOL_CHROME_DECLARED`, generated from
-//! the spec's `chrome_art_tiles`, whose comment enumerates it as "4 backdrop fills + one 8x8 tile per
-//! declared control slot". This module is the thing those tiles actually are, so the two counts are
-//! asserted equal at the bottom of the file: an icon added here without the declared number moving
-//! is a pool undercount, and it is a build failure rather than a rounding error someone finds on
-//! hardware. Same arrangement as `glyphs.rs`'s cross-module asserts, and for the same reason.
+//! the spec's `chrome_art_tiles`, whose comment enumerates it as 4 backdrop fills + one 8x8 tile per
+//! declared control slot + the `start` slot's second drawing. This module is the thing those tiles
+//! actually are, so the two counts are asserted at the bottom of the file:
+//! `ICON_TILES == CONTROL_SLOTS.len() + 1`, an icon added here without the declared number moving
+//! being a build failure rather than a rounding error someone finds on hardware. Same arrangement as
+//! `glyphs.rs`'s cross-module asserts, and for the same reason.
 //!
 //! ## What this module's tiles do while the album plays
 //!
@@ -39,23 +47,26 @@
 //!   once per band by `surface::Surface::paint_static` and never touched again; they live on the
 //!   *background* layer (BG0), which is what makes them free at commit — a clean background's map is
 //!   not copied at all.
-//! - **the five icons** are likewise written once (`paint_icons`), but on the *foreground* (BG2), so
+//! - **the six drawings** are likewise written once (`paint_icons`), but on the *foreground* (BG2), so
 //!   they share a map with things that move. That costs them nothing extra — they never dirty it
 //!   themselves — and it is the reason the foreground has to be its own background rather than part
 //!   of the band fill: an icon is mostly transparent pixels, and a transparent pixel has to reveal
-//!   art rather than punch a hole in it.
+//!   art rather than punch a hole in it. **One of them is not static any more:** the `start` slot's
+//!   play/pause pair is rewritten by `surface::Surface::update` when the transport state changes —
+//!   one cell, on an event, at AP-3b's measured changed-cell price (489 c for a bar cell, 407 c for
+//!   an unchanged one).
 //! - **the nine bar patterns** are the opposite case: `surface::draw_bar` rewrites the column the fill
 //!   boundary sits in on every §6 cell, which at `BAR_CELLS = 80` over a 4-minute track is a write
 //!   every couple of seconds, forever. Same for anything drawn from `glyphs.rs` — the clock's digits
 //!   and the state word are rewritten on the foreground too.
 //!
-//! So the chrome's *hot* set is: bar columns, clock digits, the state word, and the title on a track
-//! change — all of them BG2 cells, all of them paying a whole 2,048 B map copy per change because agb
-//! has no partial-map commit. That is the exact list §5.7 moves to sprites (~56 OAM entries, one 8×16
-//! sprite per text column and one 8×8 per icon/bar cell), and the exact reason the *fills and the
-//! scene stay BG*: a layer that changes once per boot has nothing for an OAM shadow to offer it. The
-//! per-update arithmetic, and why the presentation axis matters more than this one, is in
-//! `surface`'s module doc.
+//! So the chrome's *hot* set is: bar columns, clock digits, the state word, the `start` icon on a
+//! pause/resume, and the title on a track change — all of them BG2 cells, all of them paying a whole
+//! 2,048 B map copy per change because agb has no partial-map commit. That is the exact list §5.7
+//! moves to sprites (~56 OAM entries, one 8×16 sprite per text column and one 8×8 per icon/bar
+//! cell), and the exact reason the *fills and the scene stay BG*: a layer that changes once per boot
+//! has nothing for an OAM shadow to offer it. The per-update arithmetic, and why the presentation
+//! axis matters more than this one, is in `surface`'s module doc.
 //!
 //! ## Palette
 //!
@@ -76,8 +87,9 @@ pub const TILE_BYTES: usize = 32;
 /// backdrop", which the spec's `chrome_art_tiles` comment enumerates as one per band plus the
 /// scene's backing.
 pub const FILL_TILES: usize = 4;
-/// §5.3's control slots: `select`, `start`, `right`, `left`, `down`, one authored tile each.
-pub const ICON_TILES: usize = 5;
+/// §5.3's control slots: `select`, `start`, `right`, `left`, `down`, one authored tile each — plus
+/// the `start` slot's second drawing, so six tiles for five slots ([`transport_icon`]).
+pub const ICON_TILES: usize = 6;
 /// §6's partial-fill patterns: every reachable fill offset inside an 8 px tile (0–7 px), plus the
 /// full tile. At this variant's 1 px cells every residue is reachable, which is why it is 8 + 1.
 pub const BAR_TILES: usize = 9;
@@ -101,19 +113,35 @@ pub const FILL_TITLE: u16 = 3;
 /// The `Select` icon: a diamond. §5.3's `Select` is the scene cycle, and a diamond is the one shape
 /// that is neither an arrow nor a transport symbol.
 pub const ICON_SELECT: u16 = 4;
-/// The `Start`/`A` icon: a play triangle. This is the *affordance* — what the button does — and the
-/// transport's own state is the word beside it (§5.6's alternative, stated in the module docs).
-pub const ICON_START: u16 = 5;
+/// The `Start`/`A` icon while the transport is **paused**: a play triangle. The drawing says what the
+/// press will do — start audio — and [`transport_icon`] swaps it for [`ICON_PAUSE`] otherwise, so the
+/// two states are told apart by shape and not by a word (§5.6, ruled 2026-11-27).
+pub const ICON_PLAY: u16 = 5;
+/// The `Start`/`A` icon while audio is running: two pause bars. Same slot, second drawing; the shape
+/// is the whole difference from [`ICON_PLAY`], which is what §5.6's "not by hue alone" asks for.
+pub const ICON_PAUSE: u16 = 6;
 /// The `Left`/`L` icon: a bar and a left-pointing triangle.
-pub const ICON_PREV: u16 = 6;
+pub const ICON_PREV: u16 = 7;
 /// The `Right`/`R` icon: a right-pointing triangle and a bar.
-pub const ICON_NEXT: u16 = 7;
+pub const ICON_NEXT: u16 = 8;
 /// The `Down` icon: a return-to-start glyph (`|>` against `<|` is the pair that would be confusable
 /// with prev/next, so this is a house: a roof over a body).
-pub const ICON_RESTART: u16 = 8;
+pub const ICON_RESTART: u16 = 9;
 
 /// The first bar pattern: an empty column. `BAR_TILES` of them run from 0 to 8 filled pixels.
-pub const BAR_FIRST: u16 = 9;
+pub const BAR_FIRST: u16 = 10;
+
+/// The `start` slot's drawing for the transport's state (§5.3, ruled 2026-11-27).
+///
+/// The convention is the media-player one: the control shows the **action** a press performs, so a
+/// paused transport shows a play triangle and a running one shows pause bars. `paused` is true only
+/// for the transport's `Paused` state; the transient states (`PAUSING`, `RESUME`, `SKIP`, `PRIME`,
+/// `BUFFER`) draw the pause bars, because a press during them either pauses or is refused — and the
+/// state word, when the debug feature is on, is what names them.
+#[must_use]
+pub const fn transport_icon(paused: bool) -> u16 {
+    if paused { ICON_PLAY } else { ICON_PAUSE }
+}
 
 /// The palette bank §5.4 gives text, and the one the scene's backing draws in.
 pub const BANK_TEXT: u8 = 0;
@@ -165,9 +193,15 @@ const SELECT_BITS: [u8; 8] = [
     0b00011000, 0b00111100, 0b01111110, 0b11111111, 0b11111111, 0b01111110, 0b00111100, 0b00011000,
 ];
 
-/// `Start`/`A` — a play triangle, the affordance rather than the state (see the module docs).
-const START_BITS: [u8; 8] = [
+/// `Start`/`A` — a play triangle while the transport is paused: the press starts audio.
+const PLAY_BITS: [u8; 8] = [
     0b00010000, 0b00011100, 0b00011111, 0b00011111, 0b00011111, 0b00011111, 0b00011100, 0b00010000,
+];
+
+/// `Start`/`A` — two pause bars while audio runs: the press pauses. Two bars against a triangle is
+/// the shape difference §5.6 asks for; the two drawings share no lit pixel pattern at all.
+const PAUSE_BITS: [u8; 8] = [
+    0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01100110, 0b01100110,
 ];
 
 /// `Left`/`L` — a bar and a left-pointing triangle: previous track.
@@ -292,7 +326,7 @@ const fn bar(filled: usize) -> [u8; TILE_BYTES] {
     out
 }
 
-/// Every tile this module authors, in tileset order: the four fills, the five icons, the nine bar
+/// Every tile this module authors, in tileset order: the four fills, the six drawings, the nine bar
 /// patterns (§5.1's declared terms, in the order the constants above name).
 pub const TILES: [[u8; TILE_BYTES]; TILE_COUNT] = [
     solid(0),           // FILL_PAGE
@@ -300,7 +334,8 @@ pub const TILES: [[u8; TILE_BYTES]; TILE_COUNT] = [
     checker(2, 0),      // FILL_CHROME
     sparse(3, 0),       // FILL_TITLE
     pack(SELECT_BITS),  // ICON_SELECT
-    pack(START_BITS),   // ICON_START
+    pack(PLAY_BITS),    // ICON_PLAY
+    pack(PAUSE_BITS),   // ICON_PAUSE
     pack(PREV_BITS),    // ICON_PREV
     pack(NEXT_BITS),    // ICON_NEXT
     pack(RESTART_BITS), // ICON_RESTART
@@ -358,7 +393,10 @@ pub const fn icon_for_slot(key: &str) -> Option<u16> {
     if streq(key, "select") {
         Some(ICON_SELECT)
     } else if streq(key, "start") {
-        Some(ICON_START)
+        // The slot's *default* drawing: play. `Surface::update` swaps it for `ICON_PAUSE` while the
+        // transport runs, through `transport_icon` — the position is the slot's, the drawing is the
+        // state's, and both are declared rather than transcribed.
+        Some(ICON_PLAY)
     } else if streq(key, "right") {
         Some(ICON_NEXT)
     } else if streq(key, "left") {
@@ -422,8 +460,8 @@ const _: () = assert!(
     "§6's pattern-tile count and the authored bar patterns disagree"
 );
 const _: () = assert!(
-    ICON_TILES == crate::layout::CONTROL_SLOTS.len(),
-    "one authored icon per declared control slot, or the slot table has a hole"
+    ICON_TILES == crate::layout::CONTROL_SLOTS.len() + 1,
+    "one authored tile per declared control slot, plus the start slot's second drawing (play/pause)"
 );
 const _: () = assert!(
     every_slot_has_icon(),
@@ -435,11 +473,18 @@ const _: () = assert!(
 );
 
 // One more, and it is the one a diffuse palette would silently break: §5.6 says a state must be
-// carried by more than hue, so two icons that differ must differ in shape. The four transport icons
-// are pairwise different bitmaps, which is the cheap half of that rule; the `PAUSED` badge that
-// carries the other half is 2b's (see the module docs).
+// carried by more than hue, so two icons that differ must differ in shape. The six drawings are
+// pairwise different bitmaps, which is the cheap half of that rule — and it is the *whole* of the
+// play/pause indication's claim, because those two tiles are the state signal with no word on.
 const fn icons_are_distinct() -> bool {
-    let icons = [SELECT_BITS, START_BITS, PREV_BITS, NEXT_BITS, RESTART_BITS];
+    let icons = [
+        SELECT_BITS,
+        PLAY_BITS,
+        PAUSE_BITS,
+        PREV_BITS,
+        NEXT_BITS,
+        RESTART_BITS,
+    ];
     let mut i = 0;
     while i < icons.len() {
         let mut j = i + 1;
@@ -531,9 +576,10 @@ pub mod vram {
 mod tests {
     use super::*;
 
-    const ICONS: [([u8; 8], u16); 5] = [
+    const ICONS: [([u8; 8], u16); 6] = [
         (SELECT_BITS, ICON_SELECT),
-        (START_BITS, ICON_START),
+        (PLAY_BITS, ICON_PLAY),
+        (PAUSE_BITS, ICON_PAUSE),
         (PREV_BITS, ICON_PREV),
         (NEXT_BITS, ICON_NEXT),
         (RESTART_BITS, ICON_RESTART),

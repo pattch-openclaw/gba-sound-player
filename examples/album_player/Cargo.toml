@@ -68,7 +68,7 @@ name = "album-play"
 path = "src/album_play_main.rs"
 
 [features]
-default = ["backend-flac", "backend-stub", "arm-kernel", "deep-audit"]
+default = ["backend-flac", "backend-stub", "arm-kernel", "deep-audit", "state-word"]
 # The shipped backend: packed `GAFP` blobs through flac-lite.
 backend-flac = ["dep:flac-lite"]
 # The synthetic backend: deterministic int16 stereo, no codec, no platform.
@@ -101,6 +101,16 @@ replay-script-b = ["input-replay"]
 replay-script-c = ["input-replay"]
 # 2b PR-(3): the gate script plus one `Select` edge — the card's runtime witness.
 replay-script-card = ["input-replay"]
+# The transport's debug word in `keylabels` (`PLAYING`/`PAUSED`/`PRIME`/...). ON in `default`
+# today, because it is the one channel that names the five transient states and because AP-3's
+# boot composite asserts it — but it is **debug chrome, not the product's state signal**: that is
+# the `start` slot's play/pause drawing (§5.3's 2026-11-27 ruling, `chrome::transport_icon`).
+# Turning it off is this one word out of `default` (or `--no-default-features` plus the other
+# features); with it off the ROM draws no state word and the nine `keylabels` cells keep the band
+# fill. The flip is a ruling of its own, recorded in §5.3, because the transient states then need
+# an answer — so the feature exists now and the default moves later, not the other way round.
+# `make album-seam-test`'s stub-only host build already compiles the library with this off.
+state-word = []
 # Hardware diagnostic, never a product image: omit the explicit transparent page fill that
 # `Painted::new` writes over every visible cell of the three backgrounds. With the fill, no visible
 # cell depends on agb's reserved blank VRAM tile; without it, a Quick-Boot loader that leaves VRAM

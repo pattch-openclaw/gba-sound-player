@@ -17,7 +17,7 @@
 //!
 //! **Why three layers, and what each one owns.** The display is a background for the chrome/title
 //! art, a background for the scene region, and a foreground for everything drawn *over* that art
-//! (the glyphs, the five control icons, and the bar). They are separate `RegularBackground`s because
+//! (the glyphs, the control drawings, and the bar). They are separate `RegularBackground`s because
 //! a transparent pixel reveals the layer below: glyph and icon tiles are mostly transparent, so
 //! keeping them on the same background as the band fill would punch backdrop-coloured holes in the
 //! art instead of letting it show through. BG0 is the art background, BG1 the scene region, BG2 the
@@ -38,21 +38,24 @@
 //!
 //! ## The chrome's hot elements: what an update costs, and where OBJ would change the answer
 //!
-//! Four chrome elements move while audio is playing, and every one of them lives on the **foreground**
+//! Five chrome elements move while audio is playing, and every one of them lives on the **foreground**
 //! background (BG2): the clock when a displayed second changes, the state word on a transport event,
-//! the bar when a §6 cell advances, the title on a track change. The five control icons move once,
-//! at boot, and never again. What each costs *per update*, as the cells the diff emits — every figure
-//! below is the declared box in `layout::ELEMENTS` and `draw_text`'s per-cell diff, not an estimate:
+//! the bar when a §6 cell advances, the title on a track change, and the `start` slot's play/pause
+//! drawing on a pause/resume (one cell, and only when the transport really changed state). The other
+//! four control drawings move once, at boot, and never again. What each costs *per update*, as the
+//! cells the diff emits — every figure below is the declared box in `layout::ELEMENTS` and
+//! `draw_text`'s per-cell diff, not an estimate:
 //!
 //! | element | declared box | cells one update writes |
 //! |---|---|---|
 //! | clock | 12 × 2 | the digits whose glyph differs — one most seconds, two to four across a carry; the `/total` half is static within a track |
-//! | state word | 9 × 2 | every column whose glyph differs — `PLAYING`→`PAUSED` is most of them |
+//! | state word | 9 × 2 | every column whose glyph differs — `PLAYING`→`PAUSED` is most of them (debug chrome, feature `state-word`; drawn nowhere when it is off) |
 //! | bar | 10 × 1 | the one column the fill boundary sits in — §6's grid is `BAR_CELLS = 80` at `BAR_CELL_PX = 1`, so one cell moves it one pixel |
 //! | title | 20 × 2 | the columns whose glyph differs, plus the elision marker and the padding cells a shorter line frees |
+//! | start icon | 1 × 1 | one cell, on a transport state change — `chrome::transport_icon` names the tile and the diff skips it when it is already there |
 //!
-//! The title row is absent on a variant that declares no title (`TITLE` is `Option`), and the icons
-//! are not in this table because they never appear in an update batch after boot.
+//! The title row is absent on a variant that declares no title (`TITLE` is `Option`), and the four
+//! boot-painted icons are not in this table because they never appear in an update batch.
 //!
 //! **What those cell counts do not decide.** There is no partial-map commit, so one changed cell and
 //! forty changed cells cost the *same* `commit`: the foreground's whole 2,048 B map cloned into the
@@ -104,7 +107,8 @@
 //!
 //! ## What 2a draws, and what it deliberately does not
 //!
-//! Chrome band (clock, key-labels word, five authored control icons), title band (the elided title
+//! Chrome band (clock, the debug key-labels word, five slots' authored control drawings — the
+//! `start` one showing the play/pause pair), title band (the elided title
 //! line and §6's progress bar), and the scene region filled flat by the `blank` scene. **No album
 //! art, no track list, no title card, no viz** — those are 2b's and 4's (§11's 2a row), and the scene
 //! registry here has exactly one entry.
@@ -315,14 +319,18 @@ const fn element_index(id: &str) -> usize {
 
 /// The chrome band's clock: `elapsed / total` (§5.5, A6).
 pub const CLOCK: usize = element_index("clock");
-/// The word beside the control icons: §5.6's "a control's drawn state plus a word".
+/// The word beside the control icons: the transport state as text — **debug chrome**, not the
+/// product's state signal (§5.3, ruled 2026-11-27). It is drawn only under the crate feature
+/// `state-word`; the product's indication is the `start` slot's play/pause drawing, and the word is
+/// what names the transient states until the flip ruling answers for them.
 pub const KEYLABELS: usize = element_index("keylabels");
 /// The title line in the title band: one line, elided, never wrapped (§5.5). `None` on variant A,
 /// whose 1-row title band deliberately carries no text line.
 pub const TITLE: Option<usize> = element_index_opt("title_text");
 /// §6's progress bar, in the title band's lower row.
 pub const BAR: usize = element_index("bar");
-/// The authored control art's element; the five slots sit inside it (§5.3).
+/// The authored control art's element; the five slots sit inside it (§5.3), and one of them
+/// (`start`) shows a play/pause drawing chosen at run time.
 pub const KEYART: usize = element_index("keyart");
 
 /// 2b PR-(3)'s title-card spans and picture. `Option`, like [`TITLE`], because a
@@ -535,8 +543,13 @@ pub struct View<'a> {
     /// §6's progress cell, `0..=BAR_CELLS`, from [`BarCell::from_samples`] and the track's §6
     /// reciprocal. **Never a sample count**; the type exists so that mistake cannot compile.
     pub bar_cell: BarCell,
-    /// The transport state as a word (§5.6: shape *and* a word; until §5.3's `PAUSED` badge lands
-    /// in 2b, the word is the whole of the state's signal).
+    /// Whether the transport is `Paused` — the one bit the `start` slot's play/pause drawing needs
+    /// (§5.3, ruled 2026-11-27). True only for `Paused`: the transient states draw the pause bars,
+    /// because a press during them either pauses or is refused.
+    pub paused: bool,
+    /// The transport state as a word, drawn into `keylabels` **only** under the `state-word`
+    /// feature. Carried unconditionally so a caller and the host suite compile the same way in both
+    /// builds; with the feature off the drawing ignores it and the cells keep the band fill.
     pub state_word: &'a str,
 }
 
@@ -578,9 +591,30 @@ impl Cells {
     }
 }
 
+/// The control slot whose drawing is state-dependent (the play/pause pair, §5.3). `Option` because
+/// a variant that declares no `start` key still compiles — and then no icon is swapped.
+const START_SLOT: Option<usize> = control_index_opt("start");
+
+/// The index of the declared control slot with key `key`, at compile time, if the variant declares
+/// it. The same identity-not-position rule as [`element_index_opt`]: §5.3 keys slots by identity, so
+/// a renamed slot fails to be found rather than silently drawing the wrong icon.
+const fn control_index_opt(key: &str) -> Option<usize> {
+    let mut i = 0;
+    while i < layout::CONTROL_SLOTS.len() {
+        if streq(layout::CONTROL_SLOTS[i].key, key) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// The surface's drawing state: what is on the map, and what the clock has shown.
 pub struct Surface {
     clock: Cells,
+    /// The debug state word's cells. Absent from the type when the feature is off, so a build that
+    /// does not draw the word carries no state for it and cannot half-draw it.
+    #[cfg(feature = "state-word")]
     labels: Cells,
     title: Cells,
     bar: [u16; MAX_BAR_COLS],
@@ -603,6 +637,7 @@ impl Surface {
     pub const fn new() -> Self {
         Self {
             clock: Cells::new(),
+            #[cfg(feature = "state-word")]
             labels: Cells::new(),
             title: Cells::new(),
             bar: [0xFFFF; MAX_BAR_COLS],
@@ -667,11 +702,13 @@ impl Surface {
         }
     }
 
-    /// The foreground layer's static content: §5.3's five control icons, in the slots the variant
+    /// The foreground layer's static content: §5.3's control icons, in the slots the variant
     /// declares. Written once at boot, above the band art so the icon's negative space shows it.
     ///
     /// Positions come from the generated table and drawings from `chrome.rs`; neither is transcribed
-    /// into the other.
+    /// into the other. The `start` slot is painted with its default drawing (play) and
+    /// [`update`](Self::update) swaps it for the pause bars as soon as the transport says so — which
+    /// is correct at boot too, because before the first sample the transport is not yet playing.
     pub fn paint_icons(&mut self, writes: &mut Writes) {
         writes.clear();
         let mut slot = 0;
@@ -845,12 +882,41 @@ impl Surface {
         writes.clear();
         self.advance_clock(view);
         self.draw_clock(view, writes);
+        // The debug word (§5.3's 2026-11-27 ruling): compiled out with `state-word` off, and then
+        // `keylabels`' nine cells keep whatever the band fill put there.
+        #[cfg(feature = "state-word")]
         draw_text(&mut self.labels, KEYLABELS, view.state_word, writes);
+        self.draw_transport_icon(view.paused, writes);
         if let Some(title) = TITLE {
             draw_text(&mut self.title, title, view.title, writes);
         }
         self.draw_bar(view, writes);
         !writes.is_empty()
+    }
+
+    /// The `start` slot's play/pause drawing, swapped on a transport state change (§5.3, ruled
+    /// 2026-11-27). One cell, and nothing at all when the tile is already the right one — so a still
+    /// frame still writes nothing, and a pause costs one `set_tile` rather than a band redraw.
+    fn draw_transport_icon(&mut self, paused: bool, writes: &mut Writes) {
+        let Some(slot) = START_SLOT else {
+            return;
+        };
+        let tile = chrome::transport_icon(paused);
+        if self.icons[slot] == tile {
+            return;
+        }
+        let s = &layout::CONTROL_SLOTS[slot];
+        if writes.push(Write {
+            x: (s.px_x / chrome::TILE_PX) as u8,
+            y: (s.px_y / chrome::TILE_PX) as u8,
+            tile,
+            bank: chrome::BANK_CHROME,
+            source: Source::Chrome,
+        }) {
+            // Only remember it if the write fit: the same rule `paint_icons` follows, so a dropped
+            // write cannot leave the diff believing the map already shows the new drawing.
+            self.icons[slot] = tile;
+        }
     }
 
     /// Advance the displayed second by whole seconds, never by a divide per frame.
@@ -940,8 +1006,8 @@ impl Surface {
         }
     }
 
-    /// The five control icons, which never change after boot: written by [`paint_icons`], exposed so
-    /// a future state-carrying icon (2b's `PAUSED` badge) has one place to change.
+    /// §5.3's control drawings as currently on the map — the four boot-painted ones plus the `start`
+    /// slot's current play/pause tile. Exposed so the swap is checkable from a host test.
     #[must_use]
     pub fn icons(&self) -> &[u16; chrome::ICON_TILES] {
         &self.icons
@@ -1189,7 +1255,7 @@ mod arm {
         background: RegularBackground,
         /// BG1: the scene region.
         scene: RegularBackground,
-        /// BG2: the glyphs, the five control icons and the bar, drawn over BG0.
+        /// BG2: the glyphs, the control drawings and the bar, drawn over BG0.
         foreground: RegularBackground,
     }
 

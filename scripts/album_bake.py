@@ -2814,8 +2814,12 @@ class VariantFacts:
         self.text_distinct = self.atlas_tiles
         # The declared chrome count is what the audit uses (it is the enumerated
         # number a reviewer argued with); the derived count is printed beside it, so
-        # a disagreement is visible rather than assumed away.
-        self.chrome_derived = len(variant.bands) + 1 + len(self.control_slots)
+        # a disagreement is visible rather than assumed away. The `start` slot carries
+        # **two** drawings — the play triangle and the pause bars (§5.3, ruled
+        # 2026-11-27) — because its drawing is state-dependent, so the term counts
+        # tiles rather than keys: one per slot, plus one more for that pair.
+        transport_pair = sum(1 for slot in self.control_slots if slot.key == "start")
+        self.chrome_derived = len(variant.bands) + 1 + len(self.control_slots) + transport_pair
         # 2b PR-(1)'s resident-set walk. The scene terms are the only addend that is
         # per scene; the atlas, the chrome art and the bar's pattern tiles are the
         # variant's shared tiles and are counted once, because they are shared by
@@ -3001,7 +3005,8 @@ class VariantFacts:
             f"{self.resident_own} + projection {self.projection_own} (the audited set, {self.audited_own})"
             f" + shared text distinct {self.text_distinct} / upper {self.text_upper}"
             f" + chrome {variant.chrome_art_tiles} declared ({self.chrome_derived} derived:"
-            f" {len(variant.bands)} band backdrops + 1 region backing + {len(self.control_slots)} control tiles)"
+            f" {len(variant.bands)} band backdrops + 1 region backing + {len(self.control_slots)} control tiles "
+            f"(+1 for the start slot's play/pause pair))"
             f" + bar pattern {self.bar_pattern_tiles}  =>  distinct {self.pool_distinct}, upper {self.pool_upper}"
             f"  against tile_budget {variant.tile_budget} of a {self.spec.pool_slots}-slot regular pool"
         )
@@ -4107,7 +4112,7 @@ product = true
 tile_budget = 512
 image_tiles = 196
 bar_cells = 20
-chrome_art_tiles = 9
+chrome_art_tiles = 10
 glyph_atlas = "static"
 band = [{id="chrome", rows=2, always=true}, {id="title", rows=2, always=true}, {id="scene", rows=16, always=false}]
 palette = [{role="text", banks=[0]}, {role="chrome", banks=[1]}, {role="art", banks=[3]}, {role="viz", banks=[4]}, {role="game", banks=[5]}]
@@ -5294,9 +5299,10 @@ def layout_self_test() -> int:
         leg(f"variant {variant_id}: the chrome term, declared and derived",
             f"declared {variant.chrome_art_tiles}", f"derived {facts.chrome_derived}",
             facts.chrome_derived == variant.chrome_art_tiles,
-            "two paths for one number: the spec declares `chrome_art_tiles = 9` with its enumeration in a "
-            "comment (§5.1's band backdrops + the region's opaque backing + §5.3's key slots), and the "
-            "generator counts the same things from the declared bands and control slots")
+            "two paths for one number: the spec declares `chrome_art_tiles` with its enumeration in a "
+            "comment (§5.1's band backdrops + the region's opaque backing + §5.3's key slots, plus the "
+            "start slot's play/pause pair), and the generator counts the same things from the declared "
+            "bands, control slots and their second drawings")
         leg(f"variant {variant_id}: §5.3's control slots",
             "5 keys", f"{len(variant.controls)} declared, {len(facts.control_slots)} inside their slots",
             len(variant.controls) == 5 and len(facts.control_slots) == 5,

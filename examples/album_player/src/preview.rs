@@ -186,7 +186,10 @@ pub fn cell_char(cell: Option<&Write>) -> char {
             chrome::FILL_CHROME => '=',
             chrome::FILL_TITLE => '-',
             chrome::ICON_SELECT => 'S',
-            chrome::ICON_START => 'P',
+            chrome::ICON_PLAY => 'P',
+            // The pause drawing is two bars; 'B' is the mnemonic the composite gives it, and it is
+            // what makes the play/pause pair readable in the ASCII grid as well as on the tiles.
+            chrome::ICON_PAUSE => 'B',
             chrome::ICON_PREV => '<',
             chrome::ICON_NEXT => '>',
             chrome::ICON_RESTART => 'R',
