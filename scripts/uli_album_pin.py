@@ -1,36 +1,25 @@
 #!/usr/bin/env python3
-"""Emit the ULI2 album-corpus pin module from the C reference decoder's output.
+"""LEGACY / OPTIONAL: emit a ULI2 album pin from a C reference decoder's output.
 
-PR E's corpus is real music at the product configuration (32,768 Hz, hop 512,
-`--cap 74`, budget scaled to ~102 kbit/s). This script turns the *C reference
-decoder's* own output on that blob into the pin the bench ROM checks itself
-against, so the pin is C-sourced rather than a transcript of the decoder under
-test:
+The asset path does **not** use this script. `make uli-album-asset` and its
+siblings generate pins from the bit-exact Rust decoder in
+`crates/uli-lite/examples/gen_album_pin.rs`. This script remains for an off-tree
+cross-check: given an `uli_dec` output directory, it re-verifies the C-published
+checkpoints and emits the same module shape. It therefore needs a C decoder run
+and is not part of any repository target.
 
-  * `EXPECTED_INT8` is the C decoder's `hash_of_frame_hashes` from
-    `vectors.txt` — FNV-1a 32 of the little-endian per-frame int8 hashes, which
-    is exactly the fold `examples/uli_bench` performs (`fnv_bytes(all, &hash)`).
-  * The reconstruction below is a *witness that we read the container the same
-    way the C decoder does*: it rebuilds the album timeline from the per-track
-    `s8/NN.s8` files, re-hashes frames, and refuses to emit a pin unless every
-    checkpoint `vectors.txt` publishes (frames 0..63 and every 4096th) matches.
-
-Nothing here is an oracle of its own: the authority is the C decode.
-
-This is the last step of `make uli-album-asset` (and of `uli-cross-asset`,
-`uli-adversarial-asset` and `uli-two-track-asset`). The default master is the tracked
-`assets/sound/bioluminescent.wav` (96 kHz / 24-bit, 258.6 s); the sibling's
-`encoder/prep.py` resamples it to 32,768 Hz and writes the `album.f32` + `tracks.tsv`
-pair, the reference encoder writes the blob, and the reference decoder writes the `--ref`
-directory this script reads. The 32,768 Hz / 8-bit WAV beside the master is a listening
-derivative, not the encoder input. See `ULI2.md` -> "The measurement corpus".
+The pin is `EXPECTED_INT8`, the C decoder's `hash_of_frame_hashes` from
+`vectors.txt` — FNV-1a 32 of the little-endian per-frame int8 hashes, the fold
+`examples/uli_bench` performs. The reconstruction below rebuilds the album
+timeline from the per-track `s8/NN.s8` files, re-hashes frames, and refuses to
+emit a pin unless every checkpoint `vectors.txt` publishes (frames 0..63 and
+every 4096th) matches.
 
 Usage:
   python3 scripts/uli_album_pin.py --blob <album.uli> --ref <uli_dec OUTDIR> \\
-      --rs examples/uli_bench/src/album_pin.rs
+      --rs /tmp/album_pin_c.rs
 
-The emitted file is gitignored (ALBUM-PLAYER.md §2.3's division: the input is
-tracked, the blob and its pins are build output).
+The emitted file is build output, not inventory.
 """
 
 import argparse

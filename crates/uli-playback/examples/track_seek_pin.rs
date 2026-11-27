@@ -1,9 +1,9 @@
 //! Witness: **track seek** reproduces the continuous stream, including a track
 //! that does not start on a frame boundary.
 //!
-//! The bench pins the *continuous* decode against the C reference decoder's album
-//! hash, so a seek that reproduces the continuous stream is pinned to the C
-//! reference transitively. What a seek adds is the two things this checks:
+//! The bench pins the *continuous* decode against the reference decoder's album
+//! hash, so a seek that reproduces the continuous stream is pinned to the
+//! reference decoder transitively. What a seek adds is the two things this checks:
 //!
 //! * **the preroll**: `seek_track` decodes the track's preroll frame and discards
 //!   it, so the first frame the seam hands over is the track's first *audio* frame
@@ -28,7 +28,7 @@ use uli_lite::format::M;
 use uli_lite::{Album, Decoder, DecoderState};
 use uli_playback::source::{Frame, PcmSource, UliSource};
 
-/// Frames compared after each seek (the C decoder publishes four; this is one
+/// Frames compared after each seek (the reference publishes four; this is one
 /// more so the skip's effect is visible on two frames).
 const FRAMES: usize = 5;
 

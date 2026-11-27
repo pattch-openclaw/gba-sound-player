@@ -12,8 +12,9 @@
 export PATH="$HOME/.local/venvs/gba-audio/bin:$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 
 # --- project paths -------------------------------------------------------------
-# The sibling oracle checkout. The Makefile's own default is ../gba-audio; this
-# makes it explicit and survives a different cwd.
+# Optional: the sibling oracle checkout, used only by `make uli-accept`,
+# `make uli-oracle-check` and the probe/fixture instruments. No asset target
+# needs it; `make uli-album-asset` and its siblings run entirely in-tree.
 if [ -d "$HOME/gba-audio/encoder" ]; then
   export GBA_AUDIO="${GBA_AUDIO:-$HOME/gba-audio}"
 fi

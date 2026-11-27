@@ -35,8 +35,8 @@ mGBA, WAITCNT 4/2, 262,144-cycle period, no UI. Both corpora pinned
   sub-frame partition needs re-measuring on the product reader first — see "The
   entropy path against the C+ASM reference"); the ULI2 provenance/publish decision (root MIT
   exists; `NOTICE.md` marks the three crates unresolved). These are
-  **W4**; the asset path (**W2**) and the app switch (**W3**) are indexed in "Remaining
-  ULI2 work" below.
+  **W4**; **W2** is done (asset path local, 2026-11-27), and the app switch (**W3**) is
+  the next track — all indexed in "Remaining ULI2 work" below.
 - **The encoder: S8 is done — the acceptance matrix MATCHes on every cell (2026-11-26), and
   the pin ledger was discharged on 2026-11-27.** `make uli-accept` compares our `--rd`
   encoder against the off-tree reference on identical PCM and flags. The S7 DIFF's cause is
@@ -116,19 +116,25 @@ when the gate in the last column is measured and its result is recorded there.
 | thread | what it covers | owner | state | exit gate |
 |---|---|---|---|---|
 | **W1 — S8 bookkeeping** | the S8 pin ledger, the S7 MATCH re-take, and the stale status text in `ULI2.md` and `crates/uli-enc/README.md` | this file §S8; `ULI2.md` | **done 2026-11-27** | `make uli-accept` MATCH on every cell; frozen fixtures unchanged; §S7 carries MATCH; no live text still calls S8 open |
-| **W2 — asset path onto the in-repo encoder** | point `uli-album-asset`, `uli-adversarial-asset`, `uli-cross-asset` and `uli-two-track-asset` at `crates/uli-enc`; keep the C tools only as the `uli-accept` oracle; emit the pin from the bit-exact Rust `uli-lite` decoder instead of the C `uli_dec`; the recursive `$(MAKE) -C $(GBA_AUDIO)/encoder` build is already pinned clean (2026-11-27: `ULI_ORACLE_CFLAGS` plus `check_uli_oracle.py --expect clean`), so only the switch remains; decide the multi-track `--dacw 0`/`--dacw 1` objective and make a fresh-clone bake work without `GBA_AUDIO`'s **encoder** | this file; `Makefile`; `ULI2.md` → "The measurement corpus" | **next** | the four asset targets build and run the Rust encoder; no asset target needs `$GBA_AUDIO/build/uli_enc`; the generated blobs still decode and pin; the multi-track objective is recorded; a product bake no longer needs either C tool |
-| **W3 — the product app switches to ULI2** | `backend-uli2` + `src/backend/uli2.rs`, the derived 32,768 Hz / 512-sample geometry, the ULA2→`ALBM1` manifest seam, the app-side UI cost, and the album-length hardware run | `ALBUM-PLAYER.md` §4.2b, §11 Phase 5, AP-9/R7/Q3 | **open (app-side; can run in parallel with W2)** | `make album-rom BACKEND=uli2` plays an album from a fresh checkout; the three-arm compile and runtime parity pass; the UI fits the measured margin; the hardware run matches the FLAC arm's witness |
+| **W2 — asset path onto the in-repo encoder** | the four asset targets (`uli-album-asset`, `uli-adversarial-asset`, `uli-cross-asset`, `uli-two-track-asset`) now use `crates/uli-enc`; the pin is emitted by `crates/uli-lite/examples/gen_album_pin.rs`; `scripts/uli_prep.py` + `scripts/uli_resample.py` replace the sibling's `prep.py`; the cross tracklist/licences are vendored; the C tools remain only for `make uli-accept` | this file; `Makefile`; `ULI2.md` → "The measurement corpus"; `scripts/uli_prep.py` | **done 2026-11-27 (code); full cross corpus not regenerated** | all four asset targets use the in-tree path and need no `GBA_AUDIO`; `biomaster` and `adv` blobs are byte-identical to their C-produced predecessors (`49eb6a11…`, `1a0c8856…`); their Rust pins reproduce the existing values; the local `uli_prep.py` reproduces `album.f32`/`tracks.tsv` byte-for-byte; the cross recipe was exercised with a local tracklist (the 12-track download/encode is deferred to its next generation); multi-track uses `--dacw 0` (S9 owns `--dacw 1`); no product bake needs either C tool |
+| **W3 — the product app switches to ULI2** | `backend-uli2` + `src/backend/uli2.rs`, the derived 32,768 Hz / 512-sample geometry, the ULA2→`ALBM1` manifest seam, the app-side UI cost, and the album-length hardware run | `ALBUM-PLAYER.md` §4.2b, §11 Phase 5, AP-9/R7/Q3 | **next (app-side)** | `make album-rom BACKEND=uli2` plays an album from a fresh checkout; the three-arm compile and runtime parity pass; the UI fits the measured margin; the hardware run matches the FLAC arm's witness |
 | **W4 — codec/player residuals and S9** | the non-decode gate half (7.80 points at ~2.9x C), the dense-frame entropy tail, U5's 1 Hz redraw defect, S9's `--dacw 1` arm and the SNR licence test, and the ULI2 provenance/publish decision (root MIT exists; `NOTICE.md` marks the three crates unresolved) | this file "Current state"; `ULI2.md` §Gates/§Risks; §S9 | **open; only U5's redraw defect can block W3** | each item is measured against its own gate; U5's redraw defect is closed and the UI margin re-taken; S9's arms are admitted only by the SNR licence test |
 
-**Order and meaning for a v1 switch.** W1 is done; W2 is the next codec-track task because it
-removes the last build-time encoder dependency on `gba-audio` and makes the asset path
-reproducible from a fresh clone. W3 is the actual FLAC→ULI2 product switch and is application
-work; it can start once W2's asset shape is agreed, even before every target is switched. W4
-is deliberately last: the non-decode half and the dense entropy tail are performance work
-with a measured margin, S9 is an improvement track that is only meaningful once exactness is
-frozen, and licensing is a publish question. **ULI2 v1 is "finalized" when W1+W2+W3 are
-closed and W4's U5 redraw defect and UI-margin measurement are closed; S9 and licensing are
-explicitly outside v1.**
+**Order and meaning for a v1 switch.** W1 and W2 are done; W3 is the next track and is
+application work — the codec/asset side no longer blocks it. W4 is deliberately last: the
+non-decode half and the dense entropy tail are performance work with a measured margin, S9 is
+an improvement track that is only meaningful once exactness is frozen, and licensing is a
+publish question. **ULI2 v1 is "finalized" when W1+W2+W3 are closed and W4's U5 redraw
+defect and UI-margin measurement are closed; S9 and licensing are explicitly outside v1.**
+
+**W2 in one line (2026-11-27).** `make uli-album-asset` now runs
+`scripts/uli_prep.py` → `crates/uli-enc --rd` → `crates/uli-lite/examples/gen_album_pin.rs`,
+with no `GBA_AUDIO` in the recipe. The rebuilt `biomaster` blob is
+`sha256 49eb6a11…` (3,293,128 B), byte-identical to the C-produced corpus, and its pin is
+`16553` / `0x82452d43`; the adversarial corpus likewise reproduces `1a0c8856…` and
+`641` / `0x58163b26`. The two-track corpus is `33104` / `0xf585bb77` under the Rust encoder's
+`--dacw 0` objective. The C oracle is now reachable only through `make uli-accept`. See
+`ULI2.md` → "The measurement corpus" and the Makefile's asset targets.
 
 **Everything below this line is the ledger that produced those numbers, in
 chronological order, and it is kept deliberately: this project's method is that
@@ -1024,8 +1030,8 @@ container already carries tracks, titles, artists and a seek table. What is
 missing was the ability to **make** a `.uli` blob from our own audio: it used to
 require the C encoder in `gba-audio`, which the project's rule forbids depending
 on. **That gap is closed** — `crates/uli-enc` covers S1–S8 and emits the oracle's
-bytes — so the remaining work is W2 (point the asset targets at it) and W3 (the
-app's backend), not an encoder.
+bytes — and **W2 landed on 2026-11-27**, so the asset targets use it; the remaining work is
+W3 (the app's backend), not an encoder.
 
 **What the reference is.** ~890 lines of C plus two Python tools, and the shape
 matters more than the size:
@@ -1034,7 +1040,7 @@ matters more than the size:
 |---|---|
 | `enc_core.c` | the codec: `tables_default`/`tables_derive`/`tables_from_stats` (Huffman lengths trained from counts, with a floor), the bit writer (`bw_put`, `bw_put_eg`, zigzag), the forward MDCT (`mdct_frame`, orthonormal, hop 512, coefficients ≥500 zeroed), and `frame_code` — an **RD-optimised** per-frame search over the global step `g` and the M/S flag, cost `D + kappa·bits + mu·decoder_cycles` |
 | `uli_enc.c` | the CLI and album assembly: `--budget`/`--cap %` sizing, two-pass table training, per-frame parallelism, ULA2 container write |
-| `prep.py` | `ffmpeg` decode, resample to 32,768 Hz, mono→stereo, gapless track join, `tracks.tsv` with ASCII-folded titles |
+| `scripts/uli_prep.py` | the in-repo copy of the reference `prep.py`: `ffmpeg` decode, resample to 32,768 Hz via `scripts/uli_resample.py`, mono→stereo, gapless track join, `tracks.tsv` with ASCII-folded titles |
 | `gen_tables.py` | regenerates `src/uli/uli_tables.c` — the **synthesis** constants (PERM/PRE/POST/TW/WIN, variant P, N = 1024 / M = 512) and the step table `uli_step[g] = round(2^(g/8))`. **It does not emit the code tables**: the default `ctype`/`rbits`/`esck`/`mu` rows are C literals in `enc_core.c:tables_default`, and the default lengths come from a geometric model through `huff_lengths(·, 0.5)` |
 
 Two of those deserve emphasis because they are not obvious from the format:
@@ -1333,7 +1339,7 @@ Notes on the wording, because each one has been a source of argument:
 | `--stride`, `--fine` | **no equivalent** | yes, defaults `8`/`4` | **deleted at S8-0.** Not an improvement over the reference: it is a repair for a coarse grid we invented (see the inventory) |
 | `--no-train` | no equivalent | yes | kept, **diagnostic only**, out of the target |
 | `--g` (fixed step) | no equivalent | yes | kept, **diagnostic only**; this is the mode an A/B uses |
-| `--wav`, `--emit-pcm` | no equivalent (`prep.py` is off-tree) | yes | kept; the target is defined on **identical PCM**, and E-R2 already says the resampler is not held to byte-equality |
+| `--wav`, `--emit-pcm` | no equivalent (`scripts/uli_prep.py` is the local source-prep step) | yes | kept; the target is defined on **identical PCM**, and E-R2 already says the resampler is not held to byte-equality |
 | `--rd` | the reference always searches | yes, explicit | **on** for every S8 cell |
 
 `--musearch` deserves its own line, because S6 left a 0.04 dB gap against the reference and
@@ -2063,7 +2069,7 @@ rows by the MATCH run.
 | in-repo determinism tests | our own two runs | comparison is run-to-run, not fixed values; they need `Args` fields removed at S8-0 and no re-pin | **no re-pin.** `make uli-test` is 18 suites / 99 tests green; `--threads 1` and `--threads 4` give the same bytes on `fast` |
 | `make uli-accept` cell hashes and the S7 table | our encoder vs the oracle | **re-taken at the gate**, with MATCH and the new hashes recorded in place | **re-taken.** §S7 carries the MATCH table and full SHA-256s for `fast`, `tiny`, `biomaster`, `off-default` and `adv` |
 | S5's album numbers (33,291,896 B, `69911924…e656b8`, 31.75/28.56 dB) and the `cross` residual | our encoder | **superseded, not edited.** They stay as the S5 arm with a dated note saying S8's exactness target replaces them; they are no longer the current figure | **dated note added in §S5**; the S5 arm is retained as the record of that measurement |
-| `make uli-player-cross`'s 33,088,280 B and ALBUM-PLAYER row 5's 167,232 periods | oracle blob, ROM-scaled | **re-measured once at the gate** if the blob moves; the ROM figure is a downstream claim and must follow, not lead | **not an S8-7 pin**: the `cross` asset is produced by the oracle, not by our encoder. The 2026-11-16 figure predates the clean-oracle rebuild (S8-4b), so it is flagged for re-measurement when the `cross` corpus is next generated. Tracked in **W2**, not S8 |
+| `make uli-player-cross`'s 33,088,280 B and ALBUM-PLAYER row 5's 167,232 periods | oracle blob, ROM-scaled | **re-measured once at the gate** if the blob moves; the ROM figure is a downstream claim and must follow, not lead | **not an S8-7 pin**: the cross target now uses the Rust encoder (W2, 2026-11-27), but the full 12-track corpus was not regenerated in this pass. The 2026-11-16 figure predates both the clean-oracle rebuild (S8-4b) and W2, so it is flagged for re-measurement when `make uli-cross-asset` is next run. Tracked under W2's residual/W4, not S8 |
 
 The S8 pin ledger is therefore closed: `make uli-oracle-check` names `1991ee6c…`, the
 five-cell MATCH run is recorded in §S7, and no frozen fixture moved.
@@ -2127,8 +2133,9 @@ differs, per-region counts, and — when the stream differs — how many seek en
 Exit 2 is DIFF, 1 is a harness error; `--list` prints the cells and runs nothing.
 
 **The corpus is generated, not committed.** `make uli-album-asset` turns the tracked
-`assets/sound/bioluminescent.wav` (96 kHz / 24-bit) through the sibling's `prep.py` into
-`examples/uli_bench/assets/album.f32` + `tracks.tsv`, then the reference blob/decode/pin;
+`assets/sound/bioluminescent.wav` (96 kHz / 24-bit) through the then-sibling's `prep.py`
+(now `scripts/uli_prep.py`) into `examples/uli_bench/assets/album.f32` + `tracks.tsv`, then
+the reference blob/decode/pin;
 `make uli-adversarial-asset` generates `assets/adv/`, and `make uli-cross-asset` the 12-track
 `assets/cross/`. The full recipe and the gitignore division are in
 [`../../ULI2.md`](../../ULI2.md) -> "The measurement corpus — how `examples/uli_bench/assets`

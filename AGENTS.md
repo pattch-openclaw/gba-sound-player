@@ -14,7 +14,7 @@ make toolchain-check
 
 The harness shell does not persist `PATH` between commands, so source
 `.agents/env.sh` in every fresh shell (or prefix commands with it). It exports
-`GBA_AUDIO` when the sibling oracle exists and `ULI_ALBUM_PY`.
+`ULI_ALBUM_PY`, and `GBA_AUDIO` only when the optional sibling oracle exists.
 
 ## Reproduce the toolchain from scratch
 
@@ -39,7 +39,7 @@ It was verified on Ubuntu 24.04 arm64 on 2026-11-25.
 | `mgba-test-runner` | agb **v0.25.0**, aarch64 patches | `~/.local/bin` → `~/.local/mgba-runner/bin` |
 | Python (album/prep) | 3.12 venv: `numpy 2.5.5`, `scipy 1.18.1`, `soundfile 0.14.0`, `fonttools 4.68.0`, `pillow 13.0.0` | `~/.local/venvs/gba-audio` |
 | rootless C headers/libs | Ubuntu noble arm64 debs: zlib, libelf, libpng, libzstd, libclang-18, libllvm18 | `~/.local/rootless` |
-| oracle checkout | `gba-audio` (default `../gba-audio`, here `/home/pi/gba-audio`) | `$GBA_AUDIO` |
+| oracle checkout (optional) | `gba-audio` (set `GBA_AUDIO` explicitly; no Makefile default). Needed only by `make uli-accept`, the probe/fixture instruments and `uli-oracle-check`, never by a build or asset target | `$GBA_AUDIO` |
 
 Rust is invoked through `rustup run` by the Makefile, which reads the pinned
 channel out of `rust-toolchain.toml`. Never use a bare `cargo +nightly`; never
@@ -67,11 +67,11 @@ Run with `. .agents/env.sh`:
 | `make flac-check` | pass (gates + overlay + product + playback + spike) |
 | `make gafp-pack-check` | 4 fixtures byte-identical, 9 host facts |
 | `make album-bake` then `make album-pack-check` | bake writes assets; gate passes 54 tests |
-| `make uli-album-asset ULI_ALBUM_PY="$ULI_ALBUM_PY"` | available (runs `prep.py` + the C oracle encoder; **W2** will switch the encoder step to `crates/uli-enc`; not run here) |
+| `make uli-album-asset ULI_ALBUM_PY="$ULI_ALBUM_PY"` | available (runs the local `scripts/uli_prep.py` + `crates/uli-enc` + the Rust pin tool; no `GBA_AUDIO`; W2 landed 2026-11-27) |
 
-`make uli-accept` (the full S7/S8 matrix) and the album-level ULI2 numbers still need
-the generated corpus (`make uli-album-asset`) plus the reference encoder; the
-encoder is built at `$GBA_AUDIO/build/uli_enc`, the corpus is not generated here.
+`make uli-accept` (the full S7/S8 matrix) still needs the generated corpus
+(`make uli-album-asset`) and the optional reference encoder at
+`$GBA_AUDIO/build/uli_enc`; the corpus is not generated here.
 The `fast` cell is the exception by design: it is generated, so
 `make uli-accept ULI_ACCEPT_ONLY=fast` is the one acceptance measurement that runs
 on a bare checkout.
@@ -98,7 +98,7 @@ on a bare checkout.
    fixtures are libFLAC 1.5.0 bytes; do not "fix" them by regenerating with 1.4.3.
 3. **`python3` must be the venv for album work.** `make album-bake` calls plain
    `python3`, and `album_glyphs.py` needs `fontTools`. `.agents/env.sh` puts the
-   venv first. `gba-audio/encoder/prep.py` needs `numpy` (and ffmpeg).
+   venv first. `scripts/uli_prep.py` needs `numpy`/`scipy` (and ffmpeg).
 4. **`make album-pack-check` on a fresh clone needs `make album-bake` first.**
    The crate has an unconditional `pub mod glyphs;`, but `album-pack-check` runs
    only `album_bake.py` (which writes `assets.rs` and `layout.rs`), not
@@ -121,8 +121,8 @@ on a bare checkout.
    corpus, and it is the first regression check after any encoder change.
 8. **The acceptance corpus is generated, not committed.** `make uli-album-asset`
    turns the tracked 96 kHz/24-bit `assets/sound/bioluminescent.wav` through the
-   sibling's `encoder/prep.py` into `examples/uli_bench/assets/album.f32` +
-   `tracks.tsv`, then the reference blob/decode/pin; `make uli-adversarial-asset`
+   in-repo `scripts/uli_prep.py` into `examples/uli_bench/assets/album.f32` +
+   `tracks.tsv`, then `crates/uli-enc` and the Rust pin generator; `make uli-adversarial-asset`
    adds the fourth matrix slot, and `make uli-cross-asset` / `make uli-two-track-asset`
    the others. The assets and `src/album_pin*.rs` are gitignored. The full recipe is
    `ULI2.md` → "The measurement corpus".

@@ -13,6 +13,7 @@ project licence.
 | `opus-rs` (vendored) | **BSD-3-Clause** | `examples/opus_spike/vendor/opus-rs/` (`COPYING`); used by the Opus spike, not the album player |
 | `fusion-pixel-8px` and `ark-pixel-10px` cuts | **SIL OFL 1.1** | `assets/fonts/` (licence files beside the fonts) |
 | `uli-lite`, `uli-lite-gba`, `uli-enc` | **unresolved** | derived from the `gba-audio` reference; see `ULI2.md`. Not covered by the project licence until that provenance is settled |
+| `scripts/uli_prep.py`, `scripts/uli_resample.py` | **unresolved** | copied from the `gba-audio` reference's `encoder/prep.py` and `eval/gba_dac_model.py` so the asset path is self-contained; the same provenance question as the ULI2 crates |
 
 The rest of `crates/`, `examples/` and `scripts/` is first-party and covered by
 the root licence. `flac-lite` is validated against libFLAC (BSD-3-Clause); if it
@@ -28,6 +29,10 @@ notice should be added here.
   should be stripped before redistribution.
 - `assets/sound/*.wav` — the reference masters the fixture album is packed from;
   project assets unless a source is noted otherwise.
+- `scripts/data/uli_cross_tracklist.json` and `scripts/data/uli_cross_LICENSES.md` —
+  the measurement album's tracklist and CC licence notice, copied from the sibling
+  reference; the audio itself is downloaded under the licences in that notice and is
+  never committed.
 
 If you distribute a ROM or a cart, carry this notice, the root `LICENSE` and the
 OFL/MPL/BSD notices above with it.

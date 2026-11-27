@@ -28,7 +28,7 @@ every target and gate below has been run green on this host.
 ```sh
 # 0. one-time toolchain setup (no root needed) — idempotent
 .agents/skills/gba-build-and-test/scripts/setup-native-toolchain.sh
-. .agents/env.sh       # every fresh shell: PATH + GBA_AUDIO + ULI_ALBUM_PY
+. .agents/env.sh       # every fresh shell: PATH + ULI_ALBUM_PY (+ optional GBA_AUDIO for the oracle)
 
 # 1. every ROM the tree builds, natively (built + linked + fixed)
 make native-rom native-flac-rom native-product-play-rom native-master-play-rom \
@@ -89,7 +89,7 @@ build that reformatted your tree is fine — run `make check` before committing.
 | Host gates | nothing beyond the pinned channel + `rust-src`: they run on the **host** triple, not the GBA target |
 | `make flac-gates`'s `gafp-pack-check` leg, and anything that runs `scripts/gafp_pack.py` / `gen_gafp_fixtures.py` | **`flac` + `metaflac` 1.5.0 on PATH** (libFLAC tools). The version is part of the witness: Ubuntu 24.04's 1.4.3 regenerates `p2_fixed0_stereo_16384_b2048.gfp` as different bytes and the leg fails with a `TypeError` in `gen_gafp_fixtures.py` (a pre-existing reporting bug), not a decoder error. 1.5.0 is what the setup script builds. `gafp-check` alone (byte-comparison of the committed blob) needs only Python. |
 | `make album-bake` / `make album-pack-check` | **`flac` 1.5.0 + `metaflac` 1.5.0 + `ffmpeg` + the venv `python3` on PATH.** `scripts/album_bake.py` shells to `scripts/gafp_pack.py` per distinct track and ffmpeg-normalises sources to 16,384 Hz stereo s16; `scripts/album_glyphs.py` needs `fontTools` + `Pillow`. `.agents/env.sh` puts the venv first. Run `make album-bake` once on a fresh clone before `album-pack-check` (see gotcha 10). |
-| `make uli-album-asset` / ULI2 album corpus | **`ffmpeg` + the venv `python3` (numpy) + the sibling `gba-audio` checkout.** `encoder/prep.py` decodes/resamples the tracked WAV with ffmpeg + numpy; the reference encoder then produces `biomaster.uli` and its C-sourced pin. |
+| `make uli-album-asset` / ULI2 album corpus | **`ffmpeg` + the venv `python3` (numpy/scipy).** The in-repo `scripts/uli_prep.py` decodes/resamples the tracked WAV; `crates/uli-enc` produces `biomaster.uli`; `crates/uli-lite/examples/gen_album_pin.rs` emits the pin. No `gba-audio` checkout is needed. |
 | Rebuilding `mgba-test-runner` | `cmake`, `pkg-config`, zlib/libelf/libpng headers and libclang. The setup script supplies these root-free from `ports.ubuntu.com` into `~/.local/rootless` when the host lacks the `-dev` packages. |
 
 `make help` prints the resolved toolchain; `toolchain-check` fails fast with install
