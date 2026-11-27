@@ -3255,6 +3255,23 @@ and what it measured, at a finer grain than the decisions (one entry per step,
 not one per decision). Where the two overlap, the decision record's wording is
 authoritative and this one carries the numbers.
 
+- **2026-11-27 (later) — W2 landed: the asset path is in-repo and the `gba-audio` build/asset dependency is gone.**
+  `make uli-album-asset`, `uli-adversarial-asset`, `uli-cross-asset` and
+  `uli-two-track-asset` now run `scripts/uli_prep.py` (copied from the reference, with
+  `scripts/uli_resample.py`), `crates/uli-enc --rd`, and
+  `crates/uli-lite/examples/gen_album_pin.rs`; no asset target invokes `$GBA_AUDIO`.
+  The cross-album tracklist and its CC licence notice are vendored under `scripts/data/`.
+  Measured: the local prep reproduces `album.f32`/`tracks.tsv` byte-for-byte; the Rust
+  encoder reproduces the C `biomaster` blob (`49eb6a11…`, 3,293,128 B) and the adversarial
+  blob (`1a0c8856…`, 127,380 B); the Rust pins reproduce `16553` / `0x82452d43` and
+  `641` / `0x58163b26`. The two-track corpus uses the Rust encoder's `--dacw 0` objective
+  (`33104` / `0xf585bb77`), with the reference's default `--dacw 1` left to S9. The
+  cross recipe was exercised with a local tracklist; its full 12-track download/encode was
+  not run in this pass, so the old `cross` blob/period figure still needs re-taking. The C
+  oracle is now reachable only through `make uli-accept` (and the optional fixture/probe
+  tools).
+  W3, the album app's ULI2 backend, is the next track.
+
 - **2026-11-27 (latest) — S8's pin ledger discharged; the remaining work is indexed as four
   threads.** The S7 table was re-taken at the gate: all five cells the matrix runs (`fast`,
   `tiny`, `biomaster`, `off-default`, `adv`) are MATCH against the clean oracle

@@ -20,7 +20,7 @@ edition = "2024"
 # PR E's corpus: `assets/biomaster.uli` — the tracked reference master
 # (`assets/sound/bioluminescent.wav`, 258.61 s) encoded at the product
 # configuration (32,768 Hz, hop 512, `--cap 74`, budget scaled to ~102 kbit/s)
-# — instead of the 129-frame Phase 0 fixture. Both the blob and its C-sourced
+# — instead of the 129-frame Phase 0 fixture. Both the blob and its generated
 # pin module (`src/album_pin.rs`) are build output: `make uli-album-asset`.
 # The fixture stays the regression pin; this feature is the tail witness.
 album-corpus = []
@@ -52,7 +52,7 @@ play-only = ["gate", "album-corpus"]
 adversarial-corpus = []
 
 # E3-b's corpus: the sibling project's 12-track, 43.5-minute repertoire
-# (`make uli-cross-asset`: CC-licensed downloads + the sibling's trim recipe).
+# (`make uli-cross-asset`: CC-licensed downloads + the vendored tracklist recipe).
 # 167,222 frames — the same length as their album — so it is the album-scale
 # witness this tree's single master cannot be.
 cross-corpus = []

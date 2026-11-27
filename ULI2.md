@@ -3,8 +3,8 @@
 Status: **accepted 2026-11-13; GBA-first since 2026-11-14; decode at 1.070x
 the C + ASM reference since 2026-11-19; encoder byte-exact to the recorded
 oracle since 2026-11-26.** ULI2 is the repository's product codec and is in the
-state it needs to be used as the drop-in codec here. The format and encoder are frozen; the
-remaining work is the four threads indexed in
+state it needs to be used as the drop-in codec here. The format, encoder and asset path
+are in-repo; the remaining work is W3 (the album app) and W4 (residuals/S9), indexed in
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) →
 "Remaining ULI2 work — the four threads".
 
@@ -46,6 +46,8 @@ falsification — is the ledger, not this file; see "Where things live" below.
 | the encoder crate's own docs, and the acceptance matrix it is measured by | [`crates/uli-enc/README.md`](crates/uli-enc/README.md) |
 | how to run the measurement vehicle | [`examples/uli_bench/README.md`](examples/uli_bench/README.md) |
 | how the acceptance corpus is generated and used | **this file**, "The measurement corpus" |
+| source preparation (decode, resample, track join) | [`scripts/uli_prep.py`](scripts/uli_prep.py) + [`scripts/uli_resample.py`](scripts/uli_resample.py) |
+| the cross-album tracklist and its CC licence notice | [`scripts/data/`](scripts/data/) |
 
 **One owner per topic.** A fact lives in exactly one of these files and the others
 link to it: gates, risks and decisions belong to *this* file, measurements to the
@@ -78,8 +80,9 @@ path**, not from the repository. The decoder port and the in-repo encoder are th
 milestones; both have landed. The offline encoder is now the in-repo Rust encoder
 (`crates/uli-enc`, S1–S8): it is byte-exact to the recorded contraction-free
 oracle on every acceptance cell, and the C/OpenMP tool from `gba-audio` is kept
-only as that oracle. What remains is wiring the asset targets and the album app
-onto it (W2/W3) and S9's quality arms. The target is to replace any other
+only as that oracle. The asset targets and pins now use the in-repo encoder and the
+bit-exact Rust decoder (W2, 2026-11-27); what remains is the album app's ULI2 backend
+(W3) and S9's quality arms. The target is to replace any other
 C-language tooling or source material with Rust, so this project does not depend
 on the `gba-audio` repository or its C sources. General Python scripts and
 reusable external tools such as `ffmpeg` remain acceptable; the isolation rule
@@ -314,21 +317,18 @@ is stable.
 
 ### Boundaries
 
-- **Decoder first; Rust encoder later.** The current encoder is the offline
-  C/OpenMP tool from `gba-audio`. It is not part of the GBA image and is not
-  ported in the current decoder milestone. It is expected to be reused for the
-  time being so the decoder and playback work can use the measured assets. The
-  target is to reimplement that encoder and any other C-language tooling or
-  source material in Rust, removing the `gba-audio`/C-source dependency. General
-  Python orchestration and reusable external tools such as `ffmpeg` stay
-  allowed.
+- **Decoder and Rust encoder both landed; the asset path is local.** `crates/uli-enc`
+  is the product encoder (S1–S8), and `scripts/uli_prep.py` / `scripts/uli_resample.py`
+  are the local source-preparation path (W2, 2026-11-27). The C/OpenMP tool from
+  `gba-audio` is the optional byte-exactness oracle only. General Python
+  orchestration and reusable external tools such as `ffmpeg` stay allowed.
 - **No C, no dependency, everything in-repo.** Arm-mode asm may be adapted from
   the reference implementation; **C source may not be incorporated,** and there
-  is **no build, link or vendoring dependency on `gba-audio`** — the encoder of
-  record is used *off-tree* to produce assets, and every artefact this project
-  builds, tests or ships lives in this repository and is twinned against this
-  repository's oracle. This is the form the isolation rule takes for the asm
-  work (PR C-1) and it is unchanged for tooling.
+  is **no build, link or vendoring dependency on `gba-audio`** — every artefact this
+  project builds, tests or ships lives in this repository, and the asset path uses
+  the in-repo encoder, prep scripts and Rust pin (W2, 2026-11-27). The C tool is
+  only the optional `make uli-accept` oracle. This is the form the isolation rule
+  takes for the asm work (PR C-1) and it is unchanged for tooling.
 - **No `agb` in the core.** The core is platform-free; the product ROM composes
   it with the playback layer. This is what makes host tests and future reuse
   possible.
@@ -350,16 +350,17 @@ is stable.
 search with M/S, two-pass table training, album-wide allocation, the per-frame cycle cap and
 the ULA2 container/tables/seek/strings writer — and the blobs this tree measures now come
 from it, not from `gba-audio`. The offline C/OpenMP tool from `gba-audio` is now the
-**oracle**: `make uli-accept` holds our bytes against its, and `make uli-album-asset` still
-produces the bench corpus with it, by design (E-R1 forbids the dependency, not the oracle).
-It is never linked into the GBA image. The source-prep path (source decoding,
-resampling, track assembly) remains external Python tooling for now, which is acceptable
-under the rule below. **The Rust encoder matches the oracle's bytes on every matrix cell
+**oracle**: `make uli-accept` holds our bytes against its. It is never linked into the
+GBA image and no asset target invokes it. The source-prep path is the in-repo
+`scripts/uli_prep.py` (copied from the reference, with `scripts/uli_resample.py`), so a
+fresh clone needs ffmpeg and Python, not a `gba-audio` checkout. **The Rust encoder
+matches the oracle's bytes on every matrix cell
 (2026-11-26):** `make uli-accept` reports MATCH on `fast`, `tiny`, `biomaster`, `off-default`
 and `adv`, against the oracle of record `sha256 1991ee6c…`; the S8 pin ledger was discharged
-on 2026-11-27. What remains for the encoder is **W2** — switching the asset targets from the
-oracle's `uli_enc` to `crates/uli-enc` — and **S9**, the labelled improvements (`--dacw 1`,
-the SNR licence test, the removed search ideas). The corpus is generated by
+on 2026-11-27. **W2 landed on 2026-11-27**: all four asset targets use `crates/uli-enc`
+and the Rust pin generator, and the C tools remain only for `make uli-accept`. What
+remains on the encoder track is **S9**, the labelled improvements (`--dacw 1`, the SNR
+licence test, the removed search ideas). The corpus is generated by
 `make uli-album-asset` / `make uli-adversarial-asset`, never committed — see "The measurement
 corpus" below; `cross60` is not run while `adv` is present. And one
 thing S8 found that is not about this encoder at all: **the oracle is a binary, not a
@@ -375,10 +376,10 @@ remove the dependency on `gba-audio` and its C sources. That means, at minimum:
   container/tables/seek/strings writer; **met through S8** (`crates/uli-enc`,
   byte-exact to the recorded oracle);
 - Rust replacements for any other C-language asset-generation code that would
-  otherwise be reused from `gba-audio`; **the remaining C in the asset path is
-  the `uli_enc` oracle (only for `make uli-accept`) and the pin's `uli_dec`;
-  W2 replaces the product path and can emit the pin from the bit-exact Rust
-  `uli-lite` decoder**;
+  otherwise be reused from `gba-audio`; **the asset path no longer uses C at all** —
+  the encoder is `crates/uli-enc`, the pin is emitted by `crates/uli-lite`, and the
+  source-prep path is `scripts/uli_prep.py`; the C `uli_enc` remains only as the
+  optional `make uli-accept` oracle**;
 - deterministic, documented encoder output and its own round-trip witness;
   **met** — E-R5's four rules, `tests/determinism.rs`, and the round trip through
   `uli_lite::Album` in `tests/roundtrip.rs`.
@@ -417,11 +418,12 @@ record), S8-5 (the frozen coder: identical on 24 of 24), **S8-6 (the trainer: th
 table region reproduced from the reference's own pass-1 plan on `fast` and `tiny`)** and
 **S8-7 (the search: `fast`, `tiny`, `biomaster`, `off-default` and `adv` byte-identical to the
 oracle)** have landed; row 25 is closed. The S8 pin ledger was discharged on
-2026-11-27; what remains is W2 (asset targets onto this encoder) and S9 (quality arms). The 25-row divergence inventory, the sub-step table
+2026-11-27; W2 then switched the asset targets to it, so what remains on this track is S9
+(quality arms). The 25-row divergence inventory, the sub-step table
 with its `needs` and the five instruments are in §S8. The corpus is generated in-tree, not
 committed: see "The measurement corpus" below. The
-hand-written C encoder is now the **oracle and, until W2 lands, the asset producer** — not
-the only encoder in existence.
+hand-written C encoder is now only the **optional oracle**; the asset producer is
+`crates/uli-enc` and the pin is the Rust decoder (W2, 2026-11-27).
 Requirements, slices and gates:
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) -> "The
 encoder — the last missing piece".
@@ -474,22 +476,27 @@ per-build forms as output.
 **not** the encoder's input; the encoder path resamples the 96 kHz master itself.
 
 ```sh
-. .agents/env.sh                 # GBA_AUDIO, the venv python3, ffmpeg
+. .agents/env.sh                 # the venv python3 + ffmpeg; no GBA_AUDIO needed
 make uli-album-asset
 ```
 
-With `GBA_AUDIO` pointing at the sibling `gba-audio` checkout, that target runs:
+That target is now self-contained in this repository:
 
-1. `$GBA_AUDIO/encoder/prep.py assets/sound/bioluminescent.wav --out examples/uli_bench/assets`
-   — decode with ffmpeg and resample 96 kHz → 32,768 Hz through the sibling's
-   `eval/gba_dac_model.resample`; writes `album.f32` (f32 interleaved stereo at PCM16 scale)
-   and `tracks.tsv` (one track here, `bioluminescent`);
-2. the reference encoder — `uli_enc --budget 3294000 --cap 74 --threads 8` (override with
-   `ULI_ALBUM_BUDGET` / `ULI_ALBUM_THREADS`) → `examples/uli_bench/assets/biomaster.uli`;
-3. the reference decoder — `uli_dec … --seektest` → `assets/ref/` (`vectors.txt`, `s8/`,
-   `01.wav`, `dac8/`);
-4. `scripts/uli_album_pin.py` — the C decoder's own FNV over its int8 output →
-   `examples/uli_bench/src/album_pin.rs`, the pin the bench ROM checks itself against.
+1. `scripts/uli_prep.py assets/sound/bioluminescent.wav --out examples/uli_bench/assets`
+   — decode with ffmpeg and resample 96 kHz → 32,768 Hz through the in-repo
+   `scripts/uli_resample.py` (copied from the reference's FFT resampler); writes
+   `album.f32` (f32 interleaved stereo at PCM16 scale) and `tracks.tsv` (one track here,
+   `bioluminescent`);
+2. `crates/uli-enc` — `uli-enc --album … --tracks … --out … --rd --budget 3294000 --cap 74
+   --threads 8` (override with `ULI_ALBUM_BUDGET` / `ULI_ALBUM_THREADS`) →
+   `examples/uli_bench/assets/biomaster.uli`;
+3. `crates/uli-lite/examples/gen_album_pin.rs` — the bit-exact Rust decoder's FNV over its
+   int8 output → `examples/uli_bench/src/album_pin.rs`, the pin the bench ROM checks itself
+   against.
+
+No step needs `$GBA_AUDIO`. The optional C oracle is used only by `make uli-accept` (the
+byte-exactness measurement) and by the fixture/probe maintenance instruments, never by an
+asset target.
 
 `make uli-accept` uses the **PCM pair**, not the blob: the `biomaster` and `off-default` cells
 encode `assets/album.f32` + `assets/tracks.tsv` with the flags in `scripts/uli_accept.py`.
@@ -501,9 +508,9 @@ acceptance is the PCM pair and the flags, not the WAV.
 
 | target | input / recipe | outputs (gitignored) | used by |
 |---|---|---|---|
-| `make uli-cross-asset` | `$GBA_AUDIO/music/tracklist.json`; `scripts/uli_cross_album.py` downloads the 12 CC-licensed tracks (cache `ULI_CROSS_CACHE`), trims/fades per the sibling's recipe, then `prep.py` | `assets/cross/{album.f32,tracks.tsv}`, `cross.uli`, `cross/ref/`, `src/album_pin_cross.rs` | the `cross60` cell, album-scale bench/gate |
-| `make uli-adversarial-asset` | `scripts/gen_adversarial_corpus.py` (synthetic 10 s, offline) | `assets/adv/{album.f32,tracks.tsv}`, `adv.uli`, `adv/ref/`, `src/album_pin_adv.rs` | the matrix's fourth slot when present — it **replaces `cross60`**, which is how the matrix has always behaved |
-| `make uli-two-track-asset` | `assets/sound/bioluminescent.wav` twice through `prep.py` | `assets/two/{album.f32,tracks.tsv}`, `biotwo.uli`, `two/ref/`, `src/album_pin_two.rs` | `uli-player-two-track`, the seek witness |
+| `make uli-cross-asset` | `scripts/data/uli_cross_tracklist.json`; `scripts/uli_cross_album.py` downloads the 12 CC-licensed tracks (cache `ULI_CROSS_CACHE`), trims/fades per the vendored recipe, then `scripts/uli_prep.py` | `assets/cross/{album.f32,tracks.tsv}`, `cross.uli`, `src/album_pin_cross.rs` | the `cross60` cell, album-scale bench/gate |
+| `make uli-adversarial-asset` | `scripts/gen_adversarial_corpus.py` (synthetic 10 s, offline) | `assets/adv/{album.f32,tracks.tsv}`, `adv.uli`, `src/album_pin_adv.rs` | the matrix's fourth slot when present — it **replaces `cross60`**, which is how the matrix has always behaved |
+| `make uli-two-track-asset` | `assets/sound/bioluminescent.wav` twice through `scripts/uli_prep.py` | `assets/two/{album.f32,tracks.tsv}`, `biotwo.uli`, `src/album_pin_two.rs` | `uli-player-two-track`, the seek witness |
 
 `make uli-accept` defaults `ULI_ACCEPT_ASSETS=examples/uli_bench/assets` and resolves it to an
 absolute path (the encoders run with `cwd` inside a temp directory). Pass
@@ -511,28 +518,37 @@ absolute path (the encoders run with `cwd` inside a temp directory). Pass
 that temp directory by `scripts/gen_uli_fast_cell.py` and the fixture generator and need no
 corpus at all; `make uli-accept ULI_ACCEPT_ONLY=fast,tiny` therefore runs on a bare checkout.
 
-**Why the off-tree `prep.py`?** E-R1 forbids a build/link/vendoring dependency on
-`gba-audio`, not using it as the editor or oracle. `prep.py` is source preparation
-(decode/resample/assemble), not codec code, and E-R2 exempts the resample from the byte
-contract. The in-repo recipe is the Make target, the tracked master, `scripts/uli_album_pin.py`
-and the acceptance harness; nothing in the product path builds or links C.
+**Why the prep script is local.** The asset path used to shell to the sibling's
+`encoder/prep.py` and `eval/gba_dac_model.py`. It now uses `scripts/uli_prep.py` and
+`scripts/uli_resample.py`, copied into this repository with the resampler's arithmetic kept
+verbatim, so a fresh clone can prepare and encode a corpus without a `gba-audio` checkout.
+The cross-album tracklist and its CC licence notice are vendored under `scripts/data/`.
+ffmpeg/ffprobe, numpy and scipy remain ordinary external tools, which the project's rule
+allows. The optional C oracle is not a build or asset dependency.
 
 **Where the pins come from.** None of the `album_pin*.rs` files is an oracle of its own:
-`scripts/uli_album_pin.py` emits the C reference decoder's `hash_of_frame_hashes` and
-reconstructs every published checkpoint from the C decoder's `s8/` files, refusing to write a
-pin unless every reconstructable checkpoint matches. The blob, the decode and the pin are all
-regenerated together; a pin without its corpus is unreachable, which is why they are all
-gitignored together.
+`crates/uli-lite/examples/gen_album_pin.rs` decodes the blob with the bit-exact Rust
+reference decoder and emits the FNV-1a 32 of the little-endian per-frame int8 hashes. The
+product decoder is twinned against that reference, so the pin is a reference-vs-product
+witness. `scripts/uli_album_pin.py` is retained only as an **optional** off-tree cross-check
+against a C decoder's `--ref` output; it is not used by any target. The blob and the pin are
+regenerated together; a pin without its corpus is unreachable, which is why both are
+gitignored.
 
-### As measured (2026-11-26)
+### As measured (2026-11-27)
 
-`make uli-album-asset` and `make uli-adversarial-asset` run from a bare checkout with
-`GBA_AUDIO` and the venv; `make uli-accept` then runs `fast`, `tiny`, `biomaster`,
-`off-default` and `adv` (the fourth slot, since `adv` is present) and reports **MATCH on every
-one**, with `biomaster` at 3,293,128 B `sha256 49eb6a11…`. Row 25's last three-frame
-`biomaster` residual was the M/S header bit missing from `measure_g`'s domain comparison, now
-fixed; see [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) §S8.
-`cross60` is not run when `adv` is present; generate `cross` only if that slot is wanted.
+`make uli-album-asset`, `make uli-adversarial-asset` and `make uli-two-track-asset` run from a
+bare checkout with ffmpeg and the venv python; no `GBA_AUDIO` is needed. The biomaster blob
+was checked byte-identical to the existing C-produced one (`sha256 49eb6a11…`, 3,293,128 B),
+and the Rust pin reproduces its existing `N_FRAMES`/`EXPECTED_INT8` (`16553` / `0x82452d43`).
+The adversarial blob likewise matches its existing `sha256 1a0c8856…` (127,380 B) and pin
+`641` / `0x58163b26`. The two-track corpus now uses the Rust encoder's **`--dacw 0`**
+objective (the reference's default `--dacw 1` remains S9); its pin is `33104` / `0xf585bb77`.
+`make uli-accept` still runs the five cells against the optional oracle and reports MATCH.
+`cross60` is not run when `adv` is present; its target is code-complete and was exercised
+with a local tracklist, but the full 12-track download/encode was not run in this pass. Its
+2026-11-16 blob/period figure is therefore still flagged for re-measurement when `make
+uli-cross-asset` is next run.
 
 ## Porting plan
 
@@ -574,8 +590,8 @@ product codec.** mGBA, WAITCNT 4/2, 262,144-cycle period, both corpora pinned
   [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) §S7/§S8; the
   current MATCH table with full hashes is §S7. `cross60` is not run while `adv` is present.
 - **Still open:** the non-decode half of the gate (above); the dense-frame tail of the
-  entropy path; U5's 1 Hz text-redraw defect; the asset path onto the in-repo encoder (W2);
-  the app's ULI2 backend and geometry (W3); S9's `--dacw 1` and SNR licence test; and the
+  entropy path; U5's 1 Hz text-redraw defect; the app's ULI2 backend and geometry (W3);
+  S9's `--dacw 1` and SNR licence test; and the
   licensing/publish decision (`publish = false`; the root is MIT, but `NOTICE.md` lists the
   three ULI2 crates as unresolved). The four work threads and their exit gates
   are indexed in [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) →
@@ -896,13 +912,15 @@ product codec without pretending one codec covers both jobs.
    is the gate: our convert/IRQ/DMA half costs ~2.9x C's, which is 7.80 of the
    12.6 points we are still behind on the gate total.
 
-6. **Encoder packaging and independence — the encoder is in-repo, the asset path is not
-   (2026-11-27).** `crates/uli-enc` covers **S1–S8** under the no-C rule and is byte-exact
-   to the recorded contraction-free oracle on every acceptance cell; the C/OpenMP tool is
-   now only that oracle. The repository therefore no longer lacks an encoder, but the asset
-   targets still call `$GBA_AUDIO/build/uli_enc` (**W2**) and the album app has no ULI2
-   backend (**W3**), so a fresh clone still cannot bake a ULI2 album without the sibling
-   checkout. S9's `--dacw 1` quality arm and the licensing/publish decision (the repo now has MIT at the root, but `NOTICE.md` marks the three ULI2 crates as unresolved) remain separate.
+6. **Encoder packaging and independence — the asset path is in-repo (2026-11-27).**
+   `crates/uli-enc` covers **S1–S8** under the no-C rule and is byte-exact to the recorded
+   contraction-free oracle on every acceptance cell; the C/OpenMP tool is now only that
+   oracle. **W2 closed the last build/asset dependency**: all four asset targets use `crates/uli-enc`,
+   the pin comes from the bit-exact Rust decoder, and source preparation is
+   `scripts/uli_prep.py` / `scripts/uli_resample.py`, so a fresh clone needs ffmpeg and
+   Python but no `gba-audio` checkout. The album app still has no ULI2 backend (**W3**),
+   and S9's `--dacw 1` quality arm plus the ULI2 provenance/publish decision remain
+   separate (`NOTICE.md` marks the three crates unresolved despite the root MIT licence).
    Requirements, slices and acceptance gates: `crates/uli-lite/PLAN-OF-RECORD.md` → "The
    encoder"; work threads: → "Remaining ULI2 work — the four threads".
 7. **Rate flexibility — v1 fixed (2026-11-14).** 32,768 Hz, hop 512, stereo, no
@@ -921,6 +939,19 @@ product codec without pretending one codec covers both jobs.
 numbers *of that day* and are superseded by the current state at the top of
 [`crates/uli-lite/PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md); each
 entry is kept for the decision and its reasoning, not for its numbers.**
+
+- **2026-11-27 (later) — W2 landed: the asset path is in-repo, and the `gba-audio`
+  build/asset dependency is gone.** The four asset targets now use `scripts/uli_prep.py` (the
+  reference `prep.py` copied in, with `scripts/uli_resample.py`), `crates/uli-enc --rd`,
+  and the Rust pin generator; the cross tracklist and CC licence notice are vendored
+  under `scripts/data/`. The local prep reproduces `album.f32`/`tracks.tsv` byte-for-byte,
+  the Rust encoder reproduces the C `biomaster` and `adv` blobs, and the Rust pins
+  reproduce their existing values. The two-track corpus uses **`--dacw 0`**; the
+  reference's default `--dacw 1` remains S9. The cross recipe was exercised with a
+  local tracklist; its full 12-track download/encode was not run, so the old cross
+  blob/period figure still needs re-taking. The C oracle is now only the optional
+  `make uli-accept` instrument. **W3 — the album app's ULI2 backend — is the next
+  track.** See `crates/uli-lite/PLAN-OF-RECORD.md` → "Remaining ULI2 work".
 
 - **2026-11-27 — S8 bookkeeping closed, and the remaining ULI2 work is indexed as four
   threads.** `make uli-accept` re-taken on `fast`, `tiny`, `biomaster`, `off-default` and
@@ -959,7 +990,8 @@ entry is kept for the decision and its reasoning, not for its numbers.**
   `make uli-album-asset` turns the tracked **96 kHz / 24-bit**
   `assets/sound/bioluminescent.wav` through the sibling's `encoder/prep.py` into
   `examples/uli_bench/assets/album.f32` + `tracks.tsv`, then runs the reference
-  encoder/decoder and `scripts/uli_album_pin.py`; `make uli-adversarial-asset` adds the
+  encoder/decoder and `scripts/uli_album_pin.py` (this entry predates W2; the asset path
+  is local since 2026-11-27); `make uli-adversarial-asset` adds the
   synthetic 10 s corpus (the matrix's fourth slot, replacing `cross60` when present). Both
   outputs are gitignored; the tracked inputs are the WAV and the recipes. The acceptance
   harness now resolves `ULI_ACCEPT_ASSETS` to an absolute path, because the encoders run with

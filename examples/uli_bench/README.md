@@ -46,21 +46,23 @@ cd examples/uli_bench && cargo build --release --target thumbv4t-none-eabi \
 
 ## The corpus: `assets/` is generated, never committed
 
-The tracked input is the master audio; the blob, the `album.f32` intermediate, the
-reference decode and the pin module are build output (`.gitignore`). The recipe is
-`make uli-album-asset`, which needs `GBA_AUDIO` (the sibling `gba-audio` checkout)
-and the venv `python3`, and runs:
+The tracked input is the master audio; the blob, the `album.f32` intermediate and
+the pin module are build output (`.gitignore`). The recipe is
+`make uli-album-asset`, which needs ffmpeg and the venv `python3` (numpy/scipy), and
+runs:
 
-1. `$GBA_AUDIO/encoder/prep.py assets/sound/bioluminescent.wav --out examples/uli_bench/assets`
-   — the default master is **96 kHz / 24-bit stereo, 258.6 s**; `prep.py` resamples it to
-   32,768 Hz and writes `album.f32` (f32 interleaved stereo at PCM16 scale) and
-   `tracks.tsv`. The `bioluminescent-32768hz-8bit-stereo.wav` beside the master is a
-   listening derivative, not this target's input.
-2. the reference encoder → `assets/biomaster.uli` — **W2**
-   (`crates/uli-lite/PLAN-OF-RECORD.md` → "Remaining ULI2 work — the four threads") will
-   point this step at `crates/uli-enc`; until then it is the oracle;
-3. the reference decoder (`--seektest`) → `assets/ref/`;
-4. `scripts/uli_album_pin.py` → `src/album_pin.rs` (the C-sourced FNV pin).
+1. `scripts/uli_prep.py assets/sound/bioluminescent.wav --out examples/uli_bench/assets`
+   — the default master is **96 kHz / 24-bit stereo, 258.6 s**; the in-repo script
+   resamples it to 32,768 Hz through `scripts/uli_resample.py` and writes `album.f32`
+   (f32 interleaved stereo at PCM16 scale) and `tracks.tsv`. The
+   `bioluminescent-32768hz-8bit-stereo.wav` beside the master is a listening
+   derivative, not this target's input.
+2. `crates/uli-enc` → `assets/biomaster.uli`;
+3. `crates/uli-lite/examples/gen_album_pin.rs` → `src/album_pin.rs` (the Rust
+   decoder's FNV pin).
+
+No step needs the `gba-audio` checkout; the C oracle is used only by
+`make uli-accept`, and then only when explicitly pointed at.
 
 `make uli-accept` encodes the **PCM pair** for its `biomaster` and `off-default` cells;
 `make uli-bench` / `uli-gate` / `uli-album-bench` use the blob and/or the pin. The other
@@ -68,11 +70,11 @@ corpora in the same `assets/` tree:
 
 | target | corpus | used by |
 |---|---|---|
-| `make uli-cross-asset` | `assets/cross/` — the sibling's 12-track album, downloaded/trimmed by `scripts/uli_cross_album.py` then `prep.py` | the `cross60` cell, album-scale bench/gate |
+| `make uli-cross-asset` | `assets/cross/` — the 12-track CC-licensed album, downloaded/trimmed by `scripts/uli_cross_album.py` then `scripts/uli_prep.py` | the `cross60` cell, album-scale bench/gate |
 | `make uli-adversarial-asset` | `assets/adv/` — synthetic 10 s density set, offline | the matrix's fourth slot when present (replaces `cross60`) |
 | `make uli-two-track-asset` | `assets/two/` — the master twice, for the seek witness | `uli-player-two-track` |
 
-The full explanation, including why `prep.py` is off-tree and where the pins come from, is
+The full explanation, including the local `uli_prep.py` and where the pins come from, is
 in [`../../ULI2.md`](../../ULI2.md) -> "The measurement corpus — how
 `examples/uli_bench/assets` is generated and used".
 

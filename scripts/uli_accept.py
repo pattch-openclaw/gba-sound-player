@@ -64,9 +64,10 @@ it with:
   make uli-two-track-asset      # assets/two/ (the player's seek witness)
 
 `make uli-album-asset` takes the tracked 96 kHz / 24-bit master
-`assets/sound/bioluminescent.wav` through the sibling's `encoder/prep.py` (resample to
-32,768 Hz), then the reference encoder/decoder and `scripts/uli_album_pin.py`. The full
-recipe and the gitignore division are in `ULI2.md` -> "The measurement corpus".
+`assets/sound/bioluminescent.wav` through the in-repo `scripts/uli_prep.py` (resample to
+32,768 Hz), then `crates/uli-enc` and the Rust pin generator. The C oracle is needed only
+by `make uli-accept` itself, not by the asset targets. The full recipe and the gitignore
+division are in `ULI2.md` -> "The measurement corpus".
 
 Exit status: 0 when every cell MATCHes, 2 when any cell DIFFs, 1 on a harness error
 (missing input, encoder failure, unparseable container).
