@@ -73,6 +73,7 @@ except ImportError:  # pragma: no cover - the refusal says this out loud
 
 REPO = Path(__file__).resolve().parent.parent
 GAFP_PACK = REPO / "scripts" / "gafp_pack.py"
+ALBUM_ART = REPO / "scripts" / "album_art.py"
 DEFAULT_ALBUM = REPO / "examples" / "album_player" / "album.toml"
 
 # --- ALBM1, pinned here and in src/meta.rs ----------------------------------
@@ -179,15 +180,15 @@ class Config:
                 doc = tomllib.load(handle)
             except tomllib.TOMLDecodeError as exc:
                 raise Refusal("config", f"{path}: {exc}") from exc
-        unknown = sorted(set(doc) - {"album", "track", "out", "layout"})
+        unknown = sorted(set(doc) - {"album", "track", "out", "layout", "art"})
         if unknown:
             # D2: the bake reads these four sections and no others. Ignoring the
             # rest would make `album.toml` a config that lies about what it
             # controls. `[layout]` arrived with 2a (§9.1's A13 row: "the bake
             # step cannot generate a layout without being told which one");
-            # `[art]` stays refused here through 2a (D2, §11's note (iii): "the
-            # box list is 2a's, the box key is 2b's"), and `[viz]`, `[ui]` and
-            # `[game]` are Phase 3's.
+            # `[viz]`, `[ui]` and `[game]` are Phase 3's. `[art]` was refused here
+            # until 2b PR-(4) parsed it; the box list was 2a's and the box key is now
+            # 2b's, as §11's note (iii) scoped it.
             raise Refusal(
                 "config-section",
                 f"{path}: section(s) {', '.join(unknown)} are not part of Phase 1's "
@@ -209,6 +210,55 @@ class Config:
                 "(§5.0: geometry is declared in layout_spec.toml, and album.toml selects)",
             )
         self.layout_variant = str(layout.get("variant") or "").strip()
+
+        # 2b PR-(4): the album's art data. The allow-list is the §9 example's keys; a
+        # key the bake does not implement is refused rather than ignored, and the two
+        # modes that are *legal in §7 but not this phase's* (`cover+breathe`, 8bpp)
+        # are refused by name so a config cannot silently get a different picture.
+        self.art = None
+        art = doc.get("art") or {}
+        if art:
+            allowed = {"cover", "mode", "box", "palette_max", "bit_depth", "bleed", "dither"}
+            extra = sorted(set(art) - allowed)
+            if extra:
+                raise Refusal("config", f"{path}: [art] {', '.join(extra)} is not a field of that section")
+            mode = str(art.get("mode", "cover"))
+            if mode == "cover+breathe":
+                raise Refusal(
+                    "config",
+                    f"{path}: [art] mode cover+breathe is a per-frame palette cycle (§7) and lands with "
+                    "the visualiser's cadence (Phase 4/AP-6), not 2b's event-paced surface",
+                )
+            if mode not in ("cover", "none"):
+                raise Refusal("config", f"{path}: [art] mode {mode!r} is not one of none, cover")
+            cover = str(art.get("cover", ""))
+            if mode == "cover" and not cover:
+                raise Refusal("config", f"{path}: [art] cover is required when mode = cover")
+            palette_max = config_int(path, "[art] palette_max", art.get("palette_max", 15))
+            if not 1 <= palette_max <= 15:
+                raise Refusal("config", f"{path}: [art] palette_max {palette_max} is outside 1..=15")
+            bit_depth = config_int(path, "[art] bit_depth", art.get("bit_depth", 4))
+            if bit_depth != 4:
+                raise Refusal(
+                    "config",
+                    f"{path}: [art] bit_depth {bit_depth} is the 8bpp alternative §7 rules a side-by-side "
+                    "judged on a screen; this phase writes 4bpp only",
+                )
+            bleed = art.get("bleed", False)
+            if not isinstance(bleed, bool):
+                raise Refusal("config", f"{path}: [art] bleed must be a boolean")
+            dither = str(art.get("dither", "bayer2"))
+            if dither not in ("bayer2", "bayer4"):
+                raise Refusal("config", f"{path}: [art] dither {dither!r} is not bayer2 or bayer4")
+            box = str(art.get("box", "128x128"))
+            try:
+                box_w, box_h = (int(part) for part in box.lower().split("x", 1))
+            except ValueError:
+                raise Refusal("config", f"{path}: [art] box {box!r} is not WxH")
+            self.art = {
+                "mode": mode, "cover": cover, "palette_max": palette_max,
+                "dither": dither, "bleed": bleed, "box_w": box_w, "box_h": box_h,
+            }
 
         self.title = str(album.get("title", ""))
         self.artist = str(album.get("artist", ""))
@@ -747,7 +797,8 @@ def read_pin_module(path: Path) -> dict:
 
 
 def assets_rs(config: Config, tracks: list[dict], album_samples: int,
-              facts: "VariantFacts", longest_title: tuple[float, str]) -> str:
+              facts: "VariantFacts", longest_title: tuple[float, str],
+              art: dict | None = None) -> str:
     """The generated pin module. Deterministic text: no timestamp, no abs path.
 
     It carries the album-side half of §5.5's fit verdict — the box lives on the
@@ -793,6 +844,70 @@ def assets_rs(config: Config, tracks: list[dict], album_samples: int,
                 ]
             )
         )
+    if art is None:
+        art_consts = f'''/// 2b PR-(4): no art in this album (`[art]` absent or `mode = "none"`). The art
+/// scene draws nothing and the card has no picture; the variant's ceiling still bounds
+/// `POOL_IMAGE` because there is no selection to lower it.
+pub const HAS_ART: bool = false;
+pub const ART1: &[u8] = &[];
+pub const ART_BOX_PX_W: u32 = 0;
+pub const ART_BOX_PX_H: u32 = 0;
+pub const ART_TILES: u32 = 0;
+pub const ART_PALETTE_BANKS: u32 = 0;
+pub const ART1_BYTES: usize = 0;
+pub const ART1_SHA256: &str = "";
+pub const POOL_IMAGE: u32 = {facts.pool_image};
+pub const POOL_DISTINCT: u32 = {facts.pool_distinct};
+const _: () = assert!(
+    POOL_DISTINCT
+        == POOL_IMAGE
+            + crate::layout::POOL_TEXT_DISTINCT
+            + crate::layout::POOL_CHROME_DECLARED
+            + crate::layout::BAR_PATTERN_TILES,
+    "the album pool audit does not add up"
+);
+const _: () = assert!(
+    POOL_DISTINCT <= crate::layout::TILE_BUDGET,
+    "the album pool exceeds tile_budget"
+);
+const _: () = assert!(
+    POOL_IMAGE <= crate::layout::IMAGE_TILES_MAX,
+    "the selected image exceeds image_tiles"
+);
+'''
+    else:
+        art_consts = f'''/// 2b PR-(4): the album's cover as the selected `[art] box`. `assets/art1.bin` is
+/// generated by `scripts/album_art.py`; the host gate re-reads it through `gba_art::art1` and
+/// checks these fields against the blob, and the compile-time asserts below are the album's own
+/// budget (Decision B: the image term is the box this album ships, not the variant's ceiling).
+pub const HAS_ART: bool = true;
+pub const ART1: &[u8] = include_bytes!("../assets/art1.bin");
+pub const ART_BOX_PX_W: u32 = {art["w"]};
+pub const ART_BOX_PX_H: u32 = {art["h"]};
+pub const ART_TILES: u32 = {art["tiles"]};
+pub const ART_PALETTE_BANKS: u32 = {art["banks"]};
+pub const ART1_BYTES: usize = {art["bytes"]};
+pub const ART1_SHA256: &str = "{art["sha256"]}";
+pub const POOL_IMAGE: u32 = {facts.pool_image};
+pub const POOL_DISTINCT: u32 = {facts.pool_distinct};
+const _: () = assert!(
+    POOL_DISTINCT
+        == POOL_IMAGE
+            + crate::layout::POOL_TEXT_DISTINCT
+            + crate::layout::POOL_CHROME_DECLARED
+            + crate::layout::BAR_PATTERN_TILES,
+    "the album pool audit does not add up"
+);
+const _: () = assert!(
+    POOL_DISTINCT <= crate::layout::TILE_BUDGET,
+    "the album pool exceeds tile_budget"
+);
+const _: () = assert!(
+    POOL_IMAGE <= crate::layout::IMAGE_TILES_MAX,
+    "the selected image exceeds image_tiles"
+);
+'''
+
     return f'''//! Generated by `scripts/album_bake.py` — do not edit.
 //!
 //! The packed album this crate reads: `assets/albm1.bin` (ALBM1, the manifest
@@ -841,6 +956,7 @@ pub const YEAR: u16 = {config.year};
 /// §11's D9 says so, and §6 is where a spec digest would be ruled.
 pub const LAYOUT_VARIANT: &str = "{facts.variant.id}";
 
+{art_consts}
 {fit_note}
 pub const TITLE_LONGEST: &str = {rust_str(longest_title[1])};
 pub const TITLE_LONGEST_PX: u32 = {round(longest_title[0])};
@@ -930,6 +1046,77 @@ def write_atomic(path: Path, data: bytes) -> None:
     os.replace(tmp, path)
 
 
+def prepare_art(config: Config, facts: "VariantFacts", assets_dir: Path) -> dict | None:
+    """Generate the album's ART1 from `[art]`, and move the image term to the selection.
+
+    2b PR-(4): the box is the first album-side *geometry-adjacent* key, so it is validated
+    against the variant's derived list here (the `art-box-not-derived` row, whose validator
+    was 2a's and whose key is 2b's). The tool is the one that owns the pixels; this function
+    owns only "which box, which mode, and does the selected term fit".
+    """
+    art = config.art
+    if art is None or art["mode"] == "none":
+        return None
+    cover = Path(art["cover"])
+    if not cover.is_absolute():
+        cover = REPO / cover
+    if not cover.exists():
+        raise Refusal("art-source", f"[art] cover {cover} does not exist")
+    if not git_tracked(cover):
+        raise Refusal(
+            "art-source",
+            f"[art] cover {cover} is not tracked in git — AP-4's reproduction claim is about a "
+            "source anyone who clones the tree can re-run, exactly as §5.5's face rule is",
+        )
+    if art["bleed"]:
+        width, height = 240, 160
+    else:
+        width, height = art["box_w"], art["box_h"]
+        if width % 8 or height % 8 or width != height:
+            raise Refusal(
+                "art-box-not-derived",
+                f"[art] box {width}x{height} is not a square multiple of 8; the derived boxes are "
+                + ", ".join(f"{b.side * 8}x{b.side * 8}" for b in facts.art_boxes),
+            )
+        side = width // 8
+        if side not in [box.side for box in facts.art_boxes]:
+            raise Refusal(
+                "art-box-not-derived",
+                f"[art] box {width}x{height} is not one the selected variant {facts.variant.id} derives; "
+                f"the legal boxes are 8..{facts.art_ceiling.width_px if facts.art_ceiling else 0} px in 8 px steps",
+            )
+    tiles = (width // 8) * (height // 8)
+    facts.select_image(tiles)
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    out = assets_dir / "art1.bin"
+    cmd = [
+        sys.executable, str(ALBUM_ART),
+        "--cover", str(cover),
+        "--box", f"{width}x{height}",
+        "--dither", art["dither"],
+        "--palette-max", str(art["palette_max"]),
+        "--out", str(out),
+    ]
+    if art["bleed"]:
+        cmd.append("--bleed")
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise Refusal(
+            "art",
+            (proc.stderr or proc.stdout).strip() or f"album_art.py exited {proc.returncode}",
+        )
+    blob = out.read_bytes()
+    return {
+        "w": width,
+        "h": height,
+        "tiles": tiles,
+        "banks": 1,
+        "bytes": len(blob),
+        "sha256": hashlib.sha256(blob).hexdigest(),
+        "report": (proc.stdout or "").strip(),
+    }
+
+
 def bake(config_path: Path) -> int:
     config = Config(config_path)
     crate_dir = config_path.parent
@@ -950,6 +1137,10 @@ def bake(config_path: Path) -> int:
     # §5.0's step 5 and §11's PR-(1) row are explicit that `make album-bake` is
     # what runs the generator.
     spec, variant, facts = layout_for(config.layout_variant)
+    # 2b PR-(4): the album's cover is generated *after* the layout is resolved (the box is
+    # checked against the variant it derives) and *before* anything is written, so a refused
+    # box never leaves a stale ART1 or a module whose pool term disagrees with the image.
+    art_meta = prepare_art(config, facts, assets_dir)
     longest_title: tuple[float, str] = (0.0, "")
 
     print(f"album_bake: {config_path.relative_to(REPO) if config_path.is_relative_to(REPO) else config_path}")
@@ -963,6 +1154,13 @@ def bake(config_path: Path) -> int:
         f"{facts.bar_cell_px} px = {facts.bar_px} px, region {facts.region[0]}x{facts.region[1]} tiles, "
         f"tile_budget {variant.tile_budget} — the grid every reciprocal below is computed for (§6)"
     )
+
+    if art_meta is not None:
+        print(f"album_bake: art: {art_meta['w']}x{art_meta['h']} = {art_meta['tiles']} tiles, "
+              f"{art_meta['bytes']} B, sha256 {art_meta['sha256'][:16]}… (the pool term is the selection, "
+              "not the variant's ceiling — Decision B, 2b PR-(4))")
+        for line in art_meta["report"].splitlines():
+            print("  " + line)
 
     work = Path(tempfile.mkdtemp(prefix="album-bake-"))
     try:
@@ -1184,7 +1382,7 @@ def bake(config_path: Path) -> int:
                 f"{facts.variant.id!r} — the module that would compile is not the one this manifest was "
                 "written for (§5.0)",
             )
-        write_atomic(assets_rs_path, assets_rs(config, tracks, cursor, facts, longest_title).encode("utf-8"))
+        write_atomic(assets_rs_path, assets_rs(config, tracks, cursor, facts, longest_title, art_meta).encode("utf-8"))
         write_atomic(report_path, report_text(spec, [facts], budget=budget,
                                               budget_variant=facts.id).encode("utf-8"))
         # A track that left the config leaves its blob behind otherwise, and the
@@ -2562,6 +2760,33 @@ class VariantFacts:
                 )
             self.control_slots.append(control)
 
+    def select_image(self, tiles: int) -> None:
+        """Move the image term from the variant's ceiling to the album's selected box.
+
+        2b PR-(4)/Decision B: the *album* is what ships a box, so the budget the ROM
+        asserts against is the box it actually draws. `layout.rs` keeps the variant's
+        ceiling terms (`POOL_UPPER`); the selected term and the `POOL_DISTINCT` sum live
+        in the album-scoped `assets.rs`, so a variant's geometry module stays
+        album-independent and AP-3's snapshots keep comparing like with like.
+        """
+        if tiles > self.variant.image_tiles:
+            raise Refusal(
+                "image-tiles-over-budget",
+                f"[[variant]] {self.variant.id}: the selected art box needs {tiles} tiles, above the "
+                f"declared image_tiles {self.variant.image_tiles}",
+            )
+        self.pool_image = tiles
+        for term in self.scene_terms:
+            if "image" in term.terms:
+                term.terms["image"] = tiles
+                term.own_tiles = sum(term.terms.values())
+        self.resident_own = sum(term.own_tiles for term in self.scene_terms if term.resident)
+        self.projection_own = sum(term.own_tiles for term in self.scene_terms if not term.resident)
+        self.audited_own = self.resident_own + self.projection_own
+        self.pool_distinct = (
+            self.audited_own + self.text_distinct + self.variant.chrome_art_tiles + self.bar_pattern_tiles
+        )
+
     def _pool(self) -> None:
         variant = self.variant
         # The image term at the variant's derived ceiling: at 2a there is no
@@ -3394,16 +3619,13 @@ def layout_rs_text(facts: VariantFacts) -> str:
     add(f"pub const BAR_PATTERN_TILES: u32 = {_rs(facts.bar_pattern_tiles)};")
     add(f'pub const BAR_ELEMENT: &str = "{facts.bar_element.id if facts.bar_element else ""}";')
     add("")
-    add("/// The pool audit at this variant's own ceiling, with both bounds (§5.1, R14). `POOL_DISTINCT` is")
-    add("/// the bound a static-atlas build is held to; `POOL_UPPER` is what a per-cell renderer would")
-    add("/// allocate. Only the first is a gate for a `static` variant, and the second is kept because a")
-    add("/// margin is not a margin until the terms that will be added to it are.")
-    add(f"pub const POOL_IMAGE: u32 = {_rs(facts.pool_image)};")
+    add("/// The variant's shared pool terms, at its derived **ceiling** (§5.1, R14). The image term")
+    add("/// and the audited sum are album-scoped (2b PR-(4)'s Decision B: the album selects the box),")
+    add("/// so they are generated into `assets.rs`; this module stays a function of the spec alone.")
     add(f"pub const POOL_TEXT_DISTINCT: u32 = {_rs(facts.text_distinct)};")
     add(f"pub const POOL_TEXT_UPPER: u32 = {_rs(facts.text_upper)};")
     add(f"pub const POOL_CHROME_DECLARED: u32 = {_rs(variant.chrome_art_tiles)};")
     add(f"pub const POOL_CHROME_DERIVED: u32 = {_rs(facts.chrome_derived)};")
-    add(f"pub const POOL_DISTINCT: u32 = {_rs(facts.pool_distinct)};")
     add(f"pub const POOL_UPPER: u32 = {_rs(facts.pool_upper)};")
     add("")
     add("/// One band of §5.0's band table. `rows` is tile rows: the spec's unit, because agb allocates")
@@ -3813,12 +4035,6 @@ def layout_rs_text(facts: VariantFacts) -> str:
     add("const _: () = assert!(element_rows_are_derived(), \"a pitch is not tileable or a box is off-screen\");")
     add("const _: () = assert!(control_slots_are_inside_screen(), \"a control slot is off-screen\");")
     add("const _: () = assert!(TILE_BUDGET <= POOL_SLOTS, \"a declared budget exceeds the pool agb has\");")
-    add("const _: () = assert!(")
-    add("    POOL_DISTINCT == POOL_IMAGE + POOL_TEXT_DISTINCT + POOL_CHROME_DECLARED + BAR_PATTERN_TILES,")
-    add("    \"the pool audit does not add up: the terms and the sum disagree\"")
-    add(");")
-    add("const _: () = assert!(POOL_DISTINCT <= TILE_BUDGET, \"the distinct pool sum exceeds the budget\");")
-    add("const _: () = assert!(POOL_IMAGE <= IMAGE_TILES_MAX, \"the image term exceeds image_tiles\");")
     add("const _: () = assert!(RESIDENT_SCENES <= RESIDENT_SCENE_MAX, \"more scenes than the hardware has\");")
     add("const _: () = assert!(")
     add("    BAR_CELLS == 0")
@@ -5290,6 +5506,20 @@ def layout_self_test() -> int:
         "the title-line and region terms multiply by it; the probe measured the app's repaint "
         "shape, and the arithmetic terms say so in their own `_source` line")
 
+    # --- 2b PR-(4), Decision B: the album's box is the audited image term -----------------
+    print()
+    print("  2b PR-(4): selecting a smaller album box lowers the audited pool term")
+    selected = derive_variant(spec, spec.variants[0])
+    ceiling = selected.art_ceiling.tiles if selected.art_ceiling else 0
+    before = selected.pool_distinct
+    selected.select_image(144)  # 96x96 = 12x12 tiles
+    leg("a 96x96 box moves the image term off the ceiling and the sum with it",
+        f"{before - (ceiling - 144)}", f"{selected.pool_distinct}",
+        selected.pool_distinct == before - (ceiling - 144),
+        "Decision B (2b PR-(4)): the image term is the selected box, and `assets.rs` carries "
+        "the selected `POOL_IMAGE`/`POOL_DISTINCT` while `layout.rs` keeps the variant's ceiling "
+        "(`POOL_UPPER`), so a variant module stays album-independent")
+
     print()
     if failures:
         print(f"SELF-TEST FAILED: {len(failures)} leg(s)")
@@ -5398,7 +5628,7 @@ def self_test() -> int:
             assert not (root / "rate" / "src").exists(), "a refused bake wrote a pin module"
 
         def unknown_section_refused() -> None:
-            album = _write_config(root / "section" / "album.toml", sections="[art]\ncover = 'x.png'")
+            album = _write_config(root / "section" / "album.toml", sections="[viz]\nstreams = []")
             try:
                 bake(album)
             except Refusal as exc:
@@ -5406,7 +5636,7 @@ def self_test() -> int:
                 assert "Phase 3" in exc.detail, exc.detail
                 print(f"  refused — {exc.rule}: {exc.detail}")
             else:
-                raise AssertionError("[art] was silently ignored")
+                raise AssertionError("[viz] was silently ignored")
 
         def lpc_refused_by_the_child() -> None:
             wav = _test_wav(root / "lpc.wav")

@@ -179,6 +179,7 @@ pub fn cell_char(cell: Option<&Write>) -> char {
     }
     match w.source {
         Source::Glyph => glyph_char(w.tile),
+        Source::Art => 'A',
         Source::Chrome => match w.tile {
             chrome::FILL_PAGE => ' ',
             chrome::FILL_SCENE => '_',
@@ -238,6 +239,8 @@ fn tile_pixel(source: Source, tile: u16, tx: u32, ty: u32) -> u8 {
             let word = glyphs::GLYPHS[at];
             ((word >> (4 * tx)) & 0x0F) as u8
         }
+        // The preview's ART1 compositor is PR-(4b)'s; no art write exists yet.
+        Source::Art => 0,
     }
 }
 

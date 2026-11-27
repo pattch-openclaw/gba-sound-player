@@ -123,38 +123,18 @@ pub const MAX_CELLS: usize = 60;
 /// The most characters a drawn line can hold: the widest declared text element, in cells.
 pub const MAX_LINE: usize = layout::SCREEN_COLS as usize;
 
-/// The most cells one batch of writes carries: the whole visible screen, because a page fill must
-/// cover every cell. The region (480), the bands (120) and a frame's elements (≤92) all fit inside
-/// it. [`Writes::push`] returns whether the write fit, so a caller never records state for a cell
-/// that was dropped.
-pub const MAX_WRITES: usize = layout::SCREEN_COLS as usize * layout::SCREEN_ROWS as usize;
+/// The scene vocabulary lives in `gba-scene` since 2b PR-(4): a scene crate writes cells into
+/// a rectangle and the application owns the backgrounds. Re-exported here so every existing
+/// `surface::Writes` / `surface::Source` use-site (and the 2a host legs) is unchanged.
+pub use gba_scene::{MAX_WRITES, Rect, Source, Write, Writes};
 
 /// The most 8 px columns a declared bar can span. B's is 10; the bound is generous and asserted.
 pub const MAX_BAR_COLS: usize = 16;
 
-/// One cell's new content: where it goes, which tile, and which palette bank the map entry names.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Write {
-    pub x: u8,
-    pub y: u8,
-    pub tile: u16,
-    pub bank: u8,
-    /// Which tileset the index refers to. **Not optional, and not inferred**: two tilesets share one
-    /// 10-bit index space (§5.5a's atlas and §5.3's authored chrome), so a tile number alone cannot
-    /// say what it draws. A host renderer that guessed by index range would draw an icon where a
-    /// glyph belongs whenever the two happen to collide, and the ROM would be right while the
-    /// picture was wrong — so the plan carries the fact the device needs anyway.
-    pub source: Source,
-}
-
-/// The two tilesets a 2a surface draws from.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Source {
-    /// §5.3's authored chrome and §6's bar patterns (`chrome::TILES`).
-    Chrome,
-    /// §5.5a's glyph atlas (`glyphs::GLYPHS`).
-    Glyph,
-}
+const _: () = assert!(
+    MAX_WRITES == layout::SCREEN_COLS as usize * layout::SCREEN_ROWS as usize,
+    "gba-scene's batch bound and the variant's screen disagree"
+);
 
 /// §6's progress cell, in `0..=BAR_CELLS`.
 ///
@@ -190,103 +170,6 @@ impl BarCell {
     #[must_use]
     pub const fn get(self) -> u32 {
         self.0
-    }
-}
-
-/// A batch of [`Write`]s: what changed, in map coordinates. Fixed capacity because the ROM has no
-/// allocator on this path, and bounded by the full visible screen because a page fill must cover it.
-pub struct Writes {
-    buf: [Write; MAX_WRITES],
-    len: usize,
-    dropped: usize,
-}
-
-impl Writes {
-    #[must_use]
-    pub const fn new() -> Self {
-        const BLANK: Write = Write {
-            x: 0,
-            y: 0,
-            tile: 0xFFFF,
-            bank: 0,
-            source: Source::Chrome,
-        };
-        Self {
-            buf: [BLANK; MAX_WRITES],
-            len: 0,
-            dropped: 0,
-        }
-    }
-
-    /// Forget the batch and its overflow count. Capacity is fixed, so this is the only reuse path;
-    /// resetting `dropped` here makes the count a property of the batch a caller is about to inspect.
-    pub fn clear(&mut self) {
-        self.len = 0;
-        self.dropped = 0;
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Writes that did not fit in this batch. Zero for every geometry this tree declares; a non-zero
-    /// count is a spec that outgrew the buffer, and the host gate refuses it by name rather than
-    /// letting a partial draw look like a complete one.
-    #[must_use]
-    pub fn dropped(&self) -> usize {
-        self.dropped
-    }
-
-    #[must_use]
-    pub fn as_slice(&self) -> &[Write] {
-        &self.buf[..self.len]
-    }
-
-    /// Append one write, returning whether it fit. A caller that keeps a shadow of the map
-    /// ([`Cells`], the bar's column tiles, the icons) must update that shadow **only on `true`**: a
-    /// dropped write means the map did not change, so recording it would make the next frame's diff
-    /// skip the cell forever. `false` is also the signal the host gate reads through [`dropped`].
-    pub fn push(&mut self, w: Write) -> bool {
-        if self.len < MAX_WRITES {
-            self.buf[self.len] = w;
-            self.len += 1;
-            true
-        } else {
-            self.dropped += 1;
-            false
-        }
-    }
-
-    /// Fill a rectangle of cells with one tile. Used for the band fills and the `blank` scene — the
-    /// two places a rectangle, rather than a string, decides the cells.
-    pub fn fill(&mut self, x0: u32, y0: u32, cols: u32, rows: u32, tile: u16, bank: u8) {
-        let mut row = 0;
-        while row < rows {
-            let mut col = 0;
-            while col < cols {
-                self.push(Write {
-                    x: (x0 + col) as u8,
-                    y: (y0 + row) as u8,
-                    tile,
-                    bank,
-                    source: Source::Chrome,
-                });
-                col += 1;
-            }
-            row += 1;
-        }
-    }
-}
-
-impl Default for Writes {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -1421,6 +1304,9 @@ mod arm {
     pub struct Tilesets {
         pub chrome: TileSet,
         pub glyphs: TileSet,
+        /// The album art tileset. A valid one-tile placeholder until PR-(4b) builds it from the
+        /// parsed `ART1`; `Source::Art` exists now because the vocabulary does.
+        pub art: TileSet,
     }
 
     impl Tilesets {
@@ -1429,6 +1315,7 @@ mod arm {
             Self {
                 chrome: chrome::vram::tile_set(),
                 glyphs: glyphs::vram::tile_set(),
+                art: chrome::vram::blank_tile_set(),
             }
         }
 
@@ -1436,6 +1323,7 @@ mod arm {
             match source {
                 Source::Chrome => &self.chrome,
                 Source::Glyph => &self.glyphs,
+                Source::Art => &self.art,
             }
         }
     }

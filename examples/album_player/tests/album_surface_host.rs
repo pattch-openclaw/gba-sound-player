@@ -77,6 +77,7 @@ fn tile_char(cell: Option<&surface::Write>) -> char {
     }
     match w.source {
         surface::Source::Glyph => glyph_char(w.tile),
+        surface::Source::Art => 'A',
         surface::Source::Chrome => match w.tile {
             chrome::FILL_PAGE => ' ',
             chrome::FILL_SCENE => '_',
@@ -654,6 +655,8 @@ fn every_write_names_a_tile_that_exists_in_the_tileset_it_names() {
                         chrome::TILE_COUNT
                     );
                 }
+                // The ART1 tileset is PR-(4b)'s; the map index is 10 bits by hardware.
+                surface::Source::Art => assert!(w.tile < 1024, "{what}: art tile index is 10 bits"),
             }
         }
     };

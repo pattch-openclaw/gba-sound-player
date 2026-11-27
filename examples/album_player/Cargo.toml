@@ -37,6 +37,8 @@ license = "MIT"
 # probe, this crate and their host gates all paint from one implementation, and
 # the app may not `#[path]`-include anything under a probe directory.
 gba-playback = { path = "../../crates/gba-playback" }
+gba-scene = { path = "../../crates/gba-scene" }
+gba-art = { path = "../../crates/gba-art" }
 # The shipped backend's decoder (§4.2b). Optional so a stub-only image
 # (`--no-default-features --features backend-stub`) links no codec at all —
 # that arm is AP-9's "the UI cannot know which codec it drives" witness, and the

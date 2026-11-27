@@ -3036,6 +3036,16 @@ pinned, `clean`ed, regenerated, and covered by the byte-identity claim below. Be
 generated assets mean what the config says they mean; its audio-only half is checked from
 Phase 1.
 
+### 9.0a The configuration model: two masters, three scopes, and the crate seam *(ruled 2026-11-26, 2b PR-(4))*
+
+The data model, pinned here because 2b's art work is the first feature that touches all of it:
+
+- **Two tracked masters, different scopes.** `layout_spec.toml` is the **variant library**: geometry, bands, elements, faces, art boxes, control slots, palette banks, and each scene's kind/phase/resident. It is reusable across albums and gated on its own (AP-3). `album.toml` is the **per-album master for one ROM**: metadata, the `[[track]]` list, backend/out, `[layout] variant` (a *name*), `[art]` (cover, mode, box, palette/dither/bleed), later `[viz]`/`[game]`. **Albums select names, never numbers**: if the album carried geometry, every album would become a new gate and AP-3's per-variant snapshots would stop meaning anything (§11's ladder rule ii).
+- **Scene data vs scene geometry vs scene code.** *Data* is album-scoped: the art scene's image (`ART1`), the list's tracks (`ALBM1`), the card's metadata + counts + cover. *Geometry* is spec-scoped: band rows, element boxes, `row_px`, art boxes. *Code* is the app/crates. "Which scenes are included" has three separate meanings and they stay separate: **declared** (the spec's `SCENES`), **implemented** (the ROM's compile-time `SceneId` table, a filtered view), and **resident** (the audit flag). No per-album scene-set key is needed now; `[art] mode = "none"` simply leaves the art scene drawing nothing and the default scene on `blank`.
+- **Three generated scopes, not one monolith.** `layout.rs` is **spec + face files only** — one variant, one module, album-independent, so AP-3 snapshots and `--emit-layout` compare like with like. `assets.rs` is **album-scoped**: `ALBM1`, the track pins, the `ART1` blob, and the **selected** image term (`POOL_IMAGE`, `POOL_DISTINCT`) with the album's compile-time asserts. `layout_report.txt` spans both. **Decision B, ruled here:** the image term is the album's selected box, not the variant's ceiling — a 120×120 or 96×96 album audits and asserts against what it ships, and the ceiling stays in `layout.rs` only as `POOL_UPPER` for the variant. A 96×96 selection is witnessed in the layout self-test; the fixture's 128×128 equals B's ceiling, so it does not exercise the difference by itself.
+- **The crate seam (`gba-scene` + `gba-art`).** `crates/gba-scene` is the **vocabulary** a scene writes through: `Rect`, `Write`/`Writes`, `Source` (which tileset an index names), the screen-sized batch. `crates/gba-art` is its first **instance**: the `ART1` reader (lifted out of `examples/album_probe`, one implementation for the probe, the app and their gates) and `paint(art, rect, base_bank, &mut Writes)`. The app keeps the backgrounds, tilesets, commit and the compile-time scene registry. Guardrails: the sink is region-scoped and static, there is no `Scene` trait and no dynamic registry — §11's rule that a scene kind must be statically derivable and §16's "no general GUI toolkit" are what keep the bake able to audit a scene at all. `ART1` v1 is **ratified as the shipping format** rather than re-invented: every rule in it is a hardware fact, and the probe's spec and reader are the reference.
+- **Deferred by name, not silently.** `[art] mode = "cover+breathe"` is a per-frame palette cycle and belongs to the visualiser's cadence (Phase 4/AP-6); `bit_depth = 8` is the side-by-side §7 rules a screen; `bleed = true` is legal in §7 but no variant here declares the tiles for it (the tool prints the occlusion report; the budget refuses); `[viz]`/`[game]` and per-album scene sets are later phases.
+
 ### 9.1 The Make surface this implies
 
 Same naming discipline as the rest of the tree (`native-*` / `podman-*` twins, all
@@ -3617,7 +3627,7 @@ legs extend over the card; a host leg proves the card paints its rectangle opaqu
 chrome cell (§5.2's backing rule); the residency leg proves a declared non-resident scene is not
 counted in the pool sum. Must not re-baseline: AP-1, the chrome bands, or the audio path.
 
-**(4) Album art (A8), the card's picture, and the control art.** The `[art]` parser (D2's section
+**(4) Album art (A8), the card's picture, and the control art — 4a landed 2026-11-26, 4b remains.** The `[art]` parser (D2's section
 refusal becomes a parsed section with a per-key allow-list), `scripts/album_art.py` generalised
 from `scripts/album_probe_art.py` (its quantiser, 2×1 Bayer dither, `PALETTE_MAX` and 4bpp packing
 are already the spec), `ART1`, the art scene, the card's picture, and determinism (two runs
@@ -3631,6 +3641,8 @@ decision. Gate: `make album-art-check`, AP-4's reproduction, round-trip, allocat
 off-palette legs, and `bleed`'s occlusion report. Must not re-baseline: the derived box list or
 `image_tiles` — the image term moves from *ceiling* to *selection*, which the report shows as a
 change of term and not of budget.
+
+**Landed in two commits, because the art pipeline and the screen are different reviews.** **4a (2026-11-26):** `crates/gba-scene` (the vocabulary: `Rect`/`Write`/`Writes`/`Source`, re-exported by `surface` so the 2a legs keep their names) and `crates/gba-art` (the `ART1` reader lifted from the probe, plus `paint`); `scripts/album_art.py` (ffmpeg decode, median cut to ≤15 colours, ordered dither, `ART1` v1, occlusion report, self-test, deterministic); the `[art]` parser and its allow-list; the **album-scoped budget split** — `layout.rs` keeps the spec (and `POOL_UPPER` at the ceiling), `assets.rs` carries the selected `POOL_IMAGE`/`POOL_DISTINCT`, the `ART1` blob and the album's asserts (Decision B; a 96×96 selection is witnessed in the layout self-test); and `make album-art-check` (tool self-test, two runs byte-identical, the generated blob re-read through `gba-art`, a 96×96 tool run). The fixture album's 128×128 is B's ceiling, so the selection difference is the self-test's witness, not the fixture's. **4b remains:** the art scene and card picture, the AP-4 control-art fixture/final icons, the boot `art=` line, and the `gba-art` tileset/palette loading in `Tilesets` (currently a valid one-tile placeholder behind `Source::Art`).
 
 **(5) The presentation path (§5.7).** AP-3c's paired arms A/B/C are the instrument and can land
 inside this PR — **and from 2026-11-25 the instrument list is A/B/C _plus_ arm D and the

@@ -110,8 +110,10 @@ dependencies = [
  "agb",
  "flac-lite",
  "flac-lite-gba",
+ "gba-art",
  "gba-audio-hw",
  "gba-playback",
+ "gba-scene",
 ]
 
 [[package]]
@@ -322,6 +324,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gba-art"
+version = "0.1.0"
+dependencies = [
+ "gba-scene",
+]
+
+[[package]]
 name = "gba-audio-hw"
 version = "0.1.0"
 dependencies = [
@@ -330,6 +339,10 @@ dependencies = [
 
 [[package]]
 name = "gba-playback"
+version = "0.1.0"
+
+[[package]]
+name = "gba-scene"
 version = "0.1.0"
 
 [[package]]

@@ -59,7 +59,10 @@ pub use gba_playback::{checksum, nodiv, playback};
 // rate; inverted on purpose, so a shared module names neither.)
 const _: () = assert!(geometry::PLAYBACK_RATE_HZ == 1 << nodiv::RATE_LOG2);
 
-pub mod art1;
+// ART1 moved to `crates/gba-art` in 2b PR-(4): the probe, the app and their gates share
+// one implementation (§2.2's lift rule). The path stays `album_probe::art1`, so every
+// use-site and the host suite are unchanged.
+pub use gba_art::art1;
 pub mod art_pin;
 pub mod position;
 pub mod synth;

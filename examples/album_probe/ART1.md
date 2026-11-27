@@ -7,7 +7,11 @@ generator (`scripts/album_probe_art.py`) and the reader
 (`src/art1.rs`, in this crate) are written against one spec rather than
 converging on each other by accident.
 
-**This is a probe layout, not the shipping format.** §7's own note is that the
+**This is the shipping format as of 2b PR-(4) (2026-11-26).** It began as a probe layout,
+and the probe's reader/writer pinned it; PR-(4) ratified it because every rule below is a
+hardware fact, and the alternative was a second spec for the same conventions. The reader now
+lives in `crates/gba-art` (`gba_art::art1`), used by the probe, the app and their gates; this
+file is the reference. The original note, kept: §7's own note is that the
 real `ART1` gets designed under AP-4 with the bake tool in the loop; what Phase 0
 needs is the two things that format is made of — the *conventions* (4bpp tile
 order, BG-map entry encoding, `Rgb15` banks, an off-palette colour being an error)

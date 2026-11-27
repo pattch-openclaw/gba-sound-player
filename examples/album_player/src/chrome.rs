@@ -492,6 +492,22 @@ pub mod vram {
         unsafe { TileSet::new(bytes, TileFormat::FourBpp) }
     }
 
+    /// One blank 4bpp tile, for a source the app has a slot for but has not loaded yet.
+    ///
+    /// `gba-scene` gained `Source::Art` with 2b PR-(4); the art tileset itself is built from the
+    /// parsed `ART1` in PR-(4b), so until then `Tilesets` carries this valid one-tile set rather
+    /// than an `unreachable!` that would be the only arm a scene could hit.
+    static BLANK_WORDS: [u32; 8] = [0; 8];
+
+    #[must_use]
+    pub fn blank_tile_set() -> TileSet {
+        // SAFETY: `BLANK_WORDS` is a `[u32; 8]` static (4-byte aligned) and 32 bytes is one
+        // whole 4bpp tile — `TileSet::new`'s two preconditions.
+        let bytes: &[u8] =
+            unsafe { core::slice::from_raw_parts(BLANK_WORDS.as_ptr().cast::<u8>(), 32) };
+        unsafe { TileSet::new(bytes, TileFormat::FourBpp) }
+    }
+
     /// A palette bank from this module's platform-free `u16` table.
     #[must_use]
     pub fn palette(bank: &[u16; 16]) -> Palette16 {
