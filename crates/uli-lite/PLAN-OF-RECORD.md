@@ -120,6 +120,29 @@ when the gate in the last column is measured and its result is recorded there.
 | **W3 — the product app switches to ULI2** | `backend-uli2` + `src/backend/uli2.rs`, the derived 32,768 Hz / 512-sample geometry, the ULA2→`ALBM1` manifest seam, the app-side UI cost, and the album-length hardware run | `ALBUM-PLAYER.md` §4.2b, §11 Phase 5, AP-9/R7/Q3 | **open (app-side; can run in parallel with W2)** | `make album-rom BACKEND=uli2` plays an album from a fresh checkout; the three-arm compile and runtime parity pass; the UI fits the measured margin; the hardware run matches the FLAC arm's witness |
 | **W4 — codec/player residuals and S9** | the non-decode gate half (7.80 points at ~2.9x C), the dense-frame entropy tail, U5's 1 Hz redraw defect, S9's `--dacw 1` arm and the SNR licence test, and the ULI2 provenance/publish decision (root MIT exists; `NOTICE.md` marks the three crates unresolved) | this file "Current state"; `ULI2.md` §Gates/§Risks; §S9 | **open; only U5's redraw defect can block W3** | each item is measured against its own gate; U5's redraw defect is closed and the UI margin re-taken; S9's arms are admitted only by the SNR licence test |
 
+### W3 — the app switch, as a PR ladder (2026-11-27)
+
+The W3 row above is one thread, not one PR. The app work has four independent risk surfaces —
+the backend adapter, the bake/manifest model, the 16,384 → 32,768 Hz geometry, and the
+ROM/UI/hardware behaviour — and each can be gated on its own. The ladder is below; **W3 is
+finished only when all five steps land**. App-side detail belongs to `ALBUM-PLAYER.md` §11
+Phase 5; this section is the index and the gate list.
+
+| step | scope | depends | gate |
+|---|---|---|---|
+| **W3.1 — backend geometry and rate** | Decide and record the `ALBM1`↔ULA2 asset model; parameterise `geometry.rs` for 32,768 Hz / 512-sample frames; make `meta::PRODUCT_RATE_HZ`, `nodiv::RATE_LOG2`, `playback_rate_for_stream`, period/ring/prefill and the compile-time pins per-backend. Keep FLAC as the only ROM backend. | W2's asset shape (the decision; geometry work can begin in parallel) | FLAC album unchanged; both geometry arms host-pinned; no 16,384 assumption left outside the FLAC arm; the ULA2/`ALBM1` decision is written down. |
+| **W3.2 — ULI2 bake and manifest** | Add `backend = "uli2"` to `album_bake.py` and `meta.rs`; add the ULA2 asset path (`scripts/uli_prep.py` + `crates/uli-enc` + Rust pin); emit `ALBM1` + generated assets/pins. No ROM playback yet. | W3.1's decision; W2's asset path | A ULI2 bake produces a valid `ALBM1` + ULA2 asset; `album-pack-check` and the host reader accept it; the FLAC bake is unchanged. |
+| **W3.3 — `backend-uli2` adapter** | Add the feature and `src/backend/uli2.rs`; link `uli-lite-gba`/`uli-playback`; wrap `UliSource` behind the app `PcmSource`; prove the three-arm seam. Stub-only still links no codec. | W3.1, W3.2 | `album-seam-test` compiles and runs `flac` + `uli2` + `stub`; host pin/decode parity; bounded buffers and no allocation. |
+| **W3.4 — ROM integration** | `make album-rom BACKEND=uli2`; output-stage/fused rounding, feeder/ring chunking, skip/preroll/reset, UI clock/position arithmetic. | W3.3 | `album-test` and `album-rom` under mGBA: zero underruns, period audit closed, UI redraw measured inside the margin; the `flac` arm stays green. |
+| **W3.5 — hardware and default switch** | Album-length ULI2 run on hardware; compare the UI budget; flip the default backend; keep FLAC as the A/B control and archive its product path as alternate. | W3.4 | Hardware run: zero underruns, clean period audit, visible UI; `BACKEND=uli2` builds from a fresh clone as the default; `BACKEND=flac` still passes. |
+
+**Why not one PR.** A single PR can prove the adapter on a short album, but it cannot safely
+deliver W3's exit gate: it would mix a schema decision, a clock change, a decoder link and a
+UI that cannot be measured until the end. The repository's existing ladders split on exactly
+this kind of boundary. W3.1 is deliberately doc + geometry only; W3.2 carries the largest
+single risk (the `ALBM1`↔ULA2 model); W3.3 is comparatively small because
+`crates/uli-playback` already owns the ULI2 source seam.
+
 **Order and meaning for a v1 switch.** W1 is done; W2 is the next codec-track task because it
 removes the last build-time encoder dependency on `gba-audio` and makes the asset path
 reproducible from a fresh clone. W3 is the actual FLAC→ULI2 product switch and is application
