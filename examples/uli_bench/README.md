@@ -56,7 +56,9 @@ and the venv `python3`, and runs:
    32,768 Hz and writes `album.f32` (f32 interleaved stereo at PCM16 scale) and
    `tracks.tsv`. The `bioluminescent-32768hz-8bit-stereo.wav` beside the master is a
    listening derivative, not this target's input.
-2. the reference encoder → `assets/biomaster.uli`;
+2. the reference encoder → `assets/biomaster.uli` — **W2**
+   (`crates/uli-lite/PLAN-OF-RECORD.md` → "Remaining ULI2 work — the four threads") will
+   point this step at `crates/uli-enc`; until then it is the oracle;
 3. the reference decoder (`--seektest`) → `assets/ref/`;
 4. `scripts/uli_album_pin.py` → `src/album_pin.rs` (the C-sourced FNV pin).
 

@@ -196,14 +196,14 @@ exports, so source it before `make`.
   not cost that, because it leaves the caches alone. Quote warm numbers only, and say so.
 - **2026-11-25, aarch64 Ubuntu 24.04, root-free pinned setup:** `make test-rom` boots
   (0 tests, expected), `make check` clean, `make uli-check` pass, `make uli-test`
-  **17 suites / 93 tests**, `make uli-overlay-test` pass, `make uli-probe` reproduces the
+  **18 suites / 99 tests**, `make uli-overlay-test` pass, `make uli-probe` reproduces the
   2,400 `band_rdo` cases, `make uli-frame-diff` **exit 0** (identical on 24 of 24 since S8-5),
   `make uli-oracle-check` exit 0 — the oracle is the recorded `clean` build
   (`sha256 1991ee6c…`, zero fused multiply-adds; the pre-S8-4b fusing binary is the named
   `native` profile, and a mismatch means the measurements are against a different oracle —
   read the note, do not re-pin it),
-  `make uli-accept ULI_ACCEPT_ONLY=fast` runs the S8 progress cell in ~15 s and exits 2
-  (DIFF is the expected answer until S8 closes),
+  `make uli-accept ULI_ACCEPT_ONLY=fast` runs the S8 gate cell in ~15 s and exits 0
+  (**MATCH**; S8 was closed 2026-11-26 and its pin ledger discharged 2026-11-27),
   `make uli-bench` `[uli-bench] PASS`, `make flac-check` pass, `make gafp-pack-check`
   9 tests, `make album-bake` + `make album-pack-check` 54 tests. This is the baseline the
   current `.agents/env.sh` + setup script produce.
