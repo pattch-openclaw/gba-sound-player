@@ -28,6 +28,7 @@ edition = "2024"
 # a crate of its own (ALBUM-PLAYER.md §2.2). Platform-free like the core, so it
 # is NOT under the arm-target block: the host suite compiles it too.
 gba-playback = { path = "../../crates/gba-playback" }
+gba-art = { path = "../../crates/gba-art" }
 
 [target.'cfg(target_arch = "arm")'.dependencies]
 agb = "0.25.0"

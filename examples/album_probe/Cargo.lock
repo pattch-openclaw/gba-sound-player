@@ -108,6 +108,7 @@ name = "album-probe"
 version = "0.1.0"
 dependencies = [
  "agb",
+ "gba-art",
  "gba-playback",
 ]
 
@@ -308,7 +309,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gba-art"
+version = "0.1.0"
+dependencies = [
+ "gba-scene",
+]
+
+[[package]]
 name = "gba-playback"
+version = "0.1.0"
+
+[[package]]
+name = "gba-scene"
 version = "0.1.0"
 
 [[package]]

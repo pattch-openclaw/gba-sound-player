@@ -707,3 +707,16 @@ inheritance".
   analysis (mixing, DMA, timers)
 - <https://www.littlesounddj.com/lsd/index.php> — LSDJ, the reference
   GBA tracker/instrument this project is loosely inspired by
+
+## Licence
+
+Copyright (c) 2026 Samuel Sampson.
+
+This project is **MIT licensed** (open source). You may use, copy, modify, merge, publish,
+distribute, sublicense and sell it, provided the copyright and permission notice travel with
+copies or substantial portions of the Software. The full terms are in [`LICENSE`](LICENSE).
+
+Third-party components keep their own licences, listed in [`NOTICE.md`](NOTICE.md) — notably
+`agb` (MPL-2.0), the vendored `opus-rs` (BSD-3-Clause) and the OFL font cuts under
+`assets/fonts/`. The `uli-*` crates derived from the `gba-audio` reference have **unresolved
+licensing** and are not covered by the project licence until that is settled.

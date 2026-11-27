@@ -1,0 +1,12 @@
+[package]
+name = "gba-art"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "ART1: the album art blob's reader, and the paint that writes it into a scene rectangle. Platform-free no_std; the format is specs/album_probe/ART1.md."
+
+[dependencies]
+gba-scene = { path = "../gba-scene" }
+
+[workspace]

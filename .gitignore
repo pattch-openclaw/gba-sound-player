@@ -239,3 +239,5 @@ __pycache__/
 # `make album-card-test`'s headless run log (2b PR-(3)): the gate script plus one Select
 # edge, read back by the target that wrote it — the same per-run rule.
 /album-card-test.log
+# 2b PR-(4)'s art gate log: the tool self-test, two runs, and the ART1 host legs.
+/album-art-test.log

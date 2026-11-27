@@ -15,7 +15,7 @@
         uli-player-cross uli-player-cross-rom \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
-        album-bake album-pack-check album-seam-test album-layout-test album-glyphs-test album-rom album-player-rom album-test album-card-test \
+        album-bake album-pack-check album-seam-test album-layout-test album-glyphs-test album-rom album-player-rom album-test album-card-test album-art-check \
         album-preview album-diff-rom \
         clean clean-cache check help toolchain-check target-spec-check
 
@@ -247,6 +247,7 @@ ALBUM_REPLAY_ROM := album-player-replay.gba
 ALBUM_TEST_LOG := album-test.log
 ALBUM_CARD_ROM := album-card.gba
 ALBUM_CARD_LOG := album-card-test.log
+ALBUM_ART_LOG := album-art-test.log
 
 # --- the core and its overlay -------------------------------------------------
 FLAC_CRATE_DIR_MANIFEST := $(abspath crates/flac-lite/Cargo.toml)
@@ -336,7 +337,7 @@ ALBUM_PROBE_ART_TOOL := scripts/album_probe_art.py
 # never reformat — a CI `make test` must not mask drift that `make check` exists
 # to fail on.
 
-WORKSPACES := . crates/flac-lite crates/flac-lite-gba crates/gba-playback \
+WORKSPACES := . crates/flac-lite crates/flac-lite-gba crates/gba-playback crates/gba-scene crates/gba-art \
               crates/gba-audio-hw \
               examples/flac_spike \
               examples/overlay-kernel-check examples/opus_spike \
@@ -1964,7 +1965,7 @@ album-card-test: toolchain-check album-bake
 	    || echo "album-card-test: the runner exited $$status; the log is still the verdict"; \
 	  grep -q '^\[album-rom\] verdict PASSED' $(ALBUM_CARD_LOG) \
 	    || { echo "album-card-test: no 'verdict PASSED' line — see $(ALBUM_CARD_LOG)"; exit 1; }; \
-	  grep -q '^\[album-rom\] scene: last=title_card changes=1 implemented=2 declared=4' $(ALBUM_CARD_LOG) \
+	  grep -q '^\[album-rom\] scene: last=title_card changes=2 implemented=3 declared=4' $(ALBUM_CARD_LOG) \
 	    || { echo "album-card-test: Select did not reach the title card — the post-drain scene summary is missing or names another scene"; exit 1; }; \
 	  grep -q 'feed: .*underflows=0' $(ALBUM_CARD_LOG) \
 	    || { echo "album-card-test: the ring booked an underflow across the card's paint — see $(ALBUM_CARD_LOG)"; exit 1; }; \
@@ -1979,6 +1980,39 @@ album-card-test: toolchain-check album-bake
 # a human is watching. It says so twice rather than looking like a pass: a `[album-rom] NOTE` line at
 # boot, and `pcm=SKIPPED, fifo=SKIPPED, assets=SKIPPED — built without deep-audit` in the verdict.
 # `album-bake` stays a prerequisite for the same R11 reason as `album-rom`.
+# 2b PR-(4)'s art gate (AP-4). Three instruments, each named:
+#   * the tool's own self-test (box/off-palette/palette-cap/round-trip/determinism);
+#   * two direct runs over the tracked cover, byte-identical — the bake's determinism leg
+#     covers the album path, this covers the tool in isolation;
+#   * the host suite over the *generated* blob through `gba-art`'s shipping parser and the
+#     paint plan, which is the round-trip and allocation leg (`tests/album_art_host.rs`).
+# A box smaller than the variant's ceiling is exercised as a tool run, because Decision B's
+# selection term is what that run would feed the bake.
+album-art-check: toolchain-check album-bake
+	@python3 scripts/album_art.py --self-test
+	@tmp=$$(mktemp -d); \
+	  python3 scripts/album_art.py --cover assets/images/bioluminescent.jpeg --box 128x128 \
+	    --out $$tmp/a.bin >/dev/null || { rm -rf $$tmp; exit 1; }; \
+	  python3 scripts/album_art.py --cover assets/images/bioluminescent.jpeg --box 128x128 \
+	    --out $$tmp/b.bin >/dev/null || { rm -rf $$tmp; exit 1; }; \
+	  cmp -s $$tmp/a.bin $$tmp/b.bin \
+	    || { echo "album-art-check: two runs of album_art.py differ — the art is not reproducible"; rm -rf $$tmp; exit 1; }; \
+	  python3 scripts/album_art.py --cover assets/images/bioluminescent.jpeg --box 96x96 \
+	    --out $$tmp/small.bin >/dev/null \
+	    || { echo "album-art-check: a 96x96 box (Decision B's selection case) was refused by the tool"; rm -rf $$tmp; exit 1; }; \
+	  rm -rf $$tmp
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	@cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) \
+	    --test album_art_host > $(abspath $(ALBUM_ART_LOG)) 2>&1; \
+	  status=$$?; \
+	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath album-art-test.log) \
+	    || { tail -n 30 $(abspath album-art-test.log); echo "album-art-check: the ART1 host legs did not pass — see $(ALBUM_ART_LOG)"; exit 1; }; \
+	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath album-art-test.log) | tail -1); \
+	  [ -n "$$n" ] && [ "$$n" -ge 2 ] \
+	    || { echo "album-art-check: collected '$$n' ART1 tests, needs >= 2"; exit 1; }
+	@echo "album-art-check passed: the tool self-tests, two runs agree, a 96x96 box is legal, and the generated blob re-reads through gba-art"
+
 album-player-rom: album-bake
 	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --bin album-play \
 	  --no-default-features --features "backend-flac arm-kernel"
@@ -2303,8 +2337,8 @@ clean-outputs:
 	@rm -f $(SPIKE_CRATE_DIR)/src/rate_assets.rs $(SPIKE_CRATE_DIR)/src/rate_pcm.rs
 	@rm -f $(SPIKE_CRATE_DIR)/assets/rate_*.bin
 	@rm -f uli-bench*.log uli-attrib*.log
-	@rm -f album-probe*.log
-	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_LAYOUT_RS) $(ALBUM_LAYOUT_REPORT) $(ALBUM_GLYPHS_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_LAYOUT_GATE_LOG) $(ALBUM_GLYPHS_GATE_LOG) $(ALBUM_ROM_RUN_LOG) $(ALBUM_TEST_LOG) $(ALBUM_CARD_LOG)
+	@rm -f album-probe*.log album-art-test.log
+	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/art1.bin $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_LAYOUT_RS) $(ALBUM_LAYOUT_REPORT) $(ALBUM_GLYPHS_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_LAYOUT_GATE_LOG) $(ALBUM_GLYPHS_GATE_LOG) $(ALBUM_ROM_RUN_LOG) $(ALBUM_TEST_LOG) $(ALBUM_CARD_LOG) $(ALBUM_ART_LOG)
 	@rm -f $(ALBUM_PREVIEW)-*.png $(ALBUM_PREVIEW)-*.png.txt
 	@find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} + 2>/dev/null || true
 
@@ -2452,6 +2486,8 @@ help:
 	@echo "      album-seam-test (the seam's host gate: derived geometry vs the shipped figures, both"
 	@echo "      backend arms, the FLAC arm's fnv_pcm and fnv_fifo_l/fnv_fifo_r pins, and a stub-only"
 	@echo "      build with no decoder linked),"
+	@echo "      album-art-check (2b PR-(4): the art tool's self-test, two byte-identical runs,"
+	@echo "      and the generated ART1 re-read through crates/gba-art — AP-4's host half),"
 	@echo "      album-card-test (2b PR-(3): the gate script plus one Select edge — the title"
 	@echo "      card's paint path under live audio, with the run's whole verdict still asserted),"
 	@echo "      album-layout-test (2a's layout gate: the generator's own self-test with §9.0's nine"

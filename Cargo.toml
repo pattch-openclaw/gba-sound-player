@@ -2,6 +2,7 @@
 name = "gba-sound-player"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 # Examples are declared explicitly below. autoexamples = false keeps the standalone
 # FLAC compile probe (examples/symphonia_flac_probe/ — its own Cargo.toml,
 # intentionally broken; see FLAC.md) from being auto-discovered and built by
