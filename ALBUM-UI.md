@@ -49,8 +49,11 @@ line that keeps §16's "no GUI toolkit" intact (§10, C1).
 ### 1.2 What an item is
 
 - **A chrome item** is one of the transport actions the chrome draws, declared in the layout spec with
-  an **identity**, the **verb** its activation performs, and a **slot**. The v1 set is `previous`, `play_pause`, `next`, and —
-  see U4 — `restart`. The list is finite, declared, and compile-time.
+  an **identity**, the **verb** its activation performs, and a **slot**. The ruled v1 set is exactly
+  **`previous`, `play_pause`, `next`**, in that order (2026-11-27) — the caller's "in the end the order
+  should be `Previous Track`, `Play Pause`, `Next Track`". The list is finite, declared, and
+  compile-time. `restart`'s disposition — the fifth drawing that has no place in a three-item ring —
+  is U4, and it is the one product decision this ruling leaves.
 - **A scene item** is whatever that scene decides its navigable things are. For `list` it is one
   **track row**, derived from `ALBM1`'s `n_tracks` and the window geometry — i.e. **runtime data, not
   a spec constant**. For a scene with no items (`blank`, the `art` scene, the `title_card`), the set
@@ -71,7 +74,7 @@ the schema gaps in §6 (G3).
 | **R5 — the pane remembers** | The chrome remembers its last item; the scene remembers its last cursor and scroll. Leaving a pane does **not** reset either, and **a remembered cursor wins on re-entry** — `enter` is what a cold entry (or a declared `first`) uses (§1.6, U3). |
 | **R6 — exactly one indicator** | At most one focus indicator is visible: the focused pane draws it, the other draws none. Two indicators on screen at once is a bug, not a style. |
 | **R7 — shape, not hue** | The indicator is carried by **shape and luminance** (§5.6). A palette inversion alone is refused: it is the "differs only in colour" defect the plan already names. |
-| **R8 — the zero state** | **At boot no pane has the focus and no indicator is drawn.** The first **D-pad** press gives the chrome the focus (§1.4); the direction pressed picks the item it lands on. A scene can never be the first pane to take focus. This is the caller's answer to U1 (2026-11-27) and it replaces "start on `play_pause`": nothing is selected until the user navigates. |
+| **R8 — the zero state** | **At boot no pane has the focus and no indicator is drawn.** The first **D-pad** press — *any* direction — gives the chrome the focus **on its first item** (`previous`, §4.1). The direction is not used: entry is always the first item, which is the caller's answer to U1/U13 (2026-11-27). A scene can never be the first pane to take focus. |
 | **R9 — unstarted is not paused** | Before `Start` the product is in a **boot state**, not a transport state: no audio chain, no period served, no clock, and **every action except `Start` (and the BIOS chord) is discarded**. It is one one-way flag (`Boot::Unstarted → Boot::Started`), not a modal stack; §7 is its spec. |
 
 ### 1.4 The pane transfer
@@ -81,14 +84,19 @@ the scene, `Down` moves toward the chrome.** Precisely:
 
 | action | no focus yet (R8) | focus is in the chrome | focus is in the scene |
 |---|---|---|---|
-| `Up` | **chrome takes the focus**, on the primary item (`play_pause`) | if the scene has items, the scene takes the focus (its `enter` policy chooses the item); if not, **stays in the chrome** | scene-local (usually one item up) |
-| `Down` | **chrome takes the focus**, on the primary item (`play_pause`) | no-op in the chrome (there is nothing below it) | scene-local; at the last item/row it leaves per `edge` |
-| `Left` | **chrome takes the focus**, on the **last** item (the ring's other end) | chrome ring (R2) | scene-local |
-| `Right` | **chrome takes the focus**, on the **first** item (`previous`) — which is the caller's journey's first `Right` | chrome ring (R2) | scene-local |
+| `Up` | **chrome takes the focus**, on the **first item** (`previous`) | if the scene has items, the scene takes the focus (its `enter` policy chooses the item); if not, **stays in the chrome** | scene-local (usually one item up) |
+| `Down` | **chrome takes the focus**, on the **first item** (`previous`) | no-op in the chrome (there is nothing below it) | scene-local; at the last item/row it leaves per `edge` |
+| `Left` | **chrome takes the focus**, on the **first item** (`previous`) | chrome ring (R2) | scene-local |
+| `Right` | **chrome takes the focus**, on the **first item** (`previous`) — which is the caller's journey's first `Right` | chrome ring (R2) | scene-local |
 | `L`/`R` (shoulders) | **scene cycle, global** — focus stays in the zero state | **scene cycle, global** — `R` next, `L` previous, wrapping the implemented-set (§1.5) | same, still global |
-| `A` | **ignored** (there is no focused item; U13) | **activate the focused chrome item** | **activate the focused scene item** |
+| `A` | **ignored** (there is no focused item) | **activate the focused chrome item** | **activate the focused scene item** |
 | `B` | ignored | no-op (B is the game's button, and the chrome is the bottom pane) | **leave the scene**, focus returns to the chrome's remembered item |
 | `Start` | **transport toggle, global** — and before the first press, the one key that leaves R9's boot state | **transport toggle, global** (never contextual) | same — a scene cannot claim `Start` |
+
+One thing the zero state deliberately does **not** do: it does not choose an item from the direction
+pressed. Every D-pad direction enters at the ring's **first** item (`previous`), because "the first
+thing in the list" is the only entry point that needs no convention; the journey's `Right Right` then
+reads `previous` → `play_pause`, which is the same two presses the caller described.
 
 Two consequences stated so they are not discovered later:
 
@@ -228,9 +236,11 @@ Constraints that keep this inside the plan's budget:
 
 ### 4.1 Items and order
 
-Declared, in this order (v1): `previous`, `play_pause`, `next` — and `restart` if U4 says yes. The
-order is a **declared field**, not the order the slots happen to sit in, and the two must agree: the
-generator refuses an item order that is not the left-to-right order of its slots (G4).
+**Ruled 2026-11-27: the ring is exactly three items, in this order — `previous`, `play_pause`,
+`next`.** The order is a **declared field**, not the order the slots happen to sit in, and the two
+must agree: the generator refuses an item order that is not the left-to-right order of its slots
+(G4). `restart` is **not** a ring item; U4 is its disposition (retire the drawing and the action, or
+declare a fourth item — the schema takes N, the ring's length is not hard-coded).
 
 **The current drawn order is wrong for this model and has to move.** Today the slots are declared in
 button order — `select@21, start@22, right@23, left@24, down@25` — and the drawings are
@@ -418,7 +428,9 @@ blocking for UI-1, the rest for UI-2/UI-3.
 The caller's journey opens on **album art with "PRESS START"**, and nothing happens until `Start` —
 **including no navigation**. That is a new boot state, and this section is its spec: what is on screen,
 what has been computed, what has not, and what the measurement becomes. The *flip is approved in
-principle*; the open decision is **where the line sits** (U9a), because the boot path is not one step.
+principle*, **and the placement is ruled (U9a = C, 2026-11-27)**; the boot screen (U9b) is what
+remains open. The boot path is not one step, so what follows itemises it and says exactly where the
+gate sits under C.
 
 ### 7.1 What the boot path does today, and what the gate could sit in front of
 
@@ -444,7 +456,7 @@ So "nothing happens before `Start`" has a precise meaning, and three honest plac
 | **B — after `prefill`** | yes | **yes** (≈ 560 ms of CPU spent before the user asks) | **≈ 0** |
 | **C — after `gate`, before `prefill`** | **yes** | **no** | ≈ **305 ms** (prefill + prime) |
 
-**Recommended: C.** It splits the boot path where the two concerns actually separate: *validating the
+**Ruled 2026-11-27: C.** It splits the boot path where the two concerns actually separate: *validating the
 album* is boot work whose failure must be shown **before** the prompt (a `PRESS START` that then
 refuses is the worst possible moment for R5's error screen), while *decoding the first half-second of
 audio* is playback work that has no business running before the user asked for playback. A is the
@@ -550,7 +562,7 @@ The work does not need a new phase; it lands inside the ladder that already exis
 |---|---|---|---|
 | **UI-1 — the focus core** | `ui.rs` (pane, action table, chrome ring, dispatch), the chrome item declarations, L/R scene cycle, `Select` unbound, the indicator (option A), AP-10's F1–F5/F8 | §4.2's indicator term; §6's spec fields | 2b's PR-(5) window (the presentation PR) or its own PR before it |
 | **UI-2 — the list** | `list` scene with cursor, scroll, now-playing mark, enter/leave; the journey's F7 arm | UI-1; the list's geometry (already declared) | 2b PR-(6), which already owns "scroll, cursor, now-playing mark" |
-| **UI-3 — the boot flow** | `Boot::Unstarted` + `State::Idle`; `Start` arms audio from the prompt scene; the three AP-1 terms restated in the same PR | UI-1 (focus), **U9a** (where the gate sits — C recommended) | its own PR (§5.2/§5.3 say so) |
+| **UI-3 — the boot flow** | `Boot::Unstarted` + `State::Idle`; `Start` arms audio from the prompt scene; the three AP-1 terms restated in the same PR | UI-1 (focus); **U9a ruled: C** (validate at boot, defer the decode) | its own PR (§5.2/§5.3 say so) |
 | **UI-4 — the expensive indicator** | option C (sprite) if F6 says the commit rate is a problem | AP-3c/§5.7's chrome work | after PR-(5) |
 
 **UI-1 is the smallest thing that can be reviewed**: it changes no tile, no audio and no scene
@@ -588,21 +600,21 @@ measurement until §7's own PR.
 
 | # | question | recommendation, and why |
 |---|---|---|
-| **U1** | — | **Answered 2026-11-27 (the caller).** *No indicator at first*: the **zero state** (R8) — nothing owns the focus until the first D-pad press, which gives it to the **chrome**. The direction decides the entry item: `Right` → `previous` (the journey's first press), `Left` → the ring's last item, `Up`/`Down` → the primary `play_pause` (U13). A scene can never be the first pane to take focus |
+| **U1** | — | **Answered 2026-11-27 (the caller).** *No indicator at first*: the **zero state** (R8) — nothing owns the focus until the first D-pad press, which gives it to the **chrome on its first item** (`previous`). A scene can never be the first pane to take focus |
 | **U2** | — | **Answered 2026-11-27 (the caller).** "Wrapping is a principle, but individual scenes are responsible for their own behaviour": the chrome is a ring (R2), its vertical axis is the pane transfer (R3), and a scene declares its own `edge` (R4) — **the list uses `exit_to_chrome`**, which is the journey, and `wrap` stays legal for a scene that wants it |
 | **U3** | — | **Answered 2026-11-27 (the caller): remembered cursor wins.** R5/§1.6: a re-entry restores the scene's cursor; `enter` is what a **cold** entry (or a declared `first`) uses. The list declares `now_playing` for the cold case, which is the journey's "first element" when the album is at track 1 |
-| **U4** | Is `restart` a chrome item? It has art and a slot, but the journey never visits it | **Yes**, last in the ring, so the drawn set and the focusable set are the same thing. The alternative — draw it and make it unreachable — is an item that exists for `A` but not for `Right`, which no gate can explain |
+| **U4** | `restart`'s disposition: the caller's ruled ring is exactly three items, but a fifth drawing (a return glyph) is already authored and its action exists | **Recommend retiring it for v1** — drop the slot, the drawing and the action, so the drawn set, the focusable set and the ring are the same three things (chrome term 10 → 9, B's pool sum 463 → 462). The alternatives are a **fourth ring item** (contradicting the stated order) or a drawn-but-unreachable icon (an item only `A` could reach, which no gate can explain). The action is recoverable later by declaring a fourth item — the schema does not hard-code three |
 | **U5** | What does `Select` become? | **Unbound and reserved for v1** (recorded, not merely unimplemented), because an unbound button is a promise and a bound one is a decision. Candidates for later: a settings/menu entrance (currently a §16 non-goal) or "toggle the now-playing pane" |
 | **U6** | Does `L`/`R` cycle scenes while a **scene** holds the focus, or only from the chrome? | **Always global** (§2.1). It is the one thing a user must be able to do from anywhere, and the pane's remembered cursor survives the cycle (R5) |
 | **U7** | One indicator sprite for both panes, or one per pane? | **One per pane.** A pane may only draw inside its own rectangle (§5.2), so a shared sprite would be the one exception to the backing rule — and it would have to be presented by the chrome's OAM path anyway. R6 is about what is *visible*, not about who owns the pixels |
 | **U8** | Trait objects for scenes, or an enum? | **Enum.** No allocation, a bounded call graph, and a cost a probe can attribute. A trait object is the first step towards the widget tree §16 refuses |
 | **U9** | Does boot gate audio behind `Start`? | **Approved in principle 2026-11-27 (the caller): yes** — an unstarted state where the starting scene and the chrome are up and nothing else happens, "including not letting the user navigate the UI". §7 is its spec. Two sub-decisions remain: **U9a** where the line sits (recommended **C**: validate at boot, defer the prefill to the press, ≈ 305 ms from press to sound), and **U9b** the boot screen. Neither changes the model, only the payload |
-| **U9a** | Where the boot gate sits: before `open` (A), after `gate` (C, recommended), or after `prefill` (B) | **C**: the pin check and the container gate are boot work whose failure must precede the prompt; only the decode is deferred. Press→sound is then ≈ 305 ms, inside AP-1's 1.5 s with ~0.9 s to spare |
+| **U9a** | — | **Answered 2026-11-27 (the caller): C.** Boot validates the album (`open` + `gate`) and draws the prompt; the **prefill is deferred to the press** (≈ 305 ms from `Start` to the first sample), so no audio is decoded before the user asks and a `PRESS START` is never shown over an album that then refuses |
 | **U9b** | The boot screen: the `title_card` with its prompt restored, or full-bleed art plus a prompt with a backing strip | **The card first** — it already draws a picture and four spans, so the flip lands without a new element; the full-bleed variant needs G9's backing rule and is a separate layout PR |
 | **U10** | Does the list's row highlight invert the row's palette bank, or draw a marker? | **Marker + luminance**, because a bank inversion re-writes 88 cells per move and is hue-only (R7). The marker can be a sprite (cheap) or a cell in a dedicated column (the row numbering column is the natural home) |
 | **U11** | When a scene's `handle` says `Ignored`, may the shell pass the action to the chrome? | **No** (R1). `Ignored` is for "understood, nothing to do"; a scene that cannot use `Left` says so by having no horizontal axis, and the shell does not fall through |
 | **U12** | Is the debug word's strip (9 cells) the long-term hint line, i.e. does the `state-word` flip now have a *reason* to happen? | **Yes, but not in this PR.** §4.3 records the dependency: the hint strip is the thing the flip buys, and the flip is still its own ruling (§5.3) |
-| **U13** | From the zero state (R8), which item do `Up`/`Down` land on? | **`play_pause`** — the primary item, and the only one a vertical press can point at unambiguously; `Left`/`Right` enter at the ring's last/first item because their direction names one. `A`/`B` from the zero state are **ignored**: no focused item to activate, no pane to leave |
+| **U13** | — | **Answered 2026-11-27 (the caller): the first menu item, for every direction.** Entering the chrome with no previous focus always lands on `previous`; the pressed direction is not consulted. `A`/`B` from the zero state are still ignored — no focused item to activate, no pane to leave |
 
 ---
 
