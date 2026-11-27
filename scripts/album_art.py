@@ -281,6 +281,24 @@ def build_blob(
     header += struct.pack("<III", 0, 0, 0)
     if len(header) != HEADER_BYTES:
         raise Refusal("header", f"{len(header)} bytes, expected {HEADER_BYTES}")
+    # The file is four sections, in ART1.md's order:
+    #   header 64 B + palettes 32 B/bank + tiles 32 B/cell + map 2 B/cell.
+    # Header, palettes and tiles are multiples of 4. The map is 2 B/cell, so the
+    # body is 0 or 2 bytes short of a multiple of 4 depending on whether the cell
+    # count is even or odd. ART1.md rounds the file up to a multiple of 4 with
+    # trailing zeros: a section after the map starts word-aligned, and the reader
+    # derives the same padded length and refuses any other (`art1.rs:376-389`).
+    #
+    #   box       cells  body = 64+32+32c+2c  body % 4  pad  file
+    #   128x128   256    8,800               0         0    8,800
+    #   120x120   225    7,746               2         2    7,748
+    #    96x96    144    4,992               0         0    4,992
+    #   104x104   169    5,842               2         2    5,844
+    #
+    # `(-len) % 4` is the non-negative distance to the next multiple of 4 (Python's
+    # `%` returns 0..3 for a positive modulus); for this format it is only ever
+    # 0 or 2. The pad is not part of the checksum (palettes, tiles and map are);
+    # it is structural only.
     body = header + bytes(palettes) + tiles + bg_map
     blob = body + b"\x00" * (-len(body) % 4)
     pin = {
