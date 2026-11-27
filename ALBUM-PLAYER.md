@@ -1744,7 +1744,8 @@ What that settles, and what it deliberately leaves open:
 - **The pool pays one tile for it.** The pair is two tiles in one slot, so §5.1's chrome term moves
   9 → 10 (`chrome_art_tiles`, both variants; B's distinct sum 462 → 463 of 512, printed by the
   report), and the generator derives the number from the declared bands, slots and their second
-  drawings rather than from a constant someone remembered.
+  drawings rather than from a constant someone remembered. **It returns to 9 when the `restart` slot
+  is retired** (`ALBUM-UI.md` U4), and to 8 if the `select` diamond goes with it (its G2).
 
 **The input and focus model is a separate document now, and it supersedes this section's table
 (ruled 2026-11-27, on the caller's stated preference).** [`ALBUM-UI.md`](ALBUM-UI.md) is the
@@ -1759,7 +1760,7 @@ one state cell — so read that file before reading the rest of this section as 
 |---|---|
 | Start **or** A = pause ⇄ resume | **split**: `Start` is the global toggle, `A` activates the focused item (which is `play_pause` when focus is on it) |
 | Right/L = next track, Left/R = previous | **gone**: both are navigation/scene-cycle keys; skipping is the `next`/`previous` *items*, activated with `A` |
-| Down = restart the track | **gone**: the chrome's ring is three items (`previous`, `play_pause`, `next`); `restart` has no ring slot in v1 — its drawing is retired or becomes a declared fourth item (`ALBUM-UI.md` U4) |
+| Down = restart the track | **gone**: the chrome's ring is three items (`previous`, `play_pause`, `next`) and the `restart` drawing is retired (`ALBUM-UI.md` U4). Restarting survives **inside `previous`**, as a position rule: past 2 s of the current visit it restarts the track, under that it goes back a track — the CD-player model, so two presses in succession go back two tracks (`ALBUM-UI.md` §4.5) |
 | Select = cycle the scene | **superseded**: `L`/`R` cycle; `Select` unbound and reserved |
 | Up = — | **changed**: `Up` is the pane transfer into the scene |
 | B reserved | **changed**: `B` is "back to the chrome" in the album; still the game's action button in the game scene |

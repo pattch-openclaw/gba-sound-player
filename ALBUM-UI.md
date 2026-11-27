@@ -52,8 +52,9 @@ line that keeps §16's "no GUI toolkit" intact (§10, C1).
   an **identity**, the **verb** its activation performs, and a **slot**. The ruled v1 set is exactly
   **`previous`, `play_pause`, `next`**, in that order (2026-11-27) — the caller's "in the end the order
   should be `Previous Track`, `Play Pause`, `Next Track`". The list is finite, declared, and
-  compile-time. `restart`'s disposition — the fifth drawing that has no place in a three-item ring —
-  is U4, and it is the one product decision this ruling leaves.
+  compile-time. **`restart` is retired (U4, ruled 2026-11-27):** its slot, its drawing and its
+  `Action` go, and restarting a track becomes the `previous` item's **position-dependent** behaviour
+  (§4.5).
 - **A scene item** is whatever that scene decides its navigable things are. For `list` it is one
   **track row**, derived from `ALBM1`'s `n_tracks` and the window geometry — i.e. **runtime data, not
   a spec constant**. For a scene with no items (`blank`, the `art` scene, the `title_card`), the set
@@ -239,8 +240,9 @@ Constraints that keep this inside the plan's budget:
 **Ruled 2026-11-27: the ring is exactly three items, in this order — `previous`, `play_pause`,
 `next`.** The order is a **declared field**, not the order the slots happen to sit in, and the two
 must agree: the generator refuses an item order that is not the left-to-right order of its slots
-(G4). `restart` is **not** a ring item; U4 is its disposition (retire the drawing and the action, or
-declare a fourth item — the schema takes N, the ring's length is not hard-coded).
+(G4). `restart` is **retired** (U4, ruled 2026-11-27): the ring is the three items above, the
+return-glyph slot is dropped, and the chrome term moves 10 → 9 with B's distinct pool sum 463 → 462.
+Restarting a track does not disappear — it moves into `previous` (§4.5).
 
 **The current drawn order is wrong for this model and has to move.** Today the slots are declared in
 button order — `select@21, start@22, right@23, left@24, down@25` — and the drawings are
@@ -284,10 +286,48 @@ Two layout facts follow from this model:
 
 ### 4.4 What the chrome does on activation
 
-`A` on `previous`/`next` is the transport's existing skip path; on `play_pause` the existing faded
-toggle (§4.4); on `restart` the existing restart. **No new transport behaviour is introduced by this
-spec** — the verbs already exist and are already measured (pause: action→freeze 2 periods, measured
-frame 45→49 ≈ 67 ms; skip: ≤ ~0.6 s; both §4.4/R13). What changes is only *how they are reached*.
+`A` on `next` and on `play_pause` is the transport's existing skip / faded-toggle path. `A` on
+`previous` is those same paths with a **conditional target** (§4.5). **No new transport transition is
+introduced by this spec** — the verbs already exist and are already measured (pause: action→freeze 2
+periods, measured frame 45→49 ≈ 67 ms; skip: ≤ ~0.6 s; both §4.4/R13). What changes is *how they are
+reached*, and, for `previous`, *which* of two already-existing targets it picks.
+
+### 4.5 The `previous` item is position-dependent (ruled 2026-11-27)
+
+**The rule.** Activating `previous` restarts the current track when the current visit is past a dwell
+threshold, and otherwise goes to the previous track (wrapping at the album's start):
+
+```
+visit >= PREVIOUS_RESTART_SAMPLES   ->  target = the current track, seek to sample 0
+visit <  PREVIOUS_RESTART_SAMPLES   ->  target = the previous track (wrap 0 -> last)
+```
+
+**The threshold is 2 s**, expressed once at the product rate (`2 × RATE_HZ` = 32,768 samples at
+16,384 Hz), owned by the transport where the position lives, and **not** an album or variant field for
+v1 — a different threshold is taste, not a budget. The comparison uses the **same visit position the
+clock and the bar already display** (`paint.visit`), so the rule agrees with the screen: if the clock
+has not reached `0:02`, `previous` goes back a track.
+
+**Why this is not the pattern the plan bans.** §5.3/§4.4 refuse *time windows between presses* — "Left
+twice quickly" — because they need an input-timing ledger and they fail differently on a cartridge
+than in an emulator. This rule counts nothing: one press, one deterministic decision from a position
+the transport already computes, independent of when any earlier press happened. The caller's "press
+it twice in succession and you go to the previous song" is an **emergent property**, not a second
+rule: the first press restarted the track, so the second one's visit is under the threshold.
+`keys.rs`'s "nothing is time-dependent" rule is about the key layer; the position belongs to the
+transport.
+
+**The paths already exist.** A restart is the existing restart target — the same track, seek to 0 —
+through the same fade → truncate → re-prime machinery as a skip (measured ≤ 0.6 s, never a click,
+§4.4); only the target differs. So the merge costs one conditional, not a transition.
+
+**Three edges the spec fixes rather than leaving to the implementation:**
+
+| case | behaviour |
+|---|---|
+| track 1, visit < 2 s | `previous` **wraps to the last track** — the album's ends wrap (§5.3), and the rule does not special-case track 0 |
+| a transition in flight (`Skipping`/`Repriming`/`Pausing`/`Resuming`/`Buffering`) | **ignored and counted**, exactly as `Transport::skip` is today (it only acts from `Playing`); the contract has no cancel |
+| the transport is `Paused` | **U14** — recommended: restart and **stay paused at 0:00** (a `Buffering`-shaped refill at position 0 while the chain stays frozen, since a frozen chain cannot serve a fade); alternatives are to ignore the press, or to restart *and resume* |
 
 ---
 
@@ -412,7 +452,7 @@ blocking for UI-1, the rest for UI-2/UI-3.
 | **G3** | **`[[variant.control]] key` names a button, not an action**, so the schema cannot express "this is the `next` item" apart from "this is where the Right button's icon sits"; `A`/`B`/`L`/`R` are not expressible | §1.2, §6 | `[[variant.item]]` (this section) |
 | **G4** | **No declared focus order.** Nothing ties the item order to the slot geometry, so a ring can be built backwards and no gate can see it | §4.1, F1/F5 | declared order + `item-order-not-slot-order` |
 | **G5** | **The scene schema is tiles-only**: `kind`/`resident`/`shares_image` say what a scene *draws*, and nothing says whether it can take the focus or how it enters/leaves | §1.6, §3, UI-2 | `focus`/`enter`/`edge` fields + three refusals |
-| **G6** | **No indicator term in any budget.** Chrome tiles (10) and the OBJ ceiling (AP-6's) both have no focus-indicator line, so either option in §4.2 would be an *unaudited* tile | §4.2, R14's rule | `focus_art_tiles` (BG) or `obj_focus_*` (sprite) + `focus-indicator-over-budget` |
+| **G6** | **No indicator term in any budget.** Chrome tiles (10 today, 9 after U4's retirement) and the OBJ ceiling (AP-6's) both have no focus-indicator line, so either option in §4.2 would be an *unaudited* tile | §4.2, R14's rule | `focus_art_tiles` (BG) or `obj_focus_*` (sprite) + `focus-indicator-over-budget` |
 | **G7** | **Scenes are functions, not stateful objects.** `SceneId` is an enum and `surface.rs` paints each scene from `(album, scene)`; there is no place a cursor or a scroll offset could live | §1.7, §3 | the `scene/` structs + the `SceneState` enum (U8) |
 | **G8** | **No item-count declaration, and there must not be one for `list`** — the count is `ALBM1`'s `n_tracks`. The schema has `min_visible_rows` (a floor), not an item count, and the audit must not start reading one | §1.2, §6 | stated here; `scene-items-not-derived` refuses the temptation |
 | **G9** | **No prompt/hint element, and the art scene has no text element.** The `title_card` has four spans and an 80×80 picture; the caller's boot screen is cover + "PRESS START" | §7, U9 | U9's ruling; a declared span (card) or a backing-strip element (full-bleed) |
@@ -538,6 +578,7 @@ Proposed for §13 (none of its legs exist):
 | **F9** no regressions from the remap | audio is bit-identical (the input path is not the audio path), and no scene write leaves its rectangle | the existing `album-test` + AP-3 legs |
 | **F10** the unstarted state | before `Start`: no period is served, the clock does not move, no focus indicator exists, and **every** action except `Start` is discarded (including held-direction repeats); a `Start` edge at frame 0 starts the same run the gate had before | replay arm asserting `state=Idle`, `periods_served=0`, `focus=none` until the press |
 | **F11** the split boot ledger | `boot → prompt` and `Start → first audible sample` are both printed and both inside their ceilings, on the arm that actually waits for the press | `album-test`-shaped, one log line each |
+| **F12** the `previous` rule | at `visit ≥ 2 s` the target is the **current** track at 0; at `visit < 2 s` it is the previous track, wrapping `0 → last`; a second activation after a restart therefore goes back a track; a press during a transition is ignored and counted | host test over the target choice + a replay leg that reads `track=`/`visit=` from the log |
 
 ### 8.2 What the new map breaks, and how each is re-baselined
 
@@ -589,6 +630,7 @@ behaviour the model has to generalise past one pane, and UI-3 is the only step t
 | **C12** | AP-1: "audio begins within 1.5 s of boot", unpressed | **Approved in principle to change (2026-11-27):** §7's flip splits it into three terms — prompt-visible, `Start`→first sample, and the unpressed arm kept as a control — **in the same PR that lands the flip**. Until that PR the row stands exactly as written, and no gate may quietly re-point it at a ROM that waits for a press |
 | **C13** | §5.3's `[[variant.control]]` key = button identity | **Needs a schema decision** (§6, G3): an item's identity is not a button |
 | **C14** | The `state-word` debug feature and its nine cells | **Untouched** (its own flip ruling). §4.3 names the cells as the hint strip that frees when it flips |
+| **C15** | §5.3's "**Down** = restart the current track … replaces the usual 'press Left twice quickly' chord on purpose (§4.4)", and `keys.rs`'s "nothing is time-dependent" | **Superseded in part (2026-11-27):** restart is folded into `previous` as a **position-dependent** rule (§4.5) and the dedicated key goes. This is *not* a return to the banned chord: the chord needed an **input-timing window**; §4.5 reads the **playback position** the transport already publishes, so one press stays one deterministic act and the key layer remains time-free |
 
 **Left alone deliberately:** every geometry constant, every pool term, every face, the audio path, the
 transport's own contracts (fade/truncate/re-prime), the BIOS chord, the `WAITCNT` hold, and AP-1's
@@ -603,7 +645,8 @@ measurement until §7's own PR.
 | **U1** | — | **Answered 2026-11-27 (the caller).** *No indicator at first*: the **zero state** (R8) — nothing owns the focus until the first D-pad press, which gives it to the **chrome on its first item** (`previous`). A scene can never be the first pane to take focus |
 | **U2** | — | **Answered 2026-11-27 (the caller).** "Wrapping is a principle, but individual scenes are responsible for their own behaviour": the chrome is a ring (R2), its vertical axis is the pane transfer (R3), and a scene declares its own `edge` (R4) — **the list uses `exit_to_chrome`**, which is the journey, and `wrap` stays legal for a scene that wants it |
 | **U3** | — | **Answered 2026-11-27 (the caller): remembered cursor wins.** R5/§1.6: a re-entry restores the scene's cursor; `enter` is what a **cold** entry (or a declared `first`) uses. The list declares `now_playing` for the cold case, which is the journey's "first element" when the album is at track 1 |
-| **U4** | `restart`'s disposition: the caller's ruled ring is exactly three items, but a fifth drawing (a return glyph) is already authored and its action exists | **Recommend retiring it for v1** — drop the slot, the drawing and the action, so the drawn set, the focusable set and the ring are the same three things (chrome term 10 → 9, B's pool sum 463 → 462). The alternatives are a **fourth ring item** (contradicting the stated order) or a drawn-but-unreachable icon (an item only `A` could reach, which no gate can explain). The action is recoverable later by declaring a fourth item — the schema does not hard-code three |
+| **U4** | — | **Answered 2026-11-27 (the caller): retire the slot, the drawing and the action**, and roll restarting into `previous` (§4.5). Drawn set = focusable set = ring = three items; chrome term 10 → 9, B's pool sum 463 → 462. This is the CD-player model: the player assumes the last "track" was a mis-press |
+| **U14** | The `previous` rule's two parameters: the dwell threshold, and what a `previous` press does while **paused** | **Threshold: 2 s** (32,768 samples), from the caller's "one or two seconds" — the upper end, so a deliberate press just after the start does not fight the rule. **Paused: restart and stay paused at 0:00** (recommended), because the alternative — ignoring the press — makes the one transport key with a position rule do nothing exactly when the user is looking at the position. Both are one-line changes if the caller prefers otherwise |
 | **U5** | What does `Select` become? | **Unbound and reserved for v1** (recorded, not merely unimplemented), because an unbound button is a promise and a bound one is a decision. Candidates for later: a settings/menu entrance (currently a §16 non-goal) or "toggle the now-playing pane" |
 | **U6** | Does `L`/`R` cycle scenes while a **scene** holds the focus, or only from the chrome? | **Always global** (§2.1). It is the one thing a user must be able to do from anywhere, and the pane's remembered cursor survives the cycle (R5) |
 | **U7** | One indicator sprite for both panes, or one per pane? | **One per pane.** A pane may only draw inside its own rectangle (§5.2), so a shared sprite would be the one exception to the backing rule — and it would have to be presented by the chrome's OAM path anyway. R6 is about what is *visible*, not about who owns the pixels |
