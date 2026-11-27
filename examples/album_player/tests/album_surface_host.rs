@@ -1035,3 +1035,103 @@ fn every_card_string_fits_the_box_that_variant_declares() {
         "{counts:?} is elided in a {cols}-cell card box"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// 2b PR-(4b): a scene backs its rectangle, so the previous scene cannot show through
+// ---------------------------------------------------------------------------------------------
+
+/// The card's own boxes, in cells: the picture and the four spans. Everything else in the
+/// region must be the flat backing after a scene switch.
+fn card_boxes_in_cells() -> [(u32, u32, u32, u32); 5] {
+    let mut boxes = [(0u32, 0u32, 0u32, 0u32); 5];
+    for (slot, element) in [
+        (0, surface::CARD_ART),
+        (1, surface::CARD_TITLE),
+        (2, surface::CARD_ARTIST),
+        (3, surface::CARD_YEAR),
+        (4, surface::CARD_COUNTS),
+    ] {
+        let e = &layout::ELEMENTS[element.expect("this variant declares every card element")];
+        boxes[slot] = (
+            e.x / chrome::TILE_PX,
+            e.y / chrome::TILE_PX,
+            e.w / chrome::TILE_PX,
+            e.h / chrome::TILE_PX,
+        );
+    }
+    boxes
+}
+
+fn inside_any(boxes: &[(u32, u32, u32, u32)], x: u32, y: u32) -> bool {
+    boxes
+        .iter()
+        .any(|&(bx, by, bw, bh)| x >= bx && x < bx + bw && y >= by && y < by + bh)
+}
+
+#[test]
+fn the_card_backs_the_region_so_the_art_scene_cannot_show_through_it() {
+    if !assets::HAS_ART {
+        return;
+    }
+    use album_player::assets;
+    let art = gba_art::art1::parse(assets::ART1).expect("the bake's ART1 parses");
+    let mut canvas = Canvas::new();
+    let mut writes = surface::Writes::new();
+    // Enter from the art scene, exactly as Select does, then the card.
+    surface::Surface::paint_art(&mut writes, &art, 3);
+    canvas.apply(&writes);
+    surface::Surface::paint_blank(&mut writes);
+    canvas.apply(&writes);
+    surface::Surface::paint_card(&mut writes, &fixture_card(), Some((&art, 3)));
+    canvas.apply(&writes);
+    let card = card_boxes_in_cells();
+    for y in surface::REGION_ROW..surface::REGION_ROW + layout::REGION.rows {
+        for x in 0..layout::REGION.cols {
+            if inside_any(&card, x, y) {
+                continue;
+            }
+            let cell = canvas.grid[y as usize][x as usize]
+                .unwrap_or_else(|| panic!("region cell ({x}, {y}) is untouched"));
+            assert_eq!(
+                cell.tile,
+                chrome::FILL_SCENE,
+                "card cell ({x}, {y}) is not the region backing — the art scene is showing through"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_art_scene_backs_the_region_so_the_card_cannot_show_through_it() {
+    if !assets::HAS_ART {
+        return;
+    }
+    use album_player::assets;
+    let art = gba_art::art1::parse(assets::ART1).expect("the bake's ART1 parses");
+    let mut canvas = Canvas::new();
+    let mut writes = surface::Writes::new();
+    // Enter from the card, then art.
+    surface::Surface::paint_card(&mut writes, &fixture_card(), Some((&art, 3)));
+    canvas.apply(&writes);
+    surface::Surface::paint_blank(&mut writes);
+    canvas.apply(&writes);
+    surface::Surface::paint_art(&mut writes, &art, 3);
+    canvas.apply(&writes);
+    let side = art.tile_cols;
+    let x0 = (layout::REGION.cols - side) / 2;
+    let y0 = surface::REGION_ROW + (layout::REGION.rows - side) / 2;
+    for y in surface::REGION_ROW..surface::REGION_ROW + layout::REGION.rows {
+        for x in 0..layout::REGION.cols {
+            if x >= x0 && x < x0 + side && y >= y0 && y < y0 + side {
+                continue;
+            }
+            let cell = canvas.grid[y as usize][x as usize]
+                .unwrap_or_else(|| panic!("region cell ({x}, {y}) is untouched"));
+            assert_eq!(
+                cell.tile,
+                chrome::FILL_SCENE,
+                "art cell ({x}, {y}) is not the region backing — the card's text is showing through"
+            );
+        }
+    }
+}

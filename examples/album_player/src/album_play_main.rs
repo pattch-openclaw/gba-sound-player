@@ -1398,24 +1398,37 @@ mod rom {
         gfx: &mut Graphics<'_>,
         tiles: &surface::Tilesets,
     ) {
-        match scene {
-            surface::SceneId::Art => match &tiles.art_image {
-                Some(image) => surface::Surface::paint_art(writes, image, tiles.art_bank),
-                None => surface::Surface::paint_blank(writes),
-            },
-            surface::SceneId::Blank => surface::Surface::paint_blank(writes),
-            surface::SceneId::TitleCard => {
-                surface::Surface::paint_card(
-                    writes,
-                    &card_for(album),
-                    tiles
-                        .art_image
-                        .as_ref()
-                        .map(|image| (image, tiles.art_bank)),
-                );
-            }
-        }
+        // §5.2's backing rule, and the reason it is a *scene* rule rather than a style note:
+        // the scene background is one map shared by every scene. Without this fill, entering
+        // the card from the art scene leaves the 128x128 cover visible in the cells the card
+        // does not write, and entering art from the card leaves its text around the cover —
+        // the same scene would look different depending on where Select came from. The flat
+        // region fill is every scene's backing; content is written over it in a second batch
+        // because fill (480 cells) + card (up to 352) is over one `Writes` batch.
+        surface::Surface::paint_blank(writes);
         ui_bg.apply_scene(writes, tiles);
+        if scene != surface::SceneId::Blank {
+            writes.clear();
+            match scene {
+                surface::SceneId::Art => {
+                    if let Some(image) = &tiles.art_image {
+                        surface::Surface::paint_art(writes, image, tiles.art_bank);
+                    }
+                }
+                surface::SceneId::TitleCard => {
+                    surface::Surface::paint_card(
+                        writes,
+                        &card_for(album),
+                        tiles
+                            .art_image
+                            .as_ref()
+                            .map(|image| (image, tiles.art_bank)),
+                    );
+                }
+                surface::SceneId::Blank => {}
+            }
+            ui_bg.apply_scene(writes, tiles);
+        }
         ui_bg.commit(gfx);
     }
 
