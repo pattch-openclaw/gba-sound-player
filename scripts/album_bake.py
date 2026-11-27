@@ -1404,18 +1404,58 @@ CODE_RESERVE_BYTES = 256 * 1024
 ART_TILE_BYTES = 32
 REPORT_SCHEMA = "album-layout-report/1"
 
-#: The report's cycle estimates are arithmetic on one *measured* coefficient, named
-#: with its source. AP-0 measured the per-tile upload at 726 c with audio disarmed and
-#: a live-arm floor/mean of 1,096 / 1,242 c (`examples/album_probe/README.md:169-207`).
-#: The mean is the coefficient a cadence estimate wants, and the terms below are
-#: arithmetic on it — 2b PR-(2) replaces them with numbers measured at the app's own
-#: cadence and flips their tag from `arithmetic` to `measured`. Nothing here is a new
-#: figure: every cycle count is `tiles x this`, printed with both numbers.
-CYCLE_PER_TILE_LIVE = 1_242
+#: 2b PR-(2)'s measured coefficients: the render probe's live-audio legs, from
+#: `examples/album_probe/src/bin/render_probe.rs` (AP-3b's L1-L4), run headless on
+#: mGBA with the tree's usual arm (WAITCNT 4/2) on 2026-11-25. The bin prints sums,
+#: counts, minima and maxima; the means below are derived on the host, which is the
+#: rule the ROM follows (§6 keeps a divide off the measured path).
+#:
+#: These are **mGBA numbers**. §13 AP-3b says the hardware leg for each is AP-7's,
+#: and this file keeps that distinction rather than upgrading an emulator reading to
+#: a law: every term below names which row it came from, and the report's
+#: `[measurement render]` block carries the raw folds so a later run can disagree
+#: with these numbers visibly instead of silently.
+MEASURED_RENDER_AT = (
+    "2b PR-(2) render probe (AP-3b L1-L4), mGBA headless, WAITCNT 4/2, audio live, "
+    "2026-11-25; means derived host-side from the bin's fold sums and counts"
+)
+#: L1, one changed bar cell (8x8) — the element row §10.2 prices as 1-2 tiles.
+MEASURED_BAR_CELL_LIVE = 489
+#: L1, one clock digit: two tile rows at the 16 px pitch.
+MEASURED_CLOCK_DIGIT_LIVE = 963
+#: L1, one cell re-shown with the `(tileset, index)` it already holds. The plan
+#: expected "near-free" (agb's early-out); the measurement says 83% of a changed
+#: cell, because `set_tile_at_pos` adds and removes a reference *before* it compares
+#: the map entries (`regular_background.rs:360-378`). The saving is the map write
+#: and the dirty mark, not the allocator churn.
+MEASURED_UNCHANGED_CELL_LIVE = 407
+#: L2, a whole 600-cell region repaint (30x20), mean of eight windows.
+MEASURED_REGION_600_LIVE = 550_437
+#: L2's per-cell figure: the coefficient the arithmetic terms below use.
+MEASURED_REGION_PER_CELL_LIVE = 917
+#: L3, the priority store itself: `set_priority` is two stores and a field write.
+MEASURED_SET_PRIORITY_WRITE_LIVE = 73
+#: L3, the whole switch: set_priority + show + commit with both scenes resident.
+#: The commit is the price (mean 212,102 c, max 280,360 c — one video period's halt
+#: is the worst case, and §5.1's "tens of cycles" was right about the *write* only).
+MEASURED_SCENE_SWITCH_LIVE = 212_386
+#: L4: the stand-up of art (256) + atlas (188) + icons (16), 856 cell references.
+MEASURED_POOL_DISTINCT = 460
+MEASURED_POOL_REFS = 856
+MEASURED_POOL_SHARED = 189
+MEASURED_POOL_MAX_REFS = 45
+MEASURED_POOL_SLOTS = 512
+
+#: The per-tile coefficient the *arithmetic* terms (title line, the declared
+#: region) multiply by. It is L2's per-cell figure, not AP-0's 1,242: the probe
+#: measured the app's own repaint shape, and the difference is the allocator's
+#: dedupe on repeated tiles rather than a correction to AP-0's upload leg.
+CYCLE_PER_TILE_LIVE = MEASURED_REGION_PER_CELL_LIVE
 CYCLE_COEFFICIENT_SOURCE = (
-    "AP-0's upload leg, live audio: 1,096 c floor / 1,242 c mean per tile "
-    "(examples/album_probe/README.md:202-207), measured; the terms below are "
-    "arithmetic on it and are tagged accordingly"
+    "2b PR-(2) render probe L2: 600-cell region repaint, live audio, "
+    f"{MEASURED_REGION_600_LIVE} c / 600 cells = {MEASURED_REGION_PER_CELL_LIVE} c per cell "
+    "(mean of 8 windows); the arithmetic terms below multiply by it, and the terms the "
+    "probe measured directly are tagged measured instead"
 )
 
 
@@ -1771,7 +1811,7 @@ class BandSpec:
 
 
 class SceneSpec:
-    KEYS = ("name", "phase", "band", "kind", "resident", "min_visible_rows", "min_boxes")
+    KEYS = ("name", "phase", "band", "kind", "resident", "min_visible_rows", "min_boxes", "shares_image")
 
     def __init__(self, doc: dict, where: str) -> None:
         _checked(doc, self.KEYS, where)
@@ -1801,6 +1841,11 @@ class SceneSpec:
                 "*which* scene holds tiles, and the audit sums the scenes a ROM actually keeps resident",
             )
         self.resident = resident
+        # 2b PR-(3): a scene that draws *another scene's* image (the title card's cover
+        # vs the art scene's). Declaring it is what keeps the projection sum from
+        # counting one tracked asset twice; the validation lives in `_scenes`, where
+        # the named scene's derived box list is available.
+        self.shares_image = str(doc.get("shares_image", ""))
         self.min_visible_rows = None
         self.min_boxes = None
         for field in ("min_visible_rows", "min_boxes"):
@@ -2072,6 +2117,8 @@ class SceneTerm:
 
     @property
     def audited_as(self) -> str:
+        if self.scene.shares_image:
+            return f"shared({self.scene.shares_image})"
         return "resident" if self.resident else "projection"
 
     def __str__(self) -> str:
@@ -2344,8 +2391,13 @@ class VariantFacts:
 
     def _art(self) -> None:
         """§7's legal box list, derived: every square this variant can draw."""
+        sharing = {scene.name for scene in self.variant.scenes if scene.shares_image}
         for element in self.elements:
             if element.kind != "art" or not element.scene:
+                continue
+            if element.scene in sharing:
+                # Not the variant's box list: this element draws the image another
+                # scene already derives, and `_scenes` checks it against that list.
                 continue
             self.art_element = element
             side = min(element.wt, element.ht, math.isqrt(self.variant.image_tiles))
@@ -2373,6 +2425,48 @@ class VariantFacts:
                 )
 
     def _scenes(self) -> None:
+        # 2b PR-(3): `shares_image` names another scene whose *same tracked image* this
+        # one draws. Two checks, both facts about the spec: the named scene has an art
+        # element to share, and this scene's box is no larger than the box that scene
+        # derives — otherwise the sharing would under-count a genuinely bigger image.
+        by_name = {scene.name: scene for scene in self.variant.scenes}
+        for scene in self.variant.scenes:
+            if not scene.shares_image:
+                continue
+            target = by_name.get(scene.shares_image)
+            if target is None or target.name == scene.name:
+                raise Refusal(
+                    "spec",
+                    f"[[variant]] {self.variant.id} [[scene]] {scene.name}: shares_image "
+                    f"{scene.shares_image!r} names no other scene of this variant. The field is a "
+                    "claim that two scenes draw one image, and a claim needs a subject",
+                )
+            own = [e for e in self.elements if e.scene == scene.name and e.kind == "art"]
+            theirs = [e for e in self.elements if e.scene == target.name and e.kind == "art"]
+            if not own:
+                raise Refusal(
+                    "spec",
+                    f"[[variant]] {self.variant.id} [[scene]] {scene.name}: shares_image is declared "
+                    "and the scene has no art element — there is nothing to share, and the scene's "
+                    "own tile term would be 0 for a reason nobody wrote down",
+                )
+            if not theirs:
+                raise Refusal(
+                    "spec",
+                    f"[[variant]] {self.variant.id} [[scene]] {scene.name}: shares_image names "
+                    f"{target.name}, which declares no art element — an image shared with nothing",
+                )
+            own_side = min(own[0].wt, own[0].ht)
+            their_side = min(theirs[0].wt, theirs[0].ht, math.isqrt(self.variant.image_tiles))
+            if own_side < 1 or own_side > their_side:
+                raise Refusal(
+                    "art-box-not-derived",
+                    f"[[variant]] {self.variant.id} [[scene]] {scene.name}: its art box is "
+                    f"{own_side}x{own_side} tiles and {target.name}'s derived ceiling is "
+                    f"{their_side}x{their_side} — a shared image cannot be larger than the image it "
+                    "shares, and this is the box validator §11's PR-(3) hands the card",
+                )
+
         for scene in self.variant.scenes:
             if scene.min_visible_rows is not None:
                 rows = [element.text_rows for element in self.elements if element.scene == scene.name and element.kind == "text"]
@@ -2421,7 +2515,7 @@ class VariantFacts:
         for scene in self.variant.scenes:
             elements = [element for element in self.elements if element.scene == scene.name]
             terms: dict[str, int] = {}
-            if scene.kind in ("art", "composite"):
+            if scene.kind in ("art", "composite") and not scene.shares_image:
                 image = 0
                 for element in elements:
                     if element.kind != "art":
@@ -2989,6 +3083,8 @@ def numbers_block(facts: VariantFacts) -> list[str]:
             rows.append(f"scene_{scene.name}_min_visible_rows={scene.min_visible_rows}")
         if scene.min_boxes is not None:
             rows.append(f"scene_{scene.name}_min_boxes={scene.min_boxes}")
+        if scene.shares_image:
+            rows.append(f"scene_{scene.name}_shares_image={scene.shares_image}")
     for term in facts.scene_terms:
         rows.append(f"scene_{term.name}_own_tiles={term.own_tiles}")
         rows.append(f"scene_{term.name}_audited_as={term.audited_as}")
@@ -3000,21 +3096,64 @@ def numbers_block(facts: VariantFacts) -> list[str]:
     return sorted(rows)
 
 
-def cycles_block(facts: VariantFacts) -> list[str]:
-    """The report's cost estimate, every term tagged `arithmetic` until 2b PR-(2).
+def measurement_block() -> list[str]:
+    """2b PR-(2): the render probe's raw folds, in the report rather than in prose.
 
-    §10.2's element rows are arithmetic on AP-0's measured per-tile figure, and the plan
-    says so at every use. The same discipline here: the coefficient is named with its
-    measurement, every term is `tiles x coefficient`, and each line carries its tag — so
-    PR-(2)'s render bin can flip the terms it measured from `arithmetic` to `measured`
-    without changing the shape of this block. The scene switch is *named and not
-    estimated*: §5.1 calls "tens of cycles" an assumption, and PR-(2)'s L3 is the leg that
-    replaces it. Inventing a number here would be the thing the plan keeps warning about.
+    A coefficient without its measurement is a number somebody chose; the point of
+    AP-3b was that the plan's UI figures stopped being arithmetic on AP-0's upload
+    leg. Putting the folds here (not only in the probe's README) is what lets a
+    reader of *the* machine-readable artifact see which terms are measured, on what
+    instrument, and with what spread — and lets a later hardware run disagree with
+    them visibly.
+    """
+    return [
+        "schema=album-layout-measurement/1",
+        "render_probe_bin=examples/album_probe/src/bin/render_probe.rs",
+        f"render_probe_at={MEASURED_RENDER_AT}",
+        f"render_l1_bar_cell_live_cycles={MEASURED_BAR_CELL_LIVE}",
+        "render_l1_bar_cell_live_spread=min 480 / max 741 over 60 folds",
+        f"render_l1_clock_digit_live_cycles={MEASURED_CLOCK_DIGIT_LIVE}",
+        "render_l1_clock_digit_live_cells=2 (two tile rows at the 16 px pitch)",
+        f"render_l1_unchanged_cell_live_cycles={MEASURED_UNCHANGED_CELL_LIVE}",
+        "render_l1_unchanged_live_note=83% of a changed cell: the early-out saves the map write, "
+        "not the add/remove reference pair — 'near-free' was the plan's expectation, not the answer",
+        f"render_l2_region_600_live_cycles={MEASURED_REGION_600_LIVE}",
+        "render_l2_region_600_live_spread=min 536,080 / max 556,701 over 8 windows",
+        f"render_l2_per_cell_live_cycles={MEASURED_REGION_PER_CELL_LIVE}",
+        f"render_l3_set_priority_live_cycles={MEASURED_SET_PRIORITY_WRITE_LIVE}",
+        f"render_l3_switch_live_cycles={MEASURED_SCENE_SWITCH_LIVE}",
+        "render_l3_switch_live_spread=set_priority 73 c + show/commit mean 212,102 c, max 280,360 c",
+        f"render_l4_refs={MEASURED_POOL_REFS}",
+        f"render_l4_distinct={MEASURED_POOL_DISTINCT}",
+        f"render_l4_shared={MEASURED_POOL_SHARED}",
+        f"render_l4_max_refs={MEASURED_POOL_MAX_REFS}",
+        f"render_l4_pool_slots={MEASURED_POOL_SLOTS}",
+        "render_l4_note=refs are cell references read from the maps, distinct are live VRAM slots, "
+        "and max_refs > 1 is what a shared atlas looks like; a per-cell fallback shows distinct == refs",
+    ]
+
+
+def cycles_block(facts: VariantFacts) -> list[str]:
+    """The report's cost estimate, with each term's measurement named.
+
+    2b PR-(2) flipped the terms AP-3b's render bin measured from `arithmetic` to
+    `measured`: a changed bar cell, a changed clock digit, and the scene switch. The
+    title line and the declared region stay `arithmetic` on a *measured* per-cell
+    coefficient, because the bin measured a 600-cell window rather than those
+    elements — arithmetic on a measured coefficient is still arithmetic, and the tag
+    says which one a term is.
     """
     rows = [
         f"cycles_coefficient_per_tile={CYCLE_PER_TILE_LIVE}",
         f"cycles_coefficient_source={CYCLE_COEFFICIENT_SOURCE}",
+        f"cycles_measured_at={MEASURED_RENDER_AT}",
     ]
+
+    def measured(what: str, cycles: int, cells: int, source: str) -> None:
+        rows.append(f"cycles_{what}_cycles={cycles}")
+        rows.append(f"cycles_{what}_cells={cells}")
+        rows.append(f"cycles_{what}_tag=measured")
+        rows.append(f"cycles_{what}_source={source}")
 
     def term(what: str, tiles: int, source: str) -> None:
         rows.append(f"cycles_{what}_tiles={tiles}")
@@ -3022,33 +3161,36 @@ def cycles_block(facts: VariantFacts) -> list[str]:
         rows.append(f"cycles_{what}_tag=arithmetic")
         rows.append(f"cycles_{what}_source={source}")
 
-    # One changed bar cell: at most two 8 px tiles for a cell that straddles a boundary
-    # (§10.2's bar row, priced as 1-2 tiles).
-    term("bar_cell", 2 if facts.bar_element is not None else 0,
-         "§10.2's per-element bar row (a changed cell is 1-2 tiles); declared bar element "
-         f"{facts.bar_element.id if facts.bar_element else 'none'}")
-    # One changed clock digit: the digit's cell across the tile rows the line box spans.
+    # One changed bar cell: L1 measures one cell, and 1-2 is the declared worst case
+    # for a cell that straddles a tile boundary (§10.2's bar row).
+    measured("bar_cell", MEASURED_BAR_CELL_LIVE if facts.bar_element is not None else 0,
+             1 if facts.bar_element is not None else 0,
+             "render probe L1, one changed 8x8 cell, live audio; §10.2's bar row, whose "
+             f"declared worst case is 2 tiles for a straddling cell (element "
+             f"{facts.bar_element.id if facts.bar_element else 'none'})")
+    # One changed clock digit: L1 measures the two tile rows the 16 px line box spans.
     clock = next((element for element in facts.elements if element.kind == "text" and element.id == "clock"), None)
-    clock_tiles = 2 * clock.metrics.tile_rows_per_line if clock is not None and clock.metrics else 0
-    term("clock_digit", clock_tiles,
-         "§10.2's clock row: at most two cells x the tile rows the declared line box spans "
-         f"({clock.metrics.tile_rows_per_line if clock is not None and clock.metrics else 0})")
+    measured("clock_digit", MEASURED_CLOCK_DIGIT_LIVE if clock is not None else 0,
+             2 if clock is not None else 0,
+             "render probe L1, the digit's two tile rows, live audio; §10.2's clock row")
     # A title line on a track change: the element's whole box, because the fill cost is
     # the element's cells and not the string's length (§10.2's title row, re-cut at the
-    # product pitch).
+    # product pitch). Not measured by L1/L2 at this size, so arithmetic on L2's
+    # per-cell coefficient rather than a measured term pretending to be one.
     title_tiles = facts.title_element.wt * facts.title_element.ht if facts.title_element is not None else 0
     term("title_line", title_tiles,
-         "§10.2's title row: the declared element's cell count, not a character count")
+         "§10.2's title row: the declared element's cell count, not a character count, "
+         "multiplied by L2's measured per-cell coefficient")
     # A whole scene-region change: the region's visible cells (§10.2's partial-map row,
     # whose 600-cell figure is its rounded version; this is the declared rectangle).
     term("region_repaint", facts.region[0] * facts.region[1],
-         "§10.2's partial-map row: the declared region's visible cells")
-    rows.append("cycles_excluded_scene_switch_term=scene switch (set_priority, both scenes resident)")
-    rows.append(
-        "cycles_excluded_scene_switch_reason=not estimated: §5.1 calls 'tens of cycles' an assumption, "
-        "and AP-3b's L3 leg measures the switch with both scenes resident; 2b PR-(2) owns it. Named as "
-        "excluded so the estimate's terms above are all labelled rather than one of them being a guess"
-    )
+         "§10.2's partial-map row: the declared region's visible cells multiplied by L2's "
+         "measured per-cell coefficient; L2's 600-cell window total is in [measurement render]")
+    # The switch: measured, and named as a switch rather than as the priority write.
+    measured("scene_switch", MEASURED_SCENE_SWITCH_LIVE, 2,
+             "render probe L3, `set_priority` + show + commit with both scenes resident, "
+             f"live audio; the priority store itself is {MEASURED_SET_PRIORITY_WRITE_LIVE} c, "
+             "so the commit is the price — an event cost paid where the audio is re-primed")
     return rows
 
 
@@ -3131,6 +3273,9 @@ def report_text(spec: LayoutSpec, facts_list: list[VariantFacts],
         f"layout_code_reserve_bytes={CODE_RESERVE_BYTES}",
         "layout_source=ALBUM-PLAYER.md §10.1 (the code reserve is 256 KiB); §5.1/R14 for the pool terms",
     ]
+    lines.append("")
+    lines.append("[measurement render]")
+    lines.extend(measurement_block())
     for facts in facts_list:
         lines.append("")
         lines.append(f"[variant {facts.id}]")
@@ -3213,6 +3358,29 @@ def layout_rs_text(facts: VariantFacts) -> str:
     add(f"pub const IMAGE_TILES_MAX: u32 = {_rs(variant.image_tiles)};")
     add(f'pub const GLYPH_ATLAS: &str = "{variant.glyph_atlas}";')
     add(f"pub const RESIDENT_SCENES: u32 = {_rs(variant.resident_scenes)};")
+    add("")
+    add("/// The declared scene registry (§5.2), in the spec's order — which is also the order")
+    add("/// a `Select` cycle walks, so the order is a field and not a comment in a match arm.")
+    add("/// `phase` is the phase that builds it: a declared scene with no implementation yet is")
+    add("/// still listed, and the app's own table is a *filtered* view of this one (2b PR-(3):")
+    add("/// a host leg proves every implemented scene exists here and keeps this relative order).")
+    add("pub struct SceneDecl {")
+    add("    pub id: &'static str,")
+    add("    pub kind: &'static str,")
+    add("    pub phase: &'static str,")
+    add("    pub resident: bool,")
+    add("    pub shares_image: &'static str,")
+    add("}")
+    add(f"pub const SCENES: [SceneDecl; {len(variant.scenes)}] = [")
+    for scene in variant.scenes:
+        add("    SceneDecl {")
+        add(f'        id: "{scene.name}",')
+        add(f'        kind: "{scene.kind}",')
+        add(f'        phase: "{scene.phase}",')
+        add(f"        resident: {str(scene.resident).lower()},")
+        add(f'        shares_image: "{scene.shares_image}",')
+        add("    },")
+    add("];")
     add("")
     add("/// The progress bar's geometry (§6). `BAR_CELLS_FLOOR` is the plan's floor, quoted beside the")
     add("/// variant's derived grid so the two cannot be conflated; D9's point is exactly that conflation.")
@@ -3722,7 +3890,7 @@ chrome_art_tiles = 9
 glyph_atlas = "static"
 band = [{id="chrome", rows=2, always=true}, {id="title", rows=2, always=true}, {id="scene", rows=16, always=false}]
 palette = [{role="text", banks=[0]}, {role="chrome", banks=[1]}, {role="art", banks=[3]}, {role="viz", banks=[4]}, {role="game", banks=[5]}]
-scene = [{name="art", phase="2b", band="scene", kind="art", resident=true, min_boxes=1}, {name="list", phase="2b", band="scene", kind="text", resident=true, min_visible_rows=4}]
+scene = [{name="art", phase="2b", band="scene", kind="art", resident=true, min_boxes=1}, {name="list", phase="2b", band="scene", kind="text", resident=true, min_visible_rows=4}, {name="title_card", phase="2b", band="scene", kind="composite", resident=false, shares_image="art"}]
 element = [
   {id="clock", kind="text", band="chrome", x0=0, y0=0, x1=11, y1=1, face="fixture", row_px=16, banks=[0]},
   {id="keyart", kind="art", band="chrome", x0=20, y0=0, x1=29, y1=1, banks=[1]},
@@ -3730,6 +3898,7 @@ element = [
   {id="bar", kind="bar", band="title", x0=20, y0=1, x1=29, y1=1},
   {id="art", kind="art", band="scene", scene="art", x0=0, y0=0, x1=29, y1=15, banks=[3]},
   {id="list", kind="text", band="scene", scene="list", x0=0, y0=0, x1=29, y1=15, face="fixture", row_px=16, banks=[0]},
+  {id="card_art", kind="art", band="scene", scene="title_card", x0=0, y0=0, x1=9, y1=9, banks=[3]},
 ]
 control = [
   {key="start", band="chrome", slot="keyart", x0=21, y0=0, x1=21, y1=0},
@@ -4271,6 +4440,8 @@ def layout_self_test() -> int:
          ("resident=true, min_boxes=1", "min_boxes=1")),
         ("the retired variant-level `resident_scenes` count",
          ("tile_budget = 512", "tile_budget = 512\nresident_scenes = 1")),
+        ("a scene sharing an image with a scene that does not exist",
+         ('shares_image="art"', 'shares_image="no_such_scene"')),
     ):
         try:
             fixture = LayoutSpec(_write_spec(budget_tmp, _fixture_text(mutation), "schema.toml"))
@@ -4285,8 +4456,8 @@ def layout_self_test() -> int:
                 note = "fired ✓"
                 schema_fired += 1
         print(f"  {'scene schema':28}  {how:58}  {note}")
-    print(f"  scene schema legs fired: {schema_fired} of 3")
-    if schema_fired != 3:
+    print(f"  scene schema legs fired: {schema_fired} of 4")
+    if schema_fired != 4:
         failures.append("scene schema: a required field or the closed kind vocabulary is not asserted")
     shutil.rmtree(budget_tmp, ignore_errors=True)
 
@@ -5062,6 +5233,62 @@ def layout_self_test() -> int:
                  "the spec says so out loud: this cut came from an upstream release, and the tree does not "
                  "carry a parent file to re-run the subset against. That is also why §5.5 rules it "
                  "non-product: its chain of provenance stops at a download")
+
+    # --- 2b PR-(2): the measured terms are in the report, and said out loud ---------
+    #
+    # The render probe measured L1-L4; this leg is the pipeline's promise that the
+    # numbers arrived and are labelled as measurements rather than as arithmetic
+    # that happens to look precise. It reads the *rendered report*, not the
+    # constants, because a constant nobody emits is not a report.
+    print()
+    print("  2b PR-(2): AP-3b's measured terms are in the report, tagged and sourced")
+    report = report_text(spec, list(facts_by_variant.values()))
+    leg("the report carries a [measurement render] block",
+        "present", "present" if "[measurement render]" in report else "absent",
+        "[measurement render]" in report,
+        "2b PR-(2): the folds a coefficient came from belong in the machine-readable artifact, "
+        "not only in the probe's README")
+    leg("that block names the instrument and the date",
+        "render_probe_at=", "render_probe_at=" if "render_probe_at=" in report else "absent",
+        "render_probe_at=" in report,
+        "an un-attributed cycle number is the thing §5.1's measured table exists to avoid; the "
+        "probe's README and this line have to say mGBA vs the cart")
+    leg("the bar-cell term is `measured`, not `arithmetic`",
+        "measured", "measured" if "cycles_bar_cell_tag=measured" in report else "arithmetic",
+        "cycles_bar_cell_tag=measured" in report,
+        "AP-3b L1 measured one changed bar cell at the app's cadence; PR-(2) is where that tag "
+        "flips (`cycles_block`'s docstring said so before the measurement existed)")
+    leg("the clock-digit term is `measured` too",
+        "measured", "measured" if "cycles_clock_digit_tag=measured" in report else "arithmetic",
+        "cycles_clock_digit_tag=measured" in report,
+        "AP-3b L1's two-tile-row leg; the clock is the element R1b's hardware defect was about, so "
+        "it is not left as an estimate")
+    leg("the scene switch is measured, and no longer an excluded term",
+        "measured / absent",
+        ("measured / absent"
+         if "cycles_scene_switch_tag=measured" in report
+         and "cycles_excluded_scene_switch_term" not in report
+         else "still excluded"),
+        "cycles_scene_switch_tag=measured" in report
+        and "cycles_excluded_scene_switch_term" not in report,
+        "AP-3b L3: the priority store is 73 c and the commit is ~212,000 c — an event price, not "
+        "the 'tens of cycles' §5.1 assumed. Keeping the excluded line beside the measured one "
+        "would let two answers stand at once")
+    leg("the pool leg's shared-slot evidence is in the report",
+        f"max_refs>{1}", f"max_refs={MEASURED_POOL_MAX_REFS}",
+        MEASURED_POOL_MAX_REFS > 1 and MEASURED_POOL_DISTINCT <= MEASURED_POOL_SLOTS,
+        "AP-3b L4: refs are cell references and distinct are live slots; a per-cell fallback reads "
+        "distinct == refs, which is the failure mode a total-only check cannot see")
+    leg("the measured pool stand-up fits the 512-slot regular pool",
+        f"<={MEASURED_POOL_SLOTS}", str(MEASURED_POOL_DISTINCT),
+        MEASURED_POOL_DISTINCT <= MEASURED_POOL_SLOTS,
+        "art 256 + atlas 188 + icons 16 = 460, read back from the maps by the ROM rather than "
+        "summed here; R14's panic is what an over-fill would find instead")
+    leg("the coefficient the arithmetic terms use is L2's, not AP-0's upload leg",
+        "L2 per-cell", f"{CYCLE_PER_TILE_LIVE} c",
+        CYCLE_PER_TILE_LIVE == MEASURED_REGION_PER_CELL_LIVE,
+        "the title-line and region terms multiply by it; the probe measured the app's repaint "
+        "shape, and the arithmetic terms say so in their own `_source` line")
 
     print()
     if failures:

@@ -1,9 +1,13 @@
-# `album_probe` — AP-0, the Album Player's Phase 0 probe record
+# `album_probe` — AP-0's record, and 2b PR-(2)'s render/presentation legs
 
 AP-0 is the measurement pass `ALBUM-PLAYER.md` §13 opens with: three throwaway ROM
 images and one host gate that replace §10.2's target percentages with witnesses, and give
 §4.5's "~281,000 cycles per frame, to be confirmed by measurement" and §4.4's
-`SKIP_PRIME_CHUNKS` their first numbers.
+`SKIP_PRIME_CHUNKS` their first numbers. **2b PR-(2) added two more images and the same
+shape of gate for AP-3b and AP-3c** — `render_probe` (per-element redraw, a 600-cell
+region repaint, a `set_priority` switch, and the live tile pool) and `present_probe` (the
+event-commit arm against the OBJ-chrome/VBlank arm and a 60 Hz load), measured at
+`ALBUM-PLAYER.md` §13's rows and written up below.
 
 **What this directory is:** the UI spike (3 backgrounds, one 8×8 object, text, a palette
 fade, VBlank-paced, with the shipped lossless feeder playing synthetic PCM underneath),
@@ -40,21 +44,25 @@ Borrowing `geometry` from `examples/flac_integration` and the `Counter` from
 python3 scripts/album_probe_art.py --self-test   # generator refusal paths + audit
 make album-probe-art         # regenerate the tracked blob + pin (byte-identical)
 make album-probe-test        # the host half: 52 tests
-make native-album-probe-rom  # three .gba images + .text/.iwram/.bss/.rodata
-make album-probe             # boot all three headless, one log each
+make native-album-probe-rom  # five .gba images + .text/.iwram/.bss/.rodata
+make album-probe             # boot all five headless, one log each
 make check                   # every workspace rustfmt-clean
 make flac-check              # the shipped product's suite, unaffected
 ```
 
-`make album-probe` writes `album-probe-ui.log`, `album-probe-art.log` and
-`album-probe-skip.log` at the repository root; `make album-probe-test` writes
-`album-probe-test.log`. Every number below is copied from the three ROM logs, and each
-table's log line is quoted where the columns need it. The three verdicts:
+`make album-probe` writes `album-probe-ui.log`, `album-probe-art.log`,
+`album-probe-skip.log`, `album-probe-render.log` and `album-probe-present.log` at the
+repository root; `make album-probe-test` writes `album-probe-test.log`. Every number below
+is copied from the five ROM logs, and each table's log line is quoted where the columns
+need it. `make album-probe` also greps the render and presentation logs for their named
+legs — a PASS line with a leg quietly missing fails the target. The five verdicts:
 
 ```
 [album-probe] PASS ui arms=5 audio=live=yes video=disarmed tile=ime-off underflows=0
 [album-probe] PASS art tiles=225 live=343032 disarmed=335990 period=573440
 [album-probe] PASS skip policies=[drain, drop, truncate] queues=[shallow, deep] primes=[2, 4, 8, 16] underflows=0 audio=live
+[album-probe] PASS render legs=4 pool_distinct=460 pool_refs=856 max_refs=45 unchanged_cells=5 hidden=yes underflows=0
+[album-probe] PASS present arms=3 commits_a=3 commits_b=0 commits_c=0 vblank_b=3 vblank_c=179 underflows=0
 ```
 
 **Context for every number:** Linux aarch64 host, `mgba-test-runner` (mGBA headless) on
@@ -236,6 +244,125 @@ checksum `e990182e`, **sha256 `4ef603efaf55404ed2bc1f94d45d20344c642877fb907e151
 `rom_tiles=7200 rom_palettes=32 rom_map=450`, VRAM price **7,650 B** = 225 × 32 (tiles) +
 225 × 2 (map). §7 priced a 120×120 4bpp box at 7.2 KB ROM + 7.2 KB VRAM; the measured tile
 bytes are exactly 7,200, and the VRAM price is 450 B over that (the map).
+
+### 2b PR-(2) — the render legs, `render_probe` (AP-3b)
+
+§5.1, §5.5, §7 and §10.2 priced every UI element as arithmetic on AP-0's single-tile
+upload legs. This probe is where those tags come off: it measures the app's own drawing
+shape with the audio chain live, then measures the tile pool it stands up.
+
+```
+render pool audio=disarmed refs=856 distinct=460 shared=189 max_refs=45 pool=512 atlas_tiles=188 icon_tiles=16 art_tiles=256
+render pool_terms atlas=188 icons=16 art=256 expected_distinct<=461
+render l1_bar_cell count=60 sum=29338 min=480 max=741 wrap=0 cells=1
+render l1_clock_digit count=60 sum=28968 min=480 max=538 wrap=0 cells=1
+render l1_clock_low count=60 sum=28800 min=480 max=480 wrap=0 cells=1
+render l1_unchanged_run count=60 sum=122188 min=2020 max=2629 wrap=0 cells=5
+render l2_region_600 count=8 sum=4403499 min=536080 max=556701 wrap=0 cells=600
+render l3_set_priority count=8 sum=584 min=71 max=75 wrap=0 cells=2
+render l3_commit count=8 sum=1696814 min=124966 max=280360 wrap=0 cells=1
+render l3_whole_switch count=8 sum=1699086 min=125258 max=280644 wrap=0 cells=1
+render l3_landed flips=8 landed=8 bg0_prio=1 bg1_prio=2 (before=[1, 2, 0, 3])
+render hidden_scene map_entries=480 resolves=yes
+render audio periods=13 feeder_sum=65337 feeder_max=5028 late_max=0 late_over_grace=0 underflows=0
+```
+
+Means are derived host-side from the folds (the ROM prints no divide):
+
+| leg | window | mean | per cell | share |
+|---|---|---|---|---|
+| L1, one changed bar cell | 1 cell | **489 c** (min 480, max 741) | — | 0.085% of a 573,440 c period |
+| L1, one changed clock digit | 2 tile rows | **963 c** | 481 c | 0.168% of a period |
+| L1, one *unchanged* cell | 5-cell run | **2,037 c** | **407 c** | 0.071% of a period |
+| L2, whole region repaint | 600 cells | **550,437 c** (min 536,080, max 556,701) | **917 c** | 0.96 FLAC period · 2.10 lossy periods · 1.96 video frames |
+| L3, the priority store | 2 calls | **73 c** | 36 c | — |
+| L3, the whole switch | set_priority + show + commit | **212,386 c** (commit mean 212,102, max 280,360) | — | 0.37 FLAC / 0.81 lossy periods at the mean; the worst is one video period (1.07 lossy) |
+
+Four findings, stated as findings rather than as confirmation:
+
+1. **"Unchanged is near-free" is not what the hardware does.** The plan expected agb's
+   `set_tile_at_pos` early-out to make a no-op write nearly free; it is **83% of a changed
+   cell** (407 vs 489 c). The source says why: the early-out compares the map entries only
+   *after* `add_tile` on the new tile and `remove_tile` on the old one
+   (`regular_background.rs:360-378`), so the allocator's hash lookup and the reference
+   count are always paid. What the changed-cells rule actually saves is the map store and
+   the dirty mark. It is still the right rule — the clock is the measured case: two changed
+   cells cost **963 c** where an 11-cell full clock redraw costs 11 × ~481 ≈ **5,291 c**, a
+   5.5× saving — but "costs refcount churn and nothing else" should not be sold as
+   "nothing".
+2. **A whole-region repaint is 0.96 FLAC periods / 2.10 lossy periods**, and 600 calls in
+   one window is 1.96 video frames. §5.1's arithmetic put this row at 1.7–2.8 lossy periods;
+   the measurement lands inside that band. §5.1's conclusion stands: no whole-region
+   rewrite during playback, and the 600-cell number is an *event* price.
+3. **A scene switch is a commit price, not a map rewrite**: the `set_priority` store itself
+   is **73 c** (two calls), exactly the "tens of cycles" §5.1 assumed, and the switch's real
+   cost is the commit that makes the priority word land — mean 212,102 c, worst 280,360 c
+   (one video period). That is the price of an event paid where the audio is re-primed
+   anyway; the flips were read back from `BGxCNT` (`landed=8` of 8), so the ordering claim
+   is witnessed rather than assumed.
+4. **The shared atlas dedupes, and a total-only check would not have seen it.** The stand-up
+   is art (256 tiles) + atlas (188) + icons (16) over four backgrounds: **856 cell
+   references to 460 live slots**, 189 of those slots shared by two or more cells, and one
+   glyph slot referenced **45 times**. If the atlas had fallen back to per-cell allocation,
+   `distinct` would equal `refs` (856) and the pool would have overflowed 512 — the failure
+   mode the plan warned a total-only check reads as a pass. 460/512 = **89.8%** of the
+   regular pool; variant B's *declared* audit is 462 at its ceiling, and the probe is a
+   different stand-up, so the two are comparable in shape rather than equal by construction.
+   The hidden scene's 480 map entries and their tile words are unchanged after the
+   switches (`resolves=yes`), which is the §5.1 residency risk checked rather than argued.
+
+Zero underflows and `late_max=0` across 13 audio periods.
+
+### 2b PR-(2) — the presentation arms, `present_probe` (AP-3c)
+
+§5.7 splits "OBJ vs BG" into presentation timing and storage. This probe measures the
+timing axis with three arms, all running the same producer and the same live chain:
+**A** = the 2a product's shape (three BGs, an event-scoped `commit` when a clock digit
+changes ~1 Hz); **B** = the chrome as 56 OBJ entries, a shadow presented by DMA3 at VBlank,
+a sparse 2-entry update per tick, **no main-loop commit**; **C** = B under a 60 Hz synthetic
+chrome load (all 56 entries rewritten every frame, one 1 KiB DMA per VBlank).
+
+```
+present arm=A pass count=180 sum=9147962 min=178 max=121956 wrap=0 work_sum=4257 commit_sum=36665 due=3 commits=3
+present feeder arm=A audio=live periods=87 sum=442827 max=5133 late_max=0 late_over_grace=0 underflows=0
+present vblank arm=A frames=0 dmas=0 sum=0 max_any=0
+present obj_budget atlas_tiles=188 icon_tiles=16 oam=56 of=128 vpal_banks=1 shadow_bytes=1024 per_line_max=30
+present arm=B pass count=180 sum=9246871 min=353 max=104208 wrap=0 work_sum=21144 commit_sum=0 due=3 commits=0
+present feeder arm=B audio=live periods=88 sum=453412 max=5214 late_max=0 late_over_grace=0 underflows=0
+present vblank arm=B frames=3 dmas=6 sum=1419 max_any=473
+present arm=C pass count=180 sum=11414487 min=12755 max=116648 wrap=0 work_sum=2283448 commit_sum=0 due=0 commits=0
+present feeder arm=C audio=live periods=88 sum=461685 max=5255 late_max=0 late_over_grace=0 underflows=0
+present vblank arm=C frames=179 dmas=179 sum=362622 max_any=2077
+present compare a_pass_sum=9147962 b_pass_sum=9246871 c_pass_sum=11414487 a_commit_sum=36665 a_commits=3 b_commits=0 c_commits=0 period_cycles=573440
+```
+
+| arm | pass mean (180 frames) | commits | UI work | VBlank ISR | audio periods | lateness / underflows |
+|---|---|---|---|---|---|---|
+| A, event commit | 50,822 c | 3 (mean **12,222 c**) | 4,257 c total | — | 87 | 0 / 0 |
+| B, OBJ + sparse | 51,371 c | **0** | 21,144 c total (3 ticks) | 3 presents, 6 × 8 B DMAs, **473 c max** | 88 | 0 / 0 |
+| C, OBJ at 60 Hz | **63,414 c** | **0** | 2,283,448 c (12,686 c/frame) | 179 full 1 KiB DMAs, **2,026 c mean / 2,077 max** | 88 | 0 / 0 |
+
+**The verdict is a negative one, and it is the answer §5.7 asked for.** Arm A is clean: at
+its declared ~1 Hz cadence the commit costs 12,222 c (2.1% of a period), takes agb's fast
+path rather than the VBlank halt — exactly what §5.7 says a commit every few seconds does —
+and the producer never misses (`late_max=0`, no underflows across 87 periods). So AP-3c does
+**not** force the OBJ chrome inside 2a; §5.7's "otherwise it waits for 2b" applies, and 2b
+PR-(5) is the implementation PR, not an emergency. Arm B shows there is nothing to win at
+this cadence either: its pass mean is +1.1% of A's, inside the run's noise, because a 1 Hz
+commit that does not halt is already cheap.
+
+What B and C *do* establish is the path's price for the thing the product has not built
+yet. A sparse tick costs one 8-byte DMA per changed cell and **473 c** of VBlank service; a
+60 Hz moving chrome costs **12,686 c/frame** in the main loop plus **2,026 c/frame** in the
+VBlank handler (~5.2% of a video frame together), with zero underflows and zero lateness.
+That is the ceiling AP-6's viz budget and 2b's badge/scroll work should be priced against —
+and the 56-entry reservation is printed with it: 188 + 16 OBJ tiles (~6.4 KiB of the
+separate 32 KiB pool), 56 of 128 OAM, 1 of 16 VPAL banks, 30 sprites on the title line and
+26 on the chrome row.
+
+**Hardware is still AP-7a's.** These are mGBA numbers on this host; the VBlank ISR's cost
+is the one an emulator is least entitled to predict, which is why it is measured here as a
+fold rather than assumed from §5.7's "~256 cycles at 32-bit".
 
 ### Skip sweep — `skip_probe`, 20 skips per setting × 4 arms, audio live, fade 256
 

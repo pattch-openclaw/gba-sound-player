@@ -442,6 +442,67 @@ pub const BAR: usize = element_index("bar");
 /// The authored control art's element; the five slots sit inside it (§5.3).
 pub const KEYART: usize = element_index("keyart");
 
+/// 2b PR-(3)'s title-card spans and picture. `Option`, like [`TITLE`], because a
+/// variant that declares no card (the 8 px instrument, §5.0's A) must still compile —
+/// and then the card scene is not in [`SceneId::IMPLEMENTED`].
+pub const CARD_TITLE: Option<usize> = element_index_opt("card_title");
+pub const CARD_ARTIST: Option<usize> = element_index_opt("card_artist");
+pub const CARD_YEAR: Option<usize> = element_index_opt("card_year");
+pub const CARD_COUNTS: Option<usize> = element_index_opt("card_counts");
+pub const CARD_ART: Option<usize> = element_index_opt("card_art");
+
+/// A card is declared whole or not at all: four spans and its picture are one scene, and
+/// a variant that declared only some of them would paint a card with a hole in it at
+/// run time. The 8 px instrument (A) declares none, which is why these are `Option`s.
+const _: () = assert!(
+    CARD_TITLE.is_some() == CARD_ARTIST.is_some()
+        && CARD_ARTIST.is_some() == CARD_YEAR.is_some()
+        && CARD_YEAR.is_some() == CARD_COUNTS.is_some()
+        && CARD_COUNTS.is_some() == CARD_ART.is_some(),
+    "the title card declares its four spans and its picture together"
+);
+
+/// The scenes this ROM implements, in the spec's order (§5.2's registry).
+///
+/// It is a **filtered view** of the generated `layout::SCENES`: the spec declares
+/// `art`, `list`, `title_card` and `blank`, and this PR implements the latter two. A
+/// host leg proves every id here exists in `layout::SCENES` and that this relative
+/// order is the spec's, so `Select`'s cycle is checked against the declaration rather
+/// than against a match arm nobody rereads. Scenes land by extending this table, not
+/// by rewriting the cycle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SceneId {
+    /// A12: the album's title card, metadata only while `ART1` is 2b PR-(4)'s.
+    TitleCard,
+    /// 2a's flat region fill — the boot scene under option (c).
+    Blank,
+}
+
+impl SceneId {
+    /// The implemented scenes, in `layout::SCENES` order. `title_card` precedes
+    /// `blank` because the spec declares it first; the order is the registry's, not
+    /// this file's taste.
+    pub const IMPLEMENTED: [SceneId; 2] = [SceneId::TitleCard, SceneId::Blank];
+
+    /// The spec's name for this scene, as `layout::SCENES[].id` spells it.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            SceneId::TitleCard => "title_card",
+            SceneId::Blank => "blank",
+        }
+    }
+
+    /// The next implemented scene — §5.3's `Select`, one press per step.
+    #[must_use]
+    pub const fn next(self) -> SceneId {
+        match self {
+            SceneId::TitleCard => SceneId::Blank,
+            SceneId::Blank => SceneId::TitleCard,
+        }
+    }
+}
+
 const _: () = assert!(
     layout::ELEMENTS[CLOCK].w / chrome::TILE_PX == 12,
     "the clock's box is not 12 cells: the `M:SS/M:SS` line assumes it"
@@ -761,6 +822,95 @@ impl Surface {
         );
     }
 
+    /// 2b PR-(3): paint the title card into the scene region.
+    ///
+    /// Every cell the card names is written with an **opaque** tile — the region fill,
+    /// not the foreground's transparent page tile — because a scene must cover its
+    /// rectangle (§5.2's backing rule, whose first consumer this is). The picture is a
+    /// placeholder fill until `ART1`/`album_art.py` land in 2b PR-(4): the element is
+    /// declared and its box painted, so the layout and the pool audit are already the
+    /// product's, while the pixels are still a later PR's.
+    ///
+    /// The counts line is ASCII. §5.5a's cut is U+0020-U+007E and has no middle dot,
+    /// so the separator is `-` — the same finding 2a PR-(2) made about U+2026, stated
+    /// once here rather than rediscovered as a blank glyph.
+    pub fn paint_card(writes: &mut Writes, card: &Card<'_>) {
+        writes.clear();
+        if let Some(index) = CARD_ART {
+            let e = &layout::ELEMENTS[index];
+            writes.fill(
+                e.x / chrome::TILE_PX,
+                e.y / chrome::TILE_PX,
+                e.w / chrome::TILE_PX,
+                e.h / chrome::TILE_PX,
+                chrome::FILL_SCENE,
+                chrome::BANK_TEXT,
+            );
+        }
+
+        let mut counts = [0u8; 32];
+        let counts = fmt_counts(card.n_tracks, card.seconds, &mut counts);
+        let mut year = [0u8; 8];
+        let year = if card.year == 0 {
+            None
+        } else {
+            let n = fmt_u32(u32::from(card.year), &mut year);
+            core::str::from_utf8(&year[..n]).ok()
+        };
+        let artist = if card.artist.is_empty() {
+            "UNKNOWN"
+        } else {
+            card.artist
+        };
+
+        // One `Cells` per span: the state is the element's diff, and two spans with the
+        // same dimensions but different origins would otherwise share it.
+        if let Some(index) = CARD_TITLE {
+            let mut cells = Cells::new();
+            draw_text_on(
+                &mut cells,
+                index,
+                card.title,
+                writes,
+                chrome::FILL_SCENE,
+                chrome::BANK_TEXT,
+            );
+        }
+        if let Some(index) = CARD_ARTIST {
+            let mut cells = Cells::new();
+            draw_text_on(
+                &mut cells,
+                index,
+                artist,
+                writes,
+                chrome::FILL_SCENE,
+                chrome::BANK_TEXT,
+            );
+        }
+        if let (Some(index), Some(year)) = (CARD_YEAR, year) {
+            let mut cells = Cells::new();
+            draw_text_on(
+                &mut cells,
+                index,
+                year,
+                writes,
+                chrome::FILL_SCENE,
+                chrome::BANK_TEXT,
+            );
+        }
+        if let Some(index) = CARD_COUNTS {
+            let mut cells = Cells::new();
+            draw_text_on(
+                &mut cells,
+                index,
+                counts,
+                writes,
+                chrome::FILL_SCENE,
+                chrome::BANK_TEXT,
+            );
+        }
+    }
+
     /// Bring the foreground map up to date with `view`, appending only the cells that changed.
     ///
     /// The writes go to the foreground background: glyphs, the bar, and the transparent page tile in
@@ -899,13 +1049,38 @@ impl Default for Surface {
 /// A free function rather than a method, because it borrows one field of [`Surface`] mutably while
 /// the caller still needs the rest: a method would need `&mut self` and `&mut self.clock` at once.
 fn draw_text(cells: &mut Cells, element: usize, text: &str, writes: &mut Writes) {
-    let e = &layout::ELEMENTS[element];
-    let cols = (e.w / chrome::TILE_PX) as usize;
-    let rows = (e.h / chrome::TILE_PX) as usize;
     // Text lives on the foreground layer, so its padding is the *transparent* page tile rather than
     // the band fill. The band fill is on the background below it; writing it here would paint the
     // text layer opaque and hide the art the user wants behind the words.
-    let (fill, band_bank) = (chrome::FILL_PAGE, chrome::BANK_TEXT);
+    draw_text_on(
+        cells,
+        element,
+        text,
+        writes,
+        chrome::FILL_PAGE,
+        chrome::BANK_TEXT,
+    );
+}
+
+/// [`draw_text`] on a caller-chosen backing cell.
+///
+/// The title card draws text on the **scene** background, whose empty cells are the
+/// region fill and must stay opaque (§5.2's backing rule). `fill`/`band_bank` are the
+/// cell a glyph-less position takes: `FILL_PAGE` on the foreground, `FILL_SCENE` on
+/// the scene. Everything else — the cell model, the column-not-index rule, the
+/// tileset-named writes — is shared, because a second copy of this loop is exactly the
+/// bug 2a PR-(3)'s first run found.
+fn draw_text_on(
+    cells: &mut Cells,
+    element: usize,
+    text: &str,
+    writes: &mut Writes,
+    fill: u16,
+    band_bank: u8,
+) {
+    let e = &layout::ELEMENTS[element];
+    let cols = (e.w / chrome::TILE_PX) as usize;
+    let rows = (e.h / chrome::TILE_PX) as usize;
     if !cells.seeded || cells.cols != cols || cells.rows != rows {
         cells.seed(cols, rows, fill, band_bank);
     }
@@ -952,6 +1127,67 @@ fn draw_text(cells: &mut Cells, element: usize, text: &str, writes: &mut Writes)
         }
         row += 1;
     }
+}
+
+/// A decimal `u32` into `buf`, returning the bytes written (no padding).
+fn fmt_u32(mut value: u32, buf: &mut [u8]) -> usize {
+    let mut digit = [0u8; 10];
+    let mut n = 0;
+    loop {
+        digit[n] = b'0' + (value % 10) as u8;
+        n += 1;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
+    let mut out = 0;
+    while out < n && out < buf.len() {
+        buf[out] = digit[n - 1 - out];
+        out += 1;
+    }
+    out
+}
+
+/// `N TRACKS - M MIN` into `buf`, returning it as a `&str`.
+///
+/// Minutes round **up**: a 9:37 album is a ten-minute card, not a nine-minute one, and
+/// this is a metadata line rather than the transport clock (which truncates
+/// deliberately, §6). `seconds / 60` is a constant divisor, which the compiler
+/// strength-reduces — no `__aeabi_uidiv` is introduced on the card's event path.
+fn fmt_counts<'a>(n_tracks: u32, seconds: u32, buf: &'a mut [u8]) -> &'a str {
+    let minutes = (seconds + 59) / 60;
+    let mut out = 0;
+    out += fmt_u32(n_tracks, &mut buf[out..]);
+    for byte in b" TRACKS - " {
+        if out < buf.len() {
+            buf[out] = *byte;
+            out += 1;
+        }
+    }
+    out += fmt_u32(minutes, &mut buf[out..]);
+    for byte in b" MIN" {
+        if out < buf.len() {
+            buf[out] = *byte;
+            out += 1;
+        }
+    }
+    core::str::from_utf8(&buf[..out]).unwrap_or("")
+}
+
+/// The strings the card draws, separated from the album so the host gate can paint a
+/// card without a baked manifest. The app fills this from `meta::Album`.
+pub struct Card<'a> {
+    /// The album title (§5.2's card row).
+    pub title: &'a str,
+    /// The album artist; empty renders `UNKNOWN` rather than an empty line.
+    pub artist: &'a str,
+    /// The album year; `0` omits the line.
+    pub year: u16,
+    /// The number of tracks.
+    pub n_tracks: u32,
+    /// The album's total length in **seconds**, for the rounded minutes line.
+    pub seconds: u32,
 }
 
 /// `M:SS` into `buf`, returning the bytes written. Minutes lose their leading zero only above 9;
@@ -1086,6 +1322,17 @@ mod arm {
         /// Apply a batch of writes to the foreground map (the glyphs, icons and bar).
         pub fn apply(&mut self, writes: &Writes, tiles: &Tilesets) {
             apply_to(&mut self.foreground, writes, tiles);
+        }
+
+        /// Apply a batch of writes to the **scene** map — the title card's layer (2b PR-(3)).
+        ///
+        /// The scene background was written once at construction (the page fill and the
+        /// blank fill) and has been static since 2a. A card is the first scene to draw
+        /// at run time, and it draws here rather than on the foreground because §5.0's
+        /// rectangle rule is the whole split: the scene owns its cells, the foreground
+        /// owns the chrome's.
+        pub fn apply_scene(&mut self, writes: &Writes, tiles: &Tilesets) {
+            apply_to(&mut self.scene, writes, tiles);
         }
 
         /// Show the three backgrounds into one frame and commit it.

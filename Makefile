@@ -15,7 +15,7 @@
         uli-player-cross uli-player-cross-rom \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
-        album-bake album-pack-check album-seam-test album-layout-test album-glyphs-test album-rom album-player-rom album-test \
+        album-bake album-pack-check album-seam-test album-layout-test album-glyphs-test album-rom album-player-rom album-test album-card-test \
         album-preview album-diff-rom \
         clean clean-cache check help toolchain-check target-spec-check
 
@@ -245,6 +245,8 @@ ALBUM_ROM_RUN_LOG := album-rom-run.log
 # because a headless run cannot press a key. Its own image and log, so `album-rom`'s stay untouched.
 ALBUM_REPLAY_ROM := album-player-replay.gba
 ALBUM_TEST_LOG := album-test.log
+ALBUM_CARD_ROM := album-card.gba
+ALBUM_CARD_LOG := album-card-test.log
 
 # --- the core and its overlay -------------------------------------------------
 FLAC_CRATE_DIR_MANIFEST := $(abspath crates/flac-lite/Cargo.toml)
@@ -1406,8 +1408,9 @@ album-probe-test: toolchain-check
 	  [ "$$tracked" = "$$regenerated" ] || { echo "album-probe-test: the art tool is not deterministic — tracked $$tracked vs regenerated $$regenerated"; exit 1; }
 	@echo "album-probe-test passed: ART1 round-trip + every refusal, §6 exactness, the session clock, both clocks' geometry, and a byte-identical regeneration"
 
-# The three probe images. `cargo build` in the standalone workspace builds the
-# library and every [[bin]] (ui-probe, art-probe, skip-probe), then each raw image
+# The five probe images. `cargo build` in the standalone workspace builds the
+# library and every [[bin]] (ui-probe, art-probe, skip-probe, and 2b PR-(2)'s
+# render-probe and present-probe), then each raw image
 # is header-fixed for the cartridge — the uli-bench shape. Run one with
 # `timeout -k 5 300 $(GBA_TEST_RUNNER) album-probe-<name>.gba` and read the
 # `[album-probe]` lines. Each image prints its verdict, its `Tests finished
@@ -1422,25 +1425,60 @@ album-probe-rom: format
 	agb-gbafix $(ALBUM_PROBE_TARGET_DIR)/ui-probe -o album-probe-ui.gba
 	agb-gbafix $(ALBUM_PROBE_TARGET_DIR)/art-probe -o album-probe-art.gba
 	agb-gbafix $(ALBUM_PROBE_TARGET_DIR)/skip-probe -o album-probe-skip.gba
-	@ls -l album-probe-ui.gba album-probe-art.gba album-probe-skip.gba
+	agb-gbafix $(ALBUM_PROBE_TARGET_DIR)/render-probe -o album-probe-render.gba
+	agb-gbafix $(ALBUM_PROBE_TARGET_DIR)/present-probe -o album-probe-present.gba
+	@ls -l album-probe-ui.gba album-probe-art.gba album-probe-skip.gba \
+	       album-probe-render.gba album-probe-present.gba
 	@size -A $(ALBUM_PROBE_TARGET_DIR)/ui-probe $(ALBUM_PROBE_TARGET_DIR)/art-probe \
-	          $(ALBUM_PROBE_TARGET_DIR)/skip-probe | grep -E '^(File|\.text|\.iwram|\.bss|\.rodata)'
-	@echo "  run: timeout -k 5 300 $(GBA_TEST_RUNNER) album-probe-<ui|art|skip>.gba"
+	          $(ALBUM_PROBE_TARGET_DIR)/skip-probe $(ALBUM_PROBE_TARGET_DIR)/render-probe \
+	          $(ALBUM_PROBE_TARGET_DIR)/present-probe | grep -E '^(File|\.text|\.iwram|\.bss|\.rodata)'
+	@echo "  run: timeout -k 5 300 $(GBA_TEST_RUNNER) album-probe-<ui|art|skip|render|present>.gba"
 	@echo "  the verdict is the log's '[album-probe] PASS' line, never the exit status"
 
-# Run all three headless and keep one log each. The gate is the log, not the exit
+# Run all five headless and keep one log each. The gate is the log, not the exit
 # status (the uli-bench model): the PASS line names the measurement, and the
 # sentinel proves the run reached its end rather than a timeout. A log that ends
-# at the leash is a FAIL even if it printed a stale PASS earlier.
+# at the leash is a FAIL even if it printed a stale PASS earlier. From 2b PR-(2)
+# the render and presentation logs are also checked for their named legs: a PASS
+# that dropped a leg still fails here.
 album-probe: album-probe-rom
-	@for probe in ui art skip; do \
+	@for probe in ui art skip render present; do \
 	  timeout -k 5 300 $(GBA_TEST_RUNNER) album-probe-$$probe.gba > album-probe-$$probe.log 2>&1 || true; \
 	  grep -q '^\[album-probe\] PASS' album-probe-$$probe.log \
 	    || { echo "album-probe: album-probe-$$probe.gba printed no PASS verdict — see album-probe-$$probe.log"; exit 1; }; \
 	  grep -q '^Tests finished successfully' album-probe-$$probe.log \
 	    || { echo "album-probe: album-probe-$$probe.gba never reached the exit sentinel (a timeout, not a pass) — see album-probe-$$probe.log"; exit 1; }; \
 	done
-	@echo "album-probe done: album-probe-{ui,art,skip}.log hold the tables and the verdicts"
+	@# 2b PR-(2): the render probe's legs are named, not just a PASS. A log that
+	@# printed PASS and dropped a leg still fails here.
+	@for line in 'render pool audio=disarmed' 'render l1_unchanged_run' 'render l2_region_600' \
+	             'render l3_set_priority' 'render l3_landed' 'render hidden_scene'; do \
+	  grep -q "\[album-probe\] $$line" album-probe-render.log \
+	    || { echo "album-probe: the render log does not carry '$$line' — AP-3b's legs are not all in it"; exit 1; }; \
+	done
+	@d=$$(sed -n 's/^\[album-probe\] render pool audio=disarmed refs=[0-9]* distinct=\([0-9][0-9]*\).*/\1/p' album-probe-render.log); \
+	  [ -n "$$d" ] && [ "$$d" -gt 0 ] && [ "$$d" -le 512 ] \
+	    || { echo "album-probe: the pool leg read distinct='$$d', needs 1..512 — the stand-up did not allocate, or it overflowed the regular pool"; exit 1; }; \
+	  grep -Eq '^\[album-probe\] render pool audio=disarmed refs=[0-9]+ distinct=[0-9]+ shared=[1-9][0-9]* max_refs=[2-9][0-9]* ' album-probe-render.log \
+	    || { echo "album-probe: the pool leg shows no shared slot with two or more references — a total-only pass is the silent per-cell fallback"; exit 1; }; \
+	  grep -q '^\[album-probe\] render hidden_scene .* resolves=yes' album-probe-render.log \
+	    || { echo "album-probe: the hidden scene's map/tile data moved — the residency risk §5.1 names"; exit 1; }
+	@# AP-3c: arm A committed at its declared cadence, B and C never committed,
+	@# and the VBlank path actually presented. The comparison numbers are printed
+	@# for the reader; these are the mechanical claims.
+	@grep -Eq '^\[album-probe\] present arm=A .* commits=[1-9][0-9]*$$' album-probe-present.log \
+	  || { echo "album-probe: arm A never committed — the control arm measured nothing"; exit 1; }
+	@grep -Eq '^\[album-probe\] present arm=B .* commit_sum=0 due=[0-9]+ commits=0$$' album-probe-present.log \
+	  || { echo "album-probe: arm B committed — the OBJ arm is not commit-free"; exit 1; }
+	@grep -Eq '^\[album-probe\] present arm=C .* commit_sum=0 due=[0-9]+ commits=0$$' album-probe-present.log \
+	  || { echo "album-probe: arm C committed — the 60 Hz arm is not commit-free"; exit 1; }
+	@grep -Eq '^\[album-probe\] present vblank arm=B frames=[1-9][0-9]* dmas=[1-9][0-9]* ' album-probe-present.log \
+	  || { echo "album-probe: arm B's VBlank path presented no frame — the OAM DMA never ran"; exit 1; }
+	@grep -Eq '^\[album-probe\] present vblank arm=C frames=[1-9][0-9]* dmas=[1-9][0-9]* ' album-probe-present.log \
+	  || { echo "album-probe: arm C's VBlank path presented no frame"; exit 1; }
+	@echo "album-probe done: album-probe-{ui,art,skip}.log hold the AP-0 tables; "
+	@echo "  album-probe-{render,present}.log hold 2b PR-(2)'s legs and arms"
+
 
 # ===========================================================================
 # Album Player — Phase 1 (A3a): the pack step, and the four refusals
@@ -1678,12 +1716,12 @@ album-layout-test: toolchain-check album-bake
 	    || { echo "album-layout-test: §9.0's register did not fire all of its 2a rows by id — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
 	  grep -q '^  budget rows fired: 2 of 2$$' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) \
 	    || { echo "album-layout-test: the two budget rows 2b PR-(1) re-homed (over-budget, over-track-count) did not both fire by id — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
-	  grep -q '^  scene schema legs fired: 3 of 3$$' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) \
-	    || { echo "album-layout-test: the per-scene kind/resident schema did not refuse its three wrong specs (unknown kind, missing resident, the retired count) — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
+	  grep -q '^  scene schema legs fired: 4 of 4$$' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) \
+	    || { echo "album-layout-test: the per-scene kind/resident schema did not refuse its four wrong specs (unknown kind, missing resident, the retired count, a bad shares_image) — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
 	  ! grep -q 'SELF-TEST FAILED' $(abspath $(ALBUM_LAYOUT_GATE_LOG)) \
 	    || { echo "album-layout-test: a reproduction leg failed — see $(ALBUM_LAYOUT_GATE_LOG)"; exit 1; }; \
 	  n=$$(grep -c '  ok   <-' $(abspath $(ALBUM_LAYOUT_GATE_LOG))); \
-	  [ "$$n" -ge 110 ] || { echo "album-layout-test: '$$n' legs passed, needs >= 110 — a green that names nothing is not a green (2b PR-(1) raised the floor with the resident-set walk and the two budget legs)"; exit 1; }
+	  [ "$$n" -ge 120 ] || { echo "album-layout-test: '$$n' legs passed, needs >= 120 — a green that names nothing is not a green (2b PR-(3) raised the floor with the shares_image leg)"; exit 1; }
 	@first=$$(mktemp -d); \
 	  python3 scripts/album_bake.py --emit-layout >/dev/null || { rm -rf $$first; exit 1; }; \
 	  cp $(ALBUM_LAYOUT_RS) $$first/layout.rs || { rm -rf $$first; exit 1; }; \
@@ -1704,7 +1742,9 @@ album-layout-test: toolchain-check album-bake
 	  cmp -s $$first/report-1.txt $$first/report-2.txt \
 	    || { echo "album-layout-test: the layout report differs between two emits — the spec -> report pipeline is not deterministic"; rm -rf $$first; exit 1; }; \
 	  for key in 'schema=album-layout-report/1' 'scene_art_kind=art' 'scene_blank_resident=true' \
-	             'pool_scene_resident=0' 'pool_scene_projection=256' 'cycles_bar_cell_tag=arithmetic' \
+	             'pool_scene_resident=0' 'pool_scene_projection=256' 'cycles_bar_cell_tag=measured' \
+	             'cycles_scene_switch_tag=measured' 'render_probe_at=2b PR-(2)' \
+	             'render_l4_max_refs=45' 'scene_title_card_shares_image=art' \
 	             'rom_verdict=not computed'; do \
 	    grep -qF "$$key" $$first/report-1.txt \
 	      || { echo "album-layout-test: the report does not carry '$$key' — the machine-readable half is not saying what it must (per-scene kind/resident, the resident-set split, a labelled cycle term, the ROM verdict)"; rm -rf $$first; exit 1; }; \
@@ -1904,6 +1944,33 @@ album-rom: album-bake
 	@echo "  run: timeout -k 5 600 $(GBA_TEST_RUNNER) $(ALBUM_ROM) > $(ALBUM_ROM_RUN_LOG) 2>&1"
 	@echo "  judge by the log's '[album-rom] verdict' line, never by the exit status: a PASS loops"
 	@echo "  forever, so the timeout's exit 124 IS the passing result."
+
+# 2b PR-(3)'s card arm: the gate script plus one `Select` edge (frames 90/96 — between the
+# pause's release and the first skip), so the card's paint path runs with live audio: a
+# scene-map write into the region background, its own commit, and the chrome untouched.
+# The assertions are deliberately few and each names its own failure: the verdict line
+# aggregates the audio/transport terms, the `scene:` line is the action, and the feed line
+# proves the paint did not starve the ring. The card's geometry and opaqueness are the host
+# gate's (`tests/album_surface_host.rs`); this target is the runtime witness that the
+# `Select` path is wired, not a second geometry gate.
+album-card-test: toolchain-check album-bake
+	cd $(ALBUM_CRATE_DIR) && $(CARGO) build --release --target $(TARGET_SPEC) --bin album-play \
+	  --features "input-replay deep-audit replay-script-card"
+	agb-gbafix $(ALBUM_ROM_BIN) -o $(ALBUM_CARD_ROM)
+	@status=0; \
+	  timeout -k 5 180 $(GBA_TEST_RUNNER) $(ALBUM_CARD_ROM) > $(ALBUM_CARD_LOG) 2>&1 || status=$$?; \
+	  [ $$status -eq 124 ] \
+	    && echo "album-card-test: the runner ended at the leash (exit 124), which is the pass path" \
+	    || echo "album-card-test: the runner exited $$status; the log is still the verdict"; \
+	  grep -q '^\[album-rom\] verdict PASSED' $(ALBUM_CARD_LOG) \
+	    || { echo "album-card-test: no 'verdict PASSED' line — see $(ALBUM_CARD_LOG)"; exit 1; }; \
+	  grep -q '^\[album-rom\] scene: last=title_card changes=1 implemented=2 declared=4' $(ALBUM_CARD_LOG) \
+	    || { echo "album-card-test: Select did not reach the title card — the post-drain scene summary is missing or names another scene"; exit 1; }; \
+	  grep -q 'feed: .*underflows=0' $(ALBUM_CARD_LOG) \
+	    || { echo "album-card-test: the ring booked an underflow across the card's paint — see $(ALBUM_CARD_LOG)"; exit 1; }; \
+	  grep -q 'card=declared' $(ALBUM_CARD_LOG) \
+	    || { echo "album-card-test: the boot line does not say the card is declared — this build is not the one the test names"; exit 1; }
+	@echo "album-card-test passed: Select painted the title card, the verdict holds, and the ring never underflowed"
 
 # The same ROM, built without `deep-audit`: a **player** artifact, not a gate artifact. It plays the
 # album and runs every always-on witness (the ALBM1 structure fold, the per-track tripwires, the pin
@@ -2237,7 +2304,7 @@ clean-outputs:
 	@rm -f $(SPIKE_CRATE_DIR)/assets/rate_*.bin
 	@rm -f uli-bench*.log uli-attrib*.log
 	@rm -f album-probe*.log
-	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_LAYOUT_RS) $(ALBUM_LAYOUT_REPORT) $(ALBUM_GLYPHS_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_LAYOUT_GATE_LOG) $(ALBUM_GLYPHS_GATE_LOG) $(ALBUM_ROM_RUN_LOG) $(ALBUM_TEST_LOG)
+	@rm -f $(ALBUM_BLOB) $(ALBUM_ASSETS_DIR)/*.gfp $(ALBUM_ASSETS_RS) $(ALBUM_LAYOUT_RS) $(ALBUM_LAYOUT_REPORT) $(ALBUM_GLYPHS_RS) $(ALBUM_GATE_LOG) $(ALBUM_SEAM_GATE_LOG) $(ALBUM_LAYOUT_GATE_LOG) $(ALBUM_GLYPHS_GATE_LOG) $(ALBUM_ROM_RUN_LOG) $(ALBUM_TEST_LOG) $(ALBUM_CARD_LOG)
 	@rm -f $(ALBUM_PREVIEW)-*.png $(ALBUM_PREVIEW)-*.png.txt
 	@find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} + 2>/dev/null || true
 
@@ -2374,8 +2441,9 @@ help:
 	@echo "      timed window, never the verdict): uli-attrib, uli-attrib-subframe, uli-frame-ops"
 	@echo "    Opus (OPUS.md): native-opus-rom, opus-test"
 	@echo "    Album Player, Phase 0 (AP-0 — the probe aggregate; nothing here is"
-	@echo "      wired into flac-check or test): album-probe-rom (three probe ROMs),"
-	@echo "      album-probe (run all three headless; PASS read from each log),"
+	@echo "      wired into flac-check or test): album-probe-rom (five probe ROMs: AP-0's"
+	@echo "      three + 2b PR-(2)'s render/presentation bins),"
+	@echo "      album-probe (run all five headless; PASS and the named legs read from each log),"
 	@echo "      album-probe-art (regenerate the tracked ART1 blob + pin),"
 	@echo "      album-probe-test (the AP-0 host gate)."
 	@echo "    Album Player, Phase 1 (pack step + the app seam; ALBUM-PLAYER.md §9.0 A3a, §4.2b):"
@@ -2384,6 +2452,8 @@ help:
 	@echo "      album-seam-test (the seam's host gate: derived geometry vs the shipped figures, both"
 	@echo "      backend arms, the FLAC arm's fnv_pcm and fnv_fifo_l/fnv_fifo_r pins, and a stub-only"
 	@echo "      build with no decoder linked),"
+	@echo "      album-card-test (2b PR-(3): the gate script plus one Select edge — the title"
+	@echo "      card's paint path under live audio, with the run's whole verdict still asserted),"
 	@echo "      album-layout-test (2a's layout gate: the generator's own self-test with §9.0's nine"
 	@echo "      fireable refusals fired by id and the [meta] pool guard asked at its own error case, the"
 	@echo "      generated src/layout.rs byte-identical across two emits, and the Rust half — meta.rs's"

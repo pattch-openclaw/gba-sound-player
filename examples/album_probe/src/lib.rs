@@ -77,3 +77,11 @@ pub mod synth;
 #[cfg(target_arch = "arm")]
 #[allow(unsafe_code)]
 pub mod probe_hw;
+
+/// 2b PR-(2)'s drawing and presentation half: the hand-built tile banks, the OAM
+/// shadow with its VBlank DMA3, and the `BGxCNT`/map readers the L4 pool leg
+/// needs. Arm-only for the same reason as `probe_hw`, and separate from it because
+/// the render and presentation probes share it while the Phase 0 probes do not.
+#[cfg(target_arch = "arm")]
+#[allow(unsafe_code)]
+pub mod render_hw;

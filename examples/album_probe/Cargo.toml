@@ -66,6 +66,25 @@ test = false
 required-features = ["probe-roms"]
 bench = false
 
+# 2b PR-(2): AP-3b's render legs (per-element redraw, a 600-cell region repaint, a
+# set_priority switch, and the live tile-pool leg) and AP-3c's presentation arms
+# (event commit vs OBJ chrome + VBlank OAM DMA vs a 60 Hz synthetic chrome load).
+# Same feature gate as the Phase 0 bins: `agb` exists only on the ARM target, and
+# an integration test build would otherwise try to link two more GBA entry points.
+[[bin]]
+name = "render-probe"
+path = "src/bin/render_probe.rs"
+test = false
+required-features = ["probe-roms"]
+bench = false
+
+[[bin]]
+name = "present-probe"
+path = "src/bin/present_probe.rs"
+test = false
+required-features = ["probe-roms"]
+bench = false
+
 [workspace]
 
 [profile.dev.build-override]

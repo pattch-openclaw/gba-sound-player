@@ -97,6 +97,8 @@ input-replay = []
 replay-script-a = ["input-replay"]
 replay-script-b = ["input-replay"]
 replay-script-c = ["input-replay"]
+# 2b PR-(3): the gate script plus one `Select` edge — the card's runtime witness.
+replay-script-card = ["input-replay"]
 # Hardware diagnostic, never a product image: omit the explicit transparent page fill that
 # `Painted::new` writes over every visible cell of the three backgrounds. With the fill, no visible
 # cell depends on agb's reserved blank VRAM tile; without it, a Quick-Boot loader that leaves VRAM

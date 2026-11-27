@@ -236,3 +236,6 @@ __pycache__/
 # `make album-test`'s headless run log (AP-1's gate): the same per-run rule once more,
 # and the one the gate itself reads back, so it is output in both senses.
 /album-test.log
+# `make album-card-test`'s headless run log (2b PR-(3)): the gate script plus one Select
+# edge, read back by the target that wrote it — the same per-run rule.
+/album-card-test.log

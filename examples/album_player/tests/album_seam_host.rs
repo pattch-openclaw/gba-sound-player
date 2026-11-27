@@ -973,10 +973,22 @@ fn the_now_playing_map_is_the_tables_and_needs_no_clock() {
         keys::now_playing_action(BTN_DOWN),
         Some(Action::RestartTrack)
     );
-    // §5.3's `—`: Up, B and Select bind nothing while a track plays.
-    for unbound in [BTN_UP, BTN_B, BTN_SELECT, 0] {
+    // §5.3's `—`: Up and B bind nothing while a track plays. **Select is no longer one of
+    // them**: 2b PR-(3) gave it §5.3's scene cycle (the card is reachable mid-album), so the
+    // row is asserted rather than grouped with the unbound keys.
+    for unbound in [BTN_UP, BTN_B, 0] {
         assert_eq!(keys::now_playing_action(unbound), None);
     }
+    assert_eq!(
+        keys::now_playing_action(BTN_SELECT),
+        Some(Action::SelectScene)
+    );
+    // Select is the last row: a transport press on the same frame wins, so a scene change
+    // can never swallow a pause.
+    assert_eq!(
+        keys::now_playing_action(BTN_START | BTN_SELECT),
+        Some(Action::PauseToggle)
+    );
     // Two mapped edges in one frame resolve to the table's first row, deterministically — the rule
     // only has to be stable, and it is a `const fn`, so it is also checked at compile time.
     assert_eq!(

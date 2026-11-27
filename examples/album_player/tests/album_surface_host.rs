@@ -874,3 +874,161 @@ fn the_foreground_padding_shows_the_band_art_beneath() {
         "the text layer's transparent padding did not fall through to the band art"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// 2b PR-(3): the title card (A12) and the scene registry
+// ---------------------------------------------------------------------------------------------
+
+/// The card the app builds for this fixture's album: 3 tracks, 9:37 (rounded up to 10 min).
+fn fixture_card() -> surface::Card<'static> {
+    surface::Card {
+        title: "Bioluminescent",
+        artist: "unknown",
+        year: 2026,
+        n_tracks: 3,
+        seconds: 577,
+    }
+}
+
+#[test]
+fn the_scene_registry_is_the_spec_order_filtered_to_what_this_rom_implements() {
+    // §5.2's registry is declared once, in `layout_spec.toml`, and generated. This
+    // table is the ROM's filtered view; the test is that the filter keeps the
+    // declaration's order, so `Select`'s cycle cannot drift from the spec.
+    let mut last = None;
+    for scene in surface::SceneId::IMPLEMENTED {
+        let position = layout::SCENES
+            .iter()
+            .position(|decl| decl.id == scene.id())
+            .unwrap_or_else(|| panic!("{} is implemented but not declared", scene.id()));
+        if let Some(previous) = last {
+            assert!(
+                previous < position,
+                "{} is implemented out of the spec's order",
+                scene.id()
+            );
+        }
+        last = Some(position);
+    }
+    // Every declared scene is either implemented or explicitly a later phase's.
+    for decl in layout::SCENES.iter() {
+        let implemented = surface::SceneId::IMPLEMENTED
+            .iter()
+            .any(|scene| scene.id() == decl.id);
+        assert!(
+            implemented || decl.phase == "2b",
+            "{} is declared at {} and neither implemented nor a 2b scene",
+            decl.id,
+            decl.phase
+        );
+    }
+    // The card is non-resident and shares the art scene's image, which is the field
+    // that keeps the projection from counting the cover twice (2b PR-(3)).
+    let card = layout::SCENES
+        .iter()
+        .find(|decl| decl.id == "title_card")
+        .expect("the spec declares the title card");
+    assert!(!card.resident);
+    assert_eq!(card.shares_image, "art");
+    assert_eq!(card.kind, "composite");
+}
+
+#[test]
+fn the_card_paints_inside_the_region_and_touches_no_band() {
+    let mut writes = surface::Writes::new();
+    surface::Surface::paint_card(&mut writes, &fixture_card());
+    assert!(!writes.is_empty());
+    assert_eq!(writes.dropped(), 0, "the card's batch must fit MAX_WRITES");
+    let region_top = surface::REGION_ROW;
+    let region_bottom = region_top + layout::REGION.rows;
+    for w in writes.as_slice() {
+        assert!(
+            u32::from(w.y) >= region_top && u32::from(w.y) < region_bottom,
+            "card wrote row {} outside the scene region ({}..{})",
+            w.y,
+            region_top,
+            region_bottom
+        );
+        assert!(
+            u32::from(w.x) < layout::SCREEN_COLS,
+            "card wrote column {} off screen",
+            w.x
+        );
+        // Every card cell is opaque: never the foreground's transparent page tile.
+        assert!(
+            !(w.source == surface::Source::Chrome && w.tile == chrome::FILL_PAGE),
+            "the card wrote the transparent page tile at ({}, {})",
+            w.x,
+            w.y
+        );
+    }
+    // The picture's box is painted (a placeholder until ART1 lands in PR-(4)), so the
+    // card cannot show the previous scene through its picture.
+    let art = &layout::ELEMENTS[surface::CARD_ART.expect("this variant declares the card art")];
+    let origin = (art.x / chrome::TILE_PX, art.y / chrome::TILE_PX);
+    assert!(
+        writes
+            .as_slice()
+            .iter()
+            .any(|w| (u32::from(w.x), u32::from(w.y)) == origin),
+        "the card's picture box has no write at its origin"
+    );
+}
+
+#[test]
+fn blank_then_card_leaves_every_region_cell_opaque() {
+    // `blank` fills the region; the card writes its own cells over it. Together every
+    // visible region cell must point at an opaque tile — §5.2's backing rule, checked
+    // as the composition the device actually performs rather than as a per-call claim.
+    let mut canvas = Canvas::new();
+    let mut blank = surface::Writes::new();
+    surface::Surface::paint_blank(&mut blank);
+    canvas.apply(&blank);
+    let mut card = surface::Writes::new();
+    surface::Surface::paint_card(&mut card, &fixture_card());
+    canvas.apply(&card);
+    for y in surface::REGION_ROW..surface::REGION_ROW + layout::REGION.rows {
+        for x in 0..layout::REGION.cols {
+            let cell = canvas.grid[y as usize][x as usize]
+                .unwrap_or_else(|| panic!("region cell ({x}, {y}) is untouched"));
+            assert!(
+                cell.tile != chrome::FILL_PAGE || cell.source != surface::Source::Chrome,
+                "region cell ({x}, {y}) is the transparent page tile after blank+card"
+            );
+        }
+    }
+}
+
+#[test]
+fn every_card_string_fits_the_box_that_variant_declares() {
+    // The card's spans are elided like every other line (§5.5), so an over-long album
+    // title is *renderable* rather than a refusal. What the gate checks is the next
+    // thing: that the fixture's own strings are not silently cut, because a metadata
+    // line that reads `Bioluminescen...` is a card nobody would ship.
+    let card = fixture_card();
+    let spans: [(Option<usize>, &str); 3] = [
+        (surface::CARD_TITLE, card.title),
+        (surface::CARD_ARTIST, card.artist),
+        (surface::CARD_YEAR, "2026"),
+    ];
+    for (element, text) in spans {
+        let element = element.expect("this variant declares every card span");
+        let e = &layout::ELEMENTS[element];
+        let cols = (e.w / chrome::TILE_PX) as usize;
+        let line = surface::line_for(text, cols);
+        assert!(
+            !line.cut(),
+            "{text:?} is elided in a {cols}-cell card box; the fixture chose too long a string"
+        );
+        assert!(line.chars() <= cols);
+    }
+    // The counts line the ROM assembles for this fixture: 3 tracks, 9:37 rounded up.
+    let counts = "3 TRACKS - 10 MIN";
+    let element = surface::CARD_COUNTS.expect("this variant declares the counts span");
+    let e = &layout::ELEMENTS[element];
+    let cols = (e.w / chrome::TILE_PX) as usize;
+    assert!(
+        !surface::line_for(counts, cols).cut(),
+        "{counts:?} is elided in a {cols}-cell card box"
+    );
+}

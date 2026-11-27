@@ -373,6 +373,14 @@ fn read_cycles() -> u32 {
     (u32::from(high) << 16) | u32::from(low)
 }
 
+/// The same read as an absolute value, for a module that cannot borrow the main
+/// loop's [`timer::Counter`]: the VBlank handler's ledger is the caller this
+/// exists for. Same registers, same low/high/low protocol — not a second
+/// instrument.
+pub fn read_cycles_now() -> u32 {
+    read_cycles()
+}
+
 /// Sound hardware on: FIFO A → left at 100 %, FIFO B → right at 100 %, both FIFOs
 /// reset, master enable, bias at 8-bit/65,536 Hz — agb `hw.rs`'s enable sequence,
 /// transcribed because those functions are `pub(super)`. (Source 645-658.)

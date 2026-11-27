@@ -28,6 +28,7 @@
 //! | Right, R | [`Action::NextTrack`] | [`Cursor::Down`] |
 //! | Left, L | [`Action::PrevTrack`] | [`Cursor::Up`] |
 //! | Down | [`Action::RestartTrack`] | [`Cursor::Down`] / page down |
+//! | Select | [`Action::SelectScene`] | (none — §5.3's scene cycle, 2b PR-(3)) |
 //! | Up | *(nothing, §5.3's `—`)* | [`Cursor::Up`] / page up |
 //!
 //! Two properties of that table are *rules*, not conveniences, and both are enforced here rather
@@ -170,6 +171,11 @@ pub enum Action {
     PrevTrack,
     /// Down: restart the current track. Not a repeat action — see [`KeyFrame::repeated`].
     RestartTrack,
+    /// Select: cycle the scene (§5.3, §5.2's scene registry). A scene change, not a
+    /// transport state — the card is `Select`-reachable and audio keeps playing (2b PR-(3),
+    /// Q20 (ii): the registry order is the order in `layout::SCENES`, filtered to the scenes
+    /// this ROM implements).
+    SelectScene,
 }
 
 /// The track list's cursor column (§5.3). Delivered for a *press* and, when a direction is held,
@@ -197,6 +203,11 @@ pub const fn now_playing_action(pressed: u16) -> Option<Action> {
         Some(Action::PrevTrack)
     } else if pressed & BTN_DOWN != 0 {
         Some(Action::RestartTrack)
+    } else if pressed & BTN_SELECT != 0 {
+        // Last row: a transport button and Select on the same frame resolves to the
+        // transport, which is the table's precedence rule and the safe one — a scene
+        // change must never swallow a pause.
+        Some(Action::SelectScene)
     } else {
         None
     }

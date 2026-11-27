@@ -347,6 +347,38 @@ re-arm's delay went 23 → 25 samples between those two images). Both were repor
 than smoothed over, and the event reproduced at the same period index across two images
 and four runs, which is what makes it safe to read.
 
+### Host scheduling is not a measurement (2026-11-26)
+
+The FLAC Album Player's fast build (`album-player-fast.gba`, the shipped 16,384 Hz path) was run
+by hand in mGBA and produced audible mid-song glitches. They reproduce **only while the mGBA
+window is unfocused / running in the background**, do not occur with the window focused, and do
+not occur on real hardware. The image's own ledger disagrees with the audible defect, which is
+the point:
+
+```
+feed: pushed=5224632 … underflows=0 … [MATCH]
+audit: hw_periods=9334 coalesced=0 late=0 late_max=0 samples grace=16
+cadence: video_frames=19054 … max_gap=1 frames limit=1 [PASS]
+input: vblank ISR worst=1 samples = 1024c over 19055 frames (grace limit 16 samples) [PASS]
+```
+
+`late`/`late_max` are read from the period timer at ISR entry: `late=0 late_max=0` means no
+service entered later than the 16-sample DMA grace — no splice window — and `underflows=0` means
+the ring never starved. A host-side audio underrun cannot fake either counter. The card arm
+(10,491 periods, 12 visits, skips) printed the same clean audit.
+
+So: **a backgrounded emulator's deprioritised audio thread is not evidence about the audio
+chain.** Before investigating a "glitch", require one of: the ROM's `audit:` showing `late>0` or
+`underflows>0`, or the fault on silicon (AP-7a). A focused-window run is the minimum control.
+Recorded because the failure sounds plausible, the instrument is cheap to read, and the
+investigation spent a session on an emulator scheduling artefact.
+
+One instrument side-note from the same session: mGBA prints `[INFO] GBA DMA: Starting DMA …`
+once per sound-DMA re-arm — twice per audio period, ~58 lines/s — from its **own** `GBA DMA` log
+channel, not from `agb::println!`. `agb::println!` is Info on the ROM's debug channel too, so a
+global Warn filter hides the ROM's ledger as well; filter the `GBA DMA` channel (or keep the log
+view closed) rather than raising the level.
+
 ## Gates (the Makefile is the contract)
 
 | Gate | Proves |
