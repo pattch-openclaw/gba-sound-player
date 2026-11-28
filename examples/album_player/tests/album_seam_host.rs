@@ -1,3 +1,5 @@
+#![cfg(not(feature = "geometry-uli2"))]
+
 //! PR-3a steps (ii) and (iii-A)'s host gate: the seam, its derived geometry, and the backend arms —
 //! on the host — plus PR-3b-i's input seam and session clock.
 //!

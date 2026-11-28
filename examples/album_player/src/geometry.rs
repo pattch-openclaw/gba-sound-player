@@ -33,9 +33,6 @@
 //! `ceil(lead × rate / chunk)`, and the fact that it lands on 36 is a consequence of the declared
 //! 1,230 ms lead and 560-sample chunk, not of a literal 36 sitting in this file.
 
-use crate::meta;
-use crate::nodiv;
-
 /// The GBA timer clock: 16.78 MHz divided by 16 exactly, i.e. `2^24` Hz.
 ///
 /// `agb` 0.25.0 drives its mixer from this value (`sound/mixer/hw.rs:100` sets the reload as
@@ -142,90 +139,127 @@ const fn ceil_div(n: u32, d: u32) -> u32 {
 }
 
 // -------------------------------------------------------------------------------------------------
-// The FLAC arm
+// The two backend arms, and the one this build selected
 // -------------------------------------------------------------------------------------------------
+//
+// W3.1: the geometry was FLAC-shaped throughout. It is now one derivation with two declared arms:
+// `FLAC` keeps the shipped facts, `ULI2` declares the 32,768 Hz / 512-sample shape, and `ACTIVE` is
+// selected at compile time. The default is still FLAC; `geometry-uli2` is a host-only selection for
+// the W3.1 geometry gate, not a product backend (W3.3 adds `backend-uli2`).
 
-/// Playback rate. Declared fact: 16,384 Hz is `2^24 / 1024`, an exact integer number of timer
-/// ticks per sample (see `examples/flac_integration/src/geometry.rs:72` for why exactness matters
-/// and why the rate is not one of `agb`'s mixer menu entries — this ROM programs its own timer
-/// chain and instantiates no `agb` mixer).
-pub const RATE_HZ: u32 = 16_384;
+/// FLAC playback rate. Declared fact: 16,384 Hz is `2^24 / 1024`, an exact integer number of timer
+/// ticks per sample (see `examples/flac_integration/src/geometry.rs:72`).
+pub const FLAC_RATE_HZ: u32 = 16_384;
 
-/// Samples per hardware buffer. Declared fact: 560 is the shipped period, kept because every
-/// measured row in this project is stated on it (`examples/flac_integration/src/geometry.rs:120`),
-/// and because it is a whole number of 4-word FIFO requests.
-pub const CHUNK_SAMPLES: u32 = 560;
+/// Samples per FLAC hardware buffer. Declared fact: 560 is the shipped period (`examples/
+/// flac_integration/src/geometry.rs:120`) and a whole number of 4-word FIFO requests.
+pub const FLAC_CHUNK_SAMPLES: u32 = 560;
 
-/// Samples per decoder frame. Declared fact: the packer's 2,048-sample block
-/// (`scripts/gafp_pack.py`'s profile), and the FLAC profiled max block size.
-pub const FRAME_SAMPLES: u32 = 2_048;
+/// Samples per FLAC decoder frame: the packer's 2,048-sample block.
+pub const FLAC_FRAME_SAMPLES: u32 = 2_048;
 
-/// Lead duration, in milliseconds — a **product** choice, not a hardware fact.
+/// FLAC lead duration, in milliseconds — a **product** choice, not a hardware fact.
 ///
 /// 1,230 ms is the shipped ring depth expressed as time: 36 chunks of 560 samples is 20,160
 /// samples = 1.2305 s at 16,384 Hz. §4.2b's rule is that the depth is decided as a lead time and
-/// then divided into chunks, so the duration is what is declared and 36 is what it derives to.
-/// The shipped module's long explanation of what that depth buys (transient tolerance, 17 periods
-/// in hand after the prime, the flow-control ceiling of ~32 periods) is at
-/// `examples/flac_integration/src/geometry.rs:122-172`.
-pub const LEAD_MS: u32 = 1_230;
+/// then divided into chunks.
+pub const FLAC_LEAD_MS: u32 = 1_230;
 
-/// Prefill duration, in milliseconds — a **product** choice.
+/// FLAC prefill duration, in milliseconds — a **product** choice.
 ///
 /// 546 ms is the shipped prefill expressed as time: 16 chunks of 560 samples is 8,960 samples =
-/// 0.546875 s at 16,384 Hz, and the quantisation to whole chunks is why the declared duration is
-/// the floor rather than the realised depth. The shipped module states why it is set high: it is
-/// the cheapest protection on this path (cold-start and transient tolerance, five frames of decode
-/// before any sound), and it puts a floor under the ring depth
-/// (`examples/flac_integration/src/geometry.rs:178-206`).
-pub const PREFILL_MS: u32 = 546;
+/// 0.546875 s at 16,384 Hz.
+pub const FLAC_PREFILL_MS: u32 = 546;
 
 /// The FLAC backend's geometry, derived from the declared facts above.
-pub const FLAC: ChainGeometry =
-    ChainGeometry::derive(RATE_HZ, CHUNK_SAMPLES, FRAME_SAMPLES, LEAD_MS, PREFILL_MS);
+pub const FLAC: ChainGeometry = ChainGeometry::derive(
+    FLAC_RATE_HZ,
+    FLAC_CHUNK_SAMPLES,
+    FLAC_FRAME_SAMPLES,
+    FLAC_LEAD_MS,
+    FLAC_PREFILL_MS,
+);
 
-/// Ticks per sample at [`RATE_HZ`]: exactly 1,024 (`2^24 / 2^14`).
-pub const TICKS_PER_SAMPLE: u32 = FLAC.ticks_per_sample;
+/// ULI2 playback rate. Declared fact: 32,768 Hz is `2^24 / 512`, an exact integer number of timer
+/// ticks per sample, and the codec's fixed product rate.
+pub const ULI2_RATE_HZ: u32 = 32_768;
 
-/// Cycles per period: 560 × 1,024 = 573,440 = 34.18 ms.
-pub const PERIOD_CYCLES: u32 = FLAC.period_cycles;
+/// Samples per ULI2 hardware buffer. One ULI2 frame is 512 samples, and the product player uses a
+/// 512-sample period (`examples/uli_player/src/main.rs`: `PERIOD = M`).
+pub const ULI2_CHUNK_SAMPLES: u32 = 512;
 
-/// 32-bit words per DMA transfer: 560 / 4 = 140. This is the count the ROM writes on every re-arm;
-/// it is *not* what sizes a period (see `examples/flac_integration/src/geometry.rs:222-226`).
-pub const DMA_WORDS: u32 = FLAC.dma_words;
+/// Samples per ULI2 decoder frame. Fixed by the format: `M = 512`.
+pub const ULI2_FRAME_SAMPLES: u32 = 512;
 
-/// Lead depth in chunks: `ceil(1,230 ms × 16,384 / 560)` = 36.
-pub const RING_CHUNKS: u32 = FLAC.ring_chunks;
+/// ULI2 lead duration, in milliseconds. The product player carries 16 chunks (`RING_SAMPLES = 16 × M`
+/// in `examples/uli_player/src/main.rs`); 16 × 512 / 32,768 = 250 ms. This is a declared product
+/// choice, not a copy of FLAC's 1,230 ms; W3.3/W3.4 re-measure the UI and skip margins before the
+/// product default is switched.
+pub const ULI2_LEAD_MS: u32 = 250;
 
-/// Lead depth in samples per channel: 36 × 560 = 20,160.
-pub const RING_SAMPLES: u32 = FLAC.ring_samples;
+/// ULI2 prefill duration, in milliseconds. The product player primes 8 frames
+/// (`PREFILL_FRAMES = 8` in `examples/uli_player/src/main.rs`); 8 × 512 / 32,768 = 125 ms.
+pub const ULI2_PREFILL_MS: u32 = 125;
 
-/// Prefill depth in chunks: `ceil(546 ms × 16,384 / 560)` = 16.
-pub const PREFILL_CHUNKS: u32 = FLAC.prefill_chunks;
+/// The ULI2 backend's geometry, derived from the same `ChainGeometry` code as FLAC's.
+pub const ULI2: ChainGeometry = ChainGeometry::derive(
+    ULI2_RATE_HZ,
+    ULI2_CHUNK_SAMPLES,
+    ULI2_FRAME_SAMPLES,
+    ULI2_LEAD_MS,
+    ULI2_PREFILL_MS,
+);
 
-/// Prefill depth in samples per channel: 16 × 560 = 8,960.
-pub const PREFILL_SAMPLES: u32 = FLAC.prefill_samples;
+/// The geometry this build plays. **FLAC is the default**; `geometry-uli2` selects the ULI2 arm for
+/// the W3.1 host gate only. W3.3 turns this into the real backend selection.
+#[cfg(feature = "geometry-uli2")]
+pub const ACTIVE: ChainGeometry = ULI2;
+#[cfg(not(feature = "geometry-uli2"))]
+pub const ACTIVE: ChainGeometry = FLAC;
 
-/// The producer frames it costs to fill an empty ring to [`PREFILL_SAMPLES`]:
-/// `ceil(8,960 / 2,048)` = **5**.
-///
-/// Neither place that pays it chose the count. The boot prefill loops until the target is reached
-/// (`album_play_main.rs`'s `Producer::prefill`, whose own log line says `prefilled 10240 samples in
-/// 5 frames` and whose cost §10.2 measures at 5,241,344 c = 312 ms on the fast arm), and a starved
-/// resume's refill ([`transport`](crate::transport)'s `State::Buffering`, PR-3c) fills to the *same*
-/// target for the *same* reason: §4.2b's invariant is that the lead depth exists before audio starts,
-/// so a resume that finds none of it re-creates the one depth the plan already requires rather than
-/// inventing a second, smaller number to argue about.
-///
-/// It is derived, and it is **exact rather than an upper bound**: a refill is entered only when the
-/// ring holds less than one whole chunk that `take_chunk` could hand over, so the shortfall it covers
-/// is in `[…, PREFILL_SAMPLES]` and the count below is the same for every reachable entry — pinned by
-/// the assertions at the end of this block instead of by prose.
+/// Playback rate for this build.
+pub const RATE_HZ: u32 = ACTIVE.rate_hz;
+/// log2 of [`RATE_HZ`], the §6 arithmetic shift.
+#[cfg(feature = "geometry-uli2")]
+pub const RATE_LOG2: u32 = 15;
+#[cfg(not(feature = "geometry-uli2"))]
+pub const RATE_LOG2: u32 = 14;
+
+/// Samples per hardware buffer for this build.
+pub const CHUNK_SAMPLES: u32 = ACTIVE.chunk_samples;
+/// Samples per decoder frame for this build.
+pub const FRAME_SAMPLES: u32 = ACTIVE.frame_samples;
+/// Lead duration for this build, in milliseconds.
+#[cfg(feature = "geometry-uli2")]
+pub const LEAD_MS: u32 = ULI2_LEAD_MS;
+#[cfg(not(feature = "geometry-uli2"))]
+pub const LEAD_MS: u32 = FLAC_LEAD_MS;
+/// Prefill duration for this build, in milliseconds.
+#[cfg(feature = "geometry-uli2")]
+pub const PREFILL_MS: u32 = ULI2_PREFILL_MS;
+#[cfg(not(feature = "geometry-uli2"))]
+pub const PREFILL_MS: u32 = FLAC_PREFILL_MS;
+
+/// Ticks per sample for this build: 1,024 at 16,384 Hz, 512 at 32,768 Hz.
+pub const TICKS_PER_SAMPLE: u32 = ACTIVE.ticks_per_sample;
+/// Cycles per period for this build.
+pub const PERIOD_CYCLES: u32 = ACTIVE.period_cycles;
+/// 32-bit words per DMA transfer for this build.
+pub const DMA_WORDS: u32 = ACTIVE.dma_words;
+/// Lead depth in chunks for this build.
+pub const RING_CHUNKS: u32 = ACTIVE.ring_chunks;
+/// Lead depth in samples per channel for this build.
+pub const RING_SAMPLES: u32 = ACTIVE.ring_samples;
+/// Prefill depth in chunks for this build.
+pub const PREFILL_CHUNKS: u32 = ACTIVE.prefill_chunks;
+/// Prefill depth in samples per channel for this build.
+pub const PREFILL_SAMPLES: u32 = ACTIVE.prefill_samples;
+/// Producer frames needed to fill the prefill depth for this build.
 pub const PREFILL_FRAMES: u32 = (PREFILL_SAMPLES + FRAME_SAMPLES - 1) / FRAME_SAMPLES;
 
-/// Cycles for a frame of `n` samples at [`RATE_HZ`].
+/// Cycles for a frame of `n` samples at the selected rate.
 pub const fn frame_cycles(n: u32) -> u32 {
-    FLAC.frame_cycles(n)
+    ACTIVE.frame_cycles(n)
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -253,46 +287,60 @@ pub const fn playback_rate_for_stream(stream_rate_hz: u32) -> Option<u32> {
 }
 
 // -------------------------------------------------------------------------------------------------
-// Compile-time pins: the derivation is checkable here, not only in the host gate
+// Compile-time pins: both arms are checkable here, not only in the host gate
 // -------------------------------------------------------------------------------------------------
 
 const _: () = assert!(MIXER_TICK_HZ == 1 << 24);
-// §6's clocks are powers of two, and this is the tie D4 established at the link site: the rate
-// `meta.rs` accepts is the rate this geometry derives its ticks from. `meta.rs` keeps its own
-// assert against `nodiv`; this one is the app's second half of the same fact.
-const _: () = assert!(RATE_HZ == meta::PRODUCT_RATE_HZ);
-const _: () = assert!(RATE_HZ == 1 << nodiv::RATE_LOG2);
+
+// FLAC keeps the shipped figures.
+const _: () = assert!(FLAC.rate_hz == 16_384);
+const _: () = assert!(FLAC.ticks_per_sample == 1_024);
+const _: () = assert!(FLAC.chunk_samples % 4 == 0);
+const _: () = assert!(FLAC.dma_words * 4 == FLAC.chunk_samples);
+const _: () = assert!(FLAC.period_cycles == 573_440);
+const _: () = assert!(FLAC.ring_chunks == 36);
+const _: () = assert!(FLAC.ring_samples == 20_160);
+const _: () = assert!(FLAC.prefill_chunks == 16);
+const _: () = assert!(FLAC.prefill_samples == 8_960);
+const _: () = assert!(FLAC.ring_samples > FLAC.prefill_samples + FLAC.frame_samples);
+const _: () = assert!(FLAC.ring_samples >= FLAC.frame_samples + FLAC.chunk_samples);
+const _: () = assert!((FLAC.prefill_samples + FLAC.frame_samples - 1) / FLAC.frame_samples == 5);
+
+// The ULI2 arm is derived from the codec's fixed 32,768 Hz / 512-sample shape.
+const _: () = assert!(ULI2.rate_hz == 32_768);
+const _: () = assert!(ULI2.ticks_per_sample == 512);
+const _: () = assert!(ULI2.chunk_samples % 4 == 0);
+const _: () = assert!(ULI2.dma_words * 4 == ULI2.chunk_samples);
+const _: () = assert!(ULI2.period_cycles == 262_144);
+const _: () = assert!(ULI2.ring_chunks == 16);
+const _: () = assert!(ULI2.ring_samples == 8_192);
+const _: () = assert!(ULI2.prefill_chunks == 8);
+const _: () = assert!(ULI2.prefill_samples == 4_096);
+const _: () = assert!(ULI2.ring_samples > ULI2.prefill_samples + ULI2.frame_samples);
+const _: () = assert!(ULI2.ring_samples >= ULI2.frame_samples + ULI2.chunk_samples);
+const _: () = assert!((ULI2.prefill_samples + ULI2.frame_samples - 1) / ULI2.frame_samples == 8);
+
+// The selected arm and the shared aliases are one fact.
+const _: () = assert!(ACTIVE.rate_hz == RATE_HZ);
+const _: () = assert!(RATE_HZ == 1 << RATE_LOG2);
 const _: () = assert!(MIXER_TICK_HZ % RATE_HZ == 0);
-const _: () = assert!(TICKS_PER_SAMPLE == 1_024);
-// A chunk is a whole number of 4-sample FIFO words, and the DMA count is that number.
 const _: () = assert!(CHUNK_SAMPLES % 4 == 0);
 const _: () = assert!(DMA_WORDS * 4 == CHUNK_SAMPLES);
-const _: () = assert!(PERIOD_CYCLES == 573_440);
-const _: () = assert!(RING_CHUNKS == 36);
-const _: () = assert!(RING_SAMPLES == 20_160);
-const _: () = assert!(PREFILL_CHUNKS == 16);
-const _: () = assert!(PREFILL_SAMPLES == 8_960);
-// The shipped invariants, as compile-time facts. The first is §4.2b's "PREFILL + one frame ≤
-// RING": a prefill deeper than the ring minus a frame could never finish. The second is the
-// flow-control pair the producer and consumer must both satisfy at once (free >= frame,
-// ready >= chunk).
 const _: () = assert!(RING_SAMPLES > PREFILL_SAMPLES + FRAME_SAMPLES);
 const _: () = assert!(RING_SAMPLES >= FRAME_SAMPLES + CHUNK_SAMPLES);
-// The burst of `PREFILL_FRAMES` frames always fits the ring in one go — which is what lets a refill
-// run without the producer's room gate ever refusing it, and what lets `transport` price the wait by
-// a frame count at all.
 const _: () = assert!(PREFILL_FRAMES * FRAME_SAMPLES <= RING_SAMPLES);
-// …and the count is exact at both ends of the range a refill can be entered from: an empty ring, and
-// a ring one sample short of the chunk `take_chunk` would have taken. Anything else and the bound
-// `transport::resume_to_audio_bound` builds from this count would be priced off a guess.
 const _: () = assert!(
     (PREFILL_SAMPLES + FRAME_SAMPLES - 1) / FRAME_SAMPLES == PREFILL_FRAMES
         && (PREFILL_SAMPLES - (CHUNK_SAMPLES - 1) + FRAME_SAMPLES - 1) / FRAME_SAMPLES
             == PREFILL_FRAMES
 );
+
 // The identity rate resolves to itself, and only to itself.
 const _: () = assert!(matches!(
     playback_rate_for_stream(RATE_HZ),
     Some(rate) if rate == RATE_HZ
 ));
+#[cfg(feature = "geometry-uli2")]
+const _: () = assert!(matches!(playback_rate_for_stream(16_384), None));
+#[cfg(not(feature = "geometry-uli2"))]
 const _: () = assert!(matches!(playback_rate_for_stream(32_768), None));

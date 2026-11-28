@@ -73,6 +73,9 @@ default = ["backend-flac", "backend-stub", "arm-kernel", "deep-audit", "state-wo
 backend-flac = ["dep:flac-lite"]
 # The synthetic backend: deterministic int16 stereo, no codec, no platform.
 backend-stub = []
+# W3.1 host-only selection of the ULI2 geometry arm (32,768 Hz / 512 frames).
+# NOT a backend: the default build remains FLAC, and W3.3 adds `backend-uli2`.
+geometry-uli2 = []
 # Decode through the overlay's `ArmRiceKernel` instead of the core's
 # `TableCountKernel` — the same kernel A/B `examples/flac_integration` carries
 # (its Cargo.toml's `arm-kernel` block, mirrored).
