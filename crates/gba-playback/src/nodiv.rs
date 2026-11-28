@@ -49,12 +49,16 @@
 //! nodiv::RATE_LOG2);`, which is one line per consumer and cannot be skipped by
 //! the arithmetic itself.
 
-/// log2 of the product rate: `1 << 14 == 16_384` Hz. §6's table has both rows
-/// (`>> 14` at 16,384 Hz, `>> 15` at 32,768); the product path runs at 16,384, so
-/// 14 is the one the ROM uses. Each consumer asserts that its own clock is this
-/// power of two — see the module docs — so this stays an arithmetic fact rather
-/// than a claim about someone else's geometry file.
-pub const RATE_LOG2: u32 = 14;
+/// log2 of the 16,384 Hz product rate (`1 << 14`).
+pub const RATE_LOG2_16K: u32 = 14;
+
+/// log2 of the 32,768 Hz ULI2 rate (`1 << 15`).
+pub const RATE_LOG2_32K: u32 = 15;
+
+/// The FLAC product path's shift. Kept as the historical name because the FLAC
+/// path and its probe assert against it; a backend with another clock uses
+/// [`seconds_at`]/[`label_at`] with its own log2.
+pub const RATE_LOG2: u32 = RATE_LOG2_16K;
 
 /// The reciprocal for `mm:ss`: `floor(2^32 / 60) + 1`, the constant §6 verified
 /// exact for `sec < 2^20` (an album needs `sec < 2^12`; the margin is the point
@@ -68,8 +72,13 @@ pub const MMSS_EXACT_BELOW: u32 = 1 << 20;
 ///
 /// Truncating is intentional: the label shows whole seconds elapsed, and the bar
 /// carries the sub-second resolution.
+pub const fn seconds_at(pos_samples: u32, rate_log2: u32) -> u32 {
+    pos_samples >> rate_log2
+}
+
+/// Samples → whole seconds at the FLAC product clock.
 pub const fn seconds(pos_samples: u32) -> u32 {
-    pos_samples >> RATE_LOG2
+    seconds_at(pos_samples, RATE_LOG2)
 }
 
 /// Seconds → `(minutes, seconds)` by reciprocal multiply: one UMULL and a
@@ -80,9 +89,14 @@ pub const fn mmss(sec: u32) -> (u32, u32) {
     (m, s)
 }
 
-/// Samples → `(minutes, seconds)` in one call, for a line of text per repaint.
+/// Samples → `(minutes, seconds)` in one call at `rate_log2`.
+pub const fn label_at(pos_samples: u32, rate_log2: u32) -> (u32, u32) {
+    mmss(seconds_at(pos_samples, rate_log2))
+}
+
+/// Samples → `(minutes, seconds)` at the FLAC product clock.
 pub const fn label(pos_samples: u32) -> (u32, u32) {
-    mmss(seconds(pos_samples))
+    label_at(pos_samples, RATE_LOG2)
 }
 
 /// The bake-time reciprocal for a track of `n_samples` on a grid of `bar_cells`:

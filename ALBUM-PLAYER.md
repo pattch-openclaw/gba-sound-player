@@ -3387,6 +3387,32 @@ that rather than promote an internal constant into a headline.
 | **5 — Hardware + the second backend.** Both GBA units, two runs each, `none` vs each viz; then the album-length build on the lossy backend — **and the precondition named in this row for two years is met: U4 (real-time decode) at 86.27% worst on the gate total with 13.73 points of margin and zero starved periods, U5 (playback) met on a GBA SP with 0 underruns across three player ROMs, PR D shipped as `crates/uli-playback`** ([`ULI2.md`](ULI2.md) §Gates; corrected here the same day — this row read "U4 is not met (105% worst / 89% mean, 2026-11-15), so this waits on real-time decode with margin, then U5 … and PR D"). Phase 5's lossy half is therefore **app-side work and nothing else**: `src/backend/uli2.rs`, the derived 32,768 Hz / 512-sample geometry (§4.2b — that geometry is now testable rather than sketched), a `uli2` asset path through §9's encode indirection (a fresh-clone build is blocked on W2/R7/Q3, not on the encoder, which is byte-exact at S8), and a fresh set of measurements changing no screen and no tool — §4.2b is why that is an expectation rather than a hope. Worth knowing that the shape itself is already in this tree: `make uli-player-cross` embeds a **12-track, 43.5-minute, 167,222-frame, 33,088,280 B** album in one 32 MiB ROM (33,407,264 B of cart, 147,168 B of headroom) and served **167,232/167,232 periods with 0 underruns in mGBA** — the codec's player, not this app's, and that arm was measured 2026-11-16, before the decode pass that won today's margin, with its hardware run still asked for. **The cross-track index is [`PLAN-OF-RECORD.md`](crates/uli-lite/PLAN-OF-RECORD.md) → "Remaining ULI2 work — the four threads"; W3 is this row.** | **AP-7**, **AP-9** |
 | **6 — Reach.** A14 web config, A15 toy game | **AP-8** |
 
+#### W3.1 decision: one ULA2 album blob; `ALBM1` stays the app manifest (2026-11-27)
+
+The `ALBM1`↔ULA2 seam has one product shape, and W3.1 settles it before W3.2 writes the bake:
+
+- **The codec asset is one ULA2 album blob.** ULA2 is already an album container — tracks, titles,
+  seek table and one gapless stream — and `crates/uli-playback`/`UliSource` already reads it. Splitting
+  it into per-track ULA2 blobs would throw away the format's gapless join and its seek table for no
+  product benefit.
+- **`ALBM1` remains the application manifest**, not a codec container: album/track metadata, the
+  timeline the UI and session clock use, the bar-grid reciprocal, and the pins the boot gate checks.
+  The ULA2 track table is the backend's track list; the bake cross-checks the two and refuses on
+  disagreement, the same rule §4.3 already applies to `ALBM1` vs GAFP.
+- **The asset region carries that one ULA2 blob.** W3.2 owns the exact `ALBM1` field mapping and
+  pin shape for a non-GAFP backend (the current per-track `frames`/`max_fixed_order`/`recip` fields
+  are GAFP-shaped), and it must record the mapping rather than silently reinterpreting them.
+- **FLAC's per-track GAFP asset model is unchanged.** A `backend = "uli2"` bake emits one ULA2
+  asset; a `backend = "flac"` bake keeps the per-track GAFP blobs. The two are compile-time arms of
+  one manifest reader, never a runtime branch above `src/backend/`.
+
+**W3.1 landed 2026-11-27.** `geometry.rs` now carries `FLAC`, `ULI2` and a compile-time `ACTIVE`
+arm; `meta::PRODUCT_RATE_HZ` follows the selected geometry; `nodiv` carries both clock shifts and
+`seconds_at`/`label_at`; and `make album-geometry-test` pins the ULI2 arm under
+`--features geometry-uli2`. The default build is still FLAC and the FLAC album gate is unchanged.
+W3.2 implements the bake and the field mapping; W3.3 wraps `UliSource`; W3.4 takes the ROM/UI
+behaviour.
+
 **Why Phase 2 is split in two (ruled 2026-11-20, and the reason is in the row itself).**
 The old row shipped "layout module, title card, now-playing, track list, pause menu,
 progress bar, cover art" as one unit, which is a phase that cannot be *reviewed* — it is

@@ -15,7 +15,7 @@
         uli-player-cross uli-player-cross-rom \
         uli-overlay-test uli-kernel-twin \
         album-probe-art album-probe-test album-probe-rom album-probe \
-        album-bake album-pack-check album-seam-test album-layout-test album-glyphs-test album-rom album-player-rom album-test album-card-test album-art-check \
+        album-bake album-pack-check album-seam-test album-geometry-test album-layout-test album-glyphs-test album-rom album-player-rom album-test album-card-test album-art-check \
         album-preview album-diff-rom \
         clean clean-cache check help toolchain-check target-spec-check
 
@@ -226,6 +226,7 @@ ALBUM_GLYPHS_GATE_LOG := album-glyphs-test.log
 ALBUM_PREVIEW := album-preview
 ALBUM_GATE_LOG := album-pack-check.log
 ALBUM_SEAM_GATE_LOG := album-seam-test.log
+ALBUM_GEOMETRY_GATE_LOG := album-geometry-test.log
 # The playback ROM (PR-3a step iii): the binary cargo writes, and the fixed image
 # `agb-gbafix` makes of it. Both are build output — `*.gba` at the root is already
 # cleaned by `clean`'s output pass.
@@ -1599,6 +1600,24 @@ album-pack-check: toolchain-check
 	@echo "  container's total_samples, (d) the writer's output re-read through meta.rs — plus two bakes"
 	@echo "  byte-identical and the ALBM1 host suite green."
 
+# W3.1's geometry gate: the ULI2 arm is selected for this host binary only, and both
+# arms are pinned. It needs no ULI2 bake and no backend module; those are W3.2/W3.3.
+album-geometry-test: album-bake toolchain-check
+	@test $$(find $(ALBUM_CRATE_DIR)/tests -name 'album_geometry_host.rs' | wc -l) -eq 1 \
+	  || { echo "album-geometry-test: $(ALBUM_CRATE_DIR)/tests/album_geometry_host.rs is missing"; exit 1; }
+	@mkdir -p $(GATE_NEUTRAL_CWD)
+	@cd $(GATE_NEUTRAL_CWD) && \
+	  $(CARGO) test --release --manifest-path $(ALBUM_MANIFEST) --target $(HOST_TRIPLE) \
+	    --features geometry-uli2 --test album_geometry_host > $(abspath $(ALBUM_GEOMETRY_GATE_LOG)) 2>&1; \
+	  status=$$?; \
+	  cat $(abspath $(ALBUM_GEOMETRY_GATE_LOG)); \
+	  [ $$status -eq 0 ] && grep -q '^test result: ok\.' $(abspath $(ALBUM_GEOMETRY_GATE_LOG)) \
+	    || { echo "album-geometry-test: the host suite did not pass — see $(ALBUM_GEOMETRY_GATE_LOG)"; exit 1; }; \
+	  n=$$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' $(abspath $(ALBUM_GEOMETRY_GATE_LOG))); \
+	  [ -n "$$n" ] && [ "$$n" -ge 6 ] || { echo "album-geometry-test: collected '$$n' tests, needs >= 6"; exit 1; }
+	@echo "album-geometry-test passed: the ULI2 geometry arm is selected host-side, both arms are pinned,"
+	@echo "  the manifest clock follows the selected geometry, and the ULI2 rate contract is identity-or-refusal."
+
 # The app seam's host gate (PR-3a steps ii and iii-A, extended by PR-3b-i): the derived geometry
 # pinned to the shipped FLAC figures, the manifest/pin cross-check for every track, both backend arms
 # through `PcmSource`, the FLAC arm decoding the fixture's track to its committed `fnv_pcm` pin, and
@@ -2500,6 +2519,7 @@ help:
 	@echo "      album-seam-test (the seam's host gate: derived geometry vs the shipped figures, both"
 	@echo "      backend arms, the FLAC arm's fnv_pcm and fnv_fifo_l/fnv_fifo_r pins, and a stub-only"
 	@echo "      build with no decoder linked),"
+	@echo "      album-geometry-test (W3.1: both geometry arms pinned under --features geometry-uli2),"
 	@echo "      album-art-check (2b PR-(4): the art tool's self-test, two byte-identical runs,"
 	@echo "      and the generated ART1 re-read through crates/gba-art — AP-4's host half),"
 	@echo "      album-card-test (2b PR-(3): the gate script plus one Select edge — the title"

@@ -221,6 +221,8 @@ __pycache__/
 /album-pack-check.log
 # `make album-seam-test`'s log: the same per-run rule as the pack gate's above.
 /album-seam-test.log
+# `make album-geometry-test`'s log (W3.1 geometry arm): per-run output, same rule.
+/album-geometry-test.log
 # `make album-layout-test`'s log (2a): the self-test's legs and the sources they name,
 # rewritten every run. The counts that matter are recorded in the commit that changes
 # them, not here.

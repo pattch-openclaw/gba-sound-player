@@ -1,3 +1,5 @@
+#![cfg(not(feature = "geometry-uli2"))]
+
 //! The Phase-1 pack gate: the packed album, read through the shipping parser.
 //!
 //! `scripts/album_bake.py` wrote `assets/albm1.bin` and `src/assets.rs`; this

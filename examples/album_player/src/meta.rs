@@ -42,16 +42,15 @@ use crate::nodiv;
 /// read at (Q14: a stream is encoded at the rate it is played at, so an album
 /// declaring another rate is not playable at this one).
 ///
-/// PR-3 replaces this with the application's own §4.2b `geometry.rs`, which
-/// derives the clock per backend. Until then the app states the fact here rather
-/// than borrowing the FLAC track's geometry module (§2.2 forbids the include;
-/// §4.2b forbids the app depending on a FLAC-shaped one).
-pub const PRODUCT_RATE_HZ: u32 = 16_384;
+/// W3.1: this is the selected [`crate::geometry::RATE_HZ`] — FLAC by default, the
+/// ULI2 geometry arm when `geometry-uli2` selects it — so the manifest's accepted
+/// clock and the audio chain's derived clock cannot drift apart.
+pub const PRODUCT_RATE_HZ: u32 = crate::geometry::RATE_HZ;
 
 // §6's arithmetic and this crate's clock are the same power of two. The tie is
-// asserted here, at the link site, because `nodiv` deliberately imports no clock
-// (see its module docs) — this is the line that would fail if either moved.
-const _: () = assert!(PRODUCT_RATE_HZ == 1 << nodiv::RATE_LOG2);
+// asserted at the link site against the selected geometry's log2; `nodiv` still
+// imports no clock, and this is the line that would fail if either moved.
+const _: () = assert!(PRODUCT_RATE_HZ == 1 << crate::geometry::RATE_LOG2);
 
 /// A blob that failed validation, by rule. The payload is what the rule was
 /// checked against, so a log line or a screen can say *which* field was wrong.
